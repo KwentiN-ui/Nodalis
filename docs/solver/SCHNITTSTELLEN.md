@@ -105,6 +105,34 @@ ohne ihn konvergiert ein fortgesetzter Lauf nicht genau wie der Lauf von vorn. D
 Fingerprint deckt das Modell ohne Sets, Surfaces und Amplituden ab (ein fortsetzendes Modell
 darf solche ergänzen, siehe `KONZEPT_CCX_ABLOESUNG.md` 3.5).
 
+### Restart und Zustand (M3 T16)
+
+- `Session::snapshot()` liefert nach jedem Step den `Snapshot` (Kopie des `State`, Fingerprint,
+  `average_force`); `Session::resume(model, snapshot, options)` setzt mit dem nächsten Step
+  fort. Die Ergebnisse früherer Steps gehören nicht zur Session, sie bleiben beim Aufrufer
+  (PrePoLix hält sie gebunden, KONZEPT_CCX_ABLOESUNG 3.5).
+- `restart::model_fingerprint` ist FNV-1a über die postcard-Bytes von Knoten, Elementen,
+  Materialien, Sections, Constraints, Kontakt, Anfangsbedingungen und physikalischen
+  Konstanten: stabil über Prozesse und Rust-Versionen. Sets, Surfaces, Amplituden und
+  `*HEADING` zählen nicht, ein fortsetzendes Modell darf sie ergänzen. Der Fingerprint wird in
+  `Session::new` vom Modell genommen, wie es übergeben wird (bevor Ties Knoten verschieben).
+  `resume` prüft zusätzlich, dass die Felder des Zustands zur Knoten- und Elementzahl passen.
+- `restart::encode_snapshot`/`decode_snapshot`: Binärform (`PLXSSNAP`, Formatnummer,
+  postcard) für `<job>.s<n>.state` und gebundene Ergebnisse. Eine andere Formatnummer wird
+  abgelehnt, nicht umgewandelt (keine Migration).
+- Kommandozeile: `*RESTART, WRITE` in einem Step schreibt `<job>.rout` (`PLXSROUT`):
+  `RestartFile { analysis, snapshots }` mit dem Modell und den Steps bis zum letzten Snapshot,
+  wie gelesen (vor der Expansion von Schalen und Balken), weil eine Restart-Eingabe wie bei
+  CalculiX keine Modelldefinition hat. Gespeichert wird der Zustand am Step-Ende (`FREQUENCY`
+  > 0), `OVERLAY` behält nur den letzten. `*RESTART, READ, STEP=n` liest `<job>.rin`, liest die
+  Eingabe mit `plxs_input::read_inp_continuing` weiter (Steps ab n+1 nummeriert, Carry-over
+  vom Step n, neue Sets erlaubt), rechnet nur die neuen Steps und schreibt eine
+  eigenständige `.frd` mit absoluten Step-Nummern, wie ccx. Das Format ist plxs-eigen, eine
+  ccx-`.rout` liest plxs nicht.
+- Abnahme: `solver/plxs-cli/tests/restart.rs` setzt Kriechen, wandernde Lasten, Amplituden
+  über die Gesamtzeit und gelockerte/verriegelte Constraints nach jedem Step fort; die
+  Ergebnisse stimmen mit dem Lauf von vorn auf 1e-6 überein (praktisch bitgleich).
+
 Ein `rayon`-Pool je Session mit `threads` Threads (Default: `OMP_NUM_THREADS`, sonst alle
 Kerne). Kein globaler Zustand: mehrere Sessions pro Prozess müssen möglich sein.
 

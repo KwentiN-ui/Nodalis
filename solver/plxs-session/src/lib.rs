@@ -6,6 +6,8 @@
 //! Every session has its own rayon thread pool with `threads` threads; no global state, so
 //! several sessions can run in one process.
 
+pub mod restart;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -54,6 +56,8 @@ pub struct Session {
     pool: rayon::ThreadPool,
     threads: usize,
     options: SessionOptions,
+    /// [`restart::model_fingerprint`] of the model as given, before ties moved nodes.
+    fingerprint: u64,
 }
 
 impl Session {
@@ -68,6 +72,7 @@ impl Session {
             .num_threads(threads)
             .build()
             .map_err(|e| Error::Unsupported(format!("thread pool: {e}")))?;
+        let fingerprint = restart::model_fingerprint(&model);
         // Ties move their slave nodes before anything uses the coordinates.
         let mut model = model;
         let constraints = ModelConstraints::new(&mut model)?;
@@ -108,6 +113,7 @@ impl Session {
             pool,
             threads,
             options,
+            fingerprint,
         })
     }
 
@@ -202,26 +208,74 @@ impl Session {
         &self.cvg
     }
 
-    /// The state with a fingerprint of the model, for `*RESTART, WRITE`.
+    /// Number of steps computed so far, including those of a resumed snapshot.
+    pub fn steps_done(&self) -> u32 {
+        self.state.steps_done
+    }
+
+    /// The state after the last step with the model's fingerprint and what the session
+    /// carries to the next step: what `*RESTART, WRITE` stores and a state link hands on.
+    /// Taken after every step it costs a copy of the state.
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
-            model_fingerprint: fingerprint(&self.model),
+            model_fingerprint: self.fingerprint,
             state: self.state.clone(),
-            average_force: None,
+            average_force: self.average_force,
         }
     }
 
-    /// Continues from a snapshot of the same model.
+    /// Continues from a snapshot: the model must be the one the snapshot was taken of (sets,
+    /// surfaces and amplitudes may be new), the next step is the one after the snapshot's.
+    /// The results of the earlier steps are not part of the session; they stay with the
+    /// caller.
     pub fn resume(model: Model, snapshot: Snapshot, options: SessionOptions) -> Result<Session> {
-        if fingerprint(&model) != snapshot.model_fingerprint {
+        if restart::model_fingerprint(&model) != snapshot.model_fingerprint {
             return Err(Error::Unsupported(
-                "the restart file belongs to another model".into(),
+                "the restart state belongs to another model: nodes, elements, materials, \
+                 sections, constraints or contact changed"
+                    .into(),
             ));
         }
         let mut session = Session::new(model, options)?;
+        check_layout(&session.model, &snapshot.state)?;
         session.state = snapshot.state;
+        session.average_force = snapshot.average_force;
         Ok(session)
     }
+}
+
+/// A state that does not fit the model would index out of bounds in the procedures.
+fn check_layout(model: &Model, state: &State) -> Result<()> {
+    let nodes = model.nodes.len();
+    let elements = model.elements.len();
+    let nodal = |name: &str, field: Option<&plxs_core::state::NodalField>| -> Result<()> {
+        match field {
+            Some(f) if f.per_node == 0 || f.values.len() != nodes * f.per_node => {
+                Err(Error::Unsupported(format!(
+                    "the restart state does not fit the model: {name} for {} nodes, the model has {nodes}",
+                    f.values.len() / f.per_node.max(1)
+                )))
+            }
+            _ => Ok(()),
+        }
+    };
+    nodal("displacements", Some(&state.displacements))?;
+    nodal("velocities", state.velocities.as_ref())?;
+    nodal("accelerations", state.accelerations.as_ref())?;
+    nodal("temperatures", state.temperatures.as_ref())?;
+    for (name, field) in [
+        ("stresses", &state.stresses),
+        ("strains", &state.strains),
+        ("material state", &state.material),
+    ] {
+        if !field.offsets.is_empty() && field.offsets.len() != elements + 1 {
+            return Err(Error::Unsupported(format!(
+                "the restart state does not fit the model: {name} of {} elements, the model has {elements}",
+                field.offsets.len() - 1
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Forwards events into a channel.
@@ -231,23 +285,4 @@ impl Progress for ChannelProgress {
     fn event(&mut self, event: ProgressEvent) {
         let _ = self.0.send(event);
     }
-}
-
-/// A hash of the model's nodes, elements and sections.
-fn fingerprint(model: &Model) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    model.nodes.ids.hash(&mut h);
-    for c in &model.nodes.coordinates {
-        for v in c {
-            v.to_bits().hash(&mut h);
-        }
-    }
-    for e in &model.elements {
-        e.id.hash(&mut h);
-        e.kind.name().hash(&mut h);
-        e.nodes.hash(&mut h);
-    }
-    model.sections.len().hash(&mut h);
-    h.finish()
 }
