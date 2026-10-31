@@ -37,6 +37,13 @@ impl Fixture {
         self.path.with_extension("ref.dat")
     }
 
+    /// Files the input reads besides itself (the global results of a submodel), gzipped
+    /// as `<file>.gz` in the directory `<name>.files/`; [`stage_files`] puts them into a
+    /// job's directory.
+    pub fn files_dir(&self) -> PathBuf {
+        self.path.with_extension("files")
+    }
+
     /// `area/name`.
     pub fn id(&self) -> String {
         format!("{}/{}", self.meta.area, self.meta.name)
@@ -115,6 +122,32 @@ pub fn load_results(dir: &Path, name: &str, input: &Path) -> Result<FixtureResul
         .filter(|t| !t.trim().is_empty())
         .map(|t| parse_dat_with_input(&t, input));
     Ok(FixtureResults { frd, dat })
+}
+
+/// Copies the files of a fixture's `<name>.files/` directory into `work`, unzipping those
+/// that end in `.gz`.
+pub fn stage_files(fixture: &Fixture, work: &Path) -> Result<(), String> {
+    let dir = fixture.files_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(());
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let (target, bytes) = match name.strip_suffix(".gz") {
+            Some(stem) => {
+                let mut out = Vec::new();
+                flate2::read::GzDecoder::new(bytes.as_slice())
+                    .read_to_end(&mut out)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                (stem.to_string(), out)
+            }
+            None => (name, bytes),
+        };
+        std::fs::write(work.join(&target), bytes).map_err(|e| format!("{target}: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Gzips bytes for a golden file.

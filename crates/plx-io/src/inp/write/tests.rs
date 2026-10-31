@@ -255,6 +255,18 @@ fn dump_fixture(name: &str, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
+/// Keeps a file an input reads besides itself (the global results of a submodel) with the
+/// fixture of that name, as `<name>.files/<file>` in `PLXS_FIXTURE_DIR`.
+fn dump_fixture_file(name: &str, file: &str, bytes: &[u8]) {
+    let Some(dir) = std::env::var_os("PLXS_FIXTURE_DIR") else {
+        return;
+    };
+    let name = name.to_ascii_lowercase().replace(' ', "-");
+    let dir = PathBuf::from(dir).join(format!("{name}.files"));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(file), bytes).unwrap();
+}
+
 /// A fresh directory for a CalculiX run, `None` without CalculiX.
 fn ccx_dir(name: &str) -> Option<PathBuf> {
     if Command::new("ccx").arg("-v").output().is_err() {
@@ -6397,6 +6409,11 @@ fn calculix_submodel_follows_the_global_cantilever() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::copy(testdata("kragbalken_c3d8.frd"), dir.join("global.frd")).unwrap();
     model.properties.global_results = Some(dir.join("global.frd"));
+    dump_fixture_file(
+        name,
+        "global.frd",
+        &std::fs::read(testdata("kragbalken_c3d8.frd")).unwrap(),
+    );
     let Some(frd) = run_ccx(name, &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
@@ -6413,6 +6430,53 @@ fn calculix_submodel_follows_the_global_cantilever() {
             );
         }
     }
+}
+
+/// A submodel whose nodes lie inside the global elements: the half cantilever shortened to
+/// 45 (its nodes at x = 0, 9, 18, ..., 45), driven at its cut by the global displacements
+/// interpolated there. Corpus fixture of the solver's submodel interpolation.
+#[test]
+fn calculix_submodel_interpolates_inside_the_global_elements() {
+    let (mut mesh, mut model) = cantilever_submodel([true, true, true, false, false, false]);
+    for id in mesh.node_ids().to_vec() {
+        let [x, y, z] = mesh.node(id).unwrap();
+        mesh.set_node(id, [0.9 * x, y, z]);
+    }
+    let name = "submodel-innen";
+    let dir = std::env::temp_dir().join(format!("plx-write-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(testdata("kragbalken_c3d8.frd"), dir.join("global.frd")).unwrap();
+    model.properties.global_results = Some(dir.join("global.frd"));
+    dump_fixture_file(
+        name,
+        "global.frd",
+        &std::fs::read(testdata("kragbalken_c3d8.frd")).unwrap(),
+    );
+    let Some(frd) = run_ccx(name, &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let global = read_frd(&testdata("kragbalken_c3d8.frd")).unwrap();
+    // At the cut (x = 45, inside the global elements from 40 to 50) the submodel takes the
+    // mean of the global displacements on both sides, the beam bending linearly between.
+    let cut = (mesh.node_ids().iter().copied())
+        .find(|&n| (mesh.node(n).unwrap()[0] - 45.0).abs() < 1e-9)
+        .unwrap();
+    let [_, y, z] = mesh.node(cut).unwrap();
+    let at = |x: f64| {
+        let node = (global.mesh.node_ids().iter().copied())
+            .find(|&n| {
+                let c = global.mesh.node(n).unwrap();
+                (c[0] - x).abs() < 1e-9 && (c[1] - y).abs() < 1e-9 && (c[2] - z).abs() < 1e-9
+            })
+            .unwrap();
+        node_value(&global, "DISP", "U3", node)
+    };
+    let ours = node_value(&frd, "DISP", "U3", cut);
+    let expected = 0.5 * (at(40.0) + at(50.0));
+    assert!(
+        (ours - expected).abs() <= 1e-4 * expected.abs(),
+        "{ours} != {expected}"
+    );
 }
 
 /// The shell plate cut in half along its length at y = 5 with a symmetry boundary condition,
@@ -7203,7 +7267,9 @@ fn calculix_finds_the_disk_frequencies_on_a_sector() {
     };
     settings.num_frequencies = 2;
     settings.nodal_diameters = Some([0, 2]);
-    let frd = run_ccx_in(&dir, "sektor", &write_inp(&mesh, &model, "").unwrap());
+    let text = write_inp(&mesh, &model, "").unwrap();
+    dump_fixture("zyklisch-sektor", &text);
+    let frd = run_ccx_in(&dir, "sektor", &text);
     let dat = std::fs::read_to_string(dir.join("sektor.dat")).unwrap();
     remove_ccx_dir(&dir);
     // The results are expanded to the whole disk.
@@ -7233,6 +7299,55 @@ fn calculix_finds_the_disk_frequencies_on_a_sector() {
         .unwrap();
     let rows: Vec<f64> = nd.entries[0].values.clone();
     assert_eq!(rows, [0.0, 0.0, 1.0, 1.0, 2.0, 2.0], "{rows:?}");
+}
+
+/// A static step on the disk sector: the spinning disk, held at the bore, deforms like the
+/// sector everywhere (nodal diameter 0), and all sectors are written. Corpus fixture of the
+/// solver's cyclic symmetry in static steps.
+#[test]
+fn calculix_spins_the_disk_sector_in_a_static_step() {
+    let (mesh, mut model, left, right) = disk(12, false);
+    let mut tie = plx_model::Tie::new("Tie-1");
+    tie.master = Region::Faces(left);
+    tie.slave = Region::Faces(right);
+    tie.cyclic = Some(plx_model::CyclicSymmetry::default());
+    model.ties.push(tie);
+    let mut step = Step::new_static("Step-1");
+    step.boundary_conditions = model.steps[0].boundary_conditions.clone();
+    let mut load = tip_force();
+    load.region = Region::ElementSet("EALL".into());
+    load.kind = LoadKind::Centrifugal {
+        point: [0.0; 3],
+        axis: [0.0, 0.0, 1.0],
+        speed: 1000.0,
+    };
+    step.loads.push(load);
+    model.steps = vec![step];
+    let Some(frd) = run_ccx("zyklisch-statisch", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    assert_eq!(frd.mesh.node_count(), 12 * mesh.node_count());
+    // The outer rim moves outwards by the same amount in every sector.
+    let radial = |id: NodeId| {
+        let x = frd.mesh.node(id).unwrap();
+        let u = [
+            node_value(&frd, "DISP", "U1", id),
+            node_value(&frd, "DISP", "U2", id),
+        ];
+        (u[0] * x[0] + u[1] * x[1]) / x[0].hypot(x[1])
+    };
+    let rim = (mesh.node_ids().iter().copied())
+        .find(|&n| {
+            let x = mesh.node(n).unwrap();
+            (x[0].hypot(x[1]) - 60.0).abs() < 1e-6
+        })
+        .unwrap();
+    let offset = mesh.node_ids().iter().copied().max().unwrap();
+    let (first, other) = (radial(rim), radial(rim + 5 * offset));
+    assert!(
+        first > 0.0 && (first - other).abs() < 1e-4 * first,
+        "{first} {other}"
+    );
 }
 
 /// A steel block of 2 x 2 hexes, 10 x 10 x 10, from z = 10 to 20, standing on a vertical

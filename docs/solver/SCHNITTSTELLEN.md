@@ -728,6 +728,74 @@ Abnahme: `solver/plxs-cli/tests/constraints_corpus.rs` (alle `constraints/*` plu
 wie die vom Writer umgestellten). Gegencheck 30³-C3D8-Block mit Rigid Body und Moment:
 plxs 6,0 s, ccx 2.21 12,4 s (4 Threads), Verschiebungen auf 6,6e-6 gleich.
 
+## Stand nach M3 T15 (zyklische Symmetrie und Submodell)
+
+Was T15 gebaut hat:
+
+- `plxs-constraints::cyclic`: `CyclicSymmetry::new` projiziert die Slave-Seite des
+  `*TIE, CYCLIC SYMMETRY`, um den Sektorwinkel `φ = 2π/N` zurückgedreht, mit der Tie-Projektion
+  auf die Master-Flächen (nicht passende Netze gehen also). Beide Achsrichtungen werden
+  versucht; die, bei der mehr Knoten (näher) treffen, gewinnt. `ModelConstraints::new`
+  dreht danach die Achse im Modell (`constraints.cyclic_symmetry.axis`) so, dass die
+  Slave-Seite bei `+φ` liegt; Ausgabe und spätere Steps müssen sie nicht neu orientieren.
+  `ModelConstraints::cyclic_real` sind die Bedingungen des Knotendurchmessers 0
+  (`u_s = R(φ) Σ wᵢ uᵢ`), die `step_set` jedem Step mitgibt (statisch, `*FREQUENCY` ohne
+  `*SELECT CYCLIC SYMMETRY MODES`). `ModelConstraints::cyclic_step_set(nodes, active, spc, k)`
+  baut den verdoppelten Satz für Knotendurchmesser `k`: Realteil auf den DOFs `0..3n`,
+  Imaginärteil auf `3n..6n`, SPCs und MPCs auf beiden Kopien, gekoppelt durch
+  `c_s = e^{−ikφ} R(φ) c_m`.
+- `plxs-procedures::eigen`: `*FREQUENCY` eliminiert jetzt SPCs **und** MPCs über
+  `ModelConstraints::step_set` (`homogeneous_constraints`); Starrkörpervektoren für
+  Partizipationsfaktoren werden auf die unabhängigen DOFs eingeschränkt
+  (`restrict_to_free`, lokal an transformierten Knoten). `*BUCKLE` nutzt noch nur SPCs.
+- `plxs-procedures::cyclic`: Frequenzschritt je Knotendurchmesser `NMIN..NMAX` (Vorgabe
+  0 bis N/2) auf `diag(K, K)`, `diag(M, M)`; Moden normiert auf `aᵀMa + bᵀMb = 1`. Jeder
+  Eigenwert kommt doppelt; die `.frd` bekommt nur den ersten des Paars mit `DISP`/`DISPI`,
+  `STRESS`/`STRESSI`, `TOSTRAIN`/`TOSTRAII` (`plxs_output::imaginary_field_name`).
+  STORAGE speichert die verdoppelten Vektoren mit `nodal_diameters`.
+- `plxs-procedures::submodel`: liest die globale ASCII-`.frd` (`INPUT=` relativ zum
+  Jobverzeichnis; Volumenelemente inkl. expandierter Schalen/Balken), sucht jeden Knoten der
+  `*BOUNDARY, SUBMODEL`-Sets per Newton im isoparametrischen Element (Raster der
+  Elementboxen, sonst nächstes Element mit Warnung) und interpoliert `DISP` des letzten
+  Inkrements von `STEP=n`; `StaticLinear` schreibt die Werte (mit Amplitude, lokal an
+  transformierten Knoten) in die SPC-Werte. Nur DOF 1–3; `GLOBAL ELSET` wird mit Warnung
+  ignoriert.
+- `plxs-output`: `.dat` mit `EigenTable::CYCLIC_EIGENVALUES` (Spalte NODAL DIAMETER) und
+  `TURNING_DIRECTION` (Achsreferenz + F/B); `.frd` mit `1PAX`, Modusnummern je
+  Knotendurchmesser und **NGRAPH-Expansion** (`Sectors`): Sektor `j` ist das Modell um `−jφ`
+  gedreht, Knoten-/Element-Ids um `j·max(Id)` verschoben; Vektoren und Tensoren werden
+  gedreht, zyklische Moden zusätzlich phasenverschoben: `c_j = e^{ikjφ} R(−jφ) c`.
+- `plxs-verify`: zyklische Moden werden bis auf einen komplexen Faktor vom Betrag 1
+  verglichen (Phase per kleinste Quadrate aus `DISP`/`DISPI`, Betrag muss 1 sein);
+  Partizipationsfaktoren und effektive Modalmassen einzelner zyklischer Moden hängen von
+  dieser Phase ab und werden nicht verglichen; die Drehrichtung stehender Wellen
+  (Knotendurchmesser 0 und N/2) ist bei ccx Rundungsrauschen und wird ausgelassen.
+  Fixtures dürfen Zusatzdateien in `<name>.files/` mitbringen (globale `.frd`).
+- Abnahmetest `solver/plxs-cli/tests/cyclic_corpus.rs`: alle `cyclic/*`-Fixtures grün
+  (`cyclic_sector`, `zyklisch-sektor` mit NGRAPH=12 und Knotendurchmessern 0–2,
+  `zyklisch-statisch` mit Fliehkraft, `submodel`, `submodel-innen` mit Knoten im Inneren
+  globaler Elemente).
+
+### Was von CalculiX nur durch Beobachtung bekannt ist (T15)
+
+- Phasenkonvention: Die Slave-Seite eilt der Master-Seite um `kφ` nach (`e^{−ikφ}`), egal
+  wie die Achse in der Eingabe zeigt; die `.dat` druckt als „Axis reference direction“ das
+  Gegenteil der Achse, um die die Slave-Seite bei `+φ` liegt, und alle Moden mit
+  `0 < k < N/2` als B (rückwärts). Getauschte Slave/Master-Flächen kehren die Referenzachse um.
+- Ohne `*SELECT CYCLIC SYMMETRY MODES` rechnet ccx Knotendurchmesser 0 als reelles Problem
+  (einfache Eigenwerte, keine Paare, normale Eigenwerttabelle); statische Steps ebenso.
+- Gesamte effektive Masse, Summen der Modalmassen: auf den unabhängigen DOFs der reduzierten
+  Massenmatrix `TᵀMT` (Abhängige gehen über `T` ein), Starrkörpervektor nur auf der
+  Realteil-Kopie – so stimmen alle Summen auf 7 Stellen, und die Totalmasse hängt vom
+  Knotendurchmesser ab.
+- Feldnamen des Imaginärteils: `I` angehängt, bei acht Zeichen ersetzt es das letzte
+  (`TOSTRAII`). Die `100CL`-Nummer zählt jeden geschriebenen zyklischen Modus doppelt
+  (Partner mitgezählt), `1PMODE` ist die ungerade Nummer im Knotendurchmesser.
+- NGRAPH: alle Knoten (auch die der Slave-Seite) werden kopiert, die Kopien liegen in
+  Richtung der Master-Seite (`−jφ`).
+- Submodell: Bei deckungsgleichen Knoten und bei Knoten im Inneren globaler Elemente
+  stimmen ccx und plxs auf 1e-6 (lineare Interpolation in C3D8).
+
 ## Was M1 zu liefern hat (Abnahme)
 
 - `solver_check::run` aus `plx-app` besteht mit `plxs` als Executable (Kragbalken mit Kraft

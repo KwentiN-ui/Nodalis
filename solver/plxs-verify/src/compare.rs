@@ -54,6 +54,10 @@ pub struct Comparison {
     /// Modes (step, increment) whose shape could not be matched because they end a step
     /// (see the module documentation); their participation factors are not compared either.
     pub unmatched_modes: Vec<(u32, u32)>,
+    /// Modes (step, increment) of a cyclic symmetric model that are standing waves (nodal
+    /// diameter 0 or N/2: the imaginary part is a multiple of the real part); their turning
+    /// direction is round-off in CalculiX and not compared.
+    pub standing_modes: Vec<(u32, u32)>,
     /// The largest relative deviation of a value (relative to the largest absolute value of
     /// its component), over all compared components.
     pub max_relative: f64,
@@ -245,6 +249,19 @@ pub fn compare_frd_with(
             i += 1;
             continue;
         };
+        if is_mode(r) && r.nodal_diameter.is_some() {
+            compare_cyclic_mode(
+                &mut c,
+                &label,
+                r,
+                k,
+                tolerance * MODE_SHAPE_FACTOR,
+                undetermined,
+                noise,
+            );
+            i += 1;
+            continue;
+        }
         if is_mode(r) {
             // The cluster: the following modes of the step whose eigenvalues agree with
             // this one within the tolerance (in the reference).
@@ -555,6 +572,161 @@ fn compare_mode_cluster(
     }
 }
 
+/// The raw (not derived) components of a field, concatenated.
+fn raw_values(i: &Increment, name: &str) -> Option<Vec<f64>> {
+    let field = i.fields.iter().find(|f| f.name == name)?;
+    let mut v = Vec::new();
+    for comp in field.components.iter().filter(|c| !c.derived) {
+        v.extend(comp.values.iter().map(|&x| f64::from(x)));
+    }
+    Some(v)
+}
+
+/// Compares a mode of a cyclic symmetric model. CalculiX writes the real part `a` of the
+/// complex mode `c = a + i b` as `DISP`, `STRESS`, ... and the imaginary part as `DISPI`,
+/// `STRESSI`, ...; the mode is determined up to a complex factor of modulus one (with
+/// `(a, b)` also `(−b, a)` is a mode of the same eigenvalue, and the solver's pick within
+/// that plane is arbitrary). The factor `p` that maps the candidate's displacements onto the
+/// reference's is fitted by least squares, must have modulus one (the normalization
+/// agrees), and is applied to every pair of fields. A mode whose reference is a real
+/// vector times a phase is a standing wave (nodal diameter 0 or N/2) and recorded.
+fn compare_cyclic_mode(
+    c: &mut Comparison,
+    label: &str,
+    reference: &Increment,
+    candidate: &Increment,
+    tolerance: f64,
+    undetermined: &[String],
+    noise: &BTreeMap<String, f64>,
+) {
+    let (Some(ra), Some(rb), Some(ka), Some(kb)) = (
+        raw_values(reference, "DISP"),
+        raw_values(reference, "DISPI"),
+        raw_values(candidate, "DISP"),
+        raw_values(candidate, "DISPI"),
+    ) else {
+        c.fail(format!(
+            "{label}: a cyclic symmetric mode needs DISP and DISPI in both files"
+        ));
+        return;
+    };
+    if ra.len() != ka.len() || rb.len() != kb.len() || ra.len() != rb.len() {
+        c.fail(format!("{label}: DISP or DISPI differ in size"));
+        return;
+    }
+    // p = Σ conj(k) r / Σ |k|²
+    let (mut re, mut im, mut norm) = (0.0, 0.0, 0.0);
+    // Σ r² (complex) and Σ |r|² for the standing wave test.
+    let (mut sq_re, mut sq_im, mut r_norm) = (0.0, 0.0, 0.0);
+    for i in 0..ra.len() {
+        re += ka[i] * ra[i] + kb[i] * rb[i];
+        im += ka[i] * rb[i] - kb[i] * ra[i];
+        norm += ka[i] * ka[i] + kb[i] * kb[i];
+        sq_re += ra[i] * ra[i] - rb[i] * rb[i];
+        sq_im += 2.0 * ra[i] * rb[i];
+        r_norm += ra[i] * ra[i] + rb[i] * rb[i];
+    }
+    if norm == 0.0 {
+        c.fail(format!("{label}: the candidate's mode is zero"));
+        return;
+    }
+    let (p_re, p_im) = (re / norm, im / norm);
+    let modulus = (p_re * p_re + p_im * p_im).sqrt();
+    c.compared += 1;
+    c.max_relative = c.max_relative.max((modulus - 1.0).abs());
+    if (modulus - 1.0).abs() > tolerance {
+        c.fail(format!(
+            "{label}: the candidate's complex mode maps onto the reference's with a factor of modulus {modulus:.6} instead of 1; the modes are normalized differently or differ"
+        ));
+    }
+    if r_norm > 0.0 && ((sq_re * sq_re + sq_im * sq_im).sqrt() / r_norm - 1.0).abs() < 1e-3 {
+        c.standing_modes.push((reference.step, reference.increment));
+    }
+    // CalculiX appends `I` to the name, or replaces the last of eight letters by it.
+    let imaginary_of = |name: &str| -> String { name.chars().take(7).chain(['I']).collect() };
+    for rf in &reference.fields {
+        let name = rf.name.as_str();
+        if reference
+            .fields
+            .iter()
+            .any(|f| f.name != rf.name && imaginary_of(&f.name) == rf.name)
+        {
+            continue;
+        }
+        if name == "ERROR" || undetermined.contains(&rf.name) {
+            continue;
+        }
+        let imaginary_name = imaginary_of(name);
+        let find = |i: &'_ Increment, n: &str| i.fields.iter().find(|f| f.name == n).cloned();
+        let (Some(kf), ri, ki) = (
+            find(candidate, name),
+            find(reference, &imaginary_name),
+            find(candidate, &imaginary_name),
+        ) else {
+            c.fail(format!("{label}: the candidate has no field {name}"));
+            continue;
+        };
+        if ri.is_some() != ki.is_some() {
+            c.fail(format!(
+                "{label}: {imaginary_name} is in only one of the files"
+            ));
+            continue;
+        }
+        let floor = largest(
+            rf.components
+                .iter()
+                .chain(ri.iter().flat_map(|f| f.components.iter()))
+                .filter(|c| !c.derived)
+                .map(|c| to_f64(&c.values))
+                .collect::<Vec<_>>()
+                .iter()
+                .map(|v| v.as_slice()),
+        )
+        .max(noise.get(&rf.name).map_or(0.0, |n| n / tolerance));
+        for rc in rf.components.iter().filter(|c| !c.derived) {
+            if undetermined.contains(&format!("{} {}", rf.name, rc.name)) {
+                continue;
+            }
+            let component = |f: &Option<plx_results::Field>| -> Option<Vec<f64>> {
+                f.as_ref()?.component(&rc.name).map(|c| to_f64(&c.values))
+            };
+            let Some(k_re) = kf.component(&rc.name).map(|c| to_f64(&c.values)) else {
+                c.fail(format!("{label}: {name} has no component {}", rc.name));
+                continue;
+            };
+            let r_re = to_f64(&rc.values);
+            let k_im = component(&ki).unwrap_or_else(|| vec![0.0; k_re.len()]);
+            if k_re.len() != r_re.len() || k_im.len() != r_re.len() {
+                c.fail(format!("{label}: {name} {} differs in size", rc.name));
+                continue;
+            }
+            // p (x + i y): real part p_re x − p_im y, imaginary part p_im x + p_re y.
+            let mixed_re: Vec<f64> = (0..r_re.len())
+                .map(|n| p_re * k_re[n] - p_im * k_im[n])
+                .collect();
+            c.values(
+                &format!("{label}: {name} {} (phase fitted)", rc.name),
+                &r_re,
+                &mixed_re,
+                tolerance,
+                floor,
+            );
+            if let Some(r_im) = component(&ri) {
+                let mixed_im: Vec<f64> = (0..r_re.len())
+                    .map(|n| p_im * k_re[n] + p_re * k_im[n])
+                    .collect();
+                c.values(
+                    &format!("{label}: {imaginary_name} {} (phase fitted)", rc.name),
+                    &r_im,
+                    &mixed_im,
+                    tolerance,
+                    floor,
+                );
+            }
+        }
+    }
+}
+
 /// Solves `M X = B` for `X` (all `m × m`, row-major) by Gaussian elimination with partial
 /// pivoting; `None` when `M` is singular.
 fn solve_dense(mut matrix: Vec<f64>, rhs: &[f64], m: usize) -> Option<Vec<f64>> {
@@ -601,11 +773,19 @@ fn solve_dense(mut matrix: Vec<f64>, rhs: &[f64], m: usize) -> Option<Vec<f64>> 
 /// within the class tolerance. `unmatched_modes` are the modes (step, number) whose shape
 /// the `.frd` comparison could not match (see [`Comparison::unmatched_modes`]); their
 /// participation factors and effective modal masses are left out.
+///
+/// In a frequency step of a cyclic symmetric model (its eigenvalue table has a
+/// `NODAL_DIAMETER` column) the participation factors and effective modal masses of single
+/// modes depend on the arbitrary phase of the complex mode, and the file keeps only the
+/// first mode of each pair; they are not compared (the totals, which do not depend on it,
+/// are not parsed). The turning direction of `standing_modes` (see
+/// [`Comparison::standing_modes`]) is CalculiX's round-off and not compared either.
 pub fn compare_dat(
     reference: &DatImport,
     candidate: &DatImport,
     class: Class,
     unmatched_modes: &[(u32, u32)],
+    standing_modes: &[(u32, u32)],
 ) -> Comparison {
     let mut c = Comparison::default();
     let tolerance = class.tolerance();
@@ -648,7 +828,22 @@ pub fn compare_dat(
             ));
             continue;
         }
+        let cyclic = rs.fields.iter().any(|f| {
+            f.name == "EIGENVALUE_OUTPUT" && f.components.iter().any(|c| c.name == "NODAL_DIAMETER")
+        });
         for (rf, kf) in rs.fields.iter().zip(&ks.fields) {
+            if cyclic
+                && matches!(
+                    rf.name.as_str(),
+                    "PARTICIPATION_FACTORS" | "EFFECTIVE_MODAL_MASS"
+                )
+            {
+                c.notes.push(format!(
+                    "{label}: {} of single cyclic symmetric modes depend on the phase of the mode and are not compared",
+                    rf.name
+                ));
+                continue;
+            }
             let floor = largest(
                 rf.components
                     .iter()
@@ -675,6 +870,22 @@ pub fn compare_dat(
                 }
                 for (re, ke) in rc.entries.iter().zip(&kc.entries) {
                     let what = format!("{label}: {} {} {}", rf.name, rc.name, re.name);
+                    if rc.name == "TURNING_DIRECTION" && !standing_modes.is_empty() {
+                        let keep: Vec<usize> = (0..rs.rows.len().min(re.values.len()))
+                            .filter(|&i| !standing_modes.contains(&(rs.rows[i].0, rs.rows[i].1)))
+                            .collect();
+                        let pick = |v: &[f64]| -> Vec<f64> {
+                            keep.iter().filter_map(|&i| v.get(i).copied()).collect()
+                        };
+                        c.values(
+                            &format!("{what} (travelling waves)"),
+                            &pick(&re.values),
+                            &pick(&ke.values),
+                            tolerance,
+                            floor,
+                        );
+                        continue;
+                    }
                     match rf.name.as_str() {
                         "PARTICIPATION_FACTORS" => {
                             let clusters = mode_clusters(rs, unmatched_modes);

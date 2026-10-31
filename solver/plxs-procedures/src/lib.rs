@@ -10,11 +10,13 @@
 //!
 //! No CalculiX code was consulted.
 
+pub mod cyclic;
 pub mod eigen;
 pub mod fields;
 pub mod heat;
 pub mod history;
 pub mod static_linear;
+pub mod submodel;
 pub mod thermal;
 
 use std::sync::Arc;

@@ -111,6 +111,9 @@ impl StaticLinear {
             })
             .collect();
 
+        // Displacements of a global model at the submodel's driven nodes.
+        let submodel =
+            crate::submodel::SubmodelValues::of_step(ctx.model, step, &ctx.work_dir, progress)?;
         let start_total = ctx.state.total_time;
         // Displacements at the end of the previous step (`*BOUNDARY, FIXED`).
         let previous = ctx.state.displacements.values.clone();
@@ -147,6 +150,16 @@ impl StaticLinear {
             spc.apply_fixed(ctx.model, step, &ctx.table.dofs, &previous, &|node| {
                 ctx.constraints.rotation(node).copied()
             });
+            submodel.apply(
+                ctx.model,
+                step,
+                &ctx.table.dofs,
+                &mut spc,
+                time,
+                total,
+                period,
+                &|node| ctx.constraints.rotation(node).copied(),
+            );
             let (mut f, warnings) = load_vector(ctx.model, ctx.table, step, time, total, period)?;
             rotate_concentrated_loads(
                 ctx.model,

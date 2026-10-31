@@ -9,6 +9,7 @@ use plxs_core::constraints::RigidBodyNodes;
 use plxs_core::mesh::NodeRef;
 use plxs_core::{ElementFamily, Model};
 
+use crate::cyclic::CyclicSymmetry;
 use crate::elimination::{Added, ConstraintSet, Eliminator, LinearConstraint, Policy};
 use crate::tie;
 use crate::transform::{Rotation, node_rotations};
@@ -33,6 +34,11 @@ pub struct ModelConstraints {
     pub warnings: Vec<String>,
     /// Number of slave nodes moved on to their master surface.
     pub adjusted: usize,
+    /// The cyclic symmetry of the model, if it has one.
+    pub cyclic: Option<CyclicSymmetry>,
+    /// Its nodal diameter 0 constraints (`u_s = R u_m`), which every step but a frequency
+    /// step with `*SELECT CYCLIC SYMMETRY MODES` uses.
+    pub cyclic_real: Vec<LinearConstraint>,
 }
 
 impl ModelConstraints {
@@ -45,7 +51,7 @@ impl ModelConstraints {
         let mut tie_constraints = Vec::new();
         for t in model.constraints.ties.clone() {
             if t.cyclic_symmetry || t.multistage {
-                // Cyclic symmetry is a separate milestone (M3); the tie only names the sides.
+                // A cyclic symmetry tie only names the sides (see `cyclic`).
                 continue;
             }
             let (couplings, missed) = tie::couplings(model, &t, &model.nodes.coordinates)?;
@@ -76,6 +82,60 @@ impl ModelConstraints {
         }
         mc.rotations = node_rotations(model, &mut mc.warnings);
         let plane = plane_nodes(model);
+
+        // Cyclic symmetry: the axis is oriented so that the slave side lies at +φ.
+        let label = model
+            .constraints
+            .cyclic_symmetry
+            .as_ref()
+            .map(|c| format!("*TIE {} (cyclic symmetry)", c.tie));
+        if let Some(label) = label {
+            let origin = mc.label(label);
+            if let Some(cyclic) = CyclicSymmetry::new(model, origin)? {
+                if !cyclic.missed.is_empty() {
+                    let ids: Vec<String> = cyclic
+                        .missed
+                        .iter()
+                        .take(10)
+                        .map(|&i| model.nodes.ids[i as usize].to_string())
+                        .collect();
+                    mc.warnings.push(format!(
+                        "*WARNING in *CYCLIC SYMMETRY MODEL: {} slave node(s) find no master face after the rotation by the sector angle and are not coupled: {}{}",
+                        cyclic.missed.len(),
+                        ids.join(", "),
+                        if cyclic.missed.len() > 10 { ", ..." } else { "" }
+                    ));
+                }
+                // The input's axis points the way the sectors follow each other, so that
+                // the output and later steps need not orient it again.
+                if let Some(definition) = model.constraints.cyclic_symmetry.as_mut() {
+                    let p = cyclic.origin;
+                    definition.axis = [
+                        p,
+                        [
+                            p[0] + cyclic.axis[0],
+                            p[1] + cyclic.axis[1],
+                            p[2] + cyclic.axis[2],
+                        ],
+                    ];
+                }
+                mc.cyclic_real = cyclic
+                    .real_constraints()
+                    .into_iter()
+                    .map(|(terms, preferred)| {
+                        primary(
+                            &mc.rotations,
+                            u32::MAX,
+                            &terms,
+                            preferred,
+                            Policy::KeepPrevious,
+                            origin,
+                        )
+                    })
+                    .collect();
+                mc.cyclic = Some(cyclic);
+            }
+        }
 
         // Rigid bodies.
         for (k, body) in model.constraints.rigid_bodies.iter().enumerate() {
@@ -209,40 +269,12 @@ impl ModelConstraints {
 
     /// Adds a constraint given on global DOFs, rewritten in the primary DOFs.
     fn push_global(&mut self, global: &[(u32, f64)], preferred: u32, policy: Policy, origin: u32) {
-        let mut terms: Vec<(u32, f64)> = Vec::with_capacity(global.len());
-        for &(dof, a) in global {
-            let (node, d) = (dof / PER_NODE, (dof % PER_NODE) as usize);
-            match self.rotations.get(&node) {
-                None => add_term(&mut terms, dof, a),
-                Some(r) => {
-                    for (k, &rdk) in r[d].iter().enumerate() {
-                        if rdk != 0.0 {
-                            add_term(&mut terms, node * PER_NODE + k as u32, a * rdk);
-                        }
-                    }
-                }
-            }
-        }
-        let preferred = match self.rotations.get(&(preferred / PER_NODE)) {
-            None => preferred,
-            Some(r) => {
-                let d = (preferred % PER_NODE) as usize;
-                let k = (0..3)
-                    .max_by(|&a, &b| r[d][a].abs().total_cmp(&r[d][b].abs()))
-                    .unwrap();
-                preferred / PER_NODE * PER_NODE + k as u32
-            }
-        };
-        self.constraints.push(LinearConstraint {
-            terms,
-            preferred,
-            policy,
-            origin,
-        });
+        let c = primary(&self.rotations, u32::MAX, global, preferred, policy, origin);
+        self.constraints.push(c);
     }
 
     pub fn is_empty(&self) -> bool {
-        self.constraints.is_empty() && self.rotations.is_empty()
+        self.constraints.is_empty() && self.rotations.is_empty() && self.cyclic_real.is_empty()
     }
 
     /// The dense nodes any constraint refers to, ascending and unique. Nodes outside every
@@ -276,7 +308,7 @@ impl ModelConstraints {
         }
         let mut repivoted: HashMap<u32, usize> = HashMap::new();
         let mut conflicts: HashMap<u32, usize> = HashMap::new();
-        for c in &self.constraints {
+        for c in self.constraints.iter().chain(&self.cyclic_real) {
             match elimination.add(&c.terms, &[], c.preferred, c.policy) {
                 Added::Repivoted { .. } => *repivoted.entry(c.origin).or_default() += 1,
                 Added::Conflict => *conflicts.entry(c.origin).or_default() += 1,
@@ -303,6 +335,77 @@ impl ModelConstraints {
         let rotation = |node: u32| self.rotations.get(&node).copied();
         ConstraintSet::from_elimination(&elimination, active, &rotation, warnings, notes)
     }
+
+    /// The constraint set of a frequency step of nodal diameter `k` in a cyclic symmetric
+    /// model, on the doubled numbering: the real part of the mode on the primary DOFs
+    /// `0..3·nodes`, the imaginary part on `3·nodes..6·nodes`. Both copies carry the SPCs
+    /// (`spc_dofs`, homogeneous) and the model's MPCs; the cyclic constraints couple them
+    /// (see [`crate::cyclic`]). `active` is given for one copy.
+    pub fn cyclic_step_set(
+        &self,
+        nodes: usize,
+        active: &[bool],
+        spc_dofs: &[u32],
+        k: u32,
+    ) -> Option<ConstraintSet> {
+        let cyclic = self.cyclic.as_ref()?;
+        let n = nodes * PER_NODE as usize;
+        let offset = n as u32;
+        let mut elimination = Eliminator::new(2 * n);
+        for copy in [0, offset] {
+            for (s, &dof) in spc_dofs.iter().enumerate() {
+                elimination.add(
+                    &[(copy + dof, 1.0)],
+                    &[(s as u32, -1.0)],
+                    copy + dof,
+                    Policy::Repivot,
+                );
+            }
+        }
+        let mut conflicts: HashMap<u32, usize> = HashMap::new();
+        for copy in [0, offset] {
+            for c in &self.constraints {
+                let terms: Vec<(u32, f64)> = c.terms.iter().map(|&(d, a)| (copy + d, a)).collect();
+                if let Added::Conflict = elimination.add(&terms, &[], copy + c.preferred, c.policy)
+                {
+                    *conflicts.entry(c.origin).or_default() += 1;
+                }
+            }
+        }
+        for (terms, preferred) in cyclic.complex_constraints(k, offset) {
+            let c = primary(
+                &self.rotations,
+                nodes as u32,
+                &terms,
+                preferred,
+                Policy::KeepPrevious,
+                cyclic.origin_label,
+            );
+            if let Added::Conflict = elimination.add(&c.terms, &[], c.preferred, c.policy) {
+                *conflicts.entry(c.origin).or_default() += 1;
+            }
+        }
+        let mut warnings = Vec::new();
+        let mut origins: Vec<_> = conflicts.into_iter().collect();
+        origins.sort_unstable();
+        for (origin, count) in origins {
+            warnings.push(format!(
+                "*WARNING in {}: {count} constraint(s) contradict earlier boundary conditions or constraints and were left out",
+                self.labels[origin as usize]
+            ));
+        }
+        let mut doubled_active = active.to_vec();
+        doubled_active.resize(n, false);
+        doubled_active.extend_from_within(..);
+        let rotation = |node: u32| self.rotations.get(&(node % nodes as u32)).copied();
+        Some(ConstraintSet::from_elimination(
+            &elimination,
+            &doubled_active,
+            &rotation,
+            warnings,
+            Vec::new(),
+        ))
+    }
 }
 
 /// Nodes used only by plane stress and plane strain elements (dense index).
@@ -321,6 +424,50 @@ fn plane_nodes(model: &Model) -> Vec<bool> {
         }
     }
     plane.iter().zip(&other).map(|(&p, &o)| p && !o).collect()
+}
+
+/// A constraint given on global DOFs (`node * 3 + d`), rewritten in the primary DOFs (local
+/// directions at transformed nodes). `wrap` maps the node numbers of a doubled numbering
+/// back on to the model's (`u32::MAX` for none).
+fn primary(
+    rotations: &HashMap<u32, Rotation>,
+    wrap: u32,
+    global: &[(u32, f64)],
+    preferred: u32,
+    policy: Policy,
+    origin: u32,
+) -> LinearConstraint {
+    let rotation_of = |node: u32| rotations.get(&(node % wrap));
+    let mut terms: Vec<(u32, f64)> = Vec::with_capacity(global.len());
+    for &(dof, a) in global {
+        let (node, d) = (dof / PER_NODE, (dof % PER_NODE) as usize);
+        match rotation_of(node) {
+            None => add_term(&mut terms, dof, a),
+            Some(r) => {
+                for (k, &rdk) in r[d].iter().enumerate() {
+                    if rdk != 0.0 {
+                        add_term(&mut terms, node * PER_NODE + k as u32, a * rdk);
+                    }
+                }
+            }
+        }
+    }
+    let preferred = match rotation_of(preferred / PER_NODE) {
+        None => preferred,
+        Some(r) => {
+            let d = (preferred % PER_NODE) as usize;
+            let k = (0..3)
+                .max_by(|&a, &b| r[d][a].abs().total_cmp(&r[d][b].abs()))
+                .unwrap();
+            preferred / PER_NODE * PER_NODE + k as u32
+        }
+    };
+    LinearConstraint {
+        terms,
+        preferred,
+        policy,
+        origin,
+    }
 }
 
 fn add_term(terms: &mut Vec<(u32, f64)>, dof: u32, a: f64) {

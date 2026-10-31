@@ -67,6 +67,29 @@ fn import(args: &[String]) -> Result<(), String> {
             .replace(' ', "-");
         let text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
         let mut meta = classify(&name, &text, source);
+        // Files the input reads (`<stem>.files/` beside it), stored gzipped.
+        let extra: Vec<(String, Vec<u8>)> = match std::fs::read_dir(file.with_extension("files")) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let bytes = std::fs::read(e.path()).ok()?;
+                    Some((format!("{}.gz", e.file_name().to_string_lossy()), bytes))
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        let write_extra = |path: &Path| -> Result<(), String> {
+            if extra.is_empty() {
+                return Ok(());
+            }
+            let dir = path.with_extension("files");
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            for (name, bytes) in &extra {
+                let packed = plxs_verify::corpus::gzip(bytes).map_err(|e| e.to_string())?;
+                std::fs::write(dir.join(name), packed).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        };
         // A fixture that exists keeps its place, reference and notes; only its features are
         // refreshed when the input changed.
         if let Some(old) = existing.iter().find(|f| f.meta.name == name) {
@@ -83,6 +106,7 @@ fn import(args: &[String]) -> Result<(), String> {
                 let _ = std::fs::remove_file(old.ref_dat());
             }
             std::fs::write(old.inp(), &text).map_err(|e| e.to_string())?;
+            write_extra(&old.path)?;
             write_meta(&old.path, &meta)?;
             if !unchanged {
                 imported += 1;
@@ -93,6 +117,7 @@ fn import(args: &[String]) -> Result<(), String> {
         std::fs::create_dir_all(&area_dir).map_err(|e| e.to_string())?;
         let path = area_dir.join(&name);
         std::fs::write(path.with_extension("inp"), &text).map_err(|e| e.to_string())?;
+        write_extra(&path)?;
         write_meta(&path, &meta)?;
         imported += 1;
     }
