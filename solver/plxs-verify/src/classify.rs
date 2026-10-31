@@ -84,6 +84,10 @@ pub struct Meta {
     /// Why there is no reference, when `reference` is `none`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Documented deviations from CalculiX: `.frd` fields (`FORC`) that are not compared,
+    /// each with the reason in `note` and docs/solver/SCHNITTSTELLEN.md.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deviations: Vec<String>,
     /// Field components (`"DISP U1"`) the model leaves undetermined (a part held in one
     /// direction only), whose values in any solver are arbitrary; they are not compared.
     /// The reason belongs in `note`.
@@ -262,6 +266,7 @@ pub fn classify(name: &str, input: &str, source: &str) -> Meta {
         source: source.to_string(),
         reference: "none".into(),
         note: None,
+        deviations: Vec::new(),
         undetermined: Vec::new(),
         noise: BTreeMap::new(),
     }

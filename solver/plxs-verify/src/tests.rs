@@ -94,7 +94,7 @@ fn a_changed_value_fails_the_comparison() {
     let reference = load_reference(f).unwrap();
     let mut changed = load_reference(f).unwrap();
     let field = &mut changed.frd.increments[0].fields[0];
-    // Deviations are relative to the field norm (all components).
+    // The tolerance is relative to the field norm (largest value of all components).
     let scale = field
         .components
         .iter()

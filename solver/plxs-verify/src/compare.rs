@@ -125,7 +125,8 @@ pub fn compare_frd(reference: &FrdImport, candidate: &FrdImport, class: Class) -
 }
 
 /// [`compare_frd`] leaving out the field components named in `undetermined`
-/// (`"DISP U1"`).
+/// (`"DISP U1"`) and the values of whole fields named there (`"FORC"`, a fixture's
+/// documented deviations; such a field may also be missing in the candidate).
 pub fn compare_frd_except(
     reference: &FrdImport,
     candidate: &FrdImport,
@@ -273,22 +274,29 @@ pub fn compare_frd_with(
             tolerance,
             0.0,
         );
-        fn names(i: &plx_results::Increment) -> Vec<&str> {
-            i.fields.iter().map(|f| f.name.as_str()).collect()
-        }
-        if names(r) != names(k) {
+        // A field of a documented deviation may be missing in the candidate (CalculiX's
+        // internal stresses of U1 beams, which plxs does not write).
+        let missing_ok = |f: &&plx_results::Field| {
+            !(undetermined.contains(&f.name) && !k.fields.iter().any(|g| g.name == f.name))
+        };
+        let r_fields: Vec<&plx_results::Field> = r.fields.iter().filter(missing_ok).collect();
+        let names = |fields: &[&plx_results::Field]| -> Vec<String> {
+            fields.iter().map(|f| f.name.clone()).collect()
+        };
+        let k_fields: Vec<&plx_results::Field> = k.fields.iter().collect();
+        if names(&r_fields) != names(&k_fields) {
             c.fail(format!(
                 "{label}: fields {:?} in the reference, {:?} in the candidate",
-                names(r),
-                names(k)
+                names(&r_fields),
+                names(&k_fields)
             ));
             continue;
         }
-        for (rf, kf) in r.fields.iter().zip(&k.fields) {
+        for (rf, kf) in r_fields.iter().zip(&k_fields) {
             // The stress error estimator is a CalculiX-internal heuristic (its numbers do
             // not follow the manual's description); only its presence is compared, see
             // docs/solver/SCHNITTSTELLEN.md.
-            if rf.name == "ERROR" {
+            if rf.name == "ERROR" || undetermined.contains(&rf.name) {
                 continue;
             }
             let to_f64 = |v: &[f32]| -> Vec<f64> { v.iter().map(|&x| f64::from(x)).collect() };

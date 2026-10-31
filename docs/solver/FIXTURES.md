@@ -100,6 +100,12 @@ die Parität in der CI. Bis dahin meldet `plxs-fixtures run` für jede Fixture `
 (mit der ersten Abweichung), `ERROR` (Solver bricht ab, in M0 für alles außer `*NO ANALYSIS`:
 `procedure not implemented yet`) oder `no reference`.
 
+Eine Fixture kann in ihrer `.toml` dokumentierte Abweichungen von ccx nennen:
+`deviations = ["FORC"]` vergleicht die Werte dieser Felder nicht (fehlt das Feld beim
+Kandidaten, ist das auch erlaubt), `note` sagt warum, die Begründung steht in
+`SCHNITTSTELLEN.md`. Das ist für Ausgaben gedacht, die ccx nachweislich anders als
+dokumentiert rechnet (FORC ≠ K·u), nicht um Fehler zu verdecken.
+
 ## Feature-Matrix
 
 Erzeugt mit `plxs-fixtures matrix`; `cargo test -p plxs-verify` schlägt fehl, wenn die Tabelle
@@ -267,11 +273,18 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `static/traktion` | A | M1 | ccx 2.21 | C3D8, \*STATIC |
 | `static/wuerfel_c3d10` | A | M1 | ccx 2.21 | C3D10, \*STATIC |
 | `structural/balken_b31` | A | M2 | ccx 2.21 | B31, \*BEAM SECTION, \*STATIC |
+| `structural/balken_b31_2d` | A | M2 | ccx 2.21 | B31, \*BEAM SECTION, \*STATIC |
 | `structural/balken_b32` | A | M2 | ccx 2.21 | B32, \*BEAM SECTION, \*STATIC |
+| `structural/balken_b32_2d` | A | M2 | ccx 2.21 | B32, \*BEAM SECTION, \*STATIC |
+| `structural/balken_b32_circ` | A | M2 | ccx 2.21 | B32, \*BEAM SECTION, \*STATIC |
+| `structural/balken_b32r` | A | M2 | ccx 2.21 | B32R, \*BEAM SECTION, \*STATIC |
+| `structural/balken_b32r_box` | A | M2 | ccx 2.21 | B32R, \*BEAM SECTION, \*STATIC |
+| `structural/balken_b32r_circ` | A | M2 | ccx 2.21 | B32R, \*BEAM SECTION, \*STATIC |
 | `structural/balken_gelenk` | A | M2 | ccx 2.21 | B31, \*BEAM SECTION, \*EQUATION, \*STATIC |
 | `structural/balken_node_tie` | A | M2 | ccx 2.21 | B31, \*BEAM SECTION, \*STATIC |
 | `structural/balken_starr` | A | M2 | ccx 2.21 | B32, \*BEAM SECTION, \*EQUATION, \*STATIC |
 | `structural/edge-tie-m3d4` | A | M2 | ccx 2.21 | C3D8, M3D4, \*MEMBRANE SECTION, \*RIGID BODY, \*TIE, \*STATIC |
+| `structural/edge-tie-s4-knoten` | A | M2 | ccx 2.21 | C3D8, S4, \*SHELL SECTION, \*RIGID BODY, \*TIE, \*STATIC |
 | `structural/edge-tie-s4` | A | M2 | ccx 2.21 | C3D8, S4, \*SHELL SECTION, \*RIGID BODY, \*TIE, \*STATIC |
 | `structural/elementtyp-s8r` | A | M2 | ccx 2.21 | S8R, \*SHELL SECTION, \*STATIC |
 | `structural/membran-m3d3` | A | M2 | ccx 2.21 | M3D3, \*MEMBRANE SECTION, \*STATIC |
@@ -280,6 +293,7 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `structural/membran-s4r` | A | M2 | ccx 2.21 | M3D4R, \*MEMBRANE SECTION, \*STATIC |
 | `structural/rohr_b32r` | A | M2 | ccx 2.21 | B32R, \*BEAM SECTION, \*STATIC |
 | `structural/schale` | A | M2 | ccx 2.21 | S8, \*SHELL SECTION, \*STATIC |
+| `structural/schale_2d` | A | M2 | ccx 2.21 | S8, \*SHELL SECTION, \*STATIC |
 | `structural/schalenkante` | A | M2 | ccx 2.21 | S8, \*SHELL SECTION, \*STATIC |
 | `structural/stab_node_tie` | A | M2 | ccx 2.21 | T3D2, \*STATIC |
 | `structural/stab_t3d2` | A | M2 | ccx 2.21 | T3D2, \*STATIC |
