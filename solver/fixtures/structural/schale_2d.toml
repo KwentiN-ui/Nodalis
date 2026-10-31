@@ -1,0 +1,7 @@
+name = "schale_2d"
+area = "structural"
+class = "A"
+stage = "M2"
+features = ["*HEADING", "*NODE", "*ELEMENT", "S8", "*NSET", "*ELSET", "*MATERIAL", "*ELASTIC", "*SHELL SECTION", "*STEP", "*STATIC", "*BOUNDARY", "*CLOAD", "*DLOAD", "*NODE FILE", "*EL FILE", "*END STEP"]
+source = "testdata"
+reference = "ccx 2.21"

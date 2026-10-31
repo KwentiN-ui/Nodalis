@@ -1,0 +1,7 @@
+name = "edge-tie-s4-knoten"
+area = "structural"
+class = "A"
+stage = "M2"
+features = ["*HEADING", "*NODE", "*ELEMENT", "C3D8", "S4", "*NSET", "*ELSET", "*SURFACE", "*MATERIAL", "*ELASTIC", "*SOLID SECTION", "*SHELL SECTION", "*RIGID BODY", "*TIE", "*STEP", "*STATIC", "*BOUNDARY", "*CLOAD", "*DLOAD", "*NODE FILE", "*EL FILE", "*END STEP"]
+source = "testdata"
+reference = "ccx 2.21"

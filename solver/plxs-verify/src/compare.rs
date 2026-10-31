@@ -140,7 +140,8 @@ pub fn compare_frd(reference: &FrdImport, candidate: &FrdImport, class: Class) -
 }
 
 /// [`compare_frd`] leaving out the field components named in `undetermined`
-/// (`"DISP U1"`).
+/// (`"DISP U1"`) and the values of whole fields named there (`"FORC"`, a fixture's
+/// documented deviations; such a field may also be missing in the candidate).
 pub fn compare_frd_except(
     reference: &FrdImport,
     candidate: &FrdImport,
@@ -240,10 +241,10 @@ pub fn compare_frd_with(
             tolerance,
             0.0,
         );
-        if !same_fields(&mut c, &label, r, k) {
+        let Some((r_fields, k_fields)) = same_fields(&mut c, &label, r, k, undetermined) else {
             i += 1;
             continue;
-        }
+        };
         if is_mode(r) {
             // The cluster: the following modes of the step whose eigenvalues agree with
             // this one within the tolerance (in the reference).
@@ -272,7 +273,7 @@ pub fn compare_frd_with(
                     tolerance,
                     0.0,
                 );
-                all_structured &= same_fields(&mut c, &label, rj, kj);
+                all_structured &= same_fields(&mut c, &label, rj, kj, undetermined).is_some();
             }
             if all_structured {
                 let last_of_step = reference.increments.get(end).is_none_or(|next| {
@@ -291,8 +292,11 @@ pub fn compare_frd_with(
             i = end;
             continue;
         }
-        for (rf, kf) in r.fields.iter().zip(&k.fields) {
-            if rf.name == "ERROR" {
+        for (rf, kf) in r_fields.iter().zip(&k_fields) {
+            // The stress error estimator is a CalculiX-internal heuristic (its numbers do
+            // not follow the manual's description); only its presence is compared, see
+            // docs/solver/SCHNITTSTELLEN.md.
+            if rf.name == "ERROR" || undetermined.contains(&rf.name) {
                 continue;
             }
             let to_f64 = |v: &[f32]| -> Vec<f64> { v.iter().map(|&x| f64::from(x)).collect() };
@@ -340,19 +344,32 @@ fn is_mode(increment: &Increment) -> bool {
 }
 
 /// Checks that two increments carry the same fields; the names are structure (class D).
-fn same_fields(c: &mut Comparison, label: &str, r: &Increment, k: &Increment) -> bool {
-    fn names(i: &Increment) -> Vec<&str> {
-        i.fields.iter().map(|f| f.name.as_str()).collect()
-    }
-    if names(r) != names(k) {
+fn same_fields<'a>(
+    c: &mut Comparison,
+    label: &str,
+    r: &'a Increment,
+    k: &'a Increment,
+    undetermined: &[String],
+) -> Option<(Vec<&'a plx_results::Field>, Vec<&'a plx_results::Field>)> {
+    // A field of a documented deviation may be missing in the candidate (CalculiX's
+    // internal stresses of U1 beams, which plxs does not write).
+    let missing_ok = |f: &&plx_results::Field| {
+        !(undetermined.contains(&f.name) && !k.fields.iter().any(|g| g.name == f.name))
+    };
+    let r_fields: Vec<&plx_results::Field> = r.fields.iter().filter(missing_ok).collect();
+    let k_fields: Vec<&plx_results::Field> = k.fields.iter().collect();
+    let names = |fields: &[&plx_results::Field]| -> Vec<String> {
+        fields.iter().map(|f| f.name.clone()).collect()
+    };
+    if names(&r_fields) != names(&k_fields) {
         c.fail(format!(
             "{label}: fields {:?} in the reference, {:?} in the candidate",
-            names(r),
-            names(k)
+            names(&r_fields),
+            names(&k_fields)
         ));
-        return false;
+        return None;
     }
-    true
+    Some((r_fields, k_fields))
 }
 
 /// Compares a cluster of modes with (nearly) equal eigenvalues as bases of one subspace:
@@ -458,15 +475,19 @@ fn compare_mode_cluster(
     c.compared += m * m;
     c.max_relative = c.max_relative.max(worst);
     // Every raw component of every field, mixed.
-    for (f, rf) in first.fields.iter().enumerate() {
-        if rf.name == "ERROR" {
+    for rf in &first.fields {
+        if rf.name == "ERROR" || undetermined.contains(&rf.name) {
             continue;
+        }
+        fn field<'a>(i: &'a Increment, name: &str) -> Option<&'a plx_results::Field> {
+            i.fields.iter().find(|g| g.name == name)
         }
         // The floor of the field: its largest raw value over all modes of the cluster.
         let floor = largest(
             reference
                 .iter()
-                .flat_map(|i| i.fields[f].components.iter().filter(|c| !c.derived))
+                .filter_map(|i| field(i, &rf.name))
+                .flat_map(|g| g.components.iter().filter(|c| !c.derived))
                 .map(|c| to_f64(&c.values))
                 .collect::<Vec<_>>()
                 .iter()
@@ -479,7 +500,11 @@ fn compare_mode_cluster(
             }
             let Some(reference_values) = reference
                 .iter()
-                .map(|i| i.fields[f].component(&rc.name).map(|c| to_f64(&c.values)))
+                .map(|i| {
+                    field(i, &rf.name)?
+                        .component(&rc.name)
+                        .map(|c| to_f64(&c.values))
+                })
                 .collect::<Option<Vec<_>>>()
             else {
                 c.fail(format!(
@@ -490,7 +515,11 @@ fn compare_mode_cluster(
             };
             let Some(candidate_values) = candidate
                 .iter()
-                .map(|i| i.fields[f].component(&rc.name).map(|c| to_f64(&c.values)))
+                .map(|i| {
+                    field(i, &rf.name)?
+                        .component(&rc.name)
+                        .map(|c| to_f64(&c.values))
+                })
                 .collect::<Option<Vec<_>>>()
             else {
                 c.fail(format!("{label}: {} has no component {}", rf.name, rc.name));

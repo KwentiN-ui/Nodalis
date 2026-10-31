@@ -1,0 +1,9 @@
+name = "balken_b32_circ"
+area = "structural"
+class = "A"
+stage = "M2"
+features = ["*HEADING", "*NODE", "*ELEMENT", "B32", "*NSET", "*ELSET", "*MATERIAL", "*ELASTIC", "*BEAM SECTION", "*STEP", "*STATIC", "*BOUNDARY", "*CLOAD", "*DLOAD", "*NODE FILE", "*EL FILE", "*END STEP"]
+source = "testdata"
+reference = "ccx 2.21"
+note = "FORC not compared: at the expanded nodes of beam nodes with rotation boundary conditions ccx writes forces that are not K u (the total does not balance the loads); plxs writes K u, see docs/solver/SCHNITTSTELLEN.md"
+deviations = ["FORC"]
