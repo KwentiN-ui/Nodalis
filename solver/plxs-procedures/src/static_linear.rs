@@ -76,8 +76,9 @@ impl StaticLinear {
             ctx.state.total_time + period,
             period,
         )?;
-        let reduction = Reduction::new(total_dofs, spc);
-        let k_free = k.restrict(&reduction.free);
+        let mpcs = plxs_assembly::mpc::model_mpcs(ctx.model, &ctx.table.dofs)?;
+        let reduction = Reduction::with_mpcs(total_dofs, spc, &mpcs)?;
+        let k_free = reduction.reduce_matrix(k);
         progress.event(ProgressEvent::Info(format!(
             "number of equations: {}",
             reduction.free.len()
@@ -122,7 +123,7 @@ impl StaticLinear {
                     progress.event(ProgressEvent::Warning(warning));
                 }
             }
-            let reduction = Reduction::new(total_dofs, spc);
+            let reduction = Reduction::with_mpcs(total_dofs, spc, &mpcs)?;
             let u_p = reduction.prescribed_vector(total_dofs);
             let mut k_up = vec![0.0; total_dofs];
             k.multiply(&u_p, &mut k_up);

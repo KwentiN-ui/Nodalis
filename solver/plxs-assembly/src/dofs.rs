@@ -145,6 +145,9 @@ pub struct Reduction {
     /// Global -> reduced index, `u32::MAX` for prescribed DOFs.
     pub to_reduced: Vec<u32>,
     pub spc: Spc,
+    /// DOFs eliminated by multi-point constraints, ascending, with their expressions in
+    /// free and prescribed DOFs (see [`crate::mpc`]).
+    pub dependents: Vec<(u32, crate::mpc::Dependent)>,
 }
 
 impl Reduction {
@@ -161,28 +164,62 @@ impl Reduction {
             free,
             to_reduced,
             spc,
+            dependents: Vec::new(),
         }
     }
 
-    /// The full displacement vector with the prescribed values filled in and zeros
-    /// elsewhere.
+    /// The full displacement vector with the prescribed values filled in, the dependent
+    /// DOFs at the values the prescribed ones give them, and zeros elsewhere (`u_0`).
     pub fn prescribed_vector(&self, total: usize) -> Vec<f64> {
         let mut u = vec![0.0; total];
         for (&dof, &value) in self.spc.dofs.iter().zip(&self.spc.values) {
             u[dof as usize] = value;
         }
+        for (dof, dep) in &self.dependents {
+            let mut v = dep.constant;
+            for &(d, c) in &dep.terms {
+                if self.to_reduced[d as usize] == u32::MAX {
+                    v += c * u[d as usize];
+                }
+            }
+            u[*dof as usize] = v;
+        }
         u
     }
 
-    /// Gathers the free entries of a full vector.
+    /// `Tᵀ v`: the free entries of a full vector plus the shares of the dependent entries.
     pub fn reduce_vector(&self, full: &[f64]) -> Vec<f64> {
-        self.free.iter().map(|&dof| full[dof as usize]).collect()
+        let mut out: Vec<f64> = self.free.iter().map(|&dof| full[dof as usize]).collect();
+        for (dof, dep) in &self.dependents {
+            let v = full[*dof as usize];
+            if v == 0.0 {
+                continue;
+            }
+            for &(d, c) in &dep.terms {
+                let r = self.to_reduced[d as usize];
+                if r != u32::MAX {
+                    out[r as usize] += c * v;
+                }
+            }
+        }
+        out
     }
 
-    /// Scatters a reduced vector into the free entries of `full`.
+    /// Scatters a reduced vector into the free entries of `full` and adds its share to the
+    /// dependent entries; `full` holds [`Self::prescribed_vector`] before.
     pub fn expand_into(&self, reduced: &[f64], full: &mut [f64]) {
         for (&dof, &value) in self.free.iter().zip(reduced) {
             full[dof as usize] = value;
+        }
+        for (dof, dep) in &self.dependents {
+            let mut v = 0.0;
+            for &(d, c) in &dep.terms {
+                let r = self.to_reduced[d as usize];
+                if r != u32::MAX {
+                    v += c * reduced[r as usize];
+                }
+            }
+            full[*dof as usize] += v;
         }
     }
 }

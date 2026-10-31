@@ -146,6 +146,17 @@ fn run(args: Vec<String>) -> i32 {
         return 0;
     }
 
+    // Shells, membranes and beams are computed as the solids CalculiX expands them to.
+    let expansion = match plxs_elements::expand::expand(analysis) {
+        Ok(e) => e,
+        Err(error) => {
+            report_error(&error);
+            return 1;
+        }
+    };
+    let analysis = expansion.analysis;
+    let output_map = expansion.output;
+
     let options = plxs_session::SessionOptions {
         threads,
         work_dir: job_dir.clone(),
@@ -169,7 +180,7 @@ fn run(args: Vec<String>) -> i32 {
                 say(&format!(
                     "*ERROR: no convergence in increment {increment}: {message}"
                 ));
-                let _ = write_results(&session, &output);
+                let _ = write_results(&session, &output_map, &output);
                 return 1;
             }
             Ok(plxs_session::StepOutcome::Partial { .. }) => {}
@@ -180,7 +191,7 @@ fn run(args: Vec<String>) -> i32 {
         }
         say("");
     }
-    if let Err(error) = write_results(&session, &output) {
+    if let Err(error) = write_results(&session, &output_map, &output) {
         report_error(&error);
         return 1;
     }
@@ -197,9 +208,11 @@ fn plxs_procedures_unsupported(step: &plxs_core::Step) -> Vec<String> {
 /// Writes `.frd`, `.sta` and, when there is history output, `.dat`.
 fn write_results(
     session: &plxs_session::Session,
+    map: &plxs_elements::expand::OutputMap,
     output: &dyn Fn(&str) -> PathBuf,
 ) -> Result<(), Error> {
-    plxs_output::write_frd(&output("frd"), session.model(), session.results(), VERSION)?;
+    let (model, results) = map.apply(session.model(), session.results());
+    plxs_output::write_frd(&output("frd"), &model, &results, VERSION)?;
     plxs_output::write_sta(&output("sta"), session.sta_rows())?;
     if !session.results().history.is_empty() {
         plxs_output::write_dat(&output("dat"), session.results())?;

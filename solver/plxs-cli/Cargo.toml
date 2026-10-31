@@ -15,6 +15,7 @@ plxs-core.workspace = true
 plxs-input.workspace = true
 plxs-session.workspace = true
 plxs-output.workspace = true
+plxs-elements.workspace = true
 
 [dev-dependencies]
 plxs-verify.workspace = true

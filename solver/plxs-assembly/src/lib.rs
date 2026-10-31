@@ -13,9 +13,11 @@
 pub mod dofs;
 pub mod elements;
 pub mod loads;
+pub mod mpc;
 pub mod stiffness;
 
 pub use dofs::{DofMap, Reduction, Spc};
 pub use elements::{ElementTable, IntegrationPointLayout};
 pub use loads::load_vector;
+pub use mpc::{Dependent, Mpc};
 pub use stiffness::{assemble_stiffness, build_pattern};
