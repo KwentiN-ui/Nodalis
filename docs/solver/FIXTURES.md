@@ -219,6 +219,9 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `nonlinear/gap_stuetzen` | B | M2 | ccx 2.21 | C3D8, GAPUNI, \*GAP, \*STATIC, NLGEOM |
 | `nonlinear/kriechen` | B | M2 | ccx 2.21 | C3D8, \*CREEP, \*STATIC, \*VISCO |
 | `nonlinear/membran-vorgespannt` | B | M2 | ccx 2.21 | M3D4, \*MEMBRANE SECTION, \*STATIC, NLGEOM |
+| `nonlinear/plastisch-history` | B | M2 | ccx 2.21 | C3D8, \*PLASTIC, \*STATIC, \*EL PRINT, \*NODE PRINT |
+| `nonlinear/plastisch-kinematisch` | B | M2 | ccx 2.21 | C3D8, \*PLASTIC, \*STATIC |
+| `nonlinear/plastisch-nlgeom` | B | M2 | ccx 2.21 | C3D8, \*PLASTIC, \*STATIC, NLGEOM |
 | `nonlinear/plastisch` | B | M2 | ccx 2.21 | C3D8, \*PLASTIC, \*STATIC |
 | `plane/ebene-cax3` | A | M2 | ccx 2.21 | CAX3, \*STATIC |
 | `plane/ebene-cax4` | A | M2 | ccx 2.21 | CAX4, \*STATIC |

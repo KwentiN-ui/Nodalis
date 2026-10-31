@@ -7,7 +7,7 @@ use plxs_core::section::SectionKind;
 use plxs_core::state::IntegrationPointField;
 use plxs_core::{Element, ElementFamily, ElementType, Error, Model, Result};
 use plxs_elements::{SolidElement, plane, solid};
-use plxs_materials::LinearElastic;
+use plxs_materials::{LinearElastic, MaterialLaw, law_of};
 
 use rayon::prelude::*;
 
@@ -62,6 +62,10 @@ pub struct ElementTable {
     pub formulations: Vec<SolidElement>,
     /// Elastic constants and matrix per (section, temperature) combination.
     pub materials: Vec<(LinearElastic, [[f64; 6]; 6])>,
+    /// The material law of every entry of `materials` (elastic, plastic, creeping), for
+    /// small strains and for NLGEOM steps (finite strains).
+    pub laws: Vec<Box<dyn MaterialLaw>>,
+    pub laws_finite: Vec<Box<dyn MaterialLaw>>,
     pub dofs: DofMap,
     pub layout: IntegrationPointLayout,
     /// Elements computed natively with a constant stiffness and no integration points
@@ -131,6 +135,8 @@ impl ElementTable {
         let mut formulations = Vec::new();
         let mut material_index: HashMap<u32, u32> = HashMap::new();
         let mut materials = Vec::new();
+        let mut laws: Vec<Box<dyn MaterialLaw>> = Vec::new();
+        let mut laws_finite: Vec<Box<dyn MaterialLaw>> = Vec::new();
         let mut missing_elastic: Option<String> = None;
         let mut entries = Vec::with_capacity(model.elements.len());
         let mut offsets = Vec::with_capacity(model.elements.len() + 1);
@@ -269,6 +275,13 @@ impl ElementTable {
                         LinearElastic::of(mat, temperature)?
                     };
                     materials.push((elastic, elastic.matrix()));
+                    if mat.elastic.is_none() {
+                        laws.push(Box::new(elastic));
+                        laws_finite.push(Box::new(elastic));
+                    } else {
+                        laws.push(law_of(mat, temperature, false)?);
+                        laws_finite.push(law_of(mat, temperature, true)?);
+                    }
                     let i = materials.len() as u32 - 1;
                     material_index.insert(section_index, i);
                     (i, plxs_materials::density(mat, temperature))
@@ -331,6 +344,8 @@ impl ElementTable {
             discrete,
             formulations,
             materials,
+            laws,
+            laws_finite,
             dofs,
             layout: IntegrationPointLayout { offsets },
             linear_blocks,
@@ -488,6 +503,21 @@ impl ElementTable {
 
     pub fn material_matrix(&self, entry: &ElementEntry) -> &[[f64; 6]; 6] {
         &self.materials[entry.material as usize].1
+    }
+
+    /// The material law of an element, in its finite-strain form for NLGEOM steps.
+    pub fn law(&self, entry: &ElementEntry, finite_strain: bool) -> &dyn MaterialLaw {
+        if finite_strain {
+            self.laws_finite[entry.material as usize].as_ref()
+        } else {
+            self.laws[entry.material as usize].as_ref()
+        }
+    }
+
+    /// Whether any element has a plastic or creeping material (the step then iterates even
+    /// without NLGEOM, as CalculiX does).
+    pub fn has_nonlinear_material(&self) -> bool {
+        self.laws.iter().any(|l| l.is_nonlinear())
     }
 
     /// Coordinates of the element's nodes.

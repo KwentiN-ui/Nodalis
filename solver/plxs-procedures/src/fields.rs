@@ -132,6 +132,82 @@ pub fn nodal_average_with(
     (sum, per_element)
 }
 
+/// One component of an integration-point field as a scalar field.
+fn scalar_of(field: &IntegrationPointField, component: usize) -> IntegrationPointField {
+    IntegrationPointField {
+        per_point: 1,
+        offsets: field.offsets.clone(),
+        values: field
+            .values
+            .chunks(field.per_point)
+            .map(|p| p[component])
+            .collect(),
+    }
+}
+
+/// CalculiX's internal energy density `ENER`: half the double contraction of the stress
+/// with the total strain at every integration point (observed on its output; the plastic
+/// work is not accumulated).
+pub fn internal_energy_density(
+    stresses: &IntegrationPointField,
+    strains: &IntegrationPointField,
+) -> IntegrationPointField {
+    IntegrationPointField {
+        per_point: 1,
+        offsets: stresses.offsets.clone(),
+        values: stresses
+            .values
+            .chunks(6)
+            .zip(strains.values.chunks(6))
+            .map(|(s, e)| {
+                0.5 * (s[0] * e[0]
+                    + s[1] * e[1]
+                    + s[2] * e[2]
+                    + 2.0 * (s[3] * e[3] + s[4] * e[4] + s[5] * e[5]))
+            })
+            .collect(),
+    }
+}
+
+/// Extrapolates a scalar integration-point field to the nodes and averages it there.
+pub fn nodal_average_scalar(
+    table: &ElementTable,
+    model: &Model,
+    field: &IntegrationPointField,
+) -> Vec<f64> {
+    let nodes = model.nodes.len();
+    let mut sum = vec![0.0; nodes];
+    let mut count = vec![0u32; nodes];
+    for (index, entry) in table.entries.iter().enumerate() {
+        let formulation = table.formulation(entry);
+        let ips = formulation.integration_points();
+        let start = table.layout.offsets[index] as usize;
+        let e = formulation.extrapolation();
+        for (a, &n) in entry.nodes.iter().enumerate() {
+            let v: f64 = (0..ips)
+                .map(|g| e[a * ips + g] * field.values[start + g])
+                .sum();
+            sum[n as usize] += v;
+            count[n as usize] += 1;
+        }
+    }
+    for (s, &c) in sum.iter_mut().zip(&count) {
+        if c > 0 {
+            *s /= f64::from(c);
+        }
+    }
+    sum
+}
+
+fn scalar_field(name: &str, component: &str, order: &[(u32, u32)], values: &[f64]) -> ResultField {
+    ResultField {
+        name: name.to_string(),
+        components: vec![component.to_string()],
+        nodes: order.iter().map(|&(id, _)| id).collect(),
+        values: vec![order.iter().map(|&(_, i)| values[i as usize]).collect()],
+    }
+}
+
 fn tensor_field(
     name: &str,
     components: [&str; 6],
@@ -229,6 +305,7 @@ pub fn write_increment(
     reactions: &[f64],
     stresses: &IntegrationPointField,
     strains: &IntegrationPointField,
+    material: Option<&IntegrationPointField>,
 ) -> Result<()> {
     let variables = requested(step);
     let has = |v: &str| variables.iter().any(|x| x == v);
@@ -281,7 +358,26 @@ pub fn write_increment(
             values: vec![order.iter().map(|&(_, i)| error[i as usize]).collect()],
         });
     }
-    let known = ["U", "S", "E", "RF", "ERR", "NOE", "NT", "HFL", "RFL"];
+    if has("PEEQ") {
+        let peeq = match material {
+            Some(m) if m.per_point > 0 => scalar_of(m, 0),
+            _ => IntegrationPointField {
+                per_point: 1,
+                offsets: stresses.offsets.clone(),
+                values: vec![0.0; stresses.offsets.last().copied().unwrap_or(0) as usize],
+            },
+        };
+        let average = nodal_average_scalar(ctx.table, ctx.model, &peeq);
+        fields.push(scalar_field("PE", "PE", &order, &average));
+    }
+    if has("ENER") {
+        let energy = internal_energy_density(stresses, strains);
+        let average = nodal_average_scalar(ctx.table, ctx.model, &energy);
+        fields.push(scalar_field("ENER", "ENER", &order, &average));
+    }
+    let known = [
+        "U", "S", "E", "RF", "ERR", "NOE", "PEEQ", "ENER", "NT", "HFL", "RFL",
+    ];
     let mut reported = Vec::new();
     for v in &variables {
         if !known.contains(&v.as_str()) && !reported.contains(v) {
@@ -305,7 +401,9 @@ pub fn write_increment(
 
 /// The output variables of a step the solver does not produce yet, for a warning.
 pub fn unsupported_outputs(step: &Step) -> Vec<String> {
-    let known = ["U", "S", "E", "RF", "ERR", "NOE", "NT", "HFL", "RFL"];
+    let known = [
+        "U", "S", "E", "RF", "ERR", "NOE", "PEEQ", "ENER", "NT", "HFL", "RFL",
+    ];
     let mut out = Vec::new();
     for v in requested(step) {
         if !known.contains(&v.as_str()) && !out.contains(&v) {
