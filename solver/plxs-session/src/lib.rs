@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use plxs_assembly::{ElementTable, build_pattern};
+use plxs_constraints::ModelConstraints;
 use plxs_core::state::Snapshot;
 use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Results, State, Step};
 use plxs_linalg::{LdltSolver, Pattern};
@@ -39,6 +40,9 @@ impl Default for SessionOptions {
 pub struct Session {
     model: Model,
     table: ElementTable,
+    constraints: ModelConstraints,
+    /// Warnings of the model preparation, reported with the first step.
+    pending_warnings: Vec<String>,
     pattern: Arc<Pattern>,
     stiffness: Option<plxs_linalg::SparseMatrix>,
     solver: LdltSolver,
@@ -47,7 +51,6 @@ pub struct Session {
     sta: Vec<StaRow>,
     pool: rayon::ThreadPool,
     threads: usize,
-    #[allow(dead_code)]
     options: SessionOptions,
 }
 
@@ -63,8 +66,23 @@ impl Session {
             .num_threads(threads)
             .build()
             .map_err(|e| Error::Unsupported(format!("thread pool: {e}")))?;
+        // Ties move their slave nodes before anything uses the coordinates.
+        let mut model = model;
+        let constraints = ModelConstraints::new(&mut model)?;
+        let pending_warnings = constraints.warnings.clone();
         let (table, pattern) = pool.install(|| -> Result<_> {
-            let table = ElementTable::new(&model, 0.0)?;
+            let mut table = ElementTable::new(&model, 0.0)?;
+            // Nodes outside every element that constraints tie in (rigid body reference
+            // and rotation nodes) keep their DOFs; the out-of-plane DOF of plane nodes
+            // stays held.
+            let referenced = constraints.referenced_nodes();
+            let unused = table.dofs.unused.clone();
+            table.dofs.unused.retain(|&dof| {
+                let node = dof / 3;
+                let unconnected = unused.binary_search(&(node * 3)).is_ok()
+                    && unused.binary_search(&(node * 3 + 1)).is_ok();
+                !(unconnected && referenced.binary_search(&node).is_ok())
+            });
             let pattern = build_pattern(&table);
             Ok((table, pattern))
         })?;
@@ -75,6 +93,8 @@ impl Session {
         Ok(Session {
             model,
             table,
+            constraints,
+            pending_warnings,
             pattern,
             stiffness: None,
             solver: LdltSolver::new(threads),
@@ -91,9 +111,13 @@ impl Session {
     pub fn run_step(&mut self, step: &Step, progress: &mut dyn Progress) -> Result<StepOutcome> {
         let step_number = self.state.steps_done + 1;
         progress.event(ProgressEvent::Step { step: step_number });
+        for warning in std::mem::take(&mut self.pending_warnings) {
+            progress.event(ProgressEvent::Warning(warning));
+        }
         let ctx = ProcedureContext {
             model: &self.model,
             table: &self.table,
+            constraints: &self.constraints,
             pattern: self.pattern.clone(),
             stiffness: self.stiffness.take(),
             solver: std::mem::replace(&mut self.solver, LdltSolver::new(1)),
@@ -102,6 +126,7 @@ impl Session {
             threads: self.threads,
             step_number,
             sta: std::mem::take(&mut self.sta),
+            work_dir: self.options.work_dir.clone(),
         };
         // The procedure runs on the session's pool in a thread of its own; events come
         // through a channel so that the caller's (not necessarily `Send`) progress sink

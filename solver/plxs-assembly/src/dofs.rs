@@ -9,11 +9,18 @@ use plxs_core::{Model, Result};
 pub struct DofMap {
     pub per_node: usize,
     pub nodes: usize,
+    /// DOFs no element works on (ascending): nodes outside every element, the out-of-plane
+    /// DOF of plane strain and axisymmetric nodes. They are held at zero.
+    pub unused: Vec<u32>,
 }
 
 impl DofMap {
     pub fn new(nodes: usize, per_node: usize) -> Self {
-        Self { per_node, nodes }
+        Self {
+            per_node,
+            nodes,
+            unused: Vec::new(),
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -101,6 +108,9 @@ impl Spc {
                 }
             }
         }
+        // Unused DOFs are held at zero, whatever a boundary prescribes on them.
+        prescribed.retain(|(dof, _)| dofs.unused.binary_search(dof).is_err());
+        prescribed.extend(dofs.unused.iter().map(|&dof| (dof, 0.0)));
         prescribed.sort_by_key(|&(dof, _)| dof);
         let mut spc = Spc::default();
         for (dof, value) in prescribed {
@@ -118,6 +128,48 @@ impl Spc {
         match &boundary.region {
             NodeRef::Node(id) => vec![*id],
             NodeRef::Set(name) => model.sets.node_sets.get(name).cloned().unwrap_or_default(),
+        }
+    }
+
+    /// `*BOUNDARY, FIXED`: the DOFs keep the displacement they had at the end of the previous
+    /// step (`previous`, global components; at nodes with a local system the local
+    /// component, `rotation` gives the system).
+    pub fn apply_fixed(
+        &mut self,
+        model: &Model,
+        step: &Step,
+        dofs: &DofMap,
+        previous: &[f64],
+        rotation: &dyn Fn(u32) -> Option<[[f64; 3]; 3]>,
+    ) {
+        for boundary in step.boundaries.iter().filter(|b| b.fixed) {
+            for node in Self::nodes(model, boundary) {
+                let Some(index) = model.nodes.index(node) else {
+                    continue;
+                };
+                for d in boundary.first_dof..=boundary.last_dof {
+                    let Some(dof) = (1..=6)
+                        .contains(&d)
+                        .then(|| dofs.dof(index, d as usize - 1))
+                        .flatten()
+                    else {
+                        continue;
+                    };
+                    let k = d as usize - 1;
+                    let global = |c: usize| {
+                        dofs.dof(index, c)
+                            .and_then(|g| previous.get(g as usize).copied())
+                            .unwrap_or(0.0)
+                    };
+                    let value = match rotation(index) {
+                        Some(r) if k < 3 => (0..3).map(|c| r[c][k] * global(c)).sum(),
+                        _ => global(k),
+                    };
+                    if let Ok(pos) = self.dofs.binary_search(&dof) {
+                        self.values[pos] = value;
+                    }
+                }
+            }
         }
     }
 

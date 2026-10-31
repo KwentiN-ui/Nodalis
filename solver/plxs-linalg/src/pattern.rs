@@ -43,6 +43,29 @@ impl Pattern {
         }
     }
 
+    /// Builds a pattern from the row indices of the upper triangle per column (`rows[col]`,
+    /// any order, duplicates allowed, entries below the diagonal ignored). The diagonal is
+    /// always added.
+    pub fn from_columns(n: usize, mut rows: Vec<Vec<u32>>) -> Pattern {
+        assert_eq!(rows.len(), n);
+        let mut col_ptr = Vec::with_capacity(n + 1);
+        let mut row_idx = Vec::new();
+        col_ptr.push(0);
+        for (col, list) in rows.iter_mut().enumerate() {
+            list.retain(|&r| (r as usize) < col);
+            list.push(col as u32);
+            list.sort_unstable();
+            list.dedup();
+            row_idx.extend_from_slice(list);
+            col_ptr.push(row_idx.len() as u32);
+        }
+        Pattern {
+            n,
+            col_ptr,
+            row_idx,
+        }
+    }
+
     pub fn dimension(&self) -> usize {
         self.n
     }

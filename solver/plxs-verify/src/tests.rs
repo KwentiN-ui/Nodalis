@@ -94,12 +94,15 @@ fn a_changed_value_fails_the_comparison() {
     let reference = load_reference(f).unwrap();
     let mut changed = load_reference(f).unwrap();
     let field = &mut changed.frd.increments[0].fields[0];
-    let component = field.components.iter_mut().find(|c| !c.derived).unwrap();
-    let scale = component
-        .values
+    // Deviations are relative to the field norm (all components).
+    let scale = field
+        .components
         .iter()
+        .filter(|c| !c.derived)
+        .flat_map(|c| c.values.iter())
         .map(|v| v.abs())
         .fold(0.0_f32, f32::max);
+    let component = field.components.iter_mut().find(|c| !c.derived).unwrap();
     component.values[0] += 1e-4 * scale;
     let comparison = compare_frd(&reference.frd, &changed.frd, Class::A);
     assert_eq!(comparison.failures.len(), 1, "{:?}", comparison.failures);

@@ -1,6 +1,7 @@
 //! Procedures of the PrePoLix solver: what a step computes. M1: linear static analysis
-//! (`*STATIC` without `NLGEOM`); M2 T7: `*FREQUENCY` and `*BUCKLE` ([`eigen`]). Nonlinear,
-//! dynamic and thermal procedures follow in M2/M3 (concept section 4.5).
+//! (`*STATIC` without `NLGEOM`). M2: heat transfer and temperature-displacement steps
+//! ([`heat`], [`thermal`]), `*FREQUENCY` and `*BUCKLE` ([`eigen`]). Nonlinear and dynamic
+//! procedures follow in M2/M3 (concept section 4.5).
 //!
 //! A procedure works on a [`ProcedureContext`]: the model, its element table, the assembled
 //! stiffness matrix and solver, the state it starts from, and the results it appends to.
@@ -11,8 +12,10 @@
 
 pub mod eigen;
 pub mod fields;
+pub mod heat;
 pub mod history;
 pub mod static_linear;
+pub mod thermal;
 
 use std::sync::Arc;
 
@@ -34,6 +37,8 @@ pub enum StepOutcome {
 pub struct ProcedureContext<'a> {
     pub model: &'a Model,
     pub table: &'a ElementTable,
+    /// The model's multi-point constraints and local systems, prepared once.
+    pub constraints: &'a plxs_constraints::ModelConstraints,
     pub pattern: Arc<Pattern>,
     /// The global stiffness matrix of the last assembly, `None` before the first.
     pub stiffness: Option<SparseMatrix>,
@@ -45,6 +50,9 @@ pub struct ProcedureContext<'a> {
     pub step_number: u32,
     /// Rows of the `.sta` file written so far.
     pub sta: Vec<StaRow>,
+    /// The job's directory: files the input refers to (`*TEMPERATURE, FILE=`) are read
+    /// from here.
+    pub work_dir: std::path::PathBuf,
 }
 
 /// A procedure computes a step on the context.
@@ -70,6 +78,13 @@ pub fn run_step(
         }
         ProcedureKind::Frequency(_) => eigen::FrequencyProcedure.run(ctx, step, progress),
         ProcedureKind::Buckle(_) => eigen::BuckleProcedure.run(ctx, step, progress),
+        ProcedureKind::HeatTransfer(_)
+        | ProcedureKind::CoupledTemperatureDisplacement(_)
+        | ProcedureKind::UncoupledTemperatureDisplacement(_)
+            if !step.nlgeom =>
+        {
+            heat::HeatTransferProcedure.run(ctx, step, progress)
+        }
         other => Err(Error::Unsupported(format!(
             "procedure not implemented yet: {}{} (step {})",
             other.keyword(),

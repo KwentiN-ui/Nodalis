@@ -28,7 +28,7 @@ Fixtures werden nie von Hand editiert; wer eine ändern will, ändert den Writer
 
 ## Toleranzklassen (`class` in der `.toml`)
 
-| Klasse | Größen | Toleranz relativ zum größten Betrag der Komponente |
+| Klasse | Größen | Toleranz relativ zur Feldnorm (größter Betrag aller Komponenten des Felds) |
 |---|---|---|
 | A | linear: U, RF, NT, S/E, Eigenfrequenzen | 1e-5 (statt 1e-6 im Konzept: die ASCII-`.frd` hat sechs signifikante Stellen, mehr kann kein Solver treffen) |
 | B | nichtlinear glatt: NLGEOM, Plastizität, Kriechen, Wärme transient, Strahlung, Gaps | 1e-3 am Step-Ende; Inkrementanzahl nur Größenordnung |
@@ -40,6 +40,18 @@ Verglichen wird nicht Text, sondern was `plx_io::frd::read_frd_bytes` und
 `plx_io::dat::parse_dat` liefern (`plxs_verify::compare_frd`, `compare_dat`): dieselben
 Knoten-Ids und Elemente (expandierte Netze eingeschlossen), dieselben Inkremente (Step,
 Nummer, Art, Wert), dieselben Felder, und jede rohe Komponente innerhalb der Toleranz.
+
+Bezugsgröße ist die Feldnorm (Konzept 6.2), nicht der größte Betrag der einzelnen Komponente:
+eine Komponente, die im ganzen Modell fast null ist (S13 in einer ebenen Scheibe, F3 bei
+reiner Querlast), trägt nur Rundungsrauschen, und ccx' Extrapolation bei C3D15 weicht um
+einige 1e-6 der Feldgröße von der exakten ab. Relativ zur Komponente wären das 1e-5 und mehr; relativ
+zum Feld bleibt die Prüfung bei 1e-5 so streng wie gemeint (seit M2 T4).
+
+Rundungsrauschen (`[noise]` in der `.toml`): Felder, die physikalisch null sind (etwa
+Spannungen bei freier Wärmedehnung) und bei ccx nur Rundungsreste zeigen, bekommen einen
+absoluten Rauschpegel je Feldname, z. B. `STRESS = 1e-6`. Die Skala einer Komponente ist
+dann max(Feldnorm, Rauschpegel/Toleranz). Der Schlüssel ist die
+einzige Ausnahme von „nie von Hand editieren“: `plxs-fixtures import` behält ihn.
 
 ## Bereiche und Stufen
 
@@ -202,6 +214,24 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `nonlinear/kriechen` | B | M2 | ccx 2.21 | C3D8, \*CREEP, \*STATIC, \*VISCO |
 | `nonlinear/membran-vorgespannt` | B | M2 | ccx 2.21 | M3D4, \*MEMBRANE SECTION, \*STATIC, NLGEOM |
 | `nonlinear/plastisch` | B | M2 | ccx 2.21 | C3D8, \*PLASTIC, \*STATIC |
+| `plane/ebene-cax3` | A | M2 | ccx 2.21 | CAX3, \*STATIC |
+| `plane/ebene-cax4` | A | M2 | ccx 2.21 | CAX4, \*STATIC |
+| `plane/ebene-cax4r` | A | M2 | ccx 2.21 | CAX4R, \*STATIC |
+| `plane/ebene-cax6` | A | M2 | ccx 2.21 | CAX6, \*STATIC |
+| `plane/ebene-cax8` | A | M2 | ccx 2.21 | CAX8, \*STATIC |
+| `plane/ebene-cax8r` | A | M2 | ccx 2.21 | CAX8R, \*STATIC |
+| `plane/ebene-cpe3` | A | M2 | ccx 2.21 | CPE3, \*STATIC |
+| `plane/ebene-cpe4` | A | M2 | ccx 2.21 | CPE4, \*STATIC |
+| `plane/ebene-cpe4r` | A | M2 | ccx 2.21 | CPE4R, \*STATIC |
+| `plane/ebene-cpe6` | A | M2 | ccx 2.21 | CPE6, \*STATIC |
+| `plane/ebene-cpe8` | A | M2 | ccx 2.21 | CPE8, \*STATIC |
+| `plane/ebene-cpe8r` | A | M2 | ccx 2.21 | CPE8R, \*STATIC |
+| `plane/ebene-cps3` | A | M2 | ccx 2.21 | CPS3, \*STATIC |
+| `plane/ebene-cps4` | A | M2 | ccx 2.21 | CPS4, \*STATIC |
+| `plane/ebene-cps4r` | A | M2 | ccx 2.21 | CPS4R, \*STATIC |
+| `plane/ebene-cps6` | A | M2 | ccx 2.21 | CPS6, \*STATIC |
+| `plane/ebene-cps8` | A | M2 | ccx 2.21 | CPS8, \*STATIC |
+| `plane/ebene-cps8r` | A | M2 | ccx 2.21 | CPS8R, \*STATIC |
 | `plane/ebener-spannungszustand` | A | M2 | ccx 2.21 | CPS8, \*STATIC |
 | `plane/ebener-verzerrungszustand` | A | M2 | ccx 2.21 | CPE8, \*STATIC |
 | `plane/elementtyp-cax8r` | A | M2 | ccx 2.21 | CAX8R, \*STATIC |
