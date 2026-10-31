@@ -236,14 +236,19 @@ impl Expander {
         self.constraints(&knot_nodes);
         self.remap_steps(&original)?;
         let mut model = std::mem::take(&mut self.analysis.model);
-        model.constraints.equations.extend(self.equations.drain(..));
+        model.constraints.equations.append(&mut self.equations);
         let groups: BTreeMap<NodeId, Vec<Vec<NodeId>>> = self
             .groups
             .iter()
             .map(|(&n, g)| (n, g.iter().map(|g| g.nodes.clone()).collect()))
             .collect();
         self.analysis.model = model;
-        let output = OutputMap::expanded(&original, &self.analysis.model, groups, &self.analysis.steps);
+        let output = OutputMap::expanded(
+            &original,
+            &self.analysis.model,
+            groups,
+            &self.analysis.steps,
+        );
         Ok(Expansion {
             analysis: self.analysis,
             output,
@@ -431,9 +436,9 @@ impl Expander {
         model.nodes = nodes;
     }
 
-    /// Nodes that become knots: several expansions meet, or all three rotations are held
-    /// in some step (CalculiX then uses an expandable rigid body instead of mean rotation
-    /// constraints, which cannot hold the drilling rotation).
+    /// Nodes that become knots: several expansions meet, or all three rotations of a shell
+    /// node are held in some step (CalculiX then uses an expandable rigid body instead of
+    /// mean rotation constraints, which cannot hold the drilling rotation).
     fn knot_nodes(&self) -> HashSet<NodeId> {
         let mut knots: HashSet<NodeId> = self
             .groups
@@ -446,8 +451,11 @@ impl Expander {
             let mut held: HashMap<NodeId, [bool; 3]> = HashMap::new();
             for b in &step.boundaries {
                 for node in model.nodes_of(&b.region) {
-                    if !self.groups.contains_key(&node) {
-                        continue;
+                    // Beams hold their rotations by mean rotation constraints (the section
+                    // has extent about every axis); shells cannot about the drilling axis.
+                    match self.groups.get(&node) {
+                        Some(g) if g.iter().all(|g| g.kind == Kind::Shell) => {}
+                        _ => continue,
                     }
                     let h = held.entry(node).or_default();
                     for d in b.first_dof.max(4)..=b.last_dof.min(6) {
@@ -455,7 +463,11 @@ impl Expander {
                     }
                 }
             }
-            knots.extend(held.into_iter().filter(|(_, h)| h.iter().all(|&x| x)).map(|(n, _)| n));
+            knots.extend(
+                held.into_iter()
+                    .filter(|(_, h)| h.iter().all(|&x| x))
+                    .map(|(n, _)| n),
+            );
         }
         knots
     }
@@ -469,12 +481,53 @@ impl Expander {
 
     /// The constraints between original and expanded nodes.
     fn constraints(&mut self, knots: &HashSet<NodeId>) {
+        let held = self.held_translations();
         let nodes: Vec<NodeId> = self.groups.keys().copied().collect();
         for node in nodes {
             if knots.contains(&node) {
                 self.knot(node);
             } else {
                 self.mean(node);
+                if held.contains(&node) {
+                    self.tie_edge_midpoints(node);
+                }
+            }
+        }
+    }
+
+    /// Structural nodes with a translational boundary condition in some step.
+    fn held_translations(&self) -> HashSet<NodeId> {
+        let model = &self.analysis.model;
+        let mut held = HashSet::new();
+        for step in &self.analysis.steps {
+            for b in &step.boundaries {
+                if b.first_dof <= 3 {
+                    held.extend(
+                        model
+                            .nodes_of(&b.region)
+                            .into_iter()
+                            .filter(|n| self.groups.contains_key(n)),
+                    );
+                }
+            }
+        }
+        held
+    }
+
+    /// At a held end node of a quadratic beam the edge midpoints of the section follow the
+    /// node (ccx results show them exactly at the prescribed values; the corners only
+    /// on average, as the mean constraint says).
+    fn tie_edge_midpoints(&mut self, node: NodeId) {
+        let g = &self.groups[&node][0];
+        if g.kind != Kind::Beam || !g.used[4] {
+            return;
+        }
+        let mids: Vec<NodeId> = (4..8).map(|s| g.nodes[s]).collect();
+        for m in mids {
+            for dof in 1..=3u8 {
+                self.equations.push(Equation {
+                    terms: vec![term(m, dof, 1.0), term(node, dof, -1.0)],
+                });
             }
         }
     }
@@ -506,22 +559,40 @@ impl Expander {
     }
 
     /// The linearized expandable rigid body of a knot: every expanded node follows
-    /// `u_i = u_0 + θ × r_i + α r_i`, `r_i` from the centre of the expanded nodes.
+    /// `u_i = u_0 + θ × r_i + S r_i`, `r_i` from the centre of the expanded nodes. The
+    /// stretch `S` is isotropic (`α I`, one parameter) for shell knots and knots of
+    /// several expansions; for the knot of a single beam expansion it is the stretch in the
+    /// section plane linearized at the undeformed state, `s1 e1 e1 + s2 e2 e2` (the manual's
+    /// beam knot: the shear angle of the principal directions has no first-order effect).
     fn knot(&mut self, node: NodeId) {
         let model = &self.analysis.model;
-        let members: Vec<NodeId> = self.groups[&node]
+        let groups = &self.groups[&node];
+        let members: Vec<NodeId> = groups
             .iter()
-            .flat_map(|g| g.nodes.iter().zip(&g.used).filter(|(_, u)| **u).map(|(n, _)| *n))
+            .flat_map(|g| {
+                g.nodes
+                    .iter()
+                    .zip(&g.used)
+                    .filter(|(_, u)| **u)
+                    .map(|(n, _)| *n)
+            })
             .collect();
+        let beam_axes = (groups.len() == 1 && groups[0].kind == Kind::Beam)
+            .then(|| (groups[0].axis1, groups[0].normal));
         let coords: Vec<[f64; 3]> = members
             .iter()
             .map(|&n| model.nodes.coordinates(n).unwrap())
             .collect();
-        let centre = scale(coords.iter().fold([0.0; 3], |a, &c| add(a, c)), 1.0 / coords.len() as f64);
+        let centre = scale(
+            coords.iter().fold([0.0; 3], |a, &c| add(a, c)),
+            1.0 / coords.len() as f64,
+        );
         let x0 = model.nodes.coordinates(node).unwrap();
         let rotation = self.helper_node(x0);
         let expansion = self.helper_node(x0);
-        self.helper_fixed.push((expansion, 2));
+        if beam_axes.is_none() {
+            self.helper_fixed.push((expansion, 2));
+        }
         self.helper_fixed.push((expansion, 3));
         self.knots.insert(node, (rotation, expansion));
         for (&m, &c) in members.iter().zip(&coords) {
@@ -529,18 +600,28 @@ impl Expander {
             for d in 0..3usize {
                 // (θ × r)_d = θ_{d+1} r_{d+2} - θ_{d+2} r_{d+1}
                 let (a, b) = ((d + 1) % 3, (d + 2) % 3);
-                let mut terms = vec![
-                    term(m, d as u8 + 1, 1.0),
-                    term(node, d as u8 + 1, -1.0),
-                ];
+                let mut terms = vec![term(m, d as u8 + 1, 1.0), term(node, d as u8 + 1, -1.0)];
                 if r[b] != 0.0 {
                     terms.push(term(rotation, a as u8 + 1, -r[b]));
                 }
                 if r[a] != 0.0 {
                     terms.push(term(rotation, b as u8 + 1, r[a]));
                 }
-                if r[d] != 0.0 {
-                    terms.push(term(expansion, 1, -r[d]));
+                match beam_axes {
+                    None => {
+                        if r[d] != 0.0 {
+                            terms.push(term(expansion, 1, -r[d]));
+                        }
+                    }
+                    Some((e1, e2)) => {
+                        let (c1, c2) = (dot(r, e1) * e1[d], dot(r, e2) * e2[d]);
+                        if c1.abs() > 1e-14 * (1.0 + dot(r, r).sqrt()) {
+                            terms.push(term(expansion, 1, -c1));
+                        }
+                        if c2.abs() > 1e-14 * (1.0 + dot(r, r).sqrt()) {
+                            terms.push(term(expansion, 2, -c2));
+                        }
+                    }
                 }
                 self.equations.push(Equation { terms });
             }
@@ -555,10 +636,11 @@ impl Expander {
         }
         let model = &self.analysis.model;
         let g = &self.groups[&node][0];
-        let participants: Vec<NodeId> = (g.nodes.iter().zip(&g.used))
-            .filter(|(_, u)| **u)
-            .map(|(n, _)| *n)
-            .collect();
+        // Shells: bottom and top (the middle node lies on the axis); beams: the corners.
+        let participants: Vec<NodeId> = match g.kind {
+            Kind::Shell => vec![g.nodes[0], g.nodes[2]],
+            Kind::Beam => beam::edge_slots().iter().map(|&s| g.nodes[s]).collect(),
+        };
         let coords: Vec<[f64; 3]> = participants
             .iter()
             .map(|&n| model.nodes.coordinates(n).unwrap())
@@ -586,7 +668,10 @@ impl Expander {
         if count == 0 {
             return None;
         }
-        let mean_g = scale(gs.iter().fold([0.0; 3], |s, &g| add(s, g)), 1.0 / gs.len() as f64);
+        let mean_g = scale(
+            gs.iter().fold([0.0; 3], |s, &g| add(s, g)),
+            1.0 / gs.len() as f64,
+        );
         let x0 = model.nodes.coordinates(node).unwrap();
         let helper = self.helper_node(a);
         let _ = x0;
@@ -596,9 +681,9 @@ impl Expander {
         let n = count as f64;
         for (&p, &gi) in participants.iter().zip(&gs) {
             let c = sub(gi, mean_g);
-            for d in 0..3 {
-                if c[d].abs() > 1e-14 * (1.0 + dot(gi, gi).sqrt()) {
-                    terms.push(term(p, d as u8 + 1, c[d] / n));
+            for (d, &cd) in c.iter().enumerate() {
+                if cd.abs() > 1e-14 * (1.0 + dot(gi, gi).sqrt()) {
+                    terms.push(term(p, d as u8 + 1, cd / n));
                 }
             }
         }
@@ -714,11 +799,9 @@ impl Expander {
     fn force_shares(&self, node: NodeId) -> Vec<(NodeId, f64)> {
         let g = &self.groups[&node][0];
         match g.kind {
-            Kind::Shell if g.used[1] => vec![
-                (g.nodes[0], -0.5),
-                (g.nodes[1], 2.0),
-                (g.nodes[2], -0.5),
-            ],
+            Kind::Shell if g.used[1] => {
+                vec![(g.nodes[0], -0.5), (g.nodes[1], 2.0), (g.nodes[2], -0.5)]
+            }
             Kind::Shell => vec![(g.nodes[0], 0.5), (g.nodes[2], 0.5)],
             Kind::Beam => beam::edge_slots()
                 .iter()
@@ -746,11 +829,9 @@ impl Expander {
         kind: &mut DistributedLoadKind,
     ) -> Result<()> {
         let ids = original.elements_of(region);
-        let structural = ids.iter().any(|&id| {
-            original
-                .element(id)
-                .is_some_and(|e| expands(e.kind))
-        });
+        let structural = ids
+            .iter()
+            .any(|&id| original.element(id).is_some_and(|e| expands(e.kind)));
         if !structural {
             return Ok(());
         }
@@ -758,7 +839,8 @@ impl Expander {
         match kind {
             // Shells: `P` is a pressure on the bottom face, acting along the normal.
             DistributedLoadKind::Other { label, values }
-                if label == "P" && matches!(family, Some(ElementFamily::Shell | ElementFamily::Membrane)) =>
+                if label == "P"
+                    && matches!(family, Some(ElementFamily::Shell | ElementFamily::Membrane)) =>
             {
                 *kind = DistributedLoadKind::Pressure {
                     face: 1,
@@ -779,11 +861,13 @@ impl Expander {
 /// Normals within this angle (degrees) count as one.
 const NORMAL_ANGLE: f64 = 0.5;
 
-fn split_dofs(first: u8, last: u8) -> (Option<(u8, u8)>, Option<(u8, u8)>) {
+/// A range of degrees of freedom, first and last.
+type DofRange = Option<(u8, u8)>;
+
+/// The translational and the rotational part of a DOF range.
+fn split_dofs(first: u8, last: u8) -> (DofRange, DofRange) {
     let translation = (first <= 3).then(|| (first, last.min(3)));
     let rotation = (last >= 4 && first <= 6).then(|| (first.max(4), last.min(6)));
-    let other = (last > 6).then_some(());
-    let _ = other;
     (translation, rotation)
 }
 

@@ -74,6 +74,7 @@ fn import(args: &[String]) -> Result<(), String> {
                 std::fs::read_to_string(old.inp()).ok().as_deref() == Some(text.as_str());
             meta.area = old.meta.area.clone();
             meta.note = old.meta.note.clone();
+            meta.deviations = old.meta.deviations.clone();
             if unchanged {
                 meta.reference = old.meta.reference.clone();
             } else {

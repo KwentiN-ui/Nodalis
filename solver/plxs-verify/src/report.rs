@@ -5,7 +5,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::corpus::load_results;
-use crate::{Comparison, Fixture, compare_dat, compare_frd, load_reference};
+use crate::{Comparison, Fixture, compare_dat, compare_frd_except, load_reference};
 
 /// How a fixture went.
 #[derive(Clone, Debug, PartialEq)]
@@ -101,7 +101,12 @@ pub fn run_fixture(solver: &Path, fixture: &Fixture, work: &Path) -> Report {
         Err(e) => return report(Outcome::Error(format!("results: {e}")), short_log),
     };
     let class = fixture.meta.class;
-    let mut comparison: Comparison = compare_frd(&reference.frd, &results.frd, class);
+    let mut comparison: Comparison = compare_frd_except(
+        &reference.frd,
+        &results.frd,
+        class,
+        &fixture.meta.deviations,
+    );
     match (&reference.dat, &results.dat) {
         (Some(r), Some(c)) => {
             let dat = compare_dat(r, c, class);

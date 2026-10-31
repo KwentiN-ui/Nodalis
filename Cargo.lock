@@ -3495,6 +3495,7 @@ name = "plxs-cli"
 version = "0.3.15"
 dependencies = [
  "plxs-core",
+ "plxs-elements",
  "plxs-input",
  "plxs-output",
  "plxs-session",

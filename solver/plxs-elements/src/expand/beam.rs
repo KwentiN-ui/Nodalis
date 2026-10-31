@@ -102,7 +102,16 @@ pub(super) fn solid_type(kind: ElementType) -> ElementType {
 pub(super) fn layout(kind: ElementType) -> Vec<(usize, usize)> {
     use ElementType::*;
     match kind {
-        B31 => vec![(0, 0), (1, 0), (1, 1), (0, 1), (0, 3), (1, 3), (1, 2), (0, 2)],
+        B31 => vec![
+            (0, 0),
+            (1, 0),
+            (1, 1),
+            (0, 1),
+            (0, 3),
+            (1, 3),
+            (1, 2),
+            (0, 2),
+        ],
         B32 | B32R => vec![
             (0, 0),
             (2, 0),
@@ -129,6 +138,9 @@ pub(super) fn layout(kind: ElementType) -> Vec<(usize, usize)> {
     }
 }
 
+/// Tangents and normals at the nodes of a beam element.
+pub(super) type Directions = (Vec<[f64; 3]>, Vec<[f64; 3]>);
+
 /// Tangent and 1-direction at every node of a beam element. The tangent follows the
 /// element geometry (for B32 the derivative of the quadratic interpolation).
 pub(super) fn directions(
@@ -136,7 +148,7 @@ pub(super) fn directions(
     coords: &[[f64; 3]],
     n1: [f64; 3],
     id: u32,
-) -> Result<(Vec<[f64; 3]>, Vec<[f64; 3]>)> {
+) -> Result<Directions> {
     let tangents: Vec<[f64; 3]> = match kind {
         ElementType::B31 => {
             let t = normalize(sub(coords[1], coords[0]));

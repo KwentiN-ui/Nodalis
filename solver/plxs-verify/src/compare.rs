@@ -93,6 +93,17 @@ impl Comparison {
 /// Compares two `.frd` imports: mesh exactly, increments and raw field components within
 /// the class tolerance.
 pub fn compare_frd(reference: &FrdImport, candidate: &FrdImport, class: Class) -> Comparison {
+    compare_frd_except(reference, candidate, class, &[])
+}
+
+/// Like [`compare_frd`], but the values of the named fields (a fixture's documented
+/// deviations) are not compared; their presence and components still are.
+pub fn compare_frd_except(
+    reference: &FrdImport,
+    candidate: &FrdImport,
+    class: Class,
+    skipped: &[String],
+) -> Comparison {
     let mut c = Comparison::default();
     let tolerance = class.tolerance();
 
@@ -172,7 +183,7 @@ pub fn compare_frd(reference: &FrdImport, candidate: &FrdImport, class: Class) -
             // The stress error estimator is a CalculiX-internal heuristic (its numbers do
             // not follow the manual's description); only its presence is compared, see
             // docs/solver/SCHNITTSTELLEN.md.
-            if rf.name == "ERROR" {
+            if rf.name == "ERROR" || skipped.contains(&rf.name) {
                 continue;
             }
             // Values are compared relative to the largest value of the whole field (the

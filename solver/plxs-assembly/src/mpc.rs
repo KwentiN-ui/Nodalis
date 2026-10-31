@@ -54,7 +54,10 @@ impl Reduction {
                 if dof as usize >= total {
                     return Err(Error::input(
                         "*EQUATION",
-                        format!("constraint {} references an unknown degree of freedom", index + 1),
+                        format!(
+                            "constraint {} references an unknown degree of freedom",
+                            index + 1
+                        ),
                     ));
                 }
                 match dependents.get(&dof) {
@@ -180,6 +183,7 @@ impl Reduction {
         let (mut lr, mut lc) = (Vec::new(), Vec::new());
         // Pattern of the reduced matrix.
         let mut pairs: Vec<[u32; 2]> = Vec::new();
+        #[allow(clippy::needless_range_loop)]
         for col in 0..n {
             self.row(col as u32, &mut lc);
             if lc.is_empty() {
@@ -205,6 +209,7 @@ impl Reduction {
         let mut out = SparseMatrix::zeros(reduced);
         let values = k.values();
         let col_ptr = pattern.col_ptr();
+        #[allow(clippy::needless_range_loop)]
         for col in 0..n {
             self.row(col as u32, &mut lc);
             if lc.is_empty() {
