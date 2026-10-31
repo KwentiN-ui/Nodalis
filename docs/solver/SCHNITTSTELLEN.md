@@ -366,9 +366,14 @@ Assemblierung. Die Messlatte des Konzepts (ccx/PaStiX 8,7 s) stammt von anderer 
 - **Knotenkoordinaten** in der `.frd` laufen durch f32 (ccx schreibt einfache Genauigkeit).
 - **Einzelelement-Orakel** (verzerrte Elemente, Steifigkeit über FORC = K·u, Spannungen bei
   Zufallsverschiebung): C3D4, C3D6, C3D8, C3D8R, C3D8I, C3D20, C3D20R und alle 2D-Typen
-  ≤ 2e-6; C3D10 und C3D15 Spannungen ~6e-6 der Feldgröße (Rauschen der ccx-Extrapolation an
-  den Eckknoten). Deshalb vergleicht `plxs-verify` seit T4 relativ zur Feldnorm
-  (`FIXTURES.md`).
+  ≤ 2e-6, C3D10 1e-6. **C3D10** extrapoliert in ccx mit auf fünf Dezimalen gerundeten
+  Eckgewichten (1.92705/−0.30902, Zeilensumme 0.99999, eine gleichförmige Spannung kommt
+  also 1e-5 zu niedrig heraus); plxs bildet das nach, Mittelknoten = Mittel der Ecken.
+  **C3D15**: die Eckknotenwerte von ccx sind linear in den IP-Werten, aber mit einer Matrix,
+  die bis ~1e-5 von der exakten (und von gerundeten Varianten) abweicht und nicht
+  identifiziert ist; Feldabweichung ≤ 5e-6. Kleine Komponenten verlieren damit relativ zur
+  eigenen Größe 1e-5 und mehr, deshalb vergleicht `plxs-verify` seit T4 relativ zur
+  Feldnorm (`FIXTURES.md`).
 - Fixtures `plane/ebene-{cps,cpe,cax}{3,4,4r,6,8,8r}` (Writer-Test
   `calculix_runs_every_plane_element_type`, verzerrtes Netz, Druck und Einzellast),
   Abnahmetest `solver/plxs-cli/tests/plane_corpus.rs`.

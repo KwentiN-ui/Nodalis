@@ -10,16 +10,7 @@ use plxs_verify::{Fixture, Outcome, corpus, fixtures_root, run_corpus};
 
 /// Fixtures that need other stages, with the reason. A listed fixture may pass (once the
 /// other stage is merged); one that is not listed must.
-const WAITING: &[(&str, &str)] = &[
-    (
-        "constraints/tet-schraeg",
-        "C3D10 nodal stresses 1.7e-5 off ccx everywhere while displacements and forces agree to 1e-6 (element stage, not the constraints)",
-    ),
-    (
-        "constraints/tet-vorspannung",
-        "C3D10 nodal stresses 1.8e-5 off ccx, as tet-schraeg",
-    ),
-];
+const WAITING: &[(&str, &str)] = &[];
 
 fn selected(f: &Fixture) -> bool {
     f.meta.area == "constraints"
