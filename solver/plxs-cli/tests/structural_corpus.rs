@@ -17,10 +17,6 @@ const OPEN: &[(&str, &str)] = &[
     ("edge-tie-m3d4", "*TIE and *RIGID BODY (T6), membranes"),
     ("edge-tie-s4", "*TIE and *RIGID BODY (T6)"),
     (
-        "membran-m3d3",
-        "membranes: ccx 2.21 computes M3D3 as a plain CST",
-    ),
-    (
         "membran-m3d4",
         "membranes: M3D4 formulation of ccx 2.21 unknown",
     ),

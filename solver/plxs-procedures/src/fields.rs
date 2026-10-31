@@ -64,6 +64,17 @@ pub fn nodal_average(
     model: &Model,
     field: &IntegrationPointField,
 ) -> (Vec<[f64; 6]>, Vec<Vec<[f64; 6]>>) {
+    nodal_average_with(table, model, field, &[])
+}
+
+/// [`nodal_average`] with further elements of constant value (native membranes): dense
+/// nodes and value.
+pub fn nodal_average_with(
+    table: &ElementTable,
+    model: &Model,
+    field: &IntegrationPointField,
+    constant: &[([u32; 3], [f64; 6])],
+) -> (Vec<[f64; 6]>, Vec<Vec<[f64; 6]>>) {
     let nodes = model.nodes.len();
     let mut sum = vec![[0.0; 6]; nodes];
     let mut count = vec![0u32; nodes];
@@ -90,6 +101,14 @@ pub fn nodal_average(
             count[n as usize] += 1;
         }
         per_element.push(nodal);
+    }
+    for (nodes, value) in constant {
+        for &n in nodes {
+            for k in 0..6 {
+                sum[n as usize][k] += value[k];
+            }
+            count[n as usize] += 1;
+        }
     }
     for (s, &c) in sum.iter_mut().zip(&count) {
         if c > 0 {
@@ -203,13 +222,23 @@ pub fn write_increment(
     let has = |v: &str| variables.iter().any(|x| x == v);
     let order = node_order(ctx.model);
     let mut fields = Vec::new();
+    // Native membranes: constant strain and stress per element.
+    let (membrane_strains, membrane_stresses): (Vec<_>, Vec<_>) = ctx
+        .table
+        .membranes
+        .iter()
+        .map(|m| {
+            let (e, s) = m.strain_stress(u);
+            ((m.nodes, e), (m.nodes, s))
+        })
+        .unzip();
     // Internal unknowns (thickness change of plane stress nodes) are no displacements.
     let (u, reactions) = &ctx.table.reported(ctx.model, u, reactions);
     if has("U") {
         fields.push(vector_field("DISP", ["D1", "D2", "D3"], &order, u));
     }
     if has("S") {
-        let (average, _) = nodal_average(ctx.table, ctx.model, stresses);
+        let (average, _) = nodal_average_with(ctx.table, ctx.model, stresses, &membrane_stresses);
         fields.push(tensor_field(
             "STRESS",
             ["SXX", "SYY", "SZZ", "SXY", "SYZ", "SZX"],
@@ -218,7 +247,7 @@ pub fn write_increment(
         ));
     }
     if has("E") {
-        let (average, _) = nodal_average(ctx.table, ctx.model, strains);
+        let (average, _) = nodal_average_with(ctx.table, ctx.model, strains, &membrane_strains);
         fields.push(tensor_field(
             "TOSTRAIN",
             ["EXX", "EYY", "EZZ", "EXY", "EYZ", "EZX"],

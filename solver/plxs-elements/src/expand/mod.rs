@@ -54,10 +54,15 @@ pub fn needs_expansion(model: &Model) -> bool {
 }
 
 fn expands(kind: ElementType) -> bool {
-    matches!(
-        kind.family(),
-        ElementFamily::Shell | ElementFamily::Membrane | ElementFamily::Beam | ElementFamily::Truss
-    )
+    // M3D3 is computed natively (`crate::membrane`).
+    kind != ElementType::M3D3
+        && matches!(
+            kind.family(),
+            ElementFamily::Shell
+                | ElementFamily::Membrane
+                | ElementFamily::Beam
+                | ElementFamily::Truss
+        )
 }
 
 /// Expands the structural elements of an analysis. An analysis without them is returned

@@ -60,6 +60,32 @@ pub struct ElementTable {
     /// Elements computed natively with a constant stiffness and no integration points
     /// (the general beam U1): they enter `K` only.
     pub linear_blocks: Vec<LinearBlock>,
+    /// Native M3D3 membranes (their stiffness is among `linear_blocks`); stresses and
+    /// strains are constant per element.
+    pub membranes: Vec<Membrane>,
+}
+
+/// A constant-strain membrane triangle (`plxs_elements::membrane`).
+#[derive(Clone, Debug)]
+pub struct Membrane {
+    /// Dense node indices.
+    pub nodes: [u32; 3],
+    pub coordinates: [[f64; 3]; 3],
+    pub young: f64,
+    pub poisson: f64,
+}
+
+impl Membrane {
+    /// Strain and stress (global, tensor shear) of the displacements `u` (dense DOFs).
+    pub fn strain_stress(&self, u: &[f64]) -> ([f64; 6], [f64; 6]) {
+        let ue: Vec<f64> = self
+            .nodes
+            .iter()
+            .flat_map(|&n| (0..3).map(move |d| u[n as usize * 3 + d]))
+            .collect();
+        plxs_elements::membrane::strain_stress(&self.coordinates, &ue, self.young, self.poisson)
+            .unwrap_or(([0.0; 6], [0.0; 6]))
+    }
 }
 
 /// A constant element stiffness on global DOFs.
@@ -88,6 +114,7 @@ impl ElementTable {
         let mut offsets = Vec::with_capacity(model.elements.len() + 1);
         offsets.push(0u32);
         let mut linear_blocks = Vec::new();
+        let mut membranes = Vec::new();
         for element in &model.elements {
             if element.kind == ElementType::U1 {
                 let block = Self::u1_block(model, element, temperature)?;
@@ -95,6 +122,16 @@ impl ElementTable {
                     connected[d as usize / 3] = true;
                     uses_z[d as usize / 3] = true;
                 }
+                linear_blocks.push(block);
+                continue;
+            }
+            if element.kind == ElementType::M3D3 {
+                let (membrane, block) = Self::membrane(model, element, temperature)?;
+                for &n in &membrane.nodes {
+                    connected[n as usize] = true;
+                    uses_z[n as usize] = true;
+                }
+                membranes.push(membrane);
                 linear_blocks.push(block);
                 continue;
             }
@@ -245,6 +282,7 @@ impl ElementTable {
             dofs,
             layout: IntegrationPointLayout { offsets },
             linear_blocks,
+            membranes,
         })
     }
 
@@ -300,6 +338,63 @@ impl ElementTable {
             .flat_map(|&n| (0..3).map(move |d| n * 3 + d))
             .collect();
         Ok(LinearBlock { dofs, stiffness })
+    }
+
+    /// A native M3D3 membrane and its stiffness.
+    fn membrane(
+        model: &Model,
+        element: &Element,
+        temperature: f64,
+    ) -> Result<(Membrane, LinearBlock)> {
+        let bad =
+            |what: &str| Error::input("*ELEMENT", format!("M3D3 element {}: {what}", element.id));
+        let section = element
+            .section
+            .and_then(|s| model.sections.get(s as usize))
+            .ok_or_else(|| bad("no section"))?;
+        let (material, thickness) = match &section.kind {
+            SectionKind::Membrane {
+                material,
+                thickness,
+                ..
+            } => (material, *thickness),
+            SectionKind::Shell {
+                material,
+                thickness,
+                ..
+            } => (material, *thickness),
+            _ => return Err(bad("needs *MEMBRANE SECTION or *SHELL SECTION")),
+        };
+        let mat = model
+            .material(material)
+            .ok_or_else(|| Error::undefined("*MEMBRANE SECTION", "material", material))?;
+        let elastic = LinearElastic::of(mat, temperature)?;
+        let nodes = Self::node_indices(model, element)?;
+        if nodes.len() != 3 {
+            return Err(bad("expected three nodes"));
+        }
+        let coordinates: [[f64; 3]; 3] =
+            std::array::from_fn(|i| model.nodes.coordinates[nodes[i] as usize]);
+        let stiffness = plxs_elements::membrane::stiffness(
+            &coordinates,
+            elastic.young,
+            elastic.poisson,
+            thickness,
+        )
+        .ok_or_else(|| bad("degenerate triangle"))?;
+        let dofs = nodes
+            .iter()
+            .flat_map(|&n| (0..3).map(move |d| n * 3 + d))
+            .collect();
+        Ok((
+            Membrane {
+                nodes: [nodes[0], nodes[1], nodes[2]],
+                coordinates,
+                young: elastic.young,
+                poisson: elastic.poisson,
+            },
+            LinearBlock { dofs, stiffness },
+        ))
     }
 
     fn node_indices(model: &Model, element: &Element) -> Result<Vec<u32>> {

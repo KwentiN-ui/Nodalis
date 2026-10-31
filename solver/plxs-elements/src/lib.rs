@@ -9,6 +9,7 @@
 //! consulted.
 
 pub mod expand;
+pub mod membrane;
 pub mod plane;
 pub mod shape;
 pub mod solid;

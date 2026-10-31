@@ -488,13 +488,18 @@ ccx), dazu die Übernahmetests in `plxs-input/src/tests.rs`.
     Lasten); plxs schreibt K·u.
   - U1: STRESS/TOSTRAIN/FORC von ccx sind elementinterne Werte; plxs schreibt K·u (mit
     Momenten) und keine Elementfelder.
-- **Offen**: Membranen (M3D3 trifft ein reines CST-Scheibenelement exakt, M3D4/M3D4R
-  weichen von jeder probierten Expansion und vom Q4 ab, nur an belasteten Knoten), die genaue
+- **M3D3** (`plxs-elements/src/membrane.rs`) nativ als CST-Scheibenelement in seiner
+  Ebene (ccx 2.21 trifft das exakt): Steifigkeit als `LinearBlock`, Spannungen und
+  Dehnungen konstant je Element, an den Knoten gemittelt (`ElementTable::membranes`,
+  `fields::nodal_average_with`), Dickendehnung ε33 = −ν/(1 − ν)(ε11 + ε22). Quer zur Ebene
+  keine Steifigkeit.
+- **Offen**: Membranen M3D4/M3D4R (weichen von jeder probierten Expansion und vom Q4 ab,
+  nur an belasteten Knoten), die genaue
   BOX-Regel von ccx, die Knotenspannungen von PIPE (ccx extrapoliert anders als die lineare
   Querschnittsanpassung, bis 0,3 %),
   `*NODAL THICKNESS`, Druck auf Balken, U1 an Schalen-/Balkenknoten,
   zylindrischer `*TRANSFORM` an Schalenknoten, `*TIE`/`*RIGID BODY` (T6) für edge-tie.
-- Abnahmetest `solver/plxs-cli/tests/structural_corpus.rs` (24 von 32 grün, die offenen
+- Abnahmetest `solver/plxs-cli/tests/structural_corpus.rs` (25 von 32 grün, die offenen
   mit Grund gelistet).
 
 ## Was M1 zu liefern hat (Abnahme)
