@@ -21,6 +21,10 @@ fn frd_element(kind: ElementType) -> Option<(u8, &'static [usize])> {
     const TET10: [usize; 10] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
     const WEDGE6: [usize; 6] = [0, 1, 2, 3, 4, 5];
     const WEDGE15: [usize; 15] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 13, 14, 9, 10, 11];
+    const TRI3: [usize; 3] = [0, 1, 2];
+    const TRI6: [usize; 6] = [0, 1, 2, 3, 4, 5];
+    const QUAD4: [usize; 4] = [0, 1, 2, 3];
+    const QUAD8: [usize; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
     Some(match kind {
         C3D8 | C3D8R | C3D8I => (1, &HEX8),
         C3D6 => (2, &WEDGE6),
@@ -28,8 +32,32 @@ fn frd_element(kind: ElementType) -> Option<(u8, &'static [usize])> {
         C3D20 | C3D20R => (4, &HEX20),
         C3D15 => (5, &WEDGE15),
         C3D10 | C3D10T => (6, &TET10),
+        // CalculiX writes two-node springs and gaps as line elements, SPRING1 not at all.
+        SPRING2 | GAPUNI => (11, &[0, 1]),
+        // Plane and axisymmetric elements are written unexpanded, as CalculiX does.
+        CPS3 | CPE3 | CAX3 => (7, &TRI3),
+        CPS6 | CPE6 | CAX6 => (8, &TRI6),
+        CPS4 | CPS4R | CPE4 | CPE4R | CAX4 | CAX4R => (9, &QUAD4),
+        CPS8 | CPS8R | CPE8 | CPE8R | CAX8 | CAX8R => (10, &QUAD8),
         _ => return None,
     })
+}
+
+/// The dense indices of the nodes CalculiX writes, ascending by id: those of elements
+/// (springs and gaps included, although their elements are not written). Nodes no element
+/// uses, such as reference and rotation nodes of rigid bodies, are left out.
+pub fn written_nodes(model: &Model) -> Vec<usize> {
+    let mut used = vec![false; model.nodes.len()];
+    for element in &model.elements {
+        for &id in &element.nodes {
+            if let Some(i) = model.nodes.index(id) {
+                used[i as usize] = true;
+            }
+        }
+    }
+    let mut order: Vec<usize> = (0..model.nodes.len()).filter(|&i| used[i]).collect();
+    order.sort_by_key(|&i| model.nodes.ids[i]);
+    order
 }
 
 fn io(path: &Path, e: std::io::Error) -> Error {
@@ -69,12 +97,13 @@ pub fn write_frd_to(
         writeln!(out, "    1UMAT{:>5}{:<58}", i + 1, material.name)?;
     }
 
-    // Nodes, ascending by id.
-    let mut node_order: Vec<usize> = (0..model.nodes.len()).collect();
-    node_order.sort_by_key(|&i| model.nodes.ids[i]);
-    writeln!(out, "    2C{:>30}{:>38}", model.nodes.len(), 1)?;
+    // Nodes that belong to elements, ascending by id.
+    let node_order = written_nodes(model);
+    writeln!(out, "    2C{:>30}{:>38}", node_order.len(), 1)?;
     for &i in &node_order {
-        let c = model.nodes.coordinates[i];
+        // CalculiX writes the coordinates in single precision; rounding through f32 keeps the
+        // last digit the same (2.02577507 is written as 2.02577).
+        let c = model.nodes.coordinates[i].map(|v| f64::from(v as f32));
         writeln!(
             out,
             " -1{:>10}{}{}{}",
@@ -125,33 +154,50 @@ pub fn write_frd_to(
     writeln!(out, " -3")?;
 
     let mut set = 0u32;
-    for increment in &results.increments {
+    for (ordinal, increment) in results.increments.iter().enumerate() {
         for field in &increment.fields {
             set += 1;
-            write_block(out, set, increment, field, model.nodes.len())?;
+            write_block(
+                out,
+                set,
+                ordinal as u32 + 1,
+                increment,
+                field,
+                field.nodes.len(),
+            )?;
         }
     }
     writeln!(out, " 9999")?;
     Ok(())
 }
 
+/// The time or frequency of a `100CL` line: ten significant digits in fixed notation as
+/// CalculiX writes them (`1.000000000`, `10.89062500`), exponential outside that range.
 fn format_time(value: f64) -> String {
-    if (1e-3..10.0).contains(&value.abs()) {
+    let magnitude = value.abs();
+    if (1e-3..10.0).contains(&magnitude) {
         format!("{value:>12.9}")
+    } else if (10.0..1e9).contains(&magnitude) {
+        let digits = magnitude.log10().floor() as usize + 1;
+        format!("{value:>12.prec$}", prec = 10 - digits)
     } else {
         fortran_e12(value)
     }
 }
 
+/// One result block. `ordinal` counts the written increments over all steps (CalculiX'
+/// `100CL` numbering); time increments carry the total time, as in CalculiX.
 fn write_block(
     out: &mut impl Write,
     set: u32,
+    ordinal: u32,
     increment: &ResultsIncrement,
     field: &ResultField,
     node_count: usize,
 ) -> std::io::Result<()> {
     let analysis = match increment.kind {
         IncrementKind::Time => 0,
+        IncrementKind::Dynamic => 1,
         IncrementKind::Frequency => 2,
         IncrementKind::Buckling => 4,
         IncrementKind::ComplexFrequency => 3,
@@ -164,16 +210,22 @@ fn write_block(
     writeln!(
         out,
         "  100CL{:>5}{}{:>12}{:>22}{:>5}{:>12}",
-        101,
-        format_time(increment.value),
+        100 + ordinal,
+        format_time(match increment.kind {
+            IncrementKind::Time | IncrementKind::Dynamic => increment.total_time,
+            _ => increment.value,
+        }),
         node_count,
         analysis,
-        increment.increment,
+        match increment.kind {
+            IncrementKind::Time | IncrementKind::Dynamic => ordinal,
+            _ => increment.increment,
+        },
         1
     )?;
     let components = field.components.len();
     let (declared, trailer) = match field.name.as_str() {
-        "DISP" | "FORC" | "VELO" | "PDISP" => (components + 1, true),
+        "DISP" | "FORC" | "VELO" | "PDISP" | "FLUX" => (components + 1, true),
         _ => (components, false),
     };
     writeln!(out, " -4  {:<8}{:>5}{:>5}", field.name, declared, 1)?;

@@ -24,6 +24,7 @@ pub fn write_history(
     stresses: &IntegrationPointField,
     strains: &IntegrationPointField,
 ) {
+    let (u, forces) = &table.reported(model, u, forces);
     for request in &step.outputs.node_print {
         let Some(set) = request.set.as_deref() else {
             continue;
@@ -140,4 +141,102 @@ fn integration_point_rows(
         }
     }
     rows
+}
+
+/// Whether an `*EL PRINT` of the step asks for the heat flux.
+pub fn wants_heat_flux(step: &Step) -> bool {
+    step.outputs.el_print.iter().any(|r| {
+        r.variables
+            .iter()
+            .any(|v| v.trim().eq_ignore_ascii_case("HFL"))
+    })
+}
+
+/// Appends the thermal history blocks of an increment: `NT` (temperatures) and `RFL` (heat
+/// generation, with totals) of `*NODE PRINT`, `HFL` (heat flux at the integration points)
+/// of `*EL PRINT`.
+#[allow(clippy::too_many_arguments)]
+pub fn write_thermal_history(
+    results: &mut Results,
+    model: &Model,
+    table: &ElementTable,
+    step: &Step,
+    step_number: u32,
+    increment: u32,
+    time: f64,
+    temperatures: &[f64],
+    heat_generation: &[f64],
+    flux: Option<&IntegrationPointField>,
+) {
+    let block = |quantity: &str, set: &str, rows: Vec<(u32, Vec<f64>)>| HistoryBlock {
+        step: step_number,
+        increment,
+        quantity: quantity.to_string(),
+        set: set.to_string(),
+        time,
+        rows,
+    };
+    for request in &step.outputs.node_print {
+        let Some(set) = request.set.as_deref() else {
+            continue;
+        };
+        let Some(nodes) = model.sets.node_sets.get(set) else {
+            continue;
+        };
+        let rows_of = |values: &[f64]| -> Vec<(u32, Vec<f64>)> {
+            nodes
+                .iter()
+                .filter_map(|&id| Some((id, vec![values[model.nodes.index(id)? as usize]])))
+                .collect()
+        };
+        for variable in &request.variables {
+            match variable.trim().to_ascii_uppercase().as_str() {
+                "NT" if request.totals != Totals::Only => {
+                    results
+                        .history
+                        .push(block("temperatures", set, rows_of(temperatures)));
+                }
+                "RFL" => {
+                    let rows = rows_of(heat_generation);
+                    let sum: f64 = rows.iter().map(|r| r.1[0]).sum();
+                    if request.totals != Totals::Only {
+                        results.history.push(block("heat generation", set, rows));
+                    }
+                    if request.totals != Totals::No {
+                        results.history.push(block(
+                            "total heat generation",
+                            set,
+                            vec![(0, vec![sum])],
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let Some(flux) = flux else {
+        return;
+    };
+    for request in &step.outputs.el_print {
+        let Some(set) = request.set.as_deref() else {
+            continue;
+        };
+        let Some(elements) = model.sets.element_sets.get(set) else {
+            continue;
+        };
+        if !request
+            .variables
+            .iter()
+            .any(|v| v.trim().eq_ignore_ascii_case("HFL"))
+        {
+            continue;
+        }
+        let rows = integration_point_rows(model, table, elements, flux, false)
+            .into_iter()
+            .map(|(id, v)| (id, v[..4].to_vec()))
+            .collect();
+        results
+            .history
+            .push(block("heat flux (elem, integ.pnt.,qx,qy,qz)", set, rows));
+    }
 }

@@ -1,7 +1,7 @@
 //! What a fixture tests, derived from the keywords and element types of its input: the area
 //! (which milestone thread owns it), the tolerance class and the features it covers.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -84,6 +84,16 @@ pub struct Meta {
     /// Why there is no reference, when `reference` is `none`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Field components (`"DISP U1"`) the model leaves undetermined (a part held in one
+    /// direction only), whose values in any solver are arbitrary; they are not compared.
+    /// The reason belongs in `note`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undetermined: Vec<String>,
+    /// Absolute noise levels per `.frd` field name: deviations below them pass. Only for
+    /// fields that are zero up to round-off in the reference (see `compare_frd_with_noise`);
+    /// kept by `plxs-fixtures import`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub noise: BTreeMap<String, f64>,
 }
 
 /// The areas, in the order of precedence a fixture is assigned by: the first area whose
@@ -252,6 +262,8 @@ pub fn classify(name: &str, input: &str, source: &str) -> Meta {
         source: source.to_string(),
         reference: "none".into(),
         note: None,
+        undetermined: Vec::new(),
+        noise: BTreeMap::new(),
     }
 }
 

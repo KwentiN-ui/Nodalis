@@ -3483,6 +3483,7 @@ dependencies = [
 name = "plxs-assembly"
 version = "0.3.15"
 dependencies = [
+ "plxs-constraints",
  "plxs-core",
  "plxs-elements",
  "plxs-linalg",
@@ -3504,6 +3505,11 @@ dependencies = [
 [[package]]
 name = "plxs-constraints"
 version = "0.3.15"
+dependencies = [
+ "plxs-core",
+ "plxs-elements",
+ "plxs-linalg",
+]
 
 [[package]]
 name = "plxs-contact"
@@ -3561,6 +3567,7 @@ name = "plxs-procedures"
 version = "0.3.15"
 dependencies = [
  "plxs-assembly",
+ "plxs-constraints",
  "plxs-core",
  "plxs-elements",
  "plxs-linalg",
@@ -3573,6 +3580,7 @@ name = "plxs-session"
 version = "0.3.15"
 dependencies = [
  "plxs-assembly",
+ "plxs-constraints",
  "plxs-core",
  "plxs-linalg",
  "plxs-output",

@@ -14,6 +14,10 @@
 //!   the same. With another point or axis ccx keeps the carried load and drops the new one;
 //!   plxs does the same and says so in a warning.
 //! - Within one step every distributed load adds to the others.
+//! - The heat loads follow the same rule: a `*CFLUX` replaces the carried flux at the same
+//!   node, a `*DFLUX` the carried one with the same label (`S<n>` or `BF`) on the same
+//!   element, a `*FILM` the carried film on the same face, a `*RADIATE` the carried
+//!   radiation on the same face. Within one step they add up.
 //!
 //! - Boundaries and loads with an amplitude in step time are frozen at their value at the
 //!   end of the step they come from; `TIME=TOTAL TIME` amplitudes go on
@@ -23,11 +27,13 @@
 //! remaining single nodes or elements, so that nothing else changes.
 
 use std::collections::{BTreeMap, HashSet};
+use std::hash::Hash;
 
 use plxs_core::Model;
 use plxs_core::mesh::{ElementId, ElementRef, NodeId, NodeRef, Sets};
 use plxs_core::step::{
-    Boundary, ConcentratedLoad, DistributedLoad, DistributedLoadKind, Loads, Procedure,
+    Boundary, ConcentratedFlux, ConcentratedLoad, DistributedFlux, DistributedLoad,
+    DistributedLoadKind, Film, FluxKind, Loads, Procedure, Radiate,
 };
 
 fn nodes_of(sets: &Sets, region: &NodeRef) -> Option<Vec<NodeId>> {
@@ -84,6 +90,113 @@ pub(crate) fn replace_concentrated(
         }
     }
     *carried = kept;
+}
+
+/// Removes from `carried` every (member, key) that a load of `new` covers. A carried set
+/// load hit at some of its members is split into single-member loads for the others.
+fn replace_keyed<T: Clone, M: Copy + Eq + Hash, K: Copy + Eq + Hash>(
+    carried: &mut Vec<T>,
+    new: &[T],
+    members: impl Fn(&T) -> Option<Vec<M>>,
+    key: impl Fn(&T) -> K,
+    single: impl Fn(&T, M) -> T,
+) {
+    let mut touched: HashSet<(M, K)> = HashSet::new();
+    for load in new {
+        // An unknown set is reported by the validation; it touches nothing here.
+        for m in members(load).unwrap_or_default() {
+            touched.insert((m, key(load)));
+        }
+    }
+    if touched.is_empty() {
+        return;
+    }
+    let mut kept = Vec::with_capacity(carried.len());
+    for load in carried.drain(..) {
+        let Some(all) = members(&load) else {
+            kept.push(load);
+            continue;
+        };
+        let k = key(&load);
+        let hit = all.iter().filter(|&&m| touched.contains(&(m, k))).count();
+        if hit == 0 {
+            kept.push(load);
+        } else if hit < all.len() {
+            for m in all {
+                if !touched.contains(&(m, k)) {
+                    kept.push(single(&load, m));
+                }
+            }
+        }
+    }
+    *carried = kept;
+}
+
+/// `*CFLUX`: replaces the carried flux at the same nodes.
+pub(crate) fn replace_concentrated_flux(
+    carried: &mut Vec<ConcentratedFlux>,
+    new: &[ConcentratedFlux],
+    sets: &Sets,
+) {
+    replace_keyed(
+        carried,
+        new,
+        |l| nodes_of(sets, &l.region),
+        |_| (),
+        |l, node| ConcentratedFlux {
+            region: NodeRef::Node(node),
+            ..l.clone()
+        },
+    );
+}
+
+/// `*DFLUX`: replaces the carried flux with the same label on the same elements.
+pub(crate) fn replace_distributed_flux(
+    carried: &mut Vec<DistributedFlux>,
+    new: &[DistributedFlux],
+    sets: &Sets,
+) {
+    replace_keyed(
+        carried,
+        new,
+        |l| elements_of(sets, &l.region),
+        |l| match l.kind {
+            FluxKind::Body => 0u16,
+            FluxKind::Face(face) => 1 + face as u16,
+        },
+        |l, element| DistributedFlux {
+            region: ElementRef::Element(element),
+            ..l.clone()
+        },
+    );
+}
+
+/// `*FILM`: replaces the carried film on the same faces.
+pub(crate) fn replace_films(carried: &mut Vec<Film>, new: &[Film], sets: &Sets) {
+    replace_keyed(
+        carried,
+        new,
+        |l| elements_of(sets, &l.region),
+        |l| l.face,
+        |l, element| Film {
+            region: ElementRef::Element(element),
+            ..l.clone()
+        },
+    );
+}
+
+/// `*RADIATE`: replaces the carried radiation on the same faces.
+pub(crate) fn replace_radiations(carried: &mut Vec<Radiate>, new: &[Radiate], sets: &Sets) {
+    replace_keyed(
+        carried,
+        new,
+        |l| elements_of(sets, &l.region),
+        |l| (l.face, l.cavity),
+        |l, element| Radiate {
+            region: ElementRef::Element(element),
+            ..l.clone()
+        },
+    );
 }
 
 /// What a distributed load replaces of a carried one on the same element.

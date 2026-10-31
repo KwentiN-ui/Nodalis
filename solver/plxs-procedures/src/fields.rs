@@ -21,17 +21,17 @@ fn requested(step: &Step) -> Vec<String> {
         .collect()
 }
 
+/// The requested field variables of a step, upper case.
+pub fn requested_variables(step: &Step) -> Vec<String> {
+    requested(step)
+}
+
 /// Node ids in ascending order with their dense indices.
-fn node_order(model: &Model) -> Vec<(u32, u32)> {
-    let mut order: Vec<(u32, u32)> = model
-        .nodes
-        .ids
-        .iter()
-        .enumerate()
-        .map(|(i, &id)| (id, i as u32))
-        .collect();
-    order.sort_unstable();
-    order
+pub fn node_order(model: &Model) -> Vec<(u32, u32)> {
+    plxs_output::frd::written_nodes(model)
+        .into_iter()
+        .map(|i| (model.nodes.ids[i], i as u32))
+        .collect()
 }
 
 fn vector_field(
@@ -90,6 +90,18 @@ pub fn nodal_average(
             count[n as usize] += 1;
         }
         per_element.push(nodal);
+    }
+    // CalculiX averages over every element it writes to the `.frd`, so two-node springs and
+    // gaps count with zero stress at their nodes (observed with ccx 2.21; `SPRING1`, which
+    // it does not write, does not count).
+    for element in &table.discrete {
+        if model.elements[element.element as usize].kind != plxs_core::ElementType::SPRING1 {
+            let mut nodes: Vec<u32> = element.dofs.iter().map(|d| d / 3).collect();
+            nodes.dedup();
+            for n in nodes {
+                count[n as usize] += 1;
+            }
+        }
     }
     for (s, &c) in sum.iter_mut().zip(&count) {
         if c > 0 {
@@ -203,6 +215,8 @@ pub fn write_increment(
     let has = |v: &str| variables.iter().any(|x| x == v);
     let order = node_order(ctx.model);
     let mut fields = Vec::new();
+    // Internal unknowns (thickness change of plane stress nodes) are no displacements.
+    let (u, reactions) = &ctx.table.reported(ctx.model, u, reactions);
     if has("U") {
         fields.push(vector_field("DISP", ["D1", "D2", "D3"], &order, u));
     }
@@ -238,7 +252,7 @@ pub fn write_increment(
             values: vec![order.iter().map(|&(_, i)| error[i as usize]).collect()],
         });
     }
-    let known = ["U", "S", "E", "RF", "ERR", "NOE"];
+    let known = ["U", "S", "E", "RF", "ERR", "NOE", "NT", "HFL", "RFL"];
     let mut reported = Vec::new();
     for v in &variables {
         if !known.contains(&v.as_str()) && !reported.contains(v) {
@@ -262,7 +276,7 @@ pub fn write_increment(
 
 /// The output variables of a step the solver does not produce yet, for a warning.
 pub fn unsupported_outputs(step: &Step) -> Vec<String> {
-    let known = ["U", "S", "E", "RF", "ERR", "NOE"];
+    let known = ["U", "S", "E", "RF", "ERR", "NOE", "NT", "HFL", "RFL"];
     let mut out = Vec::new();
     for v in requested(step) {
         if !known.contains(&v.as_str()) && !out.contains(&v) {
