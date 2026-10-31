@@ -167,6 +167,26 @@ impl ElementTable {
                 density,
             });
         }
+        // Nodes that multi-point constraints tie in (the original nodes and helper nodes of
+        // expanded shells and beams, reference nodes) work through those constraints.
+        for equation in &model.constraints.equations {
+            for term in &equation.terms {
+                for id in model.nodes_of(&term.node) {
+                    if let Some(n) = model.nodes.index(id) {
+                        connected[n as usize] = true;
+                        uses_z[n as usize] = true;
+                    }
+                }
+            }
+        }
+        for body in &model.constraints.rigid_bodies {
+            for id in [body.reference_node, body.rotation_node] {
+                if let Some(n) = model.nodes.index(id) {
+                    connected[n as usize] = true;
+                    uses_z[n as usize] = true;
+                }
+            }
+        }
         // DOFs no element works on are held at zero: nodes outside every element, and the
         // out-of-plane DOF of nodes that only plane strain or axisymmetric elements use.
         for n in 0..model.nodes.len() {

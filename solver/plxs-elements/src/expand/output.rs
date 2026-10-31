@@ -63,8 +63,12 @@ impl OutputMap {
             for increment in &mut results.increments {
                 // Displacements stay the original node's own (the mean constraint's value).
                 for field in increment.fields.iter_mut().filter(|f| f.name != "DISP") {
-                    let position: HashMap<NodeId, usize> =
-                        field.nodes.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+                    let position: HashMap<NodeId, usize> = field
+                        .nodes
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &n)| (n, i))
+                        .collect();
                     let sum = field.name == "FORC";
                     for &node in &native_nodes {
                         let (Some(&target), Some(groups)) =

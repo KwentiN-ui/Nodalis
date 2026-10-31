@@ -273,7 +273,6 @@ impl Expander {
         let original = self.analysis.model.clone();
         self.replace_elements()?;
         self.drop_unused_nodes();
-        self.hold_loose_nodes();
         let knot_nodes = self.knot_nodes();
         self.constraints(&knot_nodes);
         self.remap_steps(&original)?;
@@ -493,44 +492,6 @@ impl Expander {
             }
         }
         model.nodes = nodes;
-    }
-
-    /// Nodes of the input that neither an element, a constraint nor a load uses (ccx
-    /// ignores them) are held, so that they do not make the system singular; they are not
-    /// written.
-    fn hold_loose_nodes(&mut self) {
-        let model = &self.analysis.model;
-        let mut used: HashSet<NodeId> = model
-            .elements
-            .iter()
-            .flat_map(|e| e.nodes.iter().copied())
-            .collect();
-        for equation in &model.constraints.equations {
-            for t in &equation.terms {
-                used.extend(model.nodes_of(&t.node));
-            }
-        }
-        for body in &model.constraints.rigid_bodies {
-            used.insert(body.reference_node);
-            used.insert(body.rotation_node);
-        }
-        for step in &self.analysis.steps {
-            for c in &step.loads.concentrated {
-                used.extend(model.nodes_of(&c.region));
-            }
-        }
-        let loose: Vec<NodeId> = model
-            .nodes
-            .ids
-            .iter()
-            .copied()
-            .filter(|n| !used.contains(n) && !self.groups.contains_key(n))
-            .collect();
-        for n in loose {
-            for dof in 1..=3 {
-                self.helper_fixed.push((n, dof));
-            }
-        }
     }
 
     /// Nodes that become knots: several expansions meet, or all three rotations of a shell
