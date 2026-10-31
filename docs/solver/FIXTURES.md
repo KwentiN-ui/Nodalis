@@ -47,6 +47,12 @@ reiner Querlast), trägt nur Rundungsrauschen, und ccx' eigene Extrapolation str
 und C3D15 um etwa 2e-6 der Feldgröße. Relativ zur Komponente wären das 1e-5 und mehr; relativ
 zum Feld bleibt die Prüfung bei 1e-5 so streng wie gemeint (seit M2 T4).
 
+Rundungsrauschen (`[noise]` in der `.toml`): Felder, die physikalisch null sind (etwa
+Spannungen bei freier Wärmedehnung) und bei ccx nur Rundungsreste zeigen, bekommen einen
+absoluten Rauschpegel je Feldname, z. B. `STRESS = 1e-6`. Die Skala einer Komponente ist
+dann max(Feldnorm, Rauschpegel/Toleranz). Der Schlüssel ist die
+einzige Ausnahme von „nie von Hand editieren“: `plxs-fixtures import` behält ihn.
+
 ## Bereiche und Stufen
 
 Ein Bereich ist ein Verzeichnis und gehört einem Thread (Nummern aus dem Konzept, Abschnitt

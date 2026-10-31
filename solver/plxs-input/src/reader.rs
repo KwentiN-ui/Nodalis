@@ -164,6 +164,8 @@ pub(crate) struct Reader {
     /// the lists) were carried over from the previous step; a new definition replaces those
     /// at the same node and DOF or face (`carry`), the step's own add up.
     carried_loads: (usize, usize),
+    /// The same for `*CFLUX`, `*DFLUX`, `*FILM` and `*RADIATE`.
+    carried_heat: [usize; 4],
     last_comment: Option<String>,
 }
 
@@ -181,6 +183,7 @@ impl Reader {
             model_boundaries: Vec::new(),
             carried: Carried::default(),
             carried_loads: (0, 0),
+            carried_heat: [0; 4],
             last_comment: None,
         }
     }
@@ -1525,6 +1528,12 @@ impl Reader {
         step.fields = self.carried.fields.clone();
         step.outputs = self.carried.outputs.clone();
         self.carried_loads = (step.loads.concentrated.len(), step.loads.distributed.len());
+        self.carried_heat = [
+            step.loads.concentrated_flux.len(),
+            step.loads.distributed_flux.len(),
+            step.loads.films.len(),
+            step.loads.radiations.len(),
+        ];
         self.step = Some(step);
         self.procedure_seen = false;
         self.flags = StepFlags::default();
@@ -2024,6 +2033,10 @@ impl Reader {
             match k.name.as_str() {
                 "*CLOAD" => self.carried_loads.0 = 0,
                 "*DLOAD" => self.carried_loads.1 = 0,
+                "*CFLUX" => self.carried_heat[0] = 0,
+                "*DFLUX" => self.carried_heat[1] = 0,
+                "*FILM" => self.carried_heat[2] = 0,
+                "*RADIATE" => self.carried_heat[3] = 0,
                 _ => {}
             }
         }
@@ -2185,9 +2198,17 @@ impl Reader {
                 amplitude: amplitude.clone(),
             });
         }
-        self.step_loads(k, |f| &mut f.cflux)?
-            .concentrated_flux
-            .extend(new);
+        self.step_loads(k, |f| &mut f.cflux)?;
+        let carried = self.carried_heat[0];
+        let sets = &self.reading.analysis.model.sets;
+        let Some(step) = self.step.as_mut() else {
+            return Err(k.error("outside of a step"));
+        };
+        let own = step.loads.concentrated_flux.split_off(carried);
+        crate::carry::replace_concentrated_flux(&mut step.loads.concentrated_flux, &new, sets);
+        self.carried_heat[0] = step.loads.concentrated_flux.len();
+        step.loads.concentrated_flux.extend(own);
+        step.loads.concentrated_flux.extend(new);
         Ok(())
     }
 
@@ -2215,9 +2236,17 @@ impl Reader {
                 amplitude: amplitude.clone(),
             });
         }
-        self.step_loads(k, |f| &mut f.dflux)?
-            .distributed_flux
-            .extend(new);
+        self.step_loads(k, |f| &mut f.dflux)?;
+        let carried = self.carried_heat[1];
+        let sets = &self.reading.analysis.model.sets;
+        let Some(step) = self.step.as_mut() else {
+            return Err(k.error("outside of a step"));
+        };
+        let own = step.loads.distributed_flux.split_off(carried);
+        crate::carry::replace_distributed_flux(&mut step.loads.distributed_flux, &new, sets);
+        self.carried_heat[1] = step.loads.distributed_flux.len();
+        step.loads.distributed_flux.extend(own);
+        step.loads.distributed_flux.extend(new);
         Ok(())
     }
 
@@ -2251,7 +2280,17 @@ impl Reader {
                 film_amplitude: film_amplitude.clone(),
             });
         }
-        self.step_loads(k, |f| &mut f.film)?.films.extend(new);
+        self.step_loads(k, |f| &mut f.film)?;
+        let carried = self.carried_heat[2];
+        let sets = &self.reading.analysis.model.sets;
+        let Some(step) = self.step.as_mut() else {
+            return Err(k.error("outside of a step"));
+        };
+        let own = step.loads.films.split_off(carried);
+        crate::carry::replace_films(&mut step.loads.films, &new, sets);
+        self.carried_heat[2] = step.loads.films.len();
+        step.loads.films.extend(own);
+        step.loads.films.extend(new);
         Ok(())
     }
 
@@ -2293,9 +2332,17 @@ impl Reader {
                 radiation_amplitude: radiation_amplitude.clone(),
             });
         }
-        self.step_loads(k, |f| &mut f.radiate)?
-            .radiations
-            .extend(new);
+        self.step_loads(k, |f| &mut f.radiate)?;
+        let carried = self.carried_heat[3];
+        let sets = &self.reading.analysis.model.sets;
+        let Some(step) = self.step.as_mut() else {
+            return Err(k.error("outside of a step"));
+        };
+        let own = step.loads.radiations.split_off(carried);
+        crate::carry::replace_radiations(&mut step.loads.radiations, &new, sets);
+        self.carried_heat[3] = step.loads.radiations.len();
+        step.loads.radiations.extend(own);
+        step.loads.radiations.extend(new);
         Ok(())
     }
 

@@ -1,6 +1,8 @@
 //! Comparison of parsed results: the structure must be identical (class D), the values
 //! within the tolerance of the fixture's class.
 
+use std::collections::BTreeMap;
+
 use plx_io::dat::DatImport;
 use plx_io::frd::FrdImport;
 
@@ -107,7 +109,7 @@ impl Comparison {
 /// Compares two `.frd` imports: mesh exactly, increments and raw field components within
 /// the class tolerance.
 pub fn compare_frd(reference: &FrdImport, candidate: &FrdImport, class: Class) -> Comparison {
-    compare_frd_except(reference, candidate, class, &[])
+    compare_frd_with(reference, candidate, class, &[], &BTreeMap::new())
 }
 
 /// [`compare_frd`] leaving out the field components named in `undetermined`
@@ -117,6 +119,29 @@ pub fn compare_frd_except(
     candidate: &FrdImport,
     class: Class,
     undetermined: &[String],
+) -> Comparison {
+    compare_frd_with(reference, candidate, class, undetermined, &BTreeMap::new())
+}
+
+/// [`compare_frd`] with absolute noise levels per field name (`noise` of the fixture's
+/// `.toml`): deviations below the level pass whatever the field's magnitude. Fields of
+/// round-off size in both files (stresses of a free thermal expansion) need it.
+pub fn compare_frd_with_noise(
+    reference: &FrdImport,
+    candidate: &FrdImport,
+    class: Class,
+    noise: &BTreeMap<String, f64>,
+) -> Comparison {
+    compare_frd_with(reference, candidate, class, &[], noise)
+}
+
+/// [`compare_frd`] leaving out the `undetermined` components and with the `noise` levels.
+pub fn compare_frd_with(
+    reference: &FrdImport,
+    candidate: &FrdImport,
+    class: Class,
+    undetermined: &[String],
+    noise: &BTreeMap<String, f64>,
 ) -> Comparison {
     let mut c = Comparison::default();
     let tolerance = class.tolerance();
@@ -208,7 +233,8 @@ pub fn compare_frd_except(
                 .filter(|c| !c.derived)
                 .map(|c| to_f64(&c.values))
                 .collect();
-            let floor = largest(raw.iter().map(|v| v.as_slice()));
+            let floor = largest(raw.iter().map(|v| v.as_slice()))
+                .max(noise.get(&rf.name).map_or(0.0, |n| n / tolerance));
             for rc in rf.components.iter().filter(|c| !c.derived) {
                 let Some(kc) = kf.component(&rc.name) else {
                     c.fail(format!("{label}: {} has no component {}", rf.name, rc.name));

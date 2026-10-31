@@ -12,10 +12,6 @@ use plxs_verify::{Fixture, Outcome, corpus, fixtures_root, run_corpus};
 /// other stage is merged); one that is not listed must.
 const WAITING: &[(&str, &str)] = &[
     (
-        "constraints/verteilte-temperatur",
-        "thermal expansion, *TEMPERATURE and NT output (M2 T9/T10)",
-    ),
-    (
         "constraints/tet-schraeg",
         "C3D10 nodal stresses 1.7e-5 off ccx everywhere while displacements and forces agree to 1e-6 (element stage, not the constraints)",
     ),
