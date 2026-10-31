@@ -75,7 +75,7 @@ pub fn load_vector(
             let mut fe = vec![0.0; formulation.dof_count()];
             match kind {
                 DistributedLoadKind::Pressure { face, value } => {
-                    if *face as usize == 0 || *face as usize > formulation.family.faces().len() {
+                    if *face as usize == 0 || *face as usize > formulation.face_count() {
                         return Err(Error::input(
                             "*DLOAD",
                             format!(

@@ -11,10 +11,6 @@ use plxs_verify::{Fixture, Outcome, corpus, fixtures_root, run_corpus};
 /// Fixtures that need other stages, with the reason. A listed fixture may pass (once the
 /// other stage is merged); one that is not listed must.
 const WAITING: &[(&str, &str)] = &[
-    ("constraints/referenzpunkt-2d", "CPS8 elements (M2 T4)"),
-    ("constraints/remote-2d", "CPS8 elements (M2 T4)"),
-    ("constraints/remote-2d-deformable", "CPS8 elements (M2 T4)"),
-    ("constraints/symmetrie-2d-30", "CPS8 elements (M2 T4)"),
     (
         "constraints/verteilte-temperatur",
         "thermal expansion, *TEMPERATURE and NT output (M2 T9/T10)",

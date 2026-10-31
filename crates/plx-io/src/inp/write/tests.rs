@@ -2625,6 +2625,170 @@ fn calculix_stretches_a_plane_strain_strip() {
     }
 }
 
+/// Mesh, left nodes, top edges and right edges of [`plane_patch`].
+type PlanePatch = (
+    FeMesh,
+    Vec<NodeId>,
+    Vec<(ElementId, u8)>,
+    Vec<(ElementId, u8)>,
+);
+
+/// A distorted patch of 3 × 2 cells of the given 2D shape (triangles split the cells along
+/// a diagonal) starting at `x0`, with the nodes on its left side, its top edges and its right
+/// edges.
+fn plane_patch(shape: plx_mesh::ElementShape, x0: f64) -> PlanePatch {
+    use plx_mesh::ElementShape::*;
+    let (nx, ny) = (3u32, 2u32);
+    let columns = 2 * nx + 1;
+    let id = |i: u32, j: u32| j * columns + i + 1;
+    let mut cells: Vec<Vec<NodeId>> = Vec::new();
+    for row in 0..ny {
+        for column in 0..nx {
+            let (i, j) = (2 * column, 2 * row);
+            let (a, b, c, d) = (id(i, j), id(i + 2, j), id(i + 2, j + 2), id(i, j + 2));
+            match shape {
+                Quad4 => cells.push(vec![a, b, c, d]),
+                Quad8 => cells.push(vec![
+                    a,
+                    b,
+                    c,
+                    d,
+                    id(i + 1, j),
+                    id(i + 2, j + 1),
+                    id(i + 1, j + 2),
+                    id(i, j + 1),
+                ]),
+                Tri3 => {
+                    cells.push(vec![a, b, c]);
+                    cells.push(vec![a, c, d]);
+                }
+                Tri6 => {
+                    let diagonal = id(i + 1, j + 1);
+                    cells.push(vec![a, b, c, id(i + 1, j), id(i + 2, j + 1), diagonal]);
+                    cells.push(vec![a, c, d, diagonal, id(i + 1, j + 2), id(i, j + 1)]);
+                }
+                _ => unreachable!("no 2D shape"),
+            }
+        }
+    }
+    let mut mesh = FeMesh::default();
+    for cell in &cells {
+        for &n in cell {
+            let (i, j) = ((n - 1) % columns, (n - 1) / columns);
+            let (x, y) = (f64::from(i), 0.5 * f64::from(j));
+            // A smooth distortion, so that no element is a rectangle.
+            let coords = [
+                x0 + x + 0.15 * y + 0.05 * (1.3 * x).sin(),
+                y + 0.04 * x,
+                0.0,
+            ];
+            mesh.set_node(n, coords);
+        }
+    }
+    let mut part = plx_mesh::Part {
+        name: "PLATE".into(),
+        elements: Vec::new(),
+    };
+    for (k, nodes) in cells.into_iter().enumerate() {
+        let element = k as u32 + 1;
+        let type_name = match shape {
+            Tri3 => "S3",
+            Tri6 => "S6",
+            Quad4 => "S4",
+            _ => "S8",
+        };
+        mesh.add_element(plx_mesh::Element {
+            id: element,
+            type_name: type_name.into(),
+            shape,
+            nodes,
+        })
+        .unwrap();
+        part.elements.push(element);
+    }
+    mesh.parts.push(part);
+    let on = |nodes: &[NodeId]| -> Vec<(ElementId, u8)> {
+        let mut faces = Vec::new();
+        for element in mesh.elements() {
+            for (k, edge) in element.shape.edges().iter().enumerate() {
+                if (edge.corners.iter()).all(|&l| nodes.contains(&element.nodes[l])) {
+                    faces.push((element.id, k as u8 + 1));
+                }
+            }
+        }
+        faces
+    };
+    let left: Vec<NodeId> = (0..=2 * ny)
+        .map(|j| id(0, j))
+        .filter(|&n| mesh.node(n).is_some())
+        .collect();
+    let top: Vec<NodeId> = (0..=2 * nx).map(|i| id(i, 2 * ny)).collect();
+    let right: Vec<NodeId> = (0..=2 * ny).map(|j| id(2 * nx, j)).collect();
+    let (top, right) = (on(&top), on(&right));
+    (mesh, left, top, right)
+}
+
+/// Every plane stress, plane strain and axisymmetric element type runs in CalculiX on a
+/// distorted patch with an edge pressure and an edge force (one fixture per type for the
+/// PrePoLix solver).
+#[test]
+fn calculix_runs_every_plane_element_type() {
+    use plx_mesh::ElementShape::*;
+    let types = [
+        (Tri3, "S3"),
+        (Tri6, "S6"),
+        (Quad4, "S4"),
+        (Quad4, "S4R"),
+        (Quad8, "S8"),
+        (Quad8, "S8R"),
+    ];
+    for space in [
+        ModelSpace::PlaneStress,
+        ModelSpace::PlaneStrain,
+        ModelSpace::Axisymmetric,
+    ] {
+        for (shape, chosen) in types {
+            // Axisymmetric models lie off the axis.
+            let x0 = if space == ModelSpace::Axisymmetric {
+                4.0
+            } else {
+                0.0
+            };
+            let (mesh, left, top, right) = plane_patch(shape, x0);
+            let mut model = plane_model(
+                space,
+                0.8,
+                vec![(left.clone(), FIX_X), (vec![left[0]], FIX_Y)],
+                LoadKind::Pressure(30.0),
+                Region::Faces(top),
+            );
+            model.steps[0].loads.push(Load {
+                distribution: None,
+                name: "Load-2".into(),
+                active: true,
+                visible: true,
+                region: Region::Faces(right),
+                kind: LoadKind::force([150.0, -40.0, 0.0]),
+                amplitude: None,
+                factor_amplitude: None,
+            });
+            assert!(model.set_element_type("PLATE", chosen));
+            let written = space.element_type(chosen, shape);
+            let text = write_inp(&mesh, &model, "").unwrap();
+            let block = format!("*Element, Type={written}, Elset=PLATE\n");
+            assert!(text.contains(&block), "{block:?} missing in\n{text}");
+            let name = format!("ebene-{}", written.to_ascii_lowercase());
+            let Some(frd) = run_ccx(&name, &text) else {
+                return;
+            };
+            let increment = frd.increments.last().unwrap();
+            let values = &increment.field("DISP").unwrap().components[0].values;
+            assert!(values.iter().all(|v| v.is_finite()), "{written}");
+            assert!(values.iter().any(|v| *v != 0.0), "{written}");
+        }
+    }
+}
+
 /// Axisymmetric: a thick-walled tube under internal pressure, held axially, widens as Lamé's
 /// solution for plane strain says.
 #[test]

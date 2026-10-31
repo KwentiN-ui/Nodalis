@@ -4,10 +4,10 @@
 
 use std::collections::HashMap;
 
-use plxs_core::Model;
 use plxs_core::Result;
 use plxs_core::constraints::RigidBodyNodes;
 use plxs_core::mesh::NodeRef;
+use plxs_core::{ElementFamily, Model};
 
 use crate::elimination::{Added, ConstraintSet, Eliminator, LinearConstraint, Policy};
 use crate::tie;
@@ -15,6 +15,10 @@ use crate::transform::{Rotation, node_rotations};
 
 /// Degrees of freedom per node of the primary numbering (`node * 3 + d`).
 const PER_NODE: u32 = 3;
+
+/// Offset of the two expanded layers of a plane node in a rigid body (any positive value
+/// gives the same constraints).
+const PLANE_HALF_THICKNESS: f64 = 0.5;
 
 /// The model-level constraints, independent of the step.
 #[derive(Clone, Debug, Default)]
@@ -71,6 +75,7 @@ impl ModelConstraints {
             tie_constraints.push((origin, couplings));
         }
         mc.rotations = node_rotations(model, &mut mc.warnings);
+        let plane = plane_nodes(model);
 
         // Rigid bodies.
         for (k, body) in model.constraints.rigid_bodies.iter().enumerate() {
@@ -92,28 +97,44 @@ impl ModelConstraints {
                 }
                 let x = model.nodes.coordinates[member as usize];
                 let r = [x[0] - x_ref[0], x[1] - x_ref[1], x[2] - x_ref[2]];
-                // u_i - u_ref - θ × r = 0, θ the "translations" of the rotation node.
-                let rows: [[(u32, f64); 2]; 3] = [
-                    [(1, -r[2]), (2, r[1])],
-                    [(2, -r[0]), (0, r[2])],
-                    [(0, -r[1]), (1, r[0])],
-                ];
-                for (d, theta) in rows.iter().enumerate() {
-                    let mut global = vec![
-                        (member * PER_NODE + d as u32, 1.0),
-                        (reference * PER_NODE + d as u32, -1.0),
+                // A plane stress or plane strain node joins the rigid body in its plane
+                // only: its out-of-plane DOF (the thickness change of plane stress) stays
+                // out, as the ccx results show. The node is taken at z = ±t/2 so that the
+                // body cannot rotate about x or y and its reference node does not move out
+                // of plane (any positive t gives the same constraints).
+                let in_plane = plane[member as usize];
+                let layers: &[f64] = if in_plane {
+                    &[PLANE_HALF_THICKNESS, -PLANE_HALF_THICKNESS]
+                } else {
+                    &[0.0]
+                };
+                for &offset in layers {
+                    let r = [r[0], r[1], r[2] + offset];
+                    // u_i - u_ref - θ × r = 0, θ the "translations" of the rotation node.
+                    let rows: [[(u32, f64); 2]; 3] = [
+                        [(1, -r[2]), (2, r[1])],
+                        [(2, -r[0]), (0, r[2])],
+                        [(0, -r[1]), (1, r[0])],
                     ];
-                    for &(k, a) in theta {
-                        if a != 0.0 {
-                            global.push((rot * PER_NODE + k, a));
+                    for (d, theta) in rows.iter().enumerate() {
+                        let own = d < 2 || !in_plane;
+                        let mut global = vec![(reference * PER_NODE + d as u32, -1.0)];
+                        if own {
+                            global.insert(0, (member * PER_NODE + d as u32, 1.0));
                         }
+                        for &(k, a) in theta {
+                            if a != 0.0 {
+                                global.push((rot * PER_NODE + k, a));
+                            }
+                        }
+                        let preferred = if own { member } else { reference };
+                        mc.push_global(
+                            &global,
+                            preferred * PER_NODE + d as u32,
+                            Policy::Repivot,
+                            origin,
+                        );
                     }
-                    mc.push_global(
-                        &global,
-                        member * PER_NODE + d as u32,
-                        Policy::Repivot,
-                        origin,
-                    );
                 }
             }
         }
@@ -224,6 +245,20 @@ impl ModelConstraints {
         self.constraints.is_empty() && self.rotations.is_empty()
     }
 
+    /// The dense nodes any constraint refers to, ascending and unique. Nodes outside every
+    /// element (rigid body reference and rotation nodes, remote points) take their
+    /// stiffness from these constraints alone, so their DOFs must not be held at zero.
+    pub fn referenced_nodes(&self) -> Vec<u32> {
+        let mut nodes: Vec<u32> = self
+            .constraints
+            .iter()
+            .flat_map(|c| c.terms.iter().map(|&(dof, _)| dof / PER_NODE))
+            .collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        nodes
+    }
+
     pub fn rotation(&self, node: u32) -> Option<&Rotation> {
         self.rotations.get(&node)
     }
@@ -268,6 +303,24 @@ impl ModelConstraints {
         let rotation = |node: u32| self.rotations.get(&node).copied();
         ConstraintSet::from_elimination(&elimination, active, &rotation, warnings, notes)
     }
+}
+
+/// Nodes used only by plane stress and plane strain elements (dense index).
+fn plane_nodes(model: &Model) -> Vec<bool> {
+    let n = model.nodes.len();
+    let (mut plane, mut other) = (vec![false; n], vec![false; n]);
+    for element in &model.elements {
+        let flags = match element.kind.family() {
+            ElementFamily::PlaneStress | ElementFamily::PlaneStrain => &mut plane,
+            _ => &mut other,
+        };
+        for &id in &element.nodes {
+            if let Some(i) = model.nodes.index(id) {
+                flags[i as usize] = true;
+            }
+        }
+    }
+    plane.iter().zip(&other).map(|(&p, &o)| p && !o).collect()
 }
 
 fn add_term(terms: &mut Vec<(u32, f64)>, dof: u32, a: f64) {

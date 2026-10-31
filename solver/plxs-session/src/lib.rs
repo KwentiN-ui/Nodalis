@@ -72,7 +72,18 @@ impl Session {
         let constraints = ModelConstraints::new(&mut model)?;
         let pending_warnings = constraints.warnings.clone();
         let (table, pattern) = pool.install(|| -> Result<_> {
-            let table = ElementTable::new(&model, 0.0)?;
+            let mut table = ElementTable::new(&model, 0.0)?;
+            // Nodes outside every element that constraints tie in (rigid body reference
+            // and rotation nodes) keep their DOFs; the out-of-plane DOF of plane nodes
+            // stays held.
+            let referenced = constraints.referenced_nodes();
+            let unused = table.dofs.unused.clone();
+            table.dofs.unused.retain(|&dof| {
+                let node = dof / 3;
+                let unconnected = unused.binary_search(&(node * 3)).is_ok()
+                    && unused.binary_search(&(node * 3 + 1)).is_ok();
+                !(unconnected && referenced.binary_search(&node).is_ok())
+            });
             let pattern = build_pattern(&table);
             Ok((table, pattern))
         })?;
