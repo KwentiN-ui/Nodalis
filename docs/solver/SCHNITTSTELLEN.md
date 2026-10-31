@@ -423,6 +423,63 @@ Offen für andere Threads:
 Abnahme: `solver/plxs-cli/tests/loads_corpus.rs` (alle `loads/*`-Fixtures, läuft im CI ohne
 ccx), dazu die Übernahmetests in `plxs-input/src/tests.rs`.
 
+## Stand nach M2 T5 (Schalen, Balken, Stäbe, U1)
+
+- **Expansion** (`plxs-elements/src/expand/`): vor dem Rechnen wird die Analyse umgebaut,
+  das Ergebnis ist ein Modell aus Volumenelementen plus Gleichungen; `OutputMap` bildet die
+  Ergebnisse zurück auf das, was ccx schreibt. Die CLI ruft `expand::expand` nach dem Lesen
+  und `OutputMap::apply` vor `write_frd`.
+  - Schalen S3/S4/S4R/S6/S8/S8R → C3D6/C3D8I/C3D8R/C3D15/C3D20/C3D20R, drei Knoten je
+    Normale (unten, Mitte, oben, Offset in Dicken). Balken B31/B32/B32R → C3D8I/C3D20/C3D20R,
+    acht Knoten je Querschnitt (Ecken (−+, −−, +−, ++) in (1, 2), dann Kantenmitten);
+    `*BEAM SECTION`-Vektor = 1-Richtung, 2-Richtung = t × n1. Profile: bisher nur RECT.
+  - Knotennummern wie ccx: ab größter Id + 1 (+ eine Id je Knoten eines `*TRANSFORM`), Knoten
+    aufsteigend, 3 bzw. 8 fortlaufende Ids je Expansion; nicht benutzte (Mitte von
+    Schalen-Mittelknoten) bleiben Lücken. Die `.frd` enthält nur Knoten geschriebener
+    Elemente.
+  - Kopplung: ohne Knoten Mittelwert-MPC (Schale unten/oben, Balken die vier Ecken);
+    Knoten (Kreuzung mehrerer Expansionen oder alle drei Rotationen einer Schale gehalten,
+    nicht unter `*TRANSFORM`) als linearisierter dehnbarer Starrkörper mit Hilfsknoten für
+    Rotation und Dehnung; Rotations-Randbedingungen und Momente über Mittelwert-Rotations-
+    MPCs (Hilfsknoten, DOF 1 = Winkel). Voll gehaltene Balkenknoten sind keine Knoten; an
+    gehaltenen B32-Endknoten folgen die Kantenmitten dem Knoten (ccx-Beobachtung).
+  - Einzelkräfte auf Knoten ohne Knoten wirken direkt auf die expandierten Knoten:
+    Schale (−1/2, 2, −1/2) an Ecken quadratischer Elemente, sonst 1/2, 1/2; Balken 1/4 je
+    Ecke (FORC von ccx zeigt genau diese Werte).
+  - `*TRANSFORM` (rechtwinklig) an Schalen-/Balkenknoten: Verschiebungs-Randbedingungen als
+    Gleichung am Originalknoten, Rotationen als Mittelwert-Rotation um die lokale Achse
+    (Handbuch), Lasten in globale Komponenten. Der Transform verlässt danach das Modell.
+  - T3D2 = B31 mit quadratischem Querschnitt der Fläche (ccx 2.21 liefert identische
+    Spannungen inklusive seines Faktors 0,99996), Verdrillung über eine Mittelwert-Rotation
+    gehalten. Stäbe und Membranen schreibt ccx 2.21 auf den Originalknoten (be2, tr3, qu4):
+    FORC = Summe, andere Felder = Mittel über die expandierten Knoten, DISP = Originalknoten.
+- **U1** (`plxs-elements/src/u1.rs`) nativ: Steifigkeit aus der Nachgiebigkeit des
+  eingespannten Elements, wie ccx 2.21 sie rechnet (Black-Box, k von 0,003 bis 100 und
+  zwei Elementlängen): Längs EA, Torsion G(I11 + I22) (ohne k), Biegung mit
+  Endmomenten exakt nach Euler-Bernoulli, unter Endkraft L³/(3EI) + s(φ − 3)/(1 + φ) mit
+  s = L/(kGA), φ = 12EI/(kGAL²) (nicht Timoshenkos L³/(3EI) + s). I11 steift die Biegung
+  mit Durchbiegung in 1-Richtung. Der fünfte Wert von SECTION=GENERAL ist k (die IR nennt
+  das Feld `torsion`). Rotationen der U1-Knoten liegen auf Hilfsknoten; `ElementTable`
+  führt U1 als `LinearBlock` (nur K). Ausgabe wie ccx: keine Elemente, DISP und FORC mit
+  sechs Komponenten.
+- **MPC-Elimination** (`plxs-assembly/src/mpc.rs`): `*EQUATION` und erzeugte Gleichungen
+  werden eliminiert (Tᵀ K T, abhängiger DOF = erster freier Term, sonst Umschwenken),
+  `Reduction::with_mpcs`. Knoten in Gleichungen oder Starrkörpern zählen nicht als
+  unbenutzt (T4 hält sonst Knoten ohne Element fest).
+- **Dokumentierte Abweichungen** (Fixture-`deviations`, `FIXTURES.md`):
+  - Balken mit Rotations-Randbedingung: ccx schreibt an den expandierten Knoten der
+    gehaltenen Balkenknoten FORC, die nicht K·u sind (Summe nicht im Gleichgewicht mit den
+    Lasten); plxs schreibt K·u.
+  - U1: STRESS/TOSTRAIN/FORC von ccx sind elementinterne Werte; plxs schreibt K·u (mit
+    Momenten) und keine Elementfelder.
+- **Offen**: Membranen (M3D3 trifft ein reines CST-Scheibenelement exakt, M3D4/M3D4R
+  weichen von jeder probierten Expansion und vom Q4 ab, nur an belasteten Knoten), CIRC/
+  PIPE/BOX (Querschnitts-Integrationspunkte; braucht eine Integrationsregel in der IR),
+  OUTPUT=2D, `*NODAL THICKNESS`, Druck auf Balken, U1 an Schalen-/Balkenknoten,
+  zylindrischer `*TRANSFORM` an Schalenknoten, `*TIE`/`*RIGID BODY` (T6) für edge-tie.
+- Abnahmetest `solver/plxs-cli/tests/structural_corpus.rs` (18 von 25 grün, die offenen
+  mit Grund gelistet).
+
 ## Was M1 zu liefern hat (Abnahme)
 
 - `solver_check::run` aus `plx-app` besteht mit `plxs` als Executable (Kragbalken mit Kraft

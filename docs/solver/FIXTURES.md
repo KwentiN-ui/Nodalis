@@ -94,6 +94,12 @@ die Parität in der CI. Bis dahin meldet `plxs-fixtures run` für jede Fixture `
 (mit der ersten Abweichung), `ERROR` (Solver bricht ab, in M0 für alles außer `*NO ANALYSIS`:
 `procedure not implemented yet`) oder `no reference`.
 
+Eine Fixture kann in ihrer `.toml` dokumentierte Abweichungen von ccx nennen:
+`deviations = ["FORC"]` vergleicht die Werte dieser Felder nicht (fehlt das Feld beim
+Kandidaten, ist das auch erlaubt), `note` sagt warum, die Begründung steht in
+`SCHNITTSTELLEN.md`. Das ist für Ausgaben gedacht, die ccx nachweislich anders als
+dokumentiert rechnet (FORC ≠ K·u), nicht um Fehler zu verdecken.
+
 ## Feature-Matrix
 
 Erzeugt mit `plxs-fixtures matrix`; `cargo test -p plxs-verify` schlägt fehl, wenn die Tabelle
