@@ -20,7 +20,8 @@ pub mod local_loads;
 pub mod stiffness;
 
 pub use dofs::{DofMap, Reduction, Spc};
-pub use elements::{ElementTable, IntegrationPointLayout};
+pub use elements::{ElementTable, IntegrationPointLayout, LinearBlock};
+
 pub use heat::{HeatTable, assemble_heat, heat_loads, temperature_spc};
 pub use loads::load_vector;
 pub use local_loads::rotate_concentrated_loads;

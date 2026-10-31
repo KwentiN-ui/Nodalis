@@ -32,13 +32,23 @@ fn frd_element(kind: ElementType) -> Option<(u8, &'static [usize])> {
         C3D20 | C3D20R => (4, &HEX20),
         C3D15 => (5, &WEDGE15),
         C3D10 | C3D10T => (6, &TET10),
-        // CalculiX writes two-node springs and gaps as line elements, SPRING1 not at all.
-        SPRING2 | GAPUNI => (11, &[0, 1]),
         // Plane and axisymmetric elements are written unexpanded, as CalculiX does.
         CPS3 | CPE3 | CAX3 => (7, &TRI3),
         CPS6 | CPE6 | CAX6 => (8, &TRI6),
         CPS4 | CPS4R | CPE4 | CPE4R | CAX4 | CAX4R => (9, &QUAD4),
         CPS8 | CPS8R | CPE8 | CPE8R | CAX8 | CAX8R => (10, &QUAD8),
+        M3D3 => (7, &TRI3),
+        M3D6 => (8, &TRI6),
+        M3D4 | M3D4R => (9, &QUAD4),
+        T3D2 | B31 => (11, &[0, 1]),
+        // Shells and beams with OUTPUT=2D.
+        S3 => (7, &TRI3),
+        S6 => (8, &TRI6),
+        S4 | S4R => (9, &QUAD4),
+        S8 | S8R => (10, &QUAD8),
+        B32 | B32R => (12, &[0, 2, 1]),
+        // CalculiX writes two-node springs and gaps as line elements, SPRING1 not at all.
+        SPRING2 | GAPUNI => (11, &[0, 1]),
         _ => return None,
     })
 }
@@ -252,7 +262,14 @@ fn write_block(
 /// The type and index columns of a `-5` line: vectors (`1 2 k 0`), tensors (`1 4 i j`),
 /// scalars (`1 1 0 0`).
 fn component_flags(field: &str, components: usize, k: usize) -> (u8, u8, u8) {
-    let _ = field;
+    // Displacements and forces with rotations (U1 nodes): a vector and three scalars.
+    if matches!(field, "DISP" | "FORC") && components == 6 {
+        return if k < 3 {
+            (2, k as u8 + 1, 0)
+        } else {
+            (1, 0, 0)
+        };
+    }
     match components {
         3 => (2, k as u8 + 1, 0),
         6 => {

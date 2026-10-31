@@ -1,17 +1,21 @@
 //! Element formulations of the PrePoLix solver: shape functions and integration rules of
 //! all families at one place ([`shape`]) and the solid elements ([`solid`]). Plane stress,
 //! plane strain and axisymmetric elements ([`plane`]) are expanded into solids as CalculiX
-//! does. Shells, beams, springs and gaps follow in later milestones (concept section 4.1).
-//! Heat conduction on the solids lives in [`heat`].
+//! does, and so are shells, membranes, beams and trusses ([`expand`]). Springs and gaps
+//! follow in later milestones (concept section 4.1). Heat conduction on the solids lives in
+//! [`heat`].
 //!
 //! Sources: the CalculiX manual for node, face and integration-point conventions; textbooks
 //! (Zienkiewicz & Taylor; Hughes; Bathe) for the formulations. No CalculiX code was
 //! consulted.
 
+pub mod expand;
 pub mod heat;
+pub mod membrane;
 pub mod plane;
 pub mod shape;
 pub mod solid;
+pub mod u1;
 
 pub use heat::FacePoint;
 pub use plane::{PlaneKind, expanded_type, plane};

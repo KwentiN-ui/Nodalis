@@ -16,6 +16,7 @@ pub fn build_pattern(table: &ElementTable) -> Arc<Pattern> {
             .entries
             .iter()
             .map(|e| e.dofs.as_slice())
+            .chain(table.linear_blocks.iter().map(|b| b.dofs.as_slice()))
             .chain(table.discrete.iter().map(|e| e.dofs.as_slice())),
     ))
 }
@@ -46,6 +47,9 @@ pub fn assemble_stiffness(table: &ElementTable, model: &Model, k: &mut SparseMat
         for (entry, ke) in entries.iter().zip(&matrices) {
             k.add_block(&entry.dofs, ke);
         }
+    }
+    for block in &table.linear_blocks {
+        k.add_block(&block.dofs, &block.stiffness);
     }
     // Springs; gaps depend on their status and are added by the procedures.
     for element in &table.discrete {

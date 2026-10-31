@@ -64,9 +64,46 @@ pub struct ElementTable {
     pub materials: Vec<(LinearElastic, [[f64; 6]; 6])>,
     pub dofs: DofMap,
     pub layout: IntegrationPointLayout,
+    /// Elements computed natively with a constant stiffness and no integration points
+    /// (the general beam U1): they enter `K` only.
+    pub linear_blocks: Vec<LinearBlock>,
+    /// Native M3D3 membranes (their stiffness is among `linear_blocks`); stresses and
+    /// strains are constant per element.
+    pub membranes: Vec<Membrane>,
     /// A material without `*ELASTIC`: allowed for pure heat transfer, where it gets zero
     /// elastic constants; [`Self::require_elastic`] refuses it for mechanical steps.
     pub missing_elastic: Option<String>,
+}
+
+/// A constant-strain membrane triangle (`plxs_elements::membrane`).
+#[derive(Clone, Debug)]
+pub struct Membrane {
+    /// Dense node indices.
+    pub nodes: [u32; 3],
+    pub coordinates: [[f64; 3]; 3],
+    pub young: f64,
+    pub poisson: f64,
+}
+
+impl Membrane {
+    /// Strain and stress (global, tensor shear) of the displacements `u` (dense DOFs).
+    pub fn strain_stress(&self, u: &[f64]) -> ([f64; 6], [f64; 6]) {
+        let ue: Vec<f64> = self
+            .nodes
+            .iter()
+            .flat_map(|&n| (0..3).map(move |d| u[n as usize * 3 + d]))
+            .collect();
+        plxs_elements::membrane::strain_stress(&self.coordinates, &ue, self.young, self.poisson)
+            .unwrap_or(([0.0; 6], [0.0; 6]))
+    }
+}
+
+/// A constant element stiffness on global DOFs.
+#[derive(Clone, Debug)]
+pub struct LinearBlock {
+    pub dofs: Vec<u32>,
+    /// Row-major, `dofs.len()` squared.
+    pub stiffness: Vec<f64>,
 }
 
 impl ElementTable {
@@ -98,6 +135,8 @@ impl ElementTable {
         let mut entries = Vec::with_capacity(model.elements.len());
         let mut offsets = Vec::with_capacity(model.elements.len() + 1);
         offsets.push(0u32);
+        let mut linear_blocks = Vec::new();
+        let mut membranes = Vec::new();
         let mut entry_of = Vec::with_capacity(model.elements.len());
         let mut discrete = Vec::new();
         for (index, element) in model.elements.iter().enumerate() {
@@ -113,6 +152,27 @@ impl ElementTable {
                     index as u32,
                     &nodes,
                 )?);
+                entry_of.push(u32::MAX);
+                continue;
+            }
+            if element.kind == ElementType::U1 {
+                let block = Self::u1_block(model, element, temperature)?;
+                for &d in &block.dofs {
+                    connected[d as usize / 3] = true;
+                    uses_z[d as usize / 3] = true;
+                }
+                linear_blocks.push(block);
+                entry_of.push(u32::MAX);
+                continue;
+            }
+            if element.kind == ElementType::M3D3 {
+                let (membrane, block) = Self::membrane(model, element, temperature)?;
+                for &n in &membrane.nodes {
+                    connected[n as usize] = true;
+                    uses_z[n as usize] = true;
+                }
+                membranes.push(membrane);
+                linear_blocks.push(block);
                 entry_of.push(u32::MAX);
                 continue;
             }
@@ -139,14 +199,31 @@ impl ElementTable {
             } else {
                 None
             };
-            let key = (element.kind, thickness.map_or(0, f64::to_bits));
+            // Expanded beams with a round section keep their beam section, whose profile
+            // gives the integration points.
+            let section_rule =
+                element
+                    .section
+                    .and_then(|s| match &model.sections.get(s as usize)?.kind {
+                        SectionKind::Beam { profile, .. } => {
+                            plxs_elements::expand::section_rule(element.kind, profile)
+                        }
+                        _ => None,
+                    });
+            let key = match (&section_rule, element.section) {
+                (Some(_), Some(s)) => (element.kind, u64::MAX - u64::from(s)),
+                _ => (element.kind, thickness.map_or(0, f64::to_bits)),
+            };
             let formulation = match formulation_index.get(&key) {
                 Some(&i) => i,
                 None => {
                     let made = if is_plane {
                         plane(element.kind, thickness)
                     } else {
-                        solid(element.kind)
+                        solid(element.kind).map(|f| match section_rule.clone() {
+                            Some((rule, extrapolation)) => f.with_rule(rule, extrapolation),
+                            None => f,
+                        })
                     };
                     let f = made.ok_or_else(|| {
                         Error::Unsupported(format!(
@@ -169,6 +246,9 @@ impl ElementTable {
                     let section = &model.sections[section_index as usize];
                     let name = match &section.kind {
                         SectionKind::Solid { material, .. } => material.as_str(),
+                        SectionKind::Beam { material, .. } if section_rule.is_some() => {
+                            material.as_str()
+                        }
                         _ => {
                             return Err(Error::input(
                                 "*SOLID SECTION",
@@ -215,6 +295,26 @@ impl ElementTable {
                 density,
             });
         }
+        // Nodes that multi-point constraints tie in (the original nodes and helper nodes of
+        // expanded shells and beams, reference nodes) work through those constraints.
+        for equation in &model.constraints.equations {
+            for term in &equation.terms {
+                for id in model.nodes_of(&term.node) {
+                    if let Some(n) = model.nodes.index(id) {
+                        connected[n as usize] = true;
+                        uses_z[n as usize] = true;
+                    }
+                }
+            }
+        }
+        for body in &model.constraints.rigid_bodies {
+            for id in [body.reference_node, body.rotation_node] {
+                if let Some(n) = model.nodes.index(id) {
+                    connected[n as usize] = true;
+                    uses_z[n as usize] = true;
+                }
+            }
+        }
         // DOFs no element works on are held at zero: nodes outside every element, and the
         // out-of-plane DOF of nodes that only plane strain or axisymmetric elements use.
         for n in 0..model.nodes.len() {
@@ -233,8 +333,121 @@ impl ElementTable {
             materials,
             dofs,
             layout: IntegrationPointLayout { offsets },
+            linear_blocks,
+            membranes,
             missing_elastic,
         })
+    }
+
+    /// The stiffness of a U1 beam. After the expansion its nodes are the first node, the
+    /// helper node carrying its rotations, the second node and its rotation helper.
+    fn u1_block(model: &Model, element: &Element, temperature: f64) -> Result<LinearBlock> {
+        use plxs_core::section::BeamProfile;
+        let bad =
+            |what: &str| Error::input("*ELEMENT", format!("U1 element {}: {what}", element.id));
+        if element.nodes.len() != 4 {
+            return Err(bad("expected two nodes with rotation helpers"));
+        }
+        let section = element
+            .section
+            .and_then(|s| model.sections.get(s as usize))
+            .ok_or_else(|| bad("no section"))?;
+        let SectionKind::Beam {
+            material,
+            profile:
+                BeamProfile::General {
+                    area,
+                    i11,
+                    i22,
+                    torsion,
+                    ..
+                },
+            normal,
+            ..
+        } = &section.kind
+        else {
+            return Err(bad("needs *BEAM SECTION, SECTION=GENERAL"));
+        };
+        let mat = model
+            .material(material)
+            .ok_or_else(|| Error::undefined("*BEAM SECTION", "material", material))?;
+        let elastic = LinearElastic::of(mat, temperature)?;
+        let nodes = Self::node_indices(model, element)?;
+        let x = |i: usize| model.nodes.coordinates[nodes[i] as usize];
+        // The fifth value of the section is CalculiX's shear factor k (PrePoLix writes it
+        // so; the IR calls the field `torsion`).
+        let u1 = plxs_elements::u1::U1Section {
+            area: *area,
+            i11: *i11,
+            i22: *i22,
+            shear_factor: *torsion,
+            young: elastic.young,
+            poisson: elastic.poisson,
+        };
+        let stiffness = plxs_elements::u1::stiffness(x(0), x(2), *normal, &u1)
+            .ok_or_else(|| bad("no length, or the section vector is parallel to the axis"))?;
+        let dofs = nodes
+            .iter()
+            .flat_map(|&n| (0..3).map(move |d| n * 3 + d))
+            .collect();
+        Ok(LinearBlock { dofs, stiffness })
+    }
+
+    /// A native M3D3 membrane and its stiffness.
+    fn membrane(
+        model: &Model,
+        element: &Element,
+        temperature: f64,
+    ) -> Result<(Membrane, LinearBlock)> {
+        let bad =
+            |what: &str| Error::input("*ELEMENT", format!("M3D3 element {}: {what}", element.id));
+        let section = element
+            .section
+            .and_then(|s| model.sections.get(s as usize))
+            .ok_or_else(|| bad("no section"))?;
+        let (material, thickness) = match &section.kind {
+            SectionKind::Membrane {
+                material,
+                thickness,
+                ..
+            } => (material, *thickness),
+            SectionKind::Shell {
+                material,
+                thickness,
+                ..
+            } => (material, *thickness),
+            _ => return Err(bad("needs *MEMBRANE SECTION or *SHELL SECTION")),
+        };
+        let mat = model
+            .material(material)
+            .ok_or_else(|| Error::undefined("*MEMBRANE SECTION", "material", material))?;
+        let elastic = LinearElastic::of(mat, temperature)?;
+        let nodes = Self::node_indices(model, element)?;
+        if nodes.len() != 3 {
+            return Err(bad("expected three nodes"));
+        }
+        let coordinates: [[f64; 3]; 3] =
+            std::array::from_fn(|i| model.nodes.coordinates[nodes[i] as usize]);
+        let stiffness = plxs_elements::membrane::stiffness(
+            &coordinates,
+            elastic.young,
+            elastic.poisson,
+            thickness,
+        )
+        .ok_or_else(|| bad("degenerate triangle"))?;
+        let dofs = nodes
+            .iter()
+            .flat_map(|&n| (0..3).map(move |d| n * 3 + d))
+            .collect();
+        Ok((
+            Membrane {
+                nodes: [nodes[0], nodes[1], nodes[2]],
+                coordinates,
+                young: elastic.young,
+                poisson: elastic.poisson,
+            },
+            LinearBlock { dofs, stiffness },
+        ))
     }
 
     fn node_indices(model: &Model, element: &Element) -> Result<Vec<u32>> {
@@ -254,7 +467,7 @@ impl ElementTable {
         model.elements[self.entries[entry as usize].element as usize].id
     }
 
-    /// Marks the DOFs that some element (continuum or discrete) uses.
+    /// Marks the DOFs that some element (continuum, discrete or native block) uses.
     pub fn active_dofs(&self) -> Vec<bool> {
         let mut active = vec![false; self.dofs.len()];
         for dof in self
@@ -262,6 +475,7 @@ impl ElementTable {
             .iter()
             .flat_map(|e| &e.dofs)
             .chain(self.discrete.iter().flat_map(|e| &e.dofs))
+            .chain(self.linear_blocks.iter().flat_map(|b| &b.dofs))
         {
             active[*dof as usize] = true;
         }

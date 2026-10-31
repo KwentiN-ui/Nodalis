@@ -277,6 +277,15 @@ fn invert3(j: &[[f64; 3]; 3]) -> (f64, [[f64; 3]; 3]) {
 }
 
 impl SolidElement {
+    /// The element with another integration rule and extrapolation
+    /// (`extrapolation[node * ips + ip]`), for the section points of expanded pipe beams.
+    pub fn with_rule(mut self, rule: IntegrationRule, extrapolation: Vec<f64>) -> Self {
+        assert_eq!(extrapolation.len(), rule.len() * self.node_count());
+        self.extrapolation = extrapolation;
+        self.rule = rule;
+        self
+    }
+
     pub fn node_count(&self) -> usize {
         match &self.expansion {
             Some(x) => x.nodes,
