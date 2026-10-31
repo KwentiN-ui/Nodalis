@@ -432,7 +432,11 @@ ccx), dazu die Übernahmetests in `plxs-input/src/tests.rs`.
   - Schalen S3/S4/S4R/S6/S8/S8R → C3D6/C3D8I/C3D8R/C3D15/C3D20/C3D20R, drei Knoten je
     Normale (unten, Mitte, oben, Offset in Dicken). Balken B31/B32/B32R → C3D8I/C3D20/C3D20R,
     acht Knoten je Querschnitt (Ecken (−+, −−, +−, ++) in (1, 2), dann Kantenmitten);
-    `*BEAM SECTION`-Vektor = 1-Richtung, 2-Richtung = t × n1. Profile: bisher nur RECT.
+    `*BEAM SECTION`-Vektor = 1-Richtung, 2-Richtung = t × n1. Profile: RECT, PIPE (B32R:
+    acht Punkte auf dem Kreis mit Radius √((r_a² + r_i²)/2), ab der 1-Achse, je ein Achtel
+    der Ringfläche, axial die zwei Gauß-Punkte; Verschiebungen wie ccx). Expandierte
+    PIPE-Elemente behalten ihre Balken-Section, `ElementTable` baut daraus die Regel
+    (`expand::section_rule`, `SolidElement::with_rule`).
   - Knotennummern wie ccx: ab größter Id + 1 (+ eine Id je Knoten eines `*TRANSFORM`), Knoten
     aufsteigend, 3 bzw. 8 fortlaufende Ids je Expansion; nicht benutzte (Mitte von
     Schalen-Mittelknoten) bleiben Lücken. Die `.frd` enthält nur Knoten geschriebener
@@ -473,8 +477,9 @@ ccx), dazu die Übernahmetests in `plxs-input/src/tests.rs`.
   - U1: STRESS/TOSTRAIN/FORC von ccx sind elementinterne Werte; plxs schreibt K·u (mit
     Momenten) und keine Elementfelder.
 - **Offen**: Membranen (M3D3 trifft ein reines CST-Scheibenelement exakt, M3D4/M3D4R
-  weichen von jeder probierten Expansion und vom Q4 ab, nur an belasteten Knoten), CIRC/
-  PIPE/BOX (Querschnitts-Integrationspunkte; braucht eine Integrationsregel in der IR),
+  weichen von jeder probierten Expansion und vom Q4 ab, nur an belasteten Knoten), CIRC und
+  BOX, die Knotenspannungen von PIPE (ccx extrapoliert anders als die lineare
+  Querschnittsanpassung, bis 0,3 %),
   OUTPUT=2D, `*NODAL THICKNESS`, Druck auf Balken, U1 an Schalen-/Balkenknoten,
   zylindrischer `*TRANSFORM` an Schalenknoten, `*TIE`/`*RIGID BODY` (T6) für edge-tie.
 - Abnahmetest `solver/plxs-cli/tests/structural_corpus.rs` (18 von 25 grün, die offenen

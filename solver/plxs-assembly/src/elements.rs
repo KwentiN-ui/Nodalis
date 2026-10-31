@@ -121,14 +121,31 @@ impl ElementTable {
             } else {
                 None
             };
-            let key = (element.kind, thickness.map_or(0, f64::to_bits));
+            // Expanded beams with a round section keep their beam section, whose profile
+            // gives the integration points.
+            let section_rule =
+                element
+                    .section
+                    .and_then(|s| match &model.sections.get(s as usize)?.kind {
+                        SectionKind::Beam { profile, .. } => {
+                            plxs_elements::expand::section_rule(element.kind, profile)
+                        }
+                        _ => None,
+                    });
+            let key = match (&section_rule, element.section) {
+                (Some(_), Some(s)) => (element.kind, u64::MAX - u64::from(s)),
+                _ => (element.kind, thickness.map_or(0, f64::to_bits)),
+            };
             let formulation = match formulation_index.get(&key) {
                 Some(&i) => i,
                 None => {
                     let made = if is_plane {
                         plane(element.kind, thickness)
                     } else {
-                        solid(element.kind)
+                        solid(element.kind).map(|f| match section_rule.clone() {
+                            Some((rule, extrapolation)) => f.with_rule(rule, extrapolation),
+                            None => f,
+                        })
                     };
                     let f = made.ok_or_else(|| {
                         Error::Unsupported(format!(
@@ -151,6 +168,9 @@ impl ElementTable {
                     let section = &model.sections[section_index as usize];
                     let name = match &section.kind {
                         SectionKind::Solid { material, .. } => material.as_str(),
+                        SectionKind::Beam { material, .. } if section_rule.is_some() => {
+                            material.as_str()
+                        }
                         _ => {
                             return Err(Error::input(
                                 "*SOLID SECTION",

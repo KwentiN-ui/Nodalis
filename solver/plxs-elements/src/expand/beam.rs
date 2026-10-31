@@ -35,9 +35,9 @@ impl BeamSection {
                 ));
             }
         };
-        if !matches!(profile, BeamProfile::Rect { .. }) {
+        if !matches!(profile, BeamProfile::Rect { .. } | BeamProfile::Pipe { .. }) {
             return Err(Error::Unsupported(
-                "beam sections other than RECT are not implemented yet".into(),
+                "beam sections CIRC and BOX are not implemented yet".into(),
             ));
         }
         Ok(Self {
@@ -187,4 +187,56 @@ pub(super) fn local_axes(t: [f64; 3], n2: [f64; 3]) -> ([f64; 3], [f64; 3]) {
     let n2 = normalize(sub(n2, scale(t, dot(n2, t))));
     let n1 = normalize(cross(n2, t));
     (n2, n1)
+}
+
+/// The integration rule and nodal extrapolation of an expanded beam whose section is not a
+/// rectangle, `None` for rectangles (the solid's own rule). Natural coordinates of the
+/// expanded solid: ξ along the beam, ζ along the 1-direction, η against the 2-direction.
+///
+/// PIPE (manual, "Pipe"): eight points equally spaced on the circle of radius
+/// `sqrt((r_o² + r_i²) / 2)` starting on the 1-axis, each weighing an eighth of the ring
+/// area; along the beam the two Gauss points of the reduced B32R (displacements match ccx).
+/// Nodal values: per axial point `a + b ζ + c η + d ζ η` fitted to the eight values by least
+/// squares, linear along the beam. ccx's nodal stresses follow this shape but differ by
+/// up to 0.3 % (and 11 % in the ζη term); its rule is not known yet.
+pub fn section_rule(
+    kind: ElementType,
+    profile: &BeamProfile,
+) -> Option<(crate::shape::IntegrationRule, Vec<f64>)> {
+    let BeamProfile::Pipe { radius, thickness } = *profile else {
+        return None;
+    };
+    if kind != ElementType::C3D20R {
+        return None;
+    }
+    let inner = radius - thickness;
+    let rho = ((radius * radius + inner * inner) / 2.0).sqrt() / radius;
+    let ring = std::f64::consts::PI * (radius * radius - inner * inner) / (radius * radius);
+    let g = 1.0 / 3f64.sqrt();
+    let mut points = Vec::new();
+    let mut weights = Vec::new();
+    for xi in [-g, g] {
+        for k in 0..8 {
+            let angle = (45.0 * k as f64).to_radians();
+            points.push([xi, -rho * angle.sin(), rho * angle.cos()]);
+            weights.push(ring / 8.0);
+        }
+    }
+    let nodes = crate::shape::Family::Hex20.node_coordinates();
+    let second = 4.0 * rho * rho; // Σ ζ_k² = Σ η_k² over the eight points
+    let mut extrapolation = Vec::with_capacity(nodes.len() * points.len());
+    for node in nodes {
+        for p in &points {
+            let along = 0.5 * (1.0 + node[0] * p[0].signum() / g);
+            let across = 1.0 / 8.0
+                + node[1] * p[1] / second
+                + node[2] * p[2] / second
+                + node[1] * node[2] * p[1] * p[2] / rho.powi(4);
+            extrapolation.push(along * across);
+        }
+    }
+    Some((
+        crate::shape::IntegrationRule { points, weights },
+        extrapolation,
+    ))
 }

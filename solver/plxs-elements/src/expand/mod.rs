@@ -34,6 +34,7 @@ use plxs_core::section::SectionKind;
 use plxs_core::step::{Boundary, ConcentratedLoad, DistributedLoadKind};
 use plxs_core::{Analysis, ElementFamily, ElementType, Error, Model, Result};
 
+pub use beam::section_rule;
 pub use output::OutputMap;
 
 /// A model after the expansion, and how to map its results back.
@@ -475,7 +476,11 @@ impl Expander {
             let e = &mut self.analysis.model.elements[st.element];
             e.kind = kind;
             e.nodes = nodes;
+            let round = st.beam.as_ref().is_some_and(|b| {
+                !matches!(b.profile, plxs_core::section::BeamProfile::Rect { .. })
+            });
             if let Some(s) = e.section
+                && !round
                 && converted.insert(s)
             {
                 let section = &mut self.analysis.model.sections[s as usize];
