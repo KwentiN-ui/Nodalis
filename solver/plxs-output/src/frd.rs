@@ -37,6 +37,10 @@ fn frd_element(kind: ElementType) -> Option<(u8, &'static [usize])> {
         CPS6 | CPE6 | CAX6 => (8, &TRI6),
         CPS4 | CPS4R | CPE4 | CPE4R | CAX4 | CAX4R => (9, &QUAD4),
         CPS8 | CPS8R | CPE8 | CPE8R | CAX8 | CAX8R => (10, &QUAD8),
+        M3D3 => (7, &TRI3),
+        M3D6 => (8, &TRI6),
+        M3D4 | M3D4R => (9, &QUAD4),
+        T3D2 => (11, &[0, 1]),
         _ => return None,
     })
 }

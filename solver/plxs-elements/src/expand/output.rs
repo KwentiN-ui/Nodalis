@@ -1,18 +1,24 @@
 //! From the results of the expanded model to what CalculiX writes: the `.frd` mesh holds
-//! the nodes of the (expanded) elements only, not the original nodes of shells and beams
-//! nor helper nodes of knots and mean rotations.
+//! the nodes of the written elements only, not helper nodes of knots and mean rotations.
+//!
+//! Shells and beams are written expanded (the solids on the expanded nodes). Trusses and
+//! membranes are written as themselves on their original nodes (ccx 2.21 does so): there
+//! the forces are the sums over the expanded nodes, the displacements those of the original
+//! node, and every other field the mean.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use plxs_core::mesh::NodeId;
 use plxs_core::results::Results;
-use plxs_core::{Model, Step};
+use plxs_core::{Element, ElementFamily, Model, Step};
 
 /// How results of the solver model become the written ones.
 #[derive(Clone, Debug, Default)]
 pub struct OutputMap {
-    /// Expanded nodes per original node and expansion (empty without expansion).
+    /// Used expanded nodes per original node and expansion (empty without expansion).
     pub groups: BTreeMap<NodeId, Vec<Vec<NodeId>>>,
+    /// Elements written as themselves: index into the model's elements and the original.
+    native: Vec<(usize, Element)>,
 }
 
 impl OutputMap {
@@ -21,34 +27,86 @@ impl OutputMap {
     }
 
     pub fn expanded(
-        _original: &Model,
+        original: &Model,
         _solver: &Model,
         groups: BTreeMap<NodeId, Vec<Vec<NodeId>>>,
         _steps: &[Step],
     ) -> Self {
-        Self { groups }
+        let native = original
+            .elements
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                matches!(
+                    e.kind.family(),
+                    ElementFamily::Truss | ElementFamily::Membrane
+                )
+            })
+            .map(|(i, e)| (i, e.clone()))
+            .collect();
+        Self { groups, native }
     }
 
-    /// The model and results as written: nodes that belong to no element are left out of
-    /// the mesh and of every field.
+    /// The model and results as written: native elements back on their original nodes,
+    /// and nodes that belong to no written element left out of the mesh and every field.
     pub fn apply(&self, model: &Model, results: &Results) -> (Model, Results) {
-        let used: HashSet<NodeId> = model
+        let mut out = model.clone();
+        let mut results = results.clone();
+        if !self.native.is_empty() {
+            let mut native_nodes: Vec<NodeId> = Vec::new();
+            for (index, element) in &self.native {
+                out.elements[*index] = element.clone();
+                native_nodes.extend(element.nodes.iter().copied());
+            }
+            native_nodes.sort_unstable();
+            native_nodes.dedup();
+            for increment in &mut results.increments {
+                // Displacements stay the original node's own (the mean constraint's value).
+                for field in increment.fields.iter_mut().filter(|f| f.name != "DISP") {
+                    let position: HashMap<NodeId, usize> =
+                        field.nodes.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+                    let sum = field.name == "FORC";
+                    for &node in &native_nodes {
+                        let (Some(&target), Some(groups)) =
+                            (position.get(&node), self.groups.get(&node))
+                        else {
+                            continue;
+                        };
+                        let sources: Vec<usize> = groups
+                            .iter()
+                            .flatten()
+                            .filter_map(|n| position.get(n).copied())
+                            .collect();
+                        if sources.is_empty() {
+                            continue;
+                        }
+                        for component in &mut field.values {
+                            let total: f64 = sources.iter().map(|&s| component[s]).sum();
+                            component[target] = if sum {
+                                total
+                            } else {
+                                total / sources.len() as f64
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        let used: HashSet<NodeId> = out
             .elements
             .iter()
             .flat_map(|e| e.nodes.iter().copied())
             .collect();
-        if used.len() == model.nodes.len() {
-            return (model.clone(), results.clone());
+        if used.len() == out.nodes.len() {
+            return (out, results);
         }
-        let mut out = model.clone();
         let mut nodes = plxs_core::mesh::Nodes::default();
-        for (id, x) in model.nodes.iter() {
+        for (id, x) in out.nodes.iter() {
             if used.contains(&id) {
                 nodes.insert(id, x);
             }
         }
         out.nodes = nodes;
-        let mut results = results.clone();
         for increment in &mut results.increments {
             for field in &mut increment.fields {
                 let keep: Vec<bool> = field.nodes.iter().map(|n| used.contains(n)).collect();

@@ -52,7 +52,7 @@ pub fn needs_expansion(model: &Model) -> bool {
 fn expands(kind: ElementType) -> bool {
     matches!(
         kind.family(),
-        ElementFamily::Shell | ElementFamily::Membrane | ElementFamily::Beam
+        ElementFamily::Shell | ElementFamily::Membrane | ElementFamily::Beam | ElementFamily::Truss
     )
 }
 
@@ -84,6 +84,9 @@ struct Group {
     /// Shell normal, or for beams the local 1- and 2-directions.
     normal: [f64; 3],
     axis1: [f64; 3],
+    /// Trusses: each node also gets a mean rotation constraint holding the twist about
+    /// the axis, which nothing else resists.
+    truss: bool,
     /// Shell thickness and offset, beam section key.
     thickness: f64,
     offset: f64,
@@ -104,6 +107,7 @@ struct Structural {
     normals: Vec<[f64; 3]>,
     /// Beam tangents at the local nodes.
     tangents: Vec<[f64; 3]>,
+    truss: bool,
     thickness: f64,
     offset: f64,
     beam: Option<beam::BeamSection>,
@@ -160,6 +164,7 @@ impl Expander {
                         kind: Kind::Shell,
                         normals: shell::normals(element.kind, &coords, element.id)?,
                         tangents: Vec::new(),
+                        truss: false,
                         thickness: *thickness,
                         offset: *offset,
                         beam: None,
@@ -175,6 +180,7 @@ impl Expander {
                     kind: Kind::Shell,
                     normals: shell::normals(element.kind, &coords, element.id)?,
                     tangents: Vec::new(),
+                    truss: false,
                     thickness: *thickness,
                     offset: *offset,
                     beam: None,
@@ -197,6 +203,41 @@ impl Expander {
                         kind: Kind::Beam,
                         normals,
                         tangents,
+                        truss: false,
+                        thickness: 0.0,
+                        offset: 0.0,
+                        beam: Some(section),
+                    }
+                }
+                // Trusses: like a B31 beam with a square section of the given area (manual,
+                // "Two-node truss element"; ccx 2.21 results match this beam exactly).
+                (
+                    SectionKind::Solid {
+                        thickness: Some(area),
+                        ..
+                    },
+                    ElementFamily::Truss,
+                ) => {
+                    let side = area.sqrt();
+                    let section = beam::BeamSection::new(
+                        &plxs_core::section::BeamProfile::Rect { a: side, b: side },
+                        0.0,
+                        0.0,
+                    )?;
+                    let axis = normalize(sub(coords[1], coords[0]));
+                    let n1 = if axis[2].abs() < 0.9 {
+                        [0.0, 0.0, -1.0]
+                    } else {
+                        [1.0, 0.0, 0.0]
+                    };
+                    let (tangents, normals) =
+                        beam::directions(ElementType::B31, &coords, n1, element.id)?;
+                    Structural {
+                        element: index,
+                        kind: Kind::Beam,
+                        normals,
+                        tangents,
+                        truss: true,
                         thickness: 0.0,
                         offset: 0.0,
                         beam: Some(section),
@@ -232,6 +273,7 @@ impl Expander {
         let original = self.analysis.model.clone();
         self.replace_elements()?;
         self.drop_unused_nodes();
+        self.hold_loose_nodes();
         let knot_nodes = self.knot_nodes();
         self.constraints(&knot_nodes);
         self.remap_steps(&original)?;
@@ -240,7 +282,17 @@ impl Expander {
         let groups: BTreeMap<NodeId, Vec<Vec<NodeId>>> = self
             .groups
             .iter()
-            .map(|(&n, g)| (n, g.iter().map(|g| g.nodes.clone()).collect()))
+            .map(|(&n, g)| {
+                let used = g.iter().map(|g| {
+                    g.nodes
+                        .iter()
+                        .zip(&g.used)
+                        .filter(|(_, u)| **u)
+                        .map(|(n, _)| *n)
+                        .collect()
+                });
+                (n, used.collect())
+            })
             .collect();
         self.analysis.model = model;
         let output = OutputMap::expanded(
@@ -291,6 +343,7 @@ impl Expander {
                         && st.thickness == reference.thickness
                         && st.offset == reference.offset
                         && st.beam == reference.beam
+                        && st.truss == reference.truss
                         && angle_below(st.normals[l], n0, NORMAL_ANGLE)
                         && match (st.tangents.get(l), t0) {
                             (Some(&t), Some(t0)) => angle_below(t, t0, NORMAL_ANGLE),
@@ -314,6 +367,7 @@ impl Expander {
                 };
                 groups.push(Group {
                     kind: reference.kind,
+                    truss: reference.truss,
                     members,
                     normal,
                     axis1,
@@ -380,8 +434,13 @@ impl Expander {
                     (solid, nodes)
                 }
                 Kind::Beam => {
-                    let solid = beam::solid_type(element.kind);
-                    let layout = beam::layout(element.kind);
+                    let as_beam = if st.truss {
+                        ElementType::B31
+                    } else {
+                        element.kind
+                    };
+                    let solid = beam::solid_type(as_beam);
+                    let layout = beam::layout(as_beam);
                     let nodes = layout
                         .iter()
                         .map(|&(local, slot)| {
@@ -434,6 +493,44 @@ impl Expander {
             }
         }
         model.nodes = nodes;
+    }
+
+    /// Nodes of the input that neither an element, a constraint nor a load uses (ccx
+    /// ignores them) are held, so that they do not make the system singular; they are not
+    /// written.
+    fn hold_loose_nodes(&mut self) {
+        let model = &self.analysis.model;
+        let mut used: HashSet<NodeId> = model
+            .elements
+            .iter()
+            .flat_map(|e| e.nodes.iter().copied())
+            .collect();
+        for equation in &model.constraints.equations {
+            for t in &equation.terms {
+                used.extend(model.nodes_of(&t.node));
+            }
+        }
+        for body in &model.constraints.rigid_bodies {
+            used.insert(body.reference_node);
+            used.insert(body.rotation_node);
+        }
+        for step in &self.analysis.steps {
+            for c in &step.loads.concentrated {
+                used.extend(model.nodes_of(&c.region));
+            }
+        }
+        let loose: Vec<NodeId> = model
+            .nodes
+            .ids
+            .iter()
+            .copied()
+            .filter(|n| !used.contains(n) && !self.groups.contains_key(n))
+            .collect();
+        for n in loose {
+            for dof in 1..=3 {
+                self.helper_fixed.push((n, dof));
+            }
+        }
     }
 
     /// Nodes that become knots: several expansions meet, or all three rotations of a shell
@@ -490,6 +587,13 @@ impl Expander {
                 self.mean(node);
                 if held.contains(&node) {
                     self.tie_edge_midpoints(node);
+                }
+                let g = &self.groups[&node][0];
+                if g.truss {
+                    let axis = cross(g.axis1, g.normal);
+                    if let Some(h) = self.mean_rotation_about(node, normalize(axis)) {
+                        self.helper_fixed.push((h, 1));
+                    }
                 }
             }
         }
@@ -634,6 +738,15 @@ impl Expander {
         if let Some(&h) = self.mean_rotations.get(&(node, axis)) {
             return Some(h);
         }
+        let mut a = [0.0; 3];
+        a[axis] = 1.0;
+        let helper = self.mean_rotation_about(node, a)?;
+        self.mean_rotations.insert((node, axis), helper);
+        Some(helper)
+    }
+
+    /// A mean rotation constraint about the unit vector `a`; returns its helper node.
+    fn mean_rotation_about(&mut self, node: NodeId, a: [f64; 3]) -> Option<NodeId> {
         let model = &self.analysis.model;
         let g = &self.groups[&node][0];
         // Shells: bottom and top (the middle node lies on the axis); beams: the corners.
@@ -649,8 +762,6 @@ impl Expander {
             coords.iter().fold([0.0; 3], |a, &c| add(a, c)),
             1.0 / coords.len() as f64,
         );
-        let mut a = [0.0; 3];
-        a[axis] = 1.0;
         // Linearization of the mean of sin(angle) about the axis at the reference state:
         // Σ_i (a × r_i⊥)/|r_i⊥|² · (u_i - u_c) / N = φ.
         let mut gs = Vec::new();
@@ -672,9 +783,7 @@ impl Expander {
             gs.iter().fold([0.0; 3], |s, &g| add(s, g)),
             1.0 / gs.len() as f64,
         );
-        let x0 = model.nodes.coordinates(node).unwrap();
         let helper = self.helper_node(a);
-        let _ = x0;
         self.helper_fixed.push((helper, 2));
         self.helper_fixed.push((helper, 3));
         let mut terms = Vec::new();
@@ -689,7 +798,6 @@ impl Expander {
         }
         terms.push(term(helper, 1, -1.0));
         self.equations.push(Equation { terms });
-        self.mean_rotations.insert((node, axis), helper);
         Some(helper)
     }
 
