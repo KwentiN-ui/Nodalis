@@ -164,6 +164,123 @@ fn boundaries_and_loads_carry_over_unless_reset() {
     ));
 }
 
+/// The concentrated load of a step at a node and DOF, with sets resolved.
+fn cload_at(analysis: &Analysis, step: usize, node: u32, dof: u8) -> f64 {
+    let model = &analysis.model;
+    analysis.steps[step]
+        .loads
+        .concentrated
+        .iter()
+        .filter(|l| l.dof == dof && model.nodes_of(&l.region).contains(&node))
+        .map(|l| l.value)
+        .sum()
+}
+
+/// What CalculiX 2.21 does with loads redefined without OP=NEW (the numbers were checked
+/// against ccx runs of the same cards on a cantilever, see `carry.rs`): a new step replaces
+/// the carried value at the node and DOF it names, within a step the cards add up.
+#[test]
+fn a_new_cload_replaces_the_carried_one_at_its_nodes_only() {
+    let analysis = read(&cube(
+        "*Step\n*Static\n*Boundary\nFIX, 1, 3\n*Cload\nTOP, 3, -100\n*Cload\n5, 3, -1\n*End step\n\
+*Step\n*Static\n*Cload\n6, 3, -50\n*Cload\n6, 3, -20\n*Cload\n7, 1, 4\n*End step\n",
+    ))
+    .unwrap();
+    // Step 1: the two cards on node 5 add up.
+    assert_eq!(cload_at(&analysis, 0, 5, 3), -101.0);
+    assert_eq!(cload_at(&analysis, 0, 6, 3), -100.0);
+    // Step 2: node 6 replaced by -50 - 20, nodes 5, 7, 8 keep theirs, node 7 adds DOF 1.
+    assert_eq!(cload_at(&analysis, 1, 5, 3), -101.0);
+    assert_eq!(cload_at(&analysis, 1, 6, 3), -70.0);
+    assert_eq!(cload_at(&analysis, 1, 7, 3), -100.0);
+    assert_eq!(cload_at(&analysis, 1, 8, 3), -100.0);
+    assert_eq!(cload_at(&analysis, 1, 7, 1), 4.0);
+}
+
+#[test]
+fn a_new_dload_replaces_the_carried_one_of_its_kind() {
+    let analysis = read(&cube(
+        "*Step\n*Static\n*Boundary\nFIX, 1, 3\n*Dload\nEALL, P2, 1\n\
+*Dload\nEALL, Grav, 9810, 0, 0, -1\n*Dload\nEALL, Grav, 9810, 0, -1, 0\n\
+*Dload\nEALL, Centrif, 100, 0, 0, 0, 0, 0, 1\n*End step\n\
+*Step\n*Static\n*Dload\n1, P2, 3\n*Dload\nEALL, Grav, 19620, 0, 0, -1\n\
+*Dload\nEALL, Centrif, 400, 0, 0, 0, 0, 1, 0\n*End step\n",
+    ))
+    .unwrap();
+    let step = &analysis.steps[1];
+    let pressures: Vec<f64> = (step.loads.distributed.iter())
+        .filter_map(|l| match l.kind {
+            DistributedLoadKind::Pressure { value, .. } => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pressures, [3.0]);
+    let gravity: Vec<(f64, [f64; 3])> = (step.loads.distributed.iter())
+        .filter_map(|l| match l.kind {
+            DistributedLoadKind::Gravity {
+                magnitude,
+                direction,
+            } => Some((magnitude, direction)),
+            _ => None,
+        })
+        .collect();
+    // The gravity in z is replaced, the one in y stays.
+    assert_eq!(gravity.len(), 2, "{gravity:?}");
+    assert!(gravity.contains(&(9810.0, [0.0, -1.0, 0.0])));
+    assert!(gravity.contains(&(19620.0, [0.0, 0.0, -1.0])));
+    // A centrifugal load about another axis is ignored like CalculiX does, with a warning.
+    let centrifugal: Vec<f64> = (step.loads.distributed.iter())
+        .filter_map(|l| match l.kind {
+            DistributedLoadKind::Centrifugal { omega_squared, .. } => Some(omega_squared),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(centrifugal, [100.0]);
+    let warnings = read_inp_str(
+        &cube(
+            "*Step\n*Static\n*Dload\nEALL, Centrif, 100, 0, 0, 0, 0, 0, 1\n*End step\n\
+*Step\n*Static\n*Dload\nEALL, Centrif, 400, 0, 0, 0, 0, 1, 0\n*End step\n",
+        ),
+        None,
+    )
+    .unwrap()
+    .warnings;
+    assert!(
+        warnings.iter().any(|w| w.contains("CENTRIF")),
+        "{warnings:?}"
+    );
+}
+
+/// Loads following a step-time amplitude go on with their value at the end of their step;
+/// total-time amplitudes keep acting (ccx 2.21).
+#[test]
+fn carried_loads_keep_their_final_value_of_a_step_time_amplitude() {
+    let analysis = read(&cube(
+        "*Amplitude, Name=Total, Time=Total time\n0, 0, 4, 4\n\
+*Step\n*Static\n0.5, 0.5\n*Boundary\nFIX, 1, 3\n*Boundary, Amplitude=Ramp\n5, 3, 3, 0.1\n\
+*Cload, Amplitude=Ramp\n6, 3, -100\n*Cload, Amplitude=Total\n7, 3, -100\n\
+*Dload, Amplitude=Ramp\nEALL, P2, 2\n*End step\n\
+*Step\n*Static\n2, 2\n*End step\n",
+    ))
+    .unwrap();
+    let step = &analysis.steps[1];
+    assert_eq!(cload_at(&analysis, 1, 6, 3), -50.0);
+    assert_eq!(cload_at(&analysis, 1, 7, 3), -100.0);
+    let total = step.loads.concentrated.iter().find(|l| l.value == -100.0);
+    assert_eq!(total.unwrap().amplitude.as_deref(), Some("TOTAL"));
+    assert!(matches!(
+        step.loads.distributed[0].kind,
+        DistributedLoadKind::Pressure { value, .. } if value == 1.0
+    ));
+    assert_eq!(step.loads.distributed[0].amplitude, None);
+    let lift = step
+        .boundaries
+        .iter()
+        .find(|b| b.first_dof == 3 && b.value.is_some());
+    assert_eq!(lift.unwrap().value, Some(0.05));
+    assert_eq!(lift.unwrap().amplitude, None);
+}
+
 #[test]
 fn a_perturbation_step_does_not_carry_its_loads_on() {
     let analysis = read(&cube(

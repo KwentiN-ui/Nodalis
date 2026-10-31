@@ -14,6 +14,7 @@
 //! Source: the keyword chapter of the CalculiX CrunchiX user's manual (2.23). No CalculiX
 //! source code was used.
 
+mod carry;
 mod lexer;
 mod reader;
 #[cfg(test)]

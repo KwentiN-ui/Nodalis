@@ -1,5 +1,5 @@
-//! `*STATIC` without geometric nonlinearity: one linear solve per increment, loads and
-//! prescribed displacements scaled by their amplitudes at the increment's time.
+//! `*STATIC` without geometric nonlinearity: one linear solve at the end of the step, loads
+//! and prescribed displacements scaled by their amplitudes at the step's end time.
 
 use plxs_assembly::{ElementTable, Reduction, Spc, assemble_stiffness, load_vector};
 use plxs_core::state::IntegrationPointField;
@@ -26,24 +26,15 @@ impl Procedure for StaticLinear {
                 "StaticLinear needs a *STATIC step".into(),
             ));
         };
+        // A linear step is solved once, at its end: CalculiX ignores the initial increment
+        // and `DIRECT` of a purely linear *STATIC step and reports a single increment of
+        // the size of the period (checked with ccx 2.21; the increments only show with
+        // NLGEOM or other nonlinearities, which are not this procedure's).
         let period = parameters.increments.period();
-        let initial = parameters.increments.initial().min(period);
-        if period <= 0.0 || initial <= 0.0 {
-            return Err(Error::input(
-                "*STATIC",
-                "the step period and the initial increment must be positive",
-            ));
+        if period <= 0.0 {
+            return Err(Error::input("*STATIC", "the step period must be positive"));
         }
-        let count = ((period / initial) - 1e-9).ceil().max(1.0) as u32;
-        if count > step.max_increments {
-            return Err(Error::input(
-                "*STEP",
-                format!(
-                    "{count} increments are needed but INC={} allows fewer",
-                    step.max_increments
-                ),
-            ));
-        }
+        let (initial, count) = (period, 1);
 
         // Stiffness: assembled once per model, reused by every linear step.
         if ctx.stiffness.is_none() {
@@ -179,7 +170,7 @@ impl StaticLinear {
                 step,
                 ctx.step_number,
                 increment,
-                time,
+                total,
                 &u,
                 &reactions,
                 &stresses,

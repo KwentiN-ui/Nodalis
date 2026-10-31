@@ -16,7 +16,7 @@ pub struct Results {
 /// The kind of increment, as the `.frd` header tells it.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum IncrementKind {
-    /// A time increment: `value` is the step time.
+    /// A time increment: `value` is the total time (what CalculiX writes into the `.frd`).
     Time,
     /// A mode: `value` is the eigenfrequency (Hz) or, for `*BUCKLE`, the load factor.
     Frequency,

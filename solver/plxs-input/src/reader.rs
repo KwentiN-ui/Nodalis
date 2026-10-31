@@ -160,6 +160,10 @@ pub(crate) struct Reader {
     /// `*BOUNDARY` before the first step.
     model_boundaries: Vec<Boundary>,
     carried: Carried,
+    /// How many of the current step's concentrated and distributed loads (at the front of
+    /// the lists) were carried over from the previous step; a new definition replaces those
+    /// at the same node and DOF or face (`carry`), the step's own add up.
+    carried_loads: (usize, usize),
     last_comment: Option<String>,
 }
 
@@ -176,6 +180,7 @@ impl Reader {
             flags: StepFlags::default(),
             model_boundaries: Vec::new(),
             carried: Carried::default(),
+            carried_loads: (0, 0),
             last_comment: None,
         }
     }
@@ -1517,6 +1522,7 @@ impl Reader {
         step.loads = self.carried.loads.clone();
         step.fields = self.carried.fields.clone();
         step.outputs = self.carried.outputs.clone();
+        self.carried_loads = (step.loads.concentrated.len(), step.loads.distributed.len());
         self.step = Some(step);
         self.procedure_seen = false;
         self.flags = StepFlags::default();
@@ -1539,10 +1545,20 @@ impl Reader {
             )
             .at(&k.file, k.line));
         }
-        // A perturbation step does not carry its loads on; its boundaries it does.
-        self.carried.boundaries = step.boundaries.clone();
+        // A perturbation step does not carry its loads on; its boundaries it does. Step-time
+        // amplitudes end with the step: their loads go on with their final value.
+        let step_time = crate::carry::step_period(&step.procedure);
+        let mut boundaries = step.boundaries.clone();
+        let mut loads = step.loads.clone();
+        crate::carry::freeze_step_amplitudes(
+            &self.reading.analysis.model,
+            step_time,
+            &mut boundaries,
+            &mut loads,
+        );
+        self.carried.boundaries = boundaries;
         if !step.perturbation {
-            self.carried.loads = step.loads.clone();
+            self.carried.loads = loads;
             self.carried.fields = step.fields.clone();
         }
         self.carried.outputs = step.outputs.clone();
@@ -2002,6 +2018,13 @@ impl Reader {
         let seen = flag(&mut self.flags);
         let reset = op_new && !*seen;
         *seen = true;
+        if reset {
+            match k.name.as_str() {
+                "*CLOAD" => self.carried_loads.0 = 0,
+                "*DLOAD" => self.carried_loads.1 = 0,
+                _ => {}
+            }
+        }
         let step = self.current_step(k)?;
         if reset {
             match k.name.as_str() {
@@ -2052,9 +2075,17 @@ impl Reader {
                 sector,
             });
         }
-        self.step_loads(k, |f| &mut f.cload)?
-            .concentrated
-            .extend(new);
+        self.step_loads(k, |f| &mut f.cload)?;
+        let carried = self.carried_loads.0;
+        let sets = &self.reading.analysis.model.sets;
+        let Some(step) = self.step.as_mut() else {
+            return Err(k.error("outside of a step"));
+        };
+        let own = step.loads.concentrated.split_off(carried);
+        crate::carry::replace_concentrated(&mut step.loads.concentrated, &new, sets);
+        self.carried_loads.0 = step.loads.concentrated.len();
+        step.loads.concentrated.extend(own);
+        step.loads.concentrated.extend(new);
         Ok(())
     }
 
@@ -2119,9 +2150,21 @@ impl Reader {
                 sector,
             });
         }
-        self.step_loads(k, |f| &mut f.dload)?
-            .distributed
-            .extend(new);
+        self.step_loads(k, |f| &mut f.dload)?;
+        let carried = self.carried_loads.1;
+        let sets = &self.reading.analysis.model.sets;
+        let Some(step) = self.step.as_mut() else {
+            return Err(k.error("outside of a step"));
+        };
+        let own = step.loads.distributed.split_off(carried);
+        let warnings =
+            crate::carry::replace_distributed(&mut step.loads.distributed, &mut new, sets);
+        self.carried_loads.1 = step.loads.distributed.len();
+        step.loads.distributed.extend(own);
+        step.loads.distributed.extend(new);
+        for warning in warnings {
+            self.warn(warning);
+        }
         Ok(())
     }
 

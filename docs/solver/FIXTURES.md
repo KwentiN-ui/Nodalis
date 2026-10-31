@@ -56,7 +56,7 @@ Treffer gewinnt:
 | `eigen` | M2 | T7 | *FREQUENCY (STORAGE, PERTURBATION), *BUCKLE, Eigenwerttabellen in der `.dat`, Buckling-Sets in der `.frd` |
 | `nonlinear` | M2 | T8 | NLGEOM, *PLASTIC, *VISCO/*CREEP, automatische Inkrementierung, PEEQ/PE, `.sta` |
 | `heat` | M2 | T9 | *HEAT TRANSFER stationär/transient, *CFLUX/*DFLUX/*FILM/*RADIATE, *COUPLED/*UNCOUPLED, *TEMPERATURE, *INITIAL CONDITIONS, Gap Conductance |
-| `loads` | M2 | T10 | *AMPLITUDE (TOTAL TIME), GRAV, CENTRIF, OP=NEW-Semantik, Step-Folgen (wandernde Lasten) |
+| `loads` | M2 | T10 | *AMPLITUDE (TOTAL TIME, SHIFTX/SHIFTY), P/GRAV/CENTRIF mit Amplituden, Verschiebungen mit Amplitude, quadratische Elemente, Step-Folgen (wandernde Lasten); Übernahme ohne OP=NEW in `plxs-input`-Tests |
 | `contact` | M3 | T11 (N2S), T12 (S2S, Mortar) | *CONTACT PAIR, *SURFACE BEHAVIOR (HARD/LINEAR/TIED), *FRICTION, *CLEARANCE, *MODEL CHANGE, *CHANGE FRICTION, *CONTACT FILE/PRINT, schwache Federn |
 | `dynamic` | M3 | T13 | *DYNAMIC (implizit, Rayleigh), *INITIAL CONDITIONS, TYPE=VELOCITY |
 | `modal` | M3 | T14 | *MODAL DYNAMICS, *STEADY STATE DYNAMICS, *MODAL DAMPING, *COMPLEX FREQUENCY mit Coriolis (`.eig` aus *FREQUENCY, STORAGE=YES) |
@@ -181,8 +181,11 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `heat/waermedehnung` | A | M2 | ccx 2.21 | C3D8, \*EXPANSION, \*CONDUCTIVITY, \*SPECIFIC HEAT, \*INITIAL CONDITIONS, \*COUPLED TEMPERATURE-DISPLACEMENT, \*CFLUX |
 | `heat/waermeleitung` | A | M2 | ccx 2.21 | C3D8, \*EXPANSION, \*CONDUCTIVITY, \*SPECIFIC HEAT, \*HEAT TRANSFER, \*CFLUX, \*DFLUX |
 | `loads/amplitude_hold` | A | M2 | ccx 2.21 | C3D8, \*AMPLITUDE, \*STATIC |
+| `loads/amplitude_loads` | A | M2 | ccx 2.21 | C3D8, \*AMPLITUDE, \*STATIC |
+| `loads/amplitude_total_time` | A | M2 | ccx 2.21 | C3D8, \*AMPLITUDE, \*STATIC |
 | `loads/centrifugal` | A | M2 | ccx 2.21 | C3D8, \*STATIC |
 | `loads/gravity` | A | M2 | ccx 2.21 | C3D8, \*STATIC |
+| `loads/gravity_c3d20r` | A | M2 | ccx 2.21 | C3D20R, \*STATIC |
 | `loads/moving` | A | M2 | ccx 2.21 | C3D8, \*STATIC |
 | `modal/modal` | E | M3 | none | C3D20R, \*AMPLITUDE, \*FREQUENCY, \*MODAL DYNAMICS, \*MODAL DAMPING, \*STEADY STATE DYNAMICS |
 | `modal/rotor-perturbation-false` | A | M3 | ccx 2.21 | C3D8, \*STATIC, \*FREQUENCY, \*COMPLEX FREQUENCY |
