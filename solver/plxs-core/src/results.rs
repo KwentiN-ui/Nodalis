@@ -18,6 +18,9 @@ pub struct Results {
 pub enum IncrementKind {
     /// A time increment: `value` is the total time (what CalculiX writes into the `.frd`).
     Time,
+    /// A time increment of a transient step (transient heat transfer, dynamics): `value` is
+    /// the step time; the `.frd` marks it as analysis type 1.
+    Dynamic,
     /// A mode: `value` is the eigenfrequency (Hz) or, for `*BUCKLE`, the load factor.
     Frequency,
     Buckling,

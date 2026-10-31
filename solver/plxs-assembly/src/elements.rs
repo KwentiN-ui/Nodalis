@@ -70,6 +70,9 @@ pub struct ElementTable {
     /// Native M3D3 membranes (their stiffness is among `linear_blocks`); stresses and
     /// strains are constant per element.
     pub membranes: Vec<Membrane>,
+    /// A material without `*ELASTIC`: allowed for pure heat transfer, where it gets zero
+    /// elastic constants; [`Self::require_elastic`] refuses it for mechanical steps.
+    pub missing_elastic: Option<String>,
 }
 
 /// A constant-strain membrane triangle (`plxs_elements::membrane`).
@@ -104,6 +107,17 @@ pub struct LinearBlock {
 }
 
 impl ElementTable {
+    /// Fails when a material lacks `*ELASTIC`: mechanical steps need it, heat transfer not.
+    pub fn require_elastic(&self) -> Result<()> {
+        match &self.missing_elastic {
+            Some(name) => Err(Error::input(
+                "*MATERIAL",
+                format!("material {name} has no *ELASTIC definition"),
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// Resolves the elements of a model at a uniform reference temperature. Elements the
     /// solver cannot compute yet are an error naming the type.
     pub fn new(model: &Model, temperature: f64) -> Result<Self> {
@@ -117,6 +131,7 @@ impl ElementTable {
         let mut formulations = Vec::new();
         let mut material_index: HashMap<u32, u32> = HashMap::new();
         let mut materials = Vec::new();
+        let mut missing_elastic: Option<String> = None;
         let mut entries = Vec::with_capacity(model.elements.len());
         let mut offsets = Vec::with_capacity(model.elements.len() + 1);
         offsets.push(0u32);
@@ -125,14 +140,17 @@ impl ElementTable {
         let mut entry_of = Vec::with_capacity(model.elements.len());
         let mut discrete = Vec::new();
         for (index, element) in model.elements.iter().enumerate() {
-            if matches!(
-                element.kind.family(),
-                ElementFamily::Spring | ElementFamily::Gap
-            ) {
+            let family = element.kind.family();
+            if matches!(family, ElementFamily::Spring | ElementFamily::Gap) {
+                let nodes = Self::node_indices(model, element)?;
+                for &n in &nodes {
+                    connected[n as usize] = true;
+                    uses_z[n as usize] = true;
+                }
                 discrete.push(crate::discrete::DiscreteElement::new(
                     model,
                     index as u32,
-                    &Self::node_indices(model, element)?,
+                    &nodes,
                 )?);
                 entry_of.push(u32::MAX);
                 continue;
@@ -159,7 +177,6 @@ impl ElementTable {
                 continue;
             }
             entry_of.push(entries.len() as u32);
-            let family = element.kind.family();
             let is_plane = matches!(
                 family,
                 ElementFamily::PlaneStress
@@ -242,7 +259,15 @@ impl ElementTable {
                     let mat = model
                         .material(name)
                         .ok_or_else(|| Error::undefined("*SOLID SECTION", "material", name))?;
-                    let elastic = LinearElastic::of(mat, temperature)?;
+                    let elastic = if mat.elastic.is_none() {
+                        missing_elastic.get_or_insert_with(|| mat.name.clone());
+                        LinearElastic {
+                            young: 0.0,
+                            poisson: 0.0,
+                        }
+                    } else {
+                        LinearElastic::of(mat, temperature)?
+                    };
                     materials.push((elastic, elastic.matrix()));
                     let i = materials.len() as u32 - 1;
                     material_index.insert(section_index, i);
@@ -310,6 +335,7 @@ impl ElementTable {
             layout: IntegrationPointLayout { offsets },
             linear_blocks,
             membranes,
+            missing_elastic,
         })
     }
 

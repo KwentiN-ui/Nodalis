@@ -21,8 +21,13 @@ fn requested(step: &Step) -> Vec<String> {
         .collect()
 }
 
+/// The requested field variables of a step, upper case.
+pub fn requested_variables(step: &Step) -> Vec<String> {
+    requested(step)
+}
+
 /// Node ids in ascending order with their dense indices.
-fn node_order(model: &Model) -> Vec<(u32, u32)> {
+pub fn node_order(model: &Model) -> Vec<(u32, u32)> {
     plxs_output::frd::written_nodes(model)
         .into_iter()
         .map(|i| (model.nodes.ids[i], i as u32))
@@ -276,7 +281,7 @@ pub fn write_increment(
             values: vec![order.iter().map(|&(_, i)| error[i as usize]).collect()],
         });
     }
-    let known = ["U", "S", "E", "RF", "ERR", "NOE"];
+    let known = ["U", "S", "E", "RF", "ERR", "NOE", "NT", "HFL", "RFL"];
     let mut reported = Vec::new();
     for v in &variables {
         if !known.contains(&v.as_str()) && !reported.contains(v) {
@@ -300,7 +305,7 @@ pub fn write_increment(
 
 /// The output variables of a step the solver does not produce yet, for a warning.
 pub fn unsupported_outputs(step: &Step) -> Vec<String> {
-    let known = ["U", "S", "E", "RF", "ERR", "NOE"];
+    let known = ["U", "S", "E", "RF", "ERR", "NOE", "NT", "HFL", "RFL"];
     let mut out = Vec::new();
     for v in requested(step) {
         if !known.contains(&v.as_str()) && !out.contains(&v) {

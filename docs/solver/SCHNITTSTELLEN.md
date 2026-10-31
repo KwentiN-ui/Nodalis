@@ -366,12 +366,100 @@ Assemblierung. Die Messlatte des Konzepts (ccx/PaStiX 8,7 s) stammt von anderer 
 - **Knotenkoordinaten** in der `.frd` laufen durch f32 (ccx schreibt einfache Genauigkeit).
 - **Einzelelement-Orakel** (verzerrte Elemente, Steifigkeit über FORC = K·u, Spannungen bei
   Zufallsverschiebung): C3D4, C3D6, C3D8, C3D8R, C3D8I, C3D20, C3D20R und alle 2D-Typen
-  ≤ 2e-6; C3D10 und C3D15 Spannungen ~6e-6 der Feldgröße (Rauschen der ccx-Extrapolation an
-  den Eckknoten). Deshalb vergleicht `plxs-verify` seit T4 relativ zur Feldnorm
-  (`FIXTURES.md`).
+  ≤ 2e-6, C3D10 1e-6. **C3D10** extrapoliert in ccx mit auf fünf Dezimalen gerundeten
+  Eckgewichten (1.92705/−0.30902, Zeilensumme 0.99999, eine gleichförmige Spannung kommt
+  also 1e-5 zu niedrig heraus); plxs bildet das nach, Mittelknoten = Mittel der Ecken.
+  **C3D15**: die Eckknotenwerte von ccx sind linear in den IP-Werten, aber mit einer Matrix,
+  die bis ~1e-5 von der exakten (und von gerundeten Varianten) abweicht und nicht
+  identifiziert ist; Feldabweichung ≤ 5e-6. Kleine Komponenten verlieren damit relativ zur
+  eigenen Größe 1e-5 und mehr, deshalb vergleicht `plxs-verify` seit T4 relativ zur
+  Feldnorm (`FIXTURES.md`).
 - Fixtures `plane/ebene-{cps,cpe,cax}{3,4,4r,6,8,8r}` (Writer-Test
   `calculix_runs_every_plane_element_type`, verzerrtes Netz, Druck und Einzellast),
   Abnahmetest `solver/plxs-cli/tests/plane_corpus.rs`.
+
+## Stand nach M2 T9 (Wärme, Wärmedehnung, Temperaturfelder)
+
+Gebaut: `*HEAT TRANSFER` stationär und transient (automatische Inkremente, `DELTMX`, `DIRECT`),
+`*CFLUX`, `*DFLUX` (Flächen und `BF`), `*FILM`, `*RADIATE` (ohne Hohlraumstrahlung),
+`*INITIAL CONDITIONS, TYPE=TEMPERATURE`, `*TEMPERATURE` als Werte und mit `FILE=`/`BSTEP=`,
+Wärmedehnung in `*STATIC`, `*COUPLED TEMPERATURE-DISPLACEMENT` und
+`*UNCOUPLED TEMPERATURE-DISPLACEMENT` ohne NLGEOM (mit NLGEOM folgt nach T8), Ausgaben NT,
+HFL und RFL in `.frd` und `.dat`.
+
+Wo es liegt: `plxs-elements/src/heat.rs` (Leitungs- und Kapazitätsmatrix, Gradienten,
+Flächenpunkte), `plxs-assembly/src/heat.rs` (Assemblierung, Lasten mit Tangente,
+Temperatur-SPCs auf DOF 11), `plxs-procedures/src/heat.rs` (Inkrementschleife, Newton,
+gekoppelte Mechanik) und `plxs-procedures/src/thermal.rs` (Anfangs- und Feldtemperaturen,
+frd-Leser für `FILE=`, thermische Dehnungen). `plxs-core` bekam nur
+`IncrementKind::Dynamic` (frd-Analysetyp 1 für transiente Inkremente).
+
+### Was von CalculiX durch Beobachtung bekannt ist (Wärme)
+
+Kein CalculiX-Quelltext wurde gelesen; alles aus Einzelelement-Orakeln mit ccx 2.21:
+
+- **RFL** ist K·T (nur der Leitungsanteil) an allen Knoten, wie FORC = K·u.
+- **Filme** mit konsistenter Matrix h∫NNᵀdA; die Umgebungstemperatur wirkt sofort voll, der
+  Koeffizient wird in stationären Steps mit der Zeit hochgefahren. **Strahlung**:
+  εσ((Ts−T0)⁴−(T−T0)⁴) mit an den Flächenpunkt interpolierter Temperatur.
+- **Kapazität** konsistent, Rückwärts-Euler; sie wirkt nur auf die Raten freier Knoten, ein
+  vorgeschriebener Temperatursprung erzeugt keine Kapazitätsreaktion.
+- **Rampen**: transiente Steps setzen Randbedingungen und Lasten sprunghaft (STEP),
+  stationäre Steps fahren vorgeschriebene Temperaturen vom Startwert und Flüsse/Filme von 0 an.
+- **Inkremente**: Wachstum ×1,5, wenn im Step mindestens 2 Inkremente fertig sind, die letzten
+  beiden je ≤ 4 Iterationen brauchten und das letzte nicht verkleinert wurde. Mit `DELTMX`
+  wird ein Inkrement, dessen größte Änderung an freien Knoten `DELTMX` übersteigt, mit
+  dt·0,85·DELTMX/ΔTmax wiederholt; Nichtkonvergenz viertelt. ccx zählt ein lineares Problem
+  als 2 Iterationen.
+- **Materialtemperatur**: lineare Hexaeder (C3D8, C3D8I, C3D8R) werten Leitfähigkeit,
+  Kapazität und Ausdehnung bei der Element-Mitteltemperatur aus, alle anderen Elemente an den
+  Integrationspunkten interpoliert.
+- **Wärmedehnung** α(T)(T−Z) − α(T0)(T0−Z); C3D20 integriert die thermische Last mit 2×2×2
+  Punkten wie C3D20R; FORC = K·u − f_th.
+- **Flächenintegration** für Flüsse, Filme, Strahlung: lineare Dreiecke und die Vierecke von
+  C3D6 ein Punkt, quadratische Dreiecke drei Punkte, Vierecke von C3D20 3×3, alle anderen
+  Vierecke (C3D8*, C3D20R, C3D15) 2×2.
+- **frd**: der Wert in `100CL` ist die Gesamtzeit (10 signifikante Stellen), Spalte 1 ist
+  100 + laufende Nummer, die Inkrementspalte ebenfalls die laufende Nummer.
+- **`FILE=`** nimmt den Namen wörtlich (mit `.frd`) und liest das letzte Inkrement von `BSTEP`.
+- `.dat`-Überschriften: „temperatures“, „heat generation“, „total heat generation“,
+  „heat flux (elem, integ.pnt.,qx,qy,qz)“.
+
+### Bekannte Abweichungen
+
+- **C3D8R** in Wärme: ccx rechnet einpunktig ohne Hourglass-Kontrolle (singulär, Ergebnisse
+  unbrauchbar); plxs integriert die Leitung mit 2×2×2 und gibt den Fluss am einen Punkt aus.
+- **C3D20 mit temperaturabhängiger Leitfähigkeit**: ccx' effektive Leitfähigkeit an den 27
+  Punkten folgt keiner der getesteten Temperaturinterpolationen (Formfunktionen, Mittelwert,
+  Ecken linear, Punktpermutationen); plxs interpoliert mit den Formfunktionen. Abweichung
+  einige Prozent; C3D20R und alle anderen Typen stimmen auf ~1e-5.
+- **C3D20-Spannungen mit Temperaturfeld** weichen ab, die Verschiebungen stimmen.
+- **Lasten aus dem Vorstep** werden in stationären Steps mit mehreren Inkrementen von 0 an
+  hochgefahren statt vom Vorwert (wie bei den mechanischen Lasten, siehe T10: Vorwert je Last
+  im Zustand halten, gehört zu T8).
+- Materialien ohne `*ELASTIC` sind für reine Wärmeleitung erlaubt (wie ccx); mechanische
+  Steps melden den Fehler erst beim Assemblieren der Steifigkeit.
+- `*TEMPERATURE, FILE=` liest nur ASCII-`.frd`; C3D8I-Inkompatible-Moden fehlen in der
+  thermischen Last.
+- **CPS8, CPE8, CAX8 mit Temperaturfeld**: die Verschiebungen weichen um etwa 1 % ab (die
+  thermische Last nimmt wie bei C3D20 die reduzierte Integration; mit voller Integration ist
+  es nicht besser). Alle anderen 2D-Typen stimmen auf Rundung.
+- **CAX8R-Wärmefluss**: ccx schreibt eine dritte Komponente von etwa 1 % des Radialflusses
+  (Kartesisches im 2°-Segment); plxs schreibt 0. Temperaturen und RFL stimmen.
+- Abnahmetest: `solver/plxs-cli/tests/heat_corpus.rs` (alle `heat/*`, auch `film-2d` mit
+  CPS8).
+
+### 2D-Elemente in der Wärme (mit T4)
+
+Ebene und axialsymmetrische Elemente rechnen auf ihrer Expansion: Leitungs- und
+Kapazitätsmatrix, Körperwärme und Flächenpunkte im 3D-Element, die Temperatur ist auf allen
+Lagen eines 2D-Knotens gleich (`Expansion::scalar_map`), Matrizen und Lasten werden auf die
+2D-Knoten summiert (×180 bei CAX). Kanten `F<n>` sind die Flächen `n+2` der Expansion, mit
+denselben Integrationsregeln wie die Volumenelemente (CPS8 3×3 wie C3D20). ccx schreibt für
+Knoten von 2D-Elementen **RFL = 0** in die `.frd` (geprüft CPS4, CPS8, CPE4, CAX4); in der
+`.dat` steht der echte Wert. plxs macht beides so. Einzelelement-Orakel aller CPS/CPE/CAX-
+Typen (transient, Film, Körperwärme) stimmen auf ~1e-5, außer den 4R-Typen (C3D8R, in ccx
+singulär, s. o.).
 
 ## Stand nach M2 T10 (Lasten und Amplituden)
 
@@ -400,8 +488,11 @@ beobachtet, nicht aus dem Quelltext:
     übernommene bleibt); plxs ebenso, mit Warnung. Innerhalb eines Steps addiert sich alles.
   - Randbedingungen und Lasten mit einer **Step-Zeit-Amplitude werden mit ihrem Wert am
     Step-Ende eingefroren** (Amplitude entfällt); Total-Time-Amplituden wirken weiter.
-    Geprüft für `*BOUNDARY`, `*CLOAD`, `*DLOAD` P/GRAV/CENTRIF; für `*CFLUX`, `*DFLUX`,
-    `*FILM`, `*RADIATE` nicht geprüft und nicht umgesetzt (T9).
+    Geprüft für `*BOUNDARY`, `*CLOAD`, `*DLOAD` P/GRAV/CENTRIF, seit T9 auch für `*CFLUX`
+    und `*FILM`.
+  - Wärmelasten (T9): `*CFLUX` ersetzt den übernommenen Fluss am selben Knoten, `*DFLUX` den
+    mit demselben Label (`S<n>`, `BF`) am selben Element, `*FILM` und `*RADIATE` den auf
+    derselben Fläche; innerhalb eines Steps addiert sich alles.
   - `OP=NEW` auf einer zweiten Karte derselben Art im Step lässt die erste Karte stehen (wie
     ccx).
 - PrePoLix selbst schreibt in jedem Step `OP=NEW` und alle Lasten neu; die Übernahmeregeln
@@ -416,8 +507,8 @@ Offen für andere Threads:
 - **T5/T6**: `*CLOAD` auf DOF 4-6 (Momente) läuft durch `load_vector`, sobald `DofMap` den
   Knoten Rotations-DOFs gibt; bis dahin Warnung. Momente am Referenzpunkt schreibt PrePoLix
   als DOF 1-3 des Rotationsknotens eines `*RIGID BODY` (T6).
-- Der Zähler im `100CL`-Kopf (ccx: 101, 102, ... je Ausgabezeitpunkt des Jobs) ist in plxs
-  fest 101; `plx-io` liest für Zeitinkremente nur den `1PSTEP`-Kopf.
+- Der Zähler im `100CL`-Kopf (ccx: 101, 102, ... je Ausgabezeitpunkt des Jobs) wird seit T9
+  wie bei ccx hochgezählt.
 - `*DESIGN VARIABLES` wird nur gelesen (`Model::design_variables`), gerechnet wird nichts.
 
 Abnahme: `solver/plxs-cli/tests/loads_corpus.rs` (alle `loads/*`-Fixtures, läuft im CI ohne
@@ -528,6 +619,11 @@ ccx), dazu die Übernahmetests in `plxs-input/src/tests.rs`.
   `reduce_rhs`, `particular(spc_werte) = g`, `expand(v, g)`. Die Prozeduren nutzen das statt
   `Reduction` (die für SPC-only bleibt); M2-Threads mit eigenen Prozeduren (Eigenwerte,
   Nichtlinear, Wärme) sollten ebenfalls `step_set` nehmen, sonst fehlen MPCs.
+- Mit 2D-Elementen (T4): Knoten außerhalb aller Elemente, die ein Constraint nennt
+  (`ModelConstraints::referenced_nodes`, z. B. Ref-/Rot-Knoten eines Starrkörpers), werden in
+  `Session::new` aus `DofMap::unused` genommen. Ein CPS/CPE-Knoten nimmt nur in der Ebene am
+  Starrkörper teil (seine Dickenänderung bleibt frei, wie ccx); er steht für zwei Lagen
+  z = ±t/2, damit Drehungen um x/y und die z-Verschiebung des Ref-Knotens bestimmt sind.
 - `plxs-assembly`: `ElementTable::discrete` (SPRING1/2, GAPUNI; `entries` hält nur noch
   Kontinuumselemente, `entry_of` bildet Modell-Index auf Eintrag ab), `active_dofs()`,
   `rotate_concentrated_loads` (CLOAD lokal an transformierten Knoten),

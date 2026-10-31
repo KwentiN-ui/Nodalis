@@ -158,6 +158,12 @@ fn node_map(family: Family) -> Vec<(usize, Layer)> {
 }
 
 impl Expansion {
+    /// For every node of the 3D element the 2D node it belongs to. Scalar fields
+    /// (temperatures) are the same on all layers of a 2D node.
+    pub fn scalar_map(&self) -> Vec<usize> {
+        self.map.iter().map(|&(a, _)| a).collect()
+    }
+
     /// Coordinates of the expanded nodes from those of the 2D nodes.
     pub fn coordinates(&self, coords: &[[f64; 3]]) -> Vec<[f64; 3]> {
         self.map

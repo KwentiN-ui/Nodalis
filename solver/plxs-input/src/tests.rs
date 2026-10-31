@@ -253,6 +253,53 @@ fn a_new_dload_replaces_the_carried_one_of_its_kind() {
 
 /// Loads following a step-time amplitude go on with their value at the end of their step;
 /// total-time amplitudes keep acting (ccx 2.21).
+/// The heat loads follow the same rule as `*CLOAD`/`*DLOAD` (checked against ccx 2.21 on a
+/// single C3D8, see `carry.rs`): a new step replaces the carried flux at the same node, the
+/// same label on the same element and the same film or radiation face.
+#[test]
+fn new_heat_loads_replace_the_carried_ones_of_their_kind() {
+    let analysis = read(&cube(
+        "*Physical constants, Absolute zero=-273.15, Stefan Boltzmann=5.67e-8\n\
+*Step\n*Heat transfer, Steady state\n*Boundary\nFIX, 11, 11, 20\n*Cflux\nTOP, 11, 10\n\
+*Dflux\nEALL, S2, 10\n*Dflux\nEALL, BF, 4\n*Film\nEALL, F2, 40, 7\n*Radiate\nEALL, R2, 400, 0.8\n\
+*End step\n*Step\n*Heat transfer, Steady state\n*Cflux\n7, 11, 5\n*Cflux\n7, 11, 1\n\
+*Dflux\n1, S2, 3\n*Film\n1, F3, 60, 2\n*Radiate\n1, R2, 300, 0.5\n*End step\n",
+    ))
+    .unwrap();
+    let model = &analysis.model;
+    let loads = &analysis.steps[1].loads;
+    let cflux = |node: u32| -> f64 {
+        loads
+            .concentrated_flux
+            .iter()
+            .filter(|l| model.nodes_of(&l.region).contains(&node))
+            .map(|l| l.value)
+            .sum()
+    };
+    // Node 7 replaced by 5 + 1, the other nodes of TOP keep their 10.
+    assert_eq!(cflux(7), 6.0);
+    assert_eq!(cflux(5), 10.0);
+    assert_eq!(cflux(8), 10.0);
+    // S2 replaced, BF kept.
+    let dflux: Vec<_> = loads
+        .distributed_flux
+        .iter()
+        .map(|l| (l.kind, l.value))
+        .collect();
+    assert_eq!(dflux.len(), 2);
+    assert!(dflux.contains(&(plxs_core::step::FluxKind::Body, 4.0)));
+    assert!(dflux.contains(&(plxs_core::step::FluxKind::Face(2), 3.0)));
+    // A film on another face adds, the radiation on the same face is replaced.
+    let films: Vec<_> = loads
+        .films
+        .iter()
+        .map(|f| (f.face, f.coefficient))
+        .collect();
+    assert_eq!(films, vec![(2, 7.0), (3, 2.0)]);
+    let radiations: Vec<_> = loads.radiations.iter().map(|r| r.emissivity).collect();
+    assert_eq!(radiations, vec![0.5]);
+}
+
 #[test]
 fn carried_loads_keep_their_final_value_of_a_step_time_amplitude() {
     let analysis = read(&cube(

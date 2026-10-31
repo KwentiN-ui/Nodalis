@@ -75,6 +75,7 @@ fn import(args: &[String]) -> Result<(), String> {
             meta.area = old.meta.area.clone();
             meta.note = old.meta.note.clone();
             meta.deviations = old.meta.deviations.clone();
+            meta.noise = old.meta.noise.clone();
             if unchanged {
                 meta.reference = old.meta.reference.clone();
             } else {

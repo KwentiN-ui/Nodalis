@@ -119,7 +119,8 @@ pub fn solid(kind: ElementType) -> Option<SolidElement> {
 /// * 3×3×3 hexahedra: the least-squares fit of the element's own shape functions through
 ///   the 27 points (for C3D20 the serendipity functions; the triquadratic Lagrange
 ///   polynomial differs by percent on distorted elements), rounded to five decimals.
-/// * tetrahedra: the linear polynomial through the four points.
+/// * tetrahedra: the linear polynomial through the four points, corner weights rounded to
+///   five decimals.
 /// * wedges: linear in the triangle; along the axis CalculiX's two-point weights (which
 ///   alternate with the node number, see below) or the least-squares line through the
 ///   three planes of the nine-point rule.
@@ -156,13 +157,17 @@ fn extrapolation_matrix(family: Family, rule: &IntegrationRule) -> Vec<f64> {
                 }
             }
             (Family::Tet4 | Family::Tet10, 4) => {
-                let a = 0.585_410_196_624_968_5;
-                let b = 0.138_196_601_125_010_5;
-                let l: [f64; 3] = [0, 1, 2].map(|k| (node[k] - b) / (a - b));
-                row[0] = 1.0 - l[0] - l[1] - l[2];
-                row[1] = l[0];
-                row[2] = l[1];
-                row[3] = l[2];
+                // The linear polynomial through the four points (point g lies nearest to
+                // corner g), with CalculiX's corner weights rounded to five decimals:
+                // 1.92705 and -0.30902 instead of 1.927051 and -0.309017. The rows sum to
+                // 0.99999, so a uniform stress comes out 1e-5 low, as in ccx. Midside nodes
+                // take the mean of their two corners. Fitted to ccx nodal values on
+                // distorted elements (residual at the .frd's print resolution).
+                const TET_CORNER: [f64; 2] = [1.927_05, -0.309_02];
+                let n = [1.0 - node[0] - node[1] - node[2], node[0], node[1], node[2]];
+                for (g, w) in row.iter_mut().enumerate() {
+                    *w = (0..4).map(|c| n[c] * TET_CORNER[usize::from(c != g)]).sum();
+                }
             }
             (Family::Wedge6 | Family::Wedge15, 2) => {
                 // CalculiX's weights: 1.1455 and -0.1455 (points at ±√0.6), and the point
@@ -228,11 +233,11 @@ fn least_squares_extrapolation(family: Family, rule: &IntegrationRule) -> Vec<f6
 }
 
 /// Jacobian, its determinant and the Cartesian shape function derivatives at a point.
-struct Point {
-    det: f64,
+pub(crate) struct Point {
+    pub(crate) det: f64,
     /// `dndx[i] = [dN_i/dx, dN_i/dy, dN_i/dz]`.
-    dndx: Vec<[f64; 3]>,
-    n: Vec<f64>,
+    pub(crate) dndx: Vec<[f64; 3]>,
+    pub(crate) n: Vec<f64>,
 }
 
 fn jacobian(dn: &[[f64; 3]], coords: &[[f64; 3]]) -> [[f64; 3]; 3] {
@@ -356,7 +361,7 @@ impl SolidElement {
         &self.extrapolation
     }
 
-    fn point(&self, p: [f64; 3], coords: &[[f64; 3]]) -> Point {
+    pub(crate) fn point(&self, p: [f64; 3], coords: &[[f64; 3]]) -> Point {
         let count = self.family.node_count();
         let mut n = vec![0.0; count];
         let mut dn = vec![[0.0; 3]; count];
@@ -1122,7 +1127,7 @@ mod tests {
     fn extrapolation_reproduces_linear_fields() {
         // A field linear in the natural coordinates is reproduced at the nodes by every
         // rule with more than one point: exactly, up to CalculiX's four-digit tables for
-        // the 2×2×2 hexahedra, and only in the plane for the two-point wedge rule, whose
+        // the 2×2×2 hexahedra and its five-decimal tetrahedron weights, and only in the plane for the two-point wedge rule, whose
         // axial weights follow CalculiX rather than the rule's points.
         for kind in all_kinds() {
             let e = solid(kind).unwrap();
@@ -1135,9 +1140,10 @@ mod tests {
             let hex8_points = matches!(e.family, Family::Hex8 | Family::Hex20) && ipn == 8;
             let wedge_plane = matches!(e.family, Family::Wedge6 | Family::Wedge15) && ipn == 2;
             let hex27_points = matches!(e.family, Family::Hex8 | Family::Hex20) && ipn == 27;
+            let tet_points = matches!(e.family, Family::Tet4 | Family::Tet10);
             let tolerance = if hex8_points || wedge_plane {
                 2e-3
-            } else if hex27_points {
+            } else if hex27_points || tet_points {
                 1e-4
             } else {
                 1e-10

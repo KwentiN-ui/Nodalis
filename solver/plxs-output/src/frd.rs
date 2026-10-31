@@ -164,33 +164,50 @@ pub fn write_frd_to(
     writeln!(out, " -3")?;
 
     let mut set = 0u32;
-    for increment in &results.increments {
+    for (ordinal, increment) in results.increments.iter().enumerate() {
         for field in &increment.fields {
             set += 1;
-            write_block(out, set, increment, field, field.nodes.len())?;
+            write_block(
+                out,
+                set,
+                ordinal as u32 + 1,
+                increment,
+                field,
+                field.nodes.len(),
+            )?;
         }
     }
     writeln!(out, " 9999")?;
     Ok(())
 }
 
+/// The time or frequency of a `100CL` line: ten significant digits in fixed notation as
+/// CalculiX writes them (`1.000000000`, `10.89062500`), exponential outside that range.
 fn format_time(value: f64) -> String {
-    if (1e-3..10.0).contains(&value.abs()) {
+    let magnitude = value.abs();
+    if (1e-3..10.0).contains(&magnitude) {
         format!("{value:>12.9}")
+    } else if (10.0..1e9).contains(&magnitude) {
+        let digits = magnitude.log10().floor() as usize + 1;
+        format!("{value:>12.prec$}", prec = 10 - digits)
     } else {
         fortran_e12(value)
     }
 }
 
+/// One result block. `ordinal` counts the written increments over all steps (CalculiX'
+/// `100CL` numbering); time increments carry the total time, as in CalculiX.
 fn write_block(
     out: &mut impl Write,
     set: u32,
+    ordinal: u32,
     increment: &ResultsIncrement,
     field: &ResultField,
     node_count: usize,
 ) -> std::io::Result<()> {
     let analysis = match increment.kind {
         IncrementKind::Time => 0,
+        IncrementKind::Dynamic => 1,
         IncrementKind::Frequency => 2,
         IncrementKind::Buckling => 4,
         IncrementKind::ComplexFrequency => 3,
@@ -203,16 +220,22 @@ fn write_block(
     writeln!(
         out,
         "  100CL{:>5}{}{:>12}{:>22}{:>5}{:>12}",
-        101,
-        format_time(increment.value),
+        100 + ordinal,
+        format_time(match increment.kind {
+            IncrementKind::Time | IncrementKind::Dynamic => increment.total_time,
+            _ => increment.value,
+        }),
         node_count,
         analysis,
-        increment.increment,
+        match increment.kind {
+            IncrementKind::Time | IncrementKind::Dynamic => ordinal,
+            _ => increment.increment,
+        },
         1
     )?;
     let components = field.components.len();
     let (declared, trailer) = match field.name.as_str() {
-        "DISP" | "FORC" | "VELO" | "PDISP" => (components + 1, true),
+        "DISP" | "FORC" | "VELO" | "PDISP" | "FLUX" => (components + 1, true),
         _ => (components, false),
     };
     writeln!(out, " -4  {:<8}{:>5}{:>5}", field.name, declared, 1)?;
