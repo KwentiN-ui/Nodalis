@@ -1,6 +1,7 @@
 //! Procedures of the PrePoLix solver: what a step computes. M1: linear static analysis
-//! (`*STATIC` without `NLGEOM`). Nonlinear, eigenvalue, dynamic and thermal procedures
-//! follow in M2/M3 (concept section 4.5).
+//! (`*STATIC` without `NLGEOM`); M2 T8: nonlinear static (`NLGEOM`, plastic and creeping
+//! materials) and `*VISCO`. Eigenvalue, dynamic and thermal procedures follow in M2/M3
+//! (concept section 4.5).
 //!
 //! A procedure works on a [`ProcedureContext`]: the model, its element table, the assembled
 //! stiffness matrix and solver, the state it starts from, and the results it appends to.
@@ -11,6 +12,7 @@
 
 pub mod fields;
 pub mod history;
+pub mod nonlinear;
 pub mod static_linear;
 
 use std::sync::Arc;
@@ -19,7 +21,7 @@ use plxs_assembly::ElementTable;
 use plxs_core::step::Procedure as ProcedureKind;
 use plxs_core::{Error, Model, Progress, Result, Results, State, Step};
 use plxs_linalg::{LdltSolver, Pattern, SparseMatrix};
-use plxs_output::StaRow;
+use plxs_output::{CvgRow, StaRow};
 
 /// How a step ended.
 #[derive(Clone, Debug, PartialEq)]
@@ -44,6 +46,11 @@ pub struct ProcedureContext<'a> {
     pub step_number: u32,
     /// Rows of the `.sta` file written so far.
     pub sta: Vec<StaRow>,
+    /// Rows of the `.cvg` file written so far (one per Newton iteration).
+    pub cvg: Vec<CvgRow>,
+    /// CalculiX's time-average force of the previous steps (the scale of the residual
+    /// check), `None` before the first nonlinear step.
+    pub average_force: Option<f64>,
 }
 
 /// A procedure computes a step on the context.
@@ -64,8 +71,11 @@ pub fn run_step(
 ) -> Result<StepOutcome> {
     match &step.procedure {
         ProcedureKind::NoAnalysis => Ok(StepOutcome::Converged),
-        ProcedureKind::Static(_) if !step.nlgeom => {
+        ProcedureKind::Static(_) if !step.nlgeom && !ctx.table.has_nonlinear_material() => {
             static_linear::StaticLinear.run(ctx, step, progress)
+        }
+        ProcedureKind::Static(_) | ProcedureKind::Visco(_) => {
+            nonlinear::NonlinearStatic.run(ctx, step, progress)
         }
         other => Err(Error::Unsupported(format!(
             "procedure not implemented yet: {}{} (step {})",

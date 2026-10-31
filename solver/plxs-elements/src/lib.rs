@@ -6,8 +6,10 @@
 //! (Zienkiewicz & Taylor; Hughes; Bathe) for the formulations. No CalculiX code was
 //! consulted.
 
+pub mod nonlinear;
 pub mod shape;
 pub mod solid;
 
+pub use nonlinear::PointKinematics;
 pub use shape::{Face, Family, IntegrationRule};
 pub use solid::{Formulation, SolidElement, solid};

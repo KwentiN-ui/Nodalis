@@ -6,7 +6,8 @@ use plx_model::{
     BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition, CrossSection,
     DefinedField, DefinedFieldKind, Displacement, DynamicStep, Elastic, EquationSolver, Hardening,
     Load, Material, ModalDamping, ModalDynamicsStep, NodeTie, Plastic, PlasticPoint,
-    ReferencePoint, RigidBody, Section, SectionKind, SteadyStateDynamicsStep, UnitSystem,
+    ReferencePoint, RigidBody, Section, SectionKind, StaticStep, SteadyStateDynamicsStep,
+    UnitSystem,
 };
 
 use super::*;
@@ -9105,4 +9106,141 @@ fn the_model_check_warns_of_a_shank_bonded_into_its_hole() {
     // Sliding in its hole, the shank stretches.
     model.contact_regions[0].behavior = plx_model::ContactBehavior::Frictionless;
     assert_eq!(problems(&model), []);
+}
+
+/// The bar of `calculix_yields_the_bar_pulled_beyond_its_yield_stress`: symmetry supports
+/// on three faces, a pressure on the tip face, a plastic material.
+fn uniaxial_bar(hardening: Hardening, stress: f64) -> (FeMesh, FeModel) {
+    let load = Load {
+        distribution: None,
+        name: "Pressure-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Surface("TIP".into()),
+        kind: LoadKind::Pressure(-stress),
+        amplitude: None,
+        factor_amplitude: None,
+    };
+    let (mesh, mut model) = cantilever(load);
+    s235(&mut model);
+    model.materials[0].plastic.as_mut().unwrap().hardening = hardening;
+    let (min, _) = mesh.bounds().unwrap();
+    let nodes_at = |axis: usize, value: f64| -> Vec<NodeId> {
+        (1..=99)
+            .filter(|&id| mesh.node(id).is_some_and(|c| c[axis] == value))
+            .collect()
+    };
+    let hold = |axis: usize| {
+        let mut dofs = [None; 6];
+        dofs[axis] = Some(0.0);
+        BoundaryCondition {
+            distribution: None,
+            name: format!("Symmetry-{}", axis + 1),
+            active: true,
+            visible: true,
+            region: Region::Nodes(nodes_at(axis, min[axis])),
+            kind: each_node(dofs),
+            amplitude: None,
+        }
+    };
+    model.steps[0].boundary_conditions = vec![hold(0), hold(1), hold(2)];
+    model.steps[0].field_outputs[1]
+        .variables
+        .push("PEEQ".into());
+    (mesh, model)
+}
+
+/// Kinematic hardening in tension follows the table like isotropic hardening does. (A
+/// second step unloading or reversing the load is not part of the fixture: CalculiX 2.21
+/// failed with too many cutbacks on elastic unloading and gave inconsistent plastic strains
+/// on reversal, depending on the reverse load, so there is nothing reliable to compare
+/// with. The Bauschinger effect is checked by the solver's own unit tests.)
+#[test]
+fn calculix_hardens_kinematically_in_tension() {
+    let (mesh, model) = uniaxial_bar(Hardening::Kinematic, 300.0);
+    let Some(frd) = run_ccx(
+        "plastisch-kinematisch",
+        &write_inp(&mesh, &model, "").unwrap(),
+    ) else {
+        return;
+    };
+    let peeq = node_value(&frd, "PE", "PE", 99);
+    let tension = (300.0 - 235.0) / (400.0 - 235.0) * 0.2;
+    assert!((peeq - tension).abs() < 0.05 * tension, "{peeq}");
+}
+
+/// The plastic bar with history output: equivalent plastic strain, internal energy density
+/// and stresses at the integration points of the tip elements, displacements and reaction
+/// forces of the clamped nodes.
+#[test]
+fn calculix_prints_the_plastic_strain_and_energy_of_the_bar() {
+    let (mesh, mut model) = uniaxial_bar(Hardening::Isotropic, 300.0);
+    model.steps[0].field_outputs[1]
+        .variables
+        .push("ENER".into());
+    let mut elements =
+        HistoryOutput::element("EH_Output-1", Region::ElementSet("TIP_ELEMENTS".into()));
+    elements.variables = vec!["S".into(), "PEEQ".into(), "ENER".into()];
+    model.steps[0].history_outputs.push(elements);
+    let mut nodes = HistoryOutput::node("NH_Output-1", Region::NodeSet("FIX".into()));
+    nodes.totals = Totals::Yes;
+    model.steps[0].history_outputs.push(nodes);
+    let Some(frd) = run_ccx("plastisch-history", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    // CalculiX's internal energy density is half the stress times the total strain.
+    let strain = 300.0 / 210_000.0 + (300.0 - 235.0) / (400.0 - 235.0) * 0.2;
+    let energy = node_value(&frd, "ENER", "ENER", 99);
+    assert!(
+        (energy - 0.5 * 300.0 * strain).abs() < 0.02 * energy,
+        "{energy}"
+    );
+}
+
+/// The bar stretched by 2 % under NLGEOM: the hardening curve is true stress over
+/// logarithmic plastic strain, so the solution follows from the logarithmic strain
+/// `ln(1.02)`. CalculiX reproduces the stress to 0.02 %, the plastic strain only to 0.4 %
+/// (its finite-strain plasticity differs in second order; see docs/solver/SCHNITTSTELLEN.md),
+/// so the fixture leaves the plastic strain out of the field output.
+#[test]
+fn calculix_stretches_the_bar_plastically_with_nlgeom() {
+    let (mesh, mut model) = uniaxial_bar(Hardening::Isotropic, 0.0);
+    model.steps[0].loads.clear();
+    model.steps[0].field_outputs[1].variables.pop();
+    model.steps[0].kind = StepKind::Static(StaticStep {
+        nlgeom: true,
+        incrementation: Incrementation::Automatic,
+        initial_increment: 0.2,
+        ..StaticStep::default()
+    });
+    let (_, max) = mesh.bounds().unwrap();
+    let tip: Vec<NodeId> = (1..=99)
+        .filter(|&id| mesh.node(id).is_some_and(|c| c[0] == max[0]))
+        .collect();
+    let mut dofs = [None; 6];
+    dofs[0] = Some(2.0);
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        distribution: None,
+        name: "Stretch".into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes(tip),
+        kind: each_node(dofs),
+        amplitude: None,
+    });
+    let Some(frd) = run_ccx("plastisch-nlgeom", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let strain = 1.02_f64.ln();
+    let plastic = (strain - 235.0 / 210_000.0) / (1.0 + 825.0 / 210_000.0);
+    let stress = 235.0 + 825.0 * plastic;
+    let s11 = node_value(&frd, "STRESS", "S11", 99);
+    assert!((s11 - stress).abs() < 1e-3 * stress, "{s11} vs {stress}");
+    // Lateral contraction: elastic by Poisson's ratio, plastic at constant volume.
+    let lateral = 10.0 * ((-0.3 * stress / 210_000.0 - 0.5 * plastic).exp() - 1.0);
+    let u2 = node_value(&frd, "DISP", "U2", 99);
+    assert!(
+        (u2 - lateral).abs() < 1e-3 * lateral.abs(),
+        "{u2} vs {lateral}"
+    );
 }

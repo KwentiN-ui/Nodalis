@@ -210,11 +210,11 @@ fn least_squares_extrapolation(family: Family, rule: &IntegrationRule) -> Vec<f6
 }
 
 /// Jacobian, its determinant and the Cartesian shape function derivatives at a point.
-struct Point {
-    det: f64,
+pub(crate) struct Point {
+    pub(crate) det: f64,
     /// `dndx[i] = [dN_i/dx, dN_i/dy, dN_i/dz]`.
-    dndx: Vec<[f64; 3]>,
-    n: Vec<f64>,
+    pub(crate) dndx: Vec<[f64; 3]>,
+    pub(crate) n: Vec<f64>,
 }
 
 fn jacobian(dn: &[[f64; 3]], coords: &[[f64; 3]]) -> [[f64; 3]; 3] {
@@ -271,7 +271,7 @@ impl SolidElement {
         &self.extrapolation
     }
 
-    fn point(&self, p: [f64; 3], coords: &[[f64; 3]]) -> Point {
+    pub(crate) fn point(&self, p: [f64; 3], coords: &[[f64; 3]]) -> Point {
         let count = self.node_count();
         let mut n = vec![0.0; count];
         let mut dn = vec![[0.0; 3]; count];
@@ -304,7 +304,7 @@ impl SolidElement {
 
     /// Fills the strain-displacement matrix `b` (6 × 3n, row-major) from Cartesian
     /// derivatives.
-    fn fill_b(dndx: &[[f64; 3]], b: &mut [f64]) {
+    pub(crate) fn fill_b(dndx: &[[f64; 3]], b: &mut [f64]) {
         let cols = 3 * dndx.len();
         b.iter_mut().for_each(|v| *v = 0.0);
         for (i, g) in dndx.iter().enumerate() {
@@ -326,6 +326,17 @@ impl SolidElement {
     /// the centroid scaled by `det J0 / det J` (Taylor's modification, passes the patch
     /// test).
     fn fill_g(p: [f64; 3], inv0: &[[f64; 3]; 3], det0: f64, det: f64, g: &mut [f64]) {
+        let dndx = Self::mode_gradients(p, inv0, det0, det);
+        Self::fill_b(&dndx, g);
+    }
+
+    /// Cartesian derivatives of the three incompatible modes at a point (see `fill_g`).
+    pub(crate) fn mode_gradients(
+        p: [f64; 3],
+        inv0: &[[f64; 3]; 3],
+        det0: f64,
+        det: f64,
+    ) -> [[f64; 3]; 3] {
         let dmodes = [
             [-2.0 * p[0], 0.0, 0.0],
             [0.0, -2.0 * p[1], 0.0],
@@ -338,7 +349,7 @@ impl SolidElement {
                 dndx[m][c] = scale * (d[0] * inv0[c][0] + d[1] * inv0[c][1] + d[2] * inv0[c][2]);
             }
         }
-        Self::fill_b(&dndx, g);
+        dndx
     }
 
     /// Stiffness matrix (row-major `3n × 3n`) for the material matrix `d` (6 × 6, acting
@@ -378,9 +389,18 @@ impl SolidElement {
         b: &mut [f64],
     ) {
         let ndof = self.dof_count();
+        let (mean, volume) = self.mean_gradients(coords);
+        Self::fill_b(&mean, b);
+        accumulate_btdb(b, d, ndof, volume, out);
+        self.hourglass_stiffness(coords, d, &mean, volume, out);
+    }
+
+    /// The volume average of the Cartesian shape function derivatives (the 2×2×2 average
+    /// of B of Flanagan and Belytschko) and the element volume.
+    pub(crate) fn mean_gradients(&self, coords: &[[f64; 3]]) -> (Vec<[f64; 3]>, f64) {
         let full = IntegrationRule::hex(2);
         let mut volume = 0.0;
-        let mut mean = vec![[0.0; 3]; 8];
+        let mut mean = vec![[0.0; 3]; self.node_count()];
         for (&p, &w) in full.points.iter().zip(&full.weights) {
             let point = self.point(p, coords);
             let f = point.det * w;
@@ -396,10 +416,20 @@ impl SolidElement {
                 *c /= volume;
             }
         }
-        Self::fill_b(&mean, b);
-        accumulate_btdb(b, d, ndof, volume, out);
+        (mean, volume)
+    }
 
-        // Hourglass control. Young's modulus from the isotropic material matrix.
+    /// Adds the hourglass control stiffness of the uniform-strain hexahedron to `out`
+    /// (Young's modulus from the isotropic material matrix).
+    pub(crate) fn hourglass_stiffness(
+        &self,
+        coords: &[[f64; 3]],
+        d: &[[f64; 6]; 6],
+        mean: &[[f64; 3]],
+        volume: f64,
+        out: &mut [f64],
+    ) {
+        let ndof = self.dof_count();
         let mu = d[3][3];
         let lambda = d[0][1];
         let young = mu * (3.0 * lambda + 2.0 * mu) / (lambda + mu);
@@ -436,7 +466,7 @@ impl SolidElement {
 
     /// Condensation data of the incompatible modes: `K_aa^-1 K_au` (9 × 3n) so that the
     /// mode amplitudes are `α = -K_aa^-1 K_au u`.
-    fn incompatible_coupling(
+    pub(crate) fn incompatible_coupling(
         &self,
         coords: &[[f64; 3]],
         d: &[[f64; 6]; 6],

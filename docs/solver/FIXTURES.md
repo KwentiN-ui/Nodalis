@@ -28,7 +28,7 @@ Fixtures werden nie von Hand editiert; wer eine ändern will, ändert den Writer
 
 ## Toleranzklassen (`class` in der `.toml`)
 
-| Klasse | Größen | Toleranz relativ zum größten Betrag der Komponente |
+| Klasse | Größen | Toleranz relativ zum größten Betrag des Feldes (alle Komponenten) |
 |---|---|---|
 | A | linear: U, RF, NT, S/E, Eigenfrequenzen | 1e-5 (statt 1e-6 im Konzept: die ASCII-`.frd` hat sechs signifikante Stellen, mehr kann kein Solver treffen) |
 | B | nichtlinear glatt: NLGEOM, Plastizität, Kriechen, Wärme transient, Strahlung, Gaps | 1e-3 am Step-Ende; Inkrementanzahl nur Größenordnung |
@@ -201,6 +201,9 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `nonlinear/gap_stuetzen` | B | M2 | ccx 2.21 | C3D8, GAPUNI, \*GAP, \*STATIC, NLGEOM |
 | `nonlinear/kriechen` | B | M2 | ccx 2.21 | C3D8, \*CREEP, \*STATIC, \*VISCO |
 | `nonlinear/membran-vorgespannt` | B | M2 | ccx 2.21 | M3D4, \*MEMBRANE SECTION, \*STATIC, NLGEOM |
+| `nonlinear/plastisch-history` | B | M2 | ccx 2.21 | C3D8, \*PLASTIC, \*STATIC, \*EL PRINT, \*NODE PRINT |
+| `nonlinear/plastisch-kinematisch` | B | M2 | ccx 2.21 | C3D8, \*PLASTIC, \*STATIC |
+| `nonlinear/plastisch-nlgeom` | B | M2 | ccx 2.21 | C3D8, \*PLASTIC, \*STATIC, NLGEOM |
 | `nonlinear/plastisch` | B | M2 | ccx 2.21 | C3D8, \*PLASTIC, \*STATIC |
 | `plane/ebener-spannungszustand` | A | M2 | ccx 2.21 | CPS8, \*STATIC |
 | `plane/ebener-verzerrungszustand` | A | M2 | ccx 2.21 | CPE8, \*STATIC |

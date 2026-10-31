@@ -201,6 +201,7 @@ fn write_results(
 ) -> Result<(), Error> {
     plxs_output::write_frd(&output("frd"), session.model(), session.results(), VERSION)?;
     plxs_output::write_sta(&output("sta"), session.sta_rows())?;
+    plxs_output::write_cvg(&output("cvg"), session.cvg_rows())?;
     if !session.results().history.is_empty() {
         plxs_output::write_dat(&output("dat"), session.results())?;
     }
