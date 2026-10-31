@@ -28,9 +28,14 @@ pub trait LinearSolver {
     fn inertia(&self) -> Option<usize>;
 }
 
-/// Sparse LDLᵀ (supernodal, AMD ordering) from `faer`.
+/// Systems of at least this many equations are ordered by nested dissection.
+const DISSECTION_FROM: usize = 3000;
+
+/// Sparse LDLᵀ (supernodal) from `faer`, ordered by nested dissection or AMD.
 pub struct LdltSolver {
     par: faer::Par,
+    /// Positions of the unknowns of the next `analyze`, for the geometric dissection.
+    coordinates: Option<Vec<[f64; 3]>>,
     symbolic: Option<SymbolicCholesky<u32>>,
     values: Vec<f64>,
     factorized: bool,
@@ -46,10 +51,23 @@ impl LdltSolver {
         };
         Self {
             par,
+            coordinates: None,
             symbolic: None,
             values: Vec::new(),
             factorized: false,
         }
+    }
+
+    /// Gives the positions of the unknowns (one per equation of the pattern analyzed next);
+    /// the ordering then bisects geometrically, which fills far less on meshes. Taken by the
+    /// next `analyze`.
+    pub fn set_coordinates(&mut self, coordinates: Option<Vec<[f64; 3]>>) {
+        self.coordinates = coordinates;
+    }
+
+    /// Nonzeros of the factor after `analyze`, a measure of the work of a factorization.
+    pub fn factor_nonzeros(&self) -> Option<usize> {
+        self.symbolic.as_ref().map(|s| s.len_val())
     }
 
     fn symbolic_matrix(pattern: &Pattern) -> SymbolicSparseColMatRef<'_, u32> {
@@ -74,10 +92,29 @@ fn numerical(message: impl Into<String>) -> Error {
 impl LinearSolver for LdltSolver {
     fn analyze(&mut self, pattern: &Pattern) -> Result<()> {
         let matrix = Self::symbolic_matrix(pattern);
+        // Nested dissection for large systems (it fills three-dimensional meshes far less
+        // than AMD, see `ordering`), AMD for small ones, where it is as good and cheaper.
+        let coordinates = self.coordinates.take();
+        // `PLXS_ORDERING=amd|nd` forces one ordering, for measurements.
+        let dissect = match std::env::var("PLXS_ORDERING").as_deref() {
+            Ok("amd") => false,
+            Ok("nd") => true,
+            _ => pattern.dimension() >= DISSECTION_FROM,
+        };
+        let dissection =
+            dissect.then(|| crate::ordering::nested_dissection(pattern, coordinates.as_deref()));
+        let inverse = dissection.as_deref().map(crate::ordering::inverse);
+        let ordering =
+            match (&dissection, &inverse) {
+                (Some(perm), Some(inv)) => SymmetricOrdering::Custom(
+                    faer::perm::PermRef::new_checked(perm, inv, pattern.dimension()),
+                ),
+                _ => SymmetricOrdering::Amd,
+            };
         let symbolic = factorize_symbolic_cholesky(
             matrix,
             Side::Upper,
-            SymmetricOrdering::Amd,
+            ordering,
             CholeskySymbolicParams::default(),
         )
         .map_err(|e| numerical(format!("symbolic factorization failed: {e:?}")))?;

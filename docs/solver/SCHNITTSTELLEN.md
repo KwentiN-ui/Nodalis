@@ -666,3 +666,20 @@ plxs 6,0 s, ccx 2.21 12,4 s (4 Threads), Verschiebungen auf 6,6e-6 gleich.
 - Alle Fixtures `static/*` (Stufe M1 in `FIXTURES.md`) sind grün:
   `cargo run -p plxs-verify --bin plxs-fixtures -- run --solver target/debug/plxs --area static`.
 - Benchmark 176k-DOF-Block (Build-Doku) gegen ccx-PaStiX, 4 Threads, als Zahl im PR.
+
+## Stand nach der Performance-Runde 1 (2026-10-31, Thread "CCX durch eigenen Solver ersetzen")
+
+- `plxs-linalg::ordering`: Nested Dissection als Fill-reducing Ordering für Systeme ab 3000
+  Unbekannten (`LdltSolver`, Konstante `DISSECTION_FROM`), darunter weiter faer's AMD.
+  Bisektion geometrisch am Median der längsten Achse, wenn der Löser die Positionen der
+  Unbekannten kennt (`LdltSolver::set_coordinates`, von `static_linear` und `heat` gesetzt),
+  sonst über Level-Strukturen; Vertex-Separator = kleinere Randseite; Supervariablen (DOFs
+  eines Knotens) bleiben zusammen; Blätter in Cuthill-McKee-Reihenfolge.
+- Messung 39³-Hex-Block, 173k Gleichungen, 4 Threads: AMD 840 Mio. Nonzeros im Faktor, 37 s;
+  Dissection 239 Mio., 10,6 s; CalculiX/PaStiX (Scotch) 213 Mio., 4,5 s Faktorisierung, 10,7 s
+  Gesamtlauf gegen 12,5 s plxs. Die Ergebnisse (Fixture-Korpus) ändern sich nicht.
+- `PLXS_ORDERING=amd|nd` erzwingt eine Ordnung (für Messungen).
+- Offen (T20): faer parallelisiert nur innerhalb eines Supernodes; eine baumparallele
+  supernodale LDLᵀ auf faer's dichten Kernen soll den Rest (Faktor ~2 in der numerischen
+  Faktorisierung) holen. Benchmark-Eingaben: `/mnt/project-files/prepolix/workbench/benchmark/`
+  (Projektordner, nicht im Repo), Zahlen in `KONZEPT_CCX_ABLOESUNG.md` Abschnitt 7.

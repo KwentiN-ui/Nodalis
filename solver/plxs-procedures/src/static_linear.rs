@@ -200,7 +200,16 @@ impl StaticLinear {
                 if factored.as_ref() != Some(&closed) {
                     let started = std::time::Instant::now();
                     let k_red = set.reduce(k_now);
+                    let coordinates = (set.free.iter())
+                        .map(|&dof| ctx.model.nodes.coordinates[dof as usize / 3])
+                        .collect();
+                    ctx.solver.set_coordinates(Some(coordinates));
                     ctx.solver.analyze(k_red.pattern())?;
+                    progress.event(ProgressEvent::Info(format!(
+                        "factor: {} nonzeros, ordered in {:.2} s",
+                        ctx.solver.factor_nonzeros().unwrap_or(0),
+                        started.elapsed().as_secs_f64()
+                    )));
                     ctx.solver.factorize(&k_red).map_err(|e| match e {
                         Error::Numerical { message, .. } => Error::Numerical {
                             step: ctx.step_number,
