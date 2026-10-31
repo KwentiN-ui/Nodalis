@@ -203,6 +203,8 @@ pub fn write_increment(
     let has = |v: &str| variables.iter().any(|x| x == v);
     let order = node_order(ctx.model);
     let mut fields = Vec::new();
+    // Internal unknowns (thickness change of plane stress nodes) are no displacements.
+    let (u, reactions) = &ctx.table.reported(ctx.model, u, reactions);
     if has("U") {
         fields.push(vector_field("DISP", ["D1", "D2", "D3"], &order, u));
     }

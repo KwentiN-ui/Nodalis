@@ -24,6 +24,7 @@ pub fn write_history(
     stresses: &IntegrationPointField,
     strains: &IntegrationPointField,
 ) {
+    let (u, forces) = &table.reported(model, u, forces);
     for request in &step.outputs.node_print {
         let Some(set) = request.set.as_deref() else {
             continue;

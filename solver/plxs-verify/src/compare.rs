@@ -33,6 +33,18 @@ impl Comparison {
 
     /// Compares two value lists of a component; returns false when they differ in length.
     fn values(&mut self, what: &str, reference: &[f64], candidate: &[f64], tolerance: f64) -> bool {
+        self.values_with_floor(what, reference, candidate, tolerance, 1e-12)
+    }
+
+    /// As [`Self::values`], with the scale of the component at least `floor`.
+    fn values_with_floor(
+        &mut self,
+        what: &str,
+        reference: &[f64],
+        candidate: &[f64],
+        tolerance: f64,
+        floor: f64,
+    ) -> bool {
         if reference.len() != candidate.len() {
             self.fail(format!(
                 "{what}: {} values in the reference, {} in the candidate",
@@ -46,7 +58,7 @@ impl Comparison {
             .map(|v| v.abs())
             .filter(|v| v.is_finite())
             .fold(0.0_f64, f64::max)
-            .max(1e-12);
+            .max(floor);
         let mut worst = 0.0_f64;
         let mut worst_index = 0;
         for (i, (&r, &c)) in reference.iter().zip(candidate).enumerate() {
@@ -163,17 +175,34 @@ pub fn compare_frd(reference: &FrdImport, candidate: &FrdImport, class: Class) -
             if rf.name == "ERROR" {
                 continue;
             }
+            // Values are compared relative to the largest value of the whole field (the
+            // "Feldnorm" of the concept, section 6.2), not of their own component: components
+            // of vectors and tensors mix under a change of axes, and small components (shear
+            // stresses beside large normal stresses, out-of-plane values of plane models that
+            // CalculiX writes as round-off noise) would otherwise be held to the noise of
+            // CalculiX's own output (its nodal values of quadratic wedges scatter by about
+            // 1e-6 of the field).
+            let field_scale = rf
+                .components
+                .iter()
+                .filter(|c| !c.derived)
+                .flat_map(|c| c.values.iter())
+                .map(|v| f64::from(v.abs()))
+                .filter(|v| v.is_finite())
+                .fold(0.0_f64, f64::max);
+            let floor = field_scale.max(1e-12);
             for rc in rf.components.iter().filter(|c| !c.derived) {
                 let Some(kc) = kf.component(&rc.name) else {
                     c.fail(format!("{label}: {} has no component {}", rf.name, rc.name));
                     continue;
                 };
                 let to_f64 = |v: &[f32]| -> Vec<f64> { v.iter().map(|&x| f64::from(x)).collect() };
-                c.values(
+                c.values_with_floor(
                     &format!("{label}: {} {}", rf.name, rc.name),
                     &to_f64(&rc.values),
                     &to_f64(&kc.values),
                     tolerance,
+                    floor,
                 );
             }
         }

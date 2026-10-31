@@ -21,6 +21,10 @@ fn frd_element(kind: ElementType) -> Option<(u8, &'static [usize])> {
     const TET10: [usize; 10] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
     const WEDGE6: [usize; 6] = [0, 1, 2, 3, 4, 5];
     const WEDGE15: [usize; 15] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 13, 14, 9, 10, 11];
+    const TRI3: [usize; 3] = [0, 1, 2];
+    const TRI6: [usize; 6] = [0, 1, 2, 3, 4, 5];
+    const QUAD4: [usize; 4] = [0, 1, 2, 3];
+    const QUAD8: [usize; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
     Some(match kind {
         C3D8 | C3D8R | C3D8I => (1, &HEX8),
         C3D6 => (2, &WEDGE6),
@@ -28,6 +32,11 @@ fn frd_element(kind: ElementType) -> Option<(u8, &'static [usize])> {
         C3D20 | C3D20R => (4, &HEX20),
         C3D15 => (5, &WEDGE15),
         C3D10 | C3D10T => (6, &TET10),
+        // Plane and axisymmetric elements are written unexpanded, as CalculiX does.
+        CPS3 | CPE3 | CAX3 => (7, &TRI3),
+        CPS6 | CPE6 | CAX6 => (8, &TRI6),
+        CPS4 | CPS4R | CPE4 | CPE4R | CAX4 | CAX4R => (9, &QUAD4),
+        CPS8 | CPS8R | CPE8 | CPE8R | CAX8 | CAX8R => (10, &QUAD8),
         _ => return None,
     })
 }
@@ -74,7 +83,9 @@ pub fn write_frd_to(
     node_order.sort_by_key(|&i| model.nodes.ids[i]);
     writeln!(out, "    2C{:>30}{:>38}", model.nodes.len(), 1)?;
     for &i in &node_order {
-        let c = model.nodes.coordinates[i];
+        // CalculiX writes the coordinates in single precision; rounding through f32 keeps the
+        // last digit the same (2.02577507 is written as 2.02577).
+        let c = model.nodes.coordinates[i].map(|v| f64::from(v as f32));
         writeln!(
             out,
             " -1{:>10}{}{}{}",
