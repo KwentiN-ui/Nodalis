@@ -40,7 +40,13 @@ fn frd_element(kind: ElementType) -> Option<(u8, &'static [usize])> {
         M3D3 => (7, &TRI3),
         M3D6 => (8, &TRI6),
         M3D4 | M3D4R => (9, &QUAD4),
-        T3D2 => (11, &[0, 1]),
+        T3D2 | B31 => (11, &[0, 1]),
+        // Shells and beams with OUTPUT=2D.
+        S3 => (7, &TRI3),
+        S6 => (8, &TRI6),
+        S4 | S4R => (9, &QUAD4),
+        S8 | S8R => (10, &QUAD8),
+        B32 | B32R => (12, &[0, 2, 1]),
         _ => return None,
     })
 }

@@ -461,7 +461,14 @@ ccx), dazu die Übernahmetests in `plxs-input/src/tests.rs`.
   - T3D2 = B31 mit quadratischem Querschnitt der Fläche (ccx 2.21 liefert identische
     Spannungen inklusive seines Faktors 0,99996), Verdrillung über eine Mittelwert-Rotation
     gehalten. Stäbe und Membranen schreibt ccx 2.21 auf den Originalknoten (be2, tr3, qu4):
-    FORC = Summe, andere Felder = Mittel über die expandierten Knoten, DISP = Originalknoten.
+    FORC = Summe, andere Felder (auch DISP) = Mittel über den Querschnitt.
+  - `OUTPUT=2D` (an irgendeinem `*NODE FILE`/`*EL FILE`) schreibt alle Schalen und Balken
+    ebenso auf den Originalelementen (S3/S6/S4/S8 als tr3/tr6/qu4/qu8, B31 als be2, B32 als
+    be3 mit Knotenfolge Ende, Ende, Mitte). Querschnittsmittel wie ccx 2.21: Schale
+    Simpson (1, 4, 1)/6 über unten, Mitte, oben, ohne Mittelknoten das Mittel beider
+    Flächen; Balken das Mittel der vier Ecken; FORC die Summe aller expandierten Knoten.
+    Wo mehrere Expansionen zusammentreffen, gilt das Mittel der Expansionen, DISP ist dort
+    der eigene Wert des Knotens. Ohne Rotationen (wie ccx).
 - **U1** (`plxs-elements/src/u1.rs`) nativ: Steifigkeit aus der Nachgiebigkeit des
   eingespannten Elements, wie ccx 2.21 sie rechnet (Black-Box, k von 0,003 bis 100 und
   zwei Elementlängen): Längs EA, Torsion G(I11 + I22) (ohne k), Biegung mit
@@ -485,9 +492,9 @@ ccx), dazu die Übernahmetests in `plxs-input/src/tests.rs`.
   weichen von jeder probierten Expansion und vom Q4 ab, nur an belasteten Knoten), die genaue
   BOX-Regel von ccx, die Knotenspannungen von PIPE (ccx extrapoliert anders als die lineare
   Querschnittsanpassung, bis 0,3 %),
-  OUTPUT=2D, `*NODAL THICKNESS`, Druck auf Balken, U1 an Schalen-/Balkenknoten,
+  `*NODAL THICKNESS`, Druck auf Balken, U1 an Schalen-/Balkenknoten,
   zylindrischer `*TRANSFORM` an Schalenknoten, `*TIE`/`*RIGID BODY` (T6) für edge-tie.
-- Abnahmetest `solver/plxs-cli/tests/structural_corpus.rs` (21 von 29 grün, die offenen
+- Abnahmetest `solver/plxs-cli/tests/structural_corpus.rs` (24 von 32 grün, die offenen
   mit Grund gelistet).
 
 ## Was M1 zu liefern hat (Abnahme)

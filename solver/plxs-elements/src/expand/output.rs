@@ -1,15 +1,18 @@
 //! From the results of the expanded model to what CalculiX writes: the `.frd` mesh holds
 //! the nodes of the written elements only, not helper nodes of knots and mean rotations.
 //!
-//! Shells and beams are written expanded (the solids on the expanded nodes). Trusses and
-//! membranes are written as themselves on their original nodes (ccx 2.21 does so): there
-//! the forces are the sums over the expanded nodes, the displacements those of the original
-//! node, and every other field the mean.
+//! Shells and beams are written expanded (the solids on the expanded nodes), or with
+//! `OUTPUT=2D` as themselves. Trusses and membranes are always written as themselves on
+//! their original nodes (ccx 2.21 does so). On such a node the forces are the sums over the
+//! expanded nodes and every other field the through-section mean (shells Simpson over the
+//! thickness, beams the mean of the four corners), averaged over the expansions meeting
+//! there; displacements of a node where several expansions meet are its own.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use plxs_core::mesh::NodeId;
 use plxs_core::results::Results;
+use plxs_core::step::OutputDimension;
 use plxs_core::{Element, ElementFamily, ElementType, Model, Step};
 
 /// How results of the solver model become the written ones.
@@ -21,6 +24,8 @@ pub struct OutputMap {
     native: Vec<(usize, Element)>,
     /// U1 nodes and the helper nodes of their rotations.
     rotations: BTreeMap<NodeId, NodeId>,
+    /// Through-section mean weights per original node and expansion.
+    means: BTreeMap<NodeId, Vec<Vec<(NodeId, f64)>>>,
 }
 
 impl OutputMap {
@@ -32,17 +37,24 @@ impl OutputMap {
         original: &Model,
         _solver: &Model,
         groups: BTreeMap<NodeId, Vec<Vec<NodeId>>>,
-        _steps: &[Step],
+        steps: &[Step],
     ) -> Self {
+        // `OUTPUT=2D` on any field output writes all shells and beams unexpanded.
+        let two_d = steps.iter().any(|s| {
+            s.outputs
+                .node_file
+                .iter()
+                .chain(&s.outputs.el_file)
+                .any(|f| f.output == OutputDimension::TwoD)
+        });
         let native = original
             .elements
             .iter()
             .enumerate()
-            .filter(|(_, e)| {
-                matches!(
-                    e.kind.family(),
-                    ElementFamily::Truss | ElementFamily::Membrane
-                )
+            .filter(|(_, e)| match e.kind.family() {
+                ElementFamily::Truss | ElementFamily::Membrane => true,
+                ElementFamily::Shell | ElementFamily::Beam => two_d,
+                _ => false,
             })
             .map(|(i, e)| (i, e.clone()))
             .collect();
@@ -50,7 +62,14 @@ impl OutputMap {
             groups,
             native,
             rotations: BTreeMap::new(),
+            means: BTreeMap::new(),
         }
+    }
+
+    /// The through-section mean weights of the expansions (see the module docs).
+    pub fn with_means(mut self, means: BTreeMap<NodeId, Vec<Vec<(NodeId, f64)>>>) -> Self {
+        self.means = means;
+        self
     }
 
     /// With U1 beams: CalculiX writes no element for them, their nodes with six
@@ -75,8 +94,7 @@ impl OutputMap {
             native_nodes.sort_unstable();
             native_nodes.dedup();
             for increment in &mut results.increments {
-                // Displacements stay the original node's own (the mean constraint's value).
-                for field in increment.fields.iter_mut().filter(|f| f.name != "DISP") {
+                for field in increment.fields.iter_mut() {
                     let position: HashMap<NodeId, usize> = field
                         .nodes
                         .iter()
@@ -84,27 +102,62 @@ impl OutputMap {
                         .map(|(i, &n)| (n, i))
                         .collect();
                     let sum = field.name == "FORC";
+                    let disp = field.name == "DISP";
                     for &node in &native_nodes {
-                        let (Some(&target), Some(groups)) =
-                            (position.get(&node), self.groups.get(&node))
-                        else {
+                        let Some(groups) = self.groups.get(&node) else {
                             continue;
                         };
-                        let sources: Vec<usize> = groups
-                            .iter()
-                            .flatten()
-                            .filter_map(|n| position.get(n).copied())
-                            .collect();
+                        // Displacements of a knot are the node's own.
+                        if disp && groups.len() > 1 {
+                            continue;
+                        }
+                        // Per value: (field index, weight).
+                        let sources: Vec<(usize, f64)> = if sum {
+                            groups
+                                .iter()
+                                .flatten()
+                                .filter_map(|n| position.get(n).map(|&p| (p, 1.0)))
+                                .collect()
+                        } else {
+                            let Some(means) = self.means.get(&node) else {
+                                continue;
+                            };
+                            let complete: Vec<&Vec<(NodeId, f64)>> = means
+                                .iter()
+                                .filter(|m| m.iter().all(|(n, _)| position.contains_key(n)))
+                                .collect();
+                            let share = 1.0 / complete.len().max(1) as f64;
+                            complete
+                                .into_iter()
+                                .flatten()
+                                .map(|(n, w)| (position[n], w * share))
+                                .collect()
+                        };
                         if sources.is_empty() {
                             continue;
                         }
+                        let target = match position.get(&node) {
+                            Some(&t) => t,
+                            None => {
+                                field.nodes.push(node);
+                                for component in &mut field.values {
+                                    component.push(0.0);
+                                }
+                                field.nodes.len() - 1
+                            }
+                        };
                         for component in &mut field.values {
-                            let total: f64 = sources.iter().map(|&s| component[s]).sum();
-                            component[target] = if sum {
-                                total
-                            } else {
-                                total / sources.len() as f64
-                            };
+                            component[target] =
+                                sources.iter().map(|&(s, w)| w * component[s]).sum();
+                        }
+                    }
+                    // Nodes in ascending order, as written.
+                    if field.nodes.windows(2).any(|w| w[0] > w[1]) {
+                        let mut order: Vec<usize> = (0..field.nodes.len()).collect();
+                        order.sort_by_key(|&i| field.nodes[i]);
+                        field.nodes = order.iter().map(|&i| field.nodes[i]).collect();
+                        for component in &mut field.values {
+                            *component = order.iter().map(|&i| component[i]).collect();
                         }
                     }
                 }

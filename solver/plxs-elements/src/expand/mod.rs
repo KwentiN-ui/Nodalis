@@ -316,6 +316,25 @@ impl Expander {
                 (n, used.collect())
             })
             .collect();
+        // Through-section means of every expansion: shells Simpson over the thickness
+        // (bottom, middle, top; without middle node the mean of both faces), beams the mean
+        // of the four corners (what ccx writes on the original nodes).
+        let means: BTreeMap<NodeId, Vec<Vec<(NodeId, f64)>>> = self
+            .groups
+            .iter()
+            .map(|(&n, g)| {
+                let per = g.iter().map(|g| match g.kind {
+                    Kind::Shell if g.used.get(1) == Some(&true) => vec![
+                        (g.nodes[0], 1.0 / 6.0),
+                        (g.nodes[1], 4.0 / 6.0),
+                        (g.nodes[2], 1.0 / 6.0),
+                    ],
+                    Kind::Shell => vec![(g.nodes[0], 0.5), (g.nodes[2], 0.5)],
+                    Kind::Beam => g.nodes[..4].iter().map(|&k| (k, 0.25)).collect(),
+                });
+                (n, per.collect())
+            })
+            .collect();
         self.analysis.model = model;
         let output = OutputMap::expanded(
             &original,
@@ -323,6 +342,7 @@ impl Expander {
             groups,
             &self.analysis.steps,
         )
+        .with_means(means)
         .with_rotations(self.u1_rotations.clone());
         Ok(Expansion {
             analysis: self.analysis,

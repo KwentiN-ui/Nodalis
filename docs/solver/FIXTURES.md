@@ -264,7 +264,9 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `static/traktion` | A | M1 | ccx 2.21 | C3D8, \*STATIC |
 | `static/wuerfel_c3d10` | A | M1 | ccx 2.21 | C3D10, \*STATIC |
 | `structural/balken_b31` | A | M2 | ccx 2.21 | B31, \*BEAM SECTION, \*STATIC |
+| `structural/balken_b31_2d` | A | M2 | ccx 2.21 | B31, \*BEAM SECTION, \*STATIC |
 | `structural/balken_b32` | A | M2 | ccx 2.21 | B32, \*BEAM SECTION, \*STATIC |
+| `structural/balken_b32_2d` | A | M2 | ccx 2.21 | B32, \*BEAM SECTION, \*STATIC |
 | `structural/balken_b32_circ` | A | M2 | ccx 2.21 | B32, \*BEAM SECTION, \*STATIC |
 | `structural/balken_b32r` | A | M2 | ccx 2.21 | B32R, \*BEAM SECTION, \*STATIC |
 | `structural/balken_b32r_box` | A | M2 | ccx 2.21 | B32R, \*BEAM SECTION, \*STATIC |
@@ -281,6 +283,7 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `structural/membran-s4r` | A | M2 | ccx 2.21 | M3D4R, \*MEMBRANE SECTION, \*STATIC |
 | `structural/rohr_b32r` | A | M2 | ccx 2.21 | B32R, \*BEAM SECTION, \*STATIC |
 | `structural/schale` | A | M2 | ccx 2.21 | S8, \*SHELL SECTION, \*STATIC |
+| `structural/schale_2d` | A | M2 | ccx 2.21 | S8, \*SHELL SECTION, \*STATIC |
 | `structural/schalenkante` | A | M2 | ccx 2.21 | S8, \*SHELL SECTION, \*STATIC |
 | `structural/stab_node_tie` | A | M2 | ccx 2.21 | T3D2, \*STATIC |
 | `structural/stab_t3d2` | A | M2 | ccx 2.21 | T3D2, \*STATIC |
