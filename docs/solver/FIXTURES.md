@@ -265,6 +265,10 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `static/wuerfel_c3d10` | A | M1 | ccx 2.21 | C3D10, \*STATIC |
 | `structural/balken_b31` | A | M2 | ccx 2.21 | B31, \*BEAM SECTION, \*STATIC |
 | `structural/balken_b32` | A | M2 | ccx 2.21 | B32, \*BEAM SECTION, \*STATIC |
+| `structural/balken_b32_circ` | A | M2 | ccx 2.21 | B32, \*BEAM SECTION, \*STATIC |
+| `structural/balken_b32r` | A | M2 | ccx 2.21 | B32R, \*BEAM SECTION, \*STATIC |
+| `structural/balken_b32r_box` | A | M2 | ccx 2.21 | B32R, \*BEAM SECTION, \*STATIC |
+| `structural/balken_b32r_circ` | A | M2 | ccx 2.21 | B32R, \*BEAM SECTION, \*STATIC |
 | `structural/balken_gelenk` | A | M2 | ccx 2.21 | B31, \*BEAM SECTION, \*EQUATION, \*STATIC |
 | `structural/balken_node_tie` | A | M2 | ccx 2.21 | B31, \*BEAM SECTION, \*STATIC |
 | `structural/balken_starr` | A | M2 | ccx 2.21 | B32, \*BEAM SECTION, \*EQUATION, \*STATIC |

@@ -35,11 +35,7 @@ impl BeamSection {
                 ));
             }
         };
-        if !matches!(profile, BeamProfile::Rect { .. } | BeamProfile::Pipe { .. }) {
-            return Err(Error::Unsupported(
-                "beam sections CIRC and BOX are not implemented yet".into(),
-            ));
-        }
+
         Ok(Self {
             profile: profile.clone(),
             a,
@@ -59,9 +55,20 @@ impl BeamSection {
                 scale(e2, -self.offset2 * self.b),
             ),
         );
+        // CIRC: all eight nodes on the ellipse, the corners at 45° (the quadratic solid then
+        // approximates the elliptical section; ccx's expanded coordinates show this).
+        let round = matches!(self.profile, BeamProfile::Circ { .. });
         SLOTS
             .iter()
             .map(|&(s1, s2)| {
+                let (s1, s2) = if round && s1 != 0.0 && s2 != 0.0 {
+                    (
+                        s1 * std::f64::consts::FRAC_1_SQRT_2,
+                        s2 * std::f64::consts::FRAC_1_SQRT_2,
+                    )
+                } else {
+                    (s1, s2)
+                };
                 add(
                     centre,
                     add(scale(e1, 0.5 * s1 * self.a), scale(e2, 0.5 * s2 * self.b)),
@@ -203,12 +210,29 @@ pub fn section_rule(
     kind: ElementType,
     profile: &BeamProfile,
 ) -> Option<(crate::shape::IntegrationRule, Vec<f64>)> {
-    let BeamProfile::Pipe { radius, thickness } = *profile else {
-        return None;
-    };
     if kind != ElementType::C3D20R {
         return None;
     }
+    // ccx 2.21 integrates B32R with a CIRC section the same way (the 2.11 manual still
+    // says reduced Gauss; the oracle matches Gauss-Kronrod exactly).
+    if matches!(profile, BeamProfile::Rect { .. } | BeamProfile::Circ { .. }) {
+        return Some(gauss_kronrod_rule());
+    }
+    if let BeamProfile::Box {
+        a,
+        b,
+        t1,
+        t2,
+        t3,
+        t4,
+    } = *profile
+    {
+        let t = [t1, t2, t3, t4];
+        return Some(box_rule(a, b, t));
+    }
+    let BeamProfile::Pipe { radius, thickness } = *profile else {
+        return None;
+    };
     let inner = radius - thickness;
     let rho = ((radius * radius + inner * inner) / 2.0).sqrt() / radius;
     let ring = std::f64::consts::PI * (radius * radius - inner * inner) / (radius * radius);
@@ -239,4 +263,188 @@ pub fn section_rule(
         crate::shape::IntegrationRule { points, weights },
         extrapolation,
     ))
+}
+
+/// B32R with a rectangular section (manual, "Three-node beam element"): 2 × 5 × 5
+/// Gauss-Kronrod points against hourglassing, two Gauss points along the beam and the
+/// five-point Kronrod extension of the two-point Gauss rule across the section (0,
+/// ±1/√3, ±√(6/7) with weights 28/45, 27/55, 98/495). Nodal values come from the classical
+/// 2 × 2 × 2 Gauss points the scheme contains, with the solid's own extrapolation.
+fn gauss_kronrod_rule() -> (crate::shape::IntegrationRule, Vec<f64>) {
+    let g = 1.0 / 3f64.sqrt();
+    let k = (6.0f64 / 7.0).sqrt();
+    let across = [
+        (-k, 98.0 / 495.0),
+        (-g, 27.0 / 55.0),
+        (0.0, 28.0 / 45.0),
+        (g, 27.0 / 55.0),
+        (k, 98.0 / 495.0),
+    ];
+    let mut points = Vec::new();
+    let mut weights = Vec::new();
+    for xi in [-g, g] {
+        for &(eta, we) in &across {
+            for &(zeta, wz) in &across {
+                points.push([xi, eta, zeta]);
+                weights.push(we * wz);
+            }
+        }
+    }
+    let standard = crate::solid::solid(ElementType::C3D20R).expect("C3D20R");
+    let std_points = &standard.rule.points;
+    let std_ips = std_points.len();
+    let table = standard.extrapolation();
+    let nodes = standard.node_count();
+    let mut extrapolation = vec![0.0; nodes * points.len()];
+    for (q, p) in points.iter().enumerate() {
+        if let Some(sp) = std_points
+            .iter()
+            .position(|s| (0..3).all(|c| (s[c] - p[c]).abs() < 1e-12))
+        {
+            for a in 0..nodes {
+                extrapolation[a * points.len() + q] = table[a * std_ips + sp];
+            }
+        }
+    }
+    (
+        crate::shape::IntegrationRule { points, weights },
+        extrapolation,
+    )
+}
+
+/// BOX (manual, "Box"): Simpson's rule with five points along the centre line of each of
+/// the four walls (16 points, the corners shared), each wall weighted by its thickness;
+/// along the beam the two Gauss points. Walls in the order of the section card: at +1, +2,
+/// -1 and -2. Nodal values as for the pipe: a bilinear fit across, linear along.
+fn box_rule(a: f64, b: f64, t: [f64; 4]) -> (crate::shape::IntegrationRule, Vec<f64>) {
+    // Natural coordinates: ζ along the 1-direction, η against the 2-direction.
+    let z_plus = 1.0 - t[0] / a;
+    let z_minus = -(1.0 - t[2] / a);
+    let e_plus2 = -(1.0 - t[1] / b); // wall at +2
+    let e_minus2 = 1.0 - t[3] / b; // wall at -2
+    // Natural wall thicknesses.
+    let (n1p, n2p, n1m, n2m) = (
+        2.0 * t[0] / a,
+        2.0 * t[1] / b,
+        2.0 * t[2] / a,
+        2.0 * t[3] / b,
+    );
+    // Points (η, ζ) with weights: each wall from corner to corner, Simpson 1-4-2-4-1.
+    let mut section: Vec<([f64; 2], f64)> = Vec::new();
+    let add_point = |p: [f64; 2], w: f64, list: &mut Vec<([f64; 2], f64)>| {
+        if let Some(e) = list
+            .iter_mut()
+            .find(|(q, _)| (q[0] - p[0]).abs() < 1e-12 && (q[1] - p[1]).abs() < 1e-12)
+        {
+            e.1 += w;
+        } else {
+            list.push((p, w));
+        }
+    };
+    let simpson = [1.0, 4.0, 2.0, 4.0, 1.0];
+    let walls: [([f64; 2], [f64; 2], f64); 4] = [
+        ([e_minus2, z_plus], [e_plus2, z_plus], n1p),
+        ([e_plus2, z_plus], [e_plus2, z_minus], n2p),
+        ([e_plus2, z_minus], [e_minus2, z_minus], n1m),
+        ([e_minus2, z_minus], [e_minus2, z_plus], n2m),
+    ];
+    for (from, to, thickness) in walls {
+        let length = ((to[0] - from[0]).powi(2) + (to[1] - from[1]).powi(2)).sqrt();
+        let h = length / 4.0;
+        for (k, s) in simpson.iter().enumerate() {
+            let f = k as f64 / 4.0;
+            let p = [
+                from[0] + f * (to[0] - from[0]),
+                from[1] + f * (to[1] - from[1]),
+            ];
+            add_point(p, thickness * h / 3.0 * s, &mut section);
+        }
+    }
+    let g = 1.0 / 3f64.sqrt();
+    let mut points = Vec::new();
+    let mut weights = Vec::new();
+    for xi in [-g, g] {
+        for (p, w) in &section {
+            points.push([xi, p[0], p[1]]);
+            weights.push(*w);
+        }
+    }
+    let extrapolation = section_fit_extrapolation(&points, g);
+    (
+        crate::shape::IntegrationRule { points, weights },
+        extrapolation,
+    )
+}
+
+/// Nodal values from section points: per axial station the least-squares fit of
+/// `a + b ζ + c η + d ζ η`, linear along the beam between the stations at ±g.
+fn section_fit_extrapolation(points: &[[f64; 3]], g: f64) -> Vec<f64> {
+    let nodes = crate::shape::Family::Hex20.node_coordinates();
+    let station = |xi: f64| -> Vec<usize> {
+        (0..points.len())
+            .filter(|&i| (points[i][0] - xi).abs() < 1e-12)
+            .collect()
+    };
+    let mut out = vec![0.0; nodes.len() * points.len()];
+    for xi in [-g, g] {
+        let ids = station(xi);
+        // Normal equations of the fit, 4 × 4.
+        let basis = |p: &[f64; 3]| [1.0, p[2], p[1], p[1] * p[2]];
+        let mut m = [[0.0; 4]; 4];
+        for &i in &ids {
+            let f = basis(&points[i]);
+            for r in 0..4 {
+                for c in 0..4 {
+                    m[r][c] += f[r] * f[c];
+                }
+            }
+        }
+        let inv = invert4(m);
+        for (a, node) in nodes.iter().enumerate() {
+            let along = 0.5 * (1.0 + node[0] * xi.signum() / g);
+            let fnode = basis(node);
+            for &i in &ids {
+                let fi = basis(&points[i]);
+                let mut w = 0.0;
+                for r in 0..4 {
+                    for c in 0..4 {
+                        w += fnode[r] * inv[r][c] * fi[c];
+                    }
+                }
+                out[a * points.len() + i] = along * w;
+            }
+        }
+    }
+    out
+}
+
+fn invert4(m: [[f64; 4]; 4]) -> [[f64; 4]; 4] {
+    let mut a = m;
+    let mut inv = [[0.0; 4]; 4];
+    for (i, row) in inv.iter_mut().enumerate() {
+        row[i] = 1.0;
+    }
+    for c in 0..4 {
+        let p = (c..4)
+            .max_by(|&x, &y| a[x][c].abs().total_cmp(&a[y][c].abs()))
+            .unwrap_or(c);
+        a.swap(c, p);
+        inv.swap(c, p);
+        let d = a[c][c];
+        for k in 0..4 {
+            a[c][k] /= d;
+            inv[c][k] /= d;
+        }
+        for r in 0..4 {
+            if r != c {
+                let f = a[r][c];
+                let (ac, ic) = (a[c], inv[c]);
+                for k in 0..4 {
+                    a[r][k] -= f * ac[k];
+                    inv[r][k] -= f * ic[k];
+                }
+            }
+        }
+    }
+    inv
 }

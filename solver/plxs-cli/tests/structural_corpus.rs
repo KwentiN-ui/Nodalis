@@ -10,6 +10,10 @@ use plxs_verify::{corpus, fixtures_root, run_corpus};
 
 /// Fixtures not yet computed like ccx, and why.
 const OPEN: &[(&str, &str)] = &[
+    (
+        "balken_b32r_box",
+        "BOX: Simpson rule on the wall centerlines is 2e-4 too stiff, ccx's rule not known",
+    ),
     ("edge-tie-m3d4", "*TIE and *RIGID BODY (T6), membranes"),
     ("edge-tie-s4", "*TIE and *RIGID BODY (T6)"),
     (

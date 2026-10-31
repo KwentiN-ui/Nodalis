@@ -476,9 +476,11 @@ impl Expander {
             let e = &mut self.analysis.model.elements[st.element];
             e.kind = kind;
             e.nodes = nodes;
-            let round = st.beam.as_ref().is_some_and(|b| {
-                !matches!(b.profile, plxs_core::section::BeamProfile::Rect { .. })
-            });
+            // Beams integrated on their own section points keep the beam section.
+            let round = st
+                .beam
+                .as_ref()
+                .is_some_and(|b| !st.truss && section_rule(kind, &b.profile).is_some());
             if let Some(s) = e.section
                 && !round
                 && converted.insert(s)
