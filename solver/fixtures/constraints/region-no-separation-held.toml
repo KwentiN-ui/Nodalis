@@ -5,3 +5,5 @@ stage = "M2"
 features = ["*HEADING", "*NODE", "*ELEMENT", "C3D8", "*NSET", "*ELSET", "*SURFACE", "*MATERIAL", "*ELASTIC", "*SOLID SECTION", "*EQUATION", "*STEP", "*STATIC", "*BOUNDARY", "*CLOAD", "*DLOAD", "*NODE FILE", "*EL FILE", "*END STEP"]
 source = "plx-io writer test"
 reference = "ccx 2.21"
+note = "The upper block is held in z only (its side BC and the no-separation equations act in z): its x and y displacements are undetermined"
+undetermined = ["DISP U1", "DISP U2"]

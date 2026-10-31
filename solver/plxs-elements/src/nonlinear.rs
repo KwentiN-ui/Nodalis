@@ -107,13 +107,13 @@ impl SolidElement {
                 None,
             ),
             Formulation::Reduced => {
-                let (mean, volume) = self.mean_gradients(coords);
+                let (volume, mean) = self.mean_gradients(coords);
                 let mut hourglass = vec![0.0; ndof * ndof];
                 self.hourglass_stiffness(coords, d_elastic, &mean, volume, &mut hourglass);
                 (vec![nodal(&mean, volume)], Some(hourglass))
             }
             Formulation::Incompatible => {
-                let (x, inv0, det0) = self.incompatible_coupling(coords, d_elastic);
+                let (x, inv0) = self.incompatible_coupling(coords, d_elastic);
                 let gradients = self
                     .rule
                     .points
@@ -122,7 +122,7 @@ impl SolidElement {
                     .map(|(&p, &w)| {
                         let point = self.point(p, coords);
                         let mut g = nodal(&point.dndx, point.det * w);
-                        let modes = Self::mode_gradients(p, &inv0, det0, point.det);
+                        let modes = Self::mode_gradients(p, &inv0);
                         // L_eff[(k,c)][j] = L[(k,c)][j] − Σ_m dM_m/dx_c X[3m+k][j].
                         for (m, dm) in modes.iter().enumerate() {
                             for k in 0..3 {

@@ -12,7 +12,11 @@ use crate::ElementTable;
 pub fn build_pattern(table: &ElementTable) -> Arc<Pattern> {
     Arc::new(Pattern::from_blocks(
         table.dofs.len(),
-        table.entries.iter().map(|e| e.dofs.as_slice()),
+        table
+            .entries
+            .iter()
+            .map(|e| e.dofs.as_slice())
+            .chain(table.discrete.iter().map(|e| e.dofs.as_slice())),
     ))
 }
 
@@ -41,6 +45,12 @@ pub fn assemble_stiffness(table: &ElementTable, model: &Model, k: &mut SparseMat
             .collect();
         for (entry, ke) in entries.iter().zip(&matrices) {
             k.add_block(&entry.dofs, ke);
+        }
+    }
+    // Springs; gaps depend on their status and are added by the procedures.
+    for element in &table.discrete {
+        if let Some(ke) = element.spring_stiffness() {
+            k.add_block(&element.dofs, &ke);
         }
     }
 }

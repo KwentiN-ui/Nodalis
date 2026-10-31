@@ -1,6 +1,7 @@
 //! Procedures of the PrePoLix solver: what a step computes. M1: linear static analysis
-//! (`*STATIC` without `NLGEOM`); M2 T8: nonlinear static (`NLGEOM`, plastic and creeping
-//! materials) and `*VISCO`. Eigenvalue, dynamic and thermal procedures follow in M2/M3
+//! (`*STATIC` without `NLGEOM`). M2: heat transfer and temperature-displacement steps
+//! ([`heat`], [`thermal`]), nonlinear static (`NLGEOM`, plastic and creeping materials,
+//! [`nonlinear`]) and `*VISCO`. Eigenvalue and dynamic procedures follow in M2/M3
 //! (concept section 4.5).
 //!
 //! A procedure works on a [`ProcedureContext`]: the model, its element table, the assembled
@@ -11,9 +12,11 @@
 //! No CalculiX code was consulted.
 
 pub mod fields;
+pub mod heat;
 pub mod history;
 pub mod nonlinear;
 pub mod static_linear;
+pub mod thermal;
 
 use std::sync::Arc;
 
@@ -35,6 +38,8 @@ pub enum StepOutcome {
 pub struct ProcedureContext<'a> {
     pub model: &'a Model,
     pub table: &'a ElementTable,
+    /// The model's multi-point constraints and local systems, prepared once.
+    pub constraints: &'a plxs_constraints::ModelConstraints,
     pub pattern: Arc<Pattern>,
     /// The global stiffness matrix of the last assembly, `None` before the first.
     pub stiffness: Option<SparseMatrix>,
@@ -51,6 +56,9 @@ pub struct ProcedureContext<'a> {
     /// CalculiX's time-average force of the previous steps (the scale of the residual
     /// check), `None` before the first nonlinear step.
     pub average_force: Option<f64>,
+    /// The job's directory: files the input refers to (`*TEMPERATURE, FILE=`) are read
+    /// from here.
+    pub work_dir: std::path::PathBuf,
 }
 
 /// A procedure computes a step on the context.
@@ -76,6 +84,13 @@ pub fn run_step(
         }
         ProcedureKind::Static(_) | ProcedureKind::Visco(_) => {
             nonlinear::NonlinearStatic.run(ctx, step, progress)
+        }
+        ProcedureKind::HeatTransfer(_)
+        | ProcedureKind::CoupledTemperatureDisplacement(_)
+        | ProcedureKind::UncoupledTemperatureDisplacement(_)
+            if !step.nlgeom =>
+        {
+            heat::HeatTransferProcedure.run(ctx, step, progress)
         }
         other => Err(Error::Unsupported(format!(
             "procedure not implemented yet: {}{} (step {})",

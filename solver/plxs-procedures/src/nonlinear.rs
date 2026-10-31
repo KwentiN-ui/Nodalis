@@ -9,7 +9,11 @@
 //!
 //! No CalculiX code was consulted.
 
-use plxs_assembly::{NonlinearInput, Reduction, Spc, assemble_nonlinear, load_vector};
+use plxs_assembly::discrete::{DiscreteElement, DiscreteKind};
+use plxs_assembly::{
+    NonlinearInput, Spc, assemble_nonlinear, load_vector, rotate_concentrated_loads,
+};
+use plxs_constraints::ConstraintSet;
 use plxs_core::step::{DefaultAmplitude, Incrementation, Procedure as ProcedureKind};
 use plxs_core::{Error, Progress, ProgressEvent, Result, Step};
 use plxs_linalg::{LinearSolver, SparseMatrix};
@@ -146,6 +150,18 @@ impl Procedure for NonlinearStatic {
         step: &Step,
         progress: &mut dyn Progress,
     ) -> Result<StepOutcome> {
+        ctx.table.require_elastic()?;
+        if ctx
+            .table
+            .formulations
+            .iter()
+            .any(|f| f.expansion().is_some())
+        {
+            return Err(Error::Unsupported(format!(
+                "nonlinear steps on plane or axisymmetric elements are not implemented yet (step {})",
+                step.name
+            )));
+        }
         let (increments, visco, cetol): (Incrementation, bool, f64) = match &step.procedure {
             ProcedureKind::Static(s) => (s.increments, false, 0.0),
             ProcedureKind::Visco(v) => (v.increments, true, v.cetol),
@@ -200,8 +216,10 @@ impl Procedure for NonlinearStatic {
             ctx.state.displacements = plxs_core::state::NodalField::zeros(ctx.table.dofs.nodes, 3);
         }
 
-        // The prescribed DOFs of the step do not change within it; the pattern of the free
-        // system is analysed once.
+        // The prescribed DOFs of the step do not change within it; their values may. SPCs
+        // and multi-point constraints are eliminated together, u = T v + g, like the linear
+        // procedure does.
+        let constraints = ctx.constraints;
         let spc_end = Spc::of_step(
             ctx.model,
             step,
@@ -210,13 +228,30 @@ impl Procedure for NonlinearStatic {
             start_total + period,
             period,
         )?;
-        let reduction = Reduction::new(total_dofs, spc_end);
-        let mut k = SparseMatrix::zeros(ctx.pattern.clone());
+        let active = ctx.table.active_dofs();
+        let set = constraints.step_set(ctx.model.nodes.len(), &active, &spc_end.dofs);
+        for warning in &set.warnings {
+            progress.event(ProgressEvent::Warning(warning.clone()));
+        }
+        for note in &set.notes {
+            progress.event(ProgressEvent::Info(note.clone()));
+        }
         progress.event(ProgressEvent::Info(format!(
             "number of equations: {}",
-            reduction.free.len()
+            set.reduced_len()
         )));
-        let mut analysed = false;
+        let discrete: Vec<&DiscreteElement> = ctx.table.discrete.iter().collect();
+        let mut k = SparseMatrix::zeros(ctx.pattern.clone());
+        // Displacements at the end of the previous step (`*BOUNDARY, FIXED`).
+        let previous = ctx.state.displacements.values.clone();
+        let rotation = |node: u32| constraints.rotation(node).copied();
+        let prescribed =
+            |ctx: &ProcedureContext<'_>, step_time: f64, total: f64| -> Result<Vec<f64>> {
+                let mut spc =
+                    Spc::of_step(ctx.model, step, &ctx.table.dofs, step_time, total, period)?;
+                spc.apply_fixed(ctx.model, step, &ctx.table.dofs, &previous, &rotation);
+                Ok(set.particular(&spc.values))
+            };
 
         let mut average_force = ctx.average_force.unwrap_or(controls.initial_average_force);
         let mut step_force_sum = 0.0;
@@ -252,16 +287,28 @@ impl Procedure for NonlinearStatic {
                     step_time,
                     total_time: total,
                 });
-                let spc = Spc::of_step(ctx.model, step, &ctx.table.dofs, step_time, total, period)?;
-                let (f_ext, warnings) =
+                let (mut f_ext, warnings) =
                     load_vector(ctx.model, ctx.table, step, step_time, total, period)?;
+                rotate_concentrated_loads(
+                    ctx.model,
+                    constraints,
+                    &ctx.table.dofs,
+                    step,
+                    step_time,
+                    total,
+                    period,
+                    &mut f_ext,
+                );
                 if !warned {
                     warned = true;
                     for warning in warnings {
                         progress.event(ProgressEvent::Warning(warning));
                     }
                 }
-                let reduction_now = Reduction::new(total_dofs, spc);
+                // The particular solutions of the constraints at the start and the end of
+                // the increment: their difference is the prescribed motion of the increment.
+                let g_start = prescribed(ctx, time, start_total + time)?;
+                let g_end = prescribed(ctx, step_time, total)?;
                 let input = NonlinearInput {
                     u: &[],
                     nlgeom: step.nlgeom,
@@ -272,14 +319,14 @@ impl Procedure for NonlinearStatic {
                 };
                 let result = Self::attempt(
                     ctx,
-                    step,
                     progress,
                     &controls,
-                    &reduction,
-                    &reduction_now,
+                    &set,
+                    &discrete,
+                    &g_start,
+                    &g_end,
                     &f_ext,
                     &mut k,
-                    &mut analysed,
                     input,
                     increment,
                     attempt,
@@ -423,19 +470,58 @@ impl Procedure for NonlinearStatic {
 }
 
 impl NonlinearStatic {
+    /// Adds the springs and the closed gaps to the tangent and their forces to `f_int`;
+    /// returns which discrete elements act (springs always, gaps when closed at `u`).
+    fn add_discrete(
+        discrete: &[&DiscreteElement],
+        u: &[f64],
+        k: &mut SparseMatrix,
+        f_int: &mut [f64],
+    ) -> Vec<bool> {
+        let mut acting = Vec::with_capacity(discrete.len());
+        let mut clearance = vec![0.0; f_int.len()];
+        for element in discrete {
+            let block = match element.kind {
+                DiscreteKind::Spring { .. } => element.spring_stiffness(),
+                DiscreteKind::Gap { .. } => element
+                    .gap_opening(u)
+                    .is_some_and(|o| o <= 0.0)
+                    .then(|| element.closed_stiffness()),
+            };
+            acting.push(block.is_some());
+            let Some(block) = block else {
+                continue;
+            };
+            let m = element.dofs.len();
+            k.add_block(&element.dofs, &block);
+            let ue: Vec<f64> = element.dofs.iter().map(|&d| u[d as usize]).collect();
+            for (a, &dof) in element.dofs.iter().enumerate() {
+                let f: f64 = (0..m).map(|b| block[a * m + b] * ue[b]).sum();
+                f_int[dof as usize] += f;
+            }
+            // A closed gap's force k (d + n·Δu) has the constant part k d: the load-side
+            // term of the linear procedure, here part of the internal force.
+            element.add_clearance_force(&mut clearance);
+        }
+        for (f, c) in f_int.iter_mut().zip(&clearance) {
+            *f -= c;
+        }
+        acting
+    }
+
     /// One attempt at an increment: Newton iterations from the state at the start of the
     /// increment. `Ok(Err(..))` is a failed attempt the caller cuts back.
     #[allow(clippy::too_many_arguments)]
     fn attempt(
         ctx: &mut ProcedureContext<'_>,
-        step: &Step,
         progress: &mut dyn Progress,
         controls: &Controls,
-        reduction: &Reduction,
-        reduction_now: &Reduction,
+        set: &ConstraintSet,
+        discrete: &[&DiscreteElement],
+        g_start: &[f64],
+        g_end: &[f64],
         f_ext: &[f64],
         k: &mut SparseMatrix,
-        analysed: &mut bool,
         input: NonlinearInput<'_>,
         increment: u32,
         attempt: u32,
@@ -445,39 +531,34 @@ impl NonlinearStatic {
         cetol: Option<f64>,
     ) -> Result<std::result::Result<Converged, Failure>> {
         let total_dofs = ctx.table.dofs.len();
-        // Start from the converged displacements. A change of the prescribed values enters
-        // through the first iteration as a linear prediction, `K Δu_free = r - K Δu_spc`
-        // with the tangent of the converged state, instead of moving the prescribed nodes
-        // alone and leaving the first Newton iteration a heavily distorted trial state.
+        // Start from the converged displacements, u = T v + g_start. A change of the
+        // prescribed values enters through the first iteration as a linear prediction,
+        // `Tᵀ K T Δv = Tᵀ (r - K Δg)` with the tangent of the converged state, instead of
+        // moving the prescribed nodes alone and leaving the first Newton iteration a
+        // heavily distorted trial state.
         let mut u = ctx.state.displacements.values.clone();
         u.resize(total_dofs, 0.0);
-        let mut delta_spc = vec![0.0; total_dofs];
-        let mut pending_spc = false;
-        for (&dof, &value) in reduction_now.spc.dofs.iter().zip(&reduction_now.spc.values) {
-            delta_spc[dof as usize] = value - u[dof as usize];
-            pending_spc |= value != u[dof as usize];
-        }
-        let mut u_start = u.clone();
-        for (&dof, &value) in reduction_now.spc.dofs.iter().zip(&reduction_now.spc.values) {
-            u_start[dof as usize] = value;
-        }
-        if !pending_spc {
-            u.clone_from(&u_start);
-        }
+        let delta_g: Vec<f64> = g_end.iter().zip(g_start).map(|(e, s)| e - s).collect();
+        let mut pending_g = delta_g.iter().any(|d| *d != 0.0);
+        let u_start: Vec<f64> = u.iter().zip(&delta_g).map(|(u, d)| u + d).collect();
         let mut k_delta = vec![0.0; total_dofs];
         let mut residuals: Vec<f64> = Vec::new();
         let mut last_correction = f64::INFINITY;
         let mut previous_correction = f64::INFINITY;
+        let mut acting: Option<Vec<bool>> = None;
         let mut iteration = 0u32;
-        let _ = step;
         loop {
-            let output = assemble_nonlinear(
+            let mut output = assemble_nonlinear(
                 ctx.table,
                 ctx.model,
                 &NonlinearInput { u: &u, ..input },
                 ctx.state,
                 Some(k),
             );
+            let status = Self::add_discrete(discrete, &u, k, &mut output.f_int);
+            let gaps_changed = acting.as_ref().is_some_and(|a| *a != status);
+            let closed_gaps = status.iter().filter(|&&x| x).count() as u32;
+            acting = Some(status);
             let flux = if output.flux_count > 0 {
                 output.flux_sum / output.flux_count as f64
             } else {
@@ -490,22 +571,18 @@ impl NonlinearStatic {
             } else {
                 flux.max(average_force)
             };
-            if pending_spc {
-                k.multiply(&delta_spc, &mut k_delta);
+            if pending_g {
+                k.multiply(&delta_g, &mut k_delta);
             }
-            let residual: Vec<f64> = reduction
-                .free
-                .iter()
-                .map(|&d| {
-                    let d = d as usize;
-                    f_ext[d] - output.f_int[d] - if pending_spc { k_delta[d] } else { 0.0 }
-                })
+            let residual_full: Vec<f64> = (0..total_dofs)
+                .map(|d| f_ext[d] - output.f_int[d] - if pending_g { k_delta[d] } else { 0.0 })
                 .collect();
+            let residual = set.reduce_rhs(&residual_full);
             let r_max = residual.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-            let du_max = reduction
-                .free
+            let du_max = u
                 .iter()
-                .map(|&d| (u[d as usize] - u_start[d as usize]).abs())
+                .zip(&u_start)
+                .map(|(a, b)| (a - b).abs())
                 .fold(0.0_f64, f64::max);
             residuals.push(r_max);
 
@@ -515,7 +592,7 @@ impl NonlinearStatic {
                     increment,
                     attempt,
                     iteration,
-                    contact_elements: 0,
+                    contact_elements: closed_gaps,
                     residual: r_max,
                     correction: last_correction,
                     step_time,
@@ -545,8 +622,9 @@ impl NonlinearStatic {
                                 <= controls.correction * du_max)
                 };
                 // CalculiX always iterates at least twice; the second iteration confirms
-                // the first one's residual and makes class B comparisons less noisy.
-                let converged = residual_ok && correction_ok && iteration >= 2;
+                // the first one's residual and makes class B comparisons less noisy. A gap
+                // that opened or closed in this iteration needs another one as well.
+                let converged = residual_ok && correction_ok && iteration >= 2 && !gaps_changed;
                 progress.event(ProgressEvent::Iteration {
                     step: ctx.step_number,
                     increment,
@@ -569,9 +647,11 @@ impl NonlinearStatic {
                         average_force: flux,
                     }));
                 }
-                // Divergence and slow-convergence checks.
+                // Divergence and slow-convergence checks (not across a change of the gap
+                // status, which restarts the convergence).
                 let n = residuals.len();
                 if !direct
+                    && !gaps_changed
                     && iteration >= controls.divergence_check_after
                     && n >= 3
                     && residuals[n - 1] > residuals[n - 2]
@@ -581,7 +661,7 @@ impl NonlinearStatic {
                         "the residual force increased in two consecutive iterations".into(),
                     )));
                 }
-                if iteration >= controls.estimate_after && n >= 2 && !direct {
+                if iteration >= controls.estimate_after && n >= 2 && !direct && !gaps_changed {
                     let (r1, r0) = (residuals[n - 1], residuals[n - 2]);
                     let target = controls.residual * scale;
                     if r1 > 0.0 && r0 > 0.0 && r1 < r0 && target > 0.0 {
@@ -602,14 +682,11 @@ impl NonlinearStatic {
                 }
             }
 
-            // Solve K Δu = r on the free DOFs and correct.
+            // Solve Tᵀ K T Δv = Tᵀ r and correct u = T v + g.
             iteration += 1;
-            let k_free = k.restrict(&reduction.free);
-            if !*analysed {
-                ctx.solver.analyze(k_free.pattern())?;
-                *analysed = true;
-            }
-            ctx.solver.factorize(&k_free).map_err(|e| match e {
+            let k_reduced = set.reduce(k);
+            ctx.solver.analyze(k_reduced.pattern())?;
+            ctx.solver.factorize(&k_reduced).map_err(|e| match e {
                 Error::Numerical { message, .. } => Error::Numerical {
                     step: ctx.step_number,
                     increment,
@@ -619,8 +696,9 @@ impl NonlinearStatic {
                 },
                 other => other,
             })?;
-            let mut du = residual;
-            ctx.solver.solve(&mut du)?;
+            let mut dv = residual;
+            ctx.solver.solve(&mut dv)?;
+            let du = set.expand(&dv, &vec![0.0; total_dofs]);
             previous_correction = last_correction;
             last_correction = du.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
             if !last_correction.is_finite() {
@@ -628,14 +706,14 @@ impl NonlinearStatic {
                     "the solution correction is not finite".into(),
                 )));
             }
-            for (&dof, value) in reduction.free.iter().zip(&du) {
-                u[dof as usize] += value;
+            for (ui, d) in u.iter_mut().zip(&du) {
+                *ui += d;
             }
-            if pending_spc {
-                for (&dof, &value) in reduction_now.spc.dofs.iter().zip(&reduction_now.spc.values) {
-                    u[dof as usize] = value;
+            if pending_g {
+                for (ui, d) in u.iter_mut().zip(&delta_g) {
+                    *ui += d;
                 }
-                pending_spc = false;
+                pending_g = false;
             }
         }
     }
