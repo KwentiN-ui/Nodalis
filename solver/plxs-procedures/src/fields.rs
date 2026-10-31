@@ -196,7 +196,8 @@ pub fn write_increment(
     ctx: &mut ProcedureContext<'_>,
     step: &Step,
     increment: u32,
-    time: f64,
+    // The step time; the `.frd` is labelled with the total time, like CalculiX does.
+    _time: f64,
     total: f64,
     u: &[f64],
     reactions: &[f64],
@@ -253,7 +254,9 @@ pub fn write_increment(
         step: ctx.step_number,
         increment,
         kind: IncrementKind::Time,
-        value: time,
+        // CalculiX labels a time increment with the total time (the step time only in the
+        // first step, where both agree).
+        value: total,
         total_time: total,
         nodal_diameter: None,
         fields,

@@ -389,12 +389,68 @@ Kein CalculiX-Quelltext wurde gelesen; alles aus Einzelelement-Orakeln mit ccx 2
   Ecken linear, Punktpermutationen); plxs interpoliert mit den Formfunktionen. Abweichung
   einige Prozent; C3D20R und alle anderen Typen stimmen auf ~1e-5.
 - **C3D20-Spannungen mit Temperaturfeld** weichen ab, die Verschiebungen stimmen.
-- **Lasten aus dem Vorstep** werden in Steps mit mehreren Inkrementen von 0 an hochgefahren
-  statt gehalten (wie in M1; gehört zu T10).
+- **Lasten aus dem Vorstep** werden in stationären Steps mit mehreren Inkrementen von 0 an
+  hochgefahren statt vom Vorwert (wie bei den mechanischen Lasten, siehe T10: Vorwert je Last
+  im Zustand halten, gehört zu T8).
+- Materialien ohne `*ELASTIC` sind für reine Wärmeleitung erlaubt (wie ccx); mechanische
+  Steps melden den Fehler erst beim Assemblieren der Steifigkeit.
 - `*TEMPERATURE, FILE=` liest nur ASCII-`.frd`; C3D8I-Inkompatible-Moden fehlen in der
   thermischen Last.
 - Abnahmetest: `solver/plxs-cli/tests/heat_corpus.rs`; `heat/film-2d` braucht CPS8 (T4)
   und ist bis dahin ausgenommen.
+
+## Stand nach M2 T10 (Lasten und Amplituden)
+
+Lastvektor (`plxs-assembly::load_vector`: CLOAD, DLOAD P/GRAV/CENTRIF, Amplituden mit
+`TIME=TOTAL TIME`, `SHIFTX`, `SHIFTY`) stammt aus M1; T10 hat die Regeln dahinter gegen ccx 2.21
+geprüft und die Lücken geschlossen. Alles unten wurde durch ccx-Läufe kleiner Mehr-Step-Modelle
+beobachtet, nicht aus dem Quelltext:
+
+- **Lineare `*STATIC`-Steps werden einmal am Step-Ende gelöst**, auch mit kleinerem
+  Anfangsinkrement oder `DIRECT`: ein Inkrement der Größe der Periode in `.frd`, `.dat` und
+  `.sta`. Inkremente gibt es erst mit NLGEOM bzw. anderen Nichtlinearitäten (T8).
+- **Zeitwerte**: Die `.frd` (`100CL`) und die `.dat`-Blocküberschriften (`... and time`) tragen
+  die **Gesamtzeit**, nicht die Step-Zeit (`ResultsIncrement::value` = Gesamtzeit bei
+  `IncrementKind::Time`).
+- **Amplituden**: Wert bei Zeit t = Tabelle(t − SHIFTX) + SHIFTY, linear zwischen den Punkten,
+  vor dem ersten und nach dem letzten Punkt konstant; t ist die Step-Zeit oder mit
+  `TIME=TOTAL TIME` die Gesamtzeit.
+- **Übernahme in den nächsten Step** (`plxs-input/src/carry.rs`, aufgelöst im Leser, die IR
+  bleibt unverändert):
+  - Ein `*CLOAD` ohne `OP=NEW` ersetzt die übernommene Last an demselben Knoten und DOF;
+    andere Knoten eines übernommenen Sets behalten ihre (das Set wird dafür in Einzelknoten
+    aufgeteilt). Innerhalb eines Steps addieren sich Karten auf denselben Knoten/DOF.
+  - `*DLOAD`: `P<n>` ersetzt den Druck derselben Elementfläche, `GRAV` die Schwerkraft
+    derselben Richtung (eine andere Richtung kommt hinzu), `CENTRIF` die Zentrifugallast mit
+    demselben Punkt und derselben Achse. Eine `CENTRIF` mit anderer Achse ignoriert ccx (die
+    übernommene bleibt); plxs ebenso, mit Warnung. Innerhalb eines Steps addiert sich alles.
+  - Randbedingungen und Lasten mit einer **Step-Zeit-Amplitude werden mit ihrem Wert am
+    Step-Ende eingefroren** (Amplitude entfällt); Total-Time-Amplituden wirken weiter.
+    Geprüft für `*BOUNDARY`, `*CLOAD`, `*DLOAD` P/GRAV/CENTRIF, seit T9 auch für `*CFLUX`
+    und `*FILM`.
+  - Wärmelasten (T9): `*CFLUX` ersetzt den übernommenen Fluss am selben Knoten, `*DFLUX` den
+    mit demselben Label (`S<n>`, `BF`) am selben Element, `*FILM` und `*RADIATE` den auf
+    derselben Fläche; innerhalb eines Steps addiert sich alles.
+  - `OP=NEW` auf einer zweiten Karte derselben Art im Step lässt die erste Karte stehen (wie
+    ccx).
+- PrePoLix selbst schreibt in jedem Step `OP=NEW` und alle Lasten neu; die Übernahmeregeln
+  greifen nur für Eingaben von Hand. Wandernde Lasten sind gewöhnliche Step-Folgen.
+
+Offen für andere Threads:
+
+- **T8 (nichtlinear)**: `DefaultAmplitude::Ramp` rampt in `amplitude_factor` von 0 auf den
+  Wert. ccx rampt in einem Folgestep von dem Wert am Ende des vorigen Steps auf den neuen;
+  übernommene, unveränderte Lasten bleiben also konstant. Für lineare Steps egal, für NLGEOM
+  nötig (Vorwert je Last im Zustand halten).
+- **T5/T6**: `*CLOAD` auf DOF 4-6 (Momente) läuft durch `load_vector`, sobald `DofMap` den
+  Knoten Rotations-DOFs gibt; bis dahin Warnung. Momente am Referenzpunkt schreibt PrePoLix
+  als DOF 1-3 des Rotationsknotens eines `*RIGID BODY` (T6).
+- Der Zähler im `100CL`-Kopf (ccx: 101, 102, ... je Ausgabezeitpunkt des Jobs) wird seit T9
+  wie bei ccx hochgezählt.
+- `*DESIGN VARIABLES` wird nur gelesen (`Model::design_variables`), gerechnet wird nichts.
+
+Abnahme: `solver/plxs-cli/tests/loads_corpus.rs` (alle `loads/*`-Fixtures, läuft im CI ohne
+ccx), dazu die Übernahmetests in `plxs-input/src/tests.rs`.
 
 ## Was M1 zu liefern hat (Abnahme)
 

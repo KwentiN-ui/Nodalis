@@ -17,6 +17,7 @@ pub fn write_history(
     step: &Step,
     step_number: u32,
     increment: u32,
+    // The total time, which CalculiX prints in the block headers.
     time: f64,
     u: &[f64],
     forces: &[f64],

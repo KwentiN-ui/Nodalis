@@ -490,6 +490,7 @@ impl<'h> HeatRun<'h> {
         let total_dofs = table.dofs.len();
         if ctx.stiffness.is_none() {
             let mut k = SparseMatrix::zeros(ctx.pattern.clone());
+            table.require_elastic()?;
             assemble_stiffness(table, model, &mut k);
             ctx.stiffness = Some(k);
         }

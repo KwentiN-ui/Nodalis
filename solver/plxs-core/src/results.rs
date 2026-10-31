@@ -16,7 +16,7 @@ pub struct Results {
 /// The kind of increment, as the `.frd` header tells it.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum IncrementKind {
-    /// A time increment: `value` is the step time.
+    /// A time increment: `value` is the total time (what CalculiX writes into the `.frd`).
     Time,
     /// A time increment of a transient step (transient heat transfer, dynamics): `value` is
     /// the step time; the `.frd` marks it as analysis type 1.

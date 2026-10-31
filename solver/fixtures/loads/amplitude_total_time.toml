@@ -1,0 +1,7 @@
+name = "amplitude_total_time"
+area = "loads"
+class = "A"
+stage = "M2"
+features = ["*HEADING", "*NODE", "*ELEMENT", "C3D8", "*NSET", "*ELSET", "*SURFACE", "*MATERIAL", "*DENSITY", "*ELASTIC", "*SOLID SECTION", "*AMPLITUDE", "*STEP", "*STATIC", "*BOUNDARY", "*CLOAD", "*DLOAD", "*NODE FILE", "*EL FILE", "*END STEP"]
+source = "plx-io writer test"
+reference = "ccx 2.21"

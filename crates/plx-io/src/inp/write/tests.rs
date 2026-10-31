@@ -5507,6 +5507,163 @@ fn calculix_holds_an_amplitude_after_its_last_point() {
     );
 }
 
+/// The tip deflection `U3` at node 99 at the end of every step.
+fn tip_deflection_per_step(frd: &FrdImport) -> Vec<f64> {
+    let index = frd.mesh.node_index(99).unwrap();
+    let mut out: Vec<(u32, f64)> = Vec::new();
+    for increment in &frd.increments {
+        let Some(u3) = increment.field("DISP").and_then(|f| f.component("U3")) else {
+            continue;
+        };
+        let value = f64::from(u3.values[index]);
+        match out.last_mut() {
+            Some((step, last)) if *step == increment.step => *last = value,
+            _ => out.push((increment.step, value)),
+        }
+    }
+    out.into_iter().map(|(_, v)| v).collect()
+}
+
+/// A `TIME=TOTAL TIME` amplitude with both shifts over three linear steps of different
+/// periods: each step is solved once at its end, with the amplitude read at the total time.
+#[test]
+fn calculix_reads_a_total_time_amplitude_with_shifts_across_steps() {
+    let (mesh, mut model) = cantilever(tip_force());
+    let mut total = amplitude("Total", vec![[0.0, 0.0], [1.0, 0.5], [3.0, 1.0]]);
+    total.time_span = plx_model::AmplitudeTime::Total;
+    total.shift_time = 0.25;
+    total.shift_amplitude = 0.1;
+    model.amplitudes.push(total.clone());
+    model.steps[0].loads[0].amplitude = Some("Total".into());
+    let periods = [0.5, 1.5, 2.0];
+    let first = model.steps[0].clone();
+    model.steps.clear();
+    for (n, period) in (1..).zip(periods) {
+        let mut step = first.clone();
+        step.name = format!("Step-{n}");
+        let StepKind::Static(settings) = &mut step.kind else {
+            unreachable!()
+        };
+        // The initial increment does not matter: a linear step is solved once.
+        settings.incrementation = Incrementation::Automatic;
+        settings.time_period = period;
+        settings.initial_increment = period / 2.0;
+        model.steps.push(step);
+    }
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Amplitude, Name=Total, Time=Total time, Shiftx=0.25, Shifty=0.1\n"),
+        "{text}"
+    );
+    let Some(frd) = run_ccx("amplitude_total_time", &text) else {
+        return;
+    };
+    let u3 = tip_deflection_per_step(&frd);
+    assert_eq!(u3.len(), 3, "{u3:?}");
+    // The deflections are in the ratio of the amplitude at the total times 0.5, 2 and 4.
+    let factors = [0.5, 2.0, 4.0].map(|t| total.value_at(t));
+    for (value, factor) in u3.iter().zip(factors) {
+        let expected = u3[0] * factor / factors[0];
+        assert!(
+            (value - expected).abs() < 1e-5 * expected.abs(),
+            "{u3:?} instead of the ratios of {factors:?}"
+        );
+    }
+}
+
+/// Pressure, gravity, a centrifugal load and a prescribed displacement, each scaled by a
+/// step-time amplitude, in a step that ends before the amplitudes do; then a second step
+/// that writes them again and reads them at its own end.
+#[test]
+fn calculix_scales_distributed_loads_and_displacements_by_amplitudes() {
+    let pressure = Load {
+        distribution: None,
+        name: "Pressure-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Faces(vec![(10, 4), (20, 4), (30, 4), (40, 4)]),
+        kind: LoadKind::Pressure(2.0),
+        amplitude: Some("Rise".into()),
+        factor_amplitude: None,
+    };
+    let (mesh, mut model) = cantilever(pressure);
+    let mut gravity = body_load(LoadKind::Gravity([0.0, -9810.0, 0.0]));
+    gravity.name = "Gravity-1".into();
+    gravity.amplitude = Some("Rise".into());
+    let mut spin = body_load(LoadKind::Centrifugal {
+        point: [0.0, 5.0, 5.0],
+        axis: [0.0, 0.0, 1.0],
+        speed: 100.0,
+    });
+    spin.name = "Spin-1".into();
+    spin.amplitude = Some("Fall".into());
+    let step = &mut model.steps[0];
+    step.loads.push(gravity);
+    step.loads.push(spin);
+    step.boundary_conditions.push(BoundaryCondition {
+        distribution: None,
+        name: "Lift-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes(vec![99]),
+        kind: BoundaryKind::displacement([None, None, Some(0.01), None, None, None]),
+        amplitude: Some("Fall".into()),
+    });
+    let StepKind::Static(settings) = &mut step.kind else {
+        unreachable!()
+    };
+    settings.incrementation = Incrementation::Automatic;
+    settings.time_period = 0.5;
+    settings.initial_increment = 0.5;
+    let mut second = model.steps[0].clone();
+    second.name = "Step-2".into();
+    let StepKind::Static(settings) = &mut second.kind else {
+        unreachable!()
+    };
+    settings.time_period = 2.0;
+    settings.initial_increment = 1.0;
+    model.steps.push(second);
+    model.amplitudes = vec![
+        amplitude("Rise", vec![[0.0, 0.0], [1.0, 1.0], [2.0, 3.0]]),
+        amplitude("Fall", vec![[0.0, 2.0], [2.0, 0.5]]),
+    ];
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for expected in [
+        "*Dload, Amplitude=Rise\n",
+        "*Boundary, Amplitude=Fall\nInternal_Selection-1_Lift-1, 3, 3, 0.01\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    let Some(frd) = run_ccx("amplitude_loads", &text) else {
+        return;
+    };
+    // The prescribed tip displacement follows its amplitude at each step's end.
+    let u3 = tip_deflection_per_step(&frd);
+    assert_eq!(u3.len(), 2, "{u3:?}");
+    for (value, factor) in u3.iter().zip([1.625, 0.5]) {
+        assert!((value - 0.01 * factor).abs() < 1e-9, "{u3:?}");
+    }
+}
+
+/// Gravity on quadratic elements: the consistent body force of the C3D20R cantilever adds up
+/// to its weight.
+#[test]
+fn calculix_weighs_a_quadratic_cantilever() {
+    let (mesh, model) = analysis(
+        "kragbalken_c3d20r.inp",
+        body_load(LoadKind::Gravity([0.0, 0.0, -9810.0])),
+    );
+    let Some(frd) = run_ccx("gravity_c3d20r", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let weight = 7.85e-9 * 100.0 * 100.0 * 9810.0;
+    let reaction = node_sum(&frd, "FORC", "F3", &fixed_nodes(&mesh));
+    assert!(
+        reaction > 0.9 * weight && reaction < weight,
+        "{reaction} vs {weight}"
+    );
+}
+
 #[test]
 fn history_outputs_become_print_keywords_with_their_sets() {
     let (mesh, mut model) = cantilever(tip_force());
