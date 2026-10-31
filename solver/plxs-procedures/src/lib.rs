@@ -33,6 +33,8 @@ pub enum StepOutcome {
 pub struct ProcedureContext<'a> {
     pub model: &'a Model,
     pub table: &'a ElementTable,
+    /// The model's multi-point constraints and local systems, prepared once.
+    pub constraints: &'a plxs_constraints::ModelConstraints,
     pub pattern: Arc<Pattern>,
     /// The global stiffness matrix of the last assembly, `None` before the first.
     pub stiffness: Option<SparseMatrix>,

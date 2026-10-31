@@ -47,8 +47,27 @@ fn frd_element(kind: ElementType) -> Option<(u8, &'static [usize])> {
         S4 | S4R => (9, &QUAD4),
         S8 | S8R => (10, &QUAD8),
         B32 | B32R => (12, &[0, 2, 1]),
+        // CalculiX writes two-node springs and gaps as line elements, SPRING1 not at all.
+        SPRING2 | GAPUNI => (11, &[0, 1]),
         _ => return None,
     })
+}
+
+/// The dense indices of the nodes CalculiX writes, ascending by id: those of elements
+/// (springs and gaps included, although their elements are not written). Nodes no element
+/// uses, such as reference and rotation nodes of rigid bodies, are left out.
+pub fn written_nodes(model: &Model) -> Vec<usize> {
+    let mut used = vec![false; model.nodes.len()];
+    for element in &model.elements {
+        for &id in &element.nodes {
+            if let Some(i) = model.nodes.index(id) {
+                used[i as usize] = true;
+            }
+        }
+    }
+    let mut order: Vec<usize> = (0..model.nodes.len()).filter(|&i| used[i]).collect();
+    order.sort_by_key(|&i| model.nodes.ids[i]);
+    order
 }
 
 fn io(path: &Path, e: std::io::Error) -> Error {
@@ -88,10 +107,9 @@ pub fn write_frd_to(
         writeln!(out, "    1UMAT{:>5}{:<58}", i + 1, material.name)?;
     }
 
-    // Nodes, ascending by id.
-    let mut node_order: Vec<usize> = (0..model.nodes.len()).collect();
-    node_order.sort_by_key(|&i| model.nodes.ids[i]);
-    writeln!(out, "    2C{:>30}{:>38}", model.nodes.len(), 1)?;
+    // Nodes that belong to elements, ascending by id.
+    let node_order = written_nodes(model);
+    writeln!(out, "    2C{:>30}{:>38}", node_order.len(), 1)?;
     for &i in &node_order {
         // CalculiX writes the coordinates in single precision; rounding through f32 keeps the
         // last digit the same (2.02577507 is written as 2.02577).
@@ -149,7 +167,7 @@ pub fn write_frd_to(
     for increment in &results.increments {
         for field in &increment.fields {
             set += 1;
-            write_block(out, set, increment, field, model.nodes.len())?;
+            write_block(out, set, increment, field, field.nodes.len())?;
         }
     }
     writeln!(out, " 9999")?;

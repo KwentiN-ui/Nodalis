@@ -153,8 +153,33 @@ impl Expander {
             .iter()
             .flat_map(|t| model.nodes_of(&NodeRef::Set(t.nset.clone())))
             .collect();
-        let next_id =
-            model.nodes.ids.iter().copied().max().unwrap_or(0) + 1 + transformed.len() as u32;
+        // And one per node of a `*RIGID BODY` (ccx 2.21: the first expanded id moves by
+        // the size of the rigid body's node set).
+        let rigid: usize = model
+            .constraints
+            .rigid_bodies
+            .iter()
+            .map(|body| {
+                let mut nodes: Vec<NodeId> = match &body.nodes {
+                    plxs_core::constraints::RigidBodyNodes::NodeSet(set) => {
+                        model.nodes_of(&NodeRef::Set(set.clone()))
+                    }
+                    plxs_core::constraints::RigidBodyNodes::ElementSet(set) => model
+                        .elements_of(&plxs_core::mesh::ElementRef::Set(set.clone()))
+                        .iter()
+                        .filter_map(|&id| model.element(id))
+                        .flat_map(|e| e.nodes.iter().copied())
+                        .collect(),
+                };
+                nodes.sort_unstable();
+                nodes.dedup();
+                nodes.len()
+            })
+            .sum();
+        let next_id = model.nodes.ids.iter().copied().max().unwrap_or(0)
+            + 1
+            + transformed.len() as u32
+            + rigid as u32;
         let mut structural = Vec::new();
         for (index, element) in model.elements.iter().enumerate() {
             if !expands(element.kind) {
@@ -735,14 +760,31 @@ impl Expander {
     }
 
     /// The constraints between original and expanded nodes.
+    /// Original nodes in node surfaces (tie slaves): their mean constraint makes an
+    /// expanded node dependent, so that a tie can still take the original node (ccx 2.21
+    /// ties the original node, the expanded nodes follow on average).
+    fn surface_nodes(&self, knots: &HashSet<NodeId>) -> HashSet<NodeId> {
+        let mut out = HashSet::new();
+        for surface in self.analysis.model.sets.surfaces.values() {
+            if let plxs_core::mesh::Surface::Node(ids) = surface {
+                out.extend(
+                    ids.iter()
+                        .filter(|n| self.groups.contains_key(n) && !knots.contains(n)),
+                );
+            }
+        }
+        out
+    }
+
     fn constraints(&mut self, knots: &HashSet<NodeId>) {
         let held = self.held_translations();
+        let in_surfaces = self.surface_nodes(knots);
         let nodes: Vec<NodeId> = self.groups.keys().copied().collect();
         for node in nodes {
             if knots.contains(&node) {
                 self.knot(node);
             } else {
-                self.mean(node);
+                self.mean(node, in_surfaces.contains(&node));
                 if held.contains(&node) {
                     self.tie_edge_midpoints(node);
                 }
@@ -796,7 +838,7 @@ impl Expander {
 
     /// `u_0 = mean of the edge nodes` per direction, the original node first so that it
     /// becomes the dependent DOF unless it is held.
-    fn mean(&mut self, node: NodeId) {
+    fn mean(&mut self, node: NodeId, edge_dependent: bool) {
         let g = &self.groups[&node][0];
         let edge: Vec<NodeId> = match g.kind {
             Kind::Shell => vec![g.nodes[0], g.nodes[2]],
@@ -815,6 +857,9 @@ impl Expander {
                     dof,
                     coefficient: weight,
                 });
+            }
+            if edge_dependent {
+                terms.swap(0, 1);
             }
             self.equations.push(Equation { terms });
         }

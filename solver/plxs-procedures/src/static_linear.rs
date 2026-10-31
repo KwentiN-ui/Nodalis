@@ -1,7 +1,10 @@
 //! `*STATIC` without geometric nonlinearity: one linear solve at the end of the step, loads
 //! and prescribed displacements scaled by their amplitudes at the step's end time.
 
-use plxs_assembly::{ElementTable, Reduction, Spc, assemble_stiffness, load_vector};
+use plxs_assembly::discrete::{DiscreteElement, DiscreteKind};
+use plxs_assembly::{
+    ElementTable, Spc, assemble_stiffness, load_vector, rotate_concentrated_loads,
+};
 use plxs_core::state::IntegrationPointField;
 use plxs_core::step::Procedure as ProcedureKind;
 use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Step};
@@ -67,7 +70,8 @@ impl StaticLinear {
     ) -> Result<StepOutcome> {
         let total_dofs = ctx.table.dofs.len();
 
-        // The prescribed DOFs do not change within the step; their values may.
+        // The prescribed DOFs do not change within the step; their values may. SPCs and
+        // multi-point constraints are eliminated together: u = T v + g.
         let spc = Spc::of_step(
             ctx.model,
             step,
@@ -76,29 +80,39 @@ impl StaticLinear {
             ctx.state.total_time + period,
             period,
         )?;
-        let mpcs = plxs_assembly::mpc::model_mpcs(ctx.model, &ctx.table.dofs)?;
-        let reduction = Reduction::with_mpcs(total_dofs, spc, &mpcs)?;
-        let k_free = reduction.reduce_matrix(k);
+        let active = ctx.table.active_dofs();
+        let set = ctx
+            .constraints
+            .step_set(ctx.model.nodes.len(), &active, &spc.dofs);
+        for warning in &set.warnings {
+            progress.event(ProgressEvent::Warning(warning.clone()));
+        }
+        for note in &set.notes {
+            progress.event(ProgressEvent::Info(note.clone()));
+        }
         progress.event(ProgressEvent::Info(format!(
             "number of equations: {}",
-            reduction.free.len()
+            set.reduced_len()
         )));
-        let started = std::time::Instant::now();
-        ctx.solver.analyze(k_free.pattern())?;
-        ctx.solver.factorize(&k_free).map_err(|e| match e {
-            Error::Numerical { message, .. } => Error::Numerical {
-                step: ctx.step_number,
-                increment: 1,
-                message: format!("{message}; the model is probably not sufficiently constrained"),
-            },
-            other => other,
-        })?;
-        progress.event(ProgressEvent::Info(format!(
-            "stiffness factorized in {:.2} s",
-            started.elapsed().as_secs_f64()
-        )));
+        let gaps: Vec<&DiscreteElement> = ctx
+            .table
+            .discrete
+            .iter()
+            .filter(|e| matches!(e.kind, DiscreteKind::Gap { .. }))
+            .collect();
+        // Gap status the current factorization belongs to (all open before the first).
+        let mut factored: Option<Vec<bool>> = None;
+        let mut closed: Vec<bool> = gaps
+            .iter()
+            .map(|g| {
+                g.gap_opening(&vec![0.0; total_dofs])
+                    .is_some_and(|o| o <= 0.0)
+            })
+            .collect();
 
         let start_total = ctx.state.total_time;
+        // Displacements at the end of the previous step (`*BOUNDARY, FIXED`).
+        let previous = ctx.state.displacements.values.clone();
         let mut u = vec![0.0; total_dofs];
         let mut stresses = ctx.table.layout.field(6);
         let mut strains = ctx.table.layout.field(6);
@@ -116,37 +130,104 @@ impl StaticLinear {
                 total_time: total,
             });
 
-            let spc = Spc::of_step(ctx.model, step, &ctx.table.dofs, time, total, period)?;
-            let (f, warnings) = load_vector(ctx.model, ctx.table, step, time, total, period)?;
+            let mut spc = Spc::of_step(ctx.model, step, &ctx.table.dofs, time, total, period)?;
+            spc.apply_fixed(ctx.model, step, &ctx.table.dofs, &previous, &|node| {
+                ctx.constraints.rotation(node).copied()
+            });
+            let (mut f, warnings) = load_vector(ctx.model, ctx.table, step, time, total, period)?;
+            rotate_concentrated_loads(
+                ctx.model,
+                ctx.constraints,
+                &ctx.table.dofs,
+                step,
+                time,
+                total,
+                period,
+                &mut f,
+            );
             if increment == 1 {
                 for warning in warnings {
                     progress.event(ProgressEvent::Warning(warning));
                 }
             }
-            let reduction = Reduction::with_mpcs(total_dofs, spc, &mpcs)?;
-            let u_p = reduction.prescribed_vector(total_dofs);
-            let mut k_up = vec![0.0; total_dofs];
-            k.multiply(&u_p, &mut k_up);
-            let rhs_full: Vec<f64> = f.iter().zip(&k_up).map(|(f, ku)| f - ku).collect();
-            let mut rhs = reduction.reduce_vector(&rhs_full);
-            let started = std::time::Instant::now();
-            ctx.solver.solve(&mut rhs)?;
-            progress.event(ProgressEvent::Info(format!(
-                "solved in {:.2} s",
-                started.elapsed().as_secs_f64()
-            )));
-            u.copy_from_slice(&u_p);
-            reduction.expand_into(&rhs, &mut u);
+            let g = set.particular(&spc.values);
+
+            // Gaps change the stiffness with their status: solve until it settles
+            // (contact without friction, so the result does not depend on the path).
+            let mut iterations = 0u32;
+            let mut v;
+            let mut k_used;
+            loop {
+                iterations += 1;
+                k_used = if gaps.is_empty() {
+                    None
+                } else {
+                    let mut kc = k.clone();
+                    for (gap, &c) in gaps.iter().zip(&closed) {
+                        if c {
+                            kc.add_block(&gap.dofs, &gap.closed_stiffness());
+                        }
+                    }
+                    Some(kc)
+                };
+                let k_now = k_used.as_ref().unwrap_or(k);
+                if factored.as_ref() != Some(&closed) {
+                    let started = std::time::Instant::now();
+                    let k_red = set.reduce(k_now);
+                    ctx.solver.analyze(k_red.pattern())?;
+                    ctx.solver.factorize(&k_red).map_err(|e| match e {
+                        Error::Numerical { message, .. } => Error::Numerical {
+                            step: ctx.step_number,
+                            increment,
+                            message: format!(
+                                "{message}; the model is probably not sufficiently constrained"
+                            ),
+                        },
+                        other => other,
+                    })?;
+                    progress.event(ProgressEvent::Info(format!(
+                        "stiffness factorized in {:.2} s",
+                        started.elapsed().as_secs_f64()
+                    )));
+                    factored = Some(closed.clone());
+                }
+                let mut f_now = f.clone();
+                for (gap, &c) in gaps.iter().zip(&closed) {
+                    if c {
+                        gap.add_clearance_force(&mut f_now);
+                    }
+                }
+                let mut k_g = vec![0.0; total_dofs];
+                k_now.multiply(&g, &mut k_g);
+                let rhs_full: Vec<f64> = f_now.iter().zip(&k_g).map(|(f, kg)| f - kg).collect();
+                v = set.reduce_rhs(&rhs_full);
+                let started = std::time::Instant::now();
+                ctx.solver.solve(&mut v)?;
+                progress.event(ProgressEvent::Info(format!(
+                    "solved in {:.2} s",
+                    started.elapsed().as_secs_f64()
+                )));
+                u = set.expand(&v, &g);
+                let status: Vec<bool> = gaps
+                    .iter()
+                    .map(|gap| gap.gap_opening(&u).is_some_and(|o| o <= 0.0))
+                    .collect();
+                if status == closed || iterations >= 100 {
+                    break;
+                }
+                closed = status;
+            }
+            let rhs = v;
 
             // Nodal forces as CalculiX reports them (`RF`): the internal forces K u at every
             // node, which are the reactions at prescribed DOFs, the applied loads at loaded
             // nodes and zero (up to round-off) elsewhere.
-            k.multiply(&u, &mut reactions);
+            k_used.as_ref().unwrap_or(k).multiply(&u, &mut reactions);
 
             progress.event(ProgressEvent::Iteration {
                 step: ctx.step_number,
                 increment,
-                iteration: 1,
+                iteration: iterations,
                 residual: 0.0,
                 correction: rhs.iter().fold(0.0_f64, |m, v| m.max(v.abs())),
                 converged: true,
@@ -181,7 +262,7 @@ impl StaticLinear {
                 step: ctx.step_number,
                 increment,
                 attempt: 1,
-                iterations: 1,
+                iterations,
                 total_time: total,
                 step_time: time,
                 increment_size: size,
@@ -190,7 +271,7 @@ impl StaticLinear {
                 step: ctx.step_number,
                 increment,
                 attempt: 1,
-                iterations: 1,
+                iterations,
                 total_time: total,
                 step_time: time,
                 size,

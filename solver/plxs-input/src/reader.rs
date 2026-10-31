@@ -978,8 +978,10 @@ impl Reader {
             kind: SectionKind::Gap(Gap {
                 clearance: v[0],
                 direction: [v[1], v[2], v[3]],
-                stiffness: v.get(4).copied(),
-                friction: v.get(5).copied(),
+                // Manual: field 5 is not used, field 6 the spring stiffness, field 7 the
+                // tensile force at infinite clearance (not kept, it is tiny by design).
+                stiffness: v.get(5).copied().filter(|&k| k > 0.0),
+                friction: None,
             }),
         });
         Ok(())

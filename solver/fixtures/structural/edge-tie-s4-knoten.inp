@@ -1,0 +1,177 @@
+**
+** Heading +++++++++++++++++++++++++++++++++++++++++++++++++
+**
+*Heading
+
+**
+** Nodes +++++++++++++++++++++++++++++++++++++++++++++++++++
+**
+*Node
+1, 0.00000000E0, 0.00000000E0, 1.00000000E1
+2, 5.00000000E0, 0.00000000E0, 1.00000000E1
+3, 1.00000000E1, 0.00000000E0, 1.00000000E1
+4, 0.00000000E0, 5.00000000E0, 1.00000000E1
+5, 5.00000000E0, 5.00000000E0, 1.00000000E1
+6, 1.00000000E1, 5.00000000E0, 1.00000000E1
+7, 0.00000000E0, 1.00000000E1, 1.00000000E1
+8, 5.00000000E0, 1.00000000E1, 1.00000000E1
+9, 1.00000000E1, 1.00000000E1, 1.00000000E1
+10, 0.00000000E0, 0.00000000E0, 2.00000000E1
+11, 5.00000000E0, 0.00000000E0, 2.00000000E1
+12, 1.00000000E1, 0.00000000E0, 2.00000000E1
+13, 0.00000000E0, 5.00000000E0, 2.00000000E1
+14, 5.00000000E0, 5.00000000E0, 2.00000000E1
+15, 1.00000000E1, 5.00000000E0, 2.00000000E1
+16, 0.00000000E0, 1.00000000E1, 2.00000000E1
+17, 5.00000000E0, 1.00000000E1, 2.00000000E1
+18, 1.00000000E1, 1.00000000E1, 2.00000000E1
+101, 5.00000000E0, 0.00000000E0, 0.00000000E0
+102, 5.00000000E0, 5.00000000E0, 0.00000000E0
+103, 5.00000000E0, 1.00000000E1, 0.00000000E0
+104, 5.00000000E0, 0.00000000E0, 5.00000000E0
+105, 5.00000000E0, 5.00000000E0, 5.00000000E0
+106, 5.00000000E0, 1.00000000E1, 5.00000000E0
+107, 5.00000000E0, 0.00000000E0, 1.00000000E1
+108, 5.00000000E0, 5.00000000E0, 1.00000000E1
+109, 5.00000000E0, 1.00000000E1, 1.00000000E1
+110, 5.00000000E0, 5.00000000E0, 2.00000000E1
+111, 5.00000000E0, 5.00000000E0, 2.00000000E1
+**
+** Elements ++++++++++++++++++++++++++++++++++++++++++++++++
+**
+*Element, Type=C3D8, Elset=BLOCK
+1, 1, 2, 5, 4, 10, 11, 14, 13
+2, 2, 3, 6, 5, 11, 12, 15, 14
+3, 4, 5, 8, 7, 13, 14, 17, 16
+4, 5, 6, 9, 8, 14, 15, 18, 17
+*Element, Type=S4, Elset=PLATE
+201, 101, 102, 105, 104
+202, 102, 103, 106, 105
+203, 104, 105, 108, 107
+204, 105, 106, 109, 108
+**
+** Node sets +++++++++++++++++++++++++++++++++++++++++++++++
+**
+*Nset, Nset=Internal_Selection-1_Guided-1
+10, 11, 12, 13, 14, 15, 16, 17, 18
+*Nset, Nset=Internal-1_Internal_Selection-1_Tie-1_Master
+1, 2, 3, 4, 5, 6, 7, 8, 9
+*Nset, Nset=Internal-1_Internal_Selection-1_Tie-1_Slave
+107, 108, 109
+*Nset, Nset=Internal_Selection-1_Fixed-1
+101, 102, 103
+*Nset, Nset=Internal-1_Internal_Selection-1_Pressure-1
+10, 11, 12, 13, 14, 15, 16, 17, 18
+**
+** Element sets ++++++++++++++++++++++++++++++++++++++++++++
+**
+*Elset, Elset=Internal_Selection-1_Section-1
+BLOCK
+*Elset, Elset=Internal_Selection-1_Section-2
+PLATE
+*Elset, Elset=Internal-1_Internal_Selection-1_Tie-1_Master_S1
+1, 2, 3, 4
+*Elset, Elset=Internal-1_Internal_Selection-1_Pressure-1_S2
+1, 2, 3, 4
+**
+** Surfaces ++++++++++++++++++++++++++++++++++++++++++++++++
+**
+*Surface, Name=Internal_Selection-1_Tie-1_Master, Type=Element
+Internal-1_Internal_Selection-1_Tie-1_Master_S1, S1
+*Surface, Name=Internal_Selection-1_Tie-1_Slave, Type=Node
+Internal-1_Internal_Selection-1_Tie-1_Slave
+*Surface, Name=Internal_Selection-1_Pressure-1, Type=Element
+Internal-1_Internal_Selection-1_Pressure-1_S2, S2
+**
+** Physical constants ++++++++++++++++++++++++++++++++++++++
+**
+**
+** Coordinate systems ++++++++++++++++++++++++++++++++++++++
+**
+**
+** Materials +++++++++++++++++++++++++++++++++++++++++++++++
+**
+*Material, Name=Steel
+*Elastic
+210000, 0.3
+**
+** Sections ++++++++++++++++++++++++++++++++++++++++++++++++
+**
+** Name: Section-1
+*Solid section, Elset=Internal_Selection-1_Section-1, Material=Steel
+** Name: Section-2
+*Shell section, Elset=Internal_Selection-1_Section-2, Material=Steel
+1
+**
+** Pre-tension sections ++++++++++++++++++++++++++++++++++++
+**
+**
+** Constraints +++++++++++++++++++++++++++++++++++++++++++++
+**
+** Name: Guided-1: Remote point
+*Rigid body, Nset=Internal_Selection-1_Guided-1, Ref node=110, Rot node=111
+*Tie, Name=Tie-1
+Internal_Selection-1_Tie-1_Slave, Internal_Selection-1_Tie-1_Master
+**
+** Surface interactions ++++++++++++++++++++++++++++++++++++
+**
+**
+** Contact pairs +++++++++++++++++++++++++++++++++++++++++++
+**
+**
+** Amplitudes ++++++++++++++++++++++++++++++++++++++++++++++
+**
+**
+** Initial conditions ++++++++++++++++++++++++++++++++++++++
+**
+**
+** Steps +++++++++++++++++++++++++++++++++++++++++++++++++++
+**
+**
+** Step-1 ++++++++++++++++++++++++++++++++++++++++++++++++++
+**
+*Step
+*Static
+**
+** Controls ++++++++++++++++++++++++++++++++++++++++++++++++
+**
+**
+** Output frequency ++++++++++++++++++++++++++++++++++++++++
+**
+**
+** Boundary conditions +++++++++++++++++++++++++++++++++++++
+**
+*Boundary, op=New
+** Name: Fixed-1
+*Boundary
+Internal_Selection-1_Fixed-1, 1, 6, 0
+** Name: Guided-1
+*Boundary
+110, 1, 2, 0
+**
+** Loads +++++++++++++++++++++++++++++++++++++++++++++++++++
+**
+*Cload, op=New
+*Dload, op=New
+** Name: Pressure-1
+*Dload
+Internal-1_Internal_Selection-1_Pressure-1_S2, P2, 10
+**
+** Defined fields ++++++++++++++++++++++++++++++++++++++++++
+**
+**
+** History outputs +++++++++++++++++++++++++++++++++++++++++
+**
+**
+** Field outputs +++++++++++++++++++++++++++++++++++++++++++
+**
+** Name: NF-Output-1
+*Node file
+RF, U
+** Name: EF-Output-1
+*El file
+S, E, NOE
+**
+** End step ++++++++++++++++++++++++++++++++++++++++++++++++
+**
+*End step

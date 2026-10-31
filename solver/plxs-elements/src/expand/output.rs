@@ -164,7 +164,17 @@ impl OutputMap {
             }
         }
         if !self.rotations.is_empty() {
-            out.elements.retain(|e| e.kind != ElementType::U1);
+            // U1 elements stay on their two nodes only (the frd writer skips the type but
+            // writes the nodes of every element).
+            for e in out
+                .elements
+                .iter_mut()
+                .filter(|e| e.kind == ElementType::U1)
+            {
+                if e.nodes.len() == 4 {
+                    e.nodes = vec![e.nodes[0], e.nodes[2]];
+                }
+            }
             for increment in &mut results.increments {
                 for field in &mut increment.fields {
                     let names: [&str; 3] = match field.name.as_str() {
@@ -198,6 +208,7 @@ impl OutputMap {
         let in_elements: HashSet<NodeId> = out
             .elements
             .iter()
+            .filter(|e| e.kind != ElementType::U1)
             .flat_map(|e| e.nodes.iter().copied())
             .collect();
         let mut used = in_elements.clone();

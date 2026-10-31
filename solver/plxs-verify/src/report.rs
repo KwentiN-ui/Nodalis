@@ -105,7 +105,14 @@ pub fn run_fixture(solver: &Path, fixture: &Fixture, work: &Path) -> Report {
         &reference.frd,
         &results.frd,
         class,
-        &fixture.meta.deviations,
+        // Documented deviations (whole fields) and undetermined components.
+        &fixture
+            .meta
+            .deviations
+            .iter()
+            .chain(&fixture.meta.undetermined)
+            .cloned()
+            .collect::<Vec<_>>(),
     );
     match (&reference.dat, &results.dat) {
         (Some(r), Some(c)) => {

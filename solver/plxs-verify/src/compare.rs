@@ -6,6 +6,20 @@ use plx_io::frd::FrdImport;
 
 use crate::Class;
 
+/// Values below this are round-off in every unit system PrePoLix uses (CalculiX prints
+/// e.g. reaction forces of 1e-14 where plxs computes exact zeros).
+pub const ABSOLUTE_FLOOR: f64 = 1e-7;
+
+/// The largest finite absolute value of several lists.
+fn largest<'a>(lists: impl IntoIterator<Item = &'a [f64]>) -> f64 {
+    lists
+        .into_iter()
+        .flatten()
+        .map(|v| v.abs())
+        .filter(|v| v.is_finite())
+        .fold(0.0, f64::max)
+}
+
 /// What a comparison found.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Comparison {
@@ -32,12 +46,11 @@ impl Comparison {
     }
 
     /// Compares two value lists of a component; returns false when they differ in length.
-    fn values(&mut self, what: &str, reference: &[f64], candidate: &[f64], tolerance: f64) -> bool {
-        self.values_with_floor(what, reference, candidate, tolerance, 1e-12)
-    }
-
-    /// As [`Self::values`], with the scale of the component at least `floor`.
-    fn values_with_floor(
+    /// Deviations are relative to the largest absolute reference value of the component, at
+    /// least `floor` (the norm of the whole field, so that a component that is pure
+    /// round-off, such as the shear stress of a uniaxial state, is judged against the
+    /// field) and at least [`ABSOLUTE_FLOOR`].
+    fn values(
         &mut self,
         what: &str,
         reference: &[f64],
@@ -58,7 +71,8 @@ impl Comparison {
             .map(|v| v.abs())
             .filter(|v| v.is_finite())
             .fold(0.0_f64, f64::max)
-            .max(floor);
+            .max(floor)
+            .max(ABSOLUTE_FLOOR);
         let mut worst = 0.0_f64;
         let mut worst_index = 0;
         for (i, (&r, &c)) in reference.iter().zip(candidate).enumerate() {
@@ -96,13 +110,14 @@ pub fn compare_frd(reference: &FrdImport, candidate: &FrdImport, class: Class) -
     compare_frd_except(reference, candidate, class, &[])
 }
 
-/// Like [`compare_frd`], but the values of the named fields (a fixture's documented
-/// deviations) are not compared; their presence and components still are.
+/// [`compare_frd`] leaving out the field components named in `undetermined`
+/// (`"DISP U1"`) and the values of whole fields named there (`"FORC"`, a fixture's
+/// documented deviations; such a field may also be missing in the candidate).
 pub fn compare_frd_except(
     reference: &FrdImport,
     candidate: &FrdImport,
     class: Class,
-    skipped: &[String],
+    undetermined: &[String],
 ) -> Comparison {
     let mut c = Comparison::default();
     let tolerance = class.tolerance();
@@ -119,7 +134,7 @@ pub fn compare_frd_except(
         let flat = |m: &plx_mesh::FeMesh| -> Vec<f64> {
             m.coords().iter().flat_map(|c| c.iter().copied()).collect()
         };
-        c.values("mesh: node coordinates", &flat(rm), &flat(cm), 1e-6);
+        c.values("mesh: node coordinates", &flat(rm), &flat(cm), 1e-6, 0.0);
     }
     let elements = |m: &plx_mesh::FeMesh| -> Vec<(u32, String, Vec<u32>)> {
         m.elements()
@@ -167,11 +182,12 @@ pub fn compare_frd_except(
             &[r.value],
             &[k.value],
             tolerance,
+            0.0,
         );
         // A field of a documented deviation may be missing in the candidate (CalculiX's
         // internal stresses of U1 beams, which plxs does not write).
         let missing_ok = |f: &&plx_results::Field| {
-            !(skipped.contains(&f.name) && !k.fields.iter().any(|g| g.name == f.name))
+            !(undetermined.contains(&f.name) && !k.fields.iter().any(|g| g.name == f.name))
         };
         let r_fields: Vec<&plx_results::Field> = r.fields.iter().filter(missing_ok).collect();
         let names = |fields: &[&plx_results::Field]| -> Vec<String> {
@@ -190,32 +206,26 @@ pub fn compare_frd_except(
             // The stress error estimator is a CalculiX-internal heuristic (its numbers do
             // not follow the manual's description); only its presence is compared, see
             // docs/solver/SCHNITTSTELLEN.md.
-            if rf.name == "ERROR" || skipped.contains(&rf.name) {
+            if rf.name == "ERROR" || undetermined.contains(&rf.name) {
                 continue;
             }
-            // Values are compared relative to the largest value of the whole field (the
-            // "Feldnorm" of the concept, section 6.2), not of their own component: components
-            // of vectors and tensors mix under a change of axes, and small components (shear
-            // stresses beside large normal stresses, out-of-plane values of plane models that
-            // CalculiX writes as round-off noise) would otherwise be held to the noise of
-            // CalculiX's own output (its nodal values of quadratic wedges scatter by about
-            // 1e-6 of the field).
-            let field_scale = rf
+            let to_f64 = |v: &[f32]| -> Vec<f64> { v.iter().map(|&x| f64::from(x)).collect() };
+            let raw: Vec<Vec<f64>> = rf
                 .components
                 .iter()
                 .filter(|c| !c.derived)
-                .flat_map(|c| c.values.iter())
-                .map(|v| f64::from(v.abs()))
-                .filter(|v| v.is_finite())
-                .fold(0.0_f64, f64::max);
-            let floor = field_scale.max(1e-12);
+                .map(|c| to_f64(&c.values))
+                .collect();
+            let floor = largest(raw.iter().map(|v| v.as_slice()));
             for rc in rf.components.iter().filter(|c| !c.derived) {
                 let Some(kc) = kf.component(&rc.name) else {
                     c.fail(format!("{label}: {} has no component {}", rf.name, rc.name));
                     continue;
                 };
-                let to_f64 = |v: &[f32]| -> Vec<f64> { v.iter().map(|&x| f64::from(x)).collect() };
-                c.values_with_floor(
+                if undetermined.contains(&format!("{} {}", rf.name, rc.name)) {
+                    continue;
+                }
+                c.values(
                     &format!("{label}: {} {}", rf.name, rc.name),
                     &to_f64(&rc.values),
                     &to_f64(&kc.values),
@@ -259,6 +269,7 @@ pub fn compare_dat(reference: &DatImport, candidate: &DatImport, class: Class) -
             &times(rs),
             &times(ks),
             tolerance,
+            0.0,
         );
         let fields = |s: &plx_results::history_output::HistorySet| -> Vec<String> {
             s.fields.iter().map(|f| f.name.clone()).collect()
@@ -272,6 +283,11 @@ pub fn compare_dat(reference: &DatImport, candidate: &DatImport, class: Class) -
             continue;
         }
         for (rf, kf) in rs.fields.iter().zip(&ks.fields) {
+            let floor = largest(
+                rf.components
+                    .iter()
+                    .flat_map(|c| c.entries.iter().map(|e| e.values.as_slice())),
+            );
             for rc in &rf.components {
                 let Some(kc) = kf.component(&rc.name) else {
                     c.fail(format!("{label}: {} has no component {}", rf.name, rc.name));
@@ -297,6 +313,7 @@ pub fn compare_dat(reference: &DatImport, candidate: &DatImport, class: Class) -
                         &re.values,
                         &ke.values,
                         tolerance,
+                        floor,
                     );
                 }
             }

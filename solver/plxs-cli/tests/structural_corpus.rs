@@ -14,8 +14,10 @@ const OPEN: &[(&str, &str)] = &[
         "balken_b32r_box",
         "BOX: Simpson rule on the wall centerlines is 2e-4 too stiff, ccx's rule not known",
     ),
-    ("edge-tie-m3d4", "*TIE and *RIGID BODY (T6), membranes"),
-    ("edge-tie-s4", "*TIE and *RIGID BODY (T6)"),
+    (
+        "edge-tie-m3d4",
+        "membranes: M3D4 formulation of ccx 2.21 unknown",
+    ),
     (
         "membran-m3d4",
         "membranes: M3D4 formulation of ccx 2.21 unknown",

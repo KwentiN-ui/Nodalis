@@ -23,15 +23,10 @@ fn requested(step: &Step) -> Vec<String> {
 
 /// Node ids in ascending order with their dense indices.
 fn node_order(model: &Model) -> Vec<(u32, u32)> {
-    let mut order: Vec<(u32, u32)> = model
-        .nodes
-        .ids
-        .iter()
-        .enumerate()
-        .map(|(i, &id)| (id, i as u32))
-        .collect();
-    order.sort_unstable();
-    order
+    plxs_output::frd::written_nodes(model)
+        .into_iter()
+        .map(|i| (model.nodes.ids[i], i as u32))
+        .collect()
 }
 
 fn vector_field(
@@ -108,6 +103,18 @@ pub fn nodal_average_with(
                 sum[n as usize][k] += value[k];
             }
             count[n as usize] += 1;
+        }
+    }
+    // CalculiX averages over every element it writes to the `.frd`, so two-node springs and
+    // gaps count with zero stress at their nodes (observed with ccx 2.21; `SPRING1`, which
+    // it does not write, does not count).
+    for element in &table.discrete {
+        if model.elements[element.element as usize].kind != plxs_core::ElementType::SPRING1 {
+            let mut nodes: Vec<u32> = element.dofs.iter().map(|d| d / 3).collect();
+            nodes.dedup();
+            for n in nodes {
+                count[n as usize] += 1;
+            }
         }
     }
     for (s, &c) in sum.iter_mut().zip(&count) {

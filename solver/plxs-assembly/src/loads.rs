@@ -59,6 +59,10 @@ pub fn load_vector(
             let Some(index) = model.element_index(id) else {
                 continue;
             };
+            let index = table.entry_of[index as usize];
+            if index == u32::MAX {
+                continue;
+            }
             per_element.push((index, load.kind.clone(), factor));
         }
     }
@@ -76,7 +80,8 @@ pub fn load_vector(
                             "*DLOAD",
                             format!(
                                 "face {face} does not exist on element {} of type {}",
-                                model.elements[*index as usize].id, formulation.kind
+                                table.element_id(model, *index),
+                                formulation.kind
                             ),
                         ));
                     }
@@ -91,7 +96,7 @@ pub fn load_vector(
                             "*DLOAD",
                             format!(
                                 "GRAV on element {} needs a *DENSITY",
-                                model.elements[*index as usize].id
+                                table.element_id(model, *index)
                             ),
                         )
                     })?;
@@ -108,7 +113,7 @@ pub fn load_vector(
                             "*DLOAD",
                             format!(
                                 "CENTRIF on element {} needs a *DENSITY",
-                                model.elements[*index as usize].id
+                                table.element_id(model, *index)
                             ),
                         )
                     })?;

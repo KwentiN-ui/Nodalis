@@ -275,6 +275,7 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `structural/balken_node_tie` | A | M2 | ccx 2.21 | B31, \*BEAM SECTION, \*STATIC |
 | `structural/balken_starr` | A | M2 | ccx 2.21 | B32, \*BEAM SECTION, \*EQUATION, \*STATIC |
 | `structural/edge-tie-m3d4` | A | M2 | ccx 2.21 | C3D8, M3D4, \*MEMBRANE SECTION, \*RIGID BODY, \*TIE, \*STATIC |
+| `structural/edge-tie-s4-knoten` | A | M2 | ccx 2.21 | C3D8, S4, \*SHELL SECTION, \*RIGID BODY, \*TIE, \*STATIC |
 | `structural/edge-tie-s4` | A | M2 | ccx 2.21 | C3D8, S4, \*SHELL SECTION, \*RIGID BODY, \*TIE, \*STATIC |
 | `structural/elementtyp-s8r` | A | M2 | ccx 2.21 | S8R, \*SHELL SECTION, \*STATIC |
 | `structural/membran-m3d3` | A | M2 | ccx 2.21 | M3D3, \*MEMBRANE SECTION, \*STATIC |
