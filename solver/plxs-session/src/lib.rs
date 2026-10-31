@@ -190,6 +190,7 @@ impl Session {
         Snapshot {
             model_fingerprint: fingerprint(&self.model),
             state: self.state.clone(),
+            average_force: None,
         }
     }
 
