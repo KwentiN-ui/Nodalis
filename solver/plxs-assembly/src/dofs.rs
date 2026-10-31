@@ -9,11 +9,18 @@ use plxs_core::{Model, Result};
 pub struct DofMap {
     pub per_node: usize,
     pub nodes: usize,
+    /// DOFs no element works on (ascending): nodes outside every element, the out-of-plane
+    /// DOF of plane strain and axisymmetric nodes. They are held at zero.
+    pub unused: Vec<u32>,
 }
 
 impl DofMap {
     pub fn new(nodes: usize, per_node: usize) -> Self {
-        Self { per_node, nodes }
+        Self {
+            per_node,
+            nodes,
+            unused: Vec::new(),
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -101,6 +108,9 @@ impl Spc {
                 }
             }
         }
+        // Unused DOFs are held at zero, whatever a boundary prescribes on them.
+        prescribed.retain(|(dof, _)| dofs.unused.binary_search(dof).is_err());
+        prescribed.extend(dofs.unused.iter().map(|&dof| (dof, 0.0)));
         prescribed.sort_by_key(|&(dof, _)| dof);
         let mut spc = Spc::default();
         for (dof, value) in prescribed {

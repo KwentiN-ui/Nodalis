@@ -406,7 +406,7 @@ pub fn heat_loads(
                 }
                 return Ok((*index, qe, None));
             };
-            if *face == 0 || *face as usize > formulation.family.faces().len() {
+            if *face == 0 || *face as usize > formulation.face_count() {
                 return Err(Error::input(
                     "*DFLUX",
                     format!(

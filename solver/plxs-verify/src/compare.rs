@@ -38,8 +38,7 @@ impl Comparison {
         self.values_with_floor(what, reference, candidate, tolerance, 1e-12)
     }
 
-    /// Like [`Self::values`] with a lower bound for the scale the deviation is measured
-    /// against.
+    /// As [`Self::values`], with the scale of the component at least `floor`.
     fn values_with_floor(
         &mut self,
         what: &str,
@@ -195,6 +194,13 @@ pub fn compare_frd_with_noise(
             if rf.name == "ERROR" {
                 continue;
             }
+            // Values are compared relative to the largest value of the whole field (the
+            // "Feldnorm" of the concept, section 6.2), not of their own component: components
+            // of vectors and tensors mix under a change of axes, and small components (shear
+            // stresses beside large normal stresses, out-of-plane values of plane models that
+            // CalculiX writes as round-off noise) would otherwise be held to the noise of
+            // CalculiX's own output (its nodal values of quadratic wedges scatter by about
+            // 1e-6 of the field).
             let field_scale = rf
                 .components
                 .iter()
@@ -203,7 +209,7 @@ pub fn compare_frd_with_noise(
                 .map(|v| f64::from(v.abs()))
                 .filter(|v| v.is_finite())
                 .fold(0.0_f64, f64::max);
-            let floor = (1e-6 * field_scale)
+            let floor = field_scale
                 .max(1e-12)
                 .max(noise.get(&rf.name).map_or(0.0, |n| n / tolerance));
             for rc in rf.components.iter().filter(|c| !c.derived) {

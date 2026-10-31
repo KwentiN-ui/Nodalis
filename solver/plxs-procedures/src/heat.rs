@@ -649,8 +649,10 @@ impl<'h> HeatRun<'h> {
         if has("RFL") {
             // CalculiX' RFL is the conduction K·T at every node (prescribed nodes: the heat
             // that leaves through the boundary).
+            // Nodes of plane and axisymmetric elements report 0, as CalculiX does.
             let mut kt = vec![0.0; t.len()];
             self.k.multiply(t, &mut kt);
+            zero_on_expanded(ctx.table, &mut kt);
             back.push(scalar("RFL", "RFL", &kt));
         }
         let Some(last) = ctx.results.increments.last_mut() else {
@@ -704,4 +706,16 @@ pub fn heat_flux(
         }
     }
     Ok(field)
+}
+
+/// Sets the values of nodes of plane and axisymmetric elements to zero: CalculiX writes no
+/// RFL for them (checked with ccx 2.21 on CPS4, CPS8, CPE4 and CAX4).
+fn zero_on_expanded(table: &ElementTable, values: &mut [f64]) {
+    for entry in &table.entries {
+        if table.formulation(entry).expansion().is_some() {
+            for &n in &entry.nodes {
+                values[n as usize] = 0.0;
+            }
+        }
+    }
 }

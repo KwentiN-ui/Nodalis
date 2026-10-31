@@ -1,7 +1,8 @@
 //! Three-dimensional continuum elements: C3D4, C3D10, C3D10T, C3D6, C3D15, C3D8, C3D8R,
 //! C3D8I, C3D20, C3D20R. Isoparametric displacement formulation with Gauss integration
 //! (Zienkiewicz & Taylor, chapters 5 and 8; Hughes, chapter 3); the incompatible modes of
-//! C3D8I after Wilson et al. with Taylor's modification (Taylor, Beresford & Wilson 1976),
+//! C3D8I after Wilson et al. (Taylor, Beresford & Wilson 1976) with the mode derivatives taken
+//! through the centroid Jacobian but, as CalculiX, without the det J0 / det J scaling;
 //! condensed at element level.
 //!
 //! Integration points as the CalculiX manual lists them: C3D8 and C3D20R 2×2×2, C3D20
@@ -15,6 +16,7 @@
 
 use plxs_core::ElementType;
 
+use crate::plane::{Expansion, PlaneKind};
 use crate::shape::{Family, IntegrationRule, face_rule, face_shape};
 
 /// How the element integrates.
@@ -36,6 +38,21 @@ pub struct SolidElement {
     pub formulation: Formulation,
     /// `extrapolation[node * ips + ip]`: integration-point values to nodal values.
     extrapolation: Vec<f64>,
+    /// For plane and axisymmetric elements: how the 2D element expands into this 3D one.
+    /// The public methods then take and return values of the 2D nodes.
+    expansion: Option<Box<Expansion>>,
+}
+
+/// Nodal values of a plane or axisymmetric element as CalculiX reports them, see
+/// [`SolidElement::reported_nodal`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReportedNodal {
+    /// Per 2D node.
+    pub displacements: Vec<[f64; 3]>,
+    /// Per 2D node.
+    pub forces: Vec<[f64; 3]>,
+    /// The element's contribution to the solver's force vector, 3 per 2D node.
+    pub condensed: Vec<f64>,
 }
 
 /// The solid element of a type, `None` for types that are no solids.
@@ -88,6 +105,7 @@ pub fn solid(kind: ElementType) -> Option<SolidElement> {
         rule,
         formulation,
         extrapolation,
+        expansion: None,
     })
 }
 
@@ -255,7 +273,65 @@ fn invert3(j: &[[f64; 3]; 3]) -> (f64, [[f64; 3]; 3]) {
 
 impl SolidElement {
     pub fn node_count(&self) -> usize {
-        self.family.node_count()
+        match &self.expansion {
+            Some(x) => x.nodes,
+            None => self.family.node_count(),
+        }
+    }
+
+    pub(crate) fn set_expansion(&mut self, expansion: Expansion, extrapolation: Vec<f64>) {
+        self.expansion = Some(Box::new(expansion));
+        self.extrapolation = extrapolation;
+    }
+
+    /// The expansion of a plane or axisymmetric element.
+    pub fn expansion(&self) -> Option<&Expansion> {
+        self.expansion.as_deref()
+    }
+
+    /// Whether the third DOF of the element's nodes takes part in the stiffness (not for
+    /// plane strain and axisymmetric elements, whose nodes move in their plane only).
+    pub fn uses_out_of_plane(&self) -> bool {
+        !matches!(
+            self.expansion.as_deref().map(|x| x.kind),
+            Some(PlaneKind::Strain | PlaneKind::Axisymmetric)
+        )
+    }
+
+    /// For plane and axisymmetric elements: displacements and nodal forces (`K u`) of the
+    /// 2D nodes as CalculiX reports them (see [`crate::plane`]), and the nodal forces as the
+    /// solver's own vector holds them (`Tᵀ K₃ T u`), so that the caller can swap one for
+    /// the other. `None` for solids, whose nodes report what they compute.
+    pub fn reported_nodal(
+        &self,
+        coords: &[[f64; 3]],
+        d: &[[f64; 6]; 6],
+        u: &[f64],
+    ) -> Option<ReportedNodal> {
+        let x = self.expansion.as_deref()?;
+        let coords3 = x.coordinates(coords);
+        let mut k3 = Vec::new();
+        self.stiffness_3d(&coords3, d, &mut k3);
+        let u3 = x.expand(u);
+        let n3 = u3.len();
+        let f3: Vec<f64> = (0..n3)
+            .map(|i| (0..n3).map(|j| k3[i * n3 + j] * u3[j]).sum())
+            .collect();
+        let mut condensed = vec![0.0; self.dof_count()];
+        x.condense_vector(&f3, &mut condensed);
+        Some(ReportedNodal {
+            displacements: x.reported_displacements(u),
+            forces: x.reported_forces(&f3),
+            condensed,
+        })
+    }
+
+    /// Number of faces (edges of 2D elements) that can carry a pressure.
+    pub fn face_count(&self) -> usize {
+        match &self.expansion {
+            Some(x) => x.edges(),
+            None => self.family.faces().len(),
+        }
     }
 
     pub fn dof_count(&self) -> usize {
@@ -272,7 +348,7 @@ impl SolidElement {
     }
 
     pub(crate) fn point(&self, p: [f64; 3], coords: &[[f64; 3]]) -> Point {
-        let count = self.node_count();
+        let count = self.family.node_count();
         let mut n = vec![0.0; count];
         let mut dn = vec![[0.0; 3]; count];
         self.family.shape(p, &mut n, &mut dn);
@@ -292,8 +368,15 @@ impl SolidElement {
         Point { det, dndx, n }
     }
 
-    /// Element volume.
+    /// Element volume (of the full circumference for axisymmetric elements).
     pub fn volume(&self, coords: &[[f64; 3]]) -> f64 {
+        if let Some(x) = &self.expansion {
+            return x.scale * self.volume_3d(&x.coordinates(coords));
+        }
+        self.volume_3d(coords)
+    }
+
+    fn volume_3d(&self, coords: &[[f64; 3]]) -> f64 {
         self.rule
             .points
             .iter()
@@ -323,19 +406,19 @@ impl SolidElement {
 
     /// The incompatible-mode strain matrix `g` (6 × 9) at a point: the modes
     /// `1 - ξ²`, `1 - η²`, `1 - ζ²` with the derivatives taken through the Jacobian at
-    /// the centroid scaled by `det J0 / det J` (Taylor's modification, passes the patch
-    /// test).
-    fn fill_g(p: [f64; 3], inv0: &[[f64; 3]; 3], det0: f64, det: f64, g: &mut [f64]) {
+    /// the centroid. CalculiX does not scale them by `det J0 / det J` (Taylor's patch-test
+    /// fix): the oracle stiffness of a distorted element matches the unscaled form to 4e-6
+    /// and differs from the scaled one by 2e-3, so the scaling is left out.
+    fn fill_g(p: [f64; 3], inv0: &[[f64; 3]; 3], _det0: f64, _det: f64, g: &mut [f64]) {
         let dmodes = [
             [-2.0 * p[0], 0.0, 0.0],
             [0.0, -2.0 * p[1], 0.0],
             [0.0, 0.0, -2.0 * p[2]],
         ];
-        let scale = det0 / det;
         let mut dndx = [[0.0; 3]; 3];
         for (m, d) in dmodes.iter().enumerate() {
             for c in 0..3 {
-                dndx[m][c] = scale * (d[0] * inv0[c][0] + d[1] * inv0[c][1] + d[2] * inv0[c][2]);
+                dndx[m][c] = d[0] * inv0[c][0] + d[1] * inv0[c][1] + d[2] * inv0[c][2];
             }
         }
         Self::fill_b(&dndx, g);
@@ -344,7 +427,24 @@ impl SolidElement {
     /// Stiffness matrix (row-major `3n × 3n`) for the material matrix `d` (6 × 6, acting
     /// on engineering strains).
     pub fn stiffness(&self, coords: &[[f64; 3]], d: &[[f64; 6]; 6], out: &mut Vec<f64>) {
-        let ndof = self.dof_count();
+        if let Some(x) = &self.expansion {
+            let mut k3 = Vec::new();
+            self.stiffness_3d(&x.coordinates(coords), d, &mut k3);
+            let n = self.dof_count();
+            out.clear();
+            out.resize(n * n, 0.0);
+            x.condense_matrix(&k3, out);
+            return;
+        }
+        self.stiffness_3d(coords, d, out);
+    }
+
+    fn dof_count_3d(&self) -> usize {
+        3 * self.family.node_count()
+    }
+
+    fn stiffness_3d(&self, coords: &[[f64; 3]], d: &[[f64; 6]; 6], out: &mut Vec<f64>) {
+        let ndof = self.dof_count_3d();
         out.clear();
         out.resize(ndof * ndof, 0.0);
         let mut b = vec![0.0; 6 * ndof];
@@ -366,10 +466,9 @@ impl SolidElement {
     /// C3D8R as the uniform-strain hexahedron of Flanagan and Belytschko (1981): the
     /// stiffness of the mean strain-displacement matrix over the element volume (the
     /// 2×2×2 average of B) plus the orthogonal hourglass control with the stiffness
-    /// CalculiX uses, which was identified from its output on rectangular elements:
-    /// `ε = 0.004 E V Σ_j b_j·b_j` per hourglass mode (independent of Poisson's ratio), so
-    /// that `K_hg = ε/8 Σ_α γ_α γ_αᵀ ⊗ I`. For distorted elements CalculiX's hourglass
-    /// vectors differ slightly from the orthogonalised `γ_α` (about 0.1 % of the stiffness).
+    /// CalculiX uses, which was identified from its output: `ε = 0.004 E V Σ_j b_j·b_j`
+    /// per hourglass mode (independent of Poisson's ratio), so that
+    /// `K_hg = ε/8 Σ_α γ_α γ_αᵀ ⊗ I`, with CalculiX's hourglass vectors (see below).
     fn stiffness_reduced(
         &self,
         coords: &[[f64; 3]],
@@ -377,25 +476,8 @@ impl SolidElement {
         out: &mut [f64],
         b: &mut [f64],
     ) {
-        let ndof = self.dof_count();
-        let full = IntegrationRule::hex(2);
-        let mut volume = 0.0;
-        let mut mean = vec![[0.0; 3]; 8];
-        for (&p, &w) in full.points.iter().zip(&full.weights) {
-            let point = self.point(p, coords);
-            let f = point.det * w;
-            volume += f;
-            for (m, g) in mean.iter_mut().zip(&point.dndx) {
-                for c in 0..3 {
-                    m[c] += f * g[c];
-                }
-            }
-        }
-        for m in mean.iter_mut() {
-            for c in m.iter_mut() {
-                *c /= volume;
-            }
-        }
+        let ndof = self.dof_count_3d();
+        let (volume, mean) = self.mean_gradients(coords);
         Self::fill_b(&mean, b);
         accumulate_btdb(b, d, ndof, volume, out);
 
@@ -415,9 +497,15 @@ impl SolidElement {
             [-1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0],
         ];
         for h in &H {
-            // γ = h − Σ_j (h·x_j) b_j, orthogonal to the linear displacement fields.
+            // Flanagan-Belytschko: γ = h − Σ_j (h·x_j) b_j, orthogonal to the linear
+            // displacement fields. CalculiX subtracts the term of the global z coordinate
+            // only (j = 3), which was identified from its stiffness matrices of distorted and
+            // rotated single elements (fit to the six digits of its output; with all three
+            // terms the hourglass stiffness differs by percent on such elements). Linear
+            // fields in x and y therefore excite its hourglass control slightly; the same
+            // is done here, so that the results match.
             let mut gamma = *h;
-            for j in 0..3 {
+            for j in 2..3 {
                 let hx: f64 = (0..8).map(|a| h[a] * coords[a][j]).sum();
                 for a in 0..8 {
                     gamma[a] -= hx * mean[a][j];
@@ -434,6 +522,31 @@ impl SolidElement {
         }
     }
 
+    /// Volume and volume-averaged Cartesian shape function derivatives (the uniform-strain
+    /// `B` of Flanagan and Belytschko), integrated with 2×2×2 points (exact for the
+    /// trilinear hexahedron).
+    fn mean_gradients(&self, coords: &[[f64; 3]]) -> (f64, Vec<[f64; 3]>) {
+        let full = IntegrationRule::hex(2);
+        let mut volume = 0.0;
+        let mut mean = vec![[0.0; 3]; 8];
+        for (&p, &w) in full.points.iter().zip(&full.weights) {
+            let point = self.point(p, coords);
+            let f = point.det * w;
+            volume += f;
+            for (m, g) in mean.iter_mut().zip(&point.dndx) {
+                for c in 0..3 {
+                    m[c] += f * g[c];
+                }
+            }
+        }
+        for m in mean.iter_mut() {
+            for c in m.iter_mut() {
+                *c /= volume;
+            }
+        }
+        (volume, mean)
+    }
+
     /// Condensation data of the incompatible modes: `K_aa^-1 K_au` (9 × 3n) so that the
     /// mode amplitudes are `α = -K_aa^-1 K_au u`.
     fn incompatible_coupling(
@@ -441,7 +554,7 @@ impl SolidElement {
         coords: &[[f64; 3]],
         d: &[[f64; 6]; 6],
     ) -> (Vec<f64>, [[f64; 3]; 3], f64) {
-        let ndof = self.dof_count();
+        let ndof = self.dof_count_3d();
         let mut b = vec![0.0; 6 * ndof];
         let mut g = vec![0.0; 6 * 9];
         let centre = self.point([0.0; 3], coords);
@@ -475,7 +588,7 @@ impl SolidElement {
         out: &mut [f64],
         b: &mut [f64],
     ) {
-        let ndof = self.dof_count();
+        let ndof = self.dof_count_3d();
         let (x, inv0, det0) = self.incompatible_coupling(coords, d);
         let mut g = vec![0.0; 6 * 9];
         let mut kau = vec![0.0; 9 * ndof];
@@ -501,8 +614,24 @@ impl SolidElement {
 
     /// Engineering strains at the integration points for nodal displacements `u`.
     pub fn strains(&self, coords: &[[f64; 3]], d: &[[f64; 6]; 6], u: &[f64]) -> Vec<[f64; 6]> {
-        let ndof = self.dof_count();
+        if let Some(x) = &self.expansion {
+            return self.strains_3d(&x.coordinates(coords), d, &x.expand(u));
+        }
+        self.strains_3d(coords, d, u)
+    }
+
+    fn strains_3d(&self, coords: &[[f64; 3]], d: &[[f64; 6]; 6], u: &[f64]) -> Vec<[f64; 6]> {
+        let ndof = self.dof_count_3d();
         let mut b = vec![0.0; 6 * ndof];
+        if self.formulation == Formulation::Reduced {
+            // The uniform strain of the element (CalculiX's stress at the one point follows it,
+            // which differs from B at the centre for hexahedra that are no parallelepipeds).
+            let (_, mean) = self.mean_gradients(coords);
+            Self::fill_b(&mean, &mut b);
+            let e: [f64; 6] =
+                std::array::from_fn(|r| (0..ndof).map(|c| b[r * ndof + c] * u[c]).sum());
+            return vec![e];
+        }
         let incompatible = (self.formulation == Formulation::Incompatible).then(|| {
             let (x, inv0, det0) = self.incompatible_coupling(coords, d);
             let mut alpha = [0.0; 9];
@@ -535,9 +664,31 @@ impl SolidElement {
 
     /// Internal nodal forces `∫ Bᵀ σ dV` for stresses at the integration points.
     pub fn internal_force(&self, coords: &[[f64; 3]], stresses: &[[f64; 6]], out: &mut [f64]) {
-        let ndof = self.dof_count();
+        if let Some(x) = &self.expansion {
+            let mut f3 = vec![0.0; self.dof_count_3d()];
+            self.internal_force_3d(&x.coordinates(coords), stresses, &mut f3);
+            out.iter_mut().for_each(|v| *v = 0.0);
+            x.condense_vector(&f3, out);
+            return;
+        }
+        self.internal_force_3d(coords, stresses, out);
+    }
+
+    fn internal_force_3d(&self, coords: &[[f64; 3]], stresses: &[[f64; 6]], out: &mut [f64]) {
+        let ndof = self.dof_count_3d();
         out.iter_mut().for_each(|v| *v = 0.0);
         let mut b = vec![0.0; 6 * ndof];
+        if self.formulation == Formulation::Reduced {
+            let (volume, mean) = self.mean_gradients(coords);
+            Self::fill_b(&mean, &mut b);
+            for (c, o) in out.iter_mut().enumerate() {
+                *o = volume
+                    * (0..6)
+                        .map(|r| b[r * ndof + c] * stresses[0][r])
+                        .sum::<f64>();
+            }
+            return;
+        }
         for ((&p, &w), s) in self
             .rule
             .points
@@ -556,7 +707,18 @@ impl SolidElement {
 
     /// Equivalent nodal forces of a pressure on face `face` (1-based CalculiX number),
     /// positive into the element, added to `out` (3 per node of the element).
+    /// For plane and axisymmetric elements `face` is the edge (P1..P4 of the input).
     pub fn face_load(&self, coords: &[[f64; 3]], face: u8, pressure: f64, out: &mut [f64]) {
+        if let Some(x) = &self.expansion {
+            let mut f3 = vec![0.0; self.dof_count_3d()];
+            self.face_load_3d(&x.coordinates(coords), x.face(face), pressure, &mut f3);
+            x.condense_vector(&f3, out);
+            return;
+        }
+        self.face_load_3d(coords, face, pressure, out);
+    }
+
+    fn face_load_3d(&self, coords: &[[f64; 3]], face: u8, pressure: f64, out: &mut [f64]) {
         let faces = self.family.faces();
         let f = &faces[face as usize - 1];
         let quadratic = self.family.is_quadratic();
@@ -565,7 +727,7 @@ impl SolidElement {
         } else {
             f.corners.to_vec()
         };
-        let (points, weights) = face_rule(f.corners.len(), quadratic);
+        let (points, weights) = self.face_integration(f.corners.len(), quadratic);
         let mut n = vec![0.0; nodes.len()];
         let mut dn = vec![[0.0; 2]; nodes.len()];
         for (p, w) in points.iter().zip(weights) {
@@ -591,8 +753,41 @@ impl SolidElement {
         }
     }
 
+    /// The integration points of a face for pressure loads. CalculiX does not always take
+    /// the full rule on quadrilateral faces; found by comparing its displacements under
+    /// pressure on trapezoidal faces (where the rules differ; on parallelograms they agree):
+    /// one point at the centre for C3D6 and C3D8R, 2×2 for C3D8/C3D8I and also for C3D20R
+    /// and C3D15 (whose 8-node faces are thus integrated reduced), 3×3 for C3D20.
+    fn face_integration(&self, corners: usize, quadratic: bool) -> (Vec<[f64; 2]>, Vec<f64>) {
+        if corners == 4 {
+            let one_point =
+                self.family == Family::Wedge6 || self.formulation == Formulation::Reduced;
+            if one_point {
+                return (vec![[0.0, 0.0]], vec![4.0]);
+            }
+            let full = self.family == Family::Hex20 && self.rule.len() == 27;
+            return face_rule(4, quadratic && full);
+        }
+        face_rule(corners, quadratic)
+    }
+
     /// Equivalent nodal forces of a body force per unit volume `f(x)`, added to `out`.
     pub fn body_force(
+        &self,
+        coords: &[[f64; 3]],
+        f: impl Fn([f64; 3]) -> [f64; 3],
+        out: &mut [f64],
+    ) {
+        if let Some(x) = &self.expansion {
+            let mut f3 = vec![0.0; self.dof_count_3d()];
+            self.body_force_3d(&x.coordinates(coords), f, &mut f3);
+            x.condense_vector(&f3, out);
+            return;
+        }
+        self.body_force_3d(coords, f, out);
+    }
+
+    fn body_force_3d(
         &self,
         coords: &[[f64; 3]],
         f: impl Fn([f64; 3]) -> [f64; 3],
@@ -618,6 +813,14 @@ impl SolidElement {
 
     /// Coordinates of the integration points.
     pub fn integration_point_coordinates(&self, coords: &[[f64; 3]]) -> Vec<[f64; 3]> {
+        let expanded;
+        let coords = match &self.expansion {
+            Some(x) => {
+                expanded = x.coordinates(coords);
+                &expanded[..]
+            }
+            None => coords,
+        };
         self.rule
             .points
             .iter()
@@ -810,8 +1013,11 @@ mod tests {
                     );
                 }
             }
-            // Translation and small rotation give no forces.
-            let modes: Vec<Vec<f64>> = (0..6)
+            // Translation and small rotation give no forces (on distorted C3D8R elements
+            // only translation: CalculiX's hourglass vectors, which the solver follows, are
+            // not orthogonal to linear fields in x and y).
+            let mode_count = if kind == ElementType::C3D8R { 3 } else { 6 };
+            let modes: Vec<Vec<f64>> = (0..mode_count)
                 .map(|m| {
                     (0..e.node_count())
                         .flat_map(|a| {
@@ -837,7 +1043,12 @@ mod tests {
                     );
                 }
             }
-            // A uniform strain field gives uniform strains at the integration points.
+            // A uniform strain field gives uniform strains at the integration points. Not for
+            // C3D8I: without Taylor's det J0 / det J scaling (CalculiX leaves it out) the
+            // incompatible modes pick up part of a uniform strain in a distorted element.
+            if kind == ElementType::C3D8I {
+                continue;
+            }
             let u: Vec<f64> = coords
                 .iter()
                 .flat_map(|x| {

@@ -307,9 +307,8 @@ und sind in `plxs-elements/src/solid.rs` bzw. `plxs-procedures/src/fields.rs` do
 - **Knotenspannungen** sind der ungewichtete Mittelwert der je Element extrapolierten Werte.
 - **C3D8R**: ccx = Uniform-Strain-Element (mittlere B-Matrix, exaktes Volumen) plus
   Flanagan-Belytschko-Hourglass-Steifigkeit mit `ε = 0.004·E·V·Σ_j b_j·b_j` je Mode (unabhängig
-  von ν; für Quader auf 1e-6 bestätigt, Fixture `elementtyp-c3d8r` grün). Bei verzerrten
-  Elementen nutzt ccx leicht andere Hourglass-Vektoren (~0,1 % der Steifigkeit, nicht
-  identifiziert); plxs nimmt die orthogonalisierten γ-Vektoren nach Flanagan-Belytschko.
+  von ν; für Quader auf 1e-6 bestätigt, Fixture `elementtyp-c3d8r` grün). Die
+  Hourglass-Vektoren bei verzerrten Elementen hat M2 T4 identifiziert (siehe dort).
 - **ERROR (STR(%))**: ccx schreibt das Feld immer, wenn `S` angefordert ist und `NOE` fehlt.
   Der Wert ist je Element konstant und an den Knoten das Maximum der Nachbarelemente, folgt
   aber **nicht** der Handbuchbeschreibung (Spannweite der ersten Hauptspannung an den
@@ -332,6 +331,47 @@ Verschiebungen stimmen auf 2e-6 überein. Die Faktorisierung dominiert: AMD erze
 3D-Block 444 Mio. Einträge in L (natürliche Ordnung 864 Mio.); ein Nested-Dissection-Ordering
 (Minimum-Fill für 3D-Gitter typisch 3–5× weniger) ist der Hebel für M4, nicht die
 Assemblierung. Die Messlatte des Konzepts (ccx/PaStiX 8,7 s) stammt von anderer Hardware.
+
+## Stand nach M2 T4 (2D-Elemente, restliche Volumenelemente)
+
+- **2D-Elemente** (`plxs-elements/src/plane.rs`): CPS/CPE/CAX 3, 4, 4R, 6, 8, 8R werden wie
+  in ccx in eine Lage Volumenelemente expandiert (3→C3D6, 4→C3D8, 4R→C3D8R, 6→C3D15,
+  8→C3D20, 8R→C3D20R). Eben: Knoten bei z = ±t/2 (t aus `*SOLID SECTION`, Standard 1), bei
+  quadratischen Elementen zusätzlich Mittelebenenknoten auf den senkrechten Kanten.
+  CAX: Drehung um ±1° um die y-Achse (x = r cos φ, z = r sin φ), Steifigkeit, Lasten und
+  Volumen ×180 (voller Umfang; CLOAD gilt für den vollen Umfang). Der expandierte
+  Freiheitsgrad wird über `Expansion::dof_map` auf die 2D-Knoten kondensiert (Tᵀ K T);
+  Scheibe: der dritte DOF des 2D-Knotens trägt die Dickenänderung (w oben = −w unten),
+  Platte (CPE) und CAX: w = 0. `SolidElement` mit Expansion hat dieselbe öffentliche API wie
+  ein Volumenelement; `plane(kind, dicke)` baut es.
+- **Ausgabe**: die `.frd` schreibt die 2D-Elemente unexpandiert (frd-Typen 7/8/9/10).
+  Berichtete Knotenwerte (Orakel-Anpassung, exakt bis zur Rundung): Verschiebungen,
+  Spannungen und Dehnungen = Dickenmittel der rohen kartesischen Werte der expandierten
+  Knoten, Simpson (unten + 4·Mitte + oben)/6 wo ein Mittelknoten existiert, sonst
+  Mittelwert; FORC = Summe der rohen kartesischen Kräfte der expandierten Knoten (×180 bei
+  CAX). `ElementTable::reported(model, u, f)` rechnet die Vektoren für `fields`/`history` um.
+- **Unbenutzte DOFs** (`DofMap::unused`): Knoten ohne Element und der dritte DOF von CPE-
+  und CAX-Knoten werden auf null gehalten, auch wenn eine Randbedingung sie nennt.
+- **C3D8R**: Spannung/Dehnung aus der mittleren B-Matrix (wie die Steifigkeit), nicht aus
+  B(0). Hourglass `K = ε/8 Σ γγᵀ ⊗ I` mit `γ = h − (h·z)·b_z`: ccx korrigiert die
+  Hourglass-Basis nur mit der globalen z-Komponente (auf verzerrten und gedrehten Elementen
+  auf 1e-6 bestätigt). Ein verzerrtes C3D8R ist deshalb in x/y nicht rotationsfrei; der
+  Unit-Test prüft dort nur Translationen.
+- **C3D8I**: Inkompatible Moden mit der Zentrums-Jacobimatrix, aber **ohne** Taylors
+  Skalierung det J0 / det J (Steifigkeit eines verzerrten Elements trifft ccx damit auf 1e-7,
+  mit Skalierung lag sie 2e-3 daneben). Das Element besteht den Patch-Test auf verzerrten
+  Netzen deshalb nicht exakt, genau wie ccx. Betrifft auch die Schalenexpansion (S4 → C3D8I).
+- **Flächenlasten**: Integrationsregel der Vierecksflächen wie ccx: 1 Punkt für C3D6 und
+  C3D8R, 2×2 für C3D8/C3D8I, C3D20R und C3D15, 3×3 für C3D20.
+- **Knotenkoordinaten** in der `.frd` laufen durch f32 (ccx schreibt einfache Genauigkeit).
+- **Einzelelement-Orakel** (verzerrte Elemente, Steifigkeit über FORC = K·u, Spannungen bei
+  Zufallsverschiebung): C3D4, C3D6, C3D8, C3D8R, C3D8I, C3D20, C3D20R und alle 2D-Typen
+  ≤ 2e-6; C3D10 und C3D15 Spannungen ~6e-6 der Feldgröße (Rauschen der ccx-Extrapolation an
+  den Eckknoten). Deshalb vergleicht `plxs-verify` seit T4 relativ zur Feldnorm
+  (`FIXTURES.md`).
+- Fixtures `plane/ebene-{cps,cpe,cax}{3,4,4r,6,8,8r}` (Writer-Test
+  `calculix_runs_every_plane_element_type`, verzerrtes Netz, Druck und Einzellast),
+  Abnahmetest `solver/plxs-cli/tests/plane_corpus.rs`.
 
 ## Stand nach M2 T9 (Wärme, Wärmedehnung, Temperaturfelder)
 
@@ -396,8 +436,25 @@ Kein CalculiX-Quelltext wurde gelesen; alles aus Einzelelement-Orakeln mit ccx 2
   Steps melden den Fehler erst beim Assemblieren der Steifigkeit.
 - `*TEMPERATURE, FILE=` liest nur ASCII-`.frd`; C3D8I-Inkompatible-Moden fehlen in der
   thermischen Last.
-- Abnahmetest: `solver/plxs-cli/tests/heat_corpus.rs`; `heat/film-2d` braucht CPS8 (T4)
-  und ist bis dahin ausgenommen.
+- **CPS8, CPE8, CAX8 mit Temperaturfeld**: die Verschiebungen weichen um etwa 1 % ab (die
+  thermische Last nimmt wie bei C3D20 die reduzierte Integration; mit voller Integration ist
+  es nicht besser). Alle anderen 2D-Typen stimmen auf Rundung.
+- **CAX8R-Wärmefluss**: ccx schreibt eine dritte Komponente von etwa 1 % des Radialflusses
+  (Kartesisches im 2°-Segment); plxs schreibt 0. Temperaturen und RFL stimmen.
+- Abnahmetest: `solver/plxs-cli/tests/heat_corpus.rs` (alle `heat/*`, auch `film-2d` mit
+  CPS8).
+
+### 2D-Elemente in der Wärme (mit T4)
+
+Ebene und axialsymmetrische Elemente rechnen auf ihrer Expansion: Leitungs- und
+Kapazitätsmatrix, Körperwärme und Flächenpunkte im 3D-Element, die Temperatur ist auf allen
+Lagen eines 2D-Knotens gleich (`Expansion::scalar_map`), Matrizen und Lasten werden auf die
+2D-Knoten summiert (×180 bei CAX). Kanten `F<n>` sind die Flächen `n+2` der Expansion, mit
+denselben Integrationsregeln wie die Volumenelemente (CPS8 3×3 wie C3D20). ccx schreibt für
+Knoten von 2D-Elementen **RFL = 0** in die `.frd` (geprüft CPS4, CPS8, CPE4, CAX4); in der
+`.dat` steht der echte Wert. plxs macht beides so. Einzelelement-Orakel aller CPS/CPE/CAX-
+Typen (transient, Film, Körperwärme) stimmen auf ~1e-5, außer den 4R-Typen (C3D8R, in ccx
+singulär, s. o.).
 
 ## Stand nach M2 T10 (Lasten und Amplituden)
 

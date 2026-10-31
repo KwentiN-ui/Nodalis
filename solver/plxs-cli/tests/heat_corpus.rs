@@ -6,10 +6,6 @@ use std::path::Path;
 use plxs_verify::report::format_reports;
 use plxs_verify::{Outcome, corpus, fixtures_root, run_corpus};
 
-/// Fixtures that need an element another M2 task brings: `film-2d` is a CPS8 model (T4).
-/// They may fail until then; once they pass they stay in the check like all others.
-const PENDING: &[&str] = &["heat/film-2d"];
-
 #[test]
 fn heat_fixtures_match_calculix() {
     let fixtures = corpus(&fixtures_root()).expect("fixture corpus");
@@ -24,9 +20,6 @@ fn heat_fixtures_match_calculix() {
     eprintln!("{}", format_reports(&reports));
     assert!(!reports.is_empty());
     for report in &reports {
-        if PENDING.contains(&report.fixture.as_str()) {
-            continue;
-        }
         assert!(
             report.outcome.passed() || report.outcome == Outcome::NoReference,
             "{}: {:?}\n{}",

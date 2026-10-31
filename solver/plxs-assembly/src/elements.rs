@@ -6,8 +6,10 @@ use std::collections::HashMap;
 use plxs_core::section::SectionKind;
 use plxs_core::state::IntegrationPointField;
 use plxs_core::{Element, ElementFamily, ElementType, Error, Model, Result};
-use plxs_elements::{SolidElement, solid};
+use plxs_elements::{SolidElement, plane, solid};
 use plxs_materials::LinearElastic;
+
+use rayon::prelude::*;
 
 use crate::DofMap;
 
@@ -75,8 +77,13 @@ impl ElementTable {
     /// Resolves the elements of a model at a uniform reference temperature. Elements the
     /// solver cannot compute yet are an error naming the type.
     pub fn new(model: &Model, temperature: f64) -> Result<Self> {
-        let dofs = DofMap::new(model.nodes.len(), 3);
-        let mut formulation_index: HashMap<ElementType, u32> = HashMap::new();
+        let mut dofs = DofMap::new(model.nodes.len(), 3);
+        // Formulations per type and, for plane elements, thickness.
+        let mut formulation_index: HashMap<(ElementType, u64), u32> = HashMap::new();
+        // Per node: whether some element uses its third DOF, whether it is internal.
+        let mut uses_z = vec![false; model.nodes.len()];
+        let mut connected = vec![false; model.nodes.len()];
+
         let mut formulations = Vec::new();
         let mut material_index: HashMap<u32, u32> = HashMap::new();
         let mut materials = Vec::new();
@@ -85,16 +92,39 @@ impl ElementTable {
         let mut offsets = Vec::with_capacity(model.elements.len() + 1);
         offsets.push(0u32);
         for element in &model.elements {
-            if element.kind.family() != ElementFamily::Solid {
+            let family = element.kind.family();
+            let is_plane = matches!(
+                family,
+                ElementFamily::PlaneStress
+                    | ElementFamily::PlaneStrain
+                    | ElementFamily::Axisymmetric
+            );
+            if family != ElementFamily::Solid && !is_plane {
                 return Err(Error::Unsupported(format!(
                     "element type {} is not implemented yet (element {})",
                     element.kind, element.id
                 )));
             }
-            let formulation = match formulation_index.get(&element.kind) {
+            let thickness = if is_plane {
+                element
+                    .section
+                    .and_then(|s| match &model.sections.get(s as usize)?.kind {
+                        SectionKind::Solid { thickness, .. } => *thickness,
+                        _ => None,
+                    })
+            } else {
+                None
+            };
+            let key = (element.kind, thickness.map_or(0, f64::to_bits));
+            let formulation = match formulation_index.get(&key) {
                 Some(&i) => i,
                 None => {
-                    let f = solid(element.kind).ok_or_else(|| {
+                    let made = if is_plane {
+                        plane(element.kind, thickness)
+                    } else {
+                        solid(element.kind)
+                    };
+                    let f = made.ok_or_else(|| {
                         Error::Unsupported(format!(
                             "element type {} is not implemented yet",
                             element.kind
@@ -102,7 +132,7 @@ impl ElementTable {
                     })?;
                     formulations.push(f);
                     let i = formulations.len() as u32 - 1;
-                    formulation_index.insert(element.kind, i);
+                    formulation_index.insert(key, i);
                     i
                 }
             };
@@ -141,6 +171,11 @@ impl ElementTable {
                 }
             };
             let nodes = Self::node_indices(model, element)?;
+            let f = &formulations[formulation as usize];
+            for &n in &nodes {
+                connected[n as usize] = true;
+                uses_z[n as usize] |= f.uses_out_of_plane();
+            }
             let dof_list = nodes
                 .iter()
                 .flat_map(|&n| (0..3).map(move |d| n * 3 + d as u32))
@@ -154,6 +189,16 @@ impl ElementTable {
                 dofs: dof_list,
                 density,
             });
+        }
+        // DOFs no element works on are held at zero: nodes outside every element, and the
+        // out-of-plane DOF of nodes that only plane strain or axisymmetric elements use.
+        for n in 0..model.nodes.len() {
+            let base = n as u32 * 3;
+            if !connected[n] {
+                dofs.unused.extend([base, base + 1, base + 2]);
+            } else if !uses_z[n] {
+                dofs.unused.push(base + 2);
+            }
         }
         Ok(Self {
             entries,
@@ -201,6 +246,41 @@ impl ElementTable {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Displacements and nodal forces as they are reported (`.frd`, `.dat`): what the
+    /// solver computes, except at the nodes of plane and axisymmetric elements, which report
+    /// the thickness average of their expanded nodes' displacements and the sum of their
+    /// forces, as CalculiX does (see `plxs_elements::plane`). The internal out-of-plane
+    /// unknown of plane stress nodes is no displacement and reported as zero.
+    pub fn reported(&self, model: &Model, u: &[f64], forces: &[f64]) -> (Vec<f64>, Vec<f64>) {
+        let mut u_out = u.to_vec();
+        let mut f_out = forces.to_vec();
+        if self.formulations.iter().all(|f| f.expansion().is_none()) {
+            return (u_out, f_out);
+        }
+        let reported: Vec<Option<plxs_elements::ReportedNodal>> = self
+            .entries
+            .par_iter()
+            .map(|entry| {
+                let f = self.formulation(entry);
+                f.expansion()?;
+                let coords = self.coordinates(model, entry);
+                f.reported_nodal(&coords, self.material_matrix(entry), &self.gather(entry, u))
+            })
+            .collect();
+        // Plane nodes: swap the element's share of the solver's forces for the reported one.
+        for (entry, r) in self.entries.iter().zip(&reported) {
+            let Some(r) = r else { continue };
+            for a in 0..entry.nodes.len() {
+                for k in 0..3 {
+                    let dof = entry.dofs[3 * a + k] as usize;
+                    u_out[dof] = r.displacements[a][k];
+                    f_out[dof] += r.forces[a][k] - r.condensed[3 * a + k];
+                }
+            }
+        }
+        (u_out, f_out)
     }
 
     pub fn is_empty(&self) -> bool {

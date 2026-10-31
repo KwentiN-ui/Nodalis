@@ -309,21 +309,37 @@ impl<'a> ThermalStrains<'a> {
     }
 
     /// The equivalent nodal forces `∫ Bᵀ D ε_th dV` (3 per node, global DOFs) for nodal
-    /// temperatures `t`. C3D20 integrates them with 2×2×2 points like C3D20R (its stiffness
-    /// uses 27): that is what CalculiX' reactions to a prescribed temperature show.
+    /// temperatures `t`. C3D20 (and CPS8, CPE8, CAX8, which expand into it) integrates them
+    /// with 2×2×2 points like C3D20R (its stiffness uses 27): that is what CalculiX'
+    /// reactions to a prescribed temperature show.
     pub fn load(&self, t: &[f64]) -> Vec<f64> {
-        let reduced20 = plxs_elements::solid(plxs_core::ElementType::C3D20R);
+        // The reduced twin of each fully integrated 20-node formulation (C3D20 and the
+        // expansions of CPS8, CPE8, CAX8), built once per formulation.
+        let reduced20: Vec<Option<SolidElement>> = self
+            .table
+            .formulations
+            .iter()
+            .map(|f| {
+                use plxs_core::ElementType::*;
+                let thickness = f.expansion().map(|x| x.thickness);
+                match f.kind {
+                    C3D20 => plxs_elements::solid(C3D20R),
+                    CPS8 => plxs_elements::plane(CPS8R, thickness),
+                    CPE8 => plxs_elements::plane(CPE8R, thickness),
+                    CAX8 => plxs_elements::plane(CAX8R, thickness),
+                    _ => None,
+                }
+            })
+            .collect();
         let contributions: Vec<Vec<f64>> = self
             .table
             .entries
             .par_iter()
             .enumerate()
             .map(|(index, entry)| {
-                let own = self.table.formulation(entry);
-                let formulation = match (&reduced20, own.kind) {
-                    (Some(r), plxs_core::ElementType::C3D20) => r,
-                    _ => own,
-                };
+                let formulation = reduced20[entry.formulation as usize]
+                    .as_ref()
+                    .unwrap_or_else(|| self.table.formulation(entry));
                 let (te, t0e) = self.element_temperatures(&entry.nodes, t);
                 let d = self.table.material_matrix(entry);
                 let sigma: Vec<[f64; 6]> = self
