@@ -1,6 +1,6 @@
 //! Procedures of the PrePoLix solver: what a step computes. M1: linear static analysis
-//! (`*STATIC` without `NLGEOM`). Nonlinear, eigenvalue, dynamic and thermal procedures
-//! follow in M2/M3 (concept section 4.5).
+//! (`*STATIC` without `NLGEOM`); M2 T7: `*FREQUENCY` and `*BUCKLE` ([`eigen`]). Nonlinear,
+//! dynamic and thermal procedures follow in M2/M3 (concept section 4.5).
 //!
 //! A procedure works on a [`ProcedureContext`]: the model, its element table, the assembled
 //! stiffness matrix and solver, the state it starts from, and the results it appends to.
@@ -9,6 +9,7 @@
 //!
 //! No CalculiX code was consulted.
 
+pub mod eigen;
 pub mod fields;
 pub mod history;
 pub mod static_linear;
@@ -67,6 +68,8 @@ pub fn run_step(
         ProcedureKind::Static(_) if !step.nlgeom => {
             static_linear::StaticLinear.run(ctx, step, progress)
         }
+        ProcedureKind::Frequency(_) => eigen::FrequencyProcedure.run(ctx, step, progress),
+        ProcedureKind::Buckle(_) => eigen::BuckleProcedure.run(ctx, step, progress),
         other => Err(Error::Unsupported(format!(
             "procedure not implemented yet: {}{} (step {})",
             other.keyword(),

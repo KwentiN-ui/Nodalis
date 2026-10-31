@@ -169,7 +169,7 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `eigen/beulform` | A | M2 | ccx 2.21 | C3D20R, \*BUCKLE |
 | `eigen/deaktiviert` | A | M2 | ccx 2.21 | C3D20R, \*FREQUENCY |
 | `eigen/eigenfrequenz` | A | M2 | ccx 2.21 | C3D20R, \*STATIC, \*FREQUENCY |
-| `eigen/vorspannung-beulen` | A | M2 | ccx 2.21 | C3D20R, \*STATIC, \*BUCKLE |
+| `eigen/vorspannung-beulen` | B | M2 | ccx 2.21 | C3D20R, \*STATIC, \*BUCKLE |
 | `heat/amplitude_temperature` | A | M2 | ccx 2.21 | C3D8, \*EXPANSION, \*CONDUCTIVITY, \*SPECIFIC HEAT, \*AMPLITUDE, \*HEAT TRANSFER, \*CFLUX |
 | `heat/amplitudes_thermal` | B | M2 | ccx 2.21 | C3D8, \*PHYSICAL CONSTANTS, \*EXPANSION, \*CONDUCTIVITY, \*SPECIFIC HEAT, \*AMPLITUDE, \*HEAT TRANSFER, \*CFLUX, \*DFLUX, \*FILM, \*RADIATE |
 | `heat/film-2d` | A | M2 | ccx 2.21 | CPS8, \*CONDUCTIVITY, \*HEAT TRANSFER, \*CFLUX, \*FILM |

@@ -104,7 +104,7 @@ pub fn run_fixture(solver: &Path, fixture: &Fixture, work: &Path) -> Report {
     let mut comparison: Comparison = compare_frd(&reference.frd, &results.frd, class);
     match (&reference.dat, &results.dat) {
         (Some(r), Some(c)) => {
-            let dat = compare_dat(r, c, class);
+            let dat = compare_dat(r, c, class, &comparison.unmatched_modes);
             comparison.failures.extend(dat.failures);
             comparison.max_relative = comparison.max_relative.max(dat.max_relative);
             comparison.compared += dat.compared;

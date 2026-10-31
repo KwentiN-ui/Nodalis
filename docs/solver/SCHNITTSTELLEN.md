@@ -333,6 +333,75 @@ Verschiebungen stimmen auf 2e-6 überein. Die Faktorisierung dominiert: AMD erze
 (Minimum-Fill für 3D-Gitter typisch 3–5× weniger) ist der Hebel für M4, nicht die
 Assemblierung. Die Messlatte des Konzepts (ccx/PaStiX 8,7 s) stammt von anderer Hardware.
 
+## Stand nach M2 T7 (Eigenwerte und Buckling)
+
+Was T7 gebaut hat (`*FREQUENCY`, `*BUCKLE`, beide auch mit `PERTURBATION`):
+
+- `plxs-linalg`: `ShiftInvertLanczos` (`eigen.rs`) implementiert `EigenSolver` auf faer:
+  Shift-Invert-Lanczos mit voller Reorthogonalisierung (DGKS), dickem Restart und **Locking**
+  konvergierter Vektoren mit frischem Startvektor (so werden exakt entartete Eigenwerte wie die
+  beiden Biegemoden eines quadratischen Stabs alle gefunden); Sturm-Check über die Trägheit
+  der LDLᵀ-Faktorisierung (`LdltSolver::inertia`, negative Pivots). `LdltSolver` kennt jetzt
+  eine dynamische Regularisierung winziger Pivots (`set_regularization`), weil faer ohne
+  Bunch-Kaufman-Pivotisierung bei indefinitem `K − σM` an exakten Nullpivots scheitert;
+  Shifts dicht an einem Eigenwert bleiben zu vermeiden. `SparseMatrix::add_scaled` und
+  `linear_combination` für `K − σM` auf gleichem Muster.
+- `plxs-elements`: `SolidElement::mass` (konsistent, mit der **Integrationsregel des
+  Elements selbst**: C3D20R mit 2×2×2, nicht voll – nur so stimmen die ccx-Eigenwerte auf
+  7 Stellen), `geometric_stiffness` (Anfangsspannungsmatrix aus IP-Spannungen),
+  `initial_displacement_stiffness` und `linearized_strains` (total-lagrangesch, Bathe 6.3.4,
+  `B_L = B_0 + B_1(u)`); neue Regeln `tet14`, `wedge18` für Massenmatrizen von C3D10/C3D15.
+- `plxs-assembly`: `assemble_mass` (Fehler ohne `*DENSITY`), `assemble_geometric_stiffness`,
+  `assemble_tangent_stiffness` (`K + K_u(u) + K_σ(σ)`).
+- `plxs-procedures`: `eigen::FrequencyProcedure` (Shift 0 bzw. `(2π·untere Grenze)²`,
+  negative Ersatzshifts bei singulärem `K`, obere Grenze als Filter, Massennormierung,
+  Partizipationsfaktoren `Γ = φᵀ M r` für sechs Starrkörperbewegungen um den globalen
+  Ursprung auf den **freien** DOFs, effektive Modalmasse `Γ²`, STORAGE → `state.stored_modes`)
+  und `eigen::BuckleProcedure` (statische Referenzlösung als Inkrement 0, `K_σ` der
+  Beullast, `(K + λK_σ)φ = 0` über den Operator `K⁻¹K_σ` im `K`-Skalarprodukt, kleinstes
+  positives λ). `fields::build_fields` und `history::write_table` sind herausgelöst, damit
+  Prozeduren ihre Felder und `.dat`-Tabellen selbst zusammensetzen.
+- `plxs-output`: Eigenwerttabellen der `.dat` (`EigenTable`, Überschriften und Spalten wie
+  ccx, TOTAL-Zeile) als `HistoryBlock`s mit leerem `set`; `.frd` mit Lastfallnummern,
+  Modalkopfzeilen (`1PGM`/`1PGK`/`1PHID`/`1PSUBC`/`1PMODE`) und Analysetext `MODAL`.
+- `plxs-cli` schreibt `<job>.eig` (postcard von `StoredModes`), wenn ein Step STORAGE=YES
+  verlangt; `plxs-verify` vergleicht Moden als Unterräume (Vorzeichen, entartete Paare,
+  Partizipationsfaktoren invariant, siehe `compare.rs`).
+- Abnahmetest `solver/plxs-cli/tests/eigen_corpus.rs`: alle `eigen/*`-Fixtures grün.
+
+### Was von CalculiX nur durch Beobachtung bekannt ist (T7)
+
+Aus ccx-2.21-Läufen (Fixtures und Orakel-Decks mit variierter Vorlast und rechteckigem
+Querschnitt) abgelesen, kein Quelltext:
+
+- **Lastfallnummern** der `.frd`: 100 + eine je Step (statische Inkremente teilen sich die
+  Nummer ihres Steps); Frequenzmode k → Step-Nummer + k − 1; Beulen: Referenzlösung →
+  Step-Nummer, Mode k → Step-Nummer + k. Wertspalte mit 10 signifikanten Stellen.
+- **Massenmatrix** mit der Integrationsregel des Elements (reduziert für C3D20R).
+- **Beulmoden** sind auf Einheits-Formänderungsenergie normiert: `φᵀ K φ = 1` mit der
+  Referenzsteifigkeit (Euklid-Norm der ccx-Moden exakt `1/√(φᵀKφ)` der unnormierten).
+- **Perturbation**: `K_ref = K + K_u(u_pre) + K_σ(σ_pre)` (beide Terme nötig: die
+  Eigenfrequenzen von `eigenfrequenz` stimmen nur so auf 7 Stellen). Beim Beulen mit Vorlast
+  wird die Beullast statisch mit `K_ref` gelöst (Verschiebungen auf 6 Stellen gleich), die
+  Spannung der Beullast ist das **linearisierte Inkrement** `σ_b = D B_L(u_pre) u_b`
+  (mit `B_0 u_b` liegt der Beulwert bei Vorlast 0,8 % daneben, so auf 7 Stellen: fünf
+  Orakel-Fälle mit axialer, seitlicher und Zug-Vorlast). Die Spannungen und Dehnungen der
+  Referenzlösung und der Moden eines perturbierten `*FREQUENCY` sind ebenfalls
+  `D B_L(u_pre) φ`; die **Beulformen** dagegen bekommen die linearen Dehnungen `B_0 φ`
+  (mit `B_L` wären Schubspannungen um ein Viertel falsch). Ein Restterm bis 1e-3 an den
+  Lastknoten des freien Endes ist nicht identifiziert (Fixture `vorspannung-beulen` deshalb
+  Klasse B; Eigenwerte, Referenzlösung und Modenformen stimmen auf 1e-5).
+- **FORC** von Referenzlösung und Moden ist die innere Kraft `∫ B_0ᵀ σ dV` (bei Vorlast nicht
+  der Lastvektor: die Anfangsspannungsmatrix der Vorlast fehlt darin, ccx-Werte an freien
+  Knoten entsprechend ungleich null).
+- **Lanczos-Genauigkeit**: der zweite Parameter von `*BUCKLE` (Writer: 1e-4) stoppt ccx bei
+  dicht liegenden Beulwerten bis 2e-5 vom Eigenwert entfernt; die Eigenvektoren von ccx sind
+  auf etwa 1e-5 konvergiert (Modenformen bekommen in `plxs-verify` zehnfache Toleranz). Der
+  Writer-Test `vorspannung-beulen` verlangt deshalb Genauigkeit 1e-10 und beide Moden des
+  fast entarteten Paars.
+- **Partizipationsfaktoren** werden mit den Starrkörperbewegungen um den globalen Ursprung auf
+  den freien DOFs gebildet (feste DOFs tragen nicht bei).
+
 ## Was M1 zu liefern hat (Abnahme)
 
 - `solver_check::run` aus `plx-app` besteht mit `plxs` als Executable (Kragbalken mit Kraft

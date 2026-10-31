@@ -29,6 +29,15 @@ pub fn write_dat_to(out: &mut impl Write, results: &Results) -> std::io::Result<
             writeln!(out, "                        S T E P {:>7}", block.step)?;
             writeln!(out)?;
         }
+        if let Some(table) = EigenTable::of(block) {
+            // The eigenvalue tables stand under the step heading without an increment.
+            if last.map(|(s, _)| s) != Some(block.step) {
+                writeln!(out)?;
+            }
+            last = Some((block.step, block.increment));
+            write_eigen_table(out, table, block)?;
+            continue;
+        }
         if last != Some((block.step, block.increment)) {
             writeln!(out)?;
             writeln!(
@@ -69,6 +78,105 @@ fn write_block(out: &mut impl Write, block: &HistoryBlock) -> std::io::Result<()
         }
         for v in values {
             write!(out, " {}", fortran_e13(*v))?;
+        }
+        writeln!(out)?;
+    }
+    Ok(())
+}
+
+/// The tables an eigenvalue step prints: [`HistoryBlock::quantity`] names them in
+/// CalculiX's spelling without the spacing, the set is empty, rows are keyed by mode (0
+/// for a total row). Written by `plxs-procedures::history`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EigenTable {
+    /// Rows `(mode, [eigenvalue, omega, frequency, imaginary part])`.
+    Eigenvalues,
+    /// Rows `(mode, [x, y, z, rx, ry, rz])`.
+    ParticipationFactors,
+    /// Rows `(mode, [..6])` and a row `(0, [..6])` with the totals.
+    EffectiveModalMass,
+    /// One row `(0, [..6])`.
+    TotalEffectiveMass,
+    /// Rows `(mode, [factor])`.
+    BucklingFactors,
+}
+
+impl EigenTable {
+    pub const EIGENVALUES: &'static str = "EIGENVALUE OUTPUT";
+    pub const PARTICIPATION: &'static str = "PARTICIPATION FACTORS";
+    pub const EFFECTIVE_MODAL_MASS: &'static str = "EFFECTIVE MODAL MASS";
+    pub const TOTAL_EFFECTIVE_MASS: &'static str = "TOTAL EFFECTIVE MASS";
+    pub const BUCKLING: &'static str = "BUCKLING FACTOR OUTPUT";
+
+    pub fn of(block: &HistoryBlock) -> Option<EigenTable> {
+        if !block.set.is_empty() {
+            return None;
+        }
+        Some(match block.quantity.as_str() {
+            Self::EIGENVALUES => EigenTable::Eigenvalues,
+            Self::PARTICIPATION => EigenTable::ParticipationFactors,
+            Self::EFFECTIVE_MODAL_MASS => EigenTable::EffectiveModalMass,
+            Self::TOTAL_EFFECTIVE_MASS => EigenTable::TotalEffectiveMass,
+            Self::BUCKLING => EigenTable::BucklingFactors,
+            _ => return None,
+        })
+    }
+
+    fn heading(self) -> &'static str {
+        match self {
+            EigenTable::Eigenvalues => "E I G E N V A L U E   O U T P U T",
+            EigenTable::ParticipationFactors => "P A R T I C I P A T I O N   F A C T O R S",
+            EigenTable::EffectiveModalMass => "E F F E C T I V E   M O D A L   M A S S",
+            EigenTable::TotalEffectiveMass => "T O T A L   E F F E C T I V E   M A S S",
+            EigenTable::BucklingFactors => "B U C K L I N G   F A C T O R   O U T P U T",
+        }
+    }
+}
+
+const RIGID_COLUMNS: &str = "MODE NO.   X-COMPONENT     Y-COMPONENT     Z-COMPONENT     X-ROTATION      Y-ROTATION      Z-ROTATION";
+
+fn write_eigen_table(
+    out: &mut impl Write,
+    table: EigenTable,
+    block: &HistoryBlock,
+) -> std::io::Result<()> {
+    writeln!(out)?;
+    writeln!(out, "     {}", table.heading())?;
+    writeln!(out)?;
+    match table {
+        EigenTable::Eigenvalues => {
+            writeln!(
+                out,
+                " MODE NO    EIGENVALUE                       FREQUENCY   "
+            )?;
+            writeln!(
+                out,
+                "                                     REAL PART            IMAGINARY PART"
+            )?;
+            writeln!(
+                out,
+                "                           (RAD/TIME)      (CYCLES/TIME     (RAD/TIME)"
+            )?;
+        }
+        EigenTable::BucklingFactors => {
+            writeln!(out, " MODE NO       BUCKLING")?;
+            writeln!(out, "                FACTOR")?;
+        }
+        _ => writeln!(out, "{RIGID_COLUMNS}")?,
+    }
+    writeln!(out)?;
+    for (id, values) in &block.rows {
+        if *id == 0 {
+            if table == EigenTable::EffectiveModalMass {
+                write!(out, "{:<7}", "TOTAL")?;
+            } else {
+                write!(out, "{:7}", "")?;
+            }
+        } else {
+            write!(out, "{id:>7}")?;
+        }
+        for v in values {
+            write!(out, "{:>16}", fortran_time(*v))?;
         }
         writeln!(out)?;
     }

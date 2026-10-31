@@ -124,20 +124,55 @@ pub fn write_frd_to(
     }
     writeln!(out, " -3")?;
 
-    let mut set = 0u32;
+    // Load case numbers as CalculiX counts them: one per step for time increments, one
+    // per mode of a frequency step (the first mode takes the step's number), the static
+    // reference solution of a buckle step takes the step's number and its modes count on.
+    let mut block = 0u32;
+    let mut case = 100u32;
+    let mut step_case = 100u32;
+    let mut last_step = 0u32;
     for increment in &results.increments {
+        if increment.step != last_step {
+            last_step = increment.step;
+            case += 1;
+            step_case = case;
+        }
+        let this_case = match increment.kind {
+            IncrementKind::Time => step_case,
+            IncrementKind::Buckling => step_case + increment.increment,
+            IncrementKind::Frequency | IncrementKind::ComplexFrequency => {
+                step_case + increment.increment.saturating_sub(1)
+            }
+        };
+        case = case.max(this_case);
         for field in &increment.fields {
-            set += 1;
-            write_block(out, set, increment, field, model.nodes.len())?;
+            block += 1;
+            write_block(out, block, this_case, increment, field, model.nodes.len())?;
         }
     }
     writeln!(out, " 9999")?;
     Ok(())
 }
 
+/// A number as CalculiX prints the generalized mass and stiffness of a mode: `2.747649E+07`.
+fn fortran_e12_6(value: f64) -> String {
+    if value == 0.0 || !value.is_finite() {
+        return "0.000000E+00".to_string();
+    }
+    let text = format!("{:.6E}", value.abs());
+    let (mantissa, exponent) = text.split_once('E').unwrap();
+    let exponent: i32 = exponent.parse().unwrap();
+    let sign = if value < 0.0 { "-" } else { "" };
+    let exp_sign = if exponent < 0 { "-" } else { "+" };
+    format!("{sign}{mantissa}E{exp_sign}{:02}", exponent.abs())
+}
+
+/// The value column of a block header: ten significant digits in twelve columns
+/// (`1.000000000`, `834.2587061`, `2051.835249`), exponent form outside that range.
 fn format_time(value: f64) -> String {
-    if (1e-3..10.0).contains(&value.abs()) {
-        format!("{value:>12.9}")
+    if (1e-3..1e10).contains(&value.abs()) {
+        let decimals = (9 - value.abs().log10().floor() as i32).clamp(0, 9) as usize;
+        format!("{value:>12.decimals$}")
     } else {
         fortran_e12(value)
     }
@@ -145,7 +180,8 @@ fn format_time(value: f64) -> String {
 
 fn write_block(
     out: &mut impl Write,
-    set: u32,
+    block: u32,
+    case: u32,
     increment: &ResultsIncrement,
     field: &ResultField,
     node_count: usize,
@@ -159,17 +195,47 @@ fn write_block(
     writeln!(
         out,
         "    1PSTEP{:>26}{:>12}{:>12}          ",
-        set, increment.increment, increment.step
+        block,
+        increment.increment.max(1),
+        increment.step
     )?;
+    if matches!(increment.kind, IncrementKind::Frequency) {
+        // Generalized mass and stiffness of the (mass normalized) mode, nodal diameter,
+        // subcase and mode number.
+        let omega = 2.0 * std::f64::consts::PI * increment.value;
+        let header = |key: &str, value: String| {
+            format!("{:<10}{:>26}{:30}", format!("    1P{key}"), value, "")
+        };
+        writeln!(out, "{}", header("GM", fortran_e12_6(1.0)))?;
+        writeln!(out, "{}", header("GK", fortran_e12_6(omega * omega)))?;
+        writeln!(
+            out,
+            "{}",
+            header(
+                "HID",
+                increment
+                    .nodal_diameter
+                    .map_or("-1".to_string(), |d| d.to_string())
+            )
+        )?;
+        writeln!(out, "{}", header("SUBC", "0".to_string()))?;
+        writeln!(out, "{}", header("MODE", increment.increment.to_string()))?;
+    }
+    let (analysis_name, trailer_width) = match increment.kind {
+        IncrementKind::Frequency => ("MODAL", 7),
+        _ => ("", 12),
+    };
     writeln!(
         out,
-        "  100CL{:>5}{}{:>12}{:>22}{:>5}{:>12}",
-        101,
+        "  100CL{:>5}{}{:>12}{:>22}{:>5}{}{:>width$}",
+        case,
         format_time(increment.value),
         node_count,
         analysis,
-        increment.increment,
-        1
+        case - 100,
+        analysis_name,
+        1,
+        width = trailer_width
     )?;
     let components = field.components.len();
     let (declared, trailer) = match field.name.as_str() {

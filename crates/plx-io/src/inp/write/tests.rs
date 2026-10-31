@@ -2330,6 +2330,12 @@ fn a_preloaded_buckle_step_counts_its_modes_from_one() {
         unreachable!()
     };
     settings.perturbation = true;
+    // The side load splits the degenerate pair of bending modes by 2e-4 only; with the
+    // default accuracy CalculiX's Lanczos iteration stops 2e-5 away from the buckling
+    // factor, too far for the solver fixture made from this test, and the shape of a
+    // single mode of the pair carries a trace of the other, so both are requested.
+    settings.accuracy = 1e-10;
+    settings.num_factors = 2;
     let Some(frd) = run_ccx("vorspannung-beulen", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
