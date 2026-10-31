@@ -131,12 +131,24 @@ struct Expander {
     helper_fixed: Vec<(NodeId, u8)>,
     /// Nodes of U1 beams and the helper node carrying their three rotations.
     u1_rotations: BTreeMap<NodeId, NodeId>,
+    /// Local axes of structural nodes in a `*TRANSFORM` (rows: local x, y, z).
+    local_axes: HashMap<NodeId, [[f64; 3]; 3]>,
+    /// Transformed DOFs already turned into equations.
+    local_done: HashSet<(NodeId, u8)>,
 }
 
 impl Expander {
     fn new(analysis: Analysis) -> Result<Self> {
         let model = &analysis.model;
-        let next_id = model.nodes.ids.iter().copied().max().unwrap_or(0) + 1;
+        // CalculiX numbers one new node per node of a `*TRANSFORM` before the expanded ones.
+        let transformed: HashSet<NodeId> = model
+            .constraints
+            .transforms
+            .iter()
+            .flat_map(|t| model.nodes_of(&NodeRef::Set(t.nset.clone())))
+            .collect();
+        let next_id =
+            model.nodes.ids.iter().copied().max().unwrap_or(0) + 1 + transformed.len() as u32;
         let mut structural = Vec::new();
         for (index, element) in model.elements.iter().enumerate() {
             if !expands(element.kind) {
@@ -270,6 +282,8 @@ impl Expander {
             mean_rotations: HashMap::new(),
             helper_fixed: Vec::new(),
             u1_rotations: BTreeMap::new(),
+            local_axes: HashMap::new(),
+            local_done: HashSet::new(),
         })
     }
 
@@ -280,6 +294,7 @@ impl Expander {
         self.replace_elements()?;
         self.drop_unused_nodes();
         self.u1_nodes()?;
+        self.transforms()?;
         let knot_nodes = self.knot_nodes();
         self.constraints(&knot_nodes);
         self.remap_steps(&original)?;
@@ -535,6 +550,110 @@ impl Expander {
         Ok(())
     }
 
+    /// `*TRANSFORM` on structural nodes: their boundary conditions and loads act in the
+    /// local axes, which the expansion turns into equations and mean rotations about the
+    /// local axes. The transform then leaves the model. Rectangular systems only.
+    fn transforms(&mut self) -> Result<()> {
+        let model = &mut self.analysis.model;
+        let mut kept = Vec::new();
+        for t in std::mem::take(&mut model.constraints.transforms) {
+            let nodes = model.nodes_of(&NodeRef::Set(t.nset.clone()));
+            let structural = nodes
+                .iter()
+                .filter(|n| self.groups.contains_key(n) || self.u1_rotations.contains_key(n))
+                .count();
+            if structural == 0 {
+                kept.push(t);
+                continue;
+            }
+            if structural != nodes.len() {
+                return Err(Error::Unsupported(format!(
+                    "*TRANSFORM on set {} mixes shell or beam nodes with others",
+                    t.nset
+                )));
+            }
+            if t.kind != plxs_core::constraints::TransformKind::Rectangular {
+                return Err(Error::Unsupported(
+                    "cylindrical *TRANSFORM on shell or beam nodes is not supported yet".into(),
+                ));
+            }
+            let x = normalize(t.a);
+            let z = normalize(cross(t.a, t.b));
+            let y = cross(z, x);
+            for n in nodes {
+                self.local_axes.insert(n, [x, y, z]);
+            }
+        }
+        model.constraints.transforms = kept;
+        Ok(())
+    }
+
+    /// `Σ dir_i u(node, i) = 0`, the largest coefficient first (the dependent DOF).
+    fn directional_equation(&mut self, node: NodeId, dir: [f64; 3]) {
+        let mut order = [0usize, 1, 2];
+        order.sort_by(|&a, &b| dir[b].abs().total_cmp(&dir[a].abs()));
+        let largest = dir[order[0]].abs();
+        let terms = order
+            .iter()
+            .filter(|&&i| dir[i].abs() > 1e-12 * largest)
+            .map(|&i| term(node, i as u8 + 1, dir[i]))
+            .collect();
+        self.equations.push(Equation { terms });
+    }
+
+    /// A boundary condition on a DOF of a transformed structural node: translations become
+    /// an equation on the node, rotations a mean rotation about the local axis (or an
+    /// equation on the knot's rotation node). Returns a boundary on a helper DOF, if any.
+    fn local_boundary(&mut self, node: NodeId, d: u8, b: &Boundary) -> Result<Option<Boundary>> {
+        let axes = self.local_axes[&node];
+        let prescribed = b.value.unwrap_or(0.0);
+        if d <= 3 {
+            if prescribed != 0.0 {
+                return Err(Error::Unsupported(
+                    "nonzero boundary values in a *TRANSFORM on shell or beam nodes".into(),
+                ));
+            }
+            if self.local_done.insert((node, d)) {
+                self.directional_equation(node, axes[d as usize - 1]);
+            }
+            return Ok(None);
+        }
+        let dir = axes[d as usize - 4];
+        let rotation_node = self
+            .knots
+            .get(&node)
+            .map(|k| k.0)
+            .or_else(|| self.u1_rotations.get(&node).copied());
+        if let Some(r) = rotation_node {
+            if prescribed != 0.0 {
+                return Err(Error::Unsupported(
+                    "nonzero boundary values in a *TRANSFORM on shell or beam nodes".into(),
+                ));
+            }
+            if self.local_done.insert((node, d)) {
+                self.directional_equation(r, dir);
+            }
+            return Ok(None);
+        }
+        let key = (node, 10 + (d as usize - 4));
+        let helper = match self.mean_rotations.get(&key) {
+            Some(&h) => Some(h),
+            None => {
+                let h = self.mean_rotation_about(node, dir);
+                if let Some(h) = h {
+                    self.mean_rotations.insert(key, h);
+                }
+                h
+            }
+        };
+        Ok(helper.map(|h| Boundary {
+            region: NodeRef::Node(h),
+            first_dof: 1,
+            last_dof: 1,
+            ..b.clone()
+        }))
+    }
+
     /// Nodes that become knots: several expansions meet, or all three rotations of a shell
     /// node are held in some step (CalculiX then uses an expandable rigid body instead of
     /// mean rotation constraints, which cannot hold the drilling rotation).
@@ -555,6 +674,11 @@ impl Expander {
                     match self.groups.get(&node) {
                         Some(g) if g.iter().all(|g| g.kind == Kind::Shell) => {}
                         _ => continue,
+                    }
+                    // In local axes ccx takes every held rotation as a mean rotation about
+                    // its axis (manual, "Applying the SPC's to the expanded structure").
+                    if self.local_axes.contains_key(&node) {
+                        continue;
                     }
                     let h = held.entry(node).or_default();
                     for d in b.first_dof.max(4)..=b.last_dof.min(6) {
@@ -809,7 +933,31 @@ impl Expander {
         let mut steps = std::mem::take(&mut self.analysis.steps);
         for step in &mut steps {
             let mut boundaries = Vec::new();
+            // Boundaries on transformed nodes act in local axes; the others go on per node
+            // when a set mixes both.
+            let mut global: Vec<Boundary> = Vec::new();
             for b in &step.boundaries {
+                let nodes = original.nodes_of(&b.region);
+                if !nodes.iter().any(|n| self.local_axes.contains_key(n)) {
+                    global.push(b.clone());
+                    continue;
+                }
+                for node in nodes {
+                    if !self.local_axes.contains_key(&node) {
+                        global.push(Boundary {
+                            region: NodeRef::Node(node),
+                            ..b.clone()
+                        });
+                        continue;
+                    }
+                    for d in b.first_dof..=b.last_dof.min(6) {
+                        if let Some(h) = self.local_boundary(node, d, b)? {
+                            boundaries.push(h);
+                        }
+                    }
+                }
+            }
+            for b in &global {
                 let (translation, rotation) = split_dofs(b.first_dof, b.last_dof);
                 if let Some((f, l)) = translation {
                     boundaries.push(Boundary {
@@ -834,7 +982,39 @@ impl Expander {
                 }
             }
             let mut loads = Vec::new();
+            let mut concentrated: Vec<ConcentratedLoad> = Vec::new();
             for c in &step.loads.concentrated {
+                let nodes = original.nodes_of(&c.region);
+                if c.dof > 6 || !nodes.iter().any(|n| self.local_axes.contains_key(n)) {
+                    concentrated.push(c.clone());
+                    continue;
+                }
+                for node in nodes {
+                    let Some(axes) = self.local_axes.get(&node) else {
+                        concentrated.push(ConcentratedLoad {
+                            region: NodeRef::Node(node),
+                            ..c.clone()
+                        });
+                        continue;
+                    };
+                    let (dir, base) = if c.dof <= 3 {
+                        (axes[c.dof as usize - 1], 1)
+                    } else {
+                        (axes[c.dof as usize - 4], 4)
+                    };
+                    for (i, &v) in dir.iter().enumerate() {
+                        if v != 0.0 {
+                            concentrated.push(ConcentratedLoad {
+                                region: NodeRef::Node(node),
+                                dof: base + i as u8,
+                                value: c.value * v,
+                                ..c.clone()
+                            });
+                        }
+                    }
+                }
+            }
+            for c in &concentrated {
                 if c.dof <= 3 {
                     // Forces on nodes without knot act on the expanded nodes directly.
                     let nodes = original.nodes_of(&c.region);
