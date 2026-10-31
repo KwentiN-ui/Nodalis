@@ -13,6 +13,8 @@ plxs-linalg.workspace = true
 plxs-assembly.workspace = true
 plxs-procedures.workspace = true
 plxs-output.workspace = true
+plxs-input.workspace = true
+plxs-elements.workspace = true
 rayon.workspace = true
 
 [lints]

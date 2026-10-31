@@ -6,17 +6,20 @@
 //! Every session has its own rayon thread pool with `threads` threads; no global state, so
 //! several sessions can run in one process.
 
+pub mod job;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use plxs_assembly::{ElementTable, build_pattern};
 use plxs_constraints::ModelConstraints;
 use plxs_core::state::Snapshot;
-use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Results, State, Step};
+use plxs_core::{CancelToken, Error, Model, Progress, ProgressEvent, Result, Results, State, Step};
 use plxs_linalg::{LdltSolver, Pattern};
 use plxs_output::StaRow;
 use plxs_procedures::{ProcedureContext, run_step};
 
+pub use job::{JobOptions, JobOutcome, format_event, run_job};
 pub use plxs_procedures::StepOutcome;
 pub use plxs_procedures::fields::unsupported_outputs;
 
@@ -26,6 +29,8 @@ pub struct SessionOptions {
     pub threads: usize,
     /// Where the job's files go (restart, eigenmodes).
     pub work_dir: PathBuf,
+    /// Stops the run between increments when cancelled.
+    pub cancel: CancelToken,
 }
 
 impl Default for SessionOptions {
@@ -33,6 +38,7 @@ impl Default for SessionOptions {
         Self {
             threads: 0,
             work_dir: PathBuf::from("."),
+            cancel: CancelToken::new(),
         }
     }
 }
@@ -127,6 +133,7 @@ impl Session {
             step_number,
             sta: std::mem::take(&mut self.sta),
             work_dir: self.options.work_dir.clone(),
+            cancel: self.options.cancel.clone(),
         };
         // The procedure runs on the session's pool in a thread of its own; events come
         // through a channel so that the caller's (not necessarily `Send`) progress sink

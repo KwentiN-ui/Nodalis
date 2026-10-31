@@ -1,12 +1,14 @@
-//! Running the analysis: writes the input file, starts CalculiX and shows PrePoMax's monitor
-//! window with the solver output, progress and the button to open the results.
+//! Running the analysis: writes the input file, starts the solver (the built-in one or
+//! CalculiX, see [`plx_solve::Run`]) and shows PrePoMax's monitor window with the solver
+//! output, progress and the button to open the results.
 
 use std::path::PathBuf;
 use std::time::Instant;
 
+use plx_job::JobStatus;
 use plx_job::restart::{self, Chain, Plan, StateIndex};
-use plx_job::{Job, JobStatus};
 use plx_model::EquationSolver;
+use plx_solve::{Engine, Run};
 
 use crate::model::Model;
 use crate::settings::Solver;
@@ -16,7 +18,7 @@ use crate::settings::Solver;
 pub const MAX_OUTPUT_LINES: usize = 20_000;
 
 pub struct Analysis {
-    job: Job,
+    job: Run,
     /// Name of the analysis, also of its input and results files.
     name: String,
     /// Fingerprint of the model the run solves, see [`plx_model::fingerprint::solve_input`];
@@ -326,11 +328,16 @@ impl Analysis {
         };
         let copied = copy_result_files(&fe, work_dir);
         let job_solver = solver.job_solver();
-        let hint = "Check the executable under Tools > Settings > CalculiX.";
-        if let Some(message) = crate::settings::missing_executable(&job_solver.executable) {
+        let engine = solver.engine;
+        let hint = "Check the executable under Tools > Settings > Solver.";
+        if engine == Engine::CalculiX
+            && let Some(message) = crate::settings::missing_executable(&job_solver.executable)
+        {
             return Err(format!("CalculiX not started: {message}. {hint}"));
         }
-        let restart = (!check_model).then(|| {
+        // Restarts from the state of an earlier run are CalculiX's `.rout` files; the
+        // built-in solver keeps its state in memory in a later stage.
+        let restart = (!check_model && engine == Engine::CalculiX).then(|| {
             let job = (work_dir, job_name.as_str());
             plan_restart(solver, &fe, &input, job, continuation, job_solver.clone())
         });
@@ -343,12 +350,16 @@ impl Analysis {
             Some(run) => run.chain.input.clone(),
             None => input,
         };
-        let job = Job::start(&job_solver, work_dir, &job_name, &run_input).map_err(|e| {
-            format!(
-                "CalculiX ({}) not started: {e}. {hint}",
-                job_solver.executable.display()
-            )
-        })?;
+        let job =
+            Run::start(engine, &job_solver, work_dir, &job_name, &run_input).map_err(|e| {
+                match engine {
+                    Engine::CalculiX => format!(
+                        "CalculiX ({}) not started: {e}. {hint}",
+                        job_solver.executable.display()
+                    ),
+                    Engine::PrePoLix => format!("Solver not started: {e}"),
+                }
+            })?;
         let mut output = vec![format!(
             "{name} {} in {}",
             if check_model {
@@ -566,7 +577,8 @@ impl Analysis {
         run.plan = Plan::Full("the restart failed".into());
         self.output
             .push("The restart failed: CalculiX solves all steps again.".into());
-        match Job::start(
+        match Run::start(
+            Engine::CalculiX,
             &run.job_solver,
             &run.work_dir,
             &run.job_name,
@@ -656,7 +668,7 @@ impl RestartRun {
 
     /// Joins the results of a restart with the earlier ones, keeps the full input file next
     /// to them and records the states the run wrote. Returns lines for the monitor.
-    fn finish(&self, job: &Job, status: JobStatus) -> Vec<String> {
+    fn finish(&self, job: &Run, status: JobStatus) -> Vec<String> {
         let mut notes = Vec::new();
         let (dir, name) = (&self.work_dir, self.job_name.as_str());
         if let Plan::Restart { after, time, .. } = &self.plan {

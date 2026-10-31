@@ -28,8 +28,15 @@ use plxs_output::StaRow;
 #[derive(Clone, Debug, PartialEq)]
 pub enum StepOutcome {
     Converged,
-    Diverged { increment: u32, message: String },
-    Partial { increments: u32 },
+    Diverged {
+        increment: u32,
+        message: String,
+    },
+    Partial {
+        increments: u32,
+    },
+    /// The caller cancelled the run; the state is that of the last converged increment.
+    Cancelled,
 }
 
 /// Everything a procedure works on.
@@ -52,6 +59,8 @@ pub struct ProcedureContext<'a> {
     /// The job's directory: files the input refers to (`*TEMPERATURE, FILE=`) are read
     /// from here.
     pub work_dir: std::path::PathBuf,
+    /// Set by the caller to stop the run between increments.
+    pub cancel: plxs_core::CancelToken,
 }
 
 /// A procedure computes a step on the context.

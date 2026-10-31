@@ -131,6 +131,9 @@ impl StaticLinear {
         let mut strains = ctx.table.layout.field(6);
         let mut reactions = vec![0.0; total_dofs];
         for increment in 1..=count {
+            if ctx.cancel.is_cancelled() {
+                return Ok(StepOutcome::Cancelled);
+            }
             let time = (f64::from(increment) * initial).min(period);
             let size = time - (f64::from(increment - 1) * initial).min(period);
             let total = start_total + time;

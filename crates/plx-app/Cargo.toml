@@ -31,6 +31,7 @@ plx-mesher.workspace = true
 plx-model.workspace = true
 plx-render.workspace = true
 plx-results.workspace = true
+plx-solve.workspace = true
 png.workspace = true
 rfd.workspace = true
 ron.workspace = true

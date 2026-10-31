@@ -1,0 +1,168 @@
+//! A whole job as the command line and PrePoLix run it: read the input, expand shells and
+//! beams, compute the steps on a session, write the result files. The command line prints
+//! the events in CalculiX's wording ([`format_event`]); PrePoLix consumes them directly.
+
+use std::path::{Path, PathBuf};
+
+use plxs_core::step::Procedure;
+use plxs_core::{Analysis, CancelToken, Error, Progress, ProgressEvent, Result};
+
+use crate::{Session, SessionOptions, StepOutcome};
+
+/// The version of the solver, written into the result files.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Clone, Debug)]
+pub struct JobOptions {
+    /// Threads of the run (0: all cores).
+    pub threads: usize,
+    /// The job's directory: result files go here, files the input refers to are read here.
+    pub work_dir: PathBuf,
+    /// Name of the job: the result files are `<name>.frd`, `.dat`, `.sta`.
+    pub name: String,
+    /// Writes the result files; off when the caller takes the results from memory.
+    pub write_files: bool,
+    pub cancel: CancelToken,
+}
+
+/// How a job ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JobOutcome {
+    /// Every step converged; the result files are complete.
+    Finished,
+    /// A step did not converge; the results so far are written.
+    Diverged,
+    /// Cancelled by the caller; the results so far are written.
+    Cancelled,
+}
+
+/// Reads `input` (the text of an `.inp` file, `*INCLUDE`s relative to `base`) and runs it.
+/// Errors are returned after their events; what the model is and does goes to `progress`
+/// as `Info` events, like the command line prints it.
+pub fn run_job(
+    input: &str,
+    base: Option<&Path>,
+    options: &JobOptions,
+    progress: &mut dyn Progress,
+) -> Result<JobOutcome> {
+    let reading = plxs_input::read_inp_str(input, base).map_err(|mut errors| {
+        for error in errors.iter().skip(1) {
+            progress.event(ProgressEvent::Warning(error.to_string()));
+        }
+        errors.swap_remove(0)
+    })?;
+    for warning in &reading.warnings {
+        progress.event(ProgressEvent::Warning(warning.clone()));
+    }
+    let analysis = reading.analysis;
+    progress.event(ProgressEvent::Info(format!(
+        "number of nodes: {}, elements: {}, steps: {}",
+        analysis.model.nodes.len(),
+        analysis.model.elements.len(),
+        analysis.steps.len()
+    )));
+    run_analysis(analysis, options, progress)
+}
+
+/// Runs a parsed analysis, see [`run_job`].
+pub fn run_analysis(
+    analysis: Analysis,
+    options: &JobOptions,
+    progress: &mut dyn Progress,
+) -> Result<JobOutcome> {
+    // A model check only reads the input.
+    if (analysis.steps.iter()).all(|s| matches!(s.procedure, Procedure::NoAnalysis)) {
+        for (index, _) in analysis.steps.iter().enumerate() {
+            progress.event(ProgressEvent::Step {
+                step: index as u32 + 1,
+            });
+            progress.event(ProgressEvent::Info(
+                "*NO ANALYSIS: the model was read and checked, nothing is computed.".into(),
+            ));
+        }
+        progress.event(ProgressEvent::JobDone);
+        return Ok(JobOutcome::Finished);
+    }
+    // Shells, membranes and beams are computed as the solids CalculiX expands them to.
+    let expansion = plxs_elements::expand::expand(analysis)?;
+    let analysis = expansion.analysis;
+    let output_map = expansion.output;
+    let session_options = SessionOptions {
+        threads: options.threads,
+        work_dir: options.work_dir.clone(),
+        cancel: options.cancel.clone(),
+    };
+    let mut session = Session::new(analysis.model, session_options)?;
+    let output = |ext: &str| options.work_dir.join(format!("{}.{ext}", options.name));
+    let write = |session: &Session| -> Result<()> {
+        if !options.write_files {
+            return Ok(());
+        }
+        let (model, results) = output_map.apply(session.model(), session.results());
+        plxs_output::write_frd(&output("frd"), &model, &results, VERSION)?;
+        plxs_output::write_sta(&output("sta"), session.sta_rows())?;
+        if !session.results().history.is_empty() {
+            plxs_output::write_dat(&output("dat"), session.results())?;
+        }
+        Ok(())
+    };
+    for step in &analysis.steps {
+        for variable in crate::unsupported_outputs(step) {
+            progress.event(ProgressEvent::Warning(format!(
+                "output variable {variable} is not implemented yet and is left out"
+            )));
+        }
+        if options.cancel.is_cancelled() {
+            write(&session)?;
+            return Ok(JobOutcome::Cancelled);
+        }
+        match session.run_step(step, progress)? {
+            StepOutcome::Converged | StepOutcome::Partial { .. } => {}
+            StepOutcome::Diverged { increment, message } => {
+                write(&session)?;
+                return Err(Error::Numerical {
+                    step: session.state().steps_done,
+                    increment,
+                    message: format!("no convergence: {message}"),
+                });
+            }
+            StepOutcome::Cancelled => {
+                write(&session)?;
+                return Ok(JobOutcome::Cancelled);
+            }
+        }
+    }
+    write(&session)?;
+    progress.event(ProgressEvent::JobDone);
+    Ok(JobOutcome::Finished)
+}
+
+/// The lines CalculiX would print for an event: PrePoLix's monitor reads them from the
+/// command line and from the built-in solver alike.
+pub fn format_event(event: &ProgressEvent) -> Vec<String> {
+    match event {
+        ProgressEvent::Step { step } => vec![format!(" STEP {step}"), String::new()],
+        ProgressEvent::Increment {
+            increment,
+            attempt,
+            size,
+            step_time,
+            ..
+        } => vec![
+            format!(" increment {increment} attempt {attempt}"),
+            format!(" increment size= {size:e}"),
+            format!(" actual step time= {step_time:e}"),
+        ],
+        ProgressEvent::Iteration { iteration, .. } => vec![format!(" iteration {iteration}")],
+        ProgressEvent::Cutback { reason, .. } => {
+            vec![format!(" *INFO: increment cut back: {reason}")]
+        }
+        ProgressEvent::Eigenvalue { mode, value, .. } => {
+            vec![format!(" eigenvalue {mode}: {value:e}")]
+        }
+        ProgressEvent::Warning(text) => vec![format!("*WARNING: {text}")],
+        ProgressEvent::Info(text) => vec![format!(" *INFO: {text}")],
+        ProgressEvent::IncrementDone { .. } | ProgressEvent::StepDone { .. } => Vec::new(),
+        ProgressEvent::JobDone => vec![" Job finished".into()],
+    }
+}

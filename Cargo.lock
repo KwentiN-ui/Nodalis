@@ -3385,6 +3385,7 @@ dependencies = [
  "plx-model",
  "plx-render",
  "plx-results",
+ "plx-solve",
  "png",
  "rfd",
  "ron",
@@ -3476,6 +3477,16 @@ dependencies = [
  "plx-core",
  "plx-mesh",
  "plx-model",
+ "serde",
+]
+
+[[package]]
+name = "plx-solve"
+version = "0.3.15"
+dependencies = [
+ "plx-job",
+ "plxs-core",
+ "plxs-session",
  "serde",
 ]
 
@@ -3583,6 +3594,8 @@ dependencies = [
  "plxs-assembly",
  "plxs-constraints",
  "plxs-core",
+ "plxs-elements",
+ "plxs-input",
  "plxs-linalg",
  "plxs-output",
  "plxs-procedures",

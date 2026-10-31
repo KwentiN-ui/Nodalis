@@ -2,7 +2,30 @@
 //! CalculiX's wording (PrePoLix's monitor reads that text), PrePoLix will consume them
 //! directly in phase 2.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use serde::{Deserialize, Serialize};
+
+/// Lets the caller stop a run: the procedures look at it between increments and iterations
+/// and end the step with `StepOutcome::Cancelled`. Clones share the flag.
+#[derive(Clone, Debug, Default)]
+pub struct CancelToken(Arc<AtomicBool>);
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Asks the run to stop at the next opportunity.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
 
 /// Receives the events of a run. Implementations must be cheap: events come per iteration.
 pub trait Progress {
