@@ -215,7 +215,14 @@ fn write_block(
 /// The type and index columns of a `-5` line: vectors (`1 2 k 0`), tensors (`1 4 i j`),
 /// scalars (`1 1 0 0`).
 fn component_flags(field: &str, components: usize, k: usize) -> (u8, u8, u8) {
-    let _ = field;
+    // Displacements and forces with rotations (U1 nodes): a vector and three scalars.
+    if matches!(field, "DISP" | "FORC") && components == 6 {
+        return if k < 3 {
+            (2, k as u8 + 1, 0)
+        } else {
+            (1, 0, 0)
+        };
+    }
     match components {
         3 => (2, k as u8 + 1, 0),
         6 => {

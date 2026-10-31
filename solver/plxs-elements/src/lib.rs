@@ -12,6 +12,7 @@ pub mod expand;
 pub mod plane;
 pub mod shape;
 pub mod solid;
+pub mod u1;
 
 pub use plane::{PlaneKind, expanded_type, plane};
 pub use shape::{Face, Family, IntegrationRule};

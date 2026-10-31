@@ -57,6 +57,17 @@ pub struct ElementTable {
     pub materials: Vec<(LinearElastic, [[f64; 6]; 6])>,
     pub dofs: DofMap,
     pub layout: IntegrationPointLayout,
+    /// Elements computed natively with a constant stiffness and no integration points
+    /// (the general beam U1): they enter `K` only.
+    pub linear_blocks: Vec<LinearBlock>,
+}
+
+/// A constant element stiffness on global DOFs.
+#[derive(Clone, Debug)]
+pub struct LinearBlock {
+    pub dofs: Vec<u32>,
+    /// Row-major, `dofs.len()` squared.
+    pub stiffness: Vec<f64>,
 }
 
 impl ElementTable {
@@ -76,7 +87,17 @@ impl ElementTable {
         let mut entries = Vec::with_capacity(model.elements.len());
         let mut offsets = Vec::with_capacity(model.elements.len() + 1);
         offsets.push(0u32);
+        let mut linear_blocks = Vec::new();
         for element in &model.elements {
+            if element.kind == ElementType::U1 {
+                let block = Self::u1_block(model, element, temperature)?;
+                for &d in &block.dofs {
+                    connected[d as usize / 3] = true;
+                    uses_z[d as usize / 3] = true;
+                }
+                linear_blocks.push(block);
+                continue;
+            }
             let family = element.kind.family();
             let is_plane = matches!(
                 family,
@@ -203,7 +224,62 @@ impl ElementTable {
             materials,
             dofs,
             layout: IntegrationPointLayout { offsets },
+            linear_blocks,
         })
+    }
+
+    /// The stiffness of a U1 beam. After the expansion its nodes are the first node, the
+    /// helper node carrying its rotations, the second node and its rotation helper.
+    fn u1_block(model: &Model, element: &Element, temperature: f64) -> Result<LinearBlock> {
+        use plxs_core::section::BeamProfile;
+        let bad =
+            |what: &str| Error::input("*ELEMENT", format!("U1 element {}: {what}", element.id));
+        if element.nodes.len() != 4 {
+            return Err(bad("expected two nodes with rotation helpers"));
+        }
+        let section = element
+            .section
+            .and_then(|s| model.sections.get(s as usize))
+            .ok_or_else(|| bad("no section"))?;
+        let SectionKind::Beam {
+            material,
+            profile:
+                BeamProfile::General {
+                    area,
+                    i11,
+                    i22,
+                    torsion,
+                    ..
+                },
+            normal,
+            ..
+        } = &section.kind
+        else {
+            return Err(bad("needs *BEAM SECTION, SECTION=GENERAL"));
+        };
+        let mat = model
+            .material(material)
+            .ok_or_else(|| Error::undefined("*BEAM SECTION", "material", material))?;
+        let elastic = LinearElastic::of(mat, temperature)?;
+        let nodes = Self::node_indices(model, element)?;
+        let x = |i: usize| model.nodes.coordinates[nodes[i] as usize];
+        // The fifth value of the section is CalculiX's shear factor k (PrePoLix writes it
+        // so; the IR calls the field `torsion`).
+        let u1 = plxs_elements::u1::U1Section {
+            area: *area,
+            i11: *i11,
+            i22: *i22,
+            shear_factor: *torsion,
+            young: elastic.young,
+            poisson: elastic.poisson,
+        };
+        let stiffness = plxs_elements::u1::stiffness(x(0), x(2), *normal, &u1)
+            .ok_or_else(|| bad("no length, or the section vector is parallel to the axis"))?;
+        let dofs = nodes
+            .iter()
+            .flat_map(|&n| (0..3).map(move |d| n * 3 + d))
+            .collect();
+        Ok(LinearBlock { dofs, stiffness })
     }
 
     fn node_indices(model: &Model, element: &Element) -> Result<Vec<u32>> {

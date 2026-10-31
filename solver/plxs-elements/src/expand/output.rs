@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use plxs_core::mesh::NodeId;
 use plxs_core::results::Results;
-use plxs_core::{Element, ElementFamily, Model, Step};
+use plxs_core::{Element, ElementFamily, ElementType, Model, Step};
 
 /// How results of the solver model become the written ones.
 #[derive(Clone, Debug, Default)]
@@ -19,6 +19,8 @@ pub struct OutputMap {
     pub groups: BTreeMap<NodeId, Vec<Vec<NodeId>>>,
     /// Elements written as themselves: index into the model's elements and the original.
     native: Vec<(usize, Element)>,
+    /// U1 nodes and the helper nodes of their rotations.
+    rotations: BTreeMap<NodeId, NodeId>,
 }
 
 impl OutputMap {
@@ -44,7 +46,19 @@ impl OutputMap {
             })
             .map(|(i, e)| (i, e.clone()))
             .collect();
-        Self { groups, native }
+        Self {
+            groups,
+            native,
+            rotations: BTreeMap::new(),
+        }
+    }
+
+    /// With U1 beams: CalculiX writes no element for them, their nodes with six
+    /// displacements and forces (the rotations and moments from the helper nodes), and no
+    /// element fields there.
+    pub fn with_rotations(mut self, rotations: BTreeMap<NodeId, NodeId>) -> Self {
+        self.rotations = rotations;
+        self
     }
 
     /// The model and results as written: native elements back on their original nodes,
@@ -96,11 +110,45 @@ impl OutputMap {
                 }
             }
         }
-        let used: HashSet<NodeId> = out
+        if !self.rotations.is_empty() {
+            out.elements.retain(|e| e.kind != ElementType::U1);
+            for increment in &mut results.increments {
+                for field in &mut increment.fields {
+                    let names: [&str; 3] = match field.name.as_str() {
+                        "DISP" => ["D4", "D5", "D6"],
+                        "FORC" => ["F4", "F5", "F6"],
+                        _ => continue,
+                    };
+                    let position: HashMap<NodeId, usize> = field
+                        .nodes
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &n)| (n, i))
+                        .collect();
+                    let first = field.values.len().min(3);
+                    let mut extra = vec![vec![0.0; field.nodes.len()]; 3];
+                    for (i, node) in field.nodes.iter().enumerate() {
+                        let Some(p) = self.rotations.get(node).and_then(|h| position.get(h)) else {
+                            continue;
+                        };
+                        for (k, column) in extra.iter_mut().enumerate() {
+                            column[i] = field.values.get(k).map_or(0.0, |c| c[*p]);
+                        }
+                    }
+                    field.values.truncate(first);
+                    field.values.extend(extra);
+                    field.components.truncate(first);
+                    field.components.extend(names.iter().map(|n| n.to_string()));
+                }
+            }
+        }
+        let in_elements: HashSet<NodeId> = out
             .elements
             .iter()
             .flat_map(|e| e.nodes.iter().copied())
             .collect();
+        let mut used = in_elements.clone();
+        used.extend(self.rotations.keys().copied());
         if used.len() == out.nodes.len() {
             return (out, results);
         }
@@ -113,7 +161,19 @@ impl OutputMap {
         out.nodes = nodes;
         for increment in &mut results.increments {
             for field in &mut increment.fields {
-                let keep: Vec<bool> = field.nodes.iter().map(|n| used.contains(n)).collect();
+                // Element fields only where elements are.
+                let nodal = matches!(field.name.as_str(), "DISP" | "FORC");
+                let keep: Vec<bool> = field
+                    .nodes
+                    .iter()
+                    .map(|n| {
+                        if nodal {
+                            used.contains(n)
+                        } else {
+                            in_elements.contains(n)
+                        }
+                    })
+                    .collect();
                 field.nodes = field
                     .nodes
                     .iter()
@@ -130,6 +190,9 @@ impl OutputMap {
                         .collect();
                 }
             }
+        }
+        for increment in &mut results.increments {
+            increment.fields.retain(|f| !f.nodes.is_empty());
         }
         (out, results)
     }

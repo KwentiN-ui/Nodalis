@@ -17,7 +17,7 @@ pub mod mpc;
 pub mod stiffness;
 
 pub use dofs::{DofMap, Reduction, Spc};
-pub use elements::{ElementTable, IntegrationPointLayout};
+pub use elements::{ElementTable, IntegrationPointLayout, LinearBlock};
 pub use loads::load_vector;
 pub use mpc::{Dependent, Mpc};
 pub use stiffness::{assemble_stiffness, build_pattern};

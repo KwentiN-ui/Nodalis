@@ -46,7 +46,10 @@ pub struct Expansion {
 
 /// Whether an analysis has elements that need the expansion.
 pub fn needs_expansion(model: &Model) -> bool {
-    model.elements.iter().any(|e| expands(e.kind))
+    model
+        .elements
+        .iter()
+        .any(|e| expands(e.kind) || e.kind == ElementType::U1)
 }
 
 fn expands(kind: ElementType) -> bool {
@@ -126,6 +129,8 @@ struct Expander {
     mean_rotations: HashMap<(NodeId, usize), NodeId>,
     /// Helper DOFs that need a zero boundary condition in every step.
     helper_fixed: Vec<(NodeId, u8)>,
+    /// Nodes of U1 beams and the helper node carrying their three rotations.
+    u1_rotations: BTreeMap<NodeId, NodeId>,
 }
 
 impl Expander {
@@ -264,6 +269,7 @@ impl Expander {
             knots: HashMap::new(),
             mean_rotations: HashMap::new(),
             helper_fixed: Vec::new(),
+            u1_rotations: BTreeMap::new(),
         })
     }
 
@@ -273,6 +279,7 @@ impl Expander {
         let original = self.analysis.model.clone();
         self.replace_elements()?;
         self.drop_unused_nodes();
+        self.u1_nodes()?;
         let knot_nodes = self.knot_nodes();
         self.constraints(&knot_nodes);
         self.remap_steps(&original)?;
@@ -299,7 +306,8 @@ impl Expander {
             &self.analysis.model,
             groups,
             &self.analysis.steps,
-        );
+        )
+        .with_rotations(self.u1_rotations.clone());
         Ok(Expansion {
             analysis: self.analysis,
             output,
@@ -492,6 +500,39 @@ impl Expander {
             }
         }
         model.nodes = nodes;
+    }
+
+    /// U1 beams keep their nodes; the rotations of every U1 node live on a helper node,
+    /// which the element lists after the node (`a, rotation of a, b, rotation of b`).
+    fn u1_nodes(&mut self) -> Result<()> {
+        let mut ids: Vec<NodeId> = Vec::new();
+        for e in &self.analysis.model.elements {
+            if e.kind == ElementType::U1 {
+                ids.extend(e.nodes.iter().copied());
+            }
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        for n in ids {
+            if self.groups.contains_key(&n) {
+                return Err(Error::Unsupported(format!(
+                    "node {n} joins a U1 beam to shells or beams, which is not supported yet"
+                )));
+            }
+            let x = self.analysis.model.nodes.coordinates(n).unwrap_or([0.0; 3]);
+            let helper = self.helper_node(x);
+            self.u1_rotations.insert(n, helper);
+        }
+        for e in &mut self.analysis.model.elements {
+            if e.kind == ElementType::U1 {
+                e.nodes = e
+                    .nodes
+                    .iter()
+                    .flat_map(|n| [*n, self.u1_rotations[n]])
+                    .collect();
+            }
+        }
+        Ok(())
     }
 
     /// Nodes that become knots: several expansions meet, or all three rotations of a shell
@@ -882,6 +923,9 @@ impl Expander {
     /// Where rotation DOF `d` (4..6) of an original node lives: the knot's rotation node
     /// or a mean rotation helper; `None` for nodes without rotations.
     fn rotation_dof(&mut self, node: NodeId, d: u8) -> Option<(NodeId, u8)> {
+        if let Some(&helper) = self.u1_rotations.get(&node) {
+            return Some((helper, d - 3));
+        }
         if let Some(&(rotation, _)) = self.knots.get(&node) {
             return Some((rotation, d - 3));
         }
