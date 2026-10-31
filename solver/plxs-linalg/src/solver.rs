@@ -32,6 +32,10 @@ pub trait LinearSolver {
 pub struct LdltSolver {
     par: faer::Par,
     symbolic: Option<SymbolicCholesky<u32>>,
+    /// The pattern `symbolic` belongs to: an `analyze` of the same pattern is skipped (the
+    /// Newton iterations of a step and the steps of a model share one).
+    analyzed: Option<Pattern>,
+    reused: u32,
     values: Vec<f64>,
     factorized: bool,
 }
@@ -47,9 +51,16 @@ impl LdltSolver {
         Self {
             par,
             symbolic: None,
+            analyzed: None,
+            reused: 0,
             values: Vec::new(),
             factorized: false,
         }
+    }
+
+    /// How many `analyze` calls were skipped because the pattern was the analyzed one.
+    pub fn analyses_reused(&self) -> u32 {
+        self.reused
     }
 
     fn symbolic_matrix(pattern: &Pattern) -> SymbolicSparseColMatRef<'_, u32> {
@@ -73,6 +84,11 @@ fn numerical(message: impl Into<String>) -> Error {
 
 impl LinearSolver for LdltSolver {
     fn analyze(&mut self, pattern: &Pattern) -> Result<()> {
+        if self.symbolic.is_some() && self.analyzed.as_ref() == Some(pattern) {
+            // The factor of the previous values stays valid until the next factorize.
+            self.reused += 1;
+            return Ok(());
+        }
         let matrix = Self::symbolic_matrix(pattern);
         let symbolic = factorize_symbolic_cholesky(
             matrix,
@@ -83,6 +99,7 @@ impl LinearSolver for LdltSolver {
         .map_err(|e| numerical(format!("symbolic factorization failed: {e:?}")))?;
         self.values = vec![0.0; symbolic.len_val()];
         self.symbolic = Some(symbolic);
+        self.analyzed = Some(pattern.clone());
         self.factorized = false;
         Ok(())
     }
@@ -166,7 +183,10 @@ mod tests {
         for (x, expected) in b.iter().zip([1.0, 2.0, 3.0]) {
             assert!((x - expected).abs() < 1e-12, "{b:?}");
         }
-        // Refactorize with the same pattern and other values.
+        // Refactorize with the same pattern and other values; analyzing the same pattern
+        // again keeps the symbolic factorization.
+        solver.analyze(&pattern).unwrap();
+        assert_eq!(solver.analyses_reused(), 1);
         a.add(0, 0, 4.0);
         solver.factorize(&a).unwrap();
         let mut b = vec![10.0, 10.0, 8.0];

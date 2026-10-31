@@ -133,6 +133,22 @@ darf solche ergänzen, siehe `KONZEPT_CCX_ABLOESUNG.md` 3.5).
   über die Gesamtzeit und gelockerte/verriegelte Constraints nach jedem Step fort; die
   Ergebnisse stimmen mit dem Lauf von vorn auf 1e-6 überein (praktisch bitgleich).
 
+### Profiling und Muster-Wiederverwendung (M3 T16)
+
+- `plxs_procedures::profile::Profile` misst die Wandzeit je Phase (Assemblierung,
+  Constraint-Reduktion, symbolische Analyse, Faktorisierung, Lösen, Ergebnisse) über alle
+  Steps einer Session; `ProcedureContext::profile`, `Session::profile()`. `plxs --profile`
+  oder `PLXS_PROFILE=1` druckt die Tabelle am Ende des Jobs.
+- `LdltSolver::analyze` überspringt die symbolische Analyse, wenn das Muster dasselbe ist
+  wie beim letzten Aufruf (Newton-Iterationen eines Steps, Steps desselben Modells);
+  `analyses_reused()` zählt das. Das Muster-Superset bei Kontakt (Kontaktelemente ändern das
+  Muster je Iteration) kommt mit T11.
+- Messung 2026-10-31 (Container, 4 Kerne, 24³ C3D8, 45 000 Gleichungen, NLGEOM, 4
+  Inkremente, 8 Iterationen): Faktorisierung 16,2 s von 20,3 s (80 %), Assemblierung 2,2 s,
+  Reduktion 0,5 s, Lösen 0,6 s, symbolische Analyse 0,2 s (7 von 8 wiederverwendet).
+  Der Hebel ist die Faktorisierung (Nested Dissection #408, baumparalleles LDLᵀ T20), nicht
+  die Assemblierung.
+
 Ein `rayon`-Pool je Session mit `threads` Threads (Default: `OMP_NUM_THREADS`, sonst alle
 Kerne). Kein globaler Zustand: mehrere Sessions pro Prozess müssen möglich sein.
 
