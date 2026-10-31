@@ -43,8 +43,8 @@ Nummer, Art, Wert), dieselben Felder, und jede rohe Komponente innerhalb der Tol
 
 Bezugsgröße ist die Feldnorm (Konzept 6.2), nicht der größte Betrag der einzelnen Komponente:
 eine Komponente, die im ganzen Modell fast null ist (S13 in einer ebenen Scheibe, F3 bei
-reiner Querlast), trägt nur Rundungsrauschen, und ccx' eigene Extrapolation streut bei C3D10
-und C3D15 um etwa 2e-6 der Feldgröße. Relativ zur Komponente wären das 1e-5 und mehr; relativ
+reiner Querlast), trägt nur Rundungsrauschen, und ccx' Extrapolation bei C3D15 weicht um
+einige 1e-6 der Feldgröße von der exakten ab. Relativ zur Komponente wären das 1e-5 und mehr; relativ
 zum Feld bleibt die Prüfung bei 1e-5 so streng wie gemeint (seit M2 T4).
 
 ## Bereiche und Stufen
