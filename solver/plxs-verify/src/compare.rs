@@ -1,6 +1,8 @@
 //! Comparison of parsed results: the structure must be identical (class D), the values
 //! within the tolerance of the fixture's class.
 
+use std::collections::BTreeMap;
+
 use plx_io::dat::DatImport;
 use plx_io::frd::FrdImport;
 
@@ -33,6 +35,19 @@ impl Comparison {
 
     /// Compares two value lists of a component; returns false when they differ in length.
     fn values(&mut self, what: &str, reference: &[f64], candidate: &[f64], tolerance: f64) -> bool {
+        self.values_with_floor(what, reference, candidate, tolerance, 1e-12)
+    }
+
+    /// Like [`Self::values`] with a lower bound for the scale the deviation is measured
+    /// against.
+    fn values_with_floor(
+        &mut self,
+        what: &str,
+        reference: &[f64],
+        candidate: &[f64],
+        tolerance: f64,
+        floor: f64,
+    ) -> bool {
         if reference.len() != candidate.len() {
             self.fail(format!(
                 "{what}: {} values in the reference, {} in the candidate",
@@ -46,7 +61,7 @@ impl Comparison {
             .map(|v| v.abs())
             .filter(|v| v.is_finite())
             .fold(0.0_f64, f64::max)
-            .max(1e-12);
+            .max(floor);
         let mut worst = 0.0_f64;
         let mut worst_index = 0;
         for (i, (&r, &c)) in reference.iter().zip(candidate).enumerate() {
@@ -81,6 +96,23 @@ impl Comparison {
 /// Compares two `.frd` imports: mesh exactly, increments and raw field components within
 /// the class tolerance.
 pub fn compare_frd(reference: &FrdImport, candidate: &FrdImport, class: Class) -> Comparison {
+    compare_frd_with_noise(reference, candidate, class, &BTreeMap::new())
+}
+
+/// [`compare_frd`] with absolute noise levels per field name (`noise` of the fixture's
+/// `.toml`): deviations below the level pass whatever the field's magnitude. Fields of
+/// round-off size in both files (stresses of a free thermal expansion) need it.
+///
+/// Every component is measured against the larger of its own largest magnitude and a
+/// millionth of the largest magnitude of its field, so that components that are zero up to
+/// round-off (the transverse heat flux of a one-dimensional conduction) are not compared
+/// noise against noise.
+pub fn compare_frd_with_noise(
+    reference: &FrdImport,
+    candidate: &FrdImport,
+    class: Class,
+    noise: &BTreeMap<String, f64>,
+) -> Comparison {
     let mut c = Comparison::default();
     let tolerance = class.tolerance();
 
@@ -163,17 +195,29 @@ pub fn compare_frd(reference: &FrdImport, candidate: &FrdImport, class: Class) -
             if rf.name == "ERROR" {
                 continue;
             }
+            let field_scale = rf
+                .components
+                .iter()
+                .filter(|c| !c.derived)
+                .flat_map(|c| c.values.iter())
+                .map(|v| f64::from(v.abs()))
+                .filter(|v| v.is_finite())
+                .fold(0.0_f64, f64::max);
+            let floor = (1e-6 * field_scale)
+                .max(1e-12)
+                .max(noise.get(&rf.name).map_or(0.0, |n| n / tolerance));
             for rc in rf.components.iter().filter(|c| !c.derived) {
                 let Some(kc) = kf.component(&rc.name) else {
                     c.fail(format!("{label}: {} has no component {}", rf.name, rc.name));
                     continue;
                 };
                 let to_f64 = |v: &[f32]| -> Vec<f64> { v.iter().map(|&x| f64::from(x)).collect() };
-                c.values(
+                c.values_with_floor(
                     &format!("{label}: {} {}", rf.name, rc.name),
                     &to_f64(&rc.values),
                     &to_f64(&kc.values),
                     tolerance,
+                    floor,
                 );
             }
         }

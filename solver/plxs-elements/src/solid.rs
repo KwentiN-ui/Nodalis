@@ -210,11 +210,11 @@ fn least_squares_extrapolation(family: Family, rule: &IntegrationRule) -> Vec<f6
 }
 
 /// Jacobian, its determinant and the Cartesian shape function derivatives at a point.
-struct Point {
-    det: f64,
+pub(crate) struct Point {
+    pub(crate) det: f64,
     /// `dndx[i] = [dN_i/dx, dN_i/dy, dN_i/dz]`.
-    dndx: Vec<[f64; 3]>,
-    n: Vec<f64>,
+    pub(crate) dndx: Vec<[f64; 3]>,
+    pub(crate) n: Vec<f64>,
 }
 
 fn jacobian(dn: &[[f64; 3]], coords: &[[f64; 3]]) -> [[f64; 3]; 3] {
@@ -271,7 +271,7 @@ impl SolidElement {
         &self.extrapolation
     }
 
-    fn point(&self, p: [f64; 3], coords: &[[f64; 3]]) -> Point {
+    pub(crate) fn point(&self, p: [f64; 3], coords: &[[f64; 3]]) -> Point {
         let count = self.node_count();
         let mut n = vec![0.0; count];
         let mut dn = vec![[0.0; 3]; count];

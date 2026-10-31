@@ -333,6 +333,69 @@ Verschiebungen stimmen auf 2e-6 überein. Die Faktorisierung dominiert: AMD erze
 (Minimum-Fill für 3D-Gitter typisch 3–5× weniger) ist der Hebel für M4, nicht die
 Assemblierung. Die Messlatte des Konzepts (ccx/PaStiX 8,7 s) stammt von anderer Hardware.
 
+## Stand nach M2 T9 (Wärme, Wärmedehnung, Temperaturfelder)
+
+Gebaut: `*HEAT TRANSFER` stationär und transient (automatische Inkremente, `DELTMX`, `DIRECT`),
+`*CFLUX`, `*DFLUX` (Flächen und `BF`), `*FILM`, `*RADIATE` (ohne Hohlraumstrahlung),
+`*INITIAL CONDITIONS, TYPE=TEMPERATURE`, `*TEMPERATURE` als Werte und mit `FILE=`/`BSTEP=`,
+Wärmedehnung in `*STATIC`, `*COUPLED TEMPERATURE-DISPLACEMENT` und
+`*UNCOUPLED TEMPERATURE-DISPLACEMENT` ohne NLGEOM (mit NLGEOM folgt nach T8), Ausgaben NT,
+HFL und RFL in `.frd` und `.dat`.
+
+Wo es liegt: `plxs-elements/src/heat.rs` (Leitungs- und Kapazitätsmatrix, Gradienten,
+Flächenpunkte), `plxs-assembly/src/heat.rs` (Assemblierung, Lasten mit Tangente,
+Temperatur-SPCs auf DOF 11), `plxs-procedures/src/heat.rs` (Inkrementschleife, Newton,
+gekoppelte Mechanik) und `plxs-procedures/src/thermal.rs` (Anfangs- und Feldtemperaturen,
+frd-Leser für `FILE=`, thermische Dehnungen). `plxs-core` bekam nur
+`IncrementKind::Dynamic` (frd-Analysetyp 1 für transiente Inkremente).
+
+### Was von CalculiX durch Beobachtung bekannt ist (Wärme)
+
+Kein CalculiX-Quelltext wurde gelesen; alles aus Einzelelement-Orakeln mit ccx 2.21:
+
+- **RFL** ist K·T (nur der Leitungsanteil) an allen Knoten, wie FORC = K·u.
+- **Filme** mit konsistenter Matrix h∫NNᵀdA; die Umgebungstemperatur wirkt sofort voll, der
+  Koeffizient wird in stationären Steps mit der Zeit hochgefahren. **Strahlung**:
+  εσ((Ts−T0)⁴−(T−T0)⁴) mit an den Flächenpunkt interpolierter Temperatur.
+- **Kapazität** konsistent, Rückwärts-Euler; sie wirkt nur auf die Raten freier Knoten, ein
+  vorgeschriebener Temperatursprung erzeugt keine Kapazitätsreaktion.
+- **Rampen**: transiente Steps setzen Randbedingungen und Lasten sprunghaft (STEP),
+  stationäre Steps fahren vorgeschriebene Temperaturen vom Startwert und Flüsse/Filme von 0 an.
+- **Inkremente**: Wachstum ×1,5, wenn im Step mindestens 2 Inkremente fertig sind, die letzten
+  beiden je ≤ 4 Iterationen brauchten und das letzte nicht verkleinert wurde. Mit `DELTMX`
+  wird ein Inkrement, dessen größte Änderung an freien Knoten `DELTMX` übersteigt, mit
+  dt·0,85·DELTMX/ΔTmax wiederholt; Nichtkonvergenz viertelt. ccx zählt ein lineares Problem
+  als 2 Iterationen.
+- **Materialtemperatur**: lineare Hexaeder (C3D8, C3D8I, C3D8R) werten Leitfähigkeit,
+  Kapazität und Ausdehnung bei der Element-Mitteltemperatur aus, alle anderen Elemente an den
+  Integrationspunkten interpoliert.
+- **Wärmedehnung** α(T)(T−Z) − α(T0)(T0−Z); C3D20 integriert die thermische Last mit 2×2×2
+  Punkten wie C3D20R; FORC = K·u − f_th.
+- **Flächenintegration** für Flüsse, Filme, Strahlung: lineare Dreiecke und die Vierecke von
+  C3D6 ein Punkt, quadratische Dreiecke drei Punkte, Vierecke von C3D20 3×3, alle anderen
+  Vierecke (C3D8*, C3D20R, C3D15) 2×2.
+- **frd**: der Wert in `100CL` ist die Gesamtzeit (10 signifikante Stellen), Spalte 1 ist
+  100 + laufende Nummer, die Inkrementspalte ebenfalls die laufende Nummer.
+- **`FILE=`** nimmt den Namen wörtlich (mit `.frd`) und liest das letzte Inkrement von `BSTEP`.
+- `.dat`-Überschriften: „temperatures“, „heat generation“, „total heat generation“,
+  „heat flux (elem, integ.pnt.,qx,qy,qz)“.
+
+### Bekannte Abweichungen
+
+- **C3D8R** in Wärme: ccx rechnet einpunktig ohne Hourglass-Kontrolle (singulär, Ergebnisse
+  unbrauchbar); plxs integriert die Leitung mit 2×2×2 und gibt den Fluss am einen Punkt aus.
+- **C3D20 mit temperaturabhängiger Leitfähigkeit**: ccx' effektive Leitfähigkeit an den 27
+  Punkten folgt keiner der getesteten Temperaturinterpolationen (Formfunktionen, Mittelwert,
+  Ecken linear, Punktpermutationen); plxs interpoliert mit den Formfunktionen. Abweichung
+  einige Prozent; C3D20R und alle anderen Typen stimmen auf ~1e-5.
+- **C3D20-Spannungen mit Temperaturfeld** weichen ab, die Verschiebungen stimmen.
+- **Lasten aus dem Vorstep** werden in Steps mit mehreren Inkrementen von 0 an hochgefahren
+  statt gehalten (wie in M1; gehört zu T10).
+- `*TEMPERATURE, FILE=` liest nur ASCII-`.frd`; C3D8I-Inkompatible-Moden fehlen in der
+  thermischen Last.
+- Abnahmetest: `solver/plxs-cli/tests/heat_corpus.rs`; `heat/film-2d` braucht CPS8 (T4)
+  und ist bis dahin ausgenommen.
+
 ## Was M1 zu liefern hat (Abnahme)
 
 - `solver_check::run` aus `plx-app` besteht mit `plxs` als Executable (Kragbalken mit Kraft

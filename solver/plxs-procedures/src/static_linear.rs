@@ -107,6 +107,18 @@ impl StaticLinear {
         )));
 
         let start_total = ctx.state.total_time;
+        // Temperatures (`*INITIAL CONDITIONS`, `*TEMPERATURE`, an earlier heat step) and
+        // the thermal strains they cause.
+        let temperatures =
+            crate::thermal::StepTemperatures::of_step(ctx.model, step, ctx.state, &ctx.work_dir)?;
+        let heat = if temperatures.is_active() {
+            Some(plxs_assembly::HeatTable::new(ctx.model, ctx.table)?)
+        } else {
+            None
+        };
+        let thermal = heat
+            .as_ref()
+            .and_then(|h| crate::thermal::ThermalStrains::new(ctx.model, ctx.table, h));
         let mut u = vec![0.0; total_dofs];
         let mut stresses = ctx.table.layout.field(6);
         let mut strains = ctx.table.layout.field(6);
@@ -125,7 +137,20 @@ impl StaticLinear {
             });
 
             let spc = Spc::of_step(ctx.model, step, &ctx.table.dofs, time, total, period)?;
-            let (f, warnings) = load_vector(ctx.model, ctx.table, step, time, total, period)?;
+            let (mut f, warnings) = load_vector(ctx.model, ctx.table, step, time, total, period)?;
+            let t = temperatures
+                .is_active()
+                .then(|| temperatures.at(ctx.model, step, time, total, period));
+            let thermal_strains = thermal
+                .as_ref()
+                .zip(t.as_ref())
+                .map(|(th, t)| th.strains(t));
+            let f_th = thermal.as_ref().zip(t.as_ref()).map(|(th, t)| th.load(t));
+            if let Some(f_th) = &f_th {
+                for (a, b) in f.iter_mut().zip(f_th) {
+                    *a += b;
+                }
+            }
             if increment == 1 {
                 for warning in warnings {
                     progress.event(ProgressEvent::Warning(warning));
@@ -150,6 +175,12 @@ impl StaticLinear {
             // node, which are the reactions at prescribed DOFs, the applied loads at loaded
             // nodes and zero (up to round-off) elsewhere.
             k.multiply(&u, &mut reactions);
+            // With thermal strains the internal forces are K u - f_th.
+            if let Some(f_th) = &f_th {
+                for (a, b) in reactions.iter_mut().zip(f_th) {
+                    *a -= b;
+                }
+            }
 
             progress.event(ProgressEvent::Iteration {
                 step: ctx.step_number,
@@ -161,6 +192,15 @@ impl StaticLinear {
             });
 
             integration_point_results(ctx.table, ctx.model, &u, &mut strains, &mut stresses);
+            if let (Some(th), Some(e)) = (&thermal, &thermal_strains) {
+                th.correct_stresses(e, &mut stresses);
+            }
+            if let Some(t) = &t {
+                ctx.state.temperatures = Some(plxs_core::state::NodalField {
+                    per_node: 1,
+                    values: t.clone(),
+                });
+            }
             ctx.state.displacements.per_node = 3;
             ctx.state.displacements.values.clear();
             ctx.state.displacements.values.extend_from_slice(&u);
@@ -171,6 +211,7 @@ impl StaticLinear {
                 write_increment(
                     ctx, step, increment, time, total, &u, &reactions, &stresses, &strains,
                 )?;
+                crate::thermal::insert_temperatures(ctx, step, t.as_deref());
             }
             crate::history::write_history(
                 ctx.results,
@@ -212,7 +253,7 @@ impl StaticLinear {
 
 /// Whether the field output of an increment is written: every `FREQUENCY`-th increment
 /// (the smallest frequency of the requests), the last one always.
-fn writes_increment(step: &Step, increment: u32, count: u32) -> bool {
+pub(crate) fn writes_increment(step: &Step, increment: u32, count: u32) -> bool {
     let frequency = step
         .outputs
         .node_file

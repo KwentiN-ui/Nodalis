@@ -28,7 +28,12 @@ fn a_static_fixture_is_computed_and_other_procedures_are_refused() {
         .find(|f| f.meta.name == "kragbalken")
         .unwrap();
     let report = run_fixture(&plxs(), f, &work);
-    assert!(report.outcome.passed(), "{:?}\n{}", report.outcome, report.log);
+    assert!(
+        report.outcome.passed(),
+        "{:?}\n{}",
+        report.outcome,
+        report.log
+    );
     assert!(report.log.contains("This is Version"), "{}", report.log);
     let f = fixtures
         .iter()

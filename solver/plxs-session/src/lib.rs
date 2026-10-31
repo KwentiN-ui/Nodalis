@@ -47,7 +47,6 @@ pub struct Session {
     sta: Vec<StaRow>,
     pool: rayon::ThreadPool,
     threads: usize,
-    #[allow(dead_code)]
     options: SessionOptions,
 }
 
@@ -102,6 +101,7 @@ impl Session {
             threads: self.threads,
             step_number,
             sta: std::mem::take(&mut self.sta),
+            work_dir: self.options.work_dir.clone(),
         };
         // The procedure runs on the session's pool in a thread of its own; events come
         // through a channel so that the caller's (not necessarily `Send`) progress sink
