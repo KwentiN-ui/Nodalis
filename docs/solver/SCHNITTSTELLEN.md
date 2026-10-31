@@ -315,7 +315,8 @@ Was M1 gebaut hat und wo es von den Signaturen oben abweicht (Entscheidungen des
 - `plxs-procedures`: `run_step` verteilt auf `StaticLinear` (feste Inkremente aus
   `initial`/`period`, K und Faktorisierung einmal je Step, Reaktionen = K·u); `fields` und
   `history` bauen die Felder der `.frd` und die Blöcke der `.dat` in CalculiX-Reihenfolge.
-- `plxs-output`: `write_frd(path, model, results, version)` schreibt ASCII (binär folgt),
+- `plxs-output`: `write_frd(path, model, results, version)` schreibt ASCII, `write_frd_as(.., FrdFormat::Binary)`
+  binär (Koordinaten f64 Flag 3, Ergebnisse f32 Flag 2; CLI `plxs -o bin`, M3 T16),
   `write_dat`, `write_sta`, `write_cvg`.
 - `plxs-session`: wie oben; `run_step` führt die Prozedur auf dem Pool in einem Scoped Thread
   aus und reicht `ProgressEvent`s über einen Kanal an das (nicht `Send`-pflichtige) `progress`.
