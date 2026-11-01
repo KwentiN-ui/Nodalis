@@ -527,6 +527,55 @@ pub fn surface_nodes(model: &Model, keyword: &str, name: &str) -> Result<Vec<u32
     Ok(out)
 }
 
+/// The coefficients `A = D M⁻¹` (row-major, `m × m`) of the dual shape functions of a face
+/// from its mass matrix `M = ∫N Nᵀ` and `D = diag ∫N` (Gauss-Jordan; `M` is symmetric
+/// positive definite).
+pub fn dual_coefficients(mass: &[f64], diag: &[f64], m: usize) -> Vec<f64> {
+    // Solve M X = I, then A = D X (M symmetric, so D M⁻¹ = D X).
+    let mut a = mass.to_vec();
+    let mut inv = vec![0.0; m * m];
+    for i in 0..m {
+        inv[i * m + i] = 1.0;
+    }
+    for col in 0..m {
+        let pivot_row = (col..m)
+            .max_by(|&x, &y| a[x * m + col].abs().total_cmp(&a[y * m + col].abs()))
+            .unwrap_or(col);
+        if pivot_row != col {
+            for j in 0..m {
+                a.swap(col * m + j, pivot_row * m + j);
+                inv.swap(col * m + j, pivot_row * m + j);
+            }
+        }
+        let pivot = a[col * m + col];
+        if pivot.abs() <= 1e-300 {
+            continue;
+        }
+        for j in 0..m {
+            a[col * m + j] /= pivot;
+            inv[col * m + j] /= pivot;
+        }
+        for r in 0..m {
+            if r != col {
+                let factor = a[r * m + col];
+                if factor != 0.0 {
+                    for j in 0..m {
+                        a[r * m + j] -= factor * a[col * m + j];
+                        inv[r * m + j] -= factor * inv[col * m + j];
+                    }
+                }
+            }
+        }
+    }
+    let mut out = vec![0.0; m * m];
+    for k in 0..m {
+        for j in 0..m {
+            out[k * m + j] = diag[k] * inv[k * m + j];
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,6 +638,43 @@ mod tests {
             let x = c[n];
             let exact = 1.0 + 2.0 * x[0] - 0.5 * x[1] + 0.25 * x[0] * x[1];
             assert!((v - exact).abs() < 1e-9, "node {n}: {v} vs {exact}");
+        }
+    }
+
+    #[test]
+    fn dual_shape_functions_are_biorthogonal() {
+        // Unit square, bilinear N, 2x2 Gauss.
+        let g = 0.5 / 3f64.sqrt();
+        let pts = [
+            (0.5 - g, 0.5 - g),
+            (0.5 + g, 0.5 - g),
+            (0.5 + g, 0.5 + g),
+            (0.5 - g, 0.5 + g),
+        ];
+        let n = |x: f64, y: f64| [(1.0 - x) * (1.0 - y), x * (1.0 - y), x * y, (1.0 - x) * y];
+        let mut mass = vec![0.0; 16];
+        let mut diag = vec![0.0; 4];
+        for &(x, y) in &pts {
+            let v = n(x, y);
+            for i in 0..4 {
+                diag[i] += 0.25 * v[i];
+                for j in 0..4 {
+                    mass[i * 4 + j] += 0.25 * v[i] * v[j];
+                }
+            }
+        }
+        let a = super::dual_coefficients(&mass, &diag, 4);
+        for k in 0..4 {
+            for j in 0..4 {
+                let mut integral = 0.0;
+                for &(x, y) in &pts {
+                    let v = n(x, y);
+                    let psi: f64 = (0..4).map(|l| a[k * 4 + l] * v[l]).sum();
+                    integral += 0.25 * psi * v[j];
+                }
+                let expected = if k == j { diag[k] } else { 0.0 };
+                assert!((integral - expected).abs() < 1e-12, "{k} {j}: {integral}");
+            }
         }
     }
 }

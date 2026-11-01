@@ -1,8 +1,8 @@
-//! The M3 T11 acceptance test: every fixture of the `contact` area that `plxs` can solve
-//! matches the CalculiX golden files within its class tolerance (node-to-face and
-//! face-to-face penalty contact, friction, clearance, model change, change friction,
-//! contact print). Mortar contact (T12), contact on plane elements and contact in heat
-//! steps are allowed to be refused until they land; a wrong result is not.
+//! The M3 T11/T12 acceptance test: every fixture of the `contact` area that `plxs` can
+//! solve matches the CalculiX golden files within its class tolerance (node-to-face,
+//! face-to-face and mortar contact, friction, clearance, model change, change friction,
+//! contact print). Contact on plane elements and contact in heat steps are allowed to be
+//! refused until they land; a wrong result is not.
 
 use std::path::Path;
 
@@ -22,7 +22,7 @@ fn contact_fixtures_match_calculix() {
     let _ = std::fs::remove_dir_all(&work);
     eprintln!("{}", format_reports(&reports));
     let passed = reports.iter().filter(|r| r.outcome.passed()).count();
-    assert!(passed >= 28, "only {passed} contact fixtures pass");
+    assert!(passed >= 34, "only {passed} contact fixtures pass");
     for report in &reports {
         let acceptable = match &report.outcome {
             Outcome::Pass { .. } | Outcome::NoReference => true,

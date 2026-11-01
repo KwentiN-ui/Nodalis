@@ -24,6 +24,9 @@
 
 use plxs_core::contact::{Friction, SurfaceBehavior};
 
+/// Penalty factor of hard mortar contact relative to `E / h`.
+pub const MORTAR_STIFFNESS: f64 = 1e4;
+
 /// A pressure-overclosure relation resolved with the model's defaults.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Law {
@@ -67,6 +70,21 @@ impl Law {
                 Law::Tabular(points)
             }
             Some(SurfaceBehavior::Tied { k }) => Law::Tied { k: *k },
+        }
+    }
+
+    /// The relation of a `TYPE=MORTAR` pair: without a behavior (or `HARD`) the exact,
+    /// non-penetrating contact of CalculiX's Lagrange multipliers, approximated by a penalty
+    /// so stiff that the remaining overclosure is negligible against the deformation
+    /// (`K = MORTAR_STIFFNESS · E / h`, `h` the typical face size); a given relation as for
+    /// face-to-face contact.
+    pub fn resolve_mortar(behavior: Option<&SurfaceBehavior>, young: f64, typical: f64) -> Law {
+        match behavior {
+            None | Some(SurfaceBehavior::Hard) => Law::Linear {
+                k: MORTAR_STIFFNESS * young / typical.max(1e-300),
+                sigma_inf: young / 70_000.0,
+            },
+            Some(b) => Law::resolve(Some(b), young),
         }
     }
 

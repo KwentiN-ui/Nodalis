@@ -14,8 +14,8 @@ use crate::{ContactModel, Evaluation};
 
 /// The nodal contact results: the six components of the `CONTACT` field and `CELS` for
 /// every node (dense index, zero at nodes without a contact element) and which nodes the
-/// fields list. CalculiX lists every node when a face-to-face pair exists, else (node-to-face
-/// only) just the slave nodes with a contact spring.
+/// fields list. CalculiX lists every node when a face-to-face pair exists, else just the
+/// slave nodes with a contact spring (node-to-face) and all slave nodes (mortar).
 pub struct NodalValues {
     pub values: Vec<[f64; 6]>,
     pub energy: Vec<f64>,
@@ -43,6 +43,19 @@ pub fn nodal_values(
                     energy[n] += r.energy;
                     listed[n] = true;
                 }
+                count[n] = count[n].max(1);
+            }
+            continue;
+        }
+        if !pair.mortar_nodes.is_empty() {
+            // Mortar: the nodes' own (weighted) values, every slave node listed.
+            for ((node, _), r) in pair.mortar_nodes.iter().zip(results) {
+                let n = *node as usize;
+                if r.element {
+                    sum[n] = values_of(r);
+                    energy[n] += r.energy;
+                }
+                listed[n] = true;
                 count[n] = count[n].max(1);
             }
             continue;
@@ -142,10 +155,11 @@ pub fn history_blocks(
         })
         .collect();
     // Face-to-face points are listed by slave element and face, node-to-face ones by node.
-    let slave = if pairs
-        .iter()
-        .any(|&i| contact.pairs[i].points.iter().any(|p| p.face.is_some()))
-    {
+    let by_face = |i: usize| {
+        let pair = &contact.pairs[i];
+        pair.mortar_nodes.is_empty() && pair.points.iter().any(|p| p.face.is_some())
+    };
+    let slave = if pairs.iter().any(|&i| by_face(i)) {
         "slave element+face"
     } else {
         "slave node"
@@ -159,6 +173,11 @@ pub fn history_blocks(
                     continue;
                 }
                 let mut values = Vec::with_capacity(4);
+                if let Some((node, _)) = pair.mortar_nodes.get(p) {
+                    values.extend(f(pair, r, p));
+                    rows.push((node_ids[*node as usize], values));
+                    continue;
+                }
                 let id = match pair.points[p].face {
                     Some((k, _)) => {
                         let f = &pair.slave_faces[k as usize];

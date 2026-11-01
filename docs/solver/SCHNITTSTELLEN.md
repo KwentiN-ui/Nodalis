@@ -736,8 +736,7 @@ Was T8 gebaut hat und wo es von den Signaturen oben abweicht:
 ## Stand nach M3 T11 (Penalty-Kontakt Node-to-Face und Face-to-Face)
 
 Was T11 gebaut hat und wo es von der Trait-Skizze oben abweicht (kein Trait, ein
-konkretes `ContactModel`; Mortar kommt mit T12 und wird bis dahin mit `not implemented yet`
-abgelehnt):
+konkretes `ContactModel`; Mortar siehe T12 unten):
 
 - `plxs-contact::ContactModel::new(&mut Model)` löst die `*CONTACT PAIR`s auf: Slave-Punkte
   (Node-to-Face: die Slave-Knoten mit ihrer Knotenfläche; Face-to-Face: je Slave-Face vier
@@ -770,11 +769,31 @@ abgelehnt):
   in beiden Steps gleich vorgegebener Wert wurde doppelt gezählt (Fixture
   `membran-vorgespannt`: U1 0,2 statt 0,1; dort bleibt eine Abweichung in U3, die nicht vom
   Kontakt kommt).
-- Abnahmetest `solver/plxs-cli/tests/contact_corpus.rs`: 28 von 32 `contact/*`-Fixtures grün,
-  der Rest (Mortar ×2, CPE8-Kontakt, Kontakt im gekoppelten Step) mit `not implemented yet`.
+- Abnahmetest `solver/plxs-cli/tests/contact_corpus.rs`: mit T12 34 von 36 `contact/*`-Fixtures
+  grün, der Rest (CPE8-Kontakt, Kontakt im gekoppelten Step) mit `not implemented yet`.
   Neu: neun handgeschriebene Varianten (`n2s-*` mit HARD/LINEAR/c0/EXPONENTIAL, Reibung,
   Haftung μ = 10, Clearance, Model Change, Contact Print; `s2s-contact-print`).
   `plxs-verify` kennt `noise` jetzt auch für `.dat`-Felder (`MOMENT_ABOUT_CG`).
+
+### M3 T12: Mortar (`TYPE=MORTAR`, `LINMORTAR`)
+
+- Duale Mortar-Formulierung (Wohlmuth): je Slave-Face duale Formfunktionen
+  `ψ_k = Σ_j A_kj N_j`, `A = D M⁻¹` (`D = diag ∫N`, `M = ∫N Nᵀ`, über dieselben 28
+  Integrationspunkte wie Face-to-Face; `geometry::dual_coefficients`). Je Slave-Knoten wird
+  über seine Punkte mit `a = ψ_k dA` gemittelt: gewichteter Spalt `ḡ_k`, Normale,
+  Relativverschiebung. Wegen `∫ψ_k N_j = δ_kj ∫N_k` ist die Slave-Seite der Knoten selbst, die
+  Master-Seite die Mortar-Projektion. Die Feder des Knotens (Gesetz, Reibung, Element) ist
+  dieselbe wie bei Face-to-Face (`Pair::respond`), mit der Fläche `∫N_k`.
+- Ohne `*SURFACE BEHAVIOR` (oder HARD) erzwingt ccx den Kontakt exakt (Lagrange-Multiplikatoren,
+  COPEN 0); plxs nimmt ein Penalty `K = 10⁴ E / h` (`law::MORTAR_STIFFNESS`, h typische
+  Facegröße), die Restdurchdringung liegt weit unter der Toleranz. Mit LINEAR wirkt das Gesetz
+  auf `ḡ_k`.
+- Ausgabe: CPRESS ist der Knotenmultiplikator (= Knotenkraft / `∫N_k`), gelistet werden alle
+  Slave-Knoten; CSLIP wird auch reibungsfrei geschrieben (ccx tut das; die ccx-Werte sind
+  nicht identisch, aber gegen CPRESS vernachlässigbar). Getiedter Mortar-Kontakt läuft über die
+  Integrationspunkte wie Face-to-Face.
+- Fixtures: `kontakt-mortar`, `region-mortar` (PrePoLix-Writer) und neu `mortar-frictional`,
+  `mortar-linear`, `mortar-rough`, `mortar-switched-on`; alle stimmen inklusive `CONTACT`.
 
 ### Beobachtungen an CalculiX 2.21 (Kontakt, nur aus Ausgaben)
 

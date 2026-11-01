@@ -58,6 +58,9 @@ pub struct Pair {
     /// Index into `model.contact.pairs`.
     pub index: usize,
     pub kind: ContactKind,
+    /// `TYPE=MORTAR`: face-to-face integration with a stiff penalty in place of the
+    /// Lagrange multipliers, nodal results as mortar (dual-basis) nodal values.
+    pub mortar: bool,
     pub slave_name: String,
     pub master_name: String,
     pub interaction: String,
@@ -75,6 +78,9 @@ pub struct Pair {
     /// The gap of every point in the reference configuration (after `ADJUST`), `None`
     /// without a master face nearby.
     pub initial: Vec<Option<(u32, f64)>>,
+    /// Mortar: the slave nodes and, per node, its integration points with the slave shape
+    /// function value there (empty for other pairs and tied mortar contact).
+    pub mortar_nodes: Vec<(u32, Vec<(u32, f64)>)>,
     /// Whether the pair is in force (`*MODEL CHANGE`).
     pub active: bool,
     /// Mean edge length of the master faces.
@@ -104,6 +110,26 @@ pub struct PointResult {
     pub position: [f64; 3],
     /// Whether a spring element exists for the point.
     pub element: bool,
+}
+
+/// The geometry of a slave point (or a mortar node) against the master: the relative
+/// displacement is `Σ c_i u_i` over `nodes`.
+#[derive(Clone, Debug)]
+struct Kinematics {
+    nodes: Vec<u32>,
+    coefficients: Vec<f64>,
+    normal: [f64; 3],
+    /// First tangent of the master face at the foot point (not yet orthogonalised).
+    tangent: [f64; 3],
+    geometric_gap: f64,
+    initial_gap: f64,
+    /// Gap with the clearance applied.
+    gap: f64,
+    relative: [f64; 3],
+    position: [f64; 3],
+    master_face: u32,
+    area: f64,
+    cutoff: f64,
 }
 
 /// A contact spring element: global DOFs, symmetric tangent (row-major) and internal force.
@@ -217,15 +243,6 @@ impl ContactModel {
         let young_default = first_young(model);
         for (index, pair) in model.contact.pairs.iter().enumerate() {
             let keyword = "*CONTACT PAIR";
-            match pair.kind {
-                ContactKind::NodeToSurface | ContactKind::SurfaceToSurface => {}
-                ContactKind::Mortar | ContactKind::LinearMortar => {
-                    return Err(Error::Unsupported(format!(
-                        "{keyword}: TYPE=MORTAR contact is not implemented yet (pair {} / {})",
-                        pair.slave, pair.master
-                    )));
-                }
-            }
             let interaction = model
                 .contact
                 .interactions
@@ -261,7 +278,12 @@ impl ContactModel {
                 .and_then(|f| element_young(model, f.element))
                 .or_else(|| master.first().and_then(|f| element_young(model, f.element)))
                 .unwrap_or(young_default);
-            let law = Law::resolve(interaction.behavior.as_ref(), young);
+            let mortar = matches!(pair.kind, ContactKind::Mortar | ContactKind::LinearMortar);
+            let law = if mortar {
+                Law::resolve_mortar(interaction.behavior.as_ref(), young, typical)
+            } else {
+                Law::resolve(interaction.behavior.as_ref(), young)
+            };
             let friction = FrictionLaw::resolve(interaction.friction.as_ref(), young_default);
             if law.is_tied() && friction.is_none() {
                 out.warnings.push(format!(
@@ -353,6 +375,7 @@ impl ContactModel {
             let mut prepared = Pair {
                 index,
                 kind: pair.kind,
+                mortar,
                 slave_name: pair.slave.clone(),
                 master_name: pair.master.clone(),
                 interaction: pair.interaction.clone(),
@@ -365,10 +388,48 @@ impl ContactModel {
                 points,
                 cutoff,
                 initial: Vec::new(),
+                mortar_nodes: Vec::new(),
                 active: true,
                 typical,
                 candidates: Vec::new(),
             };
+
+            if mortar && !prepared.law.is_tied() {
+                let mut by_node: std::collections::BTreeMap<u32, Vec<(u32, f64)>> =
+                    std::collections::BTreeMap::new();
+                // Dual shape functions per slave face (Wohlmuth): ψ_k = Σ_j A_kj N_j with
+                // A = D M⁻¹, D = diag ∫N, M = ∫N Nᵀ, so that ∫ψ_k N_j = δ_kj ∫N_k: the slave
+                // side of a node's weighted gap is the node itself.
+                let mut start = 0;
+                while start < prepared.points.len() {
+                    let face = prepared.points[start].face.map(|(f, _)| f);
+                    let end = start
+                        + prepared.points[start..]
+                            .iter()
+                            .take_while(|q| q.face.map(|(f, _)| f) == face)
+                            .count();
+                    let m = prepared.points[start].nodes.len();
+                    let mut mass = vec![0.0; m * m];
+                    let mut diag = vec![0.0; m];
+                    for q in &prepared.points[start..end] {
+                        for i in 0..m {
+                            diag[i] += q.weights[i] * q.area;
+                            for j in 0..m {
+                                mass[i * m + j] += q.weights[i] * q.weights[j] * q.area;
+                            }
+                        }
+                    }
+                    let dual = geometry::dual_coefficients(&mass, &diag, m);
+                    for (p, q) in prepared.points.iter().enumerate().take(end).skip(start) {
+                        for (k, &node) in q.nodes.iter().enumerate() {
+                            let psi: f64 = (0..m).map(|j| dual[k * m + j] * q.weights[j]).sum();
+                            by_node.entry(node).or_default().push((p as u32, psi));
+                        }
+                    }
+                    start = end;
+                }
+                prepared.mortar_nodes = by_node.into_iter().collect();
+            }
 
             // ADJUST: slave nodes within the distance are moved on to the master surface.
             let adjust_distance = match &pair.adjust {
@@ -542,19 +603,36 @@ impl ContactModel {
                     }
                 }
             }
-            for (point, candidates) in pair.points.iter().zip(&pair.candidates) {
+            let point_dofs = |p: usize| {
                 let mut dofs: Vec<u32> = Vec::new();
-                for &n in &point.nodes {
+                for &n in &pair.points[p].nodes {
                     dofs.extend((0..3).map(|d| n * 3 + d));
                 }
-                for &f in candidates {
+                for &f in &pair.candidates[p] {
                     for &n in &pair.master[f as usize].nodes {
                         dofs.extend((0..3).map(|d| n * 3 + d));
                     }
                 }
-                dofs.sort_unstable();
-                dofs.dedup();
-                blocks.push(dofs);
+                dofs
+            };
+            if pair.mortar_nodes.is_empty() {
+                for p in 0..pair.points.len() {
+                    let mut dofs = point_dofs(p);
+                    dofs.sort_unstable();
+                    dofs.dedup();
+                    blocks.push(dofs);
+                }
+            } else {
+                // A mortar node couples all its integration points.
+                for (_, points) in &pair.mortar_nodes {
+                    let mut dofs: Vec<u32> = points
+                        .iter()
+                        .flat_map(|&(p, _)| point_dofs(p as usize))
+                        .collect();
+                    dofs.sort_unstable();
+                    dofs.dedup();
+                    blocks.push(dofs);
+                }
             }
         }
         blocks
@@ -572,14 +650,23 @@ impl ContactModel {
         let mut evaluation = Evaluation::default();
         let current = current_configuration(coords, u);
         for (pi, pair) in self.pairs.iter().enumerate() {
-            let mut results = Vec::with_capacity(pair.points.len());
-            for p in 0..pair.points.len() {
+            let count = if pair.mortar_nodes.is_empty() {
+                pair.points.len()
+            } else {
+                pair.mortar_nodes.len()
+            };
+            let mut results = Vec::with_capacity(count);
+            for p in 0..count {
                 let previous = start
                     .get(pi)
                     .and_then(|s| s.get(p))
                     .copied()
                     .unwrap_or_default();
-                let (result, element) = pair.evaluate_point(p, &current, u, &previous, predictor);
+                let (result, element) = if pair.mortar_nodes.is_empty() {
+                    pair.evaluate_point(p, &current, u, &previous, predictor)
+                } else {
+                    pair.evaluate_mortar_node(p, &current, u, &previous, predictor)
+                };
                 if let Some(element) = element {
                     evaluation.elements.push(element);
                     if result.element {
@@ -662,6 +749,8 @@ impl Pair {
     }
 
     /// One point: its result and, when a spring exists, the element.
+    /// One integration point or slave node: its result and, when a spring exists, the
+    /// element.
     fn evaluate_point(
         &self,
         p: usize,
@@ -670,9 +759,97 @@ impl Pair {
         previous: &ContactPointState,
         predictor: bool,
     ) -> (PointResult, Option<ContactElement>) {
-        let point = &self.points[p];
-        let x = self.position(p, current);
-        let open = |x: [f64; 3], gap: f64| PointResult {
+        match self.kinematics(p, current, u) {
+            Ok(kin) => self.respond(&kin, previous, predictor),
+            Err((x, gap)) => (self.open_result(x, gap, self.points[p].area), None),
+        }
+    }
+
+    /// A mortar slave node: the kinematics of its integration points weighted with the
+    /// node's shape function (`a = N_k dA`), so that the relation acts on the weighted gap
+    /// `ḡ_k = Σ a g / Σ a` and the node carries the force `p_k Σ a` (the dual-basis mortar
+    /// condition of CalculiX for hard contact; for a penalty relation the nodal pressure is
+    /// that of the weighted gap).
+    fn evaluate_mortar_node(
+        &self,
+        k: usize,
+        current: &[[f64; 3]],
+        u: &[f64],
+        previous: &ContactPointState,
+        predictor: bool,
+    ) -> (PointResult, Option<ContactElement>) {
+        let (node, points) = &self.mortar_nodes[k];
+        let x = current[*node as usize];
+        let mut total = 0.0;
+        let mut merged: Vec<(u32, f64)> = Vec::new();
+        let mut normal = [0.0; 3];
+        let mut tangent = [0.0; 3];
+        let (mut geometric_gap, mut initial_gap, mut gap) = (0.0, 0.0, 0.0);
+        let mut relative = [0.0; 3];
+        let mut best: Option<(f64, u32)> = None;
+        let mut cutoff = 0.0_f64;
+        let mut all_area = 0.0;
+        for &(p, w) in points {
+            let p = p as usize;
+            let a = w * self.points[p].area;
+            all_area += a;
+            let Ok(kin) = self.kinematics(p, current, u) else {
+                continue;
+            };
+            total += a;
+            for (&n, &c) in kin.nodes.iter().zip(&kin.coefficients) {
+                merged.push((n, a * c));
+            }
+            for d in 0..3 {
+                normal[d] += a * kin.normal[d];
+                tangent[d] += a * kin.tangent[d];
+                relative[d] += a * kin.relative[d];
+            }
+            geometric_gap += a * kin.geometric_gap;
+            initial_gap += a * kin.initial_gap;
+            gap += a * kin.gap;
+            cutoff = cutoff.max(kin.cutoff);
+            if best.is_none_or(|(b, _)| a > b) {
+                best = Some((a, kin.master_face));
+            }
+        }
+        let Some((_, master_face)) = best else {
+            return (self.open_result(x, 0.0, all_area), None);
+        };
+        if total.abs() <= 1e-300 {
+            return (self.open_result(x, 0.0, all_area), None);
+        }
+        merged.sort_by_key(|&(n, _)| n);
+        let mut nodes: Vec<u32> = Vec::new();
+        let mut coefficients: Vec<f64> = Vec::new();
+        for (n, c) in merged {
+            if nodes.last() == Some(&n) {
+                *coefficients.last_mut().unwrap() += c / total;
+            } else {
+                nodes.push(n);
+                coefficients.push(c / total);
+            }
+        }
+        let kin = Kinematics {
+            nodes,
+            coefficients,
+            normal: normalized(normal),
+            tangent,
+            geometric_gap: geometric_gap / total,
+            initial_gap: initial_gap / total,
+            gap: gap / total,
+            relative: scale(relative, 1.0 / total),
+            position: x,
+            master_face,
+            area: total,
+            cutoff,
+        };
+        self.respond(&kin, previous, predictor)
+    }
+
+    /// The result of a point without a spring.
+    fn open_result(&self, x: [f64; 3], gap: f64, area: f64) -> PointResult {
+        PointResult {
             state: ContactPointState {
                 status: ContactStatus::Open,
                 gap,
@@ -686,18 +863,30 @@ impl Pair {
             energy: 0.0,
             force: [0.0; 3],
             master_face: None,
-            area: point.area,
+            area,
             position: x,
             element: false,
-        };
+        }
+    }
+
+    /// The geometry of a point against its master face: `Err((position, gap))` when it has
+    /// no master face (or the pair is inactive).
+    fn kinematics(
+        &self,
+        p: usize,
+        current: &[[f64; 3]],
+        u: &[f64],
+    ) -> std::result::Result<Kinematics, ([f64; 3], f64)> {
+        let point = &self.points[p];
+        let x = self.position(p, current);
         if !self.active {
-            return (open(x, 0.0), None);
+            return Err((x, 0.0));
         }
         let tied = self.law.is_tied();
         // Tied points keep the master face they started on.
         let found = if tied {
             let Some((f, _)) = self.initial[p] else {
-                return (open(x, 0.0), None);
+                return Err((x, 0.0));
             };
             let (natural, fp) = self.master[f as usize].project(current, x);
             Some((f, natural, fp, x))
@@ -705,7 +894,7 @@ impl Pair {
             self.closest(p, current)
         };
         let Some((f, _natural, fp, x)) = found else {
-            return (open(x, 0.0), None);
+            return Err((x, 0.0));
         };
         let face = &self.master[f as usize];
         let n = fp.normal;
@@ -715,11 +904,57 @@ impl Pair {
             Some(c) => geometric_gap - initial_gap + c,
             None => geometric_gap,
         };
+        // Coefficients w_i for the slave nodes, -N_j for the master nodes.
+        let mut nodes: Vec<u32> = Vec::with_capacity(point.nodes.len() + face.nodes.len());
+        let mut coefficients: Vec<f64> = Vec::with_capacity(nodes.capacity());
+        nodes.extend(&point.nodes);
+        coefficients.extend(&point.weights);
+        nodes.extend(&face.nodes);
+        coefficients.extend(fp.n.iter().map(|nj| -nj));
+        let mut relative = [0.0; 3];
+        for (&node, &c) in nodes.iter().zip(&coefficients) {
+            for d in 0..3 {
+                relative[d] += c * u[node as usize * 3 + d];
+            }
+        }
+        Ok(Kinematics {
+            nodes,
+            coefficients,
+            normal: n,
+            tangent: fp.t[0],
+            geometric_gap,
+            initial_gap,
+            gap,
+            relative,
+            position: x,
+            master_face: f,
+            area: point.area,
+            cutoff: self.cutoff[p],
+        })
+    }
+
+    /// The spring of a point (or mortar node) from its kinematics: the pressure relation,
+    /// friction with return mapping, the element.
+    fn respond(
+        &self,
+        kin: &Kinematics,
+        previous: &ContactPointState,
+        predictor: bool,
+    ) -> (PointResult, Option<ContactElement>) {
+        let tied = self.law.is_tied();
+        let n = kin.normal;
+        let (geometric_gap, initial_gap, gap, x, f) = (
+            kin.geometric_gap,
+            kin.initial_gap,
+            kin.gap,
+            kin.position,
+            kin.master_face,
+        );
         let overclosure = -gap;
         let node_to_face = self.kind == ContactKind::NodeToSurface;
-        let within = gap < self.cutoff[p];
+        let within = gap < kin.cutoff;
         let exists = if tied {
-            initial_gap.abs() <= self.cutoff[p].max(self.typical)
+            initial_gap.abs() <= kin.cutoff.max(self.typical)
         } else {
             within
         };
@@ -728,7 +963,7 @@ impl Pair {
         // that starts touching then sees the contact instead of a floating body.
         let open_face = !tied && !node_to_face && overclosure <= 0.0;
         if !exists || (open_face && !predictor) {
-            return (open(x, gap), None);
+            return (self.open_result(x, gap, kin.area), None);
         }
         let (pressure, dp) = if tied {
             // Tied: the stiffness acts on the change of the geometric gap.
@@ -745,19 +980,9 @@ impl Pair {
         };
 
         // Tangential basis and relative displacement.
-        let t1 = normalized(sub(fp.t[0], scale(n, dot(fp.t[0], n))));
+        let t1 = normalized(sub(kin.tangent, scale(n, dot(kin.tangent, n))));
         let t2 = cross(n, t1);
-        let mut relative = [0.0; 3];
-        for (&node, &w) in point.nodes.iter().zip(&point.weights) {
-            for d in 0..3 {
-                relative[d] += w * u[node as usize * 3 + d];
-            }
-        }
-        for (&node, &nj) in face.nodes.iter().zip(&fp.n) {
-            for d in 0..3 {
-                relative[d] -= nj * u[node as usize * 3 + d];
-            }
-        }
+        let relative = kin.relative;
         let tangential = [dot(relative, t1), dot(relative, t2)];
 
         // Friction: return mapping on the regularised Coulomb law.
@@ -821,7 +1046,8 @@ impl Pair {
             }
         }
         // CalculiX reports no slip for frictionless contact.
-        let reported_tangential = if self.friction.is_some() {
+        // CalculiX reports no slip for frictionless contact, except for mortar contact.
+        let reported_tangential = if self.friction.is_some() || self.mortar {
             tangential
         } else {
             [0.0; 2]
@@ -830,18 +1056,12 @@ impl Pair {
             status = ContactStatus::Open;
         }
 
-        // Element: coefficients w_i for the slave nodes, -N_j for the master nodes.
-        let mut dofs: Vec<u32> = Vec::with_capacity(3 * (point.nodes.len() + face.nodes.len()));
-        let mut coefficients: Vec<f64> = Vec::with_capacity(point.nodes.len() + face.nodes.len());
-        for (&node, &w) in point.nodes.iter().zip(&point.weights) {
+        let mut dofs: Vec<u32> = Vec::with_capacity(3 * kin.nodes.len());
+        for &node in &kin.nodes {
             dofs.extend((0..3).map(|d| node * 3 + d));
-            coefficients.push(w);
         }
-        for (&node, &nj) in face.nodes.iter().zip(&fp.n) {
-            dofs.extend((0..3).map(|d| node * 3 + d));
-            coefficients.push(-nj);
-        }
-        let area = point.area;
+        let coefficients = &kin.coefficients;
+        let area = kin.area;
         // Traction on the slave: -p n + τ (the spring pulls the slave back along the
         // relative tangential motion); the internal force is minus the force on the node.
         let traction = [
