@@ -16,11 +16,13 @@ const OPEN: &[(&str, &str)] = &[
     ),
     (
         "edge-tie-m3d4",
-        "membranes: M3D4 formulation of ccx 2.21 unknown",
+        "the solid hangs on the membrane like on a hinge: its rotation is a mechanism only the \
+         tiny out-of-plane stiffness of the membranes fixes, differently in ccx and plxs",
     ),
     (
         "membran-m3d4",
-        "membranes: M3D4 formulation of ccx 2.21 unknown",
+        "membranes: ccx's M3D4 is stiffer in its plane than the plane stress quadrilateral by \
+         a term of the order (thickness / element size)² (1e-4 here)",
     ),
     (
         "membran-m3d4r",

@@ -67,13 +67,13 @@ pub fn nodal_average(
     nodal_average_with(table, model, field, &[])
 }
 
-/// [`nodal_average`] with further elements of constant value (native membranes): dense
-/// nodes and value.
+/// [`nodal_average`] with further elements given by their nodal values (native
+/// membranes): dense nodes and the value at each.
 pub fn nodal_average_with(
     table: &ElementTable,
     model: &Model,
     field: &IntegrationPointField,
-    constant: &[([u32; 3], [f64; 6])],
+    extra: &[(&[u32], Vec<[f64; 6]>)],
 ) -> (Vec<[f64; 6]>, Vec<Vec<[f64; 6]>>) {
     let nodes = model.nodes.len();
     let mut sum = vec![[0.0; 6]; nodes];
@@ -102,8 +102,8 @@ pub fn nodal_average_with(
         }
         per_element.push(nodal);
     }
-    for (nodes, value) in constant {
-        for &n in nodes {
+    for (nodes, values) in extra {
+        for (&n, value) in nodes.iter().zip(values) {
             for k in 0..6 {
                 sum[n as usize][k] += value[k];
             }
@@ -323,13 +323,13 @@ pub fn build_fields_with(
     let has = |v: &str| variables.iter().any(|x| x == v);
     let order = node_order(model);
     let mut fields = Vec::new();
-    // Native membranes: constant strain and stress per element.
+    // Native membranes: their values at the nodes.
     let (membrane_strains, membrane_stresses): (Vec<_>, Vec<_>) = table
         .membranes
         .iter()
         .map(|m| {
-            let (e, s) = m.strain_stress(u);
-            ((m.nodes, e), (m.nodes, s))
+            let (e, s): (Vec<_>, Vec<_>) = m.nodal_values(u, step.nlgeom).into_iter().unzip();
+            ((m.nodes.as_slice(), e), (m.nodes.as_slice(), s))
         })
         .unzip();
     // Internal unknowns (thickness change of plane stress nodes) are no displacements.

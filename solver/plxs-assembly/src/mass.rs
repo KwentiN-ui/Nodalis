@@ -79,7 +79,21 @@ pub fn assemble_mass_with(
             }
         }
         Ok(me)
-    })
+    })?;
+    // Native membranes, after the solid blocks (`assemble_blocks` starts from zero).
+    for membrane in &table.membranes {
+        let rho = membrane.density.ok_or_else(|| {
+            Error::input(
+                "*DENSITY",
+                format!(
+                    "element {} has no density; a frequency or dynamic analysis needs *DENSITY for every material",
+                    model.elements[membrane.element as usize].id
+                ),
+            )
+        })?;
+        m.add_block(&membrane.dofs, &membrane.formulation.mass(rho));
+    }
+    Ok(())
 }
 
 /// Assembles the initial stress stiffness `K_σ` for the stresses at the integration
