@@ -3185,9 +3185,6 @@ fn dynamic_step(settings: &DynamicStep) -> (String, String) {
 fn modal_dynamics_step(settings: &ModalDynamicsStep) -> (String, String) {
     let header = format!("*Step, Inc={}\n", settings.increments());
     let mut procedure = String::from("*Modal dynamics");
-    if let Some(solver) = settings.solver.keyword() {
-        let _ = write!(procedure, ", Solver={solver}");
-    }
     if settings.steady_state {
         procedure.push_str(", Steady state");
     }
@@ -3212,9 +3209,6 @@ fn steady_state_dynamics_step(settings: &SteadyStateDynamicsStep) -> (String, St
     let mut procedure = String::from("*Steady state dynamics");
     if !settings.harmonic {
         procedure.push_str(", Harmonic=No");
-    }
-    if let Some(solver) = settings.solver.keyword() {
-        let _ = write!(procedure, ", Solver={solver}");
     }
     let _ = write!(
         procedure,
@@ -3309,9 +3303,6 @@ fn frequency_step(settings: &FrequencyStep, cyclic: bool) -> (String, String) {
     }
     header.push('\n');
     let mut procedure = String::from("*Frequency");
-    if let Some(solver) = settings.solver.keyword() {
-        let _ = write!(procedure, ", Solver={solver}");
-    }
     if settings.storage {
         procedure.push_str(", Storage=Yes");
     }
@@ -3366,9 +3357,6 @@ fn buckle_step(settings: &BuckleStep) -> (String, String) {
     }
     header.push('\n');
     let mut procedure = String::from("*Buckle");
-    if let Some(solver) = settings.solver.keyword() {
-        let _ = write!(procedure, ", Solver={solver}");
-    }
     let _ = writeln!(
         procedure,
         "\n{}, {}",

@@ -7,7 +7,6 @@ use std::time::Instant;
 
 use plx_job::JobStatus;
 use plx_job::restart::{self, Chain, Plan, StateIndex};
-use plx_model::EquationSolver;
 use plx_solve::{Engine, Run};
 
 use crate::model::Model;
@@ -278,14 +277,12 @@ fn before_first_step(input: &str, keyword: &str) -> String {
 
 impl Analysis {
     /// Writes the input file of the analysis `name` into `work_dir` and starts CalculiX on
-    /// it; steps left at the default solver use `default_solver`, see
-    /// [`Solver::default_solver`]. With `check_model` CalculiX only reads and checks the model
+    /// it. With `check_model` CalculiX only reads and checks the model
     /// (PrePoMax's "Check Model"). `continuation` tells which analyses it continues from the
     /// state of and which continue from its own.
     pub fn start(
         solver: &Solver,
         model: &Model,
-        default_solver: EquationSolver,
         check_model: bool,
         name: &str,
         work_dir: &std::path::Path,
@@ -301,7 +298,6 @@ impl Analysis {
         }
         let heading = format!("PrePoLix: {}", model.file_name());
         let mut fe = model.fe.clone();
-        fe.resolve_default_solver(default_solver);
         let job_name = job_name(name);
         stage_global_results(&mut fe, work_dir, &job_name)?;
         let initial = stage_linked_results(&fe, work_dir, &job_name)?;
@@ -863,16 +859,7 @@ mod tests {
             executable: "ccx".into(),
             ..Default::default()
         };
-        let mut analysis = Analysis::start(
-            &solver,
-            model,
-            EquationSolver::Default,
-            false,
-            name,
-            dir,
-            continuation,
-        )
-        .unwrap();
+        let mut analysis = Analysis::start(&solver, model, false, name, dir, continuation).unwrap();
         let status = loop {
             if let Some(status) = analysis.poll() {
                 break status;
@@ -898,16 +885,8 @@ mod tests {
             ..Default::default()
         };
         let dir = std::env::temp_dir().join(format!("prepolix-check-{}", std::process::id()));
-        let mut analysis = Analysis::start(
-            &solver,
-            &model,
-            EquationSolver::Default,
-            true,
-            "Cubes",
-            &dir,
-            &Default::default(),
-        )
-        .unwrap();
+        let mut analysis =
+            Analysis::start(&solver, &model, true, "Cubes", &dir, &Default::default()).unwrap();
         let status = loop {
             if let Some(status) = analysis.poll() {
                 break status;

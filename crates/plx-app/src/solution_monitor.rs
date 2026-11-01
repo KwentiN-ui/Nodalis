@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use plx_io::project::{BoundResults, ProjectAnalysis};
 use plx_job::JobStatus;
-use plx_model::{EquationSolver, Finding, Severity};
+use plx_model::{Finding, Severity};
 
 use crate::analysis::Analysis;
 use crate::links::Continuation;
@@ -35,7 +35,6 @@ struct Loaded {
     /// Fingerprint of the mesh it started from.
     mesh_print: u64,
     solver: Solver,
-    default_solver: EquationSolver,
     findings: Vec<Finding>,
 }
 
@@ -81,7 +80,6 @@ pub struct BackgroundSolve {
     stage: Stage,
     model: Option<Model>,
     solver: Solver,
-    default_solver: EquationSolver,
     work_dir: PathBuf,
     continuation: Continuation,
     analysis: Option<Analysis>,
@@ -114,7 +112,7 @@ impl BackgroundSolve {
         let name = data.name.clone();
         let (sender, receiver) = std::sync::mpsc::channel();
         let ctx = ctx.clone();
-        let mut probed = solver.clone();
+        let probed = solver.clone();
         std::thread::spawn(move || {
             let ProjectAnalysis {
                 geometry,
@@ -129,8 +127,6 @@ impl BackgroundSolve {
             model.geometry = geometry;
             model.mesh_inputs = mesh_inputs;
             model.bound_results = results;
-            // Probing the executable runs it: done here rather than in the GUI.
-            let default_solver = probed.default_solver();
             let findings = if model.mesh.element_count() > 0 {
                 model.findings()
             } else {
@@ -141,7 +137,6 @@ impl BackgroundSolve {
                 model,
                 mesh_print,
                 solver: probed,
-                default_solver,
                 findings,
             });
             ctx.request_repaint();
@@ -153,7 +148,6 @@ impl BackgroundSolve {
             stage: Stage::Loading(receiver),
             model: None,
             solver,
-            default_solver: EquationSolver::Default,
             work_dir,
             continuation,
             analysis: None,
@@ -284,13 +278,11 @@ impl BackgroundSolve {
                         model,
                         mesh_print,
                         solver,
-                        default_solver,
                         findings,
                     } = loaded;
                     self.model = Some(model);
                     self.mesh_print = Some(mesh_print);
                     self.solver = solver;
-                    self.default_solver = default_solver;
                     self.mesh_or_run(ctx, findings);
                 }
                 Err(TryRecvError::Empty) => {}
@@ -406,7 +398,6 @@ impl BackgroundSolve {
         let started = Analysis::start(
             &self.solver,
             model,
-            self.default_solver,
             false,
             &self.name,
             &self.work_dir,

@@ -113,6 +113,7 @@ pub fn check_analysis(
     let has_contact = !analysis.model.contact.pairs.is_empty();
     let session_options = SessionOptions {
         threads: options.threads,
+        pool: options.pool.clone(),
         work_dir: options.work_dir.clone(),
         cancel: options.cancel.clone(),
     };

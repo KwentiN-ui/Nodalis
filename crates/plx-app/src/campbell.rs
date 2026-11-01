@@ -20,7 +20,7 @@ use std::time::Duration;
 use egui::{Color32, Ui};
 use plx_job::JobStatus;
 pub use plx_model::campbell::{Mode, Setup, SpeedPoint, Whirl};
-use plx_model::{EquationSolver, FeModel, LoadKind, StepKind};
+use plx_model::{FeModel, LoadKind, StepKind};
 use plx_solve::{Engine, Run};
 
 use crate::numeric;
@@ -857,15 +857,13 @@ impl CampbellWindow {
         self.sweep.is_some()
     }
 
-    /// Starts the sweep on the model of `mesh` and `fe` in `work_dir`; steps at the default
-    /// solver use `default_solver`. With `keep` it continues the last sweep instead: a paused
+    /// Starts the sweep on the model of `mesh` and `fe` in `work_dir`. With `keep` it continues the last sweep instead: a paused
     /// one goes on, a finished one starts another `max_runs` runs that refine between the
     /// speeds it has, as long as the model is the same.
     pub fn start(
         &mut self,
         solver: &crate::settings::Solver,
         (mesh, fe): (&plx_mesh::FeMesh, &FeModel),
-        default_solver: EquationSolver,
         work_dir: std::path::PathBuf,
         keep: bool,
     ) -> Result<(), String> {
@@ -907,7 +905,8 @@ impl CampbellWindow {
         if min_speed >= max_speed {
             return Err("The lowest speed must be below the highest.".into());
         }
-        // The speeds solved at the same time share the cores.
+        // The speeds solved at the same time share the cores (CalculiX: an equal share each,
+        // the built-in solver: its one pool).
         let job_solver = solver
             .shared_by(solver.parallel_runs.max(1) as usize)
             .job_solver();
@@ -916,8 +915,7 @@ impl CampbellWindow {
         {
             return Err(format!("CalculiX not started: {message}"));
         }
-        let mut fe = fe.clone();
-        fe.resolve_default_solver(default_solver);
+        let fe = fe.clone();
         let grid_count = if max_runs == 0 {
             GRID
         } else {
@@ -1841,7 +1839,6 @@ mod tests {
             sweep_fingerprint(&mesh, &still),
             sweep_fingerprint(&mesh, &fe)
         );
-        fe.resolve_default_solver(EquationSolver::Spooles);
 
         let work_dir = std::env::temp_dir().join(format!("plx-campbell-{}", std::process::id()));
         let input = SweepInput {

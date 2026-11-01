@@ -17,6 +17,7 @@ pub mod complex;
 pub mod contact;
 pub mod dynamic;
 pub mod eigen;
+pub mod equations;
 pub mod fields;
 pub mod heat;
 pub mod history;

@@ -3681,8 +3681,7 @@ impl ProjectApp {
         let mut window = (self.node(id).and_then(Node::as_campbell_mut))
             .and_then(|c| c.window.take())
             .ok_or_else(|| "not a Campbell block".to_string())?;
-        let default_solver = self.settings.solver.default_solver();
-        let result = self.start_sweep(id, &mut window, default_solver, keep);
+        let result = self.start_sweep(id, &mut window, keep);
         if let Some(campbell) = self.node(id).and_then(Node::as_campbell_mut) {
             campbell.window = Some(window);
         }
@@ -3691,13 +3690,7 @@ impl ProjectApp {
 
     /// Starts the sweep of the Campbell block `id`, whose window is `window`, on the model of
     /// the analysis linked to it, in a folder of its own in that of the project.
-    fn start_sweep(
-        &self,
-        id: u64,
-        window: &mut CampbellWindow,
-        default_solver: plx_model::EquationSolver,
-        keep: bool,
-    ) -> Result<(), String> {
+    fn start_sweep(&self, id: u64, window: &mut CampbellWindow, keep: bool) -> Result<(), String> {
         let source = self.campbell_source(id).ok_or_else(|| {
             "No analysis is linked: drag the Setup of an analysis to the Analysis row of the \
              block."
@@ -3708,7 +3701,7 @@ impl ProjectApp {
             .join(crate::analysis::job_name(&self.project_name()))
             .join(crate::analysis::job_name(&self.name_of(id)));
         let solver = &self.settings.solver;
-        window.start(solver, (data.mesh, data.fe), default_solver, dir, keep)
+        window.start(solver, (data.mesh, data.fe), dir, keep)
     }
 
     /// Takes the finished speeds of the Campbell blocks and shows their open diagrams.
@@ -3730,9 +3723,7 @@ impl ProjectApp {
                     .is_some_and(|d| crate::campbell::applies(d.fe) && d.mesh.element_count() > 0);
                 let name = self.name_of(id);
                 let open = window.show(ctx, (&name, id), can_start, |window, keep| {
-                    // Probes the executable the first time; the settings keep what they know.
-                    let default_solver = self.settings.solver.clone().default_solver();
-                    self.start_sweep(id, window, default_solver, keep)
+                    self.start_sweep(id, window, keep)
                 });
                 window.visible = open;
             }
@@ -4708,7 +4699,8 @@ impl ProjectApp {
         let path = self.model_path();
         let mut work_dir = self.settings.solver.work_dir();
         work_dir.push(crate::analysis::job_name(&self.project_name()));
-        // The analyses solved at the same time share the cores.
+        // The analyses solved at the same time share the cores (CalculiX: an equal share
+        // each, the built-in solver: its one pool).
         let parallel = self.settings.solver.parallel_runs.max(1) as usize;
         let concurrent = (self.updating.len() + self.update_queue.len() + 1).min(parallel);
         let settings = self.settings.solver.shared_by(concurrent);
@@ -4798,12 +4790,10 @@ impl ProjectApp {
             let solved = solve.take_solved();
             // What running the executable found out about it is kept.
             let probed = solve.solver();
-            let (detected, keywords) = (probed.detected.clone(), probed.keywords.clone());
+            let keywords = probed.keywords.clone();
             if self.settings.solver.executable == probed.executable
-                && (detected != self.settings.solver.detected
-                    || keywords != self.settings.solver.keywords)
+                && keywords != self.settings.solver.keywords
             {
-                self.settings.solver.detected = detected;
                 self.settings.solver.keywords = keywords;
                 self.share_settings();
             }

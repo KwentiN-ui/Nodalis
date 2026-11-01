@@ -27,13 +27,15 @@ use plxs_assembly::{
     ElementTable, HeatTable, Reduction, Spc, assemble_heat, assemble_stiffness, heat_loads,
     load_vector, temperature_spc,
 };
+use plxs_core::progress::NoProgress;
 use plxs_core::results::{IncrementKind, ResultField, ResultsIncrement};
 use plxs_core::state::{IntegrationPointField, NodalField};
 use plxs_core::step::{DefaultAmplitude, HeatTransfer, Procedure as ProcedureKind};
 use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Step};
-use plxs_linalg::{LdltSolver, LinearSolver, SparseMatrix};
+use plxs_linalg::{LdltSolver, SparseMatrix};
 use plxs_output::StaRow;
 
+use crate::equations::{Equations, in_increment};
 use crate::fields::{nodal_average, write_increment};
 use crate::static_linear::{integration_point_results, writes_increment};
 use crate::thermal::{ThermalStrains, initial_temperatures};
@@ -97,6 +99,11 @@ struct HeatRun<'h> {
     c: Option<SparseMatrix>,
     tangent: SparseMatrix,
     solver: LdltSolver,
+    /// Direct or iterative, as the step asks, for the temperatures.
+    equations: Equations,
+    /// The same for the displacements of coupled steps (their direct solver is the
+    /// context's).
+    mechanical_equations: Equations,
     /// Node positions, for the ordering of the factorization.
     coordinates: Vec<[f64; 3]>,
     /// Free set and matrix values of the last factorization.
@@ -155,6 +162,8 @@ impl<'h> HeatRun<'h> {
             c: transient.then(|| SparseMatrix::zeros(heat.pattern.clone())),
             tangent: SparseMatrix::zeros(heat.pattern.clone()),
             solver: LdltSolver::new(ctx.threads),
+            equations: Equations::new(p.solver),
+            mechanical_equations: Equations::new(p.solver),
             coordinates: ctx.model.nodes.coordinates.clone(),
             factorized: None,
             assembled: false,
@@ -411,7 +420,9 @@ impl<'h> HeatRun<'h> {
             let residual_norm = rhs.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
             if !reduction.free.is_empty() {
                 self.factorize(&reduction.free, size)?;
-                self.solver.solve(&mut rhs)?;
+                self.equations
+                    .solve(&self.solver, &mut rhs, &mut NoProgress)
+                    .map_err(|e| in_increment(e, ctx.step_number, increment))?;
             }
             for (&dof, d) in reduction.free.iter().zip(&rhs) {
                 t[dof as usize] += d;
@@ -469,12 +480,14 @@ impl<'h> HeatRun<'h> {
             return Ok(());
         }
         let reduced = a.restrict(free);
-        if !same_free {
-            let coordinates = free.iter().map(|&n| self.coordinates[n as usize]).collect();
-            self.solver.set_coordinates(Some(coordinates));
-            self.solver.analyze(reduced.pattern())?;
-        }
-        self.solver.factorize(&reduced)?;
+        let coordinates = || free.iter().map(|&n| self.coordinates[n as usize]).collect();
+        self.equations.prepare(
+            &mut self.solver,
+            &reduced,
+            coordinates,
+            !same_free,
+            &mut NoProgress,
+        )?;
         self.factorized = Some((free.to_vec(), a.values().to_vec()));
         Ok(())
     }
@@ -508,21 +521,28 @@ impl<'h> HeatRun<'h> {
             let reduction = Reduction::new(total_dofs, spc);
             if self.mechanical_spc.as_ref() != Some(&reduction.spc.dofs) {
                 let k_free = k.restrict(&reduction.free);
-                let coordinates = (reduction.free.iter())
-                    .map(|&dof| model.nodes.coordinates[dof as usize / 3])
-                    .collect();
-                ctx.solver.set_coordinates(Some(coordinates));
-                ctx.solver.analyze(k_free.pattern())?;
-                ctx.solver.factorize(&k_free).map_err(|e| match e {
-                    Error::Numerical { message, .. } => Error::Numerical {
-                        step: ctx.step_number,
-                        increment,
-                        message: format!(
-                            "{message}; the model is probably not sufficiently constrained"
-                        ),
-                    },
-                    other => other,
-                })?;
+                let coordinates = || {
+                    (reduction.free.iter())
+                        .map(|&dof| model.nodes.coordinates[dof as usize / 3])
+                        .collect()
+                };
+                let iterative = self.mechanical_equations.is_iterative();
+                self.mechanical_equations
+                    .prepare(&mut ctx.solver, &k_free, coordinates, true, &mut NoProgress)
+                    .map_err(|e| match e {
+                        Error::Numerical { message, .. } => Error::Numerical {
+                            step: ctx.step_number,
+                            increment,
+                            message: if iterative {
+                                message
+                            } else {
+                                format!(
+                                    "{message}; the model is probably not sufficiently constrained"
+                                )
+                            },
+                        },
+                        other => other,
+                    })?;
                 self.mechanical_spc = Some(reduction.spc.dofs.clone());
             }
             let (mut f, _) = load_vector(model, table, step, time, total, self.period)?;
@@ -541,7 +561,9 @@ impl<'h> HeatRun<'h> {
             k.multiply(&u_p, &mut k_up);
             let rhs_full: Vec<f64> = f.iter().zip(&k_up).map(|(f, ku)| f - ku).collect();
             let mut rhs = reduction.reduce_vector(&rhs_full);
-            ctx.solver.solve(&mut rhs)?;
+            self.mechanical_equations
+                .solve(&ctx.solver, &mut rhs, &mut NoProgress)
+                .map_err(|e| in_increment(e, ctx.step_number, increment))?;
             let mut u = u_p;
             reduction.expand_into(&rhs, &mut u);
             // Nodal forces: the internal forces ∫ Bᵀ σ dV = K u - f_th.

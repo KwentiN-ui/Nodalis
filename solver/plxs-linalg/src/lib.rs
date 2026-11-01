@@ -1,5 +1,6 @@
 //! Sparse linear algebra of the PrePoLix solver: the sparsity pattern of a symmetric
-//! system, the matrix that fills it, and the direct solver on top of `faer`.
+//! system, the matrix that fills it, the direct solver on top of `faer` and the iterative
+//! one (conjugate gradients with an incomplete Cholesky preconditioner, [`pcg`]).
 //!
 //! Only `faer` and `rayon` are used for numerics (concept decision 7). The pattern is the
 //! upper triangle (including the diagonal) of a symmetric matrix in compressed column form
@@ -17,6 +18,7 @@ pub mod eigen;
 pub mod gmres;
 pub mod ordering;
 pub mod pattern;
+pub mod pcg;
 pub mod solver;
 pub mod supernodal;
 
@@ -24,4 +26,5 @@ pub use gmres::gmres;
 
 pub use eigen::{EigenPairs, EigenSolver, LanczosOptions, ShiftInvertLanczos};
 pub use pattern::{Pattern, SparseMatrix};
+pub use pcg::{PcgSolver, PcgStats};
 pub use solver::{LdltSolver, LinearSolver};

@@ -9,10 +9,11 @@ use plxs_assembly::{
 use plxs_core::state::IntegrationPointField;
 use plxs_core::step::Procedure as ProcedureKind;
 use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Step};
-use plxs_linalg::{LinearSolver, SparseMatrix};
+use plxs_linalg::SparseMatrix;
 use plxs_output::StaRow;
 use rayon::prelude::*;
 
+use crate::equations::{Equations, in_increment};
 use crate::fields::write_increment;
 use crate::{Procedure, ProcedureContext, StepOutcome};
 
@@ -103,6 +104,11 @@ impl StaticLinear {
             .iter()
             .filter(|e| matches!(e.kind, DiscreteKind::Gap { .. }))
             .collect();
+        let solver_choice = match &step.procedure {
+            ProcedureKind::Static(p) => p.solver,
+            _ => Default::default(),
+        };
+        let mut equations = Equations::new(solver_choice);
         // Gap status the current factorization belongs to (all open before the first).
         let mut factored: Option<Vec<bool>> = None;
         let mut closed: Vec<bool> = gaps
@@ -206,34 +212,29 @@ impl StaticLinear {
                     let started = std::time::Instant::now();
                     let k_red = set.reduce(k_now);
                     ctx.profile.add(Phase::Reduction, started);
-                    let analysis = std::time::Instant::now();
-                    let coordinates = (set.free.iter())
-                        .map(|&dof| ctx.model.nodes.coordinates[dof as usize / 3])
-                        .collect();
-                    ctx.solver.set_coordinates(Some(coordinates));
-                    ctx.solver.analyze(k_red.pattern())?;
-                    ctx.profile.add(Phase::Analysis, analysis);
-                    progress.event(ProgressEvent::Info(format!(
-                        "factor: {} nonzeros, ordered in {:.2} s",
-                        ctx.solver.factor_nonzeros().unwrap_or(0),
-                        started.elapsed().as_secs_f64()
-                    )));
+                    let coordinates = || {
+                        (set.free.iter())
+                            .map(|&dof| ctx.model.nodes.coordinates[dof as usize / 3])
+                            .collect()
+                    };
                     let factorization = std::time::Instant::now();
-                    ctx.solver.factorize(&k_red).map_err(|e| match e {
-                        Error::Numerical { message, .. } => Error::Numerical {
-                            step: ctx.step_number,
-                            increment,
-                            message: format!(
-                                "{message}; the model is probably not sufficiently constrained"
-                            ),
-                        },
-                        other => other,
-                    })?;
+                    equations
+                        .prepare(&mut ctx.solver, &k_red, coordinates, true, progress)
+                        .map_err(|e| match e {
+                            Error::Numerical { message, .. } => Error::Numerical {
+                                step: ctx.step_number,
+                                increment,
+                                message: if equations.is_iterative() {
+                                    message
+                                } else {
+                                    format!(
+                                        "{message}; the model is probably not sufficiently constrained"
+                                    )
+                                },
+                            },
+                            other => other,
+                        })?;
                     ctx.profile.add(Phase::Factorization, factorization);
-                    progress.event(ProgressEvent::Info(format!(
-                        "stiffness factorized in {:.2} s",
-                        started.elapsed().as_secs_f64()
-                    )));
                     factored = Some(closed.clone());
                 }
                 let mut f_now = f.clone();
@@ -247,12 +248,10 @@ impl StaticLinear {
                 let rhs_full: Vec<f64> = f_now.iter().zip(&k_g).map(|(f, kg)| f - kg).collect();
                 v = set.reduce_rhs(&rhs_full);
                 let started = std::time::Instant::now();
-                ctx.solver.solve(&mut v)?;
+                equations
+                    .solve(&ctx.solver, &mut v, progress)
+                    .map_err(|e| in_increment(e, ctx.step_number, increment))?;
                 ctx.profile.add(Phase::Solve, started);
-                progress.event(ProgressEvent::Info(format!(
-                    "solved in {:.2} s",
-                    started.elapsed().as_secs_f64()
-                )));
                 u = set.expand(&v, &g);
                 let status: Vec<bool> = gaps
                     .iter()

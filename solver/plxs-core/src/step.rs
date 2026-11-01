@@ -105,8 +105,8 @@ impl Procedure {
     }
 }
 
-/// The equation solver CalculiX is asked for (`SOLVER=`); the own solver maps them to its
-/// direct and iterative solvers.
+/// The equation solver CalculiX is asked for (`SOLVER=`); the own solver takes it as a hint
+/// and maps the names to its direct and iterative solvers, see [`Self::is_iterative`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EquationSolver {
     /// CalculiX's default (PaStiX in PrePoLix's builds).
@@ -117,6 +117,18 @@ pub enum EquationSolver {
     Pardiso,
     IterativeScaling,
     IterativeCholesky,
+}
+
+impl EquationSolver {
+    /// Whether the step asks for an iterative solver; the own solver then solves linear
+    /// static and heat transfer systems with conjugate gradients
+    /// (`plxs_linalg::PcgSolver`), every other name means its direct solver.
+    pub fn is_iterative(self) -> bool {
+        matches!(
+            self,
+            EquationSolver::IterativeScaling | EquationSolver::IterativeCholesky
+        )
+    }
 }
 
 /// Time incrementation of a step: initial increment, step period, minimum and maximum

@@ -3,8 +3,11 @@
 //! line is its only user in phase 1; the PrePoLix node graph will call it directly in phase
 //! 2 (a state link is a [`State`] value, not a `.rout` file).
 //!
-//! Every session has its own rayon thread pool with `threads` threads; no global state, so
-//! several sessions can run in one process.
+//! A session computes on a rayon thread pool: the caller's ([`SessionOptions::pool`]), which
+//! several sessions may share, so that one large solve gets every thread and several small
+//! ones divide them as they need them (PrePoLix keeps one such pool), or one of its own with
+//! `threads` threads (the command line). No global state, so several sessions can run in
+//! one process.
 
 pub mod check;
 pub mod job;
@@ -31,8 +34,11 @@ pub use plxs_procedures::fields::unsupported_outputs;
 
 #[derive(Clone, Debug)]
 pub struct SessionOptions {
-    /// Threads of the session's pool (0: all cores).
+    /// Threads of the session's own pool (0: all cores), when no `pool` is given.
     pub threads: usize,
+    /// A pool shared with other sessions; the session computes on it instead of a pool of
+    /// its own.
+    pub pool: Option<Arc<rayon::ThreadPool>>,
     /// Where the job's files go (restart, eigenmodes).
     pub work_dir: PathBuf,
     /// Stops the run between increments when cancelled.
@@ -43,6 +49,7 @@ impl Default for SessionOptions {
     fn default() -> Self {
         Self {
             threads: 0,
+            pool: None,
             work_dir: PathBuf::from("."),
             cancel: CancelToken::new(),
         }
@@ -66,25 +73,35 @@ pub struct Session {
     cvg: Vec<CvgRow>,
     average_force: Option<f64>,
     profile: plxs_procedures::profile::Profile,
-    pool: rayon::ThreadPool,
+    pool: Arc<rayon::ThreadPool>,
     threads: usize,
     options: SessionOptions,
     /// [`restart::model_fingerprint`] of the model as given, before ties moved nodes.
     fingerprint: u64,
 }
 
+/// A pool of `threads` threads (0: all cores).
+pub fn own_pool(threads: usize) -> Result<rayon::ThreadPool> {
+    let threads = if threads == 0 {
+        std::thread::available_parallelism().map_or(1, |n| n.get())
+    } else {
+        threads
+    };
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .thread_name(|i| format!("plxs-{i}"))
+        .build()
+        .map_err(|e| Error::Unsupported(format!("thread pool: {e}")))
+}
+
 impl Session {
     /// Prepares a model: element table, DOF numbering, sparsity pattern.
     pub fn new(model: Model, options: SessionOptions) -> Result<Session> {
-        let threads = if options.threads == 0 {
-            std::thread::available_parallelism().map_or(1, |n| n.get())
-        } else {
-            options.threads
+        let pool = match &options.pool {
+            Some(pool) => Arc::clone(pool),
+            None => Arc::new(own_pool(options.threads)?),
         };
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build()
-            .map_err(|e| Error::Unsupported(format!("thread pool: {e}")))?;
+        let threads = pool.current_num_threads();
         let fingerprint = restart::model_fingerprint(&model);
         // Ties move their slave nodes before anything uses the coordinates.
         let mut model = model;
