@@ -9,6 +9,9 @@
 //!
 //! No CalculiX code was consulted.
 
+use std::time::Instant;
+
+use crate::profile::Phase;
 use plxs_assembly::discrete::{DiscreteElement, DiscreteKind};
 use plxs_assembly::{
     NonlinearInput, Spc, add_membrane_pressures, assemble_nonlinear, load_vector,
@@ -430,6 +433,7 @@ impl Procedure for NonlinearStatic {
             ctx.state.material = output.material;
             ctx.state.total_time = total;
             let last = time >= period * (1.0 - 1e-12);
+            let started = Instant::now();
             if crate::static_linear::writes_increment_at(step, increment, last) {
                 write_increment(
                     ctx,
@@ -458,6 +462,7 @@ impl Procedure for NonlinearStatic {
                 &ctx.state.strains,
                 Some(&ctx.state.material),
             );
+            ctx.profile.add(Phase::Results, started);
             ctx.sta.push(StaRow {
                 step: ctx.step_number,
                 increment,
@@ -574,6 +579,7 @@ impl NonlinearStatic {
         let mut acting: Option<Vec<bool>> = None;
         let mut iteration = 0u32;
         loop {
+            let started = Instant::now();
             let mut output = assemble_nonlinear(
                 ctx.table,
                 ctx.model,
@@ -581,6 +587,7 @@ impl NonlinearStatic {
                 ctx.state,
                 Some(k),
             );
+            ctx.profile.add(Phase::Assembly, started);
             let status = Self::add_discrete(discrete, &u, k, &mut output.f_int);
             let gaps_changed = acting.as_ref().is_some_and(|a| *a != status);
             let closed_gaps = status.iter().filter(|&&x| x).count() as u32;
@@ -603,7 +610,9 @@ impl NonlinearStatic {
             let residual_full: Vec<f64> = (0..total_dofs)
                 .map(|d| f_ext[d] - output.f_int[d] - if pending_g { k_delta[d] } else { 0.0 })
                 .collect();
+            let started = Instant::now();
             let residual = set.reduce_rhs(&residual_full);
+            ctx.profile.add(Phase::Reduction, started);
             let r_max = residual.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
             let du_max = u
                 .iter()
@@ -710,8 +719,13 @@ impl NonlinearStatic {
 
             // Solve Tᵀ K T Δv = Tᵀ r and correct u = T v + g.
             iteration += 1;
+            let started = Instant::now();
             let k_reduced = set.reduce(k);
+            ctx.profile.add(Phase::Reduction, started);
+            let started = Instant::now();
             ctx.solver.analyze(k_reduced.pattern())?;
+            ctx.profile.add(Phase::Analysis, started);
+            let started = Instant::now();
             ctx.solver.factorize(&k_reduced).map_err(|e| match e {
                 Error::Numerical { message, .. } => Error::Numerical {
                     step: ctx.step_number,
@@ -722,8 +736,11 @@ impl NonlinearStatic {
                 },
                 other => other,
             })?;
+            ctx.profile.add(Phase::Factorization, started);
+            let started = Instant::now();
             let mut dv = residual;
             ctx.solver.solve(&mut dv)?;
+            ctx.profile.add(Phase::Solve, started);
             let du = set.expand(&dv, &vec![0.0; total_dofs]);
             previous_correction = last_correction;
             last_correction = du.iter().fold(0.0_f64, |m, v| m.max(v.abs()));

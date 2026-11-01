@@ -5,6 +5,8 @@
 //! plxs -i <job>         the same
 //! plxs -v               print the version
 //! plxs --threads <n>    number of threads (default: OMP_NUM_THREADS, else all cores)
+//! plxs -o bin <job>     write the .frd with binary number blocks (-o asc: text, default)
+//! plxs --profile <job>  print the time per phase at the end (also PLXS_PROFILE=1)
 //! ```
 //!
 //! stdout follows CalculiX's lines (`STEP n`, `increment n attempt m`, `iteration n`, `Job
@@ -48,6 +50,9 @@ fn banner() {
 fn run(args: Vec<String>) -> i32 {
     let mut job: Option<String> = None;
     let mut threads: Option<usize> = None;
+    let mut frd_format = plxs_output::FrdFormat::Ascii;
+    let mut profile = std::env::var("PLXS_PROFILE").is_ok_and(|v| !v.is_empty() && v != "0");
+    let started = std::time::Instant::now();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -63,8 +68,23 @@ fn run(args: Vec<String>) -> i32 {
                 i += 1;
                 threads = args.get(i).and_then(|t| t.parse().ok());
             }
+            "--profile" => profile = true,
+            "-o" => {
+                i += 1;
+                frd_format = match args.get(i).map(|a| a.to_ascii_lowercase()).as_deref() {
+                    Some("bin" | "binary") => plxs_output::FrdFormat::Binary,
+                    Some("asc" | "ascii" | "frd") => plxs_output::FrdFormat::Ascii,
+                    other => {
+                        say(&format!(
+                            "*ERROR: unknown output format {}; use asc or bin",
+                            other.unwrap_or("")
+                        ));
+                        return 1;
+                    }
+                };
+            }
             "-h" | "--help" => {
-                say("usage: plxs [-i] <job> [--threads <n>] | plxs -v");
+                say("usage: plxs [-i] <job> [--threads <n>] [-o asc|bin] | plxs -v");
                 return 0;
             }
             other if !other.starts_with('-') => job = Some(other.to_string()),
@@ -76,7 +96,7 @@ fn run(args: Vec<String>) -> i32 {
         i += 1;
     }
     let Some(job) = job else {
-        say("usage: plxs [-i] <job> [--threads <n>] | plxs -v");
+        say("usage: plxs [-i] <job> [--threads <n>] [-o asc|bin] | plxs -v");
         return 1;
     };
     banner();
@@ -236,7 +256,7 @@ fn run(args: Vec<String>) -> i32 {
                 say(&format!(
                     "*ERROR: no convergence in increment {increment}: {message}"
                 ));
-                let _ = write_results(&session, &output_map, &output);
+                let _ = write_results(&session, &output_map, &output, frd_format);
                 return 1;
             }
             Ok(plxs_session::StepOutcome::Partial { .. }) => {}
@@ -261,9 +281,20 @@ fn run(args: Vec<String>) -> i32 {
         }
         say("");
     }
-    if let Err(error) = write_results(&session, &output_map, &output) {
+    let writing = std::time::Instant::now();
+    if let Err(error) = write_results(&session, &output_map, &output, frd_format) {
         report_error(&error);
         return 1;
+    }
+    if profile {
+        say("");
+        for line in session.profile().report(started.elapsed()) {
+            say(&line);
+        }
+        say(&format!(
+            "   (of which writing the result files {:.3} s)",
+            writing.elapsed().as_secs_f64()
+        ));
     }
     say("");
     say(" Job finished");
@@ -283,9 +314,10 @@ fn write_results(
     session: &plxs_session::Session,
     map: &plxs_elements::expand::OutputMap,
     output: &dyn Fn(&str) -> PathBuf,
+    frd_format: plxs_output::FrdFormat,
 ) -> Result<(), Error> {
     let (model, results) = map.apply(session.model(), session.results());
-    plxs_output::write_frd(&output("frd"), &model, &results, VERSION)?;
+    plxs_output::write_frd_as(&output("frd"), &model, &results, VERSION, frd_format)?;
     plxs_output::write_sta(&output("sta"), session.sta_rows())?;
     plxs_output::write_cvg(&output("cvg"), session.cvg_rows())?;
     if !session.results().history.is_empty() {

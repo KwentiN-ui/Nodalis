@@ -133,6 +133,23 @@ darf solche ergänzen, siehe `KONZEPT_CCX_ABLOESUNG.md` 3.5).
   über die Gesamtzeit und gelockerte/verriegelte Constraints nach jedem Step fort; die
   Ergebnisse stimmen mit dem Lauf von vorn auf 1e-6 überein (praktisch bitgleich).
 
+### Profiling und Muster-Wiederverwendung (M3 T16)
+
+- `plxs_procedures::profile::Profile` misst die Wandzeit je Phase (Assemblierung,
+  Constraint-Reduktion, symbolische Analyse, Faktorisierung, Lösen, Ergebnisse) über alle
+  Steps einer Session; `ProcedureContext::profile`, `Session::profile()`. `plxs --profile`
+  oder `PLXS_PROFILE=1` druckt die Tabelle am Ende des Jobs.
+- `LdltSolver::analyze` überspringt die symbolische Analyse, wenn das Muster dasselbe ist
+  wie beim letzten Aufruf (Newton-Iterationen eines Steps, Steps desselben Modells);
+  `analyses_reused()` zählt das. Das Muster-Superset bei Kontakt (Kontaktelemente ändern das
+  Muster je Iteration) kommt mit T11.
+- Messung (Container, 4 Kerne, 24³ C3D8, 45 000 Gleichungen, NLGEOM, 4 Inkremente, 8
+  Iterationen). 2026-10-31 mit AMD: Faktorisierung 16,2 s von 20,3 s, symbolische Analyse
+  0,2 s. 2026-11-01 mit Nested Dissection und baumparallelem LDLᵀ (master): Faktorisierung
+  9,0 s von 15,3 s, die Analyse kostet einmal 2,2 s (ND ist teurer als AMD), die anderen 7
+  werden wiederverwendet; ohne Wiederverwendung wären es rund 15 s mehr. Assemblierung 2,2 s,
+  Reduktion 0,6 s, Lösen 0,6 s. Der Hebel bleibt die Faktorisierung.
+
 Ein `rayon`-Pool je Session mit `threads` Threads (Default: `OMP_NUM_THREADS`, sonst alle
 Kerne). Kein globaler Zustand: mehrere Sessions pro Prozess müssen möglich sein.
 
@@ -315,7 +332,8 @@ Was M1 gebaut hat und wo es von den Signaturen oben abweicht (Entscheidungen des
 - `plxs-procedures`: `run_step` verteilt auf `StaticLinear` (feste Inkremente aus
   `initial`/`period`, K und Faktorisierung einmal je Step, Reaktionen = K·u); `fields` und
   `history` bauen die Felder der `.frd` und die Blöcke der `.dat` in CalculiX-Reihenfolge.
-- `plxs-output`: `write_frd(path, model, results, version)` schreibt ASCII (binär folgt),
+- `plxs-output`: `write_frd(path, model, results, version)` schreibt ASCII, `write_frd_as(.., FrdFormat::Binary)`
+  binär (Koordinaten f64 Flag 3, Ergebnisse f32 Flag 2; CLI `plxs -o bin`, M3 T16),
   `write_dat`, `write_sta`, `write_cvg`.
 - `plxs-session`: wie oben; `run_step` führt die Prozedur auf dem Pool in einem Scoped Thread
   aus und reicht `ProgressEvent`s über einen Kanal an das (nicht `Send`-pflichtige) `progress`.

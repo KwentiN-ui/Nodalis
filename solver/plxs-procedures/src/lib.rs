@@ -21,6 +21,7 @@ pub mod heat;
 pub mod history;
 pub mod modal;
 pub mod nonlinear;
+pub mod profile;
 pub mod sensitivity;
 pub mod static_linear;
 pub mod thermal;
@@ -66,6 +67,8 @@ pub struct ProcedureContext<'a> {
     /// The job's directory: files the input refers to (`*TEMPERATURE, FILE=`) are read
     /// from here.
     pub work_dir: std::path::PathBuf,
+    /// Time per phase, summed over the steps of the session.
+    pub profile: profile::Profile,
 }
 
 /// A procedure computes a step on the context.

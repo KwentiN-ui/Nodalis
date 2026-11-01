@@ -53,6 +53,7 @@ pub struct Session {
     sta: Vec<StaRow>,
     cvg: Vec<CvgRow>,
     average_force: Option<f64>,
+    profile: plxs_procedures::profile::Profile,
     pool: rayon::ThreadPool,
     threads: usize,
     options: SessionOptions,
@@ -110,6 +111,7 @@ impl Session {
             sta: Vec::new(),
             cvg: Vec::new(),
             average_force: None,
+            profile: Default::default(),
             pool,
             threads,
             options,
@@ -139,25 +141,27 @@ impl Session {
             cvg: std::mem::take(&mut self.cvg),
             average_force: self.average_force,
             work_dir: self.options.work_dir.clone(),
+            profile: std::mem::take(&mut self.profile),
         };
         // The procedure runs on the session's pool in a thread of its own; events come
         // through a channel so that the caller's (not necessarily `Send`) progress sink
         // sees them as they happen.
         let (tx, rx) = std::sync::mpsc::channel::<ProgressEvent>();
         let pool = &self.pool;
-        let (outcome, stiffness, solver, sta, cvg, average_force) = std::thread::scope(|scope| {
+        let (outcome, back) = std::thread::scope(|scope| {
             let handle = scope.spawn(move || {
                 let mut ctx = ctx;
                 let mut sink = ChannelProgress(tx);
                 let outcome = pool.install(|| run_step(&mut ctx, step, &mut sink));
-                (
-                    outcome,
-                    ctx.stiffness.take(),
-                    ctx.solver,
-                    std::mem::take(&mut ctx.sta),
-                    std::mem::take(&mut ctx.cvg),
-                    ctx.average_force,
-                )
+                let back = Carried {
+                    stiffness: ctx.stiffness.take(),
+                    solver: ctx.solver,
+                    sta: std::mem::take(&mut ctx.sta),
+                    cvg: std::mem::take(&mut ctx.cvg),
+                    average_force: ctx.average_force,
+                    profile: std::mem::take(&mut ctx.profile),
+                };
+                (outcome, back)
             });
             for event in rx {
                 progress.event(event);
@@ -165,19 +169,23 @@ impl Session {
             handle.join().unwrap_or_else(|_| {
                 (
                     Err(Error::Unsupported("the solver thread panicked".into())),
-                    None,
-                    LdltSolver::new(1),
-                    Vec::new(),
-                    Vec::new(),
-                    None,
+                    Carried {
+                        stiffness: None,
+                        solver: LdltSolver::new(1),
+                        sta: Vec::new(),
+                        cvg: Vec::new(),
+                        average_force: None,
+                        profile: Default::default(),
+                    },
                 )
             })
         });
-        self.stiffness = stiffness;
-        self.solver = solver;
-        self.sta = sta;
-        self.cvg = cvg;
-        self.average_force = average_force;
+        self.stiffness = back.stiffness;
+        self.solver = back.solver;
+        self.sta = back.sta;
+        self.cvg = back.cvg;
+        self.average_force = back.average_force;
+        self.profile = back.profile;
         let outcome = outcome?;
         progress.event(ProgressEvent::StepDone {
             step: step_number,
@@ -196,6 +204,14 @@ impl Session {
 
     pub fn results(&self) -> &Results {
         &self.results
+    }
+
+    /// Time per phase of the steps so far, with the symbolic analyses the direct solver
+    /// reused.
+    pub fn profile(&self) -> plxs_procedures::profile::Profile {
+        let mut profile = self.profile.clone();
+        profile.analyses_reused = self.solver.analyses_reused();
+        profile
     }
 
     /// Rows of the `.sta` file so far.
@@ -276,6 +292,16 @@ fn check_layout(model: &Model, state: &State) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// What a step hands back to the session besides its outcome.
+struct Carried {
+    stiffness: Option<plxs_linalg::SparseMatrix>,
+    solver: LdltSolver,
+    sta: Vec<StaRow>,
+    cvg: Vec<CvgRow>,
+    average_force: Option<f64>,
+    profile: plxs_procedures::profile::Profile,
 }
 
 /// Forwards events into a channel.

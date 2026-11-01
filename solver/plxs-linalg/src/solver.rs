@@ -42,6 +42,10 @@ pub struct LdltSolver {
     /// Positions of the unknowns of the next `analyze`, for the geometric dissection.
     coordinates: Option<Vec<[f64; 3]>>,
     symbolic: Option<SymbolicCholesky<u32>>,
+    /// The pattern `symbolic` belongs to: an `analyze` of the same pattern is skipped (the
+    /// Newton iterations of a step and the steps of a model share one).
+    analyzed: Option<Pattern>,
+    reused: u32,
     /// Elimination tree and permuted structure for the tree-parallel factorization, when
     /// the symbolic analysis chose the supernodal structure.
     tree: Option<TreeSymbolic>,
@@ -70,6 +74,8 @@ impl LdltSolver {
             par,
             coordinates: None,
             symbolic: None,
+            analyzed: None,
+            reused: 0,
             tree: None,
             workspace: Workspace::default(),
             supernodal_threshold: SupernodalThreshold::AUTO,
@@ -77,6 +83,11 @@ impl LdltSolver {
             factorized: false,
             regularization: 0.0,
         }
+    }
+
+    /// How many `analyze` calls were skipped because the pattern was the analyzed one.
+    pub fn analyses_reused(&self) -> u32 {
+        self.reused
     }
 
     /// Always uses the supernodal (tree-parallel) factorization, also for systems that
@@ -127,6 +138,13 @@ fn numerical(message: impl Into<String>) -> Error {
 
 impl LinearSolver for LdltSolver {
     fn analyze(&mut self, pattern: &Pattern) -> Result<()> {
+        if self.symbolic.is_some() && self.analyzed.as_ref() == Some(pattern) {
+            // The factor of the previous values stays valid until the next factorize; the
+            // ordering of the pattern stays too.
+            self.coordinates = None;
+            self.reused += 1;
+            return Ok(());
+        }
         let matrix = Self::symbolic_matrix(pattern);
         // Nested dissection for large systems (it fills three-dimensional meshes far less
         // than AMD, see `ordering`), AMD for small ones, where it is as good and cheaper.
@@ -172,6 +190,7 @@ impl LinearSolver for LdltSolver {
             SymbolicCholeskyRaw::Simplicial(_) => None,
         };
         self.symbolic = Some(symbolic);
+        self.analyzed = Some(pattern.clone());
         self.factorized = false;
         Ok(())
     }
@@ -313,7 +332,10 @@ mod tests {
         for (x, expected) in b.iter().zip([1.0, 2.0, 3.0]) {
             assert!((x - expected).abs() < 1e-12, "{b:?}");
         }
-        // Refactorize with the same pattern and other values.
+        // Refactorize with the same pattern and other values; analyzing the same pattern
+        // again keeps the symbolic factorization.
+        solver.analyze(&pattern).unwrap();
+        assert_eq!(solver.analyses_reused(), 1);
         a.add(0, 0, 4.0);
         solver.factorize(&a).unwrap();
         let mut b = vec![10.0, 10.0, 8.0];
