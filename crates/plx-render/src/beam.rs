@@ -511,14 +511,6 @@ mod tests {
     /// offsets on a beam askew to the axes, its normal not perpendicular to it.
     #[test]
     fn rectangles_lie_where_calculix_expands_the_beam() {
-        if std::process::Command::new("ccx")
-            .arg("-v")
-            .output()
-            .is_err()
-        {
-            eprintln!("ccx not found, test skipped");
-            return;
-        }
         let direction = DVec3::new(1.0, 2.0, 0.5).normalize();
         let mut mesh = FeMesh::default();
         let mut text = String::from("*Node\n");
@@ -555,13 +547,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("plx-beam-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("beam.inp"), text).unwrap();
-        let output = std::process::Command::new("ccx")
-            .args(["-i", "beam"])
-            .current_dir(&dir)
-            .env("OMP_NUM_THREADS", "1")
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
+        plxs_session::run_input_file(&dir, "beam").unwrap_or_else(|e| panic!("{e}"));
         let frd = plx_io::frd::read_frd(&dir.join("beam.frd")).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         let render = swept(&mesh, Some(shape));

@@ -38,7 +38,7 @@ closed while the sweep runs: the block goes on and shows its progress.
     analysis stands still. Standstill itself is not
     computed, as CalculiX merges the coinciding modes there; a range from 0 starts at a fiftieth
     of the highest speed.],
-  [Maximum runs], [Number of CalculiX runs after which the sweep stops by itself (default 40);
+  [Maximum runs], [Number of runs after which the sweep stops by itself (default 40);
     0 runs until #ui("Stop") is pressed.],
   [Engine orders], [The excitation lines $f = "order" times "speed"$ drawn into the diagram, as
     a comma-separated list such as `1, 2, 3`. They can be changed after the sweep.],
@@ -47,11 +47,9 @@ closed while the sweep runs: the block goes on and shows its progress.
     run close to the speed axis. It can be changed at any time, also during the sweep.],
 )
 
-#ui("Start sweep") sets the centrifugal loads of the model to every speed, runs CalculiX in
-a folder named after the block in that of the project in the work directory (@settings) and reads the complex frequencies of the
-last Complex Frequency step and the whirl direction of every mode from the `.dat` file. When the
-`.dat` file of a CalculiX version has no readable complex frequencies, they come from the `.frd`
-file, without whirl directions. As many speeds run at the same time as #ui("Parallel analyses") of
+#ui("Start sweep") sets the centrifugal loads of the model to every speed, runs the solver in
+a folder named after the block in that of the project in the work directory (@settings) and takes the complex frequencies of the
+last Complex Frequency step and the whirl direction of every mode from its results. As many speeds run at the same time as #ui("Parallel analyses") of
 the solver settings allows. The files of a speed are deleted once its frequencies are read; those
 of a failed speed stay for a look.
 
@@ -104,6 +102,6 @@ CalculiX found at that speed (unmatched and unstable, separated by spaces), and 
 every order line. Numbers use a decimal point and the cells are separated by commas.
 #ui("Export JSON ...") saves the same table as JSON (@table-json).
 
-#note[CalculiX solves the Coriolis modes in the rotating frame of reference. The frequencies of
+#note[The solver computes the Coriolis modes in the rotating frame of reference. The frequencies of
 the diagram are therefore those an observer rotating with the shaft would see, and a pair of
 bending modes splits into a rising and a falling branch with the speed.]

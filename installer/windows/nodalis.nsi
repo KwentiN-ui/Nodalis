@@ -50,7 +50,7 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "GNU GPL 3.0 or later"
 !define MUI_ABORTWARNING
 !define MUI_COMPONENTSPAGE_SMALLDESC
 
-!define MUI_WELCOMEPAGE_TEXT "This wizard installs ${APPNAME} ${VERSION}, a pre- and postprocessor for CalculiX.$\r$\n$\r$\nThe CalculiX solver (ccx) is included, so analyses run right after installation. Another CalculiX can be set under Tools > Settings.$\r$\n$\r$\n$_CLICK"
+!define MUI_WELCOMEPAGE_TEXT "This wizard installs ${APPNAME} ${VERSION}, a finite element program with its own solver.$\r$\n$\r$\nAnalyses run right after installation, no other program is needed.$\r$\n$\r$\n$_CLICK"
 ; An update only shows the progress: the pages before and the finish page are skipped.
 !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfUpdate
 !insertmacro MUI_PAGE_WELCOME
@@ -142,10 +142,6 @@ Section "${APPNAME} (required)" SecApp
   ; The offline user guide that Help > User Guide opens.
   SetOutPath "$INSTDIR\doc"
   File "${STAGE}\doc\user-guide.html"
-  ; CalculiX with its DLLs, used when no other CalculiX is set. An update replaces it whole.
-  RMDir /r "$INSTDIR\ccx"
-  SetOutPath "$INSTDIR\ccx"
-  File /r "${STAGE}\ccx\*.*"
   SetOutPath "$INSTDIR"
 
   WriteUninstaller "$INSTDIR\uninstall.exe"
@@ -215,7 +211,7 @@ Function KeepChoices
 FunctionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecApp} "The program with the Gmsh library for geometry import and meshing and the CalculiX solver."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecApp} "The program with its solver and the Gmsh library for geometry import and meshing."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecStartMenu} "Start menu entry for all users."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecDesktop} "Desktop icon for all users."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecAssociation} "Double-clicking a .ndl file opens it in ${APPNAME}."
@@ -238,7 +234,6 @@ Section "Uninstall"
   Delete "$INSTDIR\SOURCE.txt"
   RMDir /r "$INSTDIR\licenses"
   RMDir /r "$INSTDIR\doc"
-  RMDir /r "$INSTDIR\ccx"
   ; The work directory nodalis creates next to itself when it may write there.
   RMDir /r "$INSTDIR\Temp"
   Delete "$INSTDIR\uninstall.exe"

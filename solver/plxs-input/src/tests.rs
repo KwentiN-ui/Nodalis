@@ -373,7 +373,9 @@ fn errors_use_calculix_wording() {
     );
     let errors = read(&cube("*Step\n*Static\n*Hyperfoam\n*End step\n")).unwrap_err();
     assert!(
-        errors[0].to_string().contains("not supported by plxs"),
+        errors[0]
+            .to_string()
+            .contains("is not supported by the solver yet"),
         "{}",
         errors[0]
     );

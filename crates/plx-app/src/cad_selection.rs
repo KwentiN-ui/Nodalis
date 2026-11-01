@@ -747,7 +747,6 @@ mod tests {
 
     /// The largest downward displacement CalculiX computes, if ccx is installed.
     fn tip_deflection(model: &Model) -> Option<f32> {
-        std::process::Command::new("ccx").arg("-v").output().ok()?;
         let inp = plx_io::inp::write_inp(&model.mesh, &model.fe, "Kragarm").unwrap();
         let dir = std::env::temp_dir().join(format!(
             "nodalis-lines-remesh-{}-{}",
@@ -756,12 +755,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("kragarm.inp"), inp).unwrap();
-        let status = std::process::Command::new("ccx")
-            .args(["-i", "kragarm"])
-            .current_dir(&dir)
-            .output()
-            .unwrap();
-        assert!(status.status.success(), "ccx: {status:?}");
+        plxs_session::run_input_file(&dir, "kragarm").unwrap_or_else(|e| panic!("{e}"));
         let results = read_frd(&dir.join("kragarm.frd")).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         let disp = results.increments.last().unwrap().field("DISP").unwrap();
@@ -771,7 +765,6 @@ mod tests {
 
     /// The largest displacement along x CalculiX computes, if ccx is installed.
     fn elongation(model: &Model) -> Option<f32> {
-        std::process::Command::new("ccx").arg("-v").output().ok()?;
         let inp = plx_io::inp::write_inp(&model.mesh, &model.fe, "Platte").unwrap();
         let dir = std::env::temp_dir().join(format!(
             "nodalis-remesh-{}-{}",
@@ -780,12 +773,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("platte.inp"), inp).unwrap();
-        let status = std::process::Command::new("ccx")
-            .args(["-i", "platte"])
-            .current_dir(&dir)
-            .output()
-            .unwrap();
-        assert!(status.status.success(), "ccx: {status:?}");
+        plxs_session::run_input_file(&dir, "platte").unwrap_or_else(|e| panic!("{e}"));
         let results = read_frd(&dir.join("platte.frd")).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         let disp = results.increments.last().unwrap().field("DISP").unwrap();

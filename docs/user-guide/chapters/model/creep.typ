@@ -43,7 +43,7 @@ loads first and the Visco step keeps them, so the creep starts from the loaded s
     requires a positive value; 1e-4 is the default.],
 )
 
-The new step requests `PEEQ` in the element field output, which CalculiX writes as the
+The new step requests `PEEQ` in the element field output, which the solver writes as the
 equivalent creep strain `PE`. The model check (@model-check) warns about a Visco step whose
 materials have no creep law, since it then computes the same as a static step, and reports a
 creep law without elasticity or with a constant that is not positive.

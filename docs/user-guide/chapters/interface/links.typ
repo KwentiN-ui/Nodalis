@@ -27,7 +27,7 @@ The colour of a wire tells its kind, the row tells where it acts:
     the global model of a submodel (@results-links). A Measure block takes the results of a
     step the same way, to compute a key figure of them (@measure-block).],
   [State (green)], [The target continues the source from the state after one of its steps, as
-    further steps of the same CalculiX run (@state-links).],
+    further steps of the same run (@state-links).],
   [Value (violet)], [A number of the target, such as the edge length of a mesh block, takes
     the value of a parameter (@parameters-block). Like a reference, it is then the same
     number. An input of a parameter study goes back to the blocks before it as a dashed
@@ -205,7 +205,7 @@ node).
 
 === Continuing an analysis after a step <state-links>
 
-CalculiX solves the steps of a run one after the other, each starting from the state the step
+The solver computes the steps of a run one after the other, each starting from the state the step
 before it left. A *state link* lets an analysis take that state from a step of another analysis
 and continue with steps of its own, as if they stood behind that step in one input file. Where
 Ansys Workbench links a static analysis to a pre-stressed modal analysis, Nodalis links any
@@ -247,24 +247,10 @@ space and unit system of the source. Open it and add its steps.
 
 #screenshot("continue-from-here-menu.png", [Dragging the results of a step to empty space])
 
-*Solving.* CalculiX solves only the own steps of the target: the run reads the state CalculiX
-wrote after the step in the source's run (`*RESTART, READ`) and continues. The monitor says so
-("Restart after step 2 of 3: the steps up to it are unchanged; CalculiX reads their state from
-Cantilever and solves the rest", or "from the earlier run" once the target has run before). The
-results of the target contain all steps, those of the source and its own, as if solved in one
-go.
+*Solving.* The run of the target solves the steps it took over and then its own, in one go, so
+its results contain all steps, those of the source and its own.
 
 - When the source has no results yet, #ui("Solve") and #ui("Update Project") solve it first.
-- CalculiX takes no new sets after reading a state. Nodalis therefore writes the sets the
-  target's steps need into the input file of the source as well. If they are missing because
-  the source was solved before the steps were added, the target is solved in full instead,
-  with the source's steps repeated in its own run; the results are the same, it only takes
-  longer. The monitor says #ui("Full run") and why.
-- CalculiX writes a state only after steps over time (static, dynamic, heat transfer, coupled
-  and uncoupled temperature-displacement, visco), not after a frequency, buckling or
-  perturbation step. A target that continues after such a step is solved in full as well.
-- The state files are kept in the work directory, not in the project file (@restart). On a
-  computer without them the target is solved in full.
 
 === Split and merge <split-merge>
 

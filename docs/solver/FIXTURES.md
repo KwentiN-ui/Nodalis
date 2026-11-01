@@ -127,11 +127,11 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `constraints/feder-flaeche` | A | M2 | ccx 2.21 | C3D8, SPRING2, \*SPRING, \*EQUATION, \*STATIC |
 | `constraints/federn-knoten` | A | M2 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*STATIC |
 | `constraints/federn` | A | M2 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*STATIC |
-| `constraints/gelockert` | A | M2 | ccx 2.21 | C3D8, \*EQUATION, \*STATIC, \*NODE PRINT |
-| `constraints/geteilt-false-false` | A | M2 | ccx 2.21 | C3D8, \*EQUATION, \*TIE, \*STATIC, \*NODE PRINT |
-| `constraints/geteilt-false-true` | A | M2 | ccx 2.21 | C3D8, \*EQUATION, \*TIE, \*STATIC, \*NODE PRINT |
-| `constraints/geteilt-true-false` | A | M2 | ccx 2.21 | C3D8, \*EQUATION, \*TIE, \*STATIC, \*NODE PRINT |
-| `constraints/geteilt-true-true` | A | M2 | ccx 2.21 | C3D8, \*EQUATION, \*TIE, \*STATIC, \*NODE PRINT |
+| `constraints/gelockert` | A | M2 | ccx 2.23 | C3D8, \*EQUATION, \*STATIC, \*NODE PRINT |
+| `constraints/geteilt-false-false` | A | M2 | ccx 2.23 | C3D8, \*EQUATION, \*TIE, \*STATIC, \*NODE PRINT |
+| `constraints/geteilt-false-true` | A | M2 | ccx 2.23 | C3D8, \*EQUATION, \*TIE, \*STATIC, \*NODE PRINT |
+| `constraints/geteilt-true-false` | A | M2 | ccx 2.23 | C3D8, \*EQUATION, \*TIE, \*STATIC, \*NODE PRINT |
+| `constraints/geteilt-true-true` | A | M2 | ccx 2.23 | C3D8, \*EQUATION, \*TIE, \*STATIC, \*NODE PRINT |
 | `constraints/hinge-and-pin` | A | M2 | ccx 2.21 | C3D8, \*RIGID BODY, \*STATIC |
 | `constraints/hinged-beam` | A | M2 | ccx 2.21 | C3D20R, \*RIGID BODY, \*STATIC |
 | `constraints/moment` | A | M2 | ccx 2.21 | C3D8, \*RIGID BODY, \*STATIC |
@@ -150,16 +150,18 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `constraints/remote-system` | A | M2 | ccx 2.21 | C3D8, \*TRANSFORM, \*RIGID BODY, \*STATIC |
 | `constraints/remote` | A | M2 | ccx 2.21 | C3D8, \*RIGID BODY, \*STATIC |
 | `constraints/rigid-body-held` | A | M2 | ccx 2.21 | C3D8, \*RIGID BODY, \*TIE, \*STATIC |
-| `constraints/schraube-ganz` | A | M2 | ccx 2.21 | C3D8, \*EQUATION, \*STATIC, \*NODE PRINT |
+| `constraints/schraube-ganz` | A | M2 | ccx 2.23 | C3D8, \*EQUATION, \*STATIC, \*NODE PRINT |
 | `constraints/symmetrie-2d-30` | A | M2 | ccx 2.21 | CPS8, \*TRANSFORM, \*STATIC |
 | `constraints/symmetrie-solid-30` | A | M2 | ccx 2.21 | C3D8, \*TRANSFORM, \*STATIC |
-| `constraints/tet-schraeg` | A | M2 | ccx 2.21 | C3D10, \*EQUATION, \*STATIC, \*NODE PRINT |
-| `constraints/tet-vorspannung` | A | M2 | ccx 2.21 | C3D10, \*EQUATION, \*STATIC, \*NODE PRINT |
+| `constraints/tet-schraeg` | A | M2 | ccx 2.23 | C3D10, \*EQUATION, \*STATIC, \*NODE PRINT |
+| `constraints/tet-vorspannung` | A | M2 | ccx 2.23 | C3D10, \*EQUATION, \*STATIC, \*NODE PRINT |
 | `constraints/tie` | A | M2 | ccx 2.21 | C3D8, \*TIE, \*STATIC |
-| `constraints/verkuerzung` | A | M2 | ccx 2.21 | C3D8, \*EQUATION, \*STATIC, \*NODE PRINT |
-| `constraints/verriegelt` | A | M2 | ccx 2.21 | C3D8, \*EQUATION, \*STATIC, \*NODE PRINT |
+| `constraints/verkuerzung` | A | M2 | ccx 2.23 | C3D8, \*EQUATION, \*STATIC, \*NODE PRINT |
+| `constraints/verriegelt` | A | M2 | ccx 2.23 | C3D8, \*EQUATION, \*STATIC, \*NODE PRINT |
 | `constraints/verteilte-temperatur` | A | M2 | ccx 2.21 | C3D8, \*EXPANSION, \*CONDUCTIVITY, \*SPECIFIC HEAT, \*RIGID BODY, \*INITIAL CONDITIONS, \*STATIC, \*TEMPERATURE |
-| `constraints/vorspannung` | A | M2 | ccx 2.21 | C3D8, \*EQUATION, \*STATIC, \*NODE PRINT |
+| `constraints/vorspannung` | A | M2 | ccx 2.23 | C3D8, \*EQUATION, \*STATIC, \*NODE PRINT |
+| `contact/kontakt-2d-axi` | C | M3 | ccx 2.23 | CAX8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC |
+| `contact/kontakt-2d-cps` | C | M3 | ccx 2.23 | CPS8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC |
 | `contact/kontakt-2d` | C | M3 | ccx 2.21 | CPE8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC |
 | `contact/kontakt-hard-m` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC |
 | `contact/kontakt-hard-mm` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC |
@@ -181,6 +183,8 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `contact/n2s-offset` | C | M3 | ccx 2.21 | C3D8, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*CLEARANCE, \*STATIC, \*CONTACT FILE |
 | `contact/n2s-rough` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*RIGID BODY, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*FRICTION, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE |
 | `contact/n2s-switched-on` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE, \*MODEL CHANGE |
+| `contact/region-conductance-expansion` | C | M3 | ccx 2.23 | C3D8, SPRING1, \*CONDUCTIVITY, \*EXPANSION, \*SPECIFIC HEAT, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*GAP CONDUCTANCE, \*CONTACT PAIR, \*INITIAL CONDITIONS, \*COUPLED TEMPERATURE-DISPLACEMENT, \*CFLUX |
+| `contact/region-conductance-table` | C | M3 | ccx 2.23 | C3D8, SPRING1, \*CONDUCTIVITY, \*SPECIFIC HEAT, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*GAP CONDUCTANCE, \*CONTACT PAIR, \*INITIAL CONDITIONS, \*COUPLED TEMPERATURE-DISPLACEMENT, \*CFLUX |
 | `contact/region-conductance` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*CONDUCTIVITY, \*SPECIFIC HEAT, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*GAP CONDUCTANCE, \*CONTACT PAIR, \*INITIAL CONDITIONS, \*COUPLED TEMPERATURE-DISPLACEMENT, \*CFLUX |
 | `contact/region-contact-results` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE |
 | `contact/region-friction-change` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*RIGID BODY, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*FRICTION, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE, \*CHANGE FRICTION |

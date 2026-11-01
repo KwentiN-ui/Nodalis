@@ -31,6 +31,11 @@ pub struct Model {
     pub design_variables: Option<DesignVariables>,
     /// `*RESTART, READ`: continue from the state after step `step` of the previous run.
     pub restart_read: Option<RestartRead>,
+    /// The `.eig` file of the job next to its input file, when there is one: the modes of an
+    /// earlier run for modal steps without a frequency step of their own (as CalculiX reads
+    /// `<job>.eig`).
+    #[serde(skip)]
+    pub stored_modes_file: Option<std::path::PathBuf>,
     #[serde(skip)]
     element_index: HashMap<ElementId, u32>,
 }

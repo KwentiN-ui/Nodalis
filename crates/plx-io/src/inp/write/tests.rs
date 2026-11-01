@@ -1794,30 +1794,6 @@ fn run_dat(name: &str, text: &str) -> Option<String> {
     Some(dat)
 }
 
-#[test]
-fn check_model_replaces_the_procedures_by_no_analysis() {
-    let (mesh, mut model) = cantilever(tip_force());
-    let text = write_check_inp(&mesh, &model, "").unwrap();
-    assert!(text.contains("*Step\n*No analysis\n"), "{text}");
-    assert!(!text.contains("*Static"), "{text}");
-    // The loads are still checked.
-    assert!(text.contains("*Cload\nInternal_Selection-1_Force-1, 3, -100\n"));
-    // A deactivated step stays a comment, and without an active step PrePoMax's CheckModel
-    // step is added.
-    model.steps[0].active = false;
-    let text = write_check_inp(&mesh, &model, "").unwrap();
-    assert!(
-        text.contains("** Name: StaticStep: Deactivated\n"),
-        "{text}"
-    );
-    assert!(text.contains("** CheckModel"), "{text}");
-    assert_eq!(text.matches("*No analysis").count(), 1, "{text}");
-    model.steps.clear();
-    let text = write_check_inp(&mesh, &model, "").unwrap();
-    let step = text.find("*Step\n*No analysis\n").expect(&text);
-    assert!(text[step..].contains("*End step\n"), "{text}");
-}
-
 /// The cantilever of `kragbalken_c3d20r.inp` with a frequency step after the static one.
 fn frequency_analysis() -> (FeMesh, FeModel) {
     let (mesh, mut model) = analysis("kragbalken_c3d20r.inp", tip_force());
@@ -6907,10 +6883,6 @@ fn a_moving_load_writes_a_step_per_position() {
     }
     // The node sets of other items are written once.
     assert_eq!(text.matches("*Nset, Nset=Internal_Selection").count(), 1);
-    // Check Model checks every position without solving it.
-    let check = write_check_inp(&mesh, &model, "").unwrap();
-    assert_eq!(check.matches("*No analysis").count(), 5);
-    assert!(!check.contains("*Static"));
 }
 
 #[test]

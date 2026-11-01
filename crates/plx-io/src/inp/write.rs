@@ -190,40 +190,6 @@ pub fn write_deformed_mesh_inp(
     write_inp(&deformed, &FeModel::default(), heading)
 }
 
-/// The input file for PrePoMax's "Check Model": every step's procedure is replaced by
-/// `*No analysis`, so that CalculiX only reads and checks the model. A model without active
-/// steps gets PrePoMax's `CheckModel` step.
-pub fn write_check_inp(
-    mesh: &FeMesh,
-    model: &FeModel,
-    heading: &str,
-) -> Result<String, WriteError> {
-    let mut tree = model_keywords(mesh, model, heading)?;
-    let no_analysis = || Keyword::generated("*No analysis\n".into());
-    if let Some(steps) = tree
-        .iter_mut()
-        .find(|k| matches!(&k.kind, KeywordKind::Title(name) if name == "Steps"))
-    {
-        // A deactivated step stays a comment; a step with moving loads has a `*Step` for
-        // each position.
-        for (step, _) in (steps.children.iter_mut().zip(&model.steps)).filter(|(_, s)| s.active) {
-            for header in &mut step.children {
-                if let Some(procedure) = header.children.first_mut() {
-                    *procedure = no_analysis();
-                }
-            }
-        }
-        if !model.steps.iter().any(|s| s.active) {
-            let end = Keyword::title("End step", vec![Keyword::generated("*End step\n".into())]);
-            let header = Keyword::parent("*Step\n".into(), vec![no_analysis(), end]);
-            steps
-                .children
-                .push(Keyword::title("CheckModel", vec![header]));
-        }
-    }
-    Ok(write_keywords(&tree))
-}
-
 /// The text of a keyword tree.
 pub fn write_keywords(tree: &[Keyword]) -> String {
     fn write(out: &mut String, keyword: &Keyword) {

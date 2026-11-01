@@ -52,13 +52,14 @@ impl Planar {
     }
 }
 
+/// Local corner and midside node indices of every face, whether the element is quadratic,
+/// and how its faces extend out of plane.
+type ElementFaces = (Vec<(Vec<usize>, Vec<usize>)>, bool, Option<Planar>);
+
 /// The faces of an element as local corner and midside node indices, whether it is
 /// quadratic and how its faces extend out of plane; `None` for elements without contact
 /// faces.
-fn element_faces(
-    model: &Model,
-    index: usize,
-) -> Option<(Vec<(Vec<usize>, Vec<usize>)>, bool, Option<Planar>)> {
+fn element_faces(model: &Model, index: usize) -> Option<ElementFaces> {
     let element = &model.elements[index];
     if let Some(family) = solid(element.kind).map(|s| s.family) {
         let quadratic = family.is_quadratic();

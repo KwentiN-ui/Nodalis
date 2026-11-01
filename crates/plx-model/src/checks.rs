@@ -163,9 +163,6 @@ pub enum Problem {
     MpcAndSpc,
     /// Found in the solver output only.
     RotationIn2d,
-    /// A keyword of the input file that the configured CalculiX does not know: it skips the
-    /// card with a warning. Found by testing the executable before a run, or in its output.
-    UnknownKeyword,
     /// Any other `*ERROR` of the solver output.
     SolverError,
 }
@@ -271,7 +268,6 @@ impl Problem {
             Problem::NoConvergence => "No convergence",
             Problem::MpcAndSpc => "Degree of freedom bound twice",
             Problem::RotationIn2d => "Rotation in a 2D model",
-            Problem::UnknownKeyword => "Keyword unknown to CalculiX",
             Problem::SolverError => "Solver error",
         }
     }
@@ -637,18 +633,11 @@ impl Problem {
                  prescribe rotations for them; the run aborts with \"mpc of type is \
                  unknown\" or a floating point error."
             }
-            Problem::UnknownKeyword => {
-                "The configured CalculiX does not know a keyword of the input file, usually \
-                 because it is older than the feature that writes it. CalculiX skips such a \
-                 card with only a warning and carries on without it, so the step, load or \
-                 material it defines is missing from the results."
-            }
             Problem::NoPhysicalConstants => {
                 "Radiation (*RADIATE) depends on the fourth power of the absolute \
-                 temperature, so CalculiX needs the absolute zero of the model's temperature \
+                 temperature, so the solver needs the absolute zero of the model's temperature \
                  scale and the Stefan-Boltzmann constant in its units (*PHYSICAL \
-                 CONSTANTS). Without them it aborts with \"*RADIATE card was selected but no \
-                 *PHYSICAL CONSTANTS card encountered\"."
+                 CONSTANTS). Without them it aborts."
             }
             Problem::SolverError => {
                 "The solver aborted with an error message that Nodalis does not know. \
@@ -914,10 +903,6 @@ impl Problem {
                  displacement that binds it."
             }
             Problem::RotationIn2d => "In 2D models prescribe only U1 and U2.",
-            Problem::UnknownKeyword => {
-                "Install a newer CalculiX or select it under Tools > Settings > CalculiX; \
-                 \"Test CalculiX\" there lists the features it supports."
-            }
             Problem::NoPhysicalConstants => {
                 "Open Model > Model Properties and enter Absolute zero and Stefan-Boltzmann \
                  under Physical Constants; Defaults fills them in for the unit system."
@@ -940,11 +925,6 @@ pub struct Finding {
 }
 
 impl Finding {
-    /// Keywords the configured CalculiX does not know, found before the analysis ran.
-    pub fn unknown_keywords(detail: impl Into<String>) -> Self {
-        Self::new(ModelItem::Analysis, Problem::UnknownKeyword, detail)
-    }
-
     pub(crate) fn new(item: ModelItem, problem: Problem, detail: impl Into<String>) -> Self {
         Self {
             item,
@@ -3265,26 +3245,6 @@ pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
             );
         }
     }
-    // " *WARNING in calinput. Card image cannot be interpreted:", then the card in a later
-    // line, upper case without blanks.
-    let mut unknown: Vec<&str> = Vec::new();
-    for (at, _) in (lines.iter().enumerate()).filter(|(_, l)| l.contains("cannot be interpreted")) {
-        let card = (lines[at + 1..].iter().take(3))
-            .map(|l| l.trim())
-            .find(|l| l.starts_with('*') && !l.starts_with("*WARNING"));
-        if let Some(card) = card.map(|c| c.split(',').next().unwrap_or(c))
-            && !unknown.contains(&card)
-        {
-            unknown.push(card);
-        }
-    }
-    if !unknown.is_empty() {
-        add(
-            &mut findings,
-            Problem::UnknownKeyword,
-            format!("CalculiX skipped {}", unknown.join(", ")),
-        );
-    }
     if findings.is_empty()
         && let Some(line) = lines.iter().find(|l| l.contains("*ERROR"))
     {
@@ -4901,17 +4861,11 @@ mod tests {
                 (ModelItem::Part(1), Problem::DistortedElements),
             ]
         );
-        let skipped = [
-            " *WARNING in calinput. Card image cannot be interpreted:",
-            " *WARNING reading the input file. Card image:",
-            "          *CYCLICSYMMETRYMODEL,N=12",
-            " *ERROR in something: new message",
-        ]
-        .map(String::from);
-        let findings = diagnose_solver_output(&skipped, &mesh);
+        let unknown = [" *ERROR in something: new message"].map(String::from);
+        let findings = diagnose_solver_output(&unknown, &mesh);
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].problem, Problem::UnknownKeyword);
-        assert_eq!(findings[0].detail, "CalculiX skipped *CYCLICSYMMETRYMODEL");
+        assert_eq!(findings[0].problem, Problem::SolverError);
+        assert_eq!(findings[0].detail, "*ERROR in something: new message");
         let radiate = [
             " *ERROR reading *RADIATE: *RADIATE card was selected",
             "        but no *PHYSICAL CONSTANTS card encountered",
