@@ -929,3 +929,48 @@ Was T14 gebaut hat, alles auf den Moden eines vorangehenden `*FREQUENCY, STORAGE
 - Alle Fixtures `static/*` (Stufe M1 in `FIXTURES.md`) sind grün:
   `cargo run -p plxs-verify --bin plxs-fixtures -- run --solver target/debug/plxs --area static`.
 - Benchmark 176k-DOF-Block (Build-Doku) gegen ccx-PaStiX, 4 Threads, als Zahl im PR.
+
+## Stand nach der Performance-Runde 1 (2026-10-31, Thread "CCX durch eigenen Solver ersetzen")
+
+- `plxs-linalg::ordering`: Nested Dissection als Fill-reducing Ordering für Systeme ab 3000
+  Unbekannten (`LdltSolver`, Konstante `DISSECTION_FROM`), darunter weiter faer's AMD.
+  Bisektion geometrisch am Median der längsten Achse, wenn der Löser die Positionen der
+  Unbekannten kennt (`LdltSolver::set_coordinates`, von `static_linear` und `heat` gesetzt),
+  sonst über Level-Strukturen; Vertex-Separator = kleinere Randseite; Supervariablen (DOFs
+  eines Knotens) bleiben zusammen; Blätter in Cuthill-McKee-Reihenfolge.
+- Messung 39³-Hex-Block, 173k Gleichungen, 4 Threads: AMD 840 Mio. Nonzeros im Faktor, 37 s;
+  Dissection 239 Mio., 10,6 s; CalculiX/PaStiX (Scotch) 213 Mio., 4,5 s Faktorisierung, 10,7 s
+  Gesamtlauf gegen 12,5 s plxs. Die Ergebnisse (Fixture-Korpus) ändern sich nicht.
+- `PLXS_ORDERING=amd|nd` erzwingt eine Ordnung (für Messungen).
+- Offen (T20): faer parallelisiert nur innerhalb eines Supernodes; eine baumparallele
+  supernodale LDLᵀ auf faer's dichten Kernen soll den Rest (Faktor ~2 in der numerischen
+  Faktorisierung) holen. Benchmark-Eingaben: `/mnt/project-files/prepolix/workbench/benchmark/`
+  (Projektordner, nicht im Repo), Zahlen in `KONZEPT_CCX_ABLOESUNG.md` Abschnitt 7.
+
+## Stand nach T20 (2026-11-01, Thread "Solver schneller als PaStiX machen")
+
+- `plxs-linalg::supernodal`: eigene numerische Faktorisierung für supernodale Strukturen,
+  parallel über den Eliminationsbaum. faer liefert weiter die symbolische Analyse (Ordnung,
+  Supernodes, Struktur und Speicherlayout des Faktors), deshalb bleiben `solve` und die
+  Inertia-Zählung faer's. Left-looking wie faer: ein Supernode holt die Updates aller
+  Nachfahren, deren Zeilen in seine Spalten reichen, direkt aus deren fertigen Spalten (ein
+  dichtes Produkt je Nachfahre, dann Scatter); dann faer's dichte LDLᵀ des Diagonalblocks und
+  die Dreieckslösung des Blocks darunter (transponiert in einem zusammenhängenden Puffer,
+  faer's Kerne sind darauf deutlich schneller). Teilbäume laufen ab genug Arbeit parallel
+  (rayon), kleine sequentiell ohne Rekursion; große Supernodes nahe der Wurzel teilen ihre
+  Spalten in Blöcke, die ihre Updates parallel holen. Kein Speicher über den Faktor hinaus;
+  Puffer der Produkte (`Workspace`) bleiben über Refaktorisierungen erhalten.
+- Kleine Systeme, für die faer die simpliziale Struktur wählt, rechnet weiter faer.
+  `LdltSolver::force_supernodal()` erzwingt den neuen Pfad (Tests); `PLXS_FACTOR=faer`
+  schaltet für Messungen auf faer's supernodale Faktorisierung zurück.
+- Der Faktor wird in `analyze` einmal sequentiell beschrieben: Page-Faults, die mehrere
+  Threads gleichzeitig nehmen, kosten in der Cloud-VM ein Vielfaches.
+- Verworfen: eine multifrontale Variante. Sie war mit warmem Speicher 20 % schneller (6,4 s
+  gegen 8,0 s für den 173k-Block, 4 Threads), brauchte aber 1,7 GB Update-Matrizen zusätzlich
+  zum 1,9-GB-Faktor; bei großen Modellen (1 Mio. Gleichungen) ein Speicherrisiko, und in der VM
+  war die erste Faktorisierung dadurch langsamer.
+- Ergebnisse unverändert (Fixture-Korpus grün; Block-Ergebnisse bis auf die letzte Stelle der
+  `.frd` gleich). Zahlen gegen ccx/PaStiX in `KONZEPT_CCX_ABLOESUNG.md` Abschnitt 7.4.
+- Offen: faer's dichte Kerne erreichen in der VM 40-50 GFlop/s je Kern (OpenBLAS in PaStiX
+  ca. 55-60); Dreieckslösung und dichte LDLᵀ ca. 25-35. Multithreaded Vorwärts-/
+  Rückwärtseinsetzen; Separator-Verfeinerung im Ordering (Scotch füllt 11 % weniger).

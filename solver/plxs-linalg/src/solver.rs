@@ -1,10 +1,13 @@
-//! Direct solvers on `faer`: LDLᵀ for symmetric systems. The symbolic analysis (AMD
-//! ordering, elimination tree, supernodes) is done once per pattern and reused for every
-//! numeric factorization with the same pattern.
+//! Direct solvers on `faer`: LDLᵀ for symmetric systems. The symbolic analysis (ordering,
+//! elimination tree, supernodes; `faer`'s) is done once per pattern and reused for every
+//! numeric factorization with the same pattern. Supernodal structures are factorized by the
+//! tree-parallel method of [`crate::supernodal`], small (simplicial) ones by
+//! `faer`.
 
 use faer::Side;
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::ldlt::factor::LdltRegularization;
+use faer::sparse::linalg::SupernodalThreshold;
 use faer::sparse::linalg::cholesky::{
     CholeskySymbolicParams, SymbolicCholesky, SymbolicCholeskyRaw, SymmetricOrdering,
     factorize_symbolic_cholesky, supernodal::SupernodalLdltRef,
@@ -13,6 +16,7 @@ use faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
 
 use plxs_core::{Error, Result};
 
+use crate::supernodal::{self, Regularization, TreeSymbolic, Workspace};
 use crate::{Pattern, SparseMatrix};
 
 /// A direct or iterative solver of `K x = b`.
@@ -29,10 +33,22 @@ pub trait LinearSolver {
     fn inertia(&self) -> Option<usize>;
 }
 
-/// Sparse LDLᵀ (supernodal, AMD ordering) from `faer`.
+/// Systems of at least this many equations are ordered by nested dissection.
+const DISSECTION_FROM: usize = 3000;
+
+/// Sparse LDLᵀ (supernodal) from `faer`, ordered by nested dissection or AMD.
 pub struct LdltSolver {
     par: faer::Par,
+    /// Positions of the unknowns of the next `analyze`, for the geometric dissection.
+    coordinates: Option<Vec<[f64; 3]>>,
     symbolic: Option<SymbolicCholesky<u32>>,
+    /// Elimination tree and permuted structure for the tree-parallel factorization, when
+    /// the symbolic analysis chose the supernodal structure.
+    tree: Option<TreeSymbolic>,
+    /// Scratch buffers of the factorization, reused over refactorizations.
+    workspace: Workspace,
+    /// When `faer` chooses the supernodal over the simplicial structure.
+    supernodal_threshold: SupernodalThreshold,
     values: Vec<f64>,
     factorized: bool,
     /// Relative threshold below which a pivot is replaced by `±threshold · scale` (its sign
@@ -52,11 +68,35 @@ impl LdltSolver {
         };
         Self {
             par,
+            coordinates: None,
             symbolic: None,
+            tree: None,
+            workspace: Workspace::default(),
+            supernodal_threshold: SupernodalThreshold::AUTO,
             values: Vec::new(),
             factorized: false,
             regularization: 0.0,
         }
+    }
+
+    /// Always uses the supernodal (tree-parallel) factorization, also for systems that
+    /// `faer` would factorize column by column; for tests of the supernodal path on small
+    /// matrices.
+    pub fn force_supernodal(mut self) -> Self {
+        self.supernodal_threshold = SupernodalThreshold::FORCE_SUPERNODAL;
+        self
+    }
+
+    /// Gives the positions of the unknowns (one per equation of the pattern analyzed next);
+    /// the ordering then bisects geometrically, which fills far less on meshes. Taken by the
+    /// next `analyze`.
+    pub fn set_coordinates(&mut self, coordinates: Option<Vec<[f64; 3]>>) {
+        self.coordinates = coordinates;
+    }
+
+    /// Nonzeros of the factor after `analyze`, a measure of the work of a factorization.
+    pub fn factor_nonzeros(&self) -> Option<usize> {
+        self.symbolic.as_ref().map(|s| s.len_val())
     }
 
     /// Replaces pivots smaller than `relative` times the largest diagonal entry by that
@@ -88,14 +128,49 @@ fn numerical(message: impl Into<String>) -> Error {
 impl LinearSolver for LdltSolver {
     fn analyze(&mut self, pattern: &Pattern) -> Result<()> {
         let matrix = Self::symbolic_matrix(pattern);
+        // Nested dissection for large systems (it fills three-dimensional meshes far less
+        // than AMD, see `ordering`), AMD for small ones, where it is as good and cheaper.
+        let coordinates = self.coordinates.take();
+        // `PLXS_ORDERING=amd|nd` forces one ordering, for measurements.
+        let dissect = match std::env::var("PLXS_ORDERING").as_deref() {
+            Ok("amd") => false,
+            Ok("nd") => true,
+            _ => pattern.dimension() >= DISSECTION_FROM,
+        };
+        let dissection =
+            dissect.then(|| crate::ordering::nested_dissection(pattern, coordinates.as_deref()));
+        let inverse = dissection.as_deref().map(crate::ordering::inverse);
+        let ordering =
+            match (&dissection, &inverse) {
+                (Some(perm), Some(inv)) => SymmetricOrdering::Custom(
+                    faer::perm::PermRef::new_checked(perm, inv, pattern.dimension()),
+                ),
+                _ => SymmetricOrdering::Amd,
+            };
         let symbolic = factorize_symbolic_cholesky(
             matrix,
             Side::Upper,
-            SymmetricOrdering::Amd,
-            CholeskySymbolicParams::default(),
+            ordering,
+            CholeskySymbolicParams {
+                supernodal_flop_ratio_threshold: self.supernodal_threshold,
+                ..Default::default()
+            },
         )
         .map_err(|e| numerical(format!("symbolic factorization failed: {e:?}")))?;
         self.values = vec![0.0; symbolic.len_val()];
+        // The zeroed allocation is mapped lazily; writing it once here takes its page faults
+        // in one thread. Taken by the threads of the factorization at once they cost several
+        // times more (the kernel serializes them; measured in the cloud VM: 1.9 GB of factor
+        // 1.1 s here against about 3 s inside the parallel factorization).
+        self.values.fill(0.0);
+        self.workspace.clear();
+        self.tree = match symbolic.raw() {
+            SymbolicCholeskyRaw::Supernodal(raw) => {
+                let inverse = symbolic.perm().map(|perm| perm.arrays().1);
+                Some(TreeSymbolic::new(raw, pattern, inverse))
+            }
+            SymbolicCholeskyRaw::Simplicial(_) => None,
+        };
         self.symbolic = Some(symbolic);
         self.factorized = false;
         Ok(())
@@ -107,10 +182,6 @@ impl LinearSolver for LdltSolver {
             .as_ref()
             .ok_or_else(|| numerical("factorize before analyze"))?;
         let pattern = matrix.pattern();
-        let a = SparseColMatRef::new(Self::symbolic_matrix(pattern), matrix.values());
-        let scratch = symbolic.factorize_numeric_ldlt_scratch::<f64>(self.par, Default::default());
-        let mut buffer = MemBuffer::try_new(scratch)
-            .map_err(|_| numerical("out of memory in the factorization"))?;
         let threshold = if self.regularization > 0.0 {
             let largest = matrix
                 .diagonal()
@@ -121,21 +192,50 @@ impl LinearSolver for LdltSolver {
         } else {
             0.0
         };
-        symbolic
-            .factorize_numeric_ldlt::<f64>(
-                &mut self.values,
-                a,
-                Side::Upper,
-                LdltRegularization {
-                    dynamic_regularization_signs: None,
-                    dynamic_regularization_delta: threshold,
-                    dynamic_regularization_epsilon: threshold,
-                },
-                self.par,
-                MemStack::new(&mut buffer),
-                Default::default(),
-            )
-            .map_err(|e| numerical(format!("the stiffness matrix is singular: {e:?}")))?;
+        // The tree-parallel factorization for supernodal structures (`PLXS_FACTOR=faer`
+        // falls back to faer's own, for measurements);
+        // faer's simplicial factorization for the small systems it chose that for.
+        let own = std::env::var("PLXS_FACTOR").as_deref() != Ok("faer");
+        match (symbolic.raw(), &self.tree) {
+            (SymbolicCholeskyRaw::Supernodal(raw), Some(tree)) if own => {
+                supernodal::factorize(
+                    raw,
+                    tree,
+                    matrix.values(),
+                    &mut self.values,
+                    Regularization {
+                        signs: None,
+                        delta: threshold,
+                        epsilon: threshold,
+                    },
+                    self.par,
+                    &self.workspace,
+                )
+                .map_err(|e| numerical(format!("the stiffness matrix is singular: {e:?}")))?;
+            }
+            _ => {
+                let a = SparseColMatRef::new(Self::symbolic_matrix(pattern), matrix.values());
+                let scratch =
+                    symbolic.factorize_numeric_ldlt_scratch::<f64>(self.par, Default::default());
+                let mut buffer = MemBuffer::try_new(scratch)
+                    .map_err(|_| numerical("out of memory in the factorization"))?;
+                symbolic
+                    .factorize_numeric_ldlt::<f64>(
+                        &mut self.values,
+                        a,
+                        Side::Upper,
+                        LdltRegularization {
+                            dynamic_regularization_signs: None,
+                            dynamic_regularization_delta: threshold,
+                            dynamic_regularization_epsilon: threshold,
+                        },
+                        self.par,
+                        MemStack::new(&mut buffer),
+                        Default::default(),
+                    )
+                    .map_err(|e| numerical(format!("the stiffness matrix is singular: {e:?}")))?;
+            }
+        }
         self.factorized = true;
         Ok(())
     }
