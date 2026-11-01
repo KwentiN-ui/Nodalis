@@ -2,7 +2,6 @@
 //! data directory (Linux `~/.local/share/prepolix`, Windows `%APPDATA%\prepolix\data`).
 
 use crate::numeric;
-use plx_model::EquationSolver;
 pub use plx_solve::Engine;
 use serde::{Deserialize, Serialize};
 
@@ -141,13 +140,12 @@ pub struct Solver {
     /// The CalculiX executable; a bare name is looked up on `PATH`, empty for the one shipped
     /// with prepolix (see [`bundled_ccx`]).
     pub executable: String,
-    /// Threads for the solver (`OMP_NUM_THREADS`); [`AUTOMATIC_THREADS`] for all cores,
-    /// shared by the analyses solved at the same time.
+    /// Threads for the solver: the size of the one thread pool all analyses of the built-in
+    /// solver share ([`plx_solve::pool`]), or `OMP_NUM_THREADS` of each CalculiX process;
+    /// [`AUTOMATIC_THREADS`] for all cores.
     pub threads: u32,
     /// Where analyses run; empty for the default, see [`default_work_dir`].
     pub work_dir: String,
-    /// Optional solvers found in the executable; probed again when it changes.
-    pub detected: Option<DetectedSolvers>,
     /// Keywords tested on the executable; tested again when it changes.
     pub keywords: Option<DetectedKeywords>,
     /// CalculiX writes the state after each step, so that a run after a change solves only
@@ -167,13 +165,6 @@ pub fn cores() -> u32 {
     std::thread::available_parallelism().map_or(1, |n| n.get() as u32)
 }
 
-/// Result of [`crate::solver_check::available_solvers`] for one executable.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct DetectedSolvers {
-    pub executable: String,
-    pub solvers: Vec<EquationSolver>,
-}
-
 /// Result of [`crate::solver_check::known_keywords`] for one executable, by normalized
 /// keyword, collected over the self test and the analyses run with it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -191,7 +182,6 @@ impl Default for Solver {
             executable: String::new(),
             threads: AUTOMATIC_THREADS,
             work_dir: String::new(),
-            detected: None,
             keywords: None,
             keep_restart_files: true,
             restart_limit_mb: 4096,
@@ -206,29 +196,6 @@ impl Solver {
             "" => default_work_dir(),
             dir => std::path::PathBuf::from(dir),
         }
-    }
-
-    /// The solver for steps left at [`EquationSolver::Default`]: Pardiso if the executable
-    /// has it, else PaStiX, otherwise CalculiX's own choice. The executable is probed the
-    /// first time.
-    pub fn default_solver(&mut self) -> EquationSolver {
-        // The built-in solver chooses itself.
-        if self.engine == Engine::PrePoLix {
-            return EquationSolver::Default;
-        }
-        if self.solvers().is_none()
-            && let Some(solvers) = crate::solver_check::available_solvers(
-                &self.job_solver(),
-                &self.work_dir(),
-                &|_, _| {},
-            )
-        {
-            self.detected = Some(DetectedSolvers {
-                executable: self.executable_key(),
-                solvers,
-            });
-        }
-        preferred_solver(self.solvers().unwrap_or_default())
     }
 
     /// Those of `keywords` the executable does not know. Keywords not tested on it yet are
@@ -274,15 +241,7 @@ impl Solver {
         })
     }
 
-    /// The detected solvers, if they belong to the current executable.
-    pub fn solvers(&self) -> Option<&[EquationSolver]> {
-        self.detected
-            .as_ref()
-            .filter(|d| d.executable == self.executable_key())
-            .map(|d| d.solvers.as_slice())
-    }
-
-    /// The executable the detected solvers belong to: the resolved path with the file's size
+    /// The executable restart states and tested keywords belong to: the resolved path with the file's size
     /// and modification time, so that another CalculiX at the same path, such as an update of
     /// the bundled one, is probed again.
     pub fn executable_key(&self) -> String {
@@ -310,13 +269,16 @@ impl Solver {
         }
     }
 
-    /// Threads of each of `concurrent` runs solved at the same time: the chosen number, or
-    /// with [`AUTOMATIC_THREADS`] an equal share of the cores, so that together they do not
-    /// ask for more than the computer has.
+    /// Threads of each of `concurrent` runs solved at the same time. The built-in solver
+    /// runs them all in one shared pool of the chosen size ([`AUTOMATIC_THREADS`] for all
+    /// cores), where they take the threads as they need them. CalculiX processes cannot
+    /// share; with [`AUTOMATIC_THREADS`] each gets an equal share of the cores, so that
+    /// together they do not ask for more than the computer has.
     pub fn threads_of(&self, concurrent: usize) -> u32 {
-        match self.threads {
-            AUTOMATIC_THREADS => (cores() / concurrent.max(1) as u32).max(1),
-            threads => threads,
+        match (self.engine, self.threads) {
+            (Engine::PrePoLix, threads) => threads,
+            (Engine::CalculiX, AUTOMATIC_THREADS) => (cores() / concurrent.max(1) as u32).max(1),
+            (Engine::CalculiX, threads) => threads,
         }
     }
 
@@ -343,7 +305,7 @@ fn threads_ui(ui: &mut egui::Ui, threads: &mut u32) {
     ui.horizontal(|ui| {
         let mut automatic = *threads == AUTOMATIC_THREADS;
         let tip = format!(
-            "Uses all {} cores of this computer. Analyses solved at the same time share them.",
+            "Uses all {} cores of this computer. Analyses solved at the same time share them: the built-in solver hands them out as the analyses need them, CalculiX processes get an equal share each.",
             cores()
         );
         if ui
@@ -363,14 +325,6 @@ fn threads_ui(ui: &mut egui::Ui, threads: &mut u32) {
             ui.add(numeric::drag_value(threads).range(1..=256));
         }
     });
-}
-
-/// The fastest of the detected direct solvers, or CalculiX's own choice.
-fn preferred_solver(solvers: &[EquationSolver]) -> EquationSolver {
-    [EquationSolver::Pardiso, EquationSolver::PaStiX]
-        .into_iter()
-        .find(|s| solvers.contains(s))
-        .unwrap_or(EquationSolver::Default)
 }
 
 /// Where the shipped CalculiX lies relative to the directory of the executable: Windows
@@ -447,17 +401,6 @@ impl Default for Updates {
     fn default() -> Self {
         Self {
             check_at_startup: true,
-        }
-    }
-}
-
-fn solvers_text(solvers: Option<&[EquationSolver]>) -> String {
-    match solvers {
-        None => "not checked yet".into(),
-        Some([]) => "no direct solver found".into(),
-        Some(solvers) => {
-            let names: Vec<_> = solvers.iter().filter_map(|s| s.keyword()).collect();
-            names.join(", ")
         }
     }
 }
@@ -775,14 +718,8 @@ impl SettingsWindow {
                         }
                         ui.label("Parallel analyses");
                         ui.add(numeric::drag_value(&mut solver.parallel_runs).range(1..=64))
-                            .on_hover_text("Update Project solves up to this many independent analyses at the same time, each with the threads above (with automatic threads they share the cores); the Campbell sweep runs as many speeds at a time.");
+                            .on_hover_text("Update Project solves up to this many independent analyses at the same time; the Campbell sweep runs as many speeds at a time. The built-in solver runs them in one pool of the threads above, so a single large analysis gets all of them. Each analysis needs its own memory.");
                         ui.end_row();
-                        if calculix {
-                            ui.label("Equation solvers");
-                            ui.label(solvers_text(solver.solvers()))
-                                .on_hover_text("Steps with the default solver use Pardiso if CalculiX includes it, else PaStiX. Checked at the first analysis and by \"Test solver\".");
-                            ui.end_row();
-                        }
                     });
                 ui.add_space(8.0);
                 self.solver_check_ui(ui);
@@ -890,12 +827,6 @@ impl SettingsWindow {
         if let SolverCheck::Running(receiver, _) = &self.solver_check
             && let Ok(report) = receiver.try_recv()
         {
-            if let Some(solvers) = report.solvers {
-                self.draft.solver.detected = Some(DetectedSolvers {
-                    executable: self.draft.solver.executable_key(),
-                    solvers,
-                });
-            }
             if let Some(known) = report.keywords {
                 self.draft.solver.keywords = Some(DetectedKeywords {
                     executable: self.draft.solver.executable.clone(),
@@ -909,8 +840,8 @@ impl SettingsWindow {
         ui.horizontal(|ui| {
             let engine = self.draft.solver.engine;
             let tip = match engine {
-                Engine::CalculiX => "Starts the executable, solves small cantilevers whose results are compared with beam theory, checks which equation solvers are available and whether it knows every keyword PrePoLix writes.",
-                Engine::PrePoLix => "Solves small cantilevers with the built-in solver and compares the results with beam theory.",
+                Engine::CalculiX => "Starts the executable, solves small cantilevers with the direct and the iterative equation solver, compares the results with beam theory and checks whether it knows every keyword PrePoLix writes.",
+                Engine::PrePoLix => "Solves small cantilevers with the built-in solver, direct and iterative, and compares the results with beam theory.",
             };
             let button = ui
                 .add_enabled(!running, egui::Button::new("Test solver"))
@@ -1057,17 +988,27 @@ mod tests {
 
     #[test]
     fn automatic_threads_share_the_cores() {
-        let solver = Solver::default();
+        let solver = Solver {
+            engine: Engine::CalculiX,
+            ..Solver::default()
+        };
         assert_eq!(solver.threads, AUTOMATIC_THREADS);
         assert_eq!(solver.job_solver().threads, cores());
         assert_eq!(solver.threads_of(2), (cores() / 2).max(1));
         assert_eq!(solver.threads_of(10_000), 1);
         let chosen = Solver {
             threads: 3,
-            ..Solver::default()
+            ..solver.clone()
         };
         assert_eq!(chosen.threads_of(4), 3);
         assert_eq!(chosen.shared_by(4).job_solver().threads, 3);
+        // The built-in solver's analyses share one pool instead.
+        let builtin = Solver {
+            engine: Engine::PrePoLix,
+            ..Solver::default()
+        };
+        assert_eq!(builtin.threads_of(4), AUTOMATIC_THREADS);
+        assert_eq!(builtin.shared_by(4).threads, AUTOMATIC_THREADS);
         // The old default of one thread becomes automatic, a later choice of one stays.
         let mut old: Settings = ron::from_str("(format: 1, solver: (threads: 1))").unwrap();
         old.upgrade();
@@ -1099,32 +1040,20 @@ mod tests {
     }
 
     #[test]
-    fn default_steps_take_pardiso_then_pastix() {
-        use EquationSolver::*;
-        assert_eq!(preferred_solver(&[Spooles, PaStiX, Pardiso]), Pardiso);
-        assert_eq!(preferred_solver(&[Spooles, PaStiX]), PaStiX);
-        assert_eq!(preferred_solver(&[Spooles]), Default);
-        assert_eq!(preferred_solver(&[]), Default);
-    }
-
-    #[test]
     fn replaced_executable_is_probed_again() {
         let dir = std::env::temp_dir().join(format!("plx-ccx-key-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("ccx");
         std::fs::write(&exe, "old").unwrap();
-        let mut solver = Solver {
+        let solver = Solver {
             executable: exe.display().to_string(),
             ..Solver::default()
         };
-        solver.detected = Some(DetectedSolvers {
-            executable: solver.executable_key(),
-            solvers: vec![EquationSolver::Spooles],
-        });
-        assert!(solver.solvers().is_some());
+        let old = solver.executable_key();
+        assert_eq!(solver.executable_key(), old);
         // Same path and version, but another build, e.g. the bundled CalculiX of an update.
         std::fs::write(&exe, "new build").unwrap();
-        assert!(solver.solvers().is_none());
+        assert_ne!(solver.executable_key(), old);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

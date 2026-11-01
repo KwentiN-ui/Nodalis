@@ -4,9 +4,10 @@ use std::process::Command;
 use plx_mesh::CadEntity;
 use plx_model::{
     BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition, CrossSection,
-    DefinedField, DefinedFieldKind, Displacement, DynamicStep, Elastic, EquationSolver, Hardening,
-    Load, Material, ModalDamping, ModalDynamicsStep, NodeTie, Plastic, PlasticPoint,
-    ReferencePoint, RigidBody, Section, SectionKind, SteadyStateDynamicsStep, UnitSystem,
+    DefinedField, DefinedFieldKind, Displacement, DynamicStep, Elastic, Hardening,
+    LinearSolverChoice, Load, Material, ModalDamping, ModalDynamicsStep, NodeTie, Plastic,
+    PlasticPoint, ReferencePoint, RigidBody, Section, SectionKind, SteadyStateDynamicsStep,
+    UnitSystem,
 };
 
 use super::*;
@@ -154,25 +155,19 @@ fn calculix_accepts_the_options_of_field_outputs() {
 #[test]
 fn the_chosen_solver_is_written_with_the_procedure() {
     let (mesh, mut model) = cantilever(tip_force());
-    model.resolve_default_solver(EquationSolver::Pardiso);
+    // Direct leaves the choice to the solver: its fastest direct one.
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(text.contains("*Step\n*Static, Solver=Pardiso\n"), "{text}");
+    assert!(text.contains("*Step\n*Static\n"), "{text}");
     let StepKind::Static(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
-    settings.solver = EquationSolver::IterativeCholesky;
+    settings.solver = LinearSolverChoice::Iterative;
     settings.incrementation = Incrementation::Direct;
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
         text.contains("*Static, Solver=Iterative Cholesky, Direct\n1, 1\n"),
         "{text}"
     );
-    // A solver chosen in the step is kept.
-    model.resolve_default_solver(EquationSolver::Pardiso);
-    let StepKind::Static(settings) = &model.steps[0].kind else {
-        unreachable!()
-    };
-    assert_eq!(settings.solver, EquationSolver::IterativeCholesky);
 }
 
 #[test]
@@ -1854,12 +1849,8 @@ fn a_frequency_step_is_written_like_prepomax_does() {
     };
     settings.lower_frequency = Some(100.0);
     settings.upper_frequency = None;
-    model.resolve_default_solver(EquationSolver::Spooles);
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(
-        text.contains("*Frequency, Solver=Spooles, Storage=Yes\n4, 100\n"),
-        "{text}"
-    );
+    assert!(text.contains("*Frequency, Storage=Yes\n4, 100\n"), "{text}");
 }
 
 #[test]
@@ -1942,11 +1933,11 @@ fn a_dynamic_step_is_written_like_prepomax_does() {
     settings.procedure = plx_model::DynamicProcedure::Explicit;
     settings.increments.nlgeom = true;
     settings.increments.incrementation = Incrementation::Automatic;
-    settings.increments.solver = EquationSolver::Spooles;
+    settings.increments.solver = LinearSolverChoice::Iterative;
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
         text.contains(
-            "*Step, Nlgeom, Inc=100\n*Dynamic, Solver=Spooles, Alpha=-0.1, Explicit=3\n\
+            "*Step, Nlgeom, Inc=100\n*Dynamic, Solver=Iterative Cholesky, Alpha=-0.1, Explicit=3\n\
              0.000025, 0.0015, 0.00001, 1.00000000E30\n"
         ),
         "{text}"
@@ -2100,7 +2091,6 @@ fn modal_steps_are_written_like_prepomax_does() {
     };
     settings.time_period = 0.01;
     settings.steady_state = true;
-    settings.solver = EquationSolver::Spooles;
     settings.damping = Some(ModalDamping::Direct(vec![
         plx_model::ModeDamping {
             lowest: 1,
@@ -2125,7 +2115,7 @@ fn modal_steps_are_written_like_prepomax_does() {
     }));
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
-        "*Step, Inc=100\n*Modal dynamics, Solver=Spooles, Steady state\n0.000025, 0.01\n\
+        "*Step, Inc=100\n*Modal dynamics, Steady state\n0.000025, 0.01\n\
          *Modal damping\n1, 2, 0.05\n3, 6, 0.1\n",
         "*Step\n*Steady state dynamics, Harmonic=No\n700, 900, 21, 1, 5, 0, 0.002\n\
          *Modal damping, Rayleigh\n , , 10, 0.00004\n",
@@ -2172,10 +2162,9 @@ fn a_buckle_step_is_written_like_prepomax_does() {
     settings.perturbation = true;
     settings.num_factors = 3;
     settings.accuracy = 0.01;
-    model.resolve_default_solver(EquationSolver::Spooles);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Step, Perturbation\n*Buckle, Solver=Spooles\n3, 0.01\n"),
+        text.contains("*Step, Perturbation\n*Buckle\n3, 0.01\n"),
         "{text}"
     );
 }

@@ -3487,6 +3487,7 @@ dependencies = [
  "plx-job",
  "plxs-core",
  "plxs-session",
+ "rayon",
  "serde",
 ]
 

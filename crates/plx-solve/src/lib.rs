@@ -16,6 +16,27 @@ use plx_job::{Job, JobStatus, live::LiveProgress};
 use plxs_core::{CancelToken, Error, ProgressEvent};
 use serde::{Deserialize, Serialize};
 
+/// The one thread pool every built-in run computes on, sized `threads` (0: all cores). Runs
+/// solved at the same time share it: a single large one gets every thread, several divide
+/// them as they need them, instead of each taking a fixed share of the cores. A call with
+/// another size builds a new pool for the runs started from then on; running ones finish
+/// on the old one.
+pub fn pool(threads: u32) -> std::io::Result<Arc<rayon::ThreadPool>> {
+    static POOL: Mutex<Option<(u32, Arc<rayon::ThreadPool>)>> = Mutex::new(None);
+    let mut current = POOL.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((size, pool)) = current.as_ref()
+        && *size == threads
+    {
+        return Ok(Arc::clone(pool));
+    }
+    let pool = Arc::new(
+        plxs_session::own_pool(threads as usize)
+            .map_err(|e| std::io::Error::other(e.to_string()))?,
+    );
+    *current = Some((threads, Arc::clone(&pool)));
+    Ok(pool)
+}
+
 /// The version of the built-in solver.
 pub const VERSION: &str = plxs_session::job::VERSION;
 
@@ -55,7 +76,8 @@ pub enum Run {
 
 impl Run {
     /// Writes `<work_dir>/<name>.inp` and starts `input` on `engine`; `solver` tells the
-    /// CalculiX executable and the threads of either engine.
+    /// CalculiX executable and the threads: of each CalculiX process, or of the [`pool`] the
+    /// built-in runs share.
     pub fn start(
         engine: Engine,
         solver: &plx_job::Solver,
@@ -166,7 +188,8 @@ enum Finished {
 }
 
 impl BuiltinJob {
-    /// Writes `<work_dir>/<name>.inp` and starts the solver on it with `threads` threads.
+    /// Writes `<work_dir>/<name>.inp` and starts the solver on it, on the shared [`pool`]
+    /// of `threads` threads (0: all cores).
     pub fn start(threads: u32, work_dir: &Path, name: &str, input: &str) -> std::io::Result<Self> {
         std::fs::create_dir_all(work_dir)?;
         for extension in OLD_FILES {
@@ -185,6 +208,7 @@ impl BuiltinJob {
         let cancel = CancelToken::new();
         let options = plxs_session::JobOptions {
             threads: threads as usize,
+            pool: Some(pool(threads)?),
             work_dir: work_dir.to_owned(),
             name: name.to_owned(),
             write_files: true,

@@ -14,8 +14,8 @@ use plx_io::frd::{FrdImport, read_frd};
 use plx_job::{Job, JobStatus};
 use plx_mesh::{Element, ElementId, ElementShape, FeMesh, NodeId, Part};
 use plx_model::{
-    BoundaryCondition, BoundaryKind, Elastic, EquationSolver, FeModel, Load, LoadKind, Material,
-    Region, Section, SectionKind, Step,
+    BoundaryCondition, BoundaryKind, Elastic, FeModel, LinearSolverChoice, Load, LoadKind,
+    Material, Region, Section, SectionKind, Step,
 };
 use plx_solve::{Engine, Run};
 
@@ -40,8 +40,6 @@ pub struct CheckResult {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Report {
     pub checks: Vec<CheckResult>,
-    /// Result of [`available_solvers`], if CalculiX started.
-    pub solvers: Option<Vec<EquationSolver>>,
     /// Result of [`known_keywords`] for all keywords PrePoLix writes, if CalculiX started.
     pub keywords: Option<BTreeMap<String, bool>>,
     /// What [`version_text`] read, if CalculiX started.
@@ -87,32 +85,27 @@ pub fn run(
     };
     let started = version.passed;
     let mut checks = vec![version];
-    let mut solvers = None;
     let mut keywords = None;
     if started {
         let dir = work_dir.join("SelfTest");
         set_step(progress, "Solving cantilever with end load", None);
-        checks.push(tip_force(engine, solver, &dir));
+        checks.push(tip_force(engine, solver, &dir, LinearSolverChoice::Direct));
         set_step(progress, "Solving cantilever with pressure", None);
         checks.push(pressure(engine, solver, &dir));
+        set_step(
+            progress,
+            "Solving cantilever with the iterative solver",
+            None,
+        );
+        checks.push(tip_force(
+            engine,
+            solver,
+            &dir,
+            LinearSolverChoice::Iterative,
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
     if started && engine == Engine::CalculiX {
-        let on_solver = |done, total| {
-            set_step(progress, "Checking equation solvers", Some((done, total)));
-        };
-        solvers = available_solvers(solver, work_dir, &on_solver);
-        let names = solvers.iter().flatten().filter_map(|s| s.keyword());
-        let names = names.collect::<Vec<_>>().join(", ");
-        checks.push(check(
-            "Equation solvers",
-            solvers.is_some(),
-            match &solvers {
-                Some(_) if names.is_empty() => "No direct solver found".into(),
-                Some(_) => format!("Available: {names}"),
-                None => "Not checked".into(),
-            },
-        ));
         let written = (plx_io::inp::keywords::WRITTEN_KEYWORDS.iter())
             .map(|(k, _)| k.to_string())
             .collect::<Vec<_>>();
@@ -122,7 +115,6 @@ pub fn run(
     }
     Report {
         checks,
-        solvers,
         keywords,
         version: match engine {
             Engine::CalculiX => started.then(|| version_text(&solver.executable)).flatten(),
@@ -267,69 +259,6 @@ const CYCLIC_SYMMETRY_MODEL: &str = "*Node
 A, B
 ";
 
-/// Direct solvers a CalculiX build may or may not include; the iterative ones are always there.
-const OPTIONAL_SOLVERS: [EquationSolver; 3] = [
-    EquationSolver::Pardiso,
-    EquationSolver::Spooles,
-    EquationSolver::PaStiX,
-];
-
-/// Which optional solvers the executable was built with. CalculiX has no option to list them,
-/// so a single element is solved with each: a build without the library stops with
-/// "the PARDISO library is not linked". `None` if CalculiX does not start.
-pub fn available_solvers(
-    solver: &plx_job::Solver,
-    work_dir: &Path,
-    progress: &dyn Fn(usize, usize),
-) -> Option<Vec<EquationSolver>> {
-    let dir = work_dir.join("Solvertest");
-    let mut available = Vec::new();
-    for (index, candidate) in OPTIONAL_SOLVERS.into_iter().enumerate() {
-        progress(index, OPTIONAL_SOLVERS.len());
-        let keyword = candidate.keyword()?;
-        let input = SINGLE_ELEMENT.replace("*Static", &format!("*Static, Solver={keyword}"));
-        let Ok(mut job) = Job::start(solver, &dir, keyword, &input) else {
-            let _ = std::fs::remove_dir_all(&dir);
-            return None;
-        };
-        if job.wait() == JobStatus::Completed {
-            available.push(candidate);
-        }
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-    Some(available)
-}
-
-/// A clamped cube of one linear element with a force on a free corner.
-const SINGLE_ELEMENT: &str = "*Node
-1, 0, 0, 0
-2, 1, 0, 0
-3, 1, 1, 0
-4, 0, 1, 0
-5, 0, 0, 1
-6, 1, 0, 1
-7, 1, 1, 1
-8, 0, 1, 1
-*Element, Type=C3D8, Elset=E
-1, 1, 2, 3, 4, 5, 6, 7, 8
-*Material, Name=M
-*Elastic
-210000, 0.3
-*Solid section, Elset=E, Material=M
-*Step
-*Static
-*Boundary
-1, 1, 3
-2, 1, 3
-3, 1, 3
-4, 1, 3
-*Cload
-7, 3, -1
-*Node file
-U
-*End step
-";
-
 fn check(name: &'static str, passed: bool, message: String) -> CheckResult {
     CheckResult {
         name,
@@ -387,18 +316,31 @@ fn version(executable: &Path) -> CheckResult {
 
 /// Cantilever with a surface traction on the free end: the tip deflection must match
 /// Timoshenko beam theory and the reactions must balance the load.
-fn tip_force(engine: Engine, solver: &plx_job::Solver, dir: &Path) -> CheckResult {
-    const NAME: &str = "Cantilever with end load";
+fn tip_force(
+    engine: Engine,
+    solver: &plx_job::Solver,
+    dir: &Path,
+    equations: LinearSolverChoice,
+) -> CheckResult {
+    let (name, job) = match equations {
+        LinearSolverChoice::Direct => ("Cantilever with end load", "Cantilever"),
+        LinearSolverChoice::Iterative => ("Iterative equation solver", "Iterative"),
+    };
     let mesh = beam_mesh();
     let tip = faces_where(&mesh, |p| p[0] == LENGTH);
-    let model = beam_model(
+    let mut model = beam_model(
         &mesh,
         LoadKind::force([0.0, 0.0, -TIP_FORCE]),
         Region::Faces(tip),
     );
-    let frd = match solve(engine, solver, dir, "Cantilever", &mesh, &model) {
+    for step in &mut model.steps {
+        if let plx_model::StepKind::Static(settings) = &mut step.kind {
+            settings.solver = equations;
+        }
+    }
+    let frd = match solve(engine, solver, dir, job, &mesh, &model) {
         Ok(frd) => frd,
-        Err(message) => return check(NAME, false, message),
+        Err(message) => return check(name, false, message),
     };
     let tip_nodes = nodes_where(&mesh, |p| p[0] == LENGTH);
     let deflection = -mean(&frd, "DISP", "U3", &tip_nodes);
@@ -411,7 +353,7 @@ fn tip_force(engine: Engine, solver: &plx_job::Solver, dir: &Path) -> CheckResul
     let balanced = (reaction - TIP_FORCE).abs() < 1e-3 * TIP_FORCE;
     let passed = deviation < 0.03 && balanced;
     check(
-        NAME,
+        name,
         passed,
         format!(
             "Deflection {deflection:.4} mm (beam theory {expected:.4} mm, deviation {:.1} %), reaction {reaction:.3} N (load {TIP_FORCE} N)",
@@ -670,12 +612,7 @@ mod tests {
         );
         assert_eq!(report.checks.len(), 1);
         assert!(!report.checks[0].passed);
-        assert_eq!(report.solvers, None);
         assert_eq!(report.keywords, None);
-        assert_eq!(
-            available_solvers(&solver, &std::env::temp_dir(), &|_, _| {}),
-            None
-        );
     }
 
     #[test]
@@ -697,9 +634,6 @@ mod tests {
         }
         assert_eq!(report.checks.len(), 5);
         assert!(report.checks.iter().all(|r| r.passed), "{report:#?}");
-        // Spooles is part of the usual CalculiX builds.
-        let solvers = report.solvers.unwrap();
-        assert!(solvers.contains(&EquationSolver::Spooles), "{solvers:?}");
     }
 
     /// The self test with the built-in solver needs no program and runs everywhere.
@@ -715,9 +649,8 @@ mod tests {
         for result in &report.checks {
             eprintln!("{}: {}", result.name, result.message);
         }
-        assert_eq!(report.checks.len(), 3, "{report:#?}");
+        assert_eq!(report.checks.len(), 4, "{report:#?}");
         assert!(report.checks.iter().all(|r| r.passed), "{report:#?}");
-        assert_eq!(report.solvers, None);
         assert_eq!(report.keywords, None);
         assert_eq!(report.version.as_deref(), Some(plx_solve::VERSION));
     }

@@ -10,6 +10,7 @@
 //!
 //! No CalculiX code was consulted.
 
+pub mod equations;
 pub mod fields;
 pub mod heat;
 pub mod history;

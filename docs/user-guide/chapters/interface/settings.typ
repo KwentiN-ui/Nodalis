@@ -53,13 +53,15 @@ solver covers every analysis.
 
 #fields(
   [Solver], [#ui("PrePoLix solver") (built in) or #ui("CalculiX"). The rows below that only
-    concern CalculiX (executable, restart files, equation solvers) show for CalculiX.],
+    concern CalculiX (executable, restart files) show for CalculiX.],
   [Executable], [Path to `ccx`. Empty means the CalculiX shipped with PrePoLix (shown greyed
     in the field), or `ccx` on the system path if PrePoLix was built without it. A bare name
     such as `ccx` is looked up on the system path.],
-  [Threads], [Number of threads CalculiX uses (`OMP_NUM_THREADS`). #ui("Automatic") (the
-    default) uses all processor cores; analyses or Campbell speeds solved at the same time
-    share them equally. Clear it to set a fixed number per run.],
+  [Threads], [Number of threads the solver uses. #ui("Automatic") (the default) uses all
+    processor cores. The built-in solver computes every analysis in one shared pool of these
+    threads: a single large analysis gets all of them, and analyses or Campbell speeds solved
+    at the same time take them as they need them. CalculiX processes cannot share; each gets
+    an equal share of the cores (`OMP_NUM_THREADS`), or the fixed number set here.],
   [Work directory], [Where input and result files of a run are written. Empty means a `Temp`
     folder next to the PrePoLix program, or `<system temp>/prepolix` if that folder is not
     writable.],
@@ -69,14 +71,12 @@ solver covers every analysis.
   [Restart files per project], [Beyond this size (default 4096 MB) the oldest restart files
     of the project are removed; an analysis without them is solved from the beginning.],
   [Parallel analyses], [How many independent analyses #ui("Update Project") solves at the same
-    time (default 2), each with the threads above (@update-project). With automatic threads
-    they share the cores.],
-  [Equation solvers], [The direct solvers found in the CalculiX executable, for example
-    PARDISO. Steps with the solver #ui("Default") use Pardiso when it is available, otherwise
-    PaStiX, otherwise CalculiX's own choice.],
+    time (default 2, @update-project). It limits the memory they need together; the threads
+    are shared as described above.],
   [Test solver], [Computes a cantilever under a tip load and under pressure with the chosen
-    solver and compares the results with beam theory. For CalculiX it also starts the
-    executable, checks which solvers are available and whether CalculiX knows every keyword
+    solver, and the tip load once more with the iterative equation solver (@equation-solver),
+    and compares the results with beam theory. For CalculiX it also starts the
+    executable and checks whether CalculiX knows every keyword
     PrePoLix writes. Each test shows OK or an error. While the test runs, a window over the
     application shows the running step and, for the keyword check, how far it has come; the
     CalculiX test can take a while, particularly on Windows.],

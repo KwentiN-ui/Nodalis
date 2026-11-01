@@ -3798,7 +3798,6 @@ impl Workbench {
         if let Some(model) = &mut self.model {
             model.bound_results_file = None;
         }
-        let default_solver = self.settings.solver.default_solver();
         let Some(model) = self.setup_model() else {
             return;
         };
@@ -3813,7 +3812,6 @@ impl Workbench {
         match Analysis::start(
             &self.settings.solver,
             model,
-            default_solver,
             true,
             name,
             &work_dir,
@@ -3919,13 +3917,11 @@ impl Workbench {
         if self.setup_model().is_none() {
             return;
         }
-        let default_solver = self.settings.solver.default_solver();
         let Some(model) = self.setup_model() else {
             return;
         };
         let heading = format!("PrePoLix: {}", model.file_name());
         let mut fe = model.fe.clone();
-        fe.resolve_default_solver(default_solver);
         // Checked before asking for the file; the global results are staged once it is known.
         if let Err(error) = plx_io::inp::write_inp(&model.mesh, &fe, &heading) {
             self.output.push(format!("Export not possible: {error}"));

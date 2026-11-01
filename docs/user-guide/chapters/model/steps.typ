@@ -42,14 +42,33 @@ Steps that build on the previous one, such as a step with #ui("Perturbation"), t
 whatever step now precedes them, so check the order after moving. The step numbers of existing
 results refer to the order at the time of the run.
 
-=== Solver
+=== Equation solver <equation-solver>
 
-All step types have a #ui("Solver") field: #ui("Default (Pardiso or PaStiX if available)"),
-#ui("Pardiso"), #ui("Spooles"), #ui("PaStiX"), #ui("Iterative scaling") or
-#ui("Iterative Cholesky"). #ui("Default") uses Pardiso if the CalculiX executable contains it,
-otherwise PaStiX if it contains that, otherwise the default of CalculiX. The CalculiX shipped
-with PrePoLix contains PaStiX and SPOOLES; on models with many nodes PaStiX is several times
-faster. Frequency and buckle steps need a direct solver.
+Static and heat transfer steps have an #ui("Equation solver") field that chooses how the
+systems of equations of the step are solved:
+
+#fields(
+  [Direct], [(default) A sparse direct factorization (LDLᵀ). It solves every system,
+    including contact and nonlinear tangents, but needs memory for the factor, which grows
+    quickly with the model: about 2 GB for a solid block of 170 000 equations.],
+  [Iterative], [Conjugate gradients with an incomplete Cholesky preconditioner. It needs a
+    fraction of the memory (about 35 times less on that block) and is often faster on large
+    solid models, but it only solves positive definite systems: no contact, no gaps, and the
+    model must be held against every rigid body motion. If it does not converge, the
+    analysis stops with a message that names the direct solver.],
+)
+
+#screenshot("equation-solver.png", [Equation solver of a static step])
+
+The built-in solver uses the iterative solver for linear static and heat transfer steps;
+frequency, buckle, dynamic and modal steps always solve directly, so their dialogs do not
+offer the choice. The input file writes `SOLVER=ITERATIVE CHOLESKY` for #ui("Iterative") and
+nothing for #ui("Direct"), so that CalculiX takes its fastest direct solver (Pardiso, PaStiX or
+SPOOLES, whichever it was built with; the CalculiX shipped with PrePoLix uses PaStiX).
+
+The monitor shows how a solve went: for the direct solver the size of the factor and the
+times of ordering, factorization and solution; for the iterative one the size of the
+preconditioner, the number of iterations and the remaining relative residual (below 1e-12).
 
 === Static
 
@@ -111,7 +130,7 @@ together with supports and mechanical loads.
   [Nonlinear geometry], [Coupled steps only.],
 )
 
-Incrementation and solver fields are the same as for a static step.
+Incrementation and equation solver are the same as for a static step.
 
 === Visco
 

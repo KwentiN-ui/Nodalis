@@ -112,6 +112,7 @@ fn run(args: Vec<String>) -> i32 {
         .unwrap_or_else(|| job.clone());
     let options = plxs_session::JobOptions {
         threads,
+        pool: None,
         work_dir: job_dir,
         name: stem,
         write_files: true,

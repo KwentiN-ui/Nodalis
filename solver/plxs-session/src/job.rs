@@ -14,8 +14,10 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone, Debug)]
 pub struct JobOptions {
-    /// Threads of the run (0: all cores).
+    /// Threads of the run (0: all cores), when no `pool` is given.
     pub threads: usize,
+    /// A pool shared with other runs, see [`SessionOptions::pool`].
+    pub pool: Option<std::sync::Arc<rayon::ThreadPool>>,
     /// The job's directory: result files go here, files the input refers to are read here.
     pub work_dir: PathBuf,
     /// Name of the job: the result files are `<name>.frd`, `.dat`, `.sta`.
@@ -89,6 +91,7 @@ pub fn run_analysis(
     let output_map = expansion.output;
     let session_options = SessionOptions {
         threads: options.threads,
+        pool: options.pool.clone(),
         work_dir: options.work_dir.clone(),
         cancel: options.cancel.clone(),
     };

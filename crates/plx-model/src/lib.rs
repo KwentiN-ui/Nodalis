@@ -214,18 +214,6 @@ impl FeModel {
         (self.ties.iter()).find(|t| t.active && t.cyclic.is_some())
     }
 
-    /// Replaces [`EquationSolver::Default`] in all steps by `solver`, the solver the
-    /// installed CalculiX should use by default.
-    pub fn resolve_default_solver(&mut self, solver: EquationSolver) {
-        for step in &mut self.steps {
-            if let Some(current) = step.kind.solver_mut()
-                && *current == EquationSolver::Default
-            {
-                *current = solver;
-            }
-        }
-    }
-
     /// Every region of the model: of sections, constraints, contact pairs, boundary
     /// conditions and loads.
     pub fn regions(&self) -> impl Iterator<Item = &Region> {
@@ -771,25 +759,6 @@ impl StepKind {
         }
     }
 
-    /// The equation solver of the step; a complex frequency step chooses none, it works
-    /// on the stored eigenmodes.
-    pub fn solver_mut(&mut self) -> Option<&mut EquationSolver> {
-        match self {
-            StepKind::Static(settings) => Some(&mut settings.solver),
-            StepKind::Frequency(settings) => Some(&mut settings.solver),
-            StepKind::ComplexFrequency(_) => None,
-            StepKind::Buckle(settings) => Some(&mut settings.solver),
-            StepKind::HeatTransfer(settings)
-            | StepKind::CoupledTempDisp(settings)
-            | StepKind::UncoupledTempDisp(settings) => Some(&mut settings.increments.solver),
-            StepKind::Dynamic(settings) => Some(&mut settings.increments.solver),
-            StepKind::Visco(settings) => Some(&mut settings.increments.solver),
-            StepKind::ModalDynamics(settings) => Some(&mut settings.solver),
-            StepKind::SteadyStateDynamics(settings) => Some(&mut settings.solver),
-            StepKind::Sensitivity(_) => None,
-        }
-    }
-
     /// Whether the step superposes the eigenmodes a previous frequency step stored.
     pub fn uses_stored_modes(&self) -> bool {
         matches!(
@@ -898,48 +867,37 @@ pub enum Incrementation {
     Direct,
 }
 
-/// Equation solver of a step (`SOLVER=`), PrePoMax's choices.
+/// How a step solves its systems of equations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EquationSolver {
-    /// Pardiso where the CalculiX build has it, otherwise CalculiX's own default; resolved
-    /// before the input file is written, see [`FeModel::resolve_default_solver`].
+pub enum LinearSolverChoice {
+    /// A sparse direct factorization (LDLᵀ): any system, memory for the factor.
     #[default]
-    Default,
-    Pardiso,
-    Spooles,
-    PaStiX,
-    IterativeScaling,
-    IterativeCholesky,
+    Direct,
+    /// Conjugate gradients with an incomplete Cholesky preconditioner: symmetric positive
+    /// definite systems only (linear static and heat transfer), far less memory.
+    Iterative,
 }
 
-impl EquationSolver {
-    pub const ALL: [EquationSolver; 6] = [
-        EquationSolver::Default,
-        EquationSolver::Pardiso,
-        EquationSolver::Spooles,
-        EquationSolver::PaStiX,
-        EquationSolver::IterativeScaling,
-        EquationSolver::IterativeCholesky,
-    ];
+impl LinearSolverChoice {
+    pub const ALL: [LinearSolverChoice; 2] =
+        [LinearSolverChoice::Direct, LinearSolverChoice::Iterative];
 
-    /// Whether CalculiX can use the solver for an eigenvalue problem; the iterative solvers
-    /// only solve static systems.
-    pub fn solves_eigenvalues(self) -> bool {
-        !matches!(
-            self,
-            EquationSolver::IterativeScaling | EquationSolver::IterativeCholesky
-        )
+    /// The name shown in the interface.
+    pub fn name(self) -> &'static str {
+        match self {
+            LinearSolverChoice::Direct => "Direct",
+            LinearSolverChoice::Iterative => "Iterative",
+        }
     }
 
-    /// The value of `SOLVER=` in the input file; `None` leaves the choice to CalculiX.
+    /// The value of `SOLVER=` in the input file. Direct leaves the choice to the solver,
+    /// which is its fastest direct one (CalculiX: Pardiso, PaStiX or SPOOLES, whichever it
+    /// was built with); Iterative asks for conjugate gradients with an incomplete Cholesky
+    /// preconditioner, which CalculiX and the PrePoLix solver both have.
     pub fn keyword(self) -> Option<&'static str> {
         match self {
-            EquationSolver::Default => None,
-            EquationSolver::Pardiso => Some("Pardiso"),
-            EquationSolver::Spooles => Some("Spooles"),
-            EquationSolver::PaStiX => Some("PaStiX"),
-            EquationSolver::IterativeScaling => Some("Iterative scaling"),
-            EquationSolver::IterativeCholesky => Some("Iterative Cholesky"),
+            LinearSolverChoice::Direct => None,
+            LinearSolverChoice::Iterative => Some("Iterative Cholesky"),
         }
     }
 }
@@ -958,7 +916,7 @@ pub struct StaticStep {
     pub max_increment: f64,
     /// Missing in projects saved before the solver could be chosen.
     #[serde(default)]
-    pub solver: EquationSolver,
+    pub solver: LinearSolverChoice,
 }
 
 impl Default for StaticStep {
@@ -971,7 +929,7 @@ impl Default for StaticStep {
             time_period: 1.0,
             min_increment: 1e-5,
             max_increment: 1e30,
-            solver: EquationSolver::Default,
+            solver: LinearSolverChoice::Direct,
         }
     }
 }
@@ -1016,7 +974,6 @@ pub struct FrequencyStep {
     /// Takes the stiffness of the deformed state of the previous step into account, e.g. the
     /// stiffening by a preload (`*STEP, PERTURBATION`).
     pub perturbation: bool,
-    pub solver: EquationSolver,
     /// Lowest and highest nodal diameter of a cyclic symmetric model
     /// (`*SELECT CYCLIC SYMMETRY MODES, NMIN=, NMAX=`); `None` is CalculiX's 0 and the
     /// highest one the sectors allow.
@@ -1091,7 +1048,6 @@ pub struct ModalDynamicsStep {
     /// relative error, instead of over the time period.
     pub steady_state: bool,
     pub relative_error: f64,
-    pub solver: EquationSolver,
     pub damping: Option<ModalDamping>,
 }
 
@@ -1103,7 +1059,6 @@ impl Default for ModalDynamicsStep {
             max_increments: 100,
             steady_state: false,
             relative_error: 0.01,
-            solver: EquationSolver::Default,
             damping: None,
         }
     }
@@ -1153,7 +1108,6 @@ pub struct SteadyStateDynamicsStep {
     /// Time range of one period of a non-harmonic excitation.
     pub time_lower: f64,
     pub time_upper: f64,
-    pub solver: EquationSolver,
     pub damping: Option<ModalDamping>,
 }
 
@@ -1168,7 +1122,6 @@ impl Default for SteadyStateDynamicsStep {
             fourier_terms: 20,
             time_lower: 0.0,
             time_upper: 1.0,
-            solver: EquationSolver::Default,
             damping: None,
         }
     }
@@ -1302,7 +1255,6 @@ impl Default for FrequencyStep {
             upper_frequency: None,
             storage: false,
             perturbation: false,
-            solver: EquationSolver::Default,
             nodal_diameters: None,
         }
     }
@@ -1343,7 +1295,6 @@ pub struct BuckleStep {
     /// Adds the stiffness of the deformed state of the previous step, e.g. of a preload that
     /// is not scaled by the buckling factor (`*STEP, PERTURBATION`).
     pub perturbation: bool,
-    pub solver: EquationSolver,
 }
 
 impl Default for BuckleStep {
@@ -1352,7 +1303,6 @@ impl Default for BuckleStep {
             num_factors: 1,
             accuracy: 1e-4,
             perturbation: false,
-            solver: EquationSolver::Default,
         }
     }
 }

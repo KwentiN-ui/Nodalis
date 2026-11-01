@@ -13,9 +13,9 @@ use plx_model::{
     AXIS_LABELS, Amplitude, BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition,
     BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, CrossSection,
     CyclicSymmetry, DefinedField, DefinedFieldKind, Displacement, Distribution, DynamicProcedure,
-    DynamicStep, Elastic, EquationSolver, FeModel, Field, FieldOutput, Formulation, FrequencyStep,
-    GLOBAL, Hardening, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
-    InitialCondition, InitialConditionKind, ItemRef, Load, LoadKind, Material, MeshSet,
+    DynamicStep, Elastic, FeModel, Field, FieldOutput, Formulation, FrequencyStep, GLOBAL,
+    Hardening, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialCondition,
+    InitialConditionKind, ItemRef, LinearSolverChoice, Load, LoadKind, Material, MeshSet,
     ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad, NodeTie, OutputDimension,
     OutputKind, PlasticPoint, Quantity, Region, RemoteBehavior, Section, SectionKind,
     SensitivityStep, SetKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind,
@@ -5176,6 +5176,7 @@ fn heat_transfer_form(
     settings.deltmx = limited.then_some(deltmx);
     ui.end_row();
     increments_form(ui, &mut settings.increments, units, coupled);
+    solver_row(ui, &mut settings.increments.solver);
     if !settings.steady_state {
         ui.label("");
         ui.weak("Transient: materials need density and specific heat.");
@@ -5235,7 +5236,6 @@ fn dynamic_form(ui: &mut Ui, settings: &mut DynamicStep, units: UnitSystem) {
 
 /// Settings of a modal dynamics step: the time increments, then the modal damping.
 fn modal_dynamics_form(ui: &mut Ui, settings: &mut ModalDynamicsStep, units: UnitSystem) {
-    solver_row(ui, &mut settings.solver, false);
     ui.label("");
     ui.checkbox(
         &mut settings.steady_state,
@@ -5278,7 +5278,6 @@ fn modal_dynamics_form(ui: &mut Ui, settings: &mut ModalDynamicsStep, units: Uni
 
 /// Settings of a steady state dynamics step: the frequency sweep, then the modal damping.
 fn steady_state_form(ui: &mut Ui, settings: &mut SteadyStateDynamicsStep, units: UnitSystem) {
-    solver_row(ui, &mut settings.solver, false);
     ui.label("");
     ui.checkbox(&mut settings.harmonic, "Harmonic excitation");
     ui.end_row();
@@ -5417,19 +5416,31 @@ fn validate_heat_transfer_step(settings: &HeatTransferStep) -> Result<(), String
     Ok(())
 }
 
-fn solver_row(ui: &mut Ui, solver: &mut EquationSolver, eigenvalues: bool) {
-    ui.label("Solver");
-    egui::ComboBox::from_id_salt("equation solver")
-        .selected_text(solver_label(*solver))
-        .show_ui(ui, |ui| {
-            for choice in EquationSolver::ALL {
-                if eigenvalues && !choice.solves_eigenvalues() {
-                    continue;
-                }
-                ui.selectable_value(solver, choice, solver_label(choice));
-            }
-        });
+/// "Equation solver: Direct | Iterative" of the steps whose systems the iterative solver
+/// can solve: static and heat transfer.
+fn solver_row(ui: &mut Ui, solver: &mut LinearSolverChoice) {
+    ui.label("Equation solver");
+    ui.horizontal(|ui| {
+        for choice in LinearSolverChoice::ALL {
+            ui.radio_value(solver, choice, choice.name())
+                .on_hover_text(solver_hint(choice));
+        }
+    });
     ui.end_row();
+}
+
+fn solver_hint(choice: LinearSolverChoice) -> &'static str {
+    match choice {
+        LinearSolverChoice::Direct => {
+            "Sparse direct factorization (LDL^T). Solves every system; needs memory for the \
+             factor, which grows quickly with the model."
+        }
+        LinearSolverChoice::Iterative => {
+            "Conjugate gradients with an incomplete Cholesky preconditioner. Needs a fraction \
+             of the memory and is often faster on large solid models, but only solves \
+             positive definite systems: no contact, no unsupported rigid body motion."
+        }
+    }
 }
 
 fn frequency_form(
@@ -5444,7 +5455,6 @@ fn frequency_form(
         "Perturbation (prestress from previous step)",
     );
     ui.end_row();
-    solver_row(ui, &mut settings.solver, true);
     ui.label("Number of eigenfrequencies");
     expose::field(ui, Field::Modes, |ui| {
         ui.add(numeric::drag_value(&mut settings.num_frequencies).range(1..=10_000))
@@ -5530,9 +5540,6 @@ fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep) {
 }
 
 fn validate_frequency_step(settings: &FrequencyStep) -> Result<(), String> {
-    if !settings.solver.solves_eigenvalues() {
-        return Err("The iterative solvers cannot compute eigenfrequencies.".into());
-    }
     if let (Some(lower), Some(upper)) = (settings.lower_frequency, settings.upper_frequency)
         && lower >= upper
     {
@@ -5550,7 +5557,6 @@ fn buckle_form(ui: &mut Ui, settings: &mut BuckleStep) {
         "Preload from previous step (Perturbation)",
     );
     ui.end_row();
-    solver_row(ui, &mut settings.solver, true);
     ui.label("Number of buckling factors");
     ui.add(numeric::drag_value(&mut settings.num_factors).range(1..=10_000));
     ui.end_row();
@@ -5563,9 +5569,6 @@ fn buckle_form(ui: &mut Ui, settings: &mut BuckleStep) {
 }
 
 fn validate_buckle_step(settings: &BuckleStep) -> Result<(), String> {
-    if !settings.solver.solves_eigenvalues() {
-        return Err("The iterative solvers cannot compute buckling factors.".into());
-    }
     if settings.accuracy <= 0.0 {
         return Err("The accuracy must be greater than zero.".into());
     }
@@ -5574,9 +5577,10 @@ fn validate_buckle_step(settings: &BuckleStep) -> Result<(), String> {
 
 fn static_form(ui: &mut Ui, settings: &mut StaticStep, units: UnitSystem) {
     increments_form(ui, settings, units, true);
+    solver_row(ui, &mut settings.solver);
 }
 
-/// Nonlinear geometry, solver and increments of a step with a time period; `mechanical`
+/// Nonlinear geometry and increments of a step with a time period; `mechanical`
 /// shows the geometric nonlinearity, which only steps with displacements have.
 fn increments_form(ui: &mut Ui, settings: &mut StaticStep, units: UnitSystem, mechanical: bool) {
     if mechanical {
@@ -5584,7 +5588,6 @@ fn increments_form(ui: &mut Ui, settings: &mut StaticStep, units: UnitSystem, me
         ui.checkbox(&mut settings.nlgeom, "Nonlinear geometry (Nlgeom)");
         ui.end_row();
     }
-    solver_row(ui, &mut settings.solver, false);
     ui.label("Incrementation");
     egui::ComboBox::from_id_salt("incrementation")
         .selected_text(incrementation_label(settings.incrementation))
@@ -5641,17 +5644,6 @@ fn increments_form(ui: &mut Ui, settings: &mut StaticStep, units: UnitSystem, me
             None => add(ui),
         };
         ui.end_row();
-    }
-}
-
-fn solver_label(solver: EquationSolver) -> &'static str {
-    match solver {
-        EquationSolver::Default => "Default (Pardiso or PaStiX if available)",
-        EquationSolver::Pardiso => "Pardiso",
-        EquationSolver::Spooles => "Spooles",
-        EquationSolver::PaStiX => "PaStiX",
-        EquationSolver::IterativeScaling => "Iterative scaling",
-        EquationSolver::IterativeCholesky => "Iterative Cholesky",
     }
 }
 
@@ -6053,18 +6045,6 @@ mod tests {
         ) = &mut editor.draft
         {
             settings.upper_frequency = None;
-            settings.solver = EquationSolver::IterativeCholesky;
-        }
-        assert!(editor.validate(&fe).is_err(), "iterative solver");
-        if let Draft::Step(
-            Step {
-                kind: StepKind::Frequency(settings),
-                ..
-            },
-            _,
-        ) = &mut editor.draft
-        {
-            settings.solver = EquationSolver::Default;
         }
         assert_eq!(editor.validate(&fe), Ok(()));
         editor.apply(&mut fe);
