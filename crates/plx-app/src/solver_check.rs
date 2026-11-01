@@ -508,6 +508,26 @@ fn component_values(frd: &FrdImport, field: &str, component: &str, nodes: &[Node
         .collect()
 }
 
+/// Solves the beam under a tip load with the built-in solver in `dir`, with a history output
+/// of the fixed nodes; returns its results file (`.plxr`).
+#[cfg(test)]
+pub(crate) fn solve_beam_built_in(dir: &Path) -> std::path::PathBuf {
+    let mesh = beam_mesh();
+    let tip = faces_where(&mesh, |p| p[0] == LENGTH);
+    let mut fe = beam_model(&mesh, LoadKind::force([0.0, 0.0, -1.0]), Region::Faces(tip));
+    let fixed = (mesh.node_ids().iter().copied()).filter(|&n| mesh.node(n).unwrap()[0] == 0.0);
+    let output = plx_model::HistoryOutput::node("H-Output-1", Region::Nodes(fixed.collect()));
+    fe.steps[0].history_outputs.push(output);
+    let input = plx_io::inp::write_inp(&mesh, &fe, "built-in").unwrap();
+    let solver = plx_job::Solver {
+        executable: "unused".into(),
+        threads: 1,
+    };
+    let mut run = Run::start(Engine::PrePoLix, &solver, dir, "Beam", &input).unwrap();
+    assert_eq!(run.wait(), JobStatus::Completed, "{:?}", run.new_output());
+    run.results().unwrap()
+}
+
 pub(crate) fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeModel {
     let mut step = Step::new_static("Step-1");
     step.boundary_conditions.push(BoundaryCondition {

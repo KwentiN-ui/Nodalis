@@ -1855,8 +1855,14 @@ impl Workbench {
                         view.increments.len()
                     ));
                     if !view.file_history.is_empty() {
+                        // The built-in solver's results hold their history output.
+                        let source = if plx_results::solver::is_solver_results(&model.path) {
+                            "with the results"
+                        } else {
+                            "from the .dat file"
+                        };
                         self.output.push(format!(
-                            "{} history output(s) read from the .dat file",
+                            "{} history output(s) read {source}",
                             view.file_history.len()
                         ));
                     }

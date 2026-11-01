@@ -2364,6 +2364,28 @@ fn ray_triangle(origin: Vec3, direction: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Opt
 mod tests {
     use super::*;
 
+    /// Results of the built-in solver open from their `.plxr` file like CalculiX's from the
+    /// `.frd`: with the parts of the input file beside them and the history output, without
+    /// any `.frd` or `.dat` file.
+    #[test]
+    fn results_of_the_built_in_solver_open_without_a_frd_file() {
+        let dir = std::env::temp_dir().join(format!("plx-plxr-{}", std::process::id()));
+        let path = crate::solver_check::solve_beam_built_in(&dir);
+        assert!(plx_results::solver::is_solver_results(&path));
+        assert!(!path.with_extension("frd").exists() && !path.with_extension("dat").exists());
+        let loaded = load(&path, UnitSystem::Unitless).unwrap();
+        let view = loaded.model.results.as_ref().unwrap();
+        let disp = view.increments[0].field("DISP").unwrap();
+        assert!(disp.component("ALL").is_some());
+        let read = plx_io::inp::read_inp(&path.with_extension("inp")).unwrap();
+        let names = |parts: &[plx_mesh::Part]| -> Vec<String> {
+            parts.iter().map(|p| p.name.clone()).collect()
+        };
+        assert_eq!(names(&loaded.model.mesh.parts).len(), read.mesh.parts.len());
+        assert!(!view.history.is_empty(), "{:?}", loaded.model.warnings);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn general_beams_are_taken_from_the_input_without_their_section_forces() {
         let node_mesh = || {

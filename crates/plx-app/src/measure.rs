@@ -608,6 +608,41 @@ mod tests {
             .join(name)
     }
 
+    /// Results of the built-in solver kept in a project are measured in memory: nothing is
+    /// written to the folder CalculiX's results are restored to.
+    #[test]
+    fn results_of_the_built_in_solver_are_measured_in_memory() {
+        let dir = std::env::temp_dir().join(format!("plx-measure-plxr-{}", std::process::id()));
+        let file = crate::solver_check::solve_beam_built_in(&dir.join("run"));
+        let files = [file.clone(), file.with_extension("inp")];
+        let bound = plx_io::project::bind_results("Beam", &files, false).unwrap();
+        assert!(bound.solver.is_some());
+        let restore = dir.join("restore");
+        let job = Job {
+            kind: MeasureKind::FieldExtreme {
+                field: "DISP".into(),
+                component: "U3".into(),
+                extreme: Extreme::Min,
+                region: MeasureRegion::All,
+            },
+            step: 1,
+            results: bound.clone(),
+            node_sets: BTreeMap::new(),
+            units: UnitSystem::Unitless,
+            dir: restore.clone(),
+        };
+        let value = run(&job).unwrap();
+        assert!(value < 0.0, "{value}");
+        let offered = read_offered(bound, 1, restore.clone())
+            .recv()
+            .unwrap()
+            .unwrap();
+        assert!(offered.fields.iter().any(|(name, _)| name == "DISP"));
+        assert!(!offered.history.is_empty());
+        assert!(!restore.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn measures_read_extremes_nodes_and_sets() {
         let frd = plx_io::frd::read_frd(&testdata("kragbalken_c3d8.frd")).unwrap();
