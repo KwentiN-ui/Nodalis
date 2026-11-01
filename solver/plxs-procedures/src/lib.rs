@@ -10,12 +10,13 @@
 //!
 //! No CalculiX code was consulted.
 
+pub mod complex;
 pub mod dynamic;
-pub mod modal;
 pub mod eigen;
 pub mod fields;
 pub mod heat;
 pub mod history;
+pub mod modal;
 pub mod static_linear;
 pub mod thermal;
 
@@ -81,6 +82,9 @@ pub fn run_step(
         ProcedureKind::Frequency(_) => eigen::FrequencyProcedure.run(ctx, step, progress),
         ProcedureKind::Buckle(_) => eigen::BuckleProcedure.run(ctx, step, progress),
         ProcedureKind::Dynamic(_) => dynamic::DynamicProcedure.run(ctx, step, progress),
+        ProcedureKind::ComplexFrequency(_) => {
+            complex::ComplexFrequencyProcedure.run(ctx, step, progress)
+        }
         ProcedureKind::ModalDynamics(_) => modal::ModalDynamicsProcedure.run(ctx, step, progress),
         ProcedureKind::SteadyStateDynamics(_) => {
             modal::SteadyStateProcedure.run(ctx, step, progress)

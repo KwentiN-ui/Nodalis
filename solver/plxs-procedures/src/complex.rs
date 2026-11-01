@@ -1,0 +1,525 @@
+//! `*COMPLEX FREQUENCY` (M3 T14): the eigenmodes of a rotating structure with Coriolis
+//! forces, in the space of the modes a `*FREQUENCY, STORAGE=YES` step stored.
+//!
+//! With mass-normalised modes `Φ`, their eigenvalues `Λ = diag(ω²)` and the Coriolis
+//! matrix `G = 2 ∫ ρ Nᵀ Ω̃ N dV` (`Ω̃ x = ω × x`, the angular velocity of the `CENTRIF`
+//! load), the modal coordinates obey `q̈ + Γ q̇ + Λ q = 0` with the skew-symmetric
+//! `Γ = Φᵀ G Φ`. With `y = (Λ^½ q, q̇)` this is `ẏ = S y`, `S = [[0, Λ^½], [−Λ^½, −Γ]]`
+//! real skew-symmetric: its eigenvalues are `±iμ` and `−iS` is Hermitian, solved through
+//! the real symmetric matrix `[[0, S], [−S, 0]]` of twice the size. Every positive `μ` is a
+//! complex mode with the frequency `μ`.
+//!
+//! As CalculiX prints them (observed with ccx 2.21 on the `rotor` fixtures, no source
+//! consulted): the modal coordinates of a mode are scaled so that the largest is 1 (its
+//! "participation factors"), the mode `x = Φ c` goes to the `.frd` as its real part
+//! (`DISP`, stresses and strains of it) and as magnitude and phase (`PDISP`, phase
+//! `atan(Im/Re)` in degrees, plus 180° where the real part is negative); the `.dat` gets
+//! the frequencies and the turning direction of every mode about the rotation axis.
+
+use plxs_assembly::ElementTable;
+use plxs_core::mesh::ElementRef;
+use plxs_core::results::{HistoryBlock, IncrementKind, ResultsIncrement};
+use plxs_core::step::{DistributedLoadKind, Procedure as ProcedureKind};
+use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Step};
+use plxs_linalg::dense::symmetric_eigen;
+
+use crate::fields::{build_fields, node_order};
+use crate::modal::stored_modes;
+use crate::static_linear::integration_point_results;
+use crate::{Procedure, ProcedureContext, StepOutcome};
+
+pub struct ComplexFrequencyProcedure;
+
+/// The rotation of the step's `CENTRIF` load: angular velocity vector and the dense
+/// indices of the elements it acts on.
+struct Rotation {
+    omega: [f64; 3],
+    axis: [f64; 3],
+    entries: Vec<u32>,
+}
+
+fn rotation(model: &Model, table: &ElementTable, step: &Step) -> Option<Rotation> {
+    let mut found: Option<Rotation> = None;
+    for load in &step.loads.distributed {
+        let DistributedLoadKind::Centrifugal {
+            omega_squared,
+            axis,
+            ..
+        } = &load.kind
+        else {
+            continue;
+        };
+        let len = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+        if len == 0.0 {
+            continue;
+        }
+        let unit = axis.map(|c| c / len);
+        let speed = omega_squared.max(0.0).sqrt();
+        let elements: Vec<u32> = match &load.region {
+            ElementRef::Element(id) => vec![*id],
+            ElementRef::Set(name) => model
+                .sets
+                .element_sets
+                .get(name)
+                .cloned()
+                .unwrap_or_default(),
+        };
+        let rotation = found.get_or_insert(Rotation {
+            omega: unit.map(|c| c * speed),
+            axis: unit,
+            entries: Vec::new(),
+        });
+        for id in elements {
+            if let Some(index) = model.element_index(id) {
+                let entry = table.entry_of[index as usize];
+                if entry != u32::MAX && !rotation.entries.contains(&entry) {
+                    rotation.entries.push(entry);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Adds the spin softening `−ω² ∫ ρ Nᵀ (I − a aᵀ) N dV` of every `CENTRIF` load of the
+/// step to `k`: the change of the centrifugal force with the displacement, which CalculiX
+/// takes into the stiffness of a perturbation step about a rotating state (the rotor
+/// fixtures: without it the frequencies are 1.3e-4 too high).
+pub(crate) fn add_spin_softening(
+    model: &Model,
+    table: &ElementTable,
+    step: &Step,
+    k: &mut plxs_linalg::SparseMatrix,
+) -> Result<()> {
+    for load in &step.loads.distributed {
+        let DistributedLoadKind::Centrifugal {
+            omega_squared,
+            axis,
+            ..
+        } = &load.kind
+        else {
+            continue;
+        };
+        let len = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+        if len == 0.0 || *omega_squared == 0.0 {
+            continue;
+        }
+        let a = axis.map(|c| c / len);
+        let elements: Vec<u32> = match &load.region {
+            ElementRef::Element(id) => vec![*id],
+            ElementRef::Set(name) => model
+                .sets
+                .element_sets
+                .get(name)
+                .cloned()
+                .unwrap_or_default(),
+        };
+        for id in elements {
+            let Some(index) = model.element_index(id) else {
+                continue;
+            };
+            let entry_index = table.entry_of[index as usize];
+            if entry_index == u32::MAX {
+                continue;
+            }
+            let entry = &table.entries[entry_index as usize];
+            let formulation = table.formulation(entry);
+            let nodes = entry.nodes.len();
+            let dofs = formulation.dof_count();
+            let Some(rho) = entry.density else {
+                continue;
+            };
+            if dofs != 3 * nodes {
+                return Err(Error::Unsupported(format!(
+                    "spin softening of a CENTRIF load on element type {} is not implemented yet",
+                    formulation.kind
+                )));
+            }
+            let coords = table.coordinates(model, entry);
+            let mut me = Vec::new();
+            formulation.mass(&coords, rho, &mut me);
+            let mut block = vec![0.0; dofs * dofs];
+            for p in 0..nodes {
+                for q in 0..nodes {
+                    let m_pq = me[(3 * p) * dofs + 3 * q];
+                    for i in 0..3 {
+                        for j in 0..3 {
+                            let projector = if i == j { 1.0 } else { 0.0 } - a[i] * a[j];
+                            block[(3 * p + i) * dofs + 3 * q + j] =
+                                -omega_squared * m_pq * projector;
+                        }
+                    }
+                }
+            }
+            k.add_block(&entry.dofs, &block);
+        }
+    }
+    Ok(())
+}
+
+/// `G x` for the Coriolis matrix of the rotating elements, element by element:
+/// `(G x)_a = Σ_b 2 m_ab ω × x_b` with the scalar consistent mass `m_ab`.
+fn coriolis_times(
+    model: &Model,
+    table: &ElementTable,
+    rotation: &Rotation,
+    x: &[f64],
+) -> Result<Vec<f64>> {
+    let mut out = vec![0.0; x.len()];
+    let w = rotation.omega;
+    for &index in &rotation.entries {
+        let entry = &table.entries[index as usize];
+        let formulation = table.formulation(entry);
+        let nodes = entry.nodes.len();
+        let dofs = formulation.dof_count();
+        if dofs != 3 * nodes {
+            return Err(Error::Unsupported(format!(
+                "procedure not implemented yet: *COMPLEX FREQUENCY, CORIOLIS on element type {}",
+                formulation.kind
+            )));
+        }
+        let rho = entry.density.ok_or_else(|| {
+            Error::input(
+                "*DENSITY",
+                format!(
+                    "element {} needs a density for the Coriolis forces",
+                    table.element_id(model, index)
+                ),
+            )
+        })?;
+        let coords = table.coordinates(model, entry);
+        let mut me = Vec::new();
+        formulation.mass(&coords, rho, &mut me);
+        for a in 0..nodes {
+            let mut f = [0.0; 3];
+            for b in 0..nodes {
+                let m_ab = me[(3 * a) * dofs + 3 * b];
+                if m_ab == 0.0 {
+                    continue;
+                }
+                let xb: [f64; 3] = std::array::from_fn(|c| x[entry.dofs[3 * b + c] as usize]);
+                let cross = [
+                    w[1] * xb[2] - w[2] * xb[1],
+                    w[2] * xb[0] - w[0] * xb[2],
+                    w[0] * xb[1] - w[1] * xb[0],
+                ];
+                for c in 0..3 {
+                    f[c] += 2.0 * m_ab * cross[c];
+                }
+            }
+            for c in 0..3 {
+                out[entry.dofs[3 * a + c] as usize] += f[c];
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// A complex mode in modal coordinates: frequency (rad/time) and coefficients.
+struct ComplexMode {
+    mu: f64,
+    re: Vec<f64>,
+    im: Vec<f64>,
+}
+
+/// The complex modes of `q̈ + Γ q̇ + Λ q = 0`, ascending in frequency, at most `count`.
+fn complex_modes(lambda: &[f64], gamma: &[f64], count: usize) -> Vec<ComplexMode> {
+    let m = lambda.len();
+    let w: Vec<f64> = lambda.iter().map(|l| l.max(0.0).sqrt()).collect();
+    // S = [[0, W], [−W, −Γ]], 2m × 2m.
+    let n2 = 2 * m;
+    let mut s = vec![0.0; n2 * n2];
+    for i in 0..m {
+        s[i * n2 + m + i] = w[i];
+        s[(m + i) * n2 + i] = -w[i];
+        for j in 0..m {
+            s[(m + i) * n2 + m + j] = -gamma[i * m + j];
+        }
+    }
+    // R = [[0, S], [−S, 0]] (symmetric since S is skew).
+    let n4 = 2 * n2;
+    let mut r = vec![0.0; n4 * n4];
+    for i in 0..n2 {
+        for j in 0..n2 {
+            r[i * n4 + n2 + j] = s[i * n2 + j];
+            r[(n2 + i) * n4 + j] = -s[i * n2 + j];
+        }
+    }
+    let (values, vectors) = symmetric_eigen(n4, &r);
+    // Positive eigenvalues come twice (y and i y); take every other one.
+    let mut modes = Vec::new();
+    let positive: Vec<usize> = (0..n4)
+        .filter(|&k| values[k] > 1e-9 * values[n4 - 1].abs())
+        .collect();
+    let mut k = 0;
+    while k < positive.len() && modes.len() < count {
+        let index = positive[k];
+        let v = &vectors[index];
+        // y = x_r + i x_i; the first half of y is W q.
+        let q_re: Vec<f64> = (0..m)
+            .map(|i| if w[i] > 0.0 { v[i] / w[i] } else { 0.0 })
+            .collect();
+        let q_im: Vec<f64> = (0..m)
+            .map(|i| if w[i] > 0.0 { v[n2 + i] / w[i] } else { 0.0 })
+            .collect();
+        modes.push(ComplexMode {
+            mu: values[index],
+            re: q_re,
+            im: q_im,
+        });
+        k += 2;
+    }
+    modes
+}
+
+/// Scales the coefficients so that the largest is 1 (real), as CalculiX prints them.
+fn normalise(mode: &mut ComplexMode) {
+    let (mut best, mut size) = (0, -1.0);
+    for j in 0..mode.re.len() {
+        let s = mode.re[j].hypot(mode.im[j]);
+        if s > size * (1.0 + 1e-9) {
+            best = j;
+            size = s;
+        }
+    }
+    if size <= 0.0 {
+        return;
+    }
+    // Divide by c = re + i im: (a + ib)(re − i im)/|c|².
+    let (cr, ci) = (mode.re[best], mode.im[best]);
+    let d = cr * cr + ci * ci;
+    for j in 0..mode.re.len() {
+        let (a, b) = (mode.re[j], mode.im[j]);
+        mode.re[j] = (a * cr + b * ci) / d;
+        mode.im[j] = (b * cr - a * ci) / d;
+    }
+    mode.re[best] = 1.0;
+    mode.im[best] = 0.0;
+}
+
+/// CalculiX's phase in degrees: `atan(Im/Re)`, plus 180° where the real part is negative.
+pub(crate) fn phase(re: f64, im: f64) -> f64 {
+    if re == 0.0 {
+        return if im > 0.0 {
+            90.0
+        } else if im < 0.0 {
+            -90.0
+        } else {
+            0.0
+        };
+    }
+    let p = (im / re).atan().to_degrees();
+    if re < 0.0 { p + 180.0 } else { p }
+}
+
+impl Procedure for ComplexFrequencyProcedure {
+    fn run(
+        &self,
+        ctx: &mut ProcedureContext<'_>,
+        step: &Step,
+        progress: &mut dyn Progress,
+    ) -> Result<StepOutcome> {
+        let ProcedureKind::ComplexFrequency(parameters) = &step.procedure else {
+            return Err(Error::Unsupported(
+                "ComplexFrequencyProcedure needs a *COMPLEX FREQUENCY step".into(),
+            ));
+        };
+        const KEYWORD: &str = "*COMPLEX FREQUENCY";
+        if parameters.fluid {
+            return Err(Error::Unsupported(format!(
+                "procedure not implemented yet: *COMPLEX FREQUENCY, FLUID (step {})",
+                step.name
+            )));
+        }
+        let modes = stored_modes(ctx, KEYWORD)?.clone();
+        let m = modes.modes.len();
+        let n = ctx.table.dofs.len();
+        let count = if parameters.count == 0 {
+            m
+        } else {
+            (parameters.count as usize).min(m)
+        };
+        let rotation = rotation(ctx.model, ctx.table, step);
+        if parameters.coriolis && rotation.is_none() {
+            return Err(Error::input(
+                KEYWORD,
+                "CORIOLIS needs a CENTRIF load for the rotational speed",
+            ));
+        }
+        // Γ = Φᵀ G Φ.
+        let mut gamma = vec![0.0; m * m];
+        if parameters.coriolis
+            && let Some(rotation) = &rotation
+        {
+            for j in 0..m {
+                let gphi = coriolis_times(ctx.model, ctx.table, rotation, &modes.modes[j].values)?;
+                for i in 0..m {
+                    gamma[i * m + j] = modes.modes[i]
+                        .values
+                        .iter()
+                        .zip(&gphi)
+                        .map(|(a, b)| a * b)
+                        .sum();
+                }
+            }
+            // Exactly skew-symmetric.
+            for i in 0..m {
+                for j in 0..i {
+                    let v = 0.5 * (gamma[i * m + j] - gamma[j * m + i]);
+                    gamma[i * m + j] = v;
+                    gamma[j * m + i] = -v;
+                }
+                gamma[i * m + i] = 0.0;
+            }
+        }
+        let mut complex = complex_modes(&modes.eigenvalues, &gamma, count);
+        for mode in &mut complex {
+            normalise(mode);
+        }
+        progress.event(ProgressEvent::Info(format!(
+            "{} complex modes from {m} stored modes",
+            complex.len()
+        )));
+
+        // Physical modes, results and the turning direction about the axis.
+        let axis = rotation.as_ref().map_or([1.0, 0.0, 0.0], |r| r.axis);
+        let order = node_order(ctx.model);
+        let zero = vec![0.0; n];
+        let mut stresses = ctx.table.layout.field(6);
+        let mut strains = ctx.table.layout.field(6);
+        let mut eigen_rows = Vec::new();
+        let mut turning_rows = Vec::new();
+        for (index, mode) in complex.iter().enumerate() {
+            let number = index as u32 + 1;
+            // The physical mode is mass normalised (`xᴴ M x = 1`, observed: twice the
+            // orbit area of the participation-scaled mode for a circular whirl).
+            let size = mode
+                .re
+                .iter()
+                .zip(&mode.im)
+                .map(|(a, b)| a * a + b * b)
+                .sum::<f64>()
+                .sqrt()
+                .max(f64::MIN_POSITIVE);
+            let mut x_re = vec![0.0; n];
+            let mut x_im = vec![0.0; n];
+            for (j, phi) in modes.modes.iter().enumerate() {
+                let (a, b) = (mode.re[j] / size, mode.im[j] / size);
+                for (k, v) in phi.values.iter().enumerate() {
+                    x_re[k] += a * v;
+                    x_im[k] += b * v;
+                }
+            }
+            integration_point_results(ctx.table, ctx.model, &x_re, &mut strains, &mut stresses);
+            let mut fields = build_fields(
+                ctx.table, ctx.model, step, &x_re, &zero, &stresses, &strains,
+            );
+            fields.retain(|f| f.name != "FORC" && f.name != "ENER");
+            let (re, _) = ctx.table.reported(ctx.model, &x_re, &zero);
+            let (im, _) = ctx.table.reported(ctx.model, &x_im, &zero);
+            let variables = crate::fields::requested_variables(step);
+            if variables.iter().any(|v| v == "PU") {
+                let at = fields
+                    .iter()
+                    .position(|f| f.name == "ERROR")
+                    .unwrap_or(fields.len());
+                fields.insert(
+                    at,
+                    crate::modal::magnitude_phase(
+                        "PDISP",
+                        &["MAG1", "MAG2", "MAG3", "PHA1", "PHA2", "PHA3"],
+                        &order,
+                        3,
+                        &re,
+                        &im,
+                    ),
+                );
+            }
+            // The orbit x(t) = Re(x e^{iμt}) turns with −(Re x × Im x) about the axis.
+            let mut turn = 0.0;
+            for node in 0..re.len() / 3 {
+                let a = &re[node * 3..node * 3 + 3];
+                let b = &im[node * 3..node * 3 + 3];
+                let cross = [
+                    a[1] * b[2] - a[2] * b[1],
+                    a[2] * b[0] - a[0] * b[2],
+                    a[0] * b[1] - a[1] * b[0],
+                ];
+                turn -= cross[0] * axis[0] + cross[1] * axis[1] + cross[2] * axis[2];
+            }
+            let frequency = mode.mu / (2.0 * std::f64::consts::PI);
+            eigen_rows.push((number, vec![mode.mu, frequency, 0.0]));
+            turning_rows.push((number, vec![if turn >= 0.0 { 1.0 } else { -1.0 }]));
+            ctx.results.increments.push(ResultsIncrement {
+                step: ctx.step_number,
+                increment: number,
+                kind: IncrementKind::ComplexFrequency,
+                value: frequency,
+                total_time: ctx.state.total_time,
+                nodal_diameter: None,
+                fields,
+            });
+        }
+        let table_block = |quantity: &str, rows: Vec<(u32, Vec<f64>)>| HistoryBlock {
+            step: ctx.step_number,
+            increment: 0,
+            quantity: quantity.to_string(),
+            set: String::new(),
+            time: 0.0,
+            rows,
+        };
+        ctx.results.history.push(table_block(
+            plxs_output::EigenTable::COMPLEX_EIGENVALUES,
+            eigen_rows,
+        ));
+        if rotation.is_some() {
+            turning_rows.push((0, axis.to_vec()));
+            ctx.results.history.push(table_block(
+                plxs_output::EigenTable::TURNING_DIRECTION,
+                turning_rows,
+            ));
+        }
+        ctx.state.steps_done = ctx.step_number;
+        Ok(StepOutcome::Converged)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn without_coriolis_the_complex_modes_are_the_real_ones() {
+        let modes = complex_modes(&[4.0, 9.0], &[0.0; 4], 2);
+        assert_eq!(modes.len(), 2);
+        assert!((modes[0].mu - 2.0).abs() < 1e-12);
+        assert!((modes[1].mu - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn coriolis_splits_a_degenerate_pair() {
+        // Two equal modes coupled by Γ = [[0, g], [−g, 0]]: μ² ∓ gμ − ω² = 0.
+        let (w2, g) = (100.0, 2.0);
+        let modes = complex_modes(&[w2, w2], &[0.0, g, -g, 0.0], 2);
+        let lower = (-g + (g * g + 4.0 * w2).sqrt()) / 2.0;
+        let upper = (g + (g * g + 4.0 * w2).sqrt()) / 2.0;
+        assert!((modes[0].mu - lower).abs() < 1e-10, "{}", modes[0].mu);
+        assert!((modes[1].mu - upper).abs() < 1e-10, "{}", modes[1].mu);
+        let mut m = ComplexMode {
+            mu: modes[0].mu,
+            re: modes[0].re.clone(),
+            im: modes[0].im.clone(),
+        };
+        normalise(&mut m);
+        // A circular whirl: both coefficients of modulus 1, a quarter period apart.
+        assert!((m.re[1].hypot(m.im[1]) - 1.0).abs() < 1e-9);
+        assert!(m.re[1].abs() < 1e-9);
+    }
+
+    #[test]
+    fn phases_as_calculix_prints_them() {
+        assert!((phase(-2.71162, 2.152) - 141.56).abs() < 0.01);
+        assert!((phase(1.0, -1.0) + 45.0).abs() < 1e-12);
+        assert!((phase(-1.0, -1.0) - 225.0).abs() < 1e-12);
+    }
+}

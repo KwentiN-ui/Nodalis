@@ -19,10 +19,9 @@
 //! black-box runs (docs/solver/SCHNITTSTELLEN.md, "Stand nach M3 T14").
 
 use plxs_assembly::{
-    MassRule, Spc, assemble_mass_with, assemble_stiffness, load_vector,
-    rotate_concentrated_loads,
+    MassRule, Spc, assemble_mass_with, assemble_stiffness, load_vector, rotate_concentrated_loads,
 };
-use plxs_core::results::{IncrementKind, ResultsIncrement};
+use plxs_core::results::{IncrementKind, ResultField, ResultsIncrement};
 use plxs_core::state::{NodalField, StoredModes};
 use plxs_core::step::{ModalDamping, Procedure as ProcedureKind};
 use plxs_core::{Error, Progress, ProgressEvent, Result, Step};
@@ -36,7 +35,10 @@ use crate::{Procedure, ProcedureContext, StepOutcome};
 pub struct ModalDynamicsProcedure;
 
 /// The stored modes a modal step works on, or the error CalculiX gives without them.
-pub(crate) fn stored_modes<'a>(ctx: &'a ProcedureContext<'_>, keyword: &str) -> Result<&'a StoredModes> {
+pub(crate) fn stored_modes<'a>(
+    ctx: &'a ProcedureContext<'_>,
+    keyword: &str,
+) -> Result<&'a StoredModes> {
     let modes = ctx.state.stored_modes.as_ref().ok_or_else(|| {
         Error::input(
             keyword,
@@ -278,8 +280,8 @@ impl Procedure for ModalDynamicsProcedure {
         // Modal coordinates of the motion the step starts from: q = Φᵀ M u.
         let u0 = &ctx.state.displacements.values;
         let v0 = ctx.state.velocities.as_ref().map(|v| v.values.clone());
-        let starts_at_rest = u0.iter().all(|x| *x == 0.0)
-            && v0.as_ref().is_none_or(|v| v.iter().all(|x| *x == 0.0));
+        let starts_at_rest =
+            u0.iter().all(|x| *x == 0.0) && v0.as_ref().is_none_or(|v| v.iter().all(|x| *x == 0.0));
         let (mut q, mut qd) = if starts_at_rest || u0.len() != n {
             (vec![0.0; modes.modes.len()], vec![0.0; modes.modes.len()])
         } else {
@@ -409,6 +411,49 @@ impl Procedure for ModalDynamicsProcedure {
     }
 }
 
+/// Magnitudes and phases (CalculiX's convention, see [`crate::complex::phase`]) of a
+/// complex nodal field with `per_node` components given as real and imaginary parts.
+pub(crate) fn magnitude_phase(
+    name: &str,
+    components: &[&str],
+    order: &[(u32, u32)],
+    per_node: usize,
+    re: &[f64],
+    im: &[f64],
+) -> ResultField {
+    // Round-off magnitudes (a component zero by symmetry) get the phase 0, as CalculiX
+    // prints them, not the angle of the noise.
+    let largest = re
+        .iter()
+        .zip(im)
+        .map(|(a, b)| a.hypot(*b))
+        .fold(0.0, f64::max);
+    let tiny = 1e-10 * largest;
+    ResultField {
+        name: name.to_string(),
+        components: components.iter().map(|c| c.to_string()).collect(),
+        nodes: order.iter().map(|&(id, _)| id).collect(),
+        values: (0..2 * per_node)
+            .map(|c| {
+                let k = c % per_node;
+                order
+                    .iter()
+                    .map(|&(_, i)| {
+                        let (a, b) = (re[i as usize * per_node + k], im[i as usize * per_node + k]);
+                        if c < per_node {
+                            a.hypot(b)
+                        } else if a.hypot(b) <= tiny {
+                            0.0
+                        } else {
+                            crate::complex::phase(a, b)
+                        }
+                    })
+                    .collect()
+            })
+            .collect(),
+    }
+}
+
 pub struct SteadyStateProcedure;
 
 /// The excitation frequencies (Hz) of a steady state step: the range split at the
@@ -484,7 +529,11 @@ impl Procedure for SteadyStateProcedure {
         require_homogeneous_constraints(ctx, step, KEYWORD, 1.0)?;
         let n = ctx.table.dofs.len();
         let zeta = damping_ratios(parameters.damping.as_ref(), &modes.eigenvalues);
-        let omegas: Vec<f64> = modes.eigenvalues.iter().map(|l| l.max(0.0).sqrt()).collect();
+        let omegas: Vec<f64> = modes
+            .eigenvalues
+            .iter()
+            .map(|l| l.max(0.0).sqrt())
+            .collect();
         let eigenfrequencies: Vec<f64> = omegas
             .iter()
             .map(|w| w / (2.0 * std::f64::consts::PI))
@@ -541,8 +590,9 @@ impl Procedure for SteadyStateProcedure {
                 let u = superpose(&modes.modes, c, n);
                 k.multiply(&u, &mut reactions);
                 integration_point_results(ctx.table, ctx.model, &u, &mut strains, &mut stresses);
-                let mut part =
-                    build_fields(ctx.table, ctx.model, step, &u, &reactions, &stresses, &strains);
+                let mut part = build_fields(
+                    ctx.table, ctx.model, step, &u, &reactions, &stresses, &strains,
+                );
                 if suffix {
                     part.retain(|f| f.name != "ERROR" && f.name != "ENER");
                     for field in &mut part {
@@ -570,6 +620,66 @@ impl Procedure for SteadyStateProcedure {
                 }
             }
             fields.extend(imaginary);
+            let variables = crate::fields::requested_variables(step);
+            if variables.iter().any(|v| v == "PU") {
+                let u_re = superpose(&modes.modes, &re, n);
+                let u_im = superpose(&modes.modes, &im, n);
+                let zero = vec![0.0; n];
+                let (a, _) = ctx.table.reported(ctx.model, &u_re, &zero);
+                let (b, _) = ctx.table.reported(ctx.model, &u_im, &zero);
+                let order = crate::fields::node_order(ctx.model);
+                fields.push(magnitude_phase(
+                    "PDISP",
+                    &["MAG1", "MAG2", "MAG3", "PHA1", "PHA2", "PHA3"],
+                    &order,
+                    3,
+                    &a,
+                    &b,
+                ));
+            }
+            if variables.iter().any(|v| v == "PHS") {
+                let stress = |name: &str| fields.iter().find(|f| f.name == name).cloned();
+                match (stress("STRESS"), stress("STRESSI")) {
+                    (Some(sr), Some(si)) => fields.push({
+                        let largest = (0..6)
+                            .flat_map(|k| sr.values[k].iter().zip(&si.values[k]))
+                            .map(|(x, y)| x.hypot(*y))
+                            .fold(0.0, f64::max);
+                        ResultField {
+                            name: "PSTRESS".into(),
+                            components: [
+                                "MAGXX", "MAGYY", "MAGZZ", "MAGXY", "MAGYZ", "MAGZX", "PHAXX",
+                                "PHAYY", "PHAZZ", "PHAXY", "PHAYZ", "PHAZX",
+                            ]
+                            .map(String::from)
+                            .to_vec(),
+                            nodes: sr.nodes.clone(),
+                            values: (0..12)
+                                .map(|c| {
+                                    let k = c % 6;
+                                    sr.values[k]
+                                        .iter()
+                                        .zip(&si.values[k])
+                                        .map(|(&x, &y)| {
+                                            if c < 6 {
+                                                x.hypot(y)
+                                            } else if x.hypot(y) <= 1e-10 * largest {
+                                                0.0
+                                            } else {
+                                                crate::complex::phase(x, y)
+                                            }
+                                        })
+                                        .collect()
+                                })
+                                .collect(),
+                        }
+                    }),
+                    _ if index == 0 => progress.event(ProgressEvent::Warning(
+                        "PHS needs S in the same *EL FILE request; not written".into(),
+                    )),
+                    _ => {}
+                }
+            }
             ctx.results.increments.push(ResultsIncrement {
                 step: ctx.step_number,
                 increment,
@@ -624,8 +734,14 @@ mod tests {
             let step = ModeStep::new(omega2, zeta, dt);
             let (q, v) = step.advance(0.3, -2.0, 1.5, -0.7);
             let (rq, rv) = rk4(omega2, zeta, dt, 0.3, -2.0, 1.5, -0.7);
-            assert!((q - rq).abs() < 1e-9 * (1.0 + rq.abs()), "{omega2} {zeta}: {q} vs {rq}");
-            assert!((v - rv).abs() < 1e-8 * (1.0 + rv.abs()), "{omega2} {zeta}: {v} vs {rv}");
+            assert!(
+                (q - rq).abs() < 1e-9 * (1.0 + rq.abs()),
+                "{omega2} {zeta}: {q} vs {rq}"
+            );
+            assert!(
+                (v - rv).abs() < 1e-8 * (1.0 + rv.abs()),
+                "{omega2} {zeta}: {v} vs {rv}"
+            );
         }
     }
 

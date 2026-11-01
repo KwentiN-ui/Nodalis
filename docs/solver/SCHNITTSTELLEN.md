@@ -798,6 +798,72 @@ C3D20R/C3D4/C3D10/C3D6/C3D15/CPS8/CAX8 mit variiertem Δt und α) abgelesen, kei
   S8 4e-5 mit Rampe) weichen in den Zeitschritten ab: die Massenkonvention der expandierten
   Elemente ist offen. Fixtures dafür gibt es noch nicht.
 
+## Stand nach M3 T14 (Modalverfahren, komplexe Eigenwerte)
+
+Was T14 gebaut hat, alles auf den Moden eines vorangehenden `*FREQUENCY, STORAGE=YES`
+(`state.stored_modes`, massennormiert):
+
+- `plxs-procedures::modal::ModalDynamicsProcedure` (`*MODAL DYNAMICS`): jede Mode
+  `q̈ + 2ζω q̇ + ω² q = φᵀ f(t)`, die Last zwischen den Inkrementenden linear, jedes Inkrement
+  **exakt** integriert (Matrixexponential des Zustands `(q, q̇, p, Δp)`, gilt auch für
+  ω = 0 und überkritische Dämpfung). `U`, `V`, `S`, `E`, `RF` (`K u`), `ENER` wie in T13.
+- `modal::SteadyStateProcedure` (`*STEADY STATE DYNAMICS`, harmonisch):
+  `q = φᵀ f / (ω² − Ω² + 2iζωΩ)`, Real- und Imaginärteil als `DISP`…`FORC` und
+  `DISPI`, `STRESSI`, `TOSTRAII`, `FORCI`; `PU` → `PDISP`, `PHS` → `PSTRESS` (Betrag und
+  Phase). Amplituden sind Funktionen der Frequenz.
+- `*MODAL DAMPING`: Bereiche (Moden außerhalb ungedämpft) und Rayleigh
+  `ζ = α/(2ω) + βω/2`.
+- `complex::ComplexFrequencyProcedure` (`*COMPLEX FREQUENCY, CORIOLIS`): Coriolis-Matrix
+  `G = 2∫ρ Nᵀ Ω̃ N dV` der Elemente der `CENTRIF`-Last, `Γ = Φᵀ G Φ`, das gyroskopische
+  Problem `q̈ + Γ q̇ + Λ q = 0` über die reell schiefsymmetrische Zustandsmatrix
+  `[[0, Λ^½], [−Λ^½, −Γ]]` und deren symmetrische Einbettung doppelter Größe
+  (`plxs_linalg::dense::symmetric_eigen`, faer).
+- `eigen`: ein perturbierter Frequenzschritt bekommt zu `K + K_u + K_σ` das **Spin
+  Softening** `−ω² ∫ρ Nᵀ(I − aaᵀ)N dV` jeder `CENTRIF`-Last (`complex::add_spin_softening`).
+- `plxs-output`: `IncrementKind::SteadyState` (Analysetyp 1, Inkrement 0 im `1PSTEP`),
+  komplexe Moden mit `1PGM`/`1PGK`/… Kopf und Inkrement 0, `PDISP`/`PSTRESS`-Komponenten
+  (Typ 12 bzw. 14), `DISPI`/`FORCI` mit ALL-Zeile; `.dat`-Tabellen `COMPLEX EIGENVALUE
+  OUTPUT` und `EIGENMODE TURNING DIRECTION` (`EigenTable`).
+- `plxs-verify`: komplexe Moden werden als komplexe Vektoren aus `PDISP` nach dem besten
+  Einheits-Phasenfaktor verglichen, `DISP` als Realteil des gedrehten Kandidaten; Spannungen
+  und Dehnungen komplexer Moden nicht (Realteil einer Phase, die keiner ausschreibt).
+  `PDISP`/`PSTRESS` werden überall als `MAG·e^{iPHA}` verglichen (die Phase einer
+  Rundungsnull ist beliebig). `deviations` gilt jetzt auch für `.dat`-Komponenten.
+- Abnahmetest `solver/plxs-cli/tests/modal_corpus.rs`: alle `modal/*`-Fixtures mit Referenz
+  grün; neu ist die kleine Writer-Fixture `modal-kurz` (4 Moden, Modaldynamik mit Rayleigh,
+  Sweep mit Bias, PU/PHS). `modal` (ohne Golden im Repo) stimmt lokal auf 5e-6.
+
+### Was von CalculiX durch Beobachtung bekannt ist (T14)
+
+- `*MODAL DYNAMICS` und `*STEADY STATE DYNAMICS` stimmen mit exakter Modalintegration bzw.
+  der harmonischen Modalformel auf 5e-6; ccx schreibt keine `.sta`-Zeilen für sie.
+  Ohne `AMPLITUDE=` wirken die Lasten der Modaldynamik sofort (wie `*DYNAMIC`).
+- **Frequenzraster** des Steady State: der Bereich wird an den Eigenfrequenzen darin
+  geteilt, jedes Intervall bekommt `points` Frequenzen (Enden geteilt),
+  `f = (f₁+f₂)/2 + (f₂−f₁)/2 · sign(y)|y|^(1/bias)` mit `y` gleichmäßig in [−1, 1]
+  (Bias 1 und 2,5 nachgeprüft).
+- **Phase** in `PDISP`/`PSTRESS`: `atan(Im/Re)` in Grad, plus 180° bei negativem Realteil
+  (Wertebereich −90° … 270°); Rundungsnullen haben Phase 0.
+- **Komplexe Moden**: die „Partizipationsfaktoren“ der `.dat` sind die Modalkoordinaten mit
+  der betragsgrößten auf 1 gesetzt; die `.frd`-Mode ist dieselbe Kombination,
+  massennormiert (`‖c‖ = 1`). `1PGK` = (2π f)², Wert = Frequenz.
+- Ein **perturbierter** `*FREQUENCY` nach einer statischen `CENTRIF`-Last enthält das Spin
+  Softening (ohne liegen die Rotor-Frequenzen 1,3e-4 zu hoch); ohne `PERTURBATION` rechnet
+  ccx mit der linearen Steifigkeit, die Coriolis-Kopplung nimmt `*COMPLEX FREQUENCY` aber
+  in beiden Fällen aus der `CENTRIF`-Last des Steps.
+
+### Bekannte Abweichungen (T14)
+
+- **Drehrichtung** (`TURNING DIRECTION`): plxs nimmt den Umlaufsinn der Bahn
+  `Re(x e^{iμt})` um die Achse (alle Knoten einig). ccx gibt für das zweite Biegepaar des
+  Rotors bei beiden Moden B aus, obwohl die Knoten der ersten vorwärts laufen; das Kriterium
+  von ccx ist nicht identifiziert. Die Rotor-Fixtures vergleichen die Komponente nicht
+  (`deviations`).
+- Nicht gebaut: `*MODAL DYNAMICS, STEADY STATE`, `*STEADY STATE DYNAMICS, HARMONIC=NO`,
+  Fußpunkterregung (vorgeschriebene Verschiebungen ≠ 0), `*COMPLEX FREQUENCY, FLUID`,
+  zyklisch symmetrische Moden in den Modalverfahren, `PNT`; Coriolis nur für
+  Volumenelemente. Diese Fälle werden mit `Unsupported` abgelehnt.
+
 ## Was M1 zu liefern hat (Abnahme)
 
 - `solver_check::run` aus `plx-app` besteht mit `plxs` als Executable (Kragbalken mit Kraft

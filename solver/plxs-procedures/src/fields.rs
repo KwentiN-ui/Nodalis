@@ -373,9 +373,10 @@ pub fn write_increment(
 
 /// The output variables of a step the solver does not produce yet, for a warning.
 pub fn unsupported_outputs(step: &Step) -> Vec<String> {
-    // `V` only means something in dynamic steps; CalculiX ignores it in the others.
+    // `V` only means something in dynamic steps, `PU`/`PHS` in steady state and complex
+    // frequency steps; CalculiX ignores them in the others.
     let known = [
-        "U", "V", "S", "E", "RF", "ERR", "NOE", "ENER", "NT", "HFL", "RFL",
+        "U", "V", "S", "E", "RF", "ERR", "NOE", "ENER", "NT", "HFL", "RFL", "PU", "PHS",
     ];
     let mut out = Vec::new();
     for v in requested(step) {
