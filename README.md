@@ -4,22 +4,31 @@
 
 <h1 align="center">Nodalis</h1>
 
-Nodalis is a graphical pre- and post-processor for the finite element solver
-[CalculiX](http://www.calculix.de/). It is written in
-Rust and runs on **Linux and Windows**. Organise your analyses as a project of linked nodes, import a
-geometry, mesh it, set up materials, loads and steps, run CalculiX and look at the results, all
-without editing input files by hand.
+Nodalis is a finite element program for structural and thermal analysis, written in Rust, for
+**Linux and Windows**. A project is a graph of linked nodes: geometry and mesh sources, materials,
+analyses, measurements and optimizers feed into each other, so variants, follow-up analyses and
+parameter studies are wires instead of copied files. Inside an analysis you import a geometry, mesh
+it, set up materials, contacts, loads and steps by picking on the model, solve and look at the
+results, without editing input files by hand.
+
+Nodalis comes with its own solver, written in Rust from scratch, that computes the analyses inside
+the program: no external solver to install, and results go straight into the post-processing.
 
 ![Nodalis main window with a result](docs/images/readme-hero.png)
 
-> Nodalis is a hobby project under active development. It is not affiliated with
-> CalculiX. Expect rough edges and please report what you find in the
+> Nodalis is a hobby project under active development. There is no release yet, so for now
+> build it with cargo (see below). Expect rough edges and please report what you find in the
 > [issue tracker](https://github.com/KwentiN-ui/Nodalis/issues).
 
 ## Features
 
+**Project as a node graph**
+- Analyses, geometry and mesh sources, material sets and cross-sections as blocks, linked by wires.
+- Analyses build on each other (follow-up steps, restarts) and share geometry, mesh and materials.
+- Expose parameters, measure results and let an optimizer or a Campbell sweep run the loop.
+
 **Geometry and mesh**
-- Import STEP, IGES and BREP geometry, or open an existing CalculiX `.inp` mesh.
+- Import STEP, IGES and BREP geometry, or open an existing `.inp` mesh.
 - Tetrahedral meshing (1st and 2nd order) with [Gmsh](https://gmsh.info/): per-part meshing
   parameters and local mesh sizes on faces and edges.
 - Mesh tools: merge nodes, mirror, transform, renumber.
@@ -29,14 +38,16 @@ without editing input files by hand.
 - Materials (elastic, plastic, thermal) with a material library; solid, shell and beam sections.
 - Boundary conditions, loads (pressure, surface and body loads, centrifugal, moments), amplitudes,
   initial conditions and defined fields.
-- Contact pairs and ties, constraints, rigid bodies, pre-tension, submodeling.
+- Contact regions detected automatically, ties, constraints, rigid bodies, bolts with
+  pre-tension, submodeling.
 - Node and element sets are created implicitly from your selection.
 - Unit systems with unit-aware input and model check.
 
 **Analysis**
 - Static, frequency, buckling, dynamic, modal dynamics, steady-state dynamics, heat transfer and
   coupled temperature-displacement steps, complex frequency with Campbell diagram.
-- Start CalculiX from the program and watch the solver output live.
+- Built-in solver with direct and iterative equation solvers and live progress; results stay in
+  the program.
 
 **Post-processing**
 - Contour plots, deformed shapes, section views, animations and mode shapes.
@@ -47,14 +58,14 @@ Projects are saved as `.ndl` files.
 
 ## Installation
 
-Nodalis needs two other programs: the solver CalculiX and, for geometry import and meshing, Gmsh.
-The Windows installer and the Linux AppImage bundle both. See the sections below.
+For geometry import and meshing Nodalis needs Gmsh. The Windows installer and the Linux AppImage
+bundle it, see the sections below.
 
 ### Windows
 
 Download `nodalis-<version>-setup.exe` from the
 [latest release](https://github.com/KwentiN-ui/Nodalis/releases/latest) and run it. It installs
-Nodalis with a Start menu entry, bundles Gmsh and CalculiX and can associate `.ndl` project files.
+Nodalis with a Start menu entry, bundles Gmsh and can associate `.ndl` project files.
 
 ### Linux
 
@@ -96,8 +107,8 @@ To update later, run the same command again with `--force`. To build from a clon
 Nodalis imports STEP, IGES and BREP geometry and meshes it with [Gmsh](https://gmsh.info/). Gmsh is
 not part of Nodalis and is loaded as a library at run time. The Windows installer and the Linux
 AppImage bundle it, so this section only applies if you installed with cargo or built from source.
-**Without Gmsh** Nodalis starts and works normally, but geometry import and meshing are not available. Opening `.inp` meshes and `.frd`
-results, model setup, running CalculiX and post-processing do not need it.
+**Without Gmsh** Nodalis starts and works normally, but geometry import and meshing are not available. Opening `.inp` meshes, model setup,
+solving and post-processing do not need it.
 
 On Linux, the simplest way is to take the official library (Gmsh 4.15, the tested version) from its
 PyPI package and put it next to the program. No clone and no Python packages are needed beyond `pip`:
@@ -117,21 +128,11 @@ distribution), point the setting or `NODALIS_GMSH` to it; other Gmsh 4 versions 
 not tested. The *Test Gmsh* button in the settings loads the library and meshes a cube. From a clone,
 `python3 scripts/fetch_gmsh.py` does the same, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#gmsh).
 
-### CalculiX
-
-The Windows installer and the AppImage ship CalculiX 2.23 with the SPOOLES, PaStiX and ARPACK
-solvers and use it when no other executable is set. New steps solve with PaStiX, which is much
-faster than SPOOLES on larger models. To use another CalculiX, for example one with Pardiso,
-install it, e.g. from [calculix.de](http://www.calculix.de/) or your package manager
-(`sudo apt install calculix-ccx`), and select the executable in *Tools > Settings*. A self-test
-button there checks that it works. From a clone, `scripts/build_ccx.sh` builds the shipped
-CalculiX into `target/ccx`, where development builds find it.
-
 ## Documentation
 
 The **User Guide** is a PDF attached to every [release](https://github.com/KwentiN-ui/Nodalis/releases/latest)
 (`nodalis-<version>-user-guide.pdf`). It starts with a first analysis step by step and then
-describes every dialog and what Nodalis writes to the CalculiX input file. The source is in
+describes every dialog and how the model is solved. The source is in
 [docs/user-guide/](docs/user-guide/).
 
 ## Contributing and development
