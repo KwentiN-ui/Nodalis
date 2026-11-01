@@ -51,7 +51,7 @@ pub enum Stage {
     M1,
     M2,
     M3,
-    /// Not computed by plxs in phase 1 (sensitivity); CalculiX stays in charge.
+    /// Not computed by plxs (nothing at the moment; sensitivity was here until T17).
     Ccx,
 }
 
@@ -103,7 +103,10 @@ pub struct Meta {
 /// The areas, in the order of precedence a fixture is assigned by: the first area whose
 /// marker the input carries wins.
 pub const AREAS: &[(&str, &str)] = &[
-    ("sensitivity", "*SENSITIVITY (not computed by plxs)"),
+    (
+        "sensitivity",
+        "*SENSITIVITY, *DESIGN VARIABLES, *DESIGN RESPONSE, *FILTER (T17)",
+    ),
     ("cyclic", "cyclic symmetry and submodels"),
     (
         "modal",
@@ -195,7 +198,7 @@ pub fn classify(name: &str, input: &str, source: &str) -> Meta {
         .filter(|l| l.trim().to_ascii_uppercase().starts_with("*STEP"))
         .count();
     let (area, stage) = if has("*SENSITIVITY") {
-        ("sensitivity", Stage::Ccx)
+        ("sensitivity", Stage::M3)
     } else if any(&["*CYCLIC SYMMETRY MODEL", "*SUBMODEL"]) {
         ("cyclic", Stage::M3)
     } else if any(&[
@@ -242,6 +245,10 @@ pub fn classify(name: &str, input: &str, source: &str) -> Meta {
     };
     let class = if has("*CONTACT PAIR") {
         Class::C
+    } else if has("*SENSITIVITY") {
+        // CalculiX differentiates the element matrices by finite differences and converges
+        // the eigenvectors it differentiates to about 1e-5: its sensitivities carry 1e-4.
+        Class::B
     } else if any(&["*DYNAMIC", "*MODAL DYNAMICS", "*STEADY STATE DYNAMICS"]) {
         Class::E
     } else if any(&["NLGEOM", "*PLASTIC", "*VISCO", "*CREEP"])

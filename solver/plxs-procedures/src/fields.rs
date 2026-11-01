@@ -310,7 +310,7 @@ pub fn write_increment(
 
 /// The output variables of a step the solver does not produce yet, for a warning.
 pub fn unsupported_outputs(step: &Step) -> Vec<String> {
-    let known = ["U", "S", "E", "RF", "ERR", "NOE", "NT", "HFL", "RFL"];
+    let known = ["U", "S", "E", "RF", "ERR", "NOE", "NT", "HFL", "RFL", "SEN"];
     let mut out = Vec::new();
     for v in requested(step) {
         if !known.contains(&v.as_str()) && !out.contains(&v) {

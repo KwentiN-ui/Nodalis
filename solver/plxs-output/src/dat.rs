@@ -29,6 +29,14 @@ pub fn write_dat_to(out: &mut impl Write, results: &Results) -> std::io::Result<
             writeln!(out, "                        S T E P {:>7}", block.step)?;
             writeln!(out)?;
         }
+        if block.quantity == DESIGN_RESPONSE_TABLE {
+            if last.map(|(s, _)| s) != Some(block.step) {
+                writeln!(out)?;
+            }
+            last = Some((block.step, block.increment));
+            write_design_response_table(out, block)?;
+            continue;
+        }
         if let Some(table) = EigenTable::of(block) {
             // The eigenvalue tables stand under the step heading without an increment.
             if last.map(|(s, _)| s) != Some(block.step) {
@@ -80,6 +88,43 @@ fn write_block(out: &mut impl Write, block: &HistoryBlock) -> std::io::Result<()
             write!(out, " {}", fortran_e13(*v))?;
         }
         writeln!(out)?;
+    }
+    Ok(())
+}
+
+/// The table a `*SENSITIVITY` step prints per design response (or per mode for
+/// `EIGENFREQUENCY`): [`HistoryBlock::quantity`] is this name, `set` holds the response
+/// kinds of the rows joined by commas (`MASS,STRAINENERGY`; the writer names every response
+/// by its kind), each row is `(index, [value, length of the gradient])`.
+pub const DESIGN_RESPONSE_TABLE: &str = "DESIGN RESPONSE INFORMATION";
+
+const DESIGN_RESPONSE_RULE: &str = "   ##############################################################################################################";
+
+fn write_design_response_table(out: &mut impl Write, block: &HistoryBlock) -> std::io::Result<()> {
+    let names: Vec<&str> = block.set.split(',').collect();
+    writeln!(out)?;
+    writeln!(out, "{DESIGN_RESPONSE_RULE}")?;
+    writeln!(
+        out,
+        "   D E S I G N   R E S P O N S E                    I N F O R M A T I O N"
+    )?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "   FUNCTION        FUNCTION VALUE    LENGTH GRADIENT   NAME                                                        "
+    )?;
+    writeln!(out, "{DESIGN_RESPONSE_RULE}")?;
+    writeln!(out)?;
+    for (id, values) in &block.rows {
+        let name = names.get(*id as usize).copied().unwrap_or("");
+        writeln!(
+            out,
+            "   {:<16} {:>13}{:>19}   {:<80}",
+            name,
+            fortran_time(values.first().copied().unwrap_or(0.0)),
+            fortran_time(values.get(1).copied().unwrap_or(0.0)),
+            name
+        )?;
     }
     Ok(())
 }
