@@ -437,7 +437,24 @@ impl BackgroundSolve {
         };
         self.after
             .push(format!("Analysis {}", Analysis::status_text(status)));
-        if matches!(status, JobStatus::Failed | JobStatus::FailedWithResults)
+        // The PrePoLix solver tells the causes of a failed run, typed.
+        if let Some(diagnostics) = analysis.diagnostics()
+            && let Some(model) = &self.model
+        {
+            let findings = plx_model::diagnose_solver_check(&diagnostics, &model.mesh, &model.fe);
+            let mut shown = std::collections::HashSet::new();
+            for finding in &findings {
+                if shown.insert((finding.problem, finding.detail.clone())) {
+                    self.after.push(format!(
+                        "Cause: {}: {}. {}",
+                        finding.problem.title(),
+                        finding.detail,
+                        finding.problem.fix()
+                    ));
+                }
+            }
+            self.findings = findings;
+        } else if matches!(status, JobStatus::Failed | JobStatus::FailedWithResults)
             && let Some(model) = &self.model
         {
             let findings = plx_model::diagnose_solver_output(analysis.output(), &model.mesh);

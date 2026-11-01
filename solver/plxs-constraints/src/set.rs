@@ -33,6 +33,8 @@ pub struct ModelConstraints {
     pub warnings: Vec<String>,
     /// Number of slave nodes moved on to their master surface.
     pub adjusted: usize,
+    /// Slave nodes (dense indices) of each tie that are too far from its master surface.
+    pub untied: Vec<(String, Vec<u32>)>,
 }
 
 impl ModelConstraints {
@@ -62,6 +64,7 @@ impl ModelConstraints {
                     ids.join(", "),
                     if missed.len() > 10 { ", ..." } else { "" }
                 ));
+                mc.untied.push((t.name.clone(), missed.clone()));
             }
             if t.adjust {
                 for c in &couplings {

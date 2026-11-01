@@ -27,6 +27,7 @@
 pub mod amplitude;
 pub mod constraints;
 pub mod contact;
+pub mod diagnostic;
 pub mod element;
 pub mod error;
 pub mod material;
@@ -42,6 +43,7 @@ pub mod validate;
 pub use amplitude::Amplitude;
 pub use constraints::{Constraints, Equation, RigidBody, Submodel, Tie, Transform};
 pub use contact::{Contact, ContactPair, SurfaceBehavior, SurfaceInteraction};
+pub use diagnostic::{Diagnostic, DiagnosticCode, Severity};
 pub use element::{Element, ElementFamily, ElementType};
 pub use error::{Error, Result};
 pub use material::Material;

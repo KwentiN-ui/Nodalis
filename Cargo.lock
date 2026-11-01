@@ -3511,6 +3511,7 @@ dependencies = [
  "glam",
  "plx-core",
  "plx-mesh",
+ "plxs-core",
  "ron",
  "serde",
 ]
