@@ -3916,7 +3916,14 @@ impl Workbench {
         if let Some(status) = analysis.poll() {
             self.output
                 .push(format!("Analysis {}", Analysis::status_text(status)));
-            if matches!(
+            // The PrePoLix solver tells what it found, typed: no reading of its output.
+            if let Some(diagnostics) = analysis.diagnostics()
+                && let Some(model) = self.model.as_ref()
+            {
+                self.solver_findings =
+                    plx_model::diagnose_solver_check(&diagnostics, &model.mesh, &model.fe);
+                note_solver_findings(analysis, &self.solver_findings);
+            } else if matches!(
                 status,
                 plx_job::JobStatus::Failed | plx_job::JobStatus::FailedWithResults
             ) && let Some(model) = self.model.as_ref()
@@ -7394,6 +7401,31 @@ pub struct Show {
 /// asked for another one when it opened the analysis. The request is used up.
 fn results_workspace(pinned: &mut Option<TreeView>) -> TreeView {
     pinned.take().unwrap_or(TreeView::Results)
+}
+
+/// Writes the findings of the solver's model check into the monitor, with the hint where the
+/// tree shows them.
+pub(crate) fn note_solver_findings(analysis: &mut Analysis, findings: &[plx_model::Finding]) {
+    let mut shown = std::collections::HashSet::new();
+    for finding in findings {
+        // A finding is attached to its step and to each part: say it once.
+        if !shown.insert((finding.problem, finding.detail.clone())) {
+            continue;
+        }
+        analysis.note(format!(
+            "Model check: {}: {}. {}",
+            finding.problem.title(),
+            finding.detail,
+            finding.problem.fix()
+        ));
+    }
+    if findings.is_empty() {
+        analysis.note("Model check: the solver found no problem.".into());
+    } else {
+        analysis.note(
+            "The warning symbols in the tree show where; their tooltips explain the cause.".into(),
+        );
+    }
 }
 
 #[cfg(test)]
