@@ -204,8 +204,17 @@ impl StaticLinear {
                     let k_red = set.reduce(k_now);
                     ctx.profile.add(Phase::Reduction, started);
                     let analysis = std::time::Instant::now();
+                    let coordinates = (set.free.iter())
+                        .map(|&dof| ctx.model.nodes.coordinates[dof as usize / 3])
+                        .collect();
+                    ctx.solver.set_coordinates(Some(coordinates));
                     ctx.solver.analyze(k_red.pattern())?;
                     ctx.profile.add(Phase::Analysis, analysis);
+                    progress.event(ProgressEvent::Info(format!(
+                        "factor: {} nonzeros, ordered in {:.2} s",
+                        ctx.solver.factor_nonzeros().unwrap_or(0),
+                        started.elapsed().as_secs_f64()
+                    )));
                     let factorization = std::time::Instant::now();
                     ctx.solver.factorize(&k_red).map_err(|e| match e {
                         Error::Numerical { message, .. } => Error::Numerical {

@@ -93,4 +93,5 @@ fn binary_and_text_frd_hold_the_same_results() {
     check("loads", "moving");
     check("structural", "edge-tie-s4-knoten");
     check("structural", "balken_b32");
+    check("eigen", "eigenfrequenz");
 }

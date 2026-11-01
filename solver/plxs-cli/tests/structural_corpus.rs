@@ -16,19 +16,8 @@ const OPEN: &[(&str, &str)] = &[
     ),
     (
         "edge-tie-m3d4",
-        "membranes: M3D4 formulation of ccx 2.21 unknown",
-    ),
-    (
-        "membran-m3d4",
-        "membranes: M3D4 formulation of ccx 2.21 unknown",
-    ),
-    (
-        "membran-m3d4r",
-        "membranes: M3D4R formulation of ccx 2.21 unknown",
-    ),
-    (
-        "membran-s4r",
-        "membranes: M3D4R formulation of ccx 2.21 unknown",
+        "the solid hangs on the membrane like on a hinge: its rotation is a mechanism only the \
+         tiny out-of-plane stiffness of the membranes fixes, differently in ccx and plxs",
     ),
     (
         "rohr_b32r",

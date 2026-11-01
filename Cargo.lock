@@ -3561,6 +3561,7 @@ dependencies = [
  "plxs-output",
  "plxs-session",
  "plxs-verify",
+ "postcard",
 ]
 
 [[package]]
