@@ -3646,7 +3646,9 @@ dependencies = [
  "plxs-linalg",
  "plxs-output",
  "plxs-procedures",
+ "postcard",
  "rayon",
+ "serde",
 ]
 
 [[package]]

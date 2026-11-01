@@ -51,10 +51,66 @@ pub fn read_inp(path: &Path) -> Result<Reading, Vec<Error>> {
 /// of errors and to find included files (without it `*INCLUDE` resolves relative to the
 /// working directory).
 pub fn read_inp_str(text: &str, path: Option<&Path>) -> Result<Reading, Vec<Error>> {
+    read_with(reader::Reader::new(), text, path)
+}
+
+/// Reads the input of a run that continues `base` (`*RESTART, READ`): `base` is the model
+/// and the steps up to the restart, read from the restart file; the text holds the steps
+/// after them (and may add sets). The steps are numbered on from `base`'s and start with
+/// what its last step carries over, so the analysis is the same as one input with all
+/// steps. The returned analysis holds `base`'s steps and the new ones.
+pub fn read_inp_continuing(
+    text: &str,
+    path: Option<&Path>,
+    base: Analysis,
+) -> Result<Reading, Vec<Error>> {
+    read_with(reader::Reader::continuing(base), text, path)
+}
+
+/// `*RESTART, READ` of an input text, found without reading the model: the run then needs
+/// its model from the restart file. `Some(None)` is a `*RESTART, READ` without `STEP=`.
+pub fn restart_read(text: &str) -> Option<Option<u32>> {
+    for line in text.lines() {
+        let line = line.trim_start();
+        if !line.starts_with('*') || line.starts_with("**") {
+            continue;
+        }
+        let compact: String = line
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .to_ascii_uppercase();
+        let mut parts = compact.split(',');
+        match parts.next() {
+            Some("*RESTART") => {}
+            Some("*STEP") => return None,
+            _ => continue,
+        }
+        let mut read = false;
+        let mut step = None;
+        for part in parts {
+            if part == "READ" {
+                read = true;
+            } else if let Some(value) = part.strip_prefix("STEP=") {
+                step = value.parse().ok();
+            }
+        }
+        if read {
+            return Some(step);
+        }
+    }
+    None
+}
+
+fn read_with(
+    reader: reader::Reader,
+    text: &str,
+    path: Option<&Path>,
+) -> Result<Reading, Vec<Error>> {
     let file = path.map(|p| p.display().to_string()).unwrap_or_default();
     let base = path.and_then(|p| p.parent()).map(Path::to_path_buf);
     let lines = lexer::lex(text, &file, base.as_deref()).map_err(|e| vec![e])?;
-    let mut reading = reader::Reader::new().read(&lines).map_err(|e| vec![e])?;
+    let mut reading = reader.read(&lines).map_err(|e| vec![e])?;
     let warnings = plxs_core::validate(&mut reading.analysis)?;
     reading.warnings.extend(warnings);
     Ok(reading)
