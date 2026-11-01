@@ -70,6 +70,10 @@ pub struct ProcedureContext<'a> {
     pub work_dir: std::path::PathBuf,
     /// The contact pairs of the model, prepared once (empty without contact).
     pub contact: plxs_contact::ContactModel,
+    /// The matrix pattern with the contact springs of the last increment, reused while it
+    /// holds the springs of the next (see [`contact::cached_pattern`]); kept over the steps
+    /// of a session.
+    pub contact_pattern: Option<Arc<Pattern>>,
     /// Time per phase, summed over the steps of the session.
     pub profile: profile::Profile,
 }
