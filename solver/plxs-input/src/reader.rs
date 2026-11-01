@@ -156,6 +156,9 @@ pub(crate) struct Reader {
     /// The step being read, with whether it has a procedure yet.
     step: Option<Step>,
     procedure_seen: bool,
+    /// Whether the current `*STEP` names its default amplitude (`AMPLITUDE=`); without it
+    /// dynamic procedures apply their loads at once (CalculiX's default `STEP` for them).
+    step_amplitude_given: bool,
     flags: StepFlags,
     /// `*BOUNDARY` before the first step.
     model_boundaries: Vec<Boundary>,
@@ -179,6 +182,7 @@ impl Reader {
             user_elements: HashSet::new(),
             step: None,
             procedure_seen: false,
+            step_amplitude_given: false,
             flags: StepFlags::default(),
             model_boundaries: Vec::new(),
             carried: Carried::default(),
@@ -1530,6 +1534,7 @@ impl Reader {
         };
         step.perturbation = k.has("PERTURBATION");
         step.max_increments = k.integer("INC")?.unwrap_or(100);
+        self.step_amplitude_given = k.has("AMPLITUDE");
         step.default_amplitude = match k.value("AMPLITUDE") {
             Some("STEP") => DefaultAmplitude::Step,
             _ => DefaultAmplitude::Ramp,
@@ -1781,6 +1786,12 @@ impl Reader {
             increments: incrementation(k, data)?,
             rayleigh: None,
         });
+        // CalculiX applies the loads of a dynamic step at once unless the step asks for a
+        // ramp (observed with ccx 2.21: `*STEP` without `AMPLITUDE=` gives the same
+        // results as `AMPLITUDE=STEP`).
+        if !self.step_amplitude_given {
+            self.current_step(k)?.default_amplitude = DefaultAmplitude::Step;
+        }
         self.procedure(k, procedure)
     }
 
@@ -1814,6 +1825,10 @@ impl Reader {
             period: v[1],
             damping: None,
         });
+        // Like *DYNAMIC: the loads act at once without AMPLITUDE= (ccx 2.21).
+        if !self.step_amplitude_given {
+            self.current_step(k)?.default_amplitude = DefaultAmplitude::Step;
+        }
         self.procedure(k, procedure)
     }
 

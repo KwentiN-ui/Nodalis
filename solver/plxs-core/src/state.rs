@@ -87,6 +87,10 @@ pub struct State {
     /// Which steps stored modes (`*FREQUENCY, STORAGE=YES`) and how many: what later modal
     /// steps need.
     pub stored_modes: Option<StoredModes>,
+    /// Internal energy density at the integration points at the end of a dynamic step,
+    /// which CalculiX carries over into the `ENER` of the next dynamic step.
+    #[serde(default)]
+    pub energy: Option<IntegrationPointField>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
