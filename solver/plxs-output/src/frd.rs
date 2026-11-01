@@ -220,7 +220,7 @@ fn write_block(
 ) -> std::io::Result<()> {
     let analysis = match increment.kind {
         IncrementKind::Time => 0,
-        IncrementKind::Dynamic => 1,
+        IncrementKind::Dynamic | IncrementKind::SteadyState => 1,
         IncrementKind::Frequency => 2,
         IncrementKind::Buckling => 4,
         IncrementKind::ComplexFrequency | IncrementKind::Sensitivity => 3,
@@ -228,9 +228,21 @@ fn write_block(
     writeln!(
         out,
         "    1PSTEP{:>26}{:>12}{:>12}          ",
-        set, increment.increment, increment.step
+        set,
+        if matches!(
+            increment.kind,
+            IncrementKind::SteadyState | IncrementKind::ComplexFrequency
+        ) {
+            0
+        } else {
+            increment.increment
+        },
+        increment.step
     )?;
-    if matches!(increment.kind, IncrementKind::Frequency) {
+    if matches!(
+        increment.kind,
+        IncrementKind::Frequency | IncrementKind::ComplexFrequency
+    ) {
         // Generalized mass and stiffness of the (mass normalized) mode, nodal diameter,
         // subcase and mode number.
         let omega = 2.0 * std::f64::consts::PI * increment.value;
@@ -273,7 +285,7 @@ fn write_block(
     )?;
     let components = field.components.len();
     let (declared, trailer) = match field.name.as_str() {
-        "DISP" | "FORC" | "VELO" | "PDISP" | "FLUX" | "NORM" => (components + 1, true),
+        "DISP" | "FORC" | "VELO" | "FLUX" | "NORM" | "DISPI" | "FORCI" => (components + 1, true),
         _ => (components, false),
     };
     writeln!(out, " -4  {:<8}{:>5}{:>5}", field.name, declared, 1)?;
@@ -300,6 +312,14 @@ fn write_block(
 /// The type and index columns of a `-5` line: vectors (`1 2 k 0`), tensors (`1 4 i j`),
 /// scalars (`1 1 0 0`).
 fn component_flags(field: &str, components: usize, k: usize) -> (u8, u8, u8) {
+    // Magnitudes and phases of complex displacements (MAG1..3, PHA1..3).
+    if field == "PDISP" {
+        return (12, k as u8 + 1, 0);
+    }
+    if field == "PSTRESS" {
+        const IJ: [(u8, u8); 6] = [(1, 1), (2, 2), (3, 3), (1, 2), (2, 3), (3, 1)];
+        return (14, IJ[k % 6].0, IJ[k % 6].1);
+    }
     // Displacements and forces with rotations (U1 nodes): a vector and three scalars.
     if matches!(field, "DISP" | "FORC") && components == 6 {
         return if k < 3 {

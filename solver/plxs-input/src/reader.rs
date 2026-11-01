@@ -1805,6 +1805,10 @@ impl Reader {
             period: v[1],
             damping: None,
         });
+        // Like *DYNAMIC: the loads act at once without AMPLITUDE= (ccx 2.21).
+        if !self.step_amplitude_given {
+            self.current_step(k)?.default_amplitude = DefaultAmplitude::Step;
+        }
         self.procedure(k, procedure)
     }
 

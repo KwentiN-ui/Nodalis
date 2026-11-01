@@ -64,6 +64,7 @@ fn reference_stiffness(
             &ctx.state.stresses,
             &mut k,
         )?;
+        crate::complex::add_spin_softening(ctx.model, ctx.table, step, &mut k)?;
         progress.event(ProgressEvent::Info(format!(
             "tangent stiffness of the preloaded state assembled in {:.2} s",
             started.elapsed().as_secs_f64()
