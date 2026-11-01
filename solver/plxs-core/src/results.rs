@@ -26,6 +26,9 @@ pub enum IncrementKind {
     Buckling,
     /// A complex mode: `value` is the real part of the frequency.
     ComplexFrequency,
+    /// A frequency point of a steady state dynamics step: `value` is the excitation
+    /// frequency (Hz); the `.frd` marks it as analysis type 1 with increment 0.
+    SteadyState,
 }
 
 /// Fields written for one increment of one step.

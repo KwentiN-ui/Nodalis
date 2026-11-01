@@ -220,7 +220,7 @@ fn write_block(
 ) -> std::io::Result<()> {
     let analysis = match increment.kind {
         IncrementKind::Time => 0,
-        IncrementKind::Dynamic => 1,
+        IncrementKind::Dynamic | IncrementKind::SteadyState => 1,
         IncrementKind::Frequency => 2,
         IncrementKind::Buckling => 4,
         IncrementKind::ComplexFrequency => 3,
@@ -228,7 +228,13 @@ fn write_block(
     writeln!(
         out,
         "    1PSTEP{:>26}{:>12}{:>12}          ",
-        set, increment.increment, increment.step
+        set,
+        if increment.kind == IncrementKind::SteadyState {
+            0
+        } else {
+            increment.increment
+        },
+        increment.step
     )?;
     if matches!(increment.kind, IncrementKind::Frequency) {
         // Generalized mass and stiffness of the (mass normalized) mode, nodal diameter,
@@ -273,7 +279,7 @@ fn write_block(
     )?;
     let components = field.components.len();
     let (declared, trailer) = match field.name.as_str() {
-        "DISP" | "FORC" | "VELO" | "PDISP" | "FLUX" => (components + 1, true),
+        "DISP" | "FORC" | "VELO" | "PDISP" | "FLUX" | "DISPI" | "FORCI" => (components + 1, true),
         _ => (components, false),
     };
     writeln!(out, " -4  {:<8}{:>5}{:>5}", field.name, declared, 1)?;
