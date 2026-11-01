@@ -12,8 +12,7 @@ it, set up materials, contacts, loads and steps by picking on the model, solve a
 results, without editing input files by hand.
 
 Nodalis comes with its own solver, written in Rust from scratch, that computes the analyses inside
-the program. [CalculiX](http://www.calculix.de/) can still be chosen as the solver until the
-built-in one covers everything.
+the program: no external solver to install, and results go straight into the post-processing.
 
 ![Nodalis main window with a result](docs/images/readme-hero.png)
 
@@ -29,7 +28,7 @@ built-in one covers everything.
 - Expose parameters, measure results and let an optimizer or a Campbell sweep run the loop.
 
 **Geometry and mesh**
-- Import STEP, IGES and BREP geometry, or open an existing CalculiX `.inp` mesh.
+- Import STEP, IGES and BREP geometry, or open an existing `.inp` mesh.
 - Tetrahedral meshing (1st and 2nd order) with [Gmsh](https://gmsh.info/): per-part meshing
   parameters and local mesh sizes on faces and edges.
 - Mesh tools: merge nodes, mirror, transform, renumber.
@@ -48,7 +47,7 @@ built-in one covers everything.
 - Static, frequency, buckling, dynamic, modal dynamics, steady-state dynamics, heat transfer and
   coupled temperature-displacement steps, complex frequency with Campbell diagram.
 - Built-in solver with direct and iterative equation solvers and live progress; results stay in
-  the program. Optionally CalculiX.
+  the program.
 
 **Post-processing**
 - Contour plots, deformed shapes, section views, animations and mode shapes.
@@ -59,15 +58,14 @@ Projects are saved as `.ndl` files.
 
 ## Installation
 
-For geometry import and meshing Nodalis needs Gmsh, and as long as CalculiX can still be chosen as
-the solver, it ships CalculiX too. The Windows installer and the Linux AppImage will bundle both.
-See the sections below.
+For geometry import and meshing Nodalis needs Gmsh. The Windows installer and the Linux AppImage
+bundle it, see the sections below.
 
 ### Windows
 
 Download `nodalis-<version>-setup.exe` from the
 [latest release](https://github.com/KwentiN-ui/Nodalis/releases/latest) and run it. It installs
-Nodalis with a Start menu entry, bundles Gmsh and CalculiX and can associate `.ndl` project files.
+Nodalis with a Start menu entry, bundles Gmsh and can associate `.ndl` project files.
 
 ### Linux
 
@@ -109,8 +107,8 @@ To update later, run the same command again with `--force`. To build from a clon
 Nodalis imports STEP, IGES and BREP geometry and meshes it with [Gmsh](https://gmsh.info/). Gmsh is
 not part of Nodalis and is loaded as a library at run time. The Windows installer and the Linux
 AppImage bundle it, so this section only applies if you installed with cargo or built from source.
-**Without Gmsh** Nodalis starts and works normally, but geometry import and meshing are not available. Opening `.inp` meshes and `.frd`
-results, model setup, running CalculiX and post-processing do not need it.
+**Without Gmsh** Nodalis starts and works normally, but geometry import and meshing are not available. Opening `.inp` meshes, model setup,
+solving and post-processing do not need it.
 
 On Linux, the simplest way is to take the official library (Gmsh 4.15, the tested version) from its
 PyPI package and put it next to the program. No clone and no Python packages are needed beyond `pip`:
@@ -129,17 +127,6 @@ the system library path. If you already have Gmsh installed (for example `libgms
 distribution), point the setting or `NODALIS_GMSH` to it; other Gmsh 4 versions may work but are
 not tested. The *Test Gmsh* button in the settings loads the library and meshes a cube. From a clone,
 `python3 scripts/fetch_gmsh.py` does the same, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#gmsh).
-
-### CalculiX (optional)
-
-Nodalis solves with its built-in solver; *Tools > Settings > Solver* switches to CalculiX while
-that is still offered. The Windows installer and the AppImage ship CalculiX 2.23 with the SPOOLES, PaStiX and ARPACK
-solvers and use it when no other executable is set. New steps solve with PaStiX, which is much
-faster than SPOOLES on larger models. To use another CalculiX, for example one with Pardiso,
-install it, e.g. from [calculix.de](http://www.calculix.de/) or your package manager
-(`sudo apt install calculix-ccx`), and select the executable in *Tools > Settings*. A self-test
-button there checks that it works. From a clone, `scripts/build_ccx.sh` builds the shipped
-CalculiX into `target/ccx`, where development builds find it.
 
 ## Documentation
 
