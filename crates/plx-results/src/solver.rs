@@ -59,6 +59,8 @@ impl SolverResults {
         kept.elements = model.elements.clone();
         kept.materials = model.materials.clone();
         kept.sections = model.sections.clone();
+        // What the results are expanded to the sectors of a cyclic symmetric model with.
+        kept.constraints.cyclic_symmetry = model.constraints.cyclic_symmetry.clone();
         kept.rebuild_indices();
         Self {
             model: kept,
@@ -117,7 +119,12 @@ pub struct SolverImport {
 /// The mesh and increments of `solved`, the same as reading the `.frd` file the solver would
 /// write for them, without writing and parsing it.
 pub fn from_solver(solved: &SolverResults) -> SolverImport {
-    let model = &solved.model;
+    // A cyclic symmetric model on all the sectors the `.frd` file has.
+    let expanded = plxs_output::frd::expand_sectors(&solved.model, &solved.results);
+    let (model, results) = match &expanded {
+        Some((model, results)) => (model, results),
+        None => (&solved.model, &solved.results),
+    };
     let mut import = SolverImport::default();
     for (i, material) in model.materials.iter().enumerate() {
         import.materials.insert(i as i32 + 1, material.name.clone());
@@ -186,14 +193,17 @@ pub fn from_solver(solved: &SolverResults) -> SolverImport {
     let mut buckling: Option<(u32, usize, u32)> = None;
     // Eigenfrequency sensitivities of each step so far.
     let mut senfreq: BTreeMap<u32, u32> = BTreeMap::new();
-    for (ordinal, written) in solved.results.increments.iter().enumerate() {
+    // The data set number of the `.frd` block header, which counts a mode of a cyclic
+    // symmetric model twice (its real and imaginary solution, of which one is written).
+    let mut set = 0u32;
+    for (ordinal, written) in results.increments.iter().enumerate() {
+        set += 1;
         // The `.frd` block header: time increments carry the total time, the others their
         // frequency, load factor or value; the data sets are counted from 1.
         let value = match written.kind {
             IncrementKind::Time | IncrementKind::Dynamic => written.total_time,
             _ => written.value,
         };
-        let set = ordinal as u32 + 1;
         let modal = matches!(
             written.kind,
             IncrementKind::Frequency | IncrementKind::ComplexFrequency
@@ -277,6 +287,9 @@ pub fn from_solver(solved: &SolverResults) -> SolverImport {
                     nodal_diameter,
                 }),
             }
+        }
+        if written.nodal_diameter.is_some() {
+            set += 1;
         }
     }
     import
