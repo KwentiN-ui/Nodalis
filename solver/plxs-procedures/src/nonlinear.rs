@@ -157,17 +157,6 @@ impl Procedure for NonlinearStatic {
         progress: &mut dyn Progress,
     ) -> Result<StepOutcome> {
         ctx.table.require_elastic()?;
-        if ctx
-            .table
-            .formulations
-            .iter()
-            .any(|f| f.expansion().is_some())
-        {
-            return Err(Error::Unsupported(format!(
-                "nonlinear steps on plane or axisymmetric elements are not implemented yet (step {})",
-                step.name
-            )));
-        }
         let (increments, visco, cetol): (Incrementation, bool, f64) = match &step.procedure {
             ProcedureKind::Static(s) => (s.increments, false, 0.0),
             ProcedureKind::Visco(v) => (v.increments, true, v.cetol),
@@ -453,6 +442,10 @@ impl Procedure for NonlinearStatic {
                 output,
                 ..
             } = converged;
+            // The forces the constraints carry to their independent nodes, for the output.
+            let mut forces = output.f_int.clone();
+            ctx.constraints
+                .transfer_forces(&mut forces, &spc_end.dofs, &active);
             ctx.state.displacements.per_node = 3;
             ctx.state.displacements.values.clear();
             ctx.state.displacements.values.extend_from_slice(&u);
@@ -470,7 +463,7 @@ impl Procedure for NonlinearStatic {
                     step_time,
                     total,
                     &u,
-                    &output.f_int,
+                    &forces,
                     &ctx.state.stresses.clone(),
                     &ctx.state.strains.clone(),
                     Some(&ctx.state.material.clone()),
@@ -485,7 +478,7 @@ impl Procedure for NonlinearStatic {
                 increment,
                 step_time,
                 &u,
-                &output.f_int,
+                &forces,
                 &ctx.state.stresses,
                 &ctx.state.strains,
                 Some(&ctx.state.material),

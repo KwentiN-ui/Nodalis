@@ -1,8 +1,7 @@
-//! Running an analysis with either solver engine behind one interface: the Nodalis solver
-//! `plxs` as a library in this process ([`BuiltinJob`]), or CalculiX as a child process
-//! ([`plx_job::Job`]). [`Run`] hides which one it is from the monitor and the project.
+//! Running an analysis: the solver `plxs` as a library in this process, on a thread of its
+//! own ([`Run`]), plus what other helper processes need ([`process`], [`hide_console`]).
 //!
-//! The built-in run takes the same input text as CalculiX would. Its results stay in memory
+//! A run takes the input text of a CalculiX-style `.inp` file. Its results stay in memory
 //! ([`Run::solver_results`]) and are written as one binary file `<name>.ndlr`
 //! ([`plx_results::SolverResults`]) instead of CalculiX's `.frd` and `.dat`, which Nodalis
 //! reads without parsing text; the `.sta` file is written as by CalculiX. Its progress comes
@@ -12,12 +11,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use plx_job::{Job, JobStatus, live::LiveProgress};
+use live::LiveProgress;
 use plx_results::SolverResults;
 use plxs_core::{CancelToken, Error, ProgressEvent};
-use serde::{Deserialize, Serialize};
 
 pub use plxs_core::{Diagnostic, DiagnosticCode};
+
+pub mod live;
+pub mod process;
 
 /// The one thread pool every built-in run computes on, sized `threads` (0: all cores). Runs
 /// solved at the same time share it: a single large one gets every thread, several divide
@@ -43,178 +44,76 @@ pub fn pool(threads: u32) -> std::io::Result<Arc<rayon::ThreadPool>> {
 /// The version of the built-in solver.
 pub const VERSION: &str = plxs_session::job::VERSION;
 
-/// Which solver computes the analyses.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Engine {
-    /// CalculiX `ccx` as a child process, the shipped one or the user's own.
-    #[default]
-    CalculiX,
-    /// The Nodalis solver `plxs`, built in.
-    Nodalis,
-}
-
-impl Engine {
-    pub const ALL: [Engine; 2] = [Engine::Nodalis, Engine::CalculiX];
-
-    /// The name shown in the interface.
-    pub fn name(self) -> &'static str {
-        match self {
-            Engine::CalculiX => "CalculiX",
-            Engine::Nodalis => "Nodalis solver",
-        }
-    }
-}
-
-/// Smallest `.frd` that holds results, as in `plx_job`.
-const MIN_RESULT_SIZE: u64 = 300;
-
 /// Files of a previous run that would be mistaken for results of this one.
-const OLD_FILES: [&str; 8] = ["inp", "dat", "sta", "cvg", "12d", "cel", "frd", "ndlr"];
+const OLD_FILES: [&str; 5] = ["inp", "dat", "sta", "frd", "ndlr"];
 
-/// An analysis running or finished on either engine.
-pub enum Run {
-    Process(Job),
-    Builtin(BuiltinJob),
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JobStatus {
+    Running,
+    /// Finished with results.
+    Completed,
+    /// The solver reported an error but kept results, e.g. of earlier increments.
+    FailedWithResults,
+    Failed,
+    Killed,
 }
 
-impl Run {
-    /// Writes `<work_dir>/<name>.inp` and starts `input` on `engine`; `solver` tells the
-    /// CalculiX executable and the threads: of each CalculiX process, or of the [`pool`] the
-    /// built-in runs share.
-    pub fn start(
-        engine: Engine,
-        solver: &plx_job::Solver,
-        work_dir: &Path,
-        name: &str,
-        input: &str,
-    ) -> std::io::Result<Run> {
-        match engine {
-            Engine::CalculiX => Job::start(solver, work_dir, name, input).map(Run::Process),
-            Engine::Nodalis => {
-                BuiltinJob::start(solver.threads, work_dir, name, input).map(Run::Builtin)
-            }
-        }
-    }
-
-    /// Starts the model check of `input`: CalculiX reads an input without steps
-    /// (`*NO ANALYSIS`), the Nodalis solver checks the whole input including its steps
-    /// (free motions per step) without computing results, see [`Run::diagnostics`].
-    pub fn check(
-        engine: Engine,
-        solver: &plx_job::Solver,
-        work_dir: &Path,
-        name: &str,
-        input: &str,
-    ) -> std::io::Result<Run> {
-        match engine {
-            Engine::CalculiX => Job::start(solver, work_dir, name, input).map(Run::Process),
-            Engine::Nodalis => {
-                BuiltinJob::start_check(solver.threads, work_dir, name, input).map(Run::Builtin)
-            }
-        }
-    }
-
-    /// What the Nodalis solver found, typed, once the run has finished: the findings of a
-    /// model check, or the error of a failed run with its causes. `None` for CalculiX, whose
-    /// output is text.
-    pub fn diagnostics(&self) -> Option<Vec<Diagnostic>> {
-        match self {
-            Run::Process(_) => None,
-            Run::Builtin(job) => job.diagnostics(),
-        }
-    }
-
-    pub fn engine(&self) -> Engine {
-        match self {
-            Run::Process(_) => Engine::CalculiX,
-            Run::Builtin(_) => Engine::Nodalis,
-        }
-    }
-
-    pub fn name(&self) -> &str {
-        match self {
-            Run::Process(job) => job.name(),
-            Run::Builtin(job) => job.name(),
-        }
-    }
-
-    /// Checks whether the run has finished, without waiting.
-    pub fn poll(&mut self) -> JobStatus {
-        match self {
-            Run::Process(job) => job.poll(),
-            Run::Builtin(job) => job.poll(),
-        }
-    }
-
-    /// Waits until the run has finished.
-    pub fn wait(&mut self) -> JobStatus {
-        match self {
-            Run::Process(job) => job.wait(),
-            Run::Builtin(job) => job.wait(),
-        }
-    }
-
-    /// Stops the run.
-    pub fn kill(&mut self) {
-        match self {
-            Run::Process(job) => job.kill(),
-            Run::Builtin(job) => job.kill(),
-        }
-    }
-
-    /// Output lines written since the last call.
-    pub fn new_output(&mut self) -> Vec<String> {
-        match self {
-            Run::Process(job) => job.new_output(),
-            Run::Builtin(job) => job.new_output(),
-        }
-    }
-
-    /// Where the run is by its output so far.
-    pub fn live_progress(&self) -> &LiveProgress {
-        match self {
-            Run::Process(job) => job.live_progress(),
-            Run::Builtin(job) => job.live_progress(),
-        }
-    }
-
-    /// The last increment reported in the `.sta` file.
-    pub fn progress(&self) -> Option<plx_job::Progress> {
-        let text = std::fs::read_to_string(self.file("sta")).ok()?;
-        plx_job::parse_sta(&text)
-    }
-
-    /// The results file, once results have been written to it: `.frd` of CalculiX, `.ndlr`
-    /// of the built-in solver.
-    pub fn results(&self) -> Option<PathBuf> {
-        match self {
-            Run::Process(_) => {
-                let path = self.file("frd");
-                let size = std::fs::metadata(&path).ok()?.len();
-                (size > MIN_RESULT_SIZE).then_some(path)
-            }
-            Run::Builtin(job) => job.results_written().then(|| job.results_file()),
-        }
-    }
-
-    /// The results of the built-in solver in memory, once it has finished with results.
-    pub fn solver_results(&self) -> Option<Arc<SolverResults>> {
-        match self {
-            Run::Process(_) => None,
-            Run::Builtin(job) => job.solver_results(),
-        }
-    }
-
-    pub fn file(&self, extension: &str) -> PathBuf {
-        match self {
-            Run::Process(job) => job.file(extension),
-            Run::Builtin(job) => job.file(extension),
-        }
-    }
+/// One line of the `.sta` file: the last increment the solver finished.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Progress {
+    pub step: u32,
+    pub increment: u32,
+    pub attempt: u32,
+    pub iterations: u32,
+    pub total_time: f64,
+    pub step_time: f64,
+    pub increment_time: f64,
 }
 
-/// The built-in solver computing one job on a thread of its own.
-pub struct BuiltinJob {
+/// The last increment line of a `.sta` file: `step inc att iter tot_time step_time inc_time`.
+pub fn parse_sta(text: &str) -> Option<Progress> {
+    text.lines().rev().find_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let [
+            step,
+            increment,
+            attempt,
+            iterations,
+            total,
+            step_time,
+            increment_time,
+        ] = fields[..]
+        else {
+            return None;
+        };
+        Some(Progress {
+            step: step.parse().ok()?,
+            // Increments of linear perturbation steps are marked with a "U", and attempts
+            // that did not converge too.
+            increment: increment.trim_end_matches('U').parse().ok()?,
+            attempt: attempt.trim_end_matches('U').parse().ok()?,
+            iterations: iterations.parse().ok()?,
+            total_time: total.parse().ok()?,
+            step_time: step_time.parse().ok()?,
+            increment_time: increment_time.parse().ok()?,
+        })
+    })
+}
+
+/// Keeps a child process from opening a console window on Windows, where every program
+/// started by a GUI program flashes one; elsewhere it changes nothing.
+pub fn hide_console(command: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // `CREATE_NO_WINDOW`
+        command.creation_flags(0x0800_0000);
+    }
+    command
+}
+
+/// An analysis computed by the solver on a thread of its own.
+pub struct Run {
     name: String,
     work_dir: PathBuf,
     output: Arc<Mutex<Vec<String>>>,
@@ -237,20 +136,17 @@ enum Finished {
     Error,
 }
 
-impl BuiltinJob {
+impl Run {
     /// Writes `<work_dir>/<name>.inp` and starts the solver on it, on the shared [`pool`]
     /// of `threads` threads (0: all cores).
     pub fn start(threads: u32, work_dir: &Path, name: &str, input: &str) -> std::io::Result<Self> {
         Self::spawn(threads, work_dir, name, input, false)
     }
 
-    /// Writes `<work_dir>/<name>.inp` and starts the solver's model check on it.
-    pub fn start_check(
-        threads: u32,
-        work_dir: &Path,
-        name: &str,
-        input: &str,
-    ) -> std::io::Result<Self> {
+    /// Writes `<work_dir>/<name>.inp` and starts the model check of it: the whole input
+    /// including its steps (free motions per step) without computing results, see
+    /// [`Run::diagnostics`].
+    pub fn check(threads: u32, work_dir: &Path, name: &str, input: &str) -> std::io::Result<Self> {
         Self::spawn(threads, work_dir, name, input, true)
     }
 
@@ -400,11 +296,7 @@ impl BuiltinJob {
                             say(format!(" in {}, line {}", location.file, location.line));
                         }
                         if let Error::Unsupported(_) = error {
-                            say(
-                                " The Nodalis solver does not compute this yet; CalculiX does: \
-                                 Tools > Settings > Solver."
-                                    .into(),
-                            );
+                            say(" The solver does not compute this yet.".into());
                         }
                         Finished::Error
                     }
@@ -433,7 +325,8 @@ impl BuiltinJob {
         })
     }
 
-    /// What the solver found, once it has finished; see [`Run::diagnostics`].
+    /// What the solver found, typed, once the run has finished: the findings of a model
+    /// check, or the error of a failed run with its causes.
     pub fn diagnostics(&self) -> Option<Vec<Diagnostic>> {
         if self.status == JobStatus::Running {
             return None;
@@ -507,6 +400,17 @@ impl BuiltinJob {
             .clone()
     }
 
+    /// The results file, once results have been written to it.
+    pub fn results(&self) -> Option<PathBuf> {
+        self.results_written().then(|| self.results_file())
+    }
+
+    /// The last increment reported in the `.sta` file.
+    pub fn progress(&self) -> Option<Progress> {
+        let text = std::fs::read_to_string(self.file("sta")).ok()?;
+        parse_sta(&text)
+    }
+
     fn results_written(&self) -> bool {
         self.status != JobStatus::Running
             && self
@@ -543,7 +447,7 @@ impl BuiltinJob {
     }
 }
 
-impl Drop for BuiltinJob {
+impl Drop for Run {
     fn drop(&mut self) {
         self.kill();
     }
@@ -590,12 +494,7 @@ S
     fn built_in_run_keeps_the_results_in_memory() {
         let dir = std::env::temp_dir().join(format!("plx-solve-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let solver = plx_job::Solver {
-            executable: PathBuf::from("unused"),
-            threads: 1,
-        };
-        let mut run = Run::start(Engine::Nodalis, &solver, &dir, "Cube", CUBE).unwrap();
-        assert_eq!(run.engine(), Engine::Nodalis);
+        let mut run = Run::start(1, &dir, "Cube", CUBE).unwrap();
         let status = run.wait();
         let output = run.new_output();
         assert_eq!(status, JobStatus::Completed, "{output:#?}");
@@ -628,14 +527,14 @@ S
         let input = CUBE
             .replace("*STEP", "*STEP, NLGEOM")
             .replace("*STATIC", "*COUPLED TEMPERATURE-DISPLACEMENT\n0.1, 1.0");
-        let mut job = BuiltinJob::start(1, &dir, "Dyn", &input).unwrap();
+        let mut job = Run::start(1, &dir, "Dyn", &input).unwrap();
         assert_eq!(job.wait(), JobStatus::Failed);
         let output = job.new_output();
         assert!(output.iter().any(|l| l.contains("*ERROR")), "{output:#?}");
         assert!(
             output
                 .iter()
-                .any(|l| l.contains("Tools > Settings > Solver")),
+                .any(|l| l.contains("does not compute this yet")),
             "{output:#?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -646,13 +545,106 @@ S
         let dir = std::env::temp_dir().join(format!("plx-solve-err-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let input = CUBE.replace("*CLOAD", "*CLOUD");
-        let mut job = BuiltinJob::start(1, &dir, "Err", &input).unwrap();
+        let mut job = Run::start(1, &dir, "Err", &input).unwrap();
         assert_eq!(job.wait(), JobStatus::Failed);
         let output = job.new_output();
         assert!(
             output.iter().any(|l| l.contains("cannot be interpreted")),
             "{output:#?}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const STA: &str = "\
+SUMMARY OF JOB INFORMATION
+  STEP      INC     ATT  ITRS     TOT TIME     STEP TIME         INC TIME
+     1       1     1     2   0.250000E+00  0.250000E+00  0.250000E+00
+     1       2     1     3   0.625000E+00  0.625000E+00  0.375000E+00
+";
+
+    #[test]
+    fn reads_the_last_increment_of_the_status_file() {
+        let progress = parse_sta(STA).unwrap();
+        assert_eq!(
+            (progress.step, progress.increment, progress.iterations),
+            (1, 2, 3)
+        );
+        assert_eq!(progress.step_time, 0.625);
+        assert_eq!(parse_sta("SUMMARY OF JOB INFORMATION\n"), None);
+        // An attempt that did not converge is marked with a "U".
+        let failed = parse_sta(&format!(
+            "{STA}     1  3   2U    4  0.6E+00  0.6E+00  0.1E+00\n"
+        ));
+        assert_eq!(failed.map(|p| (p.increment, p.attempt)), Some((3, 2)));
+    }
+
+    /// The live progress follows the output of a real run: two nonlinear steps, each
+    /// step's header before its increments.
+    #[test]
+    fn live_progress_follows_a_nonlinear_run() {
+        let input = "\
+*NODE
+1,0,0,0
+2,1,0,0
+3,1,1,0
+4,0,1,0
+5,0,0,1
+6,1,0,1
+7,1,1,1
+8,0,1,1
+*ELEMENT,TYPE=C3D8,ELSET=E
+1,1,2,3,4,5,6,7,8
+*NSET,NSET=BOT
+1,2,3,4
+*NSET,NSET=TOP
+5,6,7,8
+*MATERIAL,NAME=M
+*ELASTIC
+210000,0.3
+*PLASTIC
+200,0
+400,0.1
+*SOLID SECTION,ELSET=E,MATERIAL=M
+*STEP,NLGEOM,INC=100
+*STATIC
+0.5,1
+*BOUNDARY
+BOT,1,3
+TOP,3,3,0.3
+*END STEP
+*STEP,NLGEOM
+*STATIC
+0.25,1
+*BOUNDARY
+BOT,1,3
+*CLOAD
+TOP,1,10
+*END STEP
+";
+        let dir = std::env::temp_dir().join(format!("plx-solve-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut run = Run::start(1, &dir, "Analysis-1", input).unwrap();
+        assert_eq!(run.wait(), JobStatus::Completed);
+        let (mut steps, mut replay) = (Vec::new(), LiveProgress::default());
+        for line in run.new_output() {
+            replay.read(&line);
+            if replay.increment.is_some() {
+                steps.push(replay.step);
+            }
+        }
+        steps.dedup();
+        assert_eq!(
+            steps,
+            [Some(1), Some(2)],
+            "increments of both steps under their header"
+        );
+        let live = run.live_progress();
+        assert_eq!(live, &replay);
+        assert!(
+            live.iteration.is_some() && live.step_time.is_some(),
+            "{live:?}"
+        );
+        assert!(run.progress().is_some_and(|p| p.step == 2));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

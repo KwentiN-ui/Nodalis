@@ -298,6 +298,72 @@ impl ModelConstraints {
         self.rotations.get(&node)
     }
 
+    /// Carries the forces at the dependent DOFs of the multi-point constraints over to the
+    /// nodes that have no element and take their force through the constraints alone:
+    /// with the multiplier `λ = f_p / a_p` of the dependent DOF `p`, such a term `i` gets
+    /// `-a_i λ` (rigid bodies: all their terms). `f` are the internal forces of the
+    /// elements at every DOF (global directions, three per node); afterwards a reference
+    /// point reports the force and moment it takes, and the pre-tension node of a bolt the
+    /// bolt's force, as CalculiX reports them. `active[v]` marks the DOFs elements use.
+    /// Constraints whose dependent DOF is held (`held`, primary DOFs) are left alone: there
+    /// the force is a reaction already.
+    pub fn transfer_forces(&self, f: &mut [f64], held: &[u32], active: &[bool]) {
+        if self.constraints.is_empty() {
+            return;
+        }
+        let held: std::collections::HashSet<u32> = held.iter().copied().collect();
+        // Into the primary (local) directions of transformed nodes and back afterwards.
+        let turn = |f: &mut [f64], to_local: bool| {
+            for (&node, r) in &self.rotations {
+                let at = node as usize * 3;
+                let Some(v) = f.get(at..at + 3).map(|v| [v[0], v[1], v[2]]) else {
+                    continue;
+                };
+                for d in 0..3 {
+                    f[at + d] = (0..3)
+                        .map(|k| {
+                            if to_local {
+                                r[k][d] * v[k]
+                            } else {
+                                r[d][k] * v[k]
+                            }
+                        })
+                        .sum();
+                }
+            }
+        };
+        turn(f, true);
+        let rigid = |c: &LinearConstraint| {
+            (self.labels.get(c.origin as usize)).is_some_and(|l| l.starts_with("*RIGID BODY"))
+        };
+        for c in &self.constraints {
+            let rigid = rigid(c);
+            let p = c.preferred;
+            if held.contains(&p) {
+                continue;
+            }
+            let Some(&(_, a_p)) = c.terms.iter().find(|&&(v, _)| v == p) else {
+                continue;
+            };
+            let Some(&f_p) = f.get(p as usize) else {
+                continue;
+            };
+            if a_p == 0.0 || f_p == 0.0 {
+                continue;
+            }
+            let lambda = f_p / a_p;
+            for &(v, a) in &c.terms {
+                if v != p
+                    && (rigid || !active.get(v as usize).copied().unwrap_or(false))
+                    && let Some(fv) = f.get_mut(v as usize)
+                {
+                    *fv -= a * lambda;
+                }
+            }
+        }
+        turn(f, false);
+    }
+
     /// The constraint set of a step: the SPCs (`spc_dofs`, primary DOFs, i.e. local at
     /// transformed nodes) first, then the model's MPCs. `active[v]` marks the DOFs elements
     /// use. The prescribed values are passed later to [`ConstraintSet::particular`] in the

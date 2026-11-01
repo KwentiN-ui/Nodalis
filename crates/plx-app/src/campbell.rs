@@ -18,10 +18,10 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
 use egui::{Color32, Ui};
-use plx_job::JobStatus;
 pub use plx_model::campbell::{Mode, Setup, SpeedPoint, Whirl};
 use plx_model::{FeModel, LoadKind, StepKind};
-use plx_solve::{Engine, Run};
+use plx_solve::JobStatus;
+use plx_solve::Run;
 
 use crate::numeric;
 use crate::table_export;
@@ -129,7 +129,8 @@ fn is_unstable(real: f64, imaginary: f64) -> bool {
 }
 
 /// The complex frequencies and whirls of step `step` in the text of a `.dat` file.
-pub fn modes_of(dat: &str, step: u32) -> Vec<Mode> {
+#[cfg(test)]
+fn modes_of(dat: &str, step: u32) -> Vec<Mode> {
     modes_of_history(&plx_io::dat::parse_dat(dat), step)
 }
 
@@ -548,7 +549,7 @@ struct Done {
     result: Result<SpeedPoint, String>,
 }
 
-/// The running sweep: CalculiX runs in threads, as many speeds at a time as the solver
+/// The running sweep: the solver runs in threads, as many speeds at a time as the solver
 /// settings allow.
 struct Sweep {
     input: Arc<SweepInput>,
@@ -572,7 +573,7 @@ struct Sweep {
 }
 
 impl Drop for Sweep {
-    /// A sweep dropped with its block or window leaves no CalculiX running.
+    /// A sweep dropped with its block or window leaves no solver running.
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
     }
@@ -580,8 +581,8 @@ impl Drop for Sweep {
 
 /// What the sweep threads work on.
 struct SweepInput {
-    engine: Engine,
-    solver: plx_job::Solver,
+    /// Threads of the pool the speeds share, see [`plx_solve::pool`].
+    threads: u32,
     work_dir: std::path::PathBuf,
     mesh: Arc<plx_mesh::FeMesh>,
     /// The model at its own speed, with the default solver resolved.
@@ -590,7 +591,7 @@ struct SweepInput {
     step: u32,
 }
 
-/// Runs CalculiX at one speed in a thread of its own and sends the modes back. The files of a
+/// Runs the solver at one speed in a thread of its own and sends the modes back. The files of a
 /// successful run are removed, those of a failed one stay for a look.
 fn spawn_speed(
     input: Arc<SweepInput>,
@@ -615,7 +616,7 @@ fn job_name(index: u32) -> String {
     format!("Campbell-{index}")
 }
 
-/// Removes the files `name.*` CalculiX wrote in `dir`.
+/// Removes the files `name.*` the solver wrote in `dir`.
 fn remove_job_files(dir: &std::path::Path, name: &str) {
     let prefix = format!("{name}.");
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -628,7 +629,7 @@ fn remove_job_files(dir: &std::path::Path, name: &str) {
     }
 }
 
-/// One run of CalculiX at `speed`, as job `Campbell-<index>` in the work directory.
+/// One run of the solver at `speed`, as job `Campbell-<index>` in the work directory.
 fn run_speed(
     input: &SweepInput,
     speed: f64,
@@ -641,7 +642,7 @@ fn run_speed(
     let text = plx_io::inp::write_inp(&input.mesh, &fe, &heading)
         .map_err(|e| format!("{label}: input file not written: {e}"))?;
     let name = job_name(index);
-    let mut job = Run::start(input.engine, &input.solver, &input.work_dir, &name, &text)
+    let mut job = Run::start(input.threads, &input.work_dir, &name, &text)
         .map_err(|e| format!("{label}: solver not started: {e}"))?;
     let status = loop {
         let status = job.poll();
@@ -654,29 +655,16 @@ fn run_speed(
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    // The built-in solver's results are taken in memory, CalculiX's from its files.
-    let modes = match job.solver_results() {
-        Some(solved) => {
-            let history = plx_io::solver::history(&solved, None);
-            let modes = history.map_or_else(Vec::new, |h| modes_of_history(&h, input.step));
-            if modes.is_empty() {
-                modes_of_frd(&plx_io::solver::import(&solved), input.step)
-            } else {
-                modes
-            }
+    // The results are taken in memory: the history output, else the result fields.
+    let modes = job.solver_results().map_or_else(Vec::new, |solved| {
+        let history = plx_io::solver::history(&solved, None);
+        let modes = history.map_or_else(Vec::new, |h| modes_of_history(&h, input.step));
+        if modes.is_empty() {
+            modes_of_frd(&plx_io::solver::import(&solved), input.step)
+        } else {
+            modes
         }
-        None => {
-            let dat = std::fs::read_to_string(job.file("dat")).unwrap_or_default();
-            let modes = modes_of(&dat, input.step);
-            if modes.is_empty()
-                && let Ok(frd) = plx_io::frd::read_frd(&job.file("frd"))
-            {
-                modes_of_frd(&frd, input.step)
-            } else {
-                modes
-            }
-        }
-    };
+    });
     if modes.is_empty() {
         let output = job.new_output();
         let error = output
@@ -720,7 +708,7 @@ pub struct CampbellWindow {
     /// Fingerprint of the model the points were computed with, so that a sweep continues
     /// only on the same model.
     fingerprint: Option<u64>,
-    /// Number of the next CalculiX job, counted over continued sweeps.
+    /// Number of the next solver job, counted over continued sweeps.
     next_index: u32,
     /// The critical speeds as last found, with the plot generation, the number of speeds and
     /// the orders they were found for.
@@ -905,16 +893,7 @@ impl CampbellWindow {
         if min_speed >= max_speed {
             return Err("The lowest speed must be below the highest.".into());
         }
-        // The speeds solved at the same time share the cores (CalculiX: an equal share each,
-        // the built-in solver: its one pool).
-        let job_solver = solver
-            .shared_by(solver.parallel_runs.max(1) as usize)
-            .job_solver();
-        if solver.engine == Engine::CalculiX
-            && let Some(message) = crate::settings::missing_executable(&job_solver.executable)
-        {
-            return Err(format!("CalculiX not started: {message}"));
-        }
+        // The speeds solved at the same time share the solver's one pool.
         let fe = fe.clone();
         let grid_count = if max_runs == 0 {
             GRID
@@ -948,8 +927,7 @@ impl CampbellWindow {
         };
         self.sweep = Some(Sweep {
             input: Arc::new(SweepInput {
-                engine: solver.engine,
-                solver: job_solver,
+                threads: solver.threads,
                 work_dir,
                 mesh: Arc::new(mesh.clone()),
                 fe,
@@ -1180,10 +1158,10 @@ impl CampbellWindow {
                          Complex Frequency step over the speed. It starts with a coarse grid \
                          over the speed range and then adds speeds where the curves bend \
                          most, until it is stopped or has done its runs. The crossings with \
-                         the engine order lines are the critical speeds. CalculiX computes \
+                         the engine order lines are the critical speeds. The solver computes \
                          the Coriolis modes in the rotating frame of reference; the \
                          frequencies and the whirl directions (F forward, B backward) are \
-                         CalculiX's.",
+                         the solver's.",
                     );
                 }
                 ui.separator();
@@ -1247,7 +1225,7 @@ impl CampbellWindow {
                     !running,
                     numeric::drag_value(&mut self.setup.max_runs).range(0..=10_000),
                 );
-                ui.weak("CalculiX runs once per speed; 0 runs until Stop.");
+                ui.weak("The solver runs once per speed; 0 runs until Stop.");
                 ui.end_row();
                 ui.label("Engine orders");
                 ui.add_enabled(
@@ -1746,18 +1724,10 @@ mod tests {
         assert!((rpm(from_rpm(3000.0)) - 3000.0).abs() < 1e-9);
     }
 
-    /// The spinning test cantilever, swept over three speeds with CalculiX: the bending
-    /// modes split more the faster it turns, and the sweep tells forward from backward.
+    /// The spinning test cantilever, swept over three speeds: the bending modes split more
+    /// the faster it turns, and the sweep tells forward from backward.
     #[test]
-    fn calculix_sweeps_the_speed_of_the_cantilever() {
-        if std::process::Command::new("ccx")
-            .arg("-v")
-            .output()
-            .is_err()
-        {
-            eprintln!("ccx not found, test skipped");
-            return;
-        }
+    fn the_sweep_splits_the_modes_of_the_spinning_cantilever() {
         let testdata = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../testdata/kragbalken_c3d8.inp");
         let mesh = plx_io::inp::read_inp(&testdata).unwrap().mesh;
@@ -1842,8 +1812,7 @@ mod tests {
 
         let work_dir = std::env::temp_dir().join(format!("plx-campbell-{}", std::process::id()));
         let input = SweepInput {
-            engine: Engine::CalculiX,
-            solver: plx_job::Solver::default(),
+            threads: 1,
             work_dir: work_dir.clone(),
             mesh: Arc::new(mesh),
             fe,
@@ -1853,8 +1822,9 @@ mod tests {
         let points: Vec<SpeedPoint> = (grid(50.0, 200.0, 3).into_iter().enumerate())
             .map(|(i, speed)| run_speed(&input, speed, i as u32, &cancel).unwrap())
             .collect();
-        // The .frd file has the same frequencies, for CalculiX versions whose .dat differs.
-        let frd = plx_io::frd::read_frd(&work_dir.join("Campbell-2.frd")).unwrap();
+        // The result fields have the same frequencies as the history output.
+        let solved = plx_results::SolverResults::read(&work_dir.join("Campbell-2.ndlr")).unwrap();
+        let frd = plx_io::solver::import(&solved);
         let from_frd: Vec<f64> = modes_of_frd(&frd, 3).iter().map(|m| m.frequency).collect();
         let _ = std::fs::remove_dir_all(&work_dir);
         assert_eq!(points.len(), 3);
@@ -1875,8 +1845,9 @@ mod tests {
         let split = |p: &SpeedPoint| p.modes[1].frequency - p.modes[0].frequency;
         assert!((13.0..19.0).contains(&split(&points[0])), "{:?}", points[0]);
         assert!((55.0..72.0).contains(&split(&points[2])), "{points:?}");
-        // CalculiX computes in the rotating frame of reference, where the forward whirl
-        // appears below the backward one; both directions occur in the pair.
+        // The solver computes in the rotating frame of reference, as CalculiX does, where
+        // the forward whirl appears below the backward one; both directions occur in the
+        // pair.
         let whirls = [points[2].modes[0].whirl, points[2].modes[1].whirl];
         assert!(whirls.contains(&Whirl::Forward) && whirls.contains(&Whirl::Backward));
         let tracks = track(&points);

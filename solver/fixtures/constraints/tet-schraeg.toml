@@ -4,4 +4,6 @@ class = "A"
 stage = "M2"
 features = ["*HEADING", "*NODE", "*ELEMENT", "C3D10", "*NSET", "*ELSET", "*MATERIAL", "*DENSITY", "*ELASTIC", "*SOLID SECTION", "*EQUATION", "*STEP", "*STATIC", "*BOUNDARY", "*CLOAD", "*DLOAD", "*NODE PRINT", "*NODE FILE", "*EL FILE", "*END STEP"]
 source = "plx-io writer test"
-reference = "ccx 2.21"
+reference = "ccx 2.23"
+note = "FORCES RF1 of the pre-tension node not compared: on this oblique cut (normal 0.98, 0.20) ccx 2.23 reports 1039.6 = 1000 / 0.9806^2 for the preload of 1000, plxs the force the equations carry to the node, 1000 (equilibrium with the applied preload)."
+deviations = ["FORCES RF1"]

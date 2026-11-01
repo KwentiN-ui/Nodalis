@@ -145,17 +145,6 @@ pub fn run_step(
         ProcedureKind::HeatTransfer(_)
         | ProcedureKind::CoupledTemperatureDisplacement(_)
         | ProcedureKind::UncoupledTemperatureDisplacement(_)
-            if !ctx.contact.is_empty() =>
-        {
-            Err(Error::Unsupported(format!(
-                "contact in {} steps is not implemented yet (step {})",
-                step.procedure.keyword(),
-                step.name
-            )))
-        }
-        ProcedureKind::HeatTransfer(_)
-        | ProcedureKind::CoupledTemperatureDisplacement(_)
-        | ProcedureKind::UncoupledTemperatureDisplacement(_)
             if !step.nlgeom =>
         {
             heat::HeatTransferProcedure.run(ctx, step, progress)

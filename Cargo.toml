@@ -16,7 +16,6 @@ plx-model = { path = "crates/plx-model" }
 plx-io = { path = "crates/plx-io" }
 plx-results = { path = "crates/plx-results" }
 plx-mesher = { path = "crates/plx-mesher" }
-plx-job = { path = "crates/plx-job" }
 plx-render = { path = "crates/plx-render" }
 plx-solve = { path = "crates/plx-solve" }
 

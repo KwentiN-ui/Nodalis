@@ -83,7 +83,7 @@ pub fn ffmpeg_executable(setting: &str) -> PathBuf {
 
 /// Version line of FFmpeg, or why it cannot be run.
 pub fn ffmpeg_version(ffmpeg: &Path) -> Result<String, String> {
-    let output = plx_job::hide_console(&mut Command::new(ffmpeg))
+    let output = plx_solve::hide_console(&mut Command::new(ffmpeg))
         .arg("-version")
         .stdin(Stdio::null())
         .output()
@@ -372,7 +372,7 @@ impl Writer {
             }
             Format::Mp4 | Format::Mkv => {
                 let mut command = Command::new(&job.ffmpeg);
-                plx_job::hide_console(&mut command);
+                plx_solve::hide_console(&mut command);
                 command.args(ffmpeg_args(
                     [width, height],
                     job.fps,
@@ -486,7 +486,7 @@ impl Writer {
 
 /// Whether FFmpeg has the H.264 encoder libx264; some distributions ship it without.
 fn has_h264(ffmpeg: &Path) -> bool {
-    plx_job::hide_console(&mut Command::new(ffmpeg))
+    plx_solve::hide_console(&mut Command::new(ffmpeg))
         .args(["-hide_banner", "-encoders"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())

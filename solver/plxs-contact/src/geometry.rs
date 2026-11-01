@@ -3,14 +3,18 @@
 //! candidate search.
 //!
 //! Faces are taken from the element families of `plxs-elements` (corners counter-clockwise
-//! seen from outside the element, so that `t_ξ × t_η` points out of the element). Closest
+//! seen from outside the element, so that `t_ξ × t_η` points out of the element). Faces of
+//! plane and axisymmetric elements are their edges, extruded across the thickness (plane)
+//! or around the axis (axisymmetric, full circumference): a line in natural coordinate `ξ`
+//! whose second tangent is the out-of-plane axis. Closest
 //! point projection by Gauss-Newton on the face's natural coordinates (Wriggers,
 //! "Computational Contact Mechanics", chapter 4.1). No CalculiX code was consulted.
 
 use std::collections::{HashMap, HashSet};
 
 use plxs_core::mesh::Surface;
-use plxs_core::{Error, Model, Result};
+use plxs_core::section::SectionKind;
+use plxs_core::{ElementFamily, Error, Model, Result};
 use plxs_elements::shape::face_shape;
 use plxs_elements::solid;
 
@@ -26,6 +30,83 @@ pub struct ContactFace {
     pub nodes: Vec<u32>,
     pub corners: usize,
     pub quadratic: bool,
+    /// For an edge of a plane or axisymmetric element: how it extends out of plane.
+    pub planar: Option<Planar>,
+}
+
+/// The extent of an edge face out of the plane.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Planar {
+    /// Plane stress or strain: the section thickness.
+    Thickness(f64),
+    /// Axisymmetric: the full circumference `2π r` (`r` the first coordinate).
+    Axisymmetric,
+}
+
+impl Planar {
+    fn width(self, x: [f64; 3]) -> f64 {
+        match self {
+            Planar::Thickness(t) => t,
+            Planar::Axisymmetric => 2.0 * std::f64::consts::PI * x[0].abs(),
+        }
+    }
+}
+
+/// The faces of an element as local corner and midside node indices, whether it is
+/// quadratic and how its faces extend out of plane; `None` for elements without contact
+/// faces.
+fn element_faces(
+    model: &Model,
+    index: usize,
+) -> Option<(Vec<(Vec<usize>, Vec<usize>)>, bool, Option<Planar>)> {
+    let element = &model.elements[index];
+    if let Some(family) = solid(element.kind).map(|s| s.family) {
+        let quadratic = family.is_quadratic();
+        let faces = family
+            .faces()
+            .iter()
+            .map(|f| {
+                let mids = if quadratic {
+                    f.mids.to_vec()
+                } else {
+                    Vec::new()
+                };
+                (f.corners.to_vec(), mids)
+            })
+            .collect();
+        return Some((faces, quadratic, None));
+    }
+    let planar = match element.kind.family() {
+        ElementFamily::PlaneStress | ElementFamily::PlaneStrain => {
+            let thickness = element
+                .section
+                .and_then(|s| match &model.sections.get(s as usize)?.kind {
+                    SectionKind::Solid { thickness, .. } => *thickness,
+                    _ => None,
+                })
+                .filter(|t| *t > 0.0)
+                .unwrap_or(1.0);
+            Planar::Thickness(thickness)
+        }
+        ElementFamily::Axisymmetric => Planar::Axisymmetric,
+        _ => return None,
+    };
+    // Edge k runs from corner k to corner k + 1 (counter-clockwise elements: the outward
+    // normal is the edge direction × z); its midside node follows the corners.
+    let count = element.kind.node_count();
+    let corners = if count == 3 || count == 6 { 3 } else { 4 };
+    let quadratic = count > corners;
+    let faces = (0..corners)
+        .map(|k| {
+            let mids = if quadratic {
+                vec![corners + k]
+            } else {
+                Vec::new()
+            };
+            (vec![k, (k + 1) % corners], mids)
+        })
+        .collect();
+    Some((faces, quadratic, Some(planar)))
 }
 
 /// Shape functions, point, tangents and unit normal of a face at natural coordinates.
@@ -90,30 +171,28 @@ impl ContactFace {
                 .element_index(face.element)
                 .ok_or_else(|| Error::undefined(keyword, "element", face.element.to_string()))?;
             let element = &model.elements[index as usize];
-            let family = solid(element.kind).map(|s| s.family).ok_or_else(|| {
-                Error::Unsupported(format!(
-                    "{keyword}: contact on faces of {} elements is not implemented yet (element {})",
-                    element.kind, element.id
-                ))
-            })?;
-            let table = family.faces();
-            let f = table
-                .get((face.face as usize).wrapping_sub(1))
-                .ok_or_else(|| {
-                    Error::input(
-                        keyword,
-                        format!(
-                            "face S{} does not exist on element {}",
-                            face.face, element.id
-                        ),
-                    )
+            let (table, quadratic, planar) =
+                element_faces(model, index as usize).ok_or_else(|| {
+                    Error::Unsupported(format!(
+                        "{keyword}: contact on faces of {} elements is not implemented yet (element {})",
+                        element.kind, element.id
+                    ))
                 })?;
-            let quadratic = family.is_quadratic();
-            let local = f
-                .corners
+            let (corners, mids) =
+                table
+                    .get((face.face as usize).wrapping_sub(1))
+                    .ok_or_else(|| {
+                        Error::input(
+                            keyword,
+                            format!(
+                                "face S{} does not exist on element {}",
+                                face.face, element.id
+                            ),
+                        )
+                    })?;
+            let nodes = corners
                 .iter()
-                .chain(if quadratic { f.mids } else { &[] }.iter());
-            let nodes = local
+                .chain(mids)
                 .map(|&k| {
                     let id = element.nodes[k];
                     model
@@ -127,8 +206,9 @@ impl ContactFace {
                 element_id: element.id,
                 face_number: face.face,
                 nodes,
-                corners: f.corners.len(),
+                corners: corners.len(),
                 quadratic,
+                planar,
             });
         }
         Ok(out)
@@ -141,7 +221,7 @@ impl ContactFace {
         // Every face of every solid element, keyed by its sorted corner nodes.
         let mut faces: HashMap<Vec<u32>, Vec<ContactFace>> = HashMap::new();
         for (index, element) in model.elements.iter().enumerate() {
-            let Some(family) = solid(element.kind).map(|s| s.family) else {
+            let Some((table, quadratic, planar)) = element_faces(model, index) else {
                 continue;
             };
             let dense: Option<Vec<u32>> = element
@@ -153,22 +233,18 @@ impl ContactFace {
             if !dense.iter().any(|n| set.contains(n)) {
                 continue;
             }
-            for (k, f) in family.faces().iter().enumerate() {
-                let quadratic = family.is_quadratic();
-                let local = f
-                    .corners
-                    .iter()
-                    .chain(if quadratic { f.mids } else { &[] }.iter());
-                let face_nodes: Vec<u32> = local.map(|&i| dense[i]).collect();
-                let mut key: Vec<u32> = f.corners.iter().map(|&i| dense[i]).collect();
+            for (k, (corners, mids)) in table.iter().enumerate() {
+                let face_nodes: Vec<u32> = corners.iter().chain(mids).map(|&i| dense[i]).collect();
+                let mut key: Vec<u32> = corners.iter().map(|&i| dense[i]).collect();
                 key.sort_unstable();
                 faces.entry(key).or_default().push(ContactFace {
                     element: index as u32,
                     element_id: element.id,
                     face_number: k as u8 + 1,
                     nodes: face_nodes,
-                    corners: f.corners.len(),
+                    corners: corners.len(),
                     quadratic,
+                    planar,
                 });
             }
         }
@@ -187,7 +263,7 @@ impl ContactFace {
         let m = self.nodes.len();
         let mut n = vec![0.0; m];
         let mut dn = vec![[0.0; 2]; m];
-        face_shape(self.corners, self.quadratic, p, &mut n, &mut dn);
+        self.shape(self.quadratic, p, &mut n, &mut dn);
         let mut x = [0.0; 3];
         let mut t = [[0.0; 3]; 2];
         for (i, &node) in self.nodes.iter().enumerate() {
@@ -197,6 +273,24 @@ impl ContactFace {
                 t[0][d] += dn[i][0] * c[d];
                 t[1][d] += dn[i][1] * c[d];
             }
+        }
+        if let Some(planar) = self.planar {
+            // An edge: the second tangent is the out-of-plane axis, the area per unit ξ
+            // the edge length times the width out of plane.
+            t[1] = [0.0, 0.0, 1.0];
+            let c = cross(t[0], t[1]);
+            let length = norm(c);
+            return FacePoint {
+                n,
+                x,
+                t,
+                normal: if length > 0.0 {
+                    scale(c, 1.0 / length)
+                } else {
+                    [0.0, 1.0, 0.0]
+                },
+                jacobian: length * planar.width(x),
+            };
         }
         let c = cross(t[0], t[1]);
         let jacobian = norm(c);
@@ -214,8 +308,33 @@ impl ContactFace {
         }
     }
 
+    /// Shape functions and their natural derivatives: those of `plxs-elements` for faces,
+    /// the line's for edges (corners at ξ = ∓1, the midside node at 0).
+    fn shape(&self, quadratic: bool, p: [f64; 2], n: &mut [f64], dn: &mut [[f64; 2]]) {
+        if self.corners != 2 {
+            face_shape(self.corners, quadratic, p, n, dn);
+            return;
+        }
+        let x = p[0];
+        if quadratic {
+            n[0] = 0.5 * x * (x - 1.0);
+            n[1] = 0.5 * x * (x + 1.0);
+            n[2] = 1.0 - x * x;
+            dn[0] = [x - 0.5, 0.0];
+            dn[1] = [x + 0.5, 0.0];
+            dn[2] = [-2.0 * x, 0.0];
+        } else {
+            n[0] = 0.5 * (1.0 - x);
+            n[1] = 0.5 * (1.0 + x);
+            dn[0] = [-0.5, 0.0];
+            dn[1] = [0.5, 0.0];
+        }
+    }
+
     fn clamp(&self, p: [f64; 2]) -> [f64; 2] {
-        if self.corners == 4 {
+        if self.corners == 2 {
+            [p[0].clamp(-1.0, 1.0), 0.0]
+        } else if self.corners == 4 {
             [p[0].clamp(-1.0, 1.0), p[1].clamp(-1.0, 1.0)]
         } else {
             let (mut x, mut y) = (p[0].max(0.0), p[1].max(0.0));
@@ -230,7 +349,7 @@ impl ContactFace {
 
     /// The centre of the face in natural coordinates.
     pub fn centre(&self) -> [f64; 2] {
-        if self.corners == 4 {
+        if self.corners <= 4 {
             [0.0, 0.0]
         } else {
             [1.0 / 3.0, 1.0 / 3.0]
@@ -266,7 +385,9 @@ impl ContactFace {
 
     /// Whether natural coordinates lie strictly inside the face (not on its clamped border).
     pub fn is_interior(&self, p: [f64; 2]) -> bool {
-        if self.corners == 4 {
+        if self.corners == 2 {
+            p[0].abs() < 1.0 - 1e-9
+        } else if self.corners == 4 {
             p[0].abs() < 1.0 - 1e-9 && p[1].abs() < 1.0 - 1e-9
         } else {
             p[0] > 1e-9 && p[1] > 1e-9 && p[0] + p[1] < 1.0 - 1e-9
@@ -275,7 +396,9 @@ impl ContactFace {
 
     /// Whether natural coordinates lie on the face, edges included up to `tolerance`.
     pub fn contains(&self, p: [f64; 2], tolerance: f64) -> bool {
-        if self.corners == 4 {
+        if self.corners == 2 {
+            p[0].abs() <= 1.0 + tolerance
+        } else if self.corners == 4 {
             p[0].abs() <= 1.0 + tolerance && p[1].abs() <= 1.0 + tolerance
         } else {
             p[0] >= -tolerance && p[1] >= -tolerance && p[0] + p[1] <= 1.0 + tolerance
@@ -318,7 +441,29 @@ impl ContactFace {
         let (tp, tw) = triangle_rule_7();
         let mut points = Vec::new();
         let mut weights = Vec::new();
-        if self.corners == 4 {
+        if self.corners == 2 {
+            // An edge stands for the quadrilateral face of the expanded element: the same
+            // points, their ξ merged (the rule integrates exactly across the thickness).
+            let (quad, quad_weights) = ContactFace {
+                corners: 4,
+                quadratic: false,
+                planar: None,
+                ..self.clone()
+            }
+            .integration();
+            for (p, w) in quad.iter().zip(&quad_weights) {
+                match points
+                    .iter()
+                    .position(|q: &[f64; 2]| (q[0] - p[0]).abs() < 1e-12)
+                {
+                    Some(i) => weights[i] += 0.5 * w,
+                    None => {
+                        points.push([p[0], 0.0]);
+                        weights.push(0.5 * w);
+                    }
+                }
+            }
+        } else if self.corners == 4 {
             const C: [[f64; 2]; 4] = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
             for i in 0..4 {
                 let (a, b) = (C[i], C[(i + 1) % 4]);
@@ -377,7 +522,7 @@ impl ContactFace {
         let mut n = vec![0.0; self.nodes.len()];
         let mut dn = vec![[0.0; 2]; self.nodes.len()];
         for ((p, w), v) in points.iter().zip(&weights).zip(values) {
-            face_shape(self.corners, false, *p, &mut n[..m], &mut dn[..m]);
+            self.shape(false, *p, &mut n[..m], &mut dn[..m]);
             for i in 0..m {
                 b[i] += w * n[i] * v;
                 for j in 0..m {
@@ -388,7 +533,9 @@ impl ContactFace {
         let corners = solve_dense(m, &mut a, &mut b);
         let mut out = corners.clone();
         // Midside nodes: the mean of their corners.
-        if self.quadratic {
+        if self.quadratic && m == 2 {
+            out.push(0.5 * (corners[0] + corners[1]));
+        } else if self.quadratic {
             for k in 0..m {
                 out.push(0.5 * (corners[k] + corners[(k + 1) % m]));
             }
@@ -589,6 +736,7 @@ mod tests {
                 nodes: vec![0, 1, 2, 3],
                 corners: 4,
                 quadratic: false,
+                planar: None,
             },
             vec![
                 [0.0, 0.0, 0.0],

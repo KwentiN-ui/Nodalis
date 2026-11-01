@@ -454,6 +454,8 @@ impl DynamicProcedure {
             let v1 = combine(&[(1.0, &v_tilde), (gamma * dt, &a1)], n);
 
             k.multiply(&u1, &mut reactions);
+            ctx.constraints
+                .transfer_forces(&mut reactions, &spc0.dofs, &active);
             integration_point_results(ctx.table, ctx.model, &u1, &mut strains, &mut stresses);
             motion = Motion {
                 u: u1,

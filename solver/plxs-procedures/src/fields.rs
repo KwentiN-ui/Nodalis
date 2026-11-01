@@ -442,7 +442,7 @@ pub fn unsupported_outputs(step: &Step) -> Vec<String> {
     // frequency steps; CalculiX ignores them in the others.
     let known = [
         "U", "V", "S", "E", "RF", "ERR", "NOE", "PEEQ", "ENER", "NT", "HFL", "RFL", "PU", "PHS",
-        "SEN", "CDIS", "CSTR", "CELS",
+        "SEN", "CDIS", "CSTR", "CELS", "EVOL",
     ];
     let mut out = Vec::new();
     for v in requested(step) {

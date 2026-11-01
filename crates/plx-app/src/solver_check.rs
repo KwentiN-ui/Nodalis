@@ -1,23 +1,18 @@
-//! Self test of the solver from the settings: the built-in Nodalis solver, or the CalculiX
-//! executable, the shipped one or the user's own. Checks that the solver runs and computes
-//! correct results.
+//! Self test of the solver from the settings: checks that it runs and computes correct
+//! results.
 //!
-//! The test reads the version, solves small cantilevers through the same path as a real
-//! analysis (model, input file writer, run, results reader), comparing with beam theory, and
-//! for CalculiX checks that the executable knows every keyword Nodalis writes.
+//! The test solves small cantilevers through the same path as a real analysis (model, input
+//! file writer, run, results), comparing with beam theory.
 
-use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::Command;
 
-use plx_io::frd::{FrdImport, read_frd};
-use plx_job::{Job, JobStatus};
+use plx_io::frd::FrdImport;
 use plx_mesh::{Element, ElementId, ElementShape, FeMesh, NodeId, Part};
 use plx_model::{
     BoundaryCondition, BoundaryKind, Elastic, FeModel, LinearSolverChoice, Load, LoadKind,
     Material, Region, Section, SectionKind, Step,
 };
-use plx_solve::{Engine, Run};
+use plx_solve::{JobStatus, Run};
 
 pub(crate) const LENGTH: f64 = 100.0;
 const WIDTH: f64 = 10.0;
@@ -40,16 +35,12 @@ pub struct CheckResult {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Report {
     pub checks: Vec<CheckResult>,
-    /// Result of [`known_keywords`] for all keywords Nodalis writes, if CalculiX started.
-    pub keywords: Option<BTreeMap<String, bool>>,
-    /// What [`version_text`] read, if CalculiX started.
-    pub version: Option<String>,
 }
 
 /// What the self test is doing, for the window shown while it runs.
 #[derive(Clone, Debug, Default)]
 pub struct Progress {
-    /// The running step, e.g. "Testing keywords".
+    /// The running step, e.g. "Solving cantilever with pressure".
     pub step: String,
     /// How far the step has come, if it has countable parts: (done, total).
     pub count: Option<(usize, usize)>,
@@ -65,199 +56,28 @@ fn set_step(progress: &SharedProgress, step: &str, count: Option<(usize, usize)>
     }
 }
 
-/// Runs all checks one after another; stops after the version check if CalculiX does not
-/// start at all. The built-in solver has no executable and no keyword probe: it solves the
-/// cantilevers only.
-pub fn run(
-    engine: Engine,
-    solver: &plx_job::Solver,
-    work_dir: &Path,
-    progress: &SharedProgress,
-) -> Report {
+/// Runs all checks one after another on a pool of `threads` threads (0: all cores).
+pub fn run(threads: u32, work_dir: &Path, progress: &SharedProgress) -> Report {
     set_step(progress, "Starting the solver", None);
-    let version = match engine {
-        Engine::CalculiX => version(&solver.executable),
-        Engine::Nodalis => check(
-            "Start solver",
-            true,
-            format!("Nodalis solver {}, built in", plx_solve::VERSION),
-        ),
-    };
-    let started = version.passed;
-    let mut checks = vec![version];
-    let mut keywords = None;
-    if started {
-        let dir = work_dir.join("SelfTest");
-        set_step(progress, "Solving cantilever with end load", None);
-        checks.push(tip_force(engine, solver, &dir, LinearSolverChoice::Direct));
-        set_step(progress, "Solving cantilever with pressure", None);
-        checks.push(pressure(engine, solver, &dir));
-        set_step(
-            progress,
-            "Solving cantilever with the iterative solver",
-            None,
-        );
-        checks.push(tip_force(
-            engine,
-            solver,
-            &dir,
-            LinearSolverChoice::Iterative,
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-    if started && engine == Engine::CalculiX {
-        let written = (plx_io::inp::keywords::WRITTEN_KEYWORDS.iter())
-            .map(|(k, _)| k.to_string())
-            .collect::<Vec<_>>();
-        let on_keyword = |done, total| set_step(progress, "Checking keywords", Some((done, total)));
-        keywords = known_keywords(solver, work_dir, &written, &on_keyword);
-        checks.push(keyword_check(keywords.as_ref(), written.len()));
-    }
-    Report {
-        checks,
-        keywords,
-        version: match engine {
-            Engine::CalculiX => started.then(|| version_text(&solver.executable)).flatten(),
-            Engine::Nodalis => Some(plx_solve::VERSION.to_owned()),
-        },
-    }
-}
-
-/// Lists the features whose keywords the executable does not know.
-fn keyword_check(known: Option<&BTreeMap<String, bool>>, count: usize) -> CheckResult {
-    const NAME: &str = "Keywords";
-    let Some(known) = known.filter(|k| !k.is_empty()) else {
-        return check(
-            NAME,
-            false,
-            "Not checked: CalculiX did not read the test input".into(),
-        );
-    };
-    let unknown = unknown_of(
-        known,
-        plx_io::inp::keywords::WRITTEN_KEYWORDS
-            .iter()
-            .map(|(k, _)| *k),
+    let mut checks = vec![check(
+        "Start solver",
+        true,
+        format!("Nodalis solver {}", plx_solve::VERSION),
+    )];
+    let dir = work_dir.join("SelfTest");
+    set_step(progress, "Solving cantilever with end load", None);
+    checks.push(tip_force(threads, &dir, LinearSolverChoice::Direct));
+    set_step(progress, "Solving cantilever with pressure", None);
+    checks.push(pressure(threads, &dir));
+    set_step(
+        progress,
+        "Solving cantilever with the iterative solver",
+        None,
     );
-    if unknown.is_empty() {
-        return check(
-            NAME,
-            true,
-            format!("All {count} keywords Nodalis writes are known"),
-        );
-    }
-    check(
-        NAME,
-        false,
-        format!(
-            "Unknown to this CalculiX, so these features cannot be computed:\n{}",
-            by_feature(&unknown).join("\n")
-        ),
-    )
-}
-
-/// The keywords that `known` marks as unknown.
-pub fn unknown_of<'a>(
-    known: &BTreeMap<String, bool>,
-    keywords: impl IntoIterator<Item = &'a str>,
-) -> Vec<String> {
-    use plx_io::inp::keywords::normalized;
-    (keywords.into_iter())
-        .filter(|k| known.get(&normalized(k)) == Some(&false))
-        .map(str::to_string)
-        .collect()
-}
-
-/// One entry per feature, "Feature (*KEYWORD, *KEYWORD)", for a list of keywords; keywords
-/// of no known feature stand alone.
-pub fn by_feature(keywords: &[String]) -> Vec<String> {
-    let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
-    for keyword in keywords {
-        let feature = plx_io::inp::keywords::feature(keyword).unwrap_or("");
-        match groups.iter_mut().find(|(f, _)| *f == feature) {
-            Some((_, list)) => list.push(keyword),
-            None => groups.push((feature, vec![keyword])),
-        }
-    }
-    let groups = groups.into_iter().map(|(feature, list)| match feature {
-        "" => list.join(", "),
-        feature => format!("{feature} ({})", list.join(", ")),
-    });
-    groups.collect()
-}
-
-/// Whether the executable knows each keyword, by [`plx_io::inp::keywords::normalized`] name.
-/// CalculiX cannot list its keywords, so each one is read alone from an input file: an unknown
-/// keyword gives the warning "Card image cannot be interpreted", a known one another message
-/// (it is out of place there) or none. A keyword whose test does not run is left out; `None`
-/// if CalculiX does not start. A few keywords crash CalculiX when they stand alone and get the
-/// context they need first, see [`keyword_test_input`].
-pub fn known_keywords(
-    solver: &plx_job::Solver,
-    work_dir: &Path,
-    keywords: &[String],
-    progress: &dyn Fn(usize, usize),
-) -> Option<BTreeMap<String, bool>> {
-    let dir = work_dir.join("Keywordtest");
-    let mut known = BTreeMap::new();
-    for (index, keyword) in keywords.iter().enumerate() {
-        progress(index, keywords.len());
-        let Ok(mut job) = Job::start(solver, &dir, "Keyword", &keyword_test_input(keyword)) else {
-            let _ = std::fs::remove_dir_all(&dir);
-            return None;
-        };
-        let started = std::time::Instant::now();
-        while job.poll() == JobStatus::Running {
-            if started.elapsed() > std::time::Duration::from_secs(10) {
-                job.kill();
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        let output = job.new_output();
-        // Without the banner something else ran or CalculiX crashed: no verdict.
-        if job.poll() == JobStatus::Killed || !output.iter().any(|l| l.contains("CalculiX")) {
-            continue;
-        }
-        let unknown = output.iter().any(|l| l.contains("cannot be interpreted"));
-        known.insert(plx_io::inp::keywords::normalized(keyword), !unknown);
-    }
+    checks.push(tip_force(threads, &dir, LinearSolverChoice::Iterative));
     let _ = std::fs::remove_dir_all(&dir);
-    Some(known)
+    Report { checks }
 }
-
-/// The input file that tests `keyword`: the keyword alone, or, where CalculiX 2.23 crashes on
-/// that, after the model it reads. `*CYCLIC SYMMETRY MODEL` needs nodes and a cyclic tie; with
-/// them CalculiX stops with an error instead of a segmentation fault (on Windows a crash
-/// report window).
-fn keyword_test_input(keyword: &str) -> String {
-    use plx_io::inp::keywords::normalized;
-    if normalized(keyword) == normalized("*CYCLIC SYMMETRY MODEL") {
-        format!("{CYCLIC_SYMMETRY_MODEL}{keyword}, N=4, TIE=T\n0, 0, 0, 0, 0, 1\n")
-    } else {
-        format!("{keyword}\n")
-    }
-}
-
-/// One element with the two surfaces and the cyclic tie `*CYCLIC SYMMETRY MODEL` refers to.
-const CYCLIC_SYMMETRY_MODEL: &str = "*Node
-1, 0, 0, 0
-2, 1, 0, 0
-3, 1, 1, 0
-4, 0, 1, 0
-5, 0, 0, 1
-6, 1, 0, 1
-7, 1, 1, 1
-8, 0, 1, 1
-*Element, Type=C3D8, Elset=E
-1, 1, 2, 3, 4, 5, 6, 7, 8
-*Surface, Name=A, Type=Node
-1
-*Surface, Name=B, Type=Node
-2
-*Tie, Name=T, Cyclic symmetry
-A, B
-";
 
 fn check(name: &'static str, passed: bool, message: String) -> CheckResult {
     CheckResult {
@@ -267,61 +87,9 @@ fn check(name: &'static str, passed: bool, message: String) -> CheckResult {
     }
 }
 
-/// The version `ccx -v` prints, e.g. "2.21".
-pub fn version_text(executable: &Path) -> Option<String> {
-    let output = plx_job::hide_console(&mut Command::new(executable))
-        .arg("-v")
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    text.lines()
-        .find_map(|l| l.trim().strip_prefix("This is Version"))
-        .map(|v| v.trim().to_string())
-}
-
-/// `ccx -v` prints e.g. "This is Version 2.21".
-fn version(executable: &Path) -> CheckResult {
-    const NAME: &str = "Start executable";
-    if let Some(message) = crate::settings::missing_executable(executable) {
-        return check(NAME, false, message);
-    }
-    match plx_job::hide_console(&mut Command::new(executable))
-        .arg("-v")
-        .output()
-    {
-        Ok(output) => {
-            let text = String::from_utf8_lossy(&output.stdout);
-            match text
-                .lines()
-                .find_map(|l| l.trim().strip_prefix("This is Version"))
-            {
-                Some(version) => check(NAME, true, format!("CalculiX {}", version.trim())),
-                None => check(
-                    NAME,
-                    false,
-                    format!(
-                        "{} starts but reports no CalculiX version",
-                        executable.display()
-                    ),
-                ),
-            }
-        }
-        Err(error) => check(
-            NAME,
-            false,
-            format!("{} not started: {error}", executable.display()),
-        ),
-    }
-}
-
 /// Cantilever with a surface traction on the free end: the tip deflection must match
 /// Timoshenko beam theory and the reactions must balance the load.
-fn tip_force(
-    engine: Engine,
-    solver: &plx_job::Solver,
-    dir: &Path,
-    equations: LinearSolverChoice,
-) -> CheckResult {
+fn tip_force(threads: u32, dir: &Path, equations: LinearSolverChoice) -> CheckResult {
     let (name, job) = match equations {
         LinearSolverChoice::Direct => ("Cantilever with end load", "Cantilever"),
         LinearSolverChoice::Iterative => ("Iterative equation solver", "Iterative"),
@@ -338,7 +106,7 @@ fn tip_force(
             settings.solver = equations;
         }
     }
-    let frd = match solve(engine, solver, dir, job, &mesh, &model) {
+    let frd = match solve(threads, dir, job, &mesh, &model) {
         Ok(frd) => frd,
         Err(message) => return check(name, false, message),
     };
@@ -364,12 +132,12 @@ fn tip_force(
 
 /// Pressure on the free end: the axial reactions must balance pressure times area. (Loads on
 /// clamped nodes do not show up as reactions, so the end face is used, not the top.)
-fn pressure(engine: Engine, solver: &plx_job::Solver, dir: &Path) -> CheckResult {
+fn pressure(threads: u32, dir: &Path) -> CheckResult {
     const NAME: &str = "Cantilever with pressure";
     let mesh = beam_mesh();
     let tip = faces_where(&mesh, |p| p[0] == LENGTH);
     let model = beam_model(&mesh, LoadKind::Pressure(PRESSURE), Region::Faces(tip));
-    let frd = match solve(engine, solver, dir, "Pressure", &mesh, &model) {
+    let frd = match solve(threads, dir, "Pressure", &mesh, &model) {
         Ok(frd) => frd,
         Err(message) => return check(NAME, false, message),
     };
@@ -384,8 +152,7 @@ fn pressure(engine: Engine, solver: &plx_job::Solver, dir: &Path) -> CheckResult
 }
 
 fn solve(
-    engine: Engine,
-    solver: &plx_job::Solver,
+    threads: u32,
     dir: &Path,
     name: &str,
     mesh: &FeMesh,
@@ -393,8 +160,7 @@ fn solve(
 ) -> Result<FrdImport, String> {
     let input = plx_io::inp::write_inp(mesh, model, "Nodalis self-test")
         .map_err(|e| format!("Input file not written: {e}"))?;
-    let mut job =
-        Run::start(engine, solver, dir, name, &input).map_err(|e| format!("Start: {e}"))?;
+    let mut job = Run::start(threads, dir, name, &input).map_err(|e| format!("Start: {e}"))?;
     let status = job.wait();
     let output = job.new_output();
     if status != JobStatus::Completed {
@@ -407,12 +173,8 @@ fn solve(
             crate::analysis::Analysis::status_text(status)
         ));
     }
-    // The built-in solver's results in memory, CalculiX's from its file.
-    if let Some(solved) = job.solver_results() {
-        return Ok(plx_io::solver::import(&solved));
-    }
-    let path = job.results().ok_or("no results file written")?;
-    read_frd(&path).map_err(|e| format!("Results not readable: {e}"))
+    let solved = job.solver_results().ok_or("no results")?;
+    Ok(plx_io::solver::import(&solved))
 }
 
 /// Mean of a result component over nodes.
@@ -450,7 +212,7 @@ fn component_values(frd: &FrdImport, field: &str, component: &str, nodes: &[Node
         .collect()
 }
 
-/// Solves the beam under a tip load with the built-in solver in `dir`, with a history output
+/// Solves the beam under a tip load in `dir`, with a history output
 /// of the fixed nodes; returns its results file (`.ndlr`).
 #[cfg(test)]
 pub(crate) fn solve_beam_built_in(dir: &Path) -> std::path::PathBuf {
@@ -461,11 +223,7 @@ pub(crate) fn solve_beam_built_in(dir: &Path) -> std::path::PathBuf {
     let output = plx_model::HistoryOutput::node("H-Output-1", Region::Nodes(fixed.collect()));
     fe.steps[0].history_outputs.push(output);
     let input = plx_io::inp::write_inp(&mesh, &fe, "built-in").unwrap();
-    let solver = plx_job::Solver {
-        executable: "unused".into(),
-        threads: 1,
-    };
-    let mut run = Run::start(Engine::Nodalis, &solver, dir, "Beam", &input).unwrap();
+    let mut run = Run::start(1, dir, "Beam", &input).unwrap();
     assert_eq!(run.wait(), JobStatus::Completed, "{:?}", run.new_output());
     run.results().unwrap()
 }
@@ -623,156 +381,14 @@ mod tests {
     }
 
     #[test]
-    fn missing_program_fails_the_first_check_only() {
-        let solver = plx_job::Solver {
-            executable: "plx-does-not-exist".into(),
-            threads: 1,
-        };
-        let report = run(
-            Engine::CalculiX,
-            &solver,
-            &std::env::temp_dir(),
-            &Default::default(),
-        );
-        assert_eq!(report.checks.len(), 1);
-        assert!(!report.checks[0].passed);
-        assert_eq!(report.keywords, None);
-    }
-
-    #[test]
-    fn installed_calculix_passes() {
-        if Command::new("ccx").arg("-v").output().is_err() {
-            eprintln!("ccx not found, test skipped");
-            return;
-        }
+    fn the_solver_passes() {
         let dir = std::env::temp_dir().join(format!("plx-selftest-{}", std::process::id()));
-        let report = run(
-            Engine::CalculiX,
-            &plx_job::Solver::default(),
-            &dir,
-            &Default::default(),
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-        for result in &report.checks {
-            eprintln!("{}: {}", result.name, result.message);
-        }
-        assert_eq!(report.checks.len(), 5);
-        assert!(report.checks.iter().all(|r| r.passed), "{report:#?}");
-    }
-
-    /// The self test with the built-in solver needs no program and runs everywhere.
-    #[test]
-    fn built_in_solver_passes() {
-        let dir = std::env::temp_dir().join(format!("plx-selftest-builtin-{}", std::process::id()));
-        let solver = plx_job::Solver {
-            executable: "unused".into(),
-            threads: 1,
-        };
-        let report = run(Engine::Nodalis, &solver, &dir, &Default::default());
+        let report = run(1, &dir, &Default::default());
         let _ = std::fs::remove_dir_all(&dir);
         for result in &report.checks {
             eprintln!("{}: {}", result.name, result.message);
         }
         assert_eq!(report.checks.len(), 4, "{report:#?}");
         assert!(report.checks.iter().all(|r| r.passed), "{report:#?}");
-        assert_eq!(report.keywords, None);
-        assert_eq!(report.version.as_deref(), Some(plx_solve::VERSION));
-    }
-
-    /// The self test with Nodalis's own solver as a program (the CalculiX path):
-    /// `PLXS=target/debug/plxs cargo test` after `cargo build -p plxs-cli` (skipped when the
-    /// variable is not set).
-    #[test]
-    fn plxs_passes() {
-        let Ok(executable) = std::env::var("PLXS") else {
-            eprintln!("PLXS not set, test skipped");
-            return;
-        };
-        let solver = plx_job::Solver {
-            executable: executable.into(),
-            threads: 1,
-        };
-        let dir = std::env::temp_dir().join(format!("plx-selftest-plxs-{}", std::process::id()));
-        let report = run(Engine::CalculiX, &solver, &dir, &Default::default());
-        let _ = std::fs::remove_dir_all(&dir);
-        for result in &report.checks {
-            eprintln!("{}: {}", result.name, result.message);
-        }
-        assert_eq!(report.checks.len(), 5);
-        assert!(report.checks.iter().all(|r| r.passed), "{report:#?}");
-    }
-
-    #[test]
-    fn unknown_keywords_are_found() {
-        if Command::new("ccx").arg("-v").output().is_err() {
-            eprintln!("ccx not found, test skipped");
-            return;
-        }
-        let dir = std::env::temp_dir().join(format!("plx-keywordtest-{}", std::process::id()));
-        let keywords = [
-            "*Static".to_string(),
-            "*NOT A KEYWORD".into(),
-            "*node print".into(),
-        ];
-        let known =
-            known_keywords(&plx_job::Solver::default(), &dir, &keywords, &|_, _| {}).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(known.len(), 3, "{known:?}");
-        let unknown = unknown_of(&known, keywords.iter().map(String::as_str));
-        assert_eq!(unknown, ["*NOT A KEYWORD"]);
-    }
-
-    #[test]
-    fn cyclic_symmetry_test_does_not_crash_calculix() {
-        if Command::new("ccx").arg("-v").output().is_err() {
-            eprintln!("ccx not found, test skipped");
-            return;
-        }
-        let dir = std::env::temp_dir().join(format!("plx-cyclictest-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let input = keyword_test_input("*Cyclic symmetry model");
-        std::fs::write(dir.join("Keyword.inp"), input).unwrap();
-        let output = Command::new("ccx")
-            .arg("Keyword")
-            .current_dir(&dir)
-            .output()
-            .unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-        let text = String::from_utf8_lossy(&output.stdout);
-        // Alone the keyword ends in a segmentation fault; here CalculiX stops with an error.
-        assert!(output.status.code().is_some(), "{text}");
-        assert!(text.contains("*ERROR"), "{text}");
-        assert!(!text.contains("cannot be interpreted"), "{text}");
-    }
-
-    #[test]
-    fn missing_keywords_are_listed_by_feature() {
-        let keywords = [
-            "*SENSITIVITY",
-            "*OBJECTIVE",
-            "*MY KEYWORD",
-            "*CYCLIC SYMMETRY MODEL",
-        ]
-        .map(String::from);
-        assert_eq!(
-            by_feature(&keywords),
-            [
-                "Sensitivity step (*SENSITIVITY, *OBJECTIVE)",
-                "*MY KEYWORD",
-                "Cyclic symmetry (*CYCLIC SYMMETRY MODEL)"
-            ]
-        );
-        let known = BTreeMap::from([
-            ("*STATIC".to_string(), true),
-            ("*BUCKLE".to_string(), false),
-        ]);
-        let result = keyword_check(Some(&known), 2);
-        assert!(!result.passed);
-        assert!(
-            result.message.ends_with("Buckle step (*BUCKLE)"),
-            "{}",
-            result.message
-        );
-        assert!(!keyword_check(None, 2).passed);
     }
 }

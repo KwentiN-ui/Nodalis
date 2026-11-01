@@ -3145,7 +3145,7 @@ pub fn diagnose_solver_warnings(lines: &[String]) -> Vec<Finding> {
     )]
 }
 
-/// Problems CalculiX reports in its output after a failed run, mapped to the explanations of
+/// Problems the solver reports in its output after a failed run, mapped to the explanations of
 /// the checks. Distorted elements and elements without material are also attached to their
 /// parts.
 pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
@@ -3242,7 +3242,11 @@ pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
         ),
         (
             Problem::NoPhysicalConstants,
-            &["*radiate card was selected", "no *physical constants card"],
+            &[
+                "*radiate card was selected",
+                "no *physical constants card",
+                "radiation needs *physical constants",
+            ],
         ),
         (Problem::MpcAndSpc, &["dependent side of a mpc and a spc"]),
         (Problem::RotationIn2d, &["usermpc: mpc of type"]),
@@ -3257,7 +3261,7 @@ pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
             add(
                 &mut findings,
                 problem,
-                format!("CalculiX reports \"{line}\""),
+                format!("The solver reports \"{line}\""),
             );
         }
     }
@@ -4921,7 +4925,7 @@ mod tests {
         );
         assert_eq!(
             findings[0].detail,
-            "CalculiX reports \"*ERROR reading *RADIATE: *RADIATE card was selected\""
+            "The solver reports \"*ERROR reading *RADIATE: *RADIATE card was selected\""
         );
         let rigid = [
             " *ERROR in gen3dmpc: nodes belonging to",

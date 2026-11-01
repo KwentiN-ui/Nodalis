@@ -1,6 +1,6 @@
 [package]
 name = "plx-solve"
-description = "Running an analysis: the built-in Nodalis solver in-process or CalculiX as a process"
+description = "Running an analysis: the solver plxs in-process, and helper processes"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,11 +8,16 @@ repository.workspace = true
 
 [dependencies]
 rayon.workspace = true
-plx-job.workspace = true
 plx-results.workspace = true
 plxs-core.workspace = true
 plxs-session.workspace = true
-serde.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Threading",
+] }
 
 [lints]
 workspace = true

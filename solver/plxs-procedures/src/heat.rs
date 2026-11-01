@@ -14,6 +14,13 @@
 //! thermal strains of these temperatures. Geometric nonlinearity (`NLGEOM`) is not
 //! supported here.
 //!
+//! Contact: the mechanical problem of an increment becomes nonlinear (Newton's method with
+//! the contact springs on the elastic stiffness). Closed contact points conduct heat with
+//! the `*GAP CONDUCTANCE` of their interaction (per unit area, interpolated in the contact
+//! pressure). The two problems are staggered: the contact state of the displacements at
+//! the temperatures of the start of an increment decides which points conduct during the
+//! increment; heat transfer steps take the contact state of the current displacements.
+//!
 //! Time incrementation as CalculiX does it (observed with ccx, documented in
 //! `docs/solver/SCHNITTSTELLEN.md`): `DIRECT` keeps the initial increment; otherwise the
 //! increment grows by 1.5 when the last two increments converged in at most 4 iterations
@@ -32,7 +39,11 @@ use plxs_core::results::{IncrementKind, ResultField, ResultsIncrement};
 use plxs_core::state::{IntegrationPointField, NodalField};
 use plxs_core::step::{DefaultAmplitude, HeatTransfer, Procedure as ProcedureKind};
 use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Step};
-use plxs_linalg::{LdltSolver, SparseMatrix};
+use std::sync::Arc;
+
+use plxs_contact::ThermalLink;
+use plxs_core::contact::GapConductance;
+use plxs_linalg::{LdltSolver, Pattern, SparseMatrix};
 use plxs_output::StaRow;
 
 use crate::equations::{Equations, in_increment};
@@ -76,7 +87,7 @@ impl Procedure for HeatTransferProcedure {
         }
         let heat = HeatTable::new(ctx.model, ctx.table)?;
         let transient = !parameters.steady_state;
-        heat.check(ctx.model, transient)?;
+        heat.check(ctx.model, ctx.table, transient)?;
         let mut run = HeatRun::new(ctx, step, parameters, &heat, mechanical)?;
         run.increments(ctx, step, progress)
     }
@@ -111,6 +122,10 @@ struct HeatRun<'h> {
     assembled: bool,
     /// Prescribed mechanical DOFs of the last mechanical factorization.
     mechanical_spc: Option<Vec<u32>>,
+    /// Whether contact pairs are in force in the step.
+    contact: bool,
+    /// The closed contact points that conduct heat in the current increment.
+    links: Vec<ThermalLink>,
 }
 
 /// A converged increment of the thermal problem.
@@ -168,6 +183,8 @@ impl<'h> HeatRun<'h> {
             factorized: None,
             assembled: false,
             mechanical_spc: None,
+            contact: false,
+            links: Vec::new(),
         })
     }
 
@@ -189,6 +206,12 @@ impl<'h> HeatRun<'h> {
         } else {
             None
         };
+        if !ctx.contact.is_empty() {
+            for warning in ctx.contact.begin_step(step, ctx.state) {
+                progress.event(ProgressEvent::Warning(warning));
+            }
+            self.contact = ctx.contact.is_active();
+        }
 
         let mut step_time = 0.0;
         let mut dt = self.initial;
@@ -210,6 +233,43 @@ impl<'h> HeatRun<'h> {
                         step.max_increments
                     ),
                 });
+            }
+            if self.contact {
+                // The contact state that conducts heat in this increment.
+                if self.mechanical {
+                    let size = dt.min(self.period - step_time);
+                    let time = step_time + size;
+                    self.mechanics(
+                        ctx,
+                        step,
+                        thermal.as_ref(),
+                        &t,
+                        time,
+                        start_total + time,
+                        increment,
+                        false,
+                        false,
+                    )?;
+                } else {
+                    let u = displacements(ctx);
+                    ctx.contact.prepare(&model.nodes.coordinates, &u);
+                    let evaluation = ctx.contact.evaluate(
+                        &model.nodes.coordinates,
+                        &u,
+                        &ctx.state.contact,
+                        false,
+                    );
+                    ctx.contact.last = Some(evaluation);
+                }
+                let links = match &ctx.contact.last {
+                    Some(evaluation) => ctx.contact.thermal_links(
+                        &model.nodes.coordinates,
+                        &displacements(ctx),
+                        evaluation,
+                    ),
+                    None => Vec::new(),
+                };
+                self.set_links(links);
             }
             let mut attempt = 0u32;
             let (accepted, size) = loop {
@@ -301,6 +361,7 @@ impl<'h> HeatRun<'h> {
                     total,
                     increment,
                     write,
+                    true,
                 )?;
             } else if write {
                 let fields = Vec::new();
@@ -390,6 +451,7 @@ impl<'h> HeatRun<'h> {
             iteration += 1;
             if !self.assembled || self.nonlinear {
                 assemble_heat(model, table, self.heat, &t, &mut self.k, self.c.as_mut())?;
+                add_links(model, &self.links, &t, &mut self.k);
                 self.assembled = true;
             }
             let q = heat_loads(
@@ -505,7 +567,13 @@ impl<'h> HeatRun<'h> {
         total: f64,
         increment: u32,
         write: bool,
+        record: bool,
     ) -> Result<()> {
+        if self.contact {
+            return self.mechanics_with_contact(
+                ctx, step, thermal, t, time, total, increment, write, record,
+            );
+        }
         let model = ctx.model;
         let table = ctx.table;
         let total_dofs = table.dofs.len();
@@ -590,6 +658,9 @@ impl<'h> HeatRun<'h> {
                     ctx, step, increment, time, total, &u, &forces, &stresses, &strains, None,
                 )?;
             }
+            if !record {
+                return Ok(());
+            }
             crate::history::write_history(
                 ctx.results,
                 model,
@@ -608,6 +679,216 @@ impl<'h> HeatRun<'h> {
         })();
         ctx.stiffness = Some(k);
         result
+    }
+
+    /// Uses `links` for the conduction across the contact from now on: the temperature
+    /// pattern grows when they couple nodes it does not hold yet.
+    fn set_links(&mut self, links: Vec<ThermalLink>) {
+        let pattern = self.k.pattern().clone();
+        if !links
+            .iter()
+            .all(|l| crate::contact::covers(&pattern, &l.nodes))
+        {
+            let n = pattern.dimension();
+            let mut columns: Vec<Vec<u32>> = (0..n).map(|c| pattern.column(c).to_vec()).collect();
+            for link in &links {
+                for &a in &link.nodes {
+                    for &b in &link.nodes {
+                        // Upper triangle: rows above the diagonal per column.
+                        if a <= b {
+                            columns[b as usize].push(a);
+                        }
+                    }
+                }
+            }
+            for column in &mut columns {
+                column.sort_unstable();
+                column.dedup();
+            }
+            let grown = Arc::new(Pattern::from_columns(n, columns));
+            self.k = SparseMatrix::zeros(grown.clone());
+            self.tangent = SparseMatrix::zeros(grown.clone());
+            self.c = self.c.as_ref().map(|_| SparseMatrix::zeros(grown));
+            self.factorized = None;
+        }
+        self.links = links;
+        self.assembled = false;
+    }
+
+    /// The static equilibrium of an increment with contact: Newton's method on the elastic
+    /// stiffness plus the contact springs, the thermal strains of `t` as loads. Stores the
+    /// converged contact state; appends the mechanical fields when `write` and the history
+    /// output when `record`.
+    #[allow(clippy::too_many_arguments)]
+    fn mechanics_with_contact(
+        &mut self,
+        ctx: &mut ProcedureContext<'_>,
+        step: &Step,
+        thermal: Option<&ThermalStrains<'_>>,
+        t: &[f64],
+        time: f64,
+        total: f64,
+        increment: u32,
+        write: bool,
+        record: bool,
+    ) -> Result<()> {
+        let model = ctx.model;
+        let table = ctx.table;
+        let total_dofs = table.dofs.len();
+        table.require_elastic()?;
+        let coords = &model.nodes.coordinates;
+        let mut u = displacements(ctx);
+        let blocks = ctx.contact.prepare(coords, &u);
+        let pattern = crate::contact::cached_pattern(table, &blocks, &mut ctx.contact_pattern);
+        let mut k = SparseMatrix::zeros(pattern);
+        assemble_stiffness(table, model, &mut k);
+        let spc = Spc::of_step(model, step, &table.dofs, time, total, self.period)?;
+        let reduction = Reduction::new(total_dofs, spc);
+        for (dof, value) in reduction.prescribed_vector(total_dofs).iter().enumerate() {
+            if reduction.to_reduced[dof] == u32::MAX {
+                u[dof] = *value;
+            }
+        }
+        let (mut f, _) = load_vector(model, table, step, time, total, self.period)?;
+        let eps_th = thermal.map(|th| th.strains(t));
+        let f_th = match (thermal, &eps_th) {
+            (Some(th), Some(_)) => Some(th.load(t)),
+            _ => None,
+        };
+        if let Some(f_th) = &f_th {
+            for (a, b) in f.iter_mut().zip(f_th) {
+                *a += b;
+            }
+        }
+        let iterative = self.mechanical_equations.is_iterative();
+        let mut previous_status: Option<Vec<u8>> = None;
+        let mut forces = vec![0.0; total_dofs];
+        let mut iteration = 0u32;
+        let evaluation = loop {
+            iteration += 1;
+            let evaluation = ctx
+                .contact
+                .evaluate(coords, &u, &ctx.state.contact, iteration == 1);
+            let mut a = k.clone();
+            k.multiply(&u, &mut forces);
+            if let Some(f_th) = &f_th {
+                for (a, b) in forces.iter_mut().zip(f_th) {
+                    *a -= b;
+                }
+            }
+            for element in &evaluation.elements {
+                a.add_block(&element.dofs, &element.ke);
+                for (&dof, value) in element.dofs.iter().zip(&element.fe) {
+                    forces[dof as usize] += value;
+                }
+            }
+            let residual: Vec<f64> = f
+                .iter()
+                .zip(&forces)
+                .zip(
+                    f_th.as_deref()
+                        .map_or(&[][..], |v| v)
+                        .iter()
+                        .chain(std::iter::repeat(&0.0)),
+                )
+                .map(|((f, r), th)| f - th - r)
+                .collect();
+            let mut rhs = reduction.reduce_vector(&residual);
+            let a_free = a.restrict(&reduction.free);
+            let coordinates = || {
+                (reduction.free.iter())
+                    .map(|&dof| coords[dof as usize / 3])
+                    .collect()
+            };
+            self.mechanical_equations
+                .prepare(&mut ctx.solver, &a_free, coordinates, true, &mut NoProgress)
+                .map_err(|e| match e {
+                    Error::Numerical { message, .. } => Error::Numerical {
+                        step: ctx.step_number,
+                        increment,
+                        message: if iterative {
+                            message
+                        } else {
+                            format!("{message}; the model is probably not sufficiently constrained")
+                        },
+                    },
+                    other => other,
+                })?;
+            self.mechanical_equations
+                .solve(&ctx.solver, &mut rhs, &mut NoProgress)
+                .map_err(|e| in_increment(e, ctx.step_number, increment))?;
+            for (&dof, d) in reduction.free.iter().zip(&rhs) {
+                u[dof as usize] += d;
+            }
+            let correction = rhs.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            let scale = u.iter().fold(0.0_f64, |m, v| m.max(v.abs())).max(1e-30);
+            let status = evaluation.status_key();
+            let settled = previous_status.as_ref() == Some(&status);
+            previous_status = Some(status);
+            if settled && correction <= 1e-8 * scale {
+                break ctx.contact.evaluate(coords, &u, &ctx.state.contact, false);
+            }
+            if iteration >= 3 * MAX_ITERATIONS || !correction.is_finite() {
+                return Err(Error::Numerical {
+                    step: ctx.step_number,
+                    increment,
+                    message: format!(
+                        "no convergence of the contact after {iteration} iterations (largest correction {correction:.4e})"
+                    ),
+                });
+            }
+        };
+        // The factorization holds contact springs: the linear path must factorize anew.
+        self.mechanical_spc = None;
+        // Nodal forces: internal and contact forces at the converged displacements.
+        k.multiply(&u, &mut forces);
+        if let Some(f_th) = &f_th {
+            for (a, b) in forces.iter_mut().zip(f_th) {
+                *a -= b;
+            }
+        }
+        for element in &evaluation.elements {
+            for (&dof, value) in element.dofs.iter().zip(&element.fe) {
+                forces[dof as usize] += value;
+            }
+        }
+        if record {
+            ctx.state.contact = evaluation.states();
+        }
+        ctx.contact.last = Some(evaluation);
+        let mut stresses = table.layout.field(6);
+        let mut strains = table.layout.field(6);
+        integration_point_results(table, model, &u, &mut strains, &mut stresses);
+        if let (Some(th), Some(e)) = (thermal, &eps_th) {
+            th.correct_stresses(e, &mut stresses);
+        }
+        ctx.state.displacements.per_node = 3;
+        ctx.state.displacements.values.clear();
+        ctx.state.displacements.values.extend_from_slice(&u);
+        ctx.state.stresses = stresses.clone();
+        ctx.state.strains = strains.clone();
+        if write {
+            write_increment(
+                ctx, step, increment, time, total, &u, &forces, &stresses, &strains, None,
+            )?;
+        }
+        if record {
+            crate::history::write_history(
+                ctx.results,
+                model,
+                table,
+                step,
+                ctx.step_number,
+                increment,
+                time,
+                &u,
+                &forces,
+                &stresses,
+                &strains,
+                None,
+            );
+        }
+        Ok(())
     }
 
     /// The `.dat` blocks of the thermal output requests.
@@ -703,6 +984,83 @@ impl<'h> HeatRun<'h> {
         }
         last.fields.extend(back);
         Ok(())
+    }
+}
+
+/// The displacements of the state, zero where none were solved yet.
+fn displacements(ctx: &ProcedureContext<'_>) -> Vec<f64> {
+    let total = ctx.table.dofs.len();
+    let values = &ctx.state.displacements.values;
+    if values.len() == total {
+        values.clone()
+    } else {
+        vec![0.0; total]
+    }
+}
+
+/// The conductance per unit area of a closed contact point: `*GAP CONDUCTANCE` of its
+/// interaction, linear in the contact pressure between the rows of the first temperature
+/// (constant beyond them), at the mean temperature of the link's nodes for tables with
+/// several temperatures.
+fn conductance(model: &Model, link: &ThermalLink, t: &[f64]) -> f64 {
+    let Some(interaction) = model.contact.pairs.get(link.pair).and_then(|pair| {
+        model
+            .contact
+            .interactions
+            .iter()
+            .find(|i| i.name == pair.interaction)
+    }) else {
+        return 0.0;
+    };
+    match &interaction.gap_conductance {
+        None => 0.0,
+        Some(GapConductance::Constant(h)) => *h,
+        Some(GapConductance::Table(rows)) => {
+            let mean = link.nodes.iter().map(|&n| t[n as usize]).sum::<f64>()
+                / link.nodes.len().max(1) as f64;
+            // The rows of the temperature closest to the mean.
+            let temperature = rows
+                .iter()
+                .map(|r| r.2)
+                .min_by(|a, b| (a - mean).abs().total_cmp(&(b - mean).abs()))
+                .unwrap_or(0.0);
+            let mut points: Vec<(f64, f64)> = rows
+                .iter()
+                .filter(|r| r.2 == temperature)
+                .map(|r| (r.1, r.0))
+                .collect();
+            points.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let p = link.pressure;
+            match points.as_slice() {
+                [] => 0.0,
+                [only] => only.1,
+                _ if p <= points[0].0 => points[0].1,
+                _ if p >= points[points.len() - 1].0 => points[points.len() - 1].1,
+                _ => {
+                    let i = points.windows(2).position(|w| p <= w[1].0).unwrap_or(0);
+                    let (a, b) = (points[i], points[i + 1]);
+                    a.1 + (b.1 - a.1) * (p - a.0) / (b.0 - a.0)
+                }
+            }
+        }
+    }
+}
+
+/// Adds the conduction across the closed contact points: `h A c cᵀ` per link.
+fn add_links(model: &Model, links: &[ThermalLink], t: &[f64], k: &mut SparseMatrix) {
+    for link in links {
+        let h = conductance(model, link, t) * link.area;
+        if h == 0.0 {
+            continue;
+        }
+        let m = link.nodes.len();
+        let mut block = vec![0.0; m * m];
+        for i in 0..m {
+            for j in 0..m {
+                block[i * m + j] = h * link.coefficients[i] * link.coefficients[j];
+            }
+        }
+        k.add_block(&link.nodes, &block);
     }
 }
 
