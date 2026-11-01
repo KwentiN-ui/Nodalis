@@ -465,6 +465,10 @@ fn solve(
             crate::analysis::Analysis::status_text(status)
         ));
     }
+    // The built-in solver's results in memory, CalculiX's from its file.
+    if let Some(solved) = job.solver_results() {
+        return Ok(plx_io::solver::import(&solved));
+    }
     let path = job.results().ok_or("no results file written")?;
     read_frd(&path).map_err(|e| format!("Results not readable: {e}"))
 }

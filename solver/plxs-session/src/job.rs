@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use plxs_core::step::Procedure;
-use plxs_core::{Analysis, CancelToken, Error, Progress, ProgressEvent, Result};
+use plxs_core::{Analysis, CancelToken, Error, Model, Progress, ProgressEvent, Result, Results};
 
 use crate::{Session, SessionOptions, StepOutcome};
 
@@ -20,7 +20,8 @@ pub struct JobOptions {
     pub work_dir: PathBuf,
     /// Name of the job: the result files are `<name>.frd`, `.dat`, `.sta`.
     pub name: String,
-    /// Writes the result files; off when the caller takes the results from memory.
+    /// Writes the result files `.frd` and `.dat`; off when the caller takes the results from
+    /// memory (see [`run_job_keeping`]). The `.sta` file is written either way.
     pub write_files: bool,
     pub cancel: CancelToken,
 }
@@ -45,6 +46,22 @@ pub fn run_job(
     options: &JobOptions,
     progress: &mut dyn Progress,
 ) -> Result<JobOutcome> {
+    run_job_keeping(input, base, options, progress, &mut None)
+}
+
+/// The output model and results of a job: the model with shells and beams expanded as the
+/// `.frd` file shows them, and the results on it.
+pub type KeptResults = (Model, Results);
+
+/// [`run_job`], keeping the results in `kept` whenever they would be written: at the end,
+/// and after a step that did not converge or was cancelled.
+pub fn run_job_keeping(
+    input: &str,
+    base: Option<&Path>,
+    options: &JobOptions,
+    progress: &mut dyn Progress,
+    kept: &mut Option<KeptResults>,
+) -> Result<JobOutcome> {
     let reading = plxs_input::read_inp_str(input, base).map_err(|mut errors| {
         for error in errors.iter().skip(1) {
             progress.event(ProgressEvent::Warning(error.to_string()));
@@ -61,7 +78,7 @@ pub fn run_job(
         analysis.model.elements.len(),
         analysis.steps.len()
     )));
-    run_analysis(analysis, options, progress)
+    run_analysis_keeping(analysis, options, progress, kept)
 }
 
 /// Runs a parsed analysis, see [`run_job`].
@@ -69,6 +86,16 @@ pub fn run_analysis(
     analysis: Analysis,
     options: &JobOptions,
     progress: &mut dyn Progress,
+) -> Result<JobOutcome> {
+    run_analysis_keeping(analysis, options, progress, &mut None)
+}
+
+/// Runs a parsed analysis, see [`run_job_keeping`].
+pub fn run_analysis_keeping(
+    analysis: Analysis,
+    options: &JobOptions,
+    progress: &mut dyn Progress,
+    kept: &mut Option<KeptResults>,
 ) -> Result<JobOutcome> {
     // A model check only reads the input.
     if (analysis.steps.iter()).all(|s| matches!(s.procedure, Procedure::NoAnalysis)) {
@@ -94,16 +121,16 @@ pub fn run_analysis(
     };
     let mut session = Session::new(analysis.model, session_options)?;
     let output = |ext: &str| options.work_dir.join(format!("{}.{ext}", options.name));
-    let write = |session: &Session| -> Result<()> {
-        if !options.write_files {
-            return Ok(());
-        }
+    let mut write = |session: &Session| -> Result<()> {
         let (model, results) = output_map.apply(session.model(), session.results());
-        plxs_output::write_frd(&output("frd"), &model, &results, VERSION)?;
         plxs_output::write_sta(&output("sta"), session.sta_rows())?;
-        if !session.results().history.is_empty() {
-            plxs_output::write_dat(&output("dat"), session.results())?;
+        if options.write_files {
+            plxs_output::write_frd(&output("frd"), &model, &results, VERSION)?;
+            if !results.history.is_empty() {
+                plxs_output::write_dat(&output("dat"), &results)?;
+            }
         }
+        *kept = Some((model, results));
         Ok(())
     };
     for step in &analysis.steps {

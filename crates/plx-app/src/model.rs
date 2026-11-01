@@ -503,54 +503,67 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     let mut fe = FeModel::default();
     let mut contact = None;
     let mut input_sections = InputSections::default();
-    let (mesh, warnings, skipped_keywords, included_files, increments) = if extension("frd") {
-        let FrdImport {
-            mut mesh,
-            mut increments,
-            warnings,
-            date,
-            time,
-            ..
-        } = read_frd(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        // CalculiX ran in the stored SI units; the results show in the analysis' units.
-        crate::results::convert_results(&mut mesh, &mut increments, units);
-        // The results group the elements by material; the input it ran, named like the
-        // results, knows the parts.
-        contact = companion_input(path).map(|input| {
-            adopt_input_parts(
-                &mut mesh,
-                &mut increments,
-                &input,
-                units,
-                &mut input_sections,
+    // The history output of results of the built-in solver, which come without a `.dat`
+    // file; `None` for CalculiX's results, which read theirs from the file.
+    let mut solver_history = None;
+    let solver_results = plx_results::solver::is_solver_results(path);
+    let (mesh, warnings, skipped_keywords, included_files, increments) =
+        if extension("frd") || solver_results {
+            let FrdImport {
+                mut mesh,
+                mut increments,
+                warnings,
+                date,
+                time,
+                ..
+            } = if solver_results {
+                // Taken from memory as the solver left them, without a `.frd` file to parse.
+                let solved = plx_results::SolverResults::read(path).map_err(|e| e.to_string())?;
+                let input = companion_input(path).and_then(|p| std::fs::read_to_string(p).ok());
+                solver_history = Some(plx_io::solver::history(&solved, input.as_deref()));
+                plx_io::solver::import(&solved)
+            } else {
+                read_frd(path).map_err(|e| format!("{}: {e}", path.display()))?
+            };
+            // CalculiX ran in the stored SI units; the results show in the analysis' units.
+            crate::results::convert_results(&mut mesh, &mut increments, units);
+            // The results group the elements by material; the input it ran, named like the
+            // results, knows the parts.
+            contact = companion_input(path).map(|input| {
+                adopt_input_parts(
+                    &mut mesh,
+                    &mut increments,
+                    &input,
+                    units,
+                    &mut input_sections,
+                )
+            });
+            (
+                mesh,
+                warnings,
+                BTreeMap::new(),
+                0,
+                Some((increments, date, time)),
             )
-        });
-        (
-            mesh,
-            warnings,
-            BTreeMap::new(),
-            0,
-            Some((increments, date, time)),
-        )
-    } else {
-        let InpImport {
-            mut mesh,
-            warnings,
-            skipped_keywords,
-            files,
-            ..
-        } = read_inp(path).map_err(|e| e.to_string())?;
-        // The numbers of an input file are in the analysis' units; the mesh is stored in SI
-        // units.
-        let length = units.factor_to(plx_model::Quantity::Length, plx_model::STORED);
-        if length != 1.0 {
-            mesh.scale(length);
-        }
-        // Plane stress, plane strain or axisymmetric elements make a 2D model.
-        fe.properties.space = plx_model::ModelSpace::of_mesh(&mesh);
-        let included = files.len().saturating_sub(1);
-        (mesh, warnings, skipped_keywords, included, None)
-    };
+        } else {
+            let InpImport {
+                mut mesh,
+                warnings,
+                skipped_keywords,
+                files,
+                ..
+            } = read_inp(path).map_err(|e| e.to_string())?;
+            // The numbers of an input file are in the analysis' units; the mesh is stored in SI
+            // units.
+            let length = units.factor_to(plx_model::Quantity::Length, plx_model::STORED);
+            if length != 1.0 {
+                mesh.scale(length);
+            }
+            // Plane stress, plane strain or axisymmetric elements make a 2D model.
+            fe.properties.space = plx_model::ModelSpace::of_mesh(&mesh);
+            let included = files.len().saturating_sub(1);
+            (mesh, warnings, skipped_keywords, included, None)
+        };
     if mesh.element_count() == 0 {
         return Err(format!(
             "{} contains no elements that can be displayed",
@@ -574,21 +587,27 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
         view.time = time;
         view
     });
-    // History outputs CalculiX printed next to the results, as PrePoMax reads them.
+    // History outputs CalculiX printed next to the results, as PrePoMax reads them, or
+    // those of the built-in solver.
     if let Some(view) = &mut model.results {
         let dat = ["dat", "DAT"]
             .map(|e| path.with_extension(e))
             .into_iter()
-            .find(|p| p.is_file());
-        if let Some(dat) = dat {
-            match plx_io::dat::read_dat(&dat) {
+            .find(|p| p.is_file() && solver_history.is_none());
+        let history = match (solver_history, dat) {
+            (Some(history), _) => history.map(Ok),
+            (None, Some(dat)) => Some(plx_io::dat::read_dat(&dat).map_err(|e| (dat, e))),
+            (None, None) => None,
+        };
+        if let Some(history) = history {
+            match history {
                 Ok(mut import) => {
                     crate::results::convert_history(&mut import.sets, units);
                     let warnings = view.set_file_history(import.sets, &model.mesh);
                     model.warnings.extend(import.warnings);
                     model.warnings.extend(warnings);
                 }
-                Err(error) => model.warnings.push(format!("{}: {error}", dat.display())),
+                Err((dat, error)) => model.warnings.push(format!("{}: {error}", dat.display())),
             }
         }
     }

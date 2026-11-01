@@ -19,7 +19,10 @@ use plxs_linalg::{LdltSolver, Pattern};
 use plxs_output::StaRow;
 use plxs_procedures::{ProcedureContext, run_step};
 
-pub use job::{JobOptions, JobOutcome, format_event, run_job};
+pub use job::{
+    JobOptions, JobOutcome, KeptResults, format_event, run_analysis_keeping, run_job,
+    run_job_keeping,
+};
 pub use plxs_procedures::StepOutcome;
 pub use plxs_procedures::fields::unsupported_outputs;
 

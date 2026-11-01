@@ -9,9 +9,10 @@ use plxs_core::{ElementType, Error, Model, Result};
 
 use crate::fortran_e12;
 
-/// The frd element type number and the node order of a type (frd lists the vertical
+/// The frd element type number and the node order of a type, `None` for elements the `.frd`
+/// leaves out (frd lists the vertical
 /// midside nodes of quadratic hexahedra and wedges before the top ones).
-fn frd_element(kind: ElementType) -> Option<(u8, &'static [usize])> {
+pub fn frd_element(kind: ElementType) -> Option<(u8, &'static [usize])> {
     use ElementType::*;
     const HEX8: [usize; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
     const HEX20: [usize; 20] = [

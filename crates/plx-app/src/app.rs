@@ -838,6 +838,18 @@ impl AnalysisWindow {
                 {
                     self.workbench.export_deformed_mesh();
                 }
+                let export = egui::Button::new("Export CalculiX Results (.frd) …");
+                let tip = "Writes the current results as CalculiX's result files: the .frd \
+                           file and, with history output, the .dat file beside it, for \
+                           CalculiX GraphiX, PrePoMax and other programs that read them.";
+                if ui
+                    .add_enabled(deformed, export)
+                    .on_hover_text(tip)
+                    .on_disabled_hover_text("No results are open.")
+                    .clicked()
+                {
+                    self.workbench.export_calculix_results();
+                }
                 let tip = "Writes the current results for ParaView and other VTK programs, \
                            one increment or a time series of several.";
                 for (label, format) in [
@@ -1214,10 +1226,33 @@ impl AnalysisWindow {
     }
 }
 
-/// Whether a file is a CalculiX results file (`.frd`).
+/// Writes the results file `source` as CalculiX's files `frd` and `.dat` beside it: results
+/// of the built-in solver (`.plxr`) are converted, CalculiX's own files copied.
+pub fn export_calculix_results(
+    source: &std::path::Path,
+    frd: &std::path::Path,
+) -> Result<(), String> {
+    if plx_results::solver::is_solver_results(source) {
+        let solved = plx_results::SolverResults::read(source).map_err(|e| e.to_string())?;
+        return plx_io::solver::export_calculix(&solved, frd)
+            .map_err(|e| format!("{}: {e}", frd.display()));
+    }
+    if source == frd {
+        return Ok(());
+    }
+    std::fs::copy(source, frd).map_err(|e| format!("{}: {e}", frd.display()))?;
+    let (dat, target) = (source.with_extension("dat"), frd.with_extension("dat"));
+    if dat.is_file() {
+        std::fs::copy(&dat, &target).map_err(|e| format!("{}: {e}", target.display()))?;
+    }
+    Ok(())
+}
+
+/// Whether a file is a results file: CalculiX's (`.frd`) or the built-in solver's (`.plxr`).
 pub fn is_results_file(path: &std::path::Path) -> bool {
     path.extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("frd"))
+        || plx_results::solver::is_solver_results(path)
 }
 
 /// Tooltip of Solve, in the tool bar and the Analysis menu.
@@ -4027,6 +4062,34 @@ impl Workbench {
                     .push(format!("Deformed mesh exported to {}", path.display())),
                 Err(error) => self.output.push(format!("{}: {error}", path.display())),
             }
+        }
+    }
+
+    /// File > Export CalculiX Results: the current results as a `.frd` file with the `.dat`
+    /// file beside it. Results of the built-in solver are written from memory, those of
+    /// CalculiX copied.
+    fn export_calculix_results(&mut self) {
+        let Some(model) = self.results.get(self.current_result) else {
+            return;
+        };
+        let source = model.path.clone();
+        let stem = source
+            .file_stem()
+            .map_or("Results".into(), |s| s.to_string_lossy().into_owned());
+        let picked = rfd::FileDialog::new()
+            .set_title("Export CalculiX Results")
+            .add_filter("CalculiX results (*.frd)", &["frd"])
+            .set_file_name(format!("{stem}.frd"))
+            .save_file();
+        let Some(path) = picked else {
+            return;
+        };
+        let path = path.with_extension("frd");
+        match export_calculix_results(&source, &path) {
+            Ok(()) => self
+                .output
+                .push(format!("Results exported to {}", path.display())),
+            Err(error) => self.output.push(format!("Export not possible: {error}")),
         }
     }
 

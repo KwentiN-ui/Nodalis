@@ -19,6 +19,8 @@ window has these entries:
     (@export-inp).],
   [Export Deformed Mesh (.inp) ...], [Writes the displayed deformed mesh of the current result
     as a mesh-only input file (@export-deformed).],
+  [Export CalculiX Results (.frd) ...], [Writes the current results as CalculiX's `.frd` file,
+    with the `.dat` file of the history output beside it (@bind-result).],
   [Export VTU ... / Export VTK ...], [Write the current results, one increment or a time
     series, for ParaView and other VTK programs (@export-vtk).],
   [Close Analysis], [Closes the window; the analysis stays in the project.],
@@ -41,8 +43,10 @@ window has these entries:
   the mesh* is read: nodes, elements, `*NSET`, `*ELSET` (also `GENERATE`), `*SURFACE` and files
   referenced with `*INCLUDE`. Every element set named in `*ELEMENT, ELSET=...` becomes a part.
   All other keywords (materials, steps, ...) are skipped and listed in the output pane.
-/ `.frd` (CalculiX results): the results of the analysis' own runs. Result files from elsewhere
-  are not opened.
+/ `.frd` (CalculiX results): the results of the analysis' own runs with CalculiX. Result files
+  from elsewhere are not opened.
+/ `.plxr` (PrePoLix solver results): the results of the analysis' own runs with the built-in
+  solver, a compact binary file instead of `.frd` and `.dat` (@bind-result).
 / CAD files: imported with #menu("Geometry", "Import ...") (@geometry-import).
 
 Supported element types of `.inp` meshes: `C3D4`, `C3D6`, `C3D8`, `C3D10`, `C3D15`, `C3D20` with

@@ -2,7 +2,7 @@
 //! and the editor of a Measure block.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 use plx_io::frd::FrdImport;
@@ -175,7 +175,8 @@ pub struct Job {
     pub node_sets: BTreeMap<String, Vec<NodeId>>,
     /// The units its messages give lengths in.
     pub units: UnitSystem,
-    /// Where the results files are written to be read.
+    /// Where the files of CalculiX's results are written to be read; those of the built-in
+    /// solver are read in memory.
     pub dir: PathBuf,
 }
 
@@ -189,19 +190,19 @@ pub fn start(job: Job) -> Receiver<Result<f64, String>> {
 }
 
 fn run(job: &Job) -> Result<f64, String> {
-    let frd_path =
-        plx_io::project::restore_results(&job.results, &job.dir).map_err(|e| e.to_string())?;
-    let frd = plx_io::frd::read_frd(&frd_path).map_err(|e| e.to_string())?;
-    let dat = read_dat_beside(&frd_path);
-    // The input CalculiX ran knows the shells and beams it expanded.
-    let expanded = plx_io::inp::read_inp(&frd_path.with_extension("inp"))
+    // Results of the built-in solver are read in memory, CalculiX's from their files.
+    let read = job.results.read(&job.dir)?;
+    let frd = read.results;
+    // The input the solver ran knows the shells and beams it expanded.
+    let expanded = (read.input.as_deref())
+        .and_then(|text| plx_io::inp::read_inp_str(text, None).ok())
         .map(|input| plx_io::frd::expanded_nodes(&input.mesh, &frd.mesh))
         .unwrap_or_default();
     evaluate_expanded(
         &job.kind,
         job.step,
         &frd,
-        dat.as_ref(),
+        read.history.as_ref(),
         &job.node_sets,
         &expanded,
         job.units,
@@ -265,18 +266,12 @@ pub fn read_offered(
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let read = || {
-            let frd_path =
-                plx_io::project::restore_results(&results, &dir).map_err(|e| e.to_string())?;
-            let frd = plx_io::frd::read_frd(&frd_path).map_err(|e| e.to_string())?;
-            Ok(offered(step, &frd, read_dat_beside(&frd_path).as_ref()))
+            let read = results.read(&dir)?;
+            Ok(offered(step, &read.results, read.history.as_ref()))
         };
         let _ = sender.send(read());
     });
     receiver
-}
-
-fn read_dat_beside(frd: &Path) -> Option<plx_io::dat::DatImport> {
-    plx_io::dat::read_dat(&frd.with_extension("dat")).ok()
 }
 
 /// The kind of number the value is, for value links from the block to Math blocks and
