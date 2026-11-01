@@ -395,6 +395,10 @@ fn write_block(
 /// The type and index columns of a `-5` line: vectors (`1 2 k 0`), tensors (`1 4 i j`),
 /// scalars (`1 1 0 0`).
 fn component_flags(field: &str, components: usize, k: usize) -> (u8, u8, u8) {
+    // Contact results are six scalars.
+    if field == "CONTACT" {
+        return (1, 0, 0);
+    }
     // Magnitudes and phases of complex displacements (MAG1..3, PHA1..3).
     if field == "PDISP" {
         return (12, k as u8 + 1, 0);
