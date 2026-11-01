@@ -181,6 +181,19 @@ pub fn write_frd_to(
     Ok(())
 }
 
+/// A number as CalculiX prints the generalized mass and stiffness of a mode: `2.747649E+07`.
+fn fortran_e12_6(value: f64) -> String {
+    if value == 0.0 || !value.is_finite() {
+        return "0.000000E+00".to_string();
+    }
+    let text = format!("{:.6E}", value.abs());
+    let (mantissa, exponent) = text.split_once('E').unwrap();
+    let exponent: i32 = exponent.parse().unwrap();
+    let sign = if value < 0.0 { "-" } else { "" };
+    let exp_sign = if exponent < 0 { "-" } else { "+" };
+    format!("{sign}{mantissa}E{exp_sign}{:02}", exponent.abs())
+}
+
 /// The time or frequency of a `100CL` line: ten significant digits in fixed notation as
 /// CalculiX writes them (`1.000000000`, `10.89062500`), exponential outside that range.
 fn format_time(value: f64) -> String {
@@ -210,16 +223,42 @@ fn write_block(
         IncrementKind::Dynamic => 1,
         IncrementKind::Frequency => 2,
         IncrementKind::Buckling => 4,
-        IncrementKind::ComplexFrequency => 3,
+        IncrementKind::ComplexFrequency | IncrementKind::Sensitivity => 3,
     };
     writeln!(
         out,
         "    1PSTEP{:>26}{:>12}{:>12}          ",
         set, increment.increment, increment.step
     )?;
+    if matches!(increment.kind, IncrementKind::Frequency) {
+        // Generalized mass and stiffness of the (mass normalized) mode, nodal diameter,
+        // subcase and mode number.
+        let omega = 2.0 * std::f64::consts::PI * increment.value;
+        let header = |key: &str, value: String| {
+            format!("{:<10}{:>26}{:30}", format!("    1P{key}"), value, "")
+        };
+        writeln!(out, "{}", header("GM", fortran_e12_6(1.0)))?;
+        writeln!(out, "{}", header("GK", fortran_e12_6(omega * omega)))?;
+        writeln!(
+            out,
+            "{}",
+            header(
+                "HID",
+                increment
+                    .nodal_diameter
+                    .map_or("-1".to_string(), |d| d.to_string())
+            )
+        )?;
+        writeln!(out, "{}", header("SUBC", "0".to_string()))?;
+        writeln!(out, "{}", header("MODE", increment.increment.to_string()))?;
+    }
+    let (analysis_name, trailer_width) = match increment.kind {
+        IncrementKind::Frequency => ("MODAL", 7),
+        _ => ("", 12),
+    };
     writeln!(
         out,
-        "  100CL{:>5}{}{:>12}{:>22}{:>5}{:>12}",
+        "  100CL{:>5}{}{:>12}{:>22}{:>5}{}{:>width$}",
         100 + ordinal,
         format_time(match increment.kind {
             IncrementKind::Time | IncrementKind::Dynamic => increment.total_time,
@@ -227,15 +266,14 @@ fn write_block(
         }),
         node_count,
         analysis,
-        match increment.kind {
-            IncrementKind::Time | IncrementKind::Dynamic => ordinal,
-            _ => increment.increment,
-        },
-        1
+        ordinal,
+        analysis_name,
+        1,
+        width = trailer_width
     )?;
     let components = field.components.len();
     let (declared, trailer) = match field.name.as_str() {
-        "DISP" | "FORC" | "VELO" | "PDISP" | "FLUX" => (components + 1, true),
+        "DISP" | "FORC" | "VELO" | "PDISP" | "FLUX" | "NORM" => (components + 1, true),
         _ => (components, false),
     };
     writeln!(out, " -4  {:<8}{:>5}{:>5}", field.name, declared, 1)?;

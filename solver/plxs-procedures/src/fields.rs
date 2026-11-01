@@ -292,28 +292,39 @@ pub fn principal_stresses(s: &[f64; 6]) -> [f64; 3] {
     v
 }
 
-/// Appends the fields of an increment to the results.
-#[allow(clippy::too_many_arguments)]
-pub fn write_increment(
-    ctx: &mut ProcedureContext<'_>,
+/// The nodal fields of a displacement state as the step's `*NODE FILE` / `*EL FILE`
+/// requests ask for them, in CalculiX's order: DISP, STRESS, TOSTRAIN, FORC, ENER, ERROR.
+pub fn build_fields(
+    table: &ElementTable,
+    model: &Model,
     step: &Step,
-    increment: u32,
-    // The step time; the `.frd` is labelled with the total time, like CalculiX does.
-    _time: f64,
-    total: f64,
+    u: &[f64],
+    reactions: &[f64],
+    stresses: &IntegrationPointField,
+    strains: &IntegrationPointField,
+) -> Vec<ResultField> {
+    build_fields_with(table, model, step, u, reactions, stresses, strains, None)
+}
+
+/// [`build_fields`] with the material state of the integration points (equivalent plastic
+/// strain first), which gives `PE`; without it `PE` is zero.
+#[allow(clippy::too_many_arguments)]
+pub fn build_fields_with(
+    table: &ElementTable,
+    model: &Model,
+    step: &Step,
     u: &[f64],
     reactions: &[f64],
     stresses: &IntegrationPointField,
     strains: &IntegrationPointField,
     material: Option<&IntegrationPointField>,
-) -> Result<()> {
+) -> Vec<ResultField> {
     let variables = requested(step);
     let has = |v: &str| variables.iter().any(|x| x == v);
-    let order = node_order(ctx.model);
+    let order = node_order(model);
     let mut fields = Vec::new();
     // Native membranes: constant strain and stress per element.
-    let (membrane_strains, membrane_stresses): (Vec<_>, Vec<_>) = ctx
-        .table
+    let (membrane_strains, membrane_stresses): (Vec<_>, Vec<_>) = table
         .membranes
         .iter()
         .map(|m| {
@@ -322,12 +333,12 @@ pub fn write_increment(
         })
         .unzip();
     // Internal unknowns (thickness change of plane stress nodes) are no displacements.
-    let (u, reactions) = &ctx.table.reported(ctx.model, u, reactions);
+    let (u, reactions) = &table.reported(model, u, reactions);
     if has("U") {
         fields.push(vector_field("DISP", ["D1", "D2", "D3"], &order, u));
     }
     if has("S") {
-        let (average, _) = nodal_average_with(ctx.table, ctx.model, stresses, &membrane_stresses);
+        let (average, _) = nodal_average_with(table, model, stresses, &membrane_stresses);
         fields.push(tensor_field(
             "STRESS",
             ["SXX", "SYY", "SZZ", "SXY", "SYZ", "SZX"],
@@ -336,7 +347,7 @@ pub fn write_increment(
         ));
     }
     if has("E") {
-        let (average, _) = nodal_average_with(ctx.table, ctx.model, strains, &membrane_strains);
+        let (average, _) = nodal_average_with(table, model, strains, &membrane_strains);
         fields.push(tensor_field(
             "TOSTRAIN",
             ["EXX", "EYY", "EZZ", "EXY", "EYZ", "EZX"],
@@ -347,17 +358,6 @@ pub fn write_increment(
     if has("RF") {
         fields.push(vector_field("FORC", ["F1", "F2", "F3"], &order, reactions));
     }
-    // CalculiX writes the error estimator whenever stresses are requested, unless `NOE`
-    // switches it off.
-    if (has("S") || has("ERR")) && !has("NOE") {
-        let error = stress_error(ctx.table, ctx.model, stresses);
-        fields.push(ResultField {
-            name: "ERROR".into(),
-            components: vec!["STR(%)".into()],
-            nodes: order.iter().map(|&(id, _)| id).collect(),
-            values: vec![order.iter().map(|&(_, i)| error[i as usize]).collect()],
-        });
-    }
     if has("PEEQ") {
         let peeq = match material {
             Some(m) if m.per_point > 0 => scalar_of(m, 0),
@@ -367,23 +367,50 @@ pub fn write_increment(
                 values: vec![0.0; stresses.offsets.last().copied().unwrap_or(0) as usize],
             },
         };
-        let average = nodal_average_scalar(ctx.table, ctx.model, &peeq);
-        fields.push(scalar_field("PE", "PE", &order, &average));
+        let nodal = nodal_average_scalar(table, model, &peeq);
+        fields.push(scalar_field("PE", "PE", &order, &nodal));
     }
     if has("ENER") {
         let energy = internal_energy_density(stresses, strains);
-        let average = nodal_average_scalar(ctx.table, ctx.model, &energy);
-        fields.push(scalar_field("ENER", "ENER", &order, &average));
+        let nodal = nodal_average_scalar(table, model, &energy);
+        fields.push(ResultField {
+            name: "ENER".into(),
+            components: vec!["ENER".into()],
+            nodes: order.iter().map(|&(id, _)| id).collect(),
+            values: vec![order.iter().map(|&(_, i)| nodal[i as usize]).collect()],
+        });
     }
-    let known = [
-        "U", "S", "E", "RF", "ERR", "NOE", "PEEQ", "ENER", "NT", "HFL", "RFL",
-    ];
-    let mut reported = Vec::new();
-    for v in &variables {
-        if !known.contains(&v.as_str()) && !reported.contains(v) {
-            reported.push(v.clone());
-        }
+    // CalculiX writes the error estimator whenever stresses are requested, unless `NOE`
+    // switches it off.
+    if (has("S") || has("ERR")) && !has("NOE") {
+        let error = stress_error(table, model, stresses);
+        fields.push(ResultField {
+            name: "ERROR".into(),
+            components: vec!["STR(%)".into()],
+            nodes: order.iter().map(|&(id, _)| id).collect(),
+            values: vec![order.iter().map(|&(_, i)| error[i as usize]).collect()],
+        });
     }
+    fields
+}
+
+/// Appends the fields of a time increment to the results.
+#[allow(clippy::too_many_arguments)]
+pub fn write_increment(
+    ctx: &mut ProcedureContext<'_>,
+    step: &Step,
+    increment: u32,
+    _time: f64,
+    total: f64,
+    u: &[f64],
+    reactions: &[f64],
+    stresses: &IntegrationPointField,
+    strains: &IntegrationPointField,
+    material: Option<&IntegrationPointField>,
+) -> Result<()> {
+    let fields = build_fields_with(
+        ctx.table, ctx.model, step, u, reactions, stresses, strains, material,
+    );
     ctx.results.increments.push(ResultsIncrement {
         step: ctx.step_number,
         increment,
@@ -395,14 +422,14 @@ pub fn write_increment(
         nodal_diameter: None,
         fields,
     });
-    let _ = &reported;
     Ok(())
 }
 
 /// The output variables of a step the solver does not produce yet, for a warning.
 pub fn unsupported_outputs(step: &Step) -> Vec<String> {
+    // `V` only means something in dynamic steps; CalculiX ignores it in the others.
     let known = [
-        "U", "S", "E", "RF", "ERR", "NOE", "PEEQ", "ENER", "NT", "HFL", "RFL",
+        "U", "V", "S", "E", "RF", "ERR", "NOE", "PEEQ", "ENER", "NT", "HFL", "RFL", "SEN",
     ];
     let mut out = Vec::new();
     for v in requested(step) {
