@@ -1,0 +1,9 @@
+name = "statisch-dynamisch"
+area = "dynamic"
+class = "E"
+stage = "M3"
+features = ["*HEADING", "*NODE", "*ELEMENT", "C3D20R", "*NSET", "*ELSET", "*MATERIAL", "*DENSITY", "*ELASTIC", "*SOLID SECTION", "*AMPLITUDE", "*STEP", "*STATIC", "*BOUNDARY", "*CLOAD", "*DLOAD", "*NODE FILE", "*EL FILE", "*END STEP", "*DYNAMIC"]
+source = "plx-io writer test"
+reference = "ccx 2.21"
+note = "a dynamic step after a static preload: the initial accelerations differ from ccx by about 2e-3 (DISP agrees to 2e-5), see docs/solver/SCHNITTSTELLEN.md (Stand nach M3 T13)"
+deviations = ["VELO", "STRESS", "TOSTRAIN", "FORC"]
