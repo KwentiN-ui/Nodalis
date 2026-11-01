@@ -5,7 +5,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::corpus::load_results;
-use crate::{Comparison, Fixture, compare_dat, compare_frd_with, load_reference};
+use crate::{Comparison, Fixture, compare_dat_with_noise, compare_frd_with, load_reference};
 
 /// How a fixture went.
 #[derive(Clone, Debug, PartialEq)]
@@ -117,7 +117,7 @@ pub fn run_fixture(solver: &Path, fixture: &Fixture, work: &Path) -> Report {
     );
     match (&reference.dat, &results.dat) {
         (Some(r), Some(c)) => {
-            let dat = compare_dat(r, c, class);
+            let dat = compare_dat_with_noise(r, c, class, &fixture.meta.noise);
             comparison.failures.extend(dat.failures);
             comparison.max_relative = comparison.max_relative.max(dat.max_relative);
             comparison.compared += dat.compared;

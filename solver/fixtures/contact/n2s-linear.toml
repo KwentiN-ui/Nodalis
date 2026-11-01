@@ -1,0 +1,7 @@
+name = "n2s-linear"
+area = "contact"
+class = "C"
+stage = "M3"
+features = ["*HEADING", "*NODE", "*ELEMENT", "C3D8", "SPRING1", "*NSET", "*ELSET", "*SURFACE", "*MATERIAL", "*ELASTIC", "*SOLID SECTION", "*SPRING", "*SURFACE INTERACTION", "*SURFACE BEHAVIOR", "*CONTACT PAIR", "*STEP", "*STATIC", "*BOUNDARY", "*CLOAD", "*DLOAD", "*NODE FILE", "*EL FILE", "*CONTACT FILE", "*END STEP"]
+source = "hand-written variant of a plx-io contact fixture"
+reference = "ccx 2.21"

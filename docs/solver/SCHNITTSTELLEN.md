@@ -733,6 +733,80 @@ Was T8 gebaut hat und wo es von den Signaturen oben abweicht:
   hydrostatischen Anteil ab (Volumenänderung des plastischen Flusses zweiter Ordnung).
 - `.dat`: Blöcke in der Reihenfolge der `*EL PRINT`/`*NODE PRINT`-Karten der Eingabe.
 
+## Stand nach M3 T11 (Penalty-Kontakt Node-to-Face und Face-to-Face)
+
+Was T11 gebaut hat und wo es von der Trait-Skizze oben abweicht (kein Trait, ein
+konkretes `ContactModel`; Mortar kommt mit T12 und wird bis dahin mit `not implemented yet`
+abgelehnt):
+
+- `plxs-contact::ContactModel::new(&mut Model)` löst die `*CONTACT PAIR`s auf: Slave-Punkte
+  (Node-to-Face: die Slave-Knoten mit ihrer Knotenfläche; Face-to-Face: je Slave-Face vier
+  Dreiecke um den Mittelpunkt mit der 7-Punkt-Regel, 28 Punkte je Viereck), Master-Faces,
+  Gesetz (`law::Law`), Reibung (`law::FrictionLaw`), `*CLEARANCE`, `ADJUST` (verschiebt
+  Slave-Knoten auf den Master, ändert also `model.nodes`). `begin_step` wendet
+  `*MODEL CHANGE, TYPE=CONTACT PAIR` (über `State::inactive_pairs`) und `*CHANGE FRICTION`
+  an; `prepare` sucht je Inkrement die Kandidaten-Faces (Gitter) und liefert die DOF-Blöcke
+  für das Matrixmuster; `evaluate` liefert je Punkt eine Penalty-Feder (`ContactElement`:
+  DOFs, symmetrische Tangente, innere Kraft, unsymmetrischer Rest) mit Return-Mapping für
+  die Reibung; `output` die Knotenfelder und `*CONTACT PRINT`-Blöcke.
+- Gleitreibung macht die Tangente unsymmetrisch (`dτ/dd = μ dp/dd` entlang der
+  Gleitrichtung). `plxs-linalg::gmres` löst dann `(K + E) Δv = r` mit dem faktorisierten
+  symmetrischen Teil als Vorkonditionierer (rechts, Restart 60); ohne Gleiten bleibt es
+  beim direkten LDLᵀ-Solve. Ohne den Rest konvergiert μ = 10 nicht.
+- Prädiktor: in der ersten Iteration eines Inkrements bekommen Punkte innerhalb des Cutoffs
+  ohne Druck die Steifigkeit des Gesetzes und die Haftsteifigkeit, aber keine Kraft
+  (Face-to-Face: offene Punkte; Node-to-Face: Knoten im Zug). Ohne sie treibt der erste
+  Schritt einen nur über Kontakt gehaltenen Körper weg oder lässt alle Punkte gleiten.
+- `plxs-procedures`: `*STATIC` mit Kontakt läuft immer nichtlinear (NonlinearStatic, auch
+  ohne NLGEOM). Ein Wechsel des Kontaktstatus (offen/haftend/gleitend) erzwingt eine weitere
+  Iteration wie ein Gap. CONT.EL. in `.cvg`/`.sta` zählt die Kontaktfedern mit Kraft.
+  Kontakt in Wärme- und gekoppelten Steps sowie auf 2D-Elementen: `not implemented yet`.
+- IR (additiv): `HistoryOutput.surfaces: Option<(slave, master)>` für
+  `*CONTACT PRINT, SLAVE=, MASTER=`.
+- Mehrschritt-Randbedingungen (auch für T8 relevant): `Spc::start_from_previous` lässt jede
+  vorgeschriebene Verschiebung eines nichtlinearen Steps beim Wert des Vorschritts beginnen;
+  RAMP geht linear zum neuen Wert, STEP/eigene Amplitude springt im ersten Inkrement. Vorher
+  blieb ein im Folgestep neu gehaltener Freiheitsgrad auf seinem alten Wert stehen, und ein
+  in beiden Steps gleich vorgegebener Wert wurde doppelt gezählt (Fixture
+  `membran-vorgespannt`: U1 0,2 statt 0,1; dort bleibt eine Abweichung in U3, die nicht vom
+  Kontakt kommt).
+- Abnahmetest `solver/plxs-cli/tests/contact_corpus.rs`: 28 von 32 `contact/*`-Fixtures grün,
+  der Rest (Mortar ×2, CPE8-Kontakt, Kontakt im gekoppelten Step) mit `not implemented yet`.
+  Neu: neun handgeschriebene Varianten (`n2s-*` mit HARD/LINEAR/c0/EXPONENTIAL, Reibung,
+  Haftung μ = 10, Clearance, Model Change, Contact Print; `s2s-contact-print`).
+  `plxs-verify` kennt `noise` jetzt auch für `.dat`-Felder (`MOMENT_ABOUT_CG`).
+
+### Beobachtungen an CalculiX 2.21 (Kontakt, nur aus Ausgaben)
+
+- Node-to-Face, LINEAR: geglättet `p = K d/2 + (K d/π)·atan(K d/(π σ∞))`, σ∞ ohne Angabe
+  `E/70000` des Slave-Materials; Feder innerhalb `5 c0` (mit c0) bzw. `10⁻³ √A` (A
+  Knotenfläche). EXPONENTIAL `p = p0·10^(2d/c0)` bis zum Cutoff c0. HARD = LINEAR mit
+  K = 50 E. Reibung wirkt auch im Zug (Schub an Knoten mit negativem CPRESS), Grenze μ|p|.
+  `*CLEARANCE` wird ignoriert. Ein TABULAR-Gesetz mit erstem Punkt (0, 0) ergab in ccx gar
+  keinen Kontakt (Körper fliegt weg); keine Fixture.
+- Face-to-Face: nur Überschneidung trägt (`p = K d`, σ∞ und c0 ohne Wirkung, EXPONENTIAL nur
+  für d > 0, TABULAR ergab Druck null). Integration wie oben, exakt an den Contact-Print-Werten
+  bestätigt (Reihenfolge der Punkte stimmt).
+- `.frd` `CONTACT`: COPEN, CSLIP1, CSLIP2, CPRESS, CSHEAR1, CSHEAR2; COPEN negativ bei
+  Durchdringung; CSLIP ist die gesamte tangentiale Relativverschiebung (bei Haftung = τ/λ),
+  reibungsfrei null. Node-to-Face listet nur Knoten mit Feder, Face-to-Face alle Knoten.
+  **Abweichung:** die Extrapolation der Face-to-Face-Werte auf die Knoten ist nicht
+  identifiziert (manche Knoten tragen den exakten Knotenwert, andere einen
+  Integrationspunktwert, CPRESS auch negativ); plxs passt je Face bilinear an und mittelt.
+  Die S2S-Fixtures vergleichen `CONTACT` deshalb nicht (`deviations`), U/S/FORC und der
+  Contact Print stimmen.
+- `.dat` (`*CONTACT PRINT` braucht SLAVE/MASTER): Blöcke „… (slave element+face,…)“ bzw.
+  „… (slave node,…)“ „for all contact elements and time“, „total number of contact elements
+  for time“, „statistics for slave set …“ mit vier beschrifteten Zeilen (Kraft+Moment um den
+  Ursprung, Schwerpunkt+mittlere Normale, Moment um den Schwerpunkt, Fläche+Normalkraft
+  (+ = Zug)+Schub); die Statistik nur für Face-to-Face.
+- `FORC` enthält die Kontaktkräfte.
+- Node-to-Face mit Slave-Knoten, die über den Master-Rand hinausgleiten: ccx lässt im
+  Folgestep Eckknoten fallen, Kantenmittenknoten mit gleichem Überstand nicht; die Regel ist
+  nicht identifiziert (plxs: Projektion am Inkrementanfang mehr als 10⁻³ in natürlichen
+  Koordinaten außerhalb → keine Feder). Deshalb keine N2S-Fixture zu CHANGE FRICTION; die
+  S2S-Fixture `region-friction-change` deckt es ab.
+
 ## Was M1 zu liefern hat (Abnahme)
 
 - `solver_check::run` aus `plx-app` besteht mit `plxs` als Executable (Kragbalken mit Kraft

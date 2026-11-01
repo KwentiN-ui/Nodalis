@@ -149,26 +149,32 @@ fn exponential(c0: f64, p0: f64, d: f64) -> (f64, f64) {
     (p, b * p)
 }
 
+/// The tabular relation: zero below the first point, linear interpolation, constant beyond
+/// the last point. Outside the table the derivative is that of the nearest segment, so
+/// that a spring at zero pressure (or saturated) still has a stiffness for the next
+/// iteration instead of leaving the body unsupported.
 fn tabular(points: &[(f64, f64)], d: f64) -> (f64, f64) {
-    let Some(first) = points.first() else {
+    let Some(&first) = points.first() else {
         return (0.0, 0.0);
     };
-    if d <= first.0 {
-        return if points.len() == 1 || d < first.0 {
-            (if d < first.0 { 0.0 } else { first.1 }, 0.0)
-        } else {
-            (first.1, 0.0)
-        };
+    let slope = |w: &[(f64, f64)]| {
+        let ((x0, p0), (x1, p1)) = (w[0], w[1]);
+        if x1 > x0 { (p1 - p0) / (x1 - x0) } else { 0.0 }
+    };
+    if points.len() == 1 {
+        return (if d < first.0 { 0.0 } else { first.1 }, 0.0);
+    }
+    if d < first.0 {
+        return (0.0, slope(&points[..2]));
     }
     for w in points.windows(2) {
-        let (x0, p0) = w[0];
-        let (x1, p1) = w[1];
-        if d <= x1 {
-            let slope = if x1 > x0 { (p1 - p0) / (x1 - x0) } else { 0.0 };
-            return (p0 + slope * (d - x0), slope);
+        if d <= w[1].0 {
+            let s = slope(w);
+            return (w[0].1 + s * (d - w[0].0), s);
         }
     }
-    (points.last().unwrap().1, 0.0)
+    let n = points.len();
+    (points[n - 1].1, slope(&points[n - 2..]))
 }
 
 /// Coulomb friction with a stick slope.

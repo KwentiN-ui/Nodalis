@@ -43,8 +43,13 @@ pub fn contact_fields(
     if !has("CDIS") && !has("CSTR") && !has("CELS") {
         return out;
     }
-    let (values, energy) =
-        plxs_contact::output::nodal_values(contact, evaluation, model.nodes.len());
+    let nodal = plxs_contact::output::nodal_values(contact, evaluation, model.nodes.len());
+    let (values, energy) = (&nodal.values, &nodal.energy);
+    let order: Vec<(u32, u32)> = order
+        .iter()
+        .copied()
+        .filter(|&(_, i)| nodal.listed.as_ref().is_none_or(|l| l[i as usize]))
+        .collect();
     let nodes: Vec<u32> = order.iter().map(|&(id, _)| id).collect();
     if has("CDIS") || has("CSTR") {
         let names = ["COPEN", "CSLIP1", "CSLIP2", "CPRESS", "CSHEAR1", "CSHEAR2"];

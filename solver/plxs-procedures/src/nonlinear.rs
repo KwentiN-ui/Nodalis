@@ -466,6 +466,7 @@ impl Procedure for NonlinearStatic {
                         &ctx.contact,
                         evaluation,
                         request,
+                        &ctx.model.nodes.ids,
                         ctx.step_number,
                         increment,
                         total,
@@ -621,22 +622,6 @@ impl NonlinearStatic {
                     }
                 }
                 status.extend(evaluation.status_key());
-                if std::env::var_os("PLXS_DEBUG_CONTACT").is_some() {
-                    let mut c = [0usize; 3];
-                    let mut pmax = 0.0_f64;
-                    for r in evaluation.points.iter().flatten() {
-                        match r.state.status {
-                            plxs_core::state::ContactStatus::Open => c[0] += 1,
-                            plxs_core::state::ContactStatus::Stick => c[1] += 1,
-                            plxs_core::state::ContactStatus::Slip => c[2] += 1,
-                        }
-                        pmax = pmax.max(r.state.pressure);
-                    }
-                    eprintln!(
-                        "DEBUG contact open {} stick {} slip {} pmax {pmax:e}",
-                        c[0], c[1], c[2]
-                    );
-                }
                 Some(evaluation)
             } else {
                 None

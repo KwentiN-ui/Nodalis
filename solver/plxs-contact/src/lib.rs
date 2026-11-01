@@ -339,6 +339,17 @@ impl ContactModel {
                 .iter()
                 .find(|c| c.slave == pair.slave && c.master == pair.master)
                 .map(|c| c.value);
+            // CalculiX applies *CLEARANCE to face-to-face contact only (observed: a
+            // node-to-face pair with a clearance behaves as without one).
+            let clearance = if pair.kind == ContactKind::NodeToSurface && clearance.is_some() {
+                out.warnings.push(format!(
+                    "*CLEARANCE of contact pair {} / {} is ignored: it applies to face-to-face contact only",
+                    pair.slave, pair.master
+                ));
+                None
+            } else {
+                clearance
+            };
             let mut prepared = Pair {
                 index,
                 kind: pair.kind,
@@ -517,6 +528,20 @@ impl ContactModel {
                 continue;
             }
             pair.prepare_candidates(&current);
+            if pair.kind == ContactKind::NodeToSurface && !pair.law.is_tied() {
+                // Node-to-face: a slave node whose projection at the start of the increment
+                // falls beside the master surface gets no spring in this increment
+                // (observed: ccx drops a node that slid past the master's edge in an
+                // earlier step, and keeps one that slides off within the increment).
+                for p in 0..pair.points.len() {
+                    let beside = pair.closest(p, &current).is_none_or(|(f, natural, ..)| {
+                        !pair.master[f as usize].contains(natural, 1e-3)
+                    });
+                    if beside {
+                        pair.candidates[p].clear();
+                    }
+                }
+            }
             for (point, candidates) in pair.points.iter().zip(&pair.candidates) {
                 let mut dofs: Vec<u32> = Vec::new();
                 for &n in &point.nodes {
@@ -744,7 +769,9 @@ impl Pair {
         // Sliding: d(shear)/d(overclosure) = μ dp/dd along the slip direction.
         let mut coupling = [0.0; 2];
         match self.friction {
-            Some(friction) if tied || pressure > 0.0 => {
+            // Node-to-face springs keep their friction in tension as well (observed: ccx
+            // reports shear at nodes with a negative CPRESS), bounded by μ |p|.
+            Some(friction) if tied || pressure > 0.0 || (node_to_face && pressure < 0.0) => {
                 let lambda = friction.stick;
                 let trial = [
                     lambda * (tangential[0] - slip[0]),
@@ -754,12 +781,12 @@ impl Pair {
                 let limit = if tied {
                     f64::INFINITY
                 } else {
-                    friction.mu * pressure
+                    friction.mu * pressure.abs()
                 };
                 if size <= limit || size == 0.0 {
                     shear = trial;
                     tangent = [[lambda, 0.0], [0.0, lambda]];
-                    tangential_energy = 0.5 * lambda * (size * size) / lambda.max(1e-300);
+                    tangential_energy = 0.5 * size * size / lambda;
                 } else {
                     status = ContactStatus::Slip;
                     let dir = [trial[0] / size, trial[1] / size];
@@ -774,10 +801,11 @@ impl Pair {
                         [-a * dir[0] * dir[1], a * (1.0 - dir[1] * dir[1])],
                     ];
                     tangential_energy = 0.5 * limit * limit / lambda;
-                    coupling = [friction.mu * dp * dir[0], friction.mu * dp * dir[1]];
+                    let dlimit = friction.mu * dp * pressure.signum();
+                    coupling = [dlimit * dir[0], dlimit * dir[1]];
                 }
             }
-            Some(friction) if open_face => {
+            Some(friction) if open_face || (predictor && !tied) => {
                 // Within the cutoff but not touching: the stick stiffness as a predictor,
                 // without a force, like the normal stiffness above.
                 slip = tangential;

@@ -273,6 +273,15 @@ impl ContactFace {
         }
     }
 
+    /// Whether natural coordinates lie on the face, edges included up to `tolerance`.
+    pub fn contains(&self, p: [f64; 2], tolerance: f64) -> bool {
+        if self.corners == 4 {
+            p[0].abs() <= 1.0 + tolerance && p[1].abs() <= 1.0 + tolerance
+        } else {
+            p[0] >= -tolerance && p[1] >= -tolerance && p[0] + p[1] <= 1.0 + tolerance
+        }
+    }
+
     /// Bounding box of the face nodes.
     pub fn bounds(&self, coords: &[[f64; 3]]) -> ([f64; 3], [f64; 3]) {
         let mut lo = [f64::INFINITY; 3];

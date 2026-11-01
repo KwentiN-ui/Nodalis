@@ -12,16 +12,27 @@ use plxs_core::step::HistoryOutput;
 use crate::geometry::{cross, dot, norm, normalized, scale};
 use crate::{ContactModel, Evaluation};
 
-/// The six components of the `CONTACT` field and `CELS` for every node (dense index): zero
-/// at nodes without a contact element.
+/// The nodal contact results: the six components of the `CONTACT` field and `CELS` for
+/// every node (dense index, zero at nodes without a contact element) and which nodes the
+/// fields list. CalculiX lists every node when a face-to-face pair exists, else (node-to-face
+/// only) just the slave nodes with a contact spring.
+pub struct NodalValues {
+    pub values: Vec<[f64; 6]>,
+    pub energy: Vec<f64>,
+    /// `None`: all nodes.
+    pub listed: Option<Vec<bool>>,
+}
+
 pub fn nodal_values(
     contact: &ContactModel,
     evaluation: &Evaluation,
     node_count: usize,
-) -> (Vec<[f64; 6]>, Vec<f64>) {
+) -> NodalValues {
     let mut sum = vec![[0.0; 6]; node_count];
     let mut energy = vec![0.0; node_count];
     let mut count = vec![0u32; node_count];
+    let mut listed = vec![false; node_count];
+    let mut faces = false;
     for (pair, results) in contact.pairs.iter().zip(&evaluation.points) {
         if pair.slave_faces.is_empty() || pair.points.iter().all(|p| p.face.is_none()) {
             // Node-to-face: the node's own values.
@@ -30,11 +41,13 @@ pub fn nodal_values(
                 if r.element {
                     sum[n] = values_of(r);
                     energy[n] += r.energy;
+                    listed[n] = true;
                 }
                 count[n] = count[n].max(1);
             }
             continue;
         }
+        faces = true;
         // Face-to-face: per slave face, extrapolate the integration point values.
         let mut start = 0;
         for (f, face) in pair.slave_faces.iter().enumerate() {
@@ -45,19 +58,21 @@ pub fn nodal_values(
                     .count();
             let points = &results[start..end];
             if points.iter().any(|r| r.element) {
-                let mut nodal = vec![[0.0; 6]; face.nodes.len()];
-                for c in 0..6 {
-                    let values: Vec<f64> = points
-                        .iter()
-                        .map(|r| if r.element { values_of(r)[c] } else { 0.0 })
-                        .collect();
-                    for (k, v) in face.extrapolate(&values).into_iter().enumerate() {
-                        nodal[k][c] = v;
-                    }
-                }
-                for (k, &node) in face.nodes.iter().enumerate() {
-                    for c in 0..6 {
-                        sum[node as usize][c] += nodal[k][c];
+                let columns: Vec<Vec<f64>> = (0..6)
+                    .map(|c| {
+                        let values: Vec<f64> = points
+                            .iter()
+                            .map(|r| if r.element { values_of(r)[c] } else { 0.0 })
+                            .collect();
+                        face.extrapolate(&values)
+                    })
+                    .collect();
+                let nodal: Vec<[f64; 6]> = (0..face.nodes.len())
+                    .map(|k| std::array::from_fn(|c| columns[c][k]))
+                    .collect();
+                for (values, &node) in nodal.iter().zip(&face.nodes) {
+                    for (s, v) in sum[node as usize].iter_mut().zip(values) {
+                        *s += v;
                     }
                     count[node as usize] += 1;
                 }
@@ -81,7 +96,11 @@ pub fn nodal_values(
             }
         }
     }
-    (sum, energy)
+    NodalValues {
+        values: sum,
+        energy,
+        listed: (!faces).then_some(listed),
+    }
 }
 
 fn values_of(r: &crate::PointResult) -> [f64; 6] {
@@ -100,6 +119,7 @@ pub fn history_blocks(
     contact: &ContactModel,
     evaluation: &Evaluation,
     request: &HistoryOutput,
+    node_ids: &[u32],
     step: u32,
     increment: u32,
     time: f64,
@@ -121,6 +141,15 @@ pub fn history_blocks(
             })
         })
         .collect();
+    // Face-to-face points are listed by slave element and face, node-to-face ones by node.
+    let slave = if pairs
+        .iter()
+        .any(|&i| contact.pairs[i].points.iter().any(|p| p.face.is_some()))
+    {
+        "slave element+face"
+    } else {
+        "slave node"
+    };
     let elements = |f: &dyn Fn(&crate::Pair, &crate::PointResult, usize) -> Vec<f64>| {
         let mut rows = Vec::new();
         for &i in &pairs {
@@ -129,16 +158,17 @@ pub fn history_blocks(
                 if !r.element {
                     continue;
                 }
-                let (element, face) = match pair.points[p].face {
+                let mut values = Vec::with_capacity(4);
+                let id = match pair.points[p].face {
                     Some((k, _)) => {
                         let f = &pair.slave_faces[k as usize];
-                        (f.element_id, f64::from(f.face_number))
+                        values.push(f64::from(f.face_number));
+                        f.element_id
                     }
-                    None => (pair.points[p].nodes[0], 0.0),
+                    None => node_ids[pair.points[p].nodes[0] as usize],
                 };
-                let mut values = vec![face];
                 values.extend(f(pair, r, p));
-                rows.push((element, values));
+                rows.push((id, values));
             }
         }
         rows
@@ -157,22 +187,26 @@ pub fn history_blocks(
                 ));
             }
             "CDIS" => out.push(block(
-                "relative contact displacement (slave element+face,normal,tang1,tang2)",
+                &format!("relative contact displacement ({slave},normal,tang1,tang2)"),
                 "",
                 elements(&|_, r, _| vec![r.state.gap, r.tangential[0], r.tangential[1]]),
             )),
             "CSTR" => out.push(block(
-                "contact stress (slave element+face,press,tang1,tang2)",
+                &format!("contact stress ({slave},press,tang1,tang2)"),
                 "",
                 elements(&|_, r, _| vec![r.state.pressure, r.shear[0], r.shear[1]]),
             )),
             "CELS" => out.push(block(
-                "contact spring energy (slave element+face,energy)",
+                &format!("contact spring energy ({slave},energy)"),
                 "",
                 elements(&|_, r, _| vec![r.energy]),
             )),
             "CF" => {
-                for &i in &pairs {
+                // CalculiX prints the statistics for face-to-face pairs only.
+                for &i in pairs
+                    .iter()
+                    .filter(|&&i| contact.pairs[i].points.iter().any(|p| p.face.is_some()))
+                {
                     let pair = &contact.pairs[i];
                     let results = &evaluation.points[i];
                     let mut force = [0.0; 3];

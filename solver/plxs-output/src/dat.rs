@@ -44,7 +44,63 @@ pub fn write_dat_to(out: &mut impl Write, results: &Results) -> std::io::Result<
     Ok(())
 }
 
+/// The blocks of `*CONTACT PRINT` (empty set): headings without a set, elements with their
+/// face, the statistics in four labelled rows.
+fn write_contact_block(out: &mut impl Write, block: &HistoryBlock) -> std::io::Result<()> {
+    let time = fortran_time(block.time);
+    writeln!(out)?;
+    let q = &block.quantity;
+    if q.starts_with("total number of contact elements") {
+        writeln!(out, " {q} for time  {time}")?;
+        writeln!(out)?;
+        for (_, values) in &block.rows {
+            writeln!(out, "{:>17}", values.first().copied().unwrap_or(0.0) as u64)?;
+        }
+        writeln!(out)?;
+        return Ok(());
+    }
+    if q.starts_with("statistics for slave set") {
+        writeln!(out, " {q} and time  {time}")?;
+        let labels = [
+            "total surface force (fx,fy,fz) and moment about the origin (mx,my,mz)",
+            "center of gravity and mean normal",
+            "moment about the center of gravity(mx,my,mz)",
+            "area,  normal force (+ = tension) and shear force (size)",
+        ];
+        for (label, (_, values)) in labels.iter().zip(&block.rows) {
+            writeln!(out)?;
+            writeln!(out, "   {label}")?;
+            writeln!(out)?;
+            write!(out, "  ")?;
+            for v in values {
+                write!(out, " {}", fortran_e13(*v))?;
+            }
+            writeln!(out)?;
+        }
+        return Ok(());
+    }
+    writeln!(out, " {q} for all contact elements and time {time}")?;
+    writeln!(out)?;
+    let faces = q.contains("element+face");
+    for (id, values) in &block.rows {
+        let mut values = values.as_slice();
+        write!(out, "{id:>10}")?;
+        if faces {
+            write!(out, "{:>11}", values.first().copied().unwrap_or(0.0) as u32)?;
+            values = &values[1..];
+        }
+        for v in values {
+            write!(out, " {}", fortran_e13(*v))?;
+        }
+        writeln!(out)?;
+    }
+    Ok(())
+}
+
 fn write_block(out: &mut impl Write, block: &HistoryBlock) -> std::io::Result<()> {
+    if block.set.is_empty() && is_contact_quantity(&block.quantity) {
+        return write_contact_block(out, block);
+    }
     writeln!(out)?;
     writeln!(
         out,
@@ -73,4 +129,12 @@ fn write_block(out: &mut impl Write, block: &HistoryBlock) -> std::io::Result<()
         writeln!(out)?;
     }
     Ok(())
+}
+
+fn is_contact_quantity(quantity: &str) -> bool {
+    quantity.starts_with("total number of contact elements")
+        || quantity.starts_with("statistics for slave set")
+        || quantity.starts_with("relative contact displacement")
+        || quantity.starts_with("contact stress")
+        || quantity.starts_with("contact spring energy")
 }
