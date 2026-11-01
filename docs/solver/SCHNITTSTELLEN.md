@@ -99,6 +99,12 @@ impl Session {
 pub enum StepOutcome { Converged, Diverged { increment: u32, message: String }, Partial { increments: u32 } }
 ```
 
+`Snapshot { model_fingerprint, state, average_force }` (M3 T16): `average_force` ist der
+zeitgemittelte Kraftmaßstab der Residuenprüfung, den die Session von Step zu Step trägt;
+ohne ihn konvergiert ein fortgesetzter Lauf nicht genau wie der Lauf von vorn. Der
+Fingerprint deckt das Modell ohne Sets, Surfaces und Amplituden ab (ein fortsetzendes Modell
+darf solche ergänzen, siehe `KONZEPT_CCX_ABLOESUNG.md` 3.5).
+
 Ein `rayon`-Pool je Session mit `threads` Threads (Default: `OMP_NUM_THREADS`, sonst alle
 Kerne). Kein globaler Zustand: mehrere Sessions pro Prozess müssen möglich sein.
 
