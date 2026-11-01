@@ -2,17 +2,18 @@
 //! `plxs` as a library in this process ([`BuiltinJob`]), or CalculiX as a child process
 //! ([`plx_job::Job`]). [`Run`] hides which one it is from the monitor and the project.
 //!
-//! The built-in run takes the same input text as CalculiX would and writes the same result
-//! files (`.frd`, `.dat`, `.sta`) into the work directory, so that results are kept, bound
-//! into the project and read back without change; its progress comes as typed events, which
-//! are rendered into CalculiX's lines for the monitor. A later stage keeps the results in
-//! memory instead of the files.
+//! The built-in run takes the same input text as CalculiX would. Its results stay in memory
+//! ([`Run::solver_results`]) and are written as one binary file `<name>.plxr`
+//! ([`plx_results::SolverResults`]) instead of CalculiX's `.frd` and `.dat`, which PrePoLix
+//! reads without parsing text; the `.sta` file is written as by CalculiX. Its progress comes
+//! as typed events, which are rendered into CalculiX's lines for the monitor.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use plx_job::{Job, JobStatus, live::LiveProgress};
+use plx_results::SolverResults;
 use plxs_core::{CancelToken, Error, ProgressEvent};
 use serde::{Deserialize, Serialize};
 
@@ -68,7 +69,7 @@ impl Engine {
 const MIN_RESULT_SIZE: u64 = 300;
 
 /// Files of a previous run that would be mistaken for results of this one.
-const OLD_FILES: [&str; 7] = ["inp", "dat", "sta", "cvg", "12d", "cel", "frd"];
+const OLD_FILES: [&str; 8] = ["inp", "dat", "sta", "cvg", "12d", "cel", "frd", "plxr"];
 
 /// An analysis running or finished on either engine.
 pub enum Run {
@@ -183,11 +184,25 @@ impl Run {
         plx_job::parse_sta(&text)
     }
 
-    /// The result file, once results have been written to it.
+    /// The results file, once results have been written to it: `.frd` of CalculiX, `.plxr`
+    /// of the built-in solver.
     pub fn results(&self) -> Option<PathBuf> {
-        let path = self.file("frd");
-        let size = std::fs::metadata(&path).ok()?.len();
-        (size > MIN_RESULT_SIZE).then_some(path)
+        match self {
+            Run::Process(_) => {
+                let path = self.file("frd");
+                let size = std::fs::metadata(&path).ok()?.len();
+                (size > MIN_RESULT_SIZE).then_some(path)
+            }
+            Run::Builtin(job) => job.results_written().then(|| job.results_file()),
+        }
+    }
+
+    /// The results of the built-in solver in memory, once it has finished with results.
+    pub fn solver_results(&self) -> Option<Arc<SolverResults>> {
+        match self {
+            Run::Process(_) => None,
+            Run::Builtin(job) => job.solver_results(),
+        }
     }
 
     pub fn file(&self, extension: &str) -> PathBuf {
@@ -203,6 +218,8 @@ pub struct BuiltinJob {
     name: String,
     work_dir: PathBuf,
     output: Arc<Mutex<Vec<String>>>,
+    /// The results, once the solver has finished with some.
+    solved: Arc<Mutex<Option<Arc<SolverResults>>>>,
     live: LiveProgress,
     cancel: CancelToken,
     handle: Option<JoinHandle<Finished>>,
@@ -262,11 +279,15 @@ impl BuiltinJob {
         let options = plxs_session::JobOptions {
             threads: threads as usize,
             pool: Some(pool(threads)?),
+            write_files: false,
             cancel: cancel.clone(),
             ..plxs_session::JobOptions::new(work_dir, name)
         };
         let input = input.to_owned();
         let lines = Arc::clone(&output);
+        let solved = Arc::new(Mutex::new(None));
+        let keep_results = Arc::clone(&solved);
+        let results_file = work_dir.join(format!("{name}.{}", plx_results::solver::EXTENSION));
         let diagnostics = Arc::new(Mutex::new(None));
         let found = Arc::clone(&diagnostics);
         let handle = std::thread::Builder::new()
@@ -278,6 +299,7 @@ impl BuiltinJob {
                         say(line);
                     }
                 };
+                let mut kept = None;
                 let keep = |list: Vec<Diagnostic>| {
                     *found.lock().unwrap_or_else(|e| e.into_inner()) = Some(list);
                 };
@@ -314,8 +336,28 @@ impl BuiltinJob {
                     };
                 }
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    plxs_session::run_job(&input, Some(&input_path), &options, &mut progress)
+                    plxs_session::run_job_keeping(
+                        &input,
+                        Some(&input_path),
+                        &options,
+                        &mut progress,
+                        &mut kept,
+                    )
                 }));
+                // The results so far, also of a step that did not converge.
+                if let Some((model, results)) = kept {
+                    let results = SolverResults::new(&model, results, VERSION);
+                    match results.write(&results_file) {
+                        Ok(()) => {
+                            *keep_results.lock().unwrap_or_else(|e| e.into_inner()) =
+                                Some(Arc::new(results));
+                        }
+                        Err(error) => say(format!(
+                            "*ERROR: results not written to {}: {error}",
+                            results_file.display()
+                        )),
+                    }
+                }
                 // A singular matrix or a failed increment: the model check names the cause
                 // (free motions, untied nodes).
                 if let Ok(Err(error)) = &run {
@@ -381,6 +423,7 @@ impl BuiltinJob {
             name: name.to_owned(),
             work_dir: work_dir.to_owned(),
             output,
+            solved,
             live: LiveProgress::default(),
             cancel,
             handle: Some(handle),
@@ -448,8 +491,30 @@ impl BuiltinJob {
         &self.live
     }
 
+    /// The results file `<name>.plxr`.
+    pub fn results_file(&self) -> PathBuf {
+        self.file(plx_results::solver::EXTENSION)
+    }
+
+    /// The results in memory, once the solver has finished with some.
+    pub fn solver_results(&self) -> Option<Arc<SolverResults>> {
+        if self.status == JobStatus::Running {
+            return None;
+        }
+        self.solved
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     fn results_written(&self) -> bool {
-        std::fs::metadata(self.file("frd")).is_ok_and(|m| m.len() > MIN_RESULT_SIZE)
+        self.status != JobStatus::Running
+            && self
+                .solved
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+            && self.results_file().is_file()
     }
 
     fn join(&mut self) {
@@ -458,7 +523,12 @@ impl BuiltinJob {
         };
         let finished = handle.join().unwrap_or(Finished::Error);
         // A model check computes no results.
-        let results = !self.check && self.results_written();
+        let results = !self.check
+            && self
+                .solved
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some();
         if self.check && finished == Finished::Done {
             self.status = JobStatus::Completed;
             return;
@@ -517,7 +587,7 @@ S
 ";
 
     #[test]
-    fn built_in_run_writes_the_result_files() {
+    fn built_in_run_keeps_the_results_in_memory() {
         let dir = std::env::temp_dir().join(format!("plx-solve-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let solver = plx_job::Solver {
@@ -534,7 +604,18 @@ S
             "{output:#?}"
         );
         assert!(output.iter().any(|l| l.trim() == "STEP 1"), "{output:#?}");
-        assert!(run.results().is_some());
+        // The results stay in memory and in the `.plxr` file, without a `.frd` file.
+        assert_eq!(run.results(), Some(run.file("plxr")));
+        assert!(!run.file("frd").exists());
+        let solved = run.solver_results().unwrap();
+        let import = plx_results::from_solver(&solved);
+        assert_eq!(import.mesh.node_count(), 8);
+        let disp = import.increments[0].field("DISP").unwrap();
+        let u1 = disp.component("U1").unwrap();
+        assert!(u1.values.iter().all(|v| v.is_finite()));
+        assert!(u1.values.iter().any(|&v| v > 0.0));
+        let read = SolverResults::read(&run.file("plxr")).unwrap();
+        assert_eq!(read, *solved);
         assert!(run.file("inp").is_file());
         assert!(run.file("sta").is_file());
         let _ = std::fs::remove_dir_all(&dir);

@@ -11,6 +11,9 @@ plx-core.workspace = true
 plx-mesh.workspace = true
 plx-model.workspace = true
 glam.workspace = true
+plxs-core.workspace = true
+plxs-output.workspace = true
+postcard.workspace = true
 serde.workspace = true
 
 [lints]

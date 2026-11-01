@@ -10,15 +10,18 @@ pub use plx_model::equation;
 pub mod field_output;
 pub mod history_output;
 pub mod hot_spot;
+pub mod names;
 pub mod path;
 pub mod principal;
 pub mod saved_view;
+pub mod solver;
 pub mod transformation;
 
 pub use derived::{add_derived_components, principal_values};
 pub use equation::Equation;
 pub use field_output::{FieldOutput, FieldOutputKind, LimitBasis};
 pub use principal::{Principal, VectorSource};
+pub use solver::{SolverResults, from_solver};
 pub use transformation::{Transformation, TransformationKind};
 
 use serde::{Deserialize, Serialize};

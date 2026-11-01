@@ -491,8 +491,9 @@ pub struct Link {
     pub excluded: Vec<String>,
 }
 
-/// The files of a finished analysis kept in the project file: the input file CalculiX ran,
-/// its results (`.frd`) and history output (`.dat`).
+/// The results of a finished analysis kept in the project file: the input file the solver
+/// ran and its results, those of the built-in solver in [`BoundResults::solver`], those of
+/// CalculiX as its files (`.frd`, history output in `.dat`, eigenmodes in `.eig`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct BoundResults {
     /// The analysis the results belong to.
@@ -510,6 +511,10 @@ pub struct BoundResults {
     #[serde(default)]
     pub with_errors: bool,
     pub files: Vec<BoundFile>,
+    /// The results of the built-in solver, a `.plxr` file ([`plx_results::SolverResults`]),
+    /// read without a `.frd` file; CalculiX's results are among [`BoundResults::files`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solver: Option<BoundFile>,
     /// What the user defined on the results, restored with them; as of the last save.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<ResultsSettings>,
@@ -526,15 +531,107 @@ pub struct BoundFile {
 }
 
 impl BoundResults {
+    fn all_files(&self) -> impl Iterator<Item = &BoundFile> {
+        self.files.iter().chain(&self.solver)
+    }
+
     /// Size of the files as stored in the project.
     pub fn stored_size(&self) -> u64 {
-        self.files.iter().map(|f| f.data.len() as u64).sum()
+        self.all_files().map(|f| f.data.len() as u64).sum()
     }
 
     /// Size of the files themselves.
     pub fn size(&self) -> u64 {
-        self.files.iter().map(|f| f.size).sum()
+        self.all_files().map(|f| f.size).sum()
     }
+
+    /// The results of the built-in solver, read in memory; `None` for results of CalculiX.
+    pub fn solver_results(&self) -> Result<Option<plx_results::SolverResults>, ProjectError> {
+        let Some(file) = &self.solver else {
+            return Ok(None);
+        };
+        let bytes = unpack(file, Path::new(&file.name))?;
+        plx_results::SolverResults::from_bytes(&bytes)
+            .map(Some)
+            .map_err(|e| ProjectError::Format {
+                path: PathBuf::from(&file.name),
+                message: e.to_string(),
+            })
+    }
+
+    /// The text of the bound file with extension `extension`, such as the input file.
+    pub fn text(&self, extension: &str) -> Option<String> {
+        let file = self.files.iter().find(|f| {
+            Path::new(&f.name)
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case(extension))
+        })?;
+        let bytes = unpack(file, Path::new(&file.name)).ok()?;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// The name of the results as a CalculiX results file (`.frd`): the bound one, or the
+    /// one [`restore_calculix_results`] writes for results of the built-in solver.
+    pub fn calculix_results_name(&self) -> Option<String> {
+        if let Some(file) = &self.solver {
+            return Some(
+                Path::new(&file.name)
+                    .with_extension("frd")
+                    .display()
+                    .to_string(),
+            );
+        }
+        (self.files.iter())
+            .find(|f| is_frd(Path::new(&f.name)))
+            .map(|f| f.name.clone())
+    }
+
+    /// Reads the results in memory: those of the built-in solver directly, those of CalculiX
+    /// from their files written into `dir` first.
+    pub fn read(&self, dir: &Path) -> Result<ReadResults, String> {
+        if let Some(solved) = self.solver_results().map_err(|e| e.to_string())? {
+            let input = self.text("inp");
+            let history = crate::solver::history(&solved, input.as_deref());
+            return Ok(ReadResults {
+                results: crate::solver::import(&solved),
+                history,
+                input,
+            });
+        }
+        let frd = restore_results(self, dir).map_err(|e| e.to_string())?;
+        let results = crate::frd::read_frd(&frd).map_err(|e| e.to_string())?;
+        let history = crate::dat::read_dat(&frd.with_extension("dat")).ok();
+        let input = std::fs::read_to_string(frd.with_extension("inp")).ok();
+        Ok(ReadResults {
+            results,
+            history,
+            input,
+        })
+    }
+}
+
+/// Bound results read in memory, see [`BoundResults::read`].
+pub struct ReadResults {
+    pub results: crate::frd::FrdImport,
+    pub history: Option<crate::dat::DatImport>,
+    /// The input file the solver ran.
+    pub input: Option<String>,
+}
+
+/// The content of a bound file; `path` names it in errors.
+fn unpack(file: &BoundFile, path: &Path) -> Result<Vec<u8>, ProjectError> {
+    let format = |message: String| ProjectError::Format {
+        path: path.to_owned(),
+        message,
+    };
+    let compressed = BASE64
+        .decode(&file.data)
+        .map_err(|e| format(format!("bound file {}: {e}", file.name)))?;
+    let mut content = Vec::with_capacity(file.size as usize);
+    DeflateDecoder::new(compressed.as_slice())
+        .read_to_end(&mut content)
+        .map_err(|e| format(format!("bound file {}: {e}", file.name)))?;
+    Ok(content)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -632,7 +729,8 @@ pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
 }
 
 /// Reads the files of a finished analysis into [`BoundResults`]; files that do not exist are
-/// left out, the results file has to be there.
+/// left out, the results file (`.frd` of CalculiX or `.plxr` of the built-in solver) has to
+/// be there.
 pub fn bind_results(
     analysis: &str,
     files: &[PathBuf],
@@ -644,6 +742,7 @@ pub fn bind_results(
         steps: Vec::new(),
         with_errors,
         files: Vec::new(),
+        solver: None,
         settings: None,
     };
     for path in files {
@@ -662,16 +761,22 @@ pub fn bind_results(
         let mut encoder = DeflateEncoder::new(Vec::new(), Compression::new(3));
         encoder.write_all(&content).map_err(io)?;
         let compressed = encoder.finish().map_err(io)?;
-        bound.files.push(BoundFile {
+        let file = BoundFile {
             name: file_name(path).unwrap_or_default(),
             size: content.len() as u64,
             data: BASE64.encode(compressed),
-        });
+        };
+        if plx_results::solver::is_solver_results(path) {
+            bound.solver = Some(file);
+        } else {
+            bound.files.push(file);
+        }
     }
     Ok(bound)
 }
 
-/// Writes the files of bound results into `dir`; returns the results file (`.frd`).
+/// Writes the files of bound results into `dir`; returns the results file: `.plxr` for
+/// results of the built-in solver, `.frd` for those of CalculiX.
 pub fn restore_results(bound: &BoundResults, dir: &Path) -> Result<PathBuf, ProjectError> {
     let format = |message: String| ProjectError::Format {
         path: dir.to_owned(),
@@ -682,14 +787,14 @@ pub fn restore_results(bound: &BoundResults, dir: &Path) -> Result<PathBuf, Proj
         source,
     };
     std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
-    // Files of results restored here before, which the results read next to their `.frd`:
-    // a history output (`.dat`) the bound results do not have would be taken for theirs.
+    // Files of results restored here before, which the results read next to their results
+    // file: a history output (`.dat`) the bound results do not have would be taken for
+    // theirs, a `.frd` of CalculiX for the results of the built-in solver.
     for file in bound
-        .files
-        .iter()
+        .all_files()
         .filter(|f| is_results_file(Path::new(&f.name)))
     {
-        for extension in ["inp", "dat", "frd"] {
+        for extension in ["inp", "dat", "frd", plx_results::solver::EXTENSION] {
             let old = dir.join(Path::new(&file.name).with_extension(extension));
             if old.parent() == Some(dir) && old.is_file() {
                 std::fs::remove_file(&old).map_err(|e| io(&old, e))?;
@@ -697,7 +802,7 @@ pub fn restore_results(bound: &BoundResults, dir: &Path) -> Result<PathBuf, Proj
         }
     }
     let mut results = None;
-    for file in &bound.files {
+    for file in bound.all_files() {
         // Only a plain file name: a project cannot write elsewhere.
         let name = Path::new(&file.name);
         if file_name(name).as_deref() != Some(file.name.as_str()) {
@@ -706,14 +811,8 @@ pub fn restore_results(bound: &BoundResults, dir: &Path) -> Result<PathBuf, Proj
                 file.name
             )));
         }
-        let compressed = BASE64
-            .decode(&file.data)
-            .map_err(|e| format(format!("bound file {}: {e}", file.name)))?;
-        let mut content = Vec::with_capacity(file.size as usize);
-        DeflateDecoder::new(compressed.as_slice())
-            .read_to_end(&mut content)
-            .map_err(|e| format(format!("bound file {}: {e}", file.name)))?;
         let path = dir.join(name);
+        let content = unpack(file, &path)?;
         std::fs::write(&path, content).map_err(|e| io(&path, e))?;
         if is_results_file(&path) {
             results = Some(path);
@@ -722,23 +821,34 @@ pub fn restore_results(bound: &BoundResults, dir: &Path) -> Result<PathBuf, Proj
     results.ok_or_else(|| format("the bound results have no results file (.frd)".into()))
 }
 
+/// Writes the bound results into `dir` as CalculiX's files and returns the `.frd` file:
+/// the bound files of CalculiX's results, or those exported from the results of the
+/// built-in solver, for what reads CalculiX's files.
+pub fn restore_calculix_results(bound: &BoundResults, dir: &Path) -> Result<PathBuf, ProjectError> {
+    let restored = restore_results(bound, dir)?;
+    if !plx_results::solver::is_solver_results(&restored) {
+        return Ok(restored);
+    }
+    let format = |message: String| ProjectError::Format {
+        path: restored.clone(),
+        message,
+    };
+    let solved = plx_results::SolverResults::read(&restored).map_err(|e| format(e.to_string()))?;
+    let frd = restored.with_extension("frd");
+    crate::solver::export_calculix(&solved, &frd).map_err(|source| ProjectError::Io {
+        path: frd.clone(),
+        source,
+    })?;
+    Ok(frd)
+}
+
 /// Writes the bound file named `name`, such as the eigenmodes (`.eig`) of a frequency
 /// step, to `path`; false if the bound results have no such file.
 pub fn restore_file(bound: &BoundResults, name: &str, path: &Path) -> Result<bool, ProjectError> {
     let Some(file) = bound.files.iter().find(|f| f.name == name) else {
         return Ok(false);
     };
-    let format = |message: String| ProjectError::Format {
-        path: path.to_owned(),
-        message,
-    };
-    let compressed = BASE64
-        .decode(&file.data)
-        .map_err(|e| format(format!("bound file {}: {e}", file.name)))?;
-    let mut content = Vec::with_capacity(file.size as usize);
-    DeflateDecoder::new(compressed.as_slice())
-        .read_to_end(&mut content)
-        .map_err(|e| format(format!("bound file {}: {e}", file.name)))?;
+    let content = unpack(file, path)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|source| ProjectError::Io {
             path: dir.to_owned(),
@@ -752,7 +862,12 @@ pub fn restore_file(bound: &BoundResults, name: &str, path: &Path) -> Result<boo
     Ok(true)
 }
 
+/// Whether a file holds results: `.frd` of CalculiX or `.plxr` of the built-in solver.
 fn is_results_file(path: &Path) -> bool {
+    is_frd(path) || plx_results::solver::is_solver_results(path)
+}
+
+fn is_frd(path: &Path) -> bool {
     path.extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("frd"))
 }

@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 rayon.workspace = true
 plx-job.workspace = true
+plx-results.workspace = true
 plxs-core.workspace = true
 plxs-session.workspace = true
 serde.workspace = true
