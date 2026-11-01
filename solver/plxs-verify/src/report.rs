@@ -72,6 +72,9 @@ pub fn run_fixture(solver: &Path, fixture: &Fixture, work: &Path) -> Report {
     if let Err(e) = std::fs::copy(fixture.inp(), work.join(format!("{job}.inp"))) {
         return report(Outcome::Error(e.to_string()), String::new());
     }
+    if let Err(e) = crate::corpus::stage_files(fixture, work) {
+        return report(Outcome::Error(e), String::new());
+    }
     let output = match Command::new(solver)
         .args(["-i", job])
         .current_dir(work)
@@ -123,10 +126,12 @@ pub fn run_fixture(solver: &Path, fixture: &Fixture, work: &Path) -> Report {
                 c,
                 class,
                 &comparison.unmatched_modes,
+                &comparison.standing_modes,
                 &undetermined,
                 &fixture.meta.noise,
             );
             comparison.failures.extend(dat.failures);
+            comparison.notes.extend(dat.notes);
             comparison.max_relative = comparison.max_relative.max(dat.max_relative);
             comparison.compared += dat.compared;
         }

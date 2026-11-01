@@ -12,7 +12,7 @@ pub mod frd;
 pub mod sta;
 
 pub use dat::{EigenTable, write_dat};
-pub use frd::{FrdFormat, write_frd, write_frd_as};
+pub use frd::{FrdFormat, imaginary_field_name, write_frd, write_frd_as};
 pub use sta::{CvgRow, StaRow, write_cvg, write_sta};
 
 /// A number in Fortran's `E12.5` layout: `-1.77481E-03`, `0.00000E+00`, three-digit

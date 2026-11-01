@@ -210,6 +210,13 @@ pub enum EigenTable {
     BucklingFactors,
     /// A complex frequency step: rows `(mode, [omega, frequency, imaginary part])`.
     ComplexEigenvalues,
+    /// A frequency step of a cyclic symmetric model, per nodal diameter: rows
+    /// `(mode, [nodal diameter, eigenvalue, omega, frequency, imaginary part])`.
+    CyclicEigenvalues,
+    /// The turning direction of the modes of a cyclic symmetric model: a first row
+    /// `(0, [axis x, y, z])` with the reference direction, then rows
+    /// `(mode, [nodal diameter, +1 forward / -1 backward])`.
+    CyclicTurningDirection,
     /// Rows `(mode, [+1 forward or −1 backward])` and a row `(0, [axis x, y, z])`.
     TurningDirection,
 }
@@ -221,7 +228,9 @@ impl EigenTable {
     pub const TOTAL_EFFECTIVE_MASS: &'static str = "TOTAL EFFECTIVE MASS";
     pub const BUCKLING: &'static str = "BUCKLING FACTOR OUTPUT";
     pub const COMPLEX_EIGENVALUES: &'static str = "COMPLEX EIGENVALUE OUTPUT";
+    pub const CYCLIC_EIGENVALUES: &'static str = "CYCLIC EIGENVALUE OUTPUT";
     pub const TURNING_DIRECTION: &'static str = "EIGENMODE TURNING DIRECTION";
+    pub const CYCLIC_TURNING_DIRECTION: &'static str = "CYCLIC EIGENMODE TURNING DIRECTION";
 
     pub fn of(block: &HistoryBlock) -> Option<EigenTable> {
         if !block.set.is_empty() {
@@ -234,7 +243,9 @@ impl EigenTable {
             Self::TOTAL_EFFECTIVE_MASS => EigenTable::TotalEffectiveMass,
             Self::BUCKLING => EigenTable::BucklingFactors,
             Self::COMPLEX_EIGENVALUES => EigenTable::ComplexEigenvalues,
+            Self::CYCLIC_EIGENVALUES => EigenTable::CyclicEigenvalues,
             Self::TURNING_DIRECTION => EigenTable::TurningDirection,
+            Self::CYCLIC_TURNING_DIRECTION => EigenTable::CyclicTurningDirection,
             _ => return None,
         })
     }
@@ -247,7 +258,10 @@ impl EigenTable {
             EigenTable::TotalEffectiveMass => "T O T A L   E F F E C T I V E   M A S S",
             EigenTable::BucklingFactors => "B U C K L I N G   F A C T O R   O U T P U T",
             EigenTable::ComplexEigenvalues => "E I G E N V A L U E   O U T P U T",
-            EigenTable::TurningDirection => "E I G E N M O D E   T U R N I N G   D I R E C T I O N",
+            EigenTable::CyclicEigenvalues => "E I G E N V A L U E   O U T P U T",
+            EigenTable::TurningDirection | EigenTable::CyclicTurningDirection => {
+                "E I G E N M O D E   T U R N I N G   D I R E C T I O N"
+            }
         }
     }
 }
@@ -263,6 +277,51 @@ fn write_eigen_table(
     writeln!(out, "     {}", table.heading())?;
     writeln!(out)?;
     match table {
+        EigenTable::CyclicEigenvalues => {
+            writeln!(
+                out,
+                "  NODAL   MODE NO    EIGENVALUE                      FREQUENCY"
+            )?;
+            writeln!(
+                out,
+                " DIAMETER                                    REAL PART            IMAGINARY PART"
+            )?;
+            writeln!(
+                out,
+                "                                    (RAD/TIME)      (CYCLES/TIME)   (RAD/TIME)"
+            )?;
+            writeln!(out)?;
+            for (mode, values) in &block.rows {
+                write!(out, "{:>5}{mode:>11}", values[0] as u32)?;
+                for v in &values[1..] {
+                    write!(out, "{:>16}", fortran_time(*v))?;
+                }
+                writeln!(out)?;
+            }
+            return Ok(());
+        }
+        EigenTable::CyclicTurningDirection => {
+            let mut rows = block.rows.iter();
+            if let Some((_, axis)) = rows.next() {
+                write!(out, "    Axis reference direction: ")?;
+                for v in axis {
+                    write!(out, "{:>12}", fortran_e10(*v))?;
+                }
+                writeln!(out)?;
+            }
+            writeln!(out)?;
+            writeln!(
+                out,
+                "  NODAL   MODE NO     TURNING DIRECTION (F=FORWARD,B=BACKWARD)"
+            )?;
+            writeln!(out, " DIAMETER")?;
+            writeln!(out)?;
+            for (mode, values) in rows {
+                let direction = if values[1] > 0.0 { "F" } else { "B" };
+                writeln!(out, "{:>5}{mode:>11}{direction:>11}", values[0] as u32)?;
+            }
+            return Ok(());
+        }
         EigenTable::Eigenvalues => {
             writeln!(
                 out,

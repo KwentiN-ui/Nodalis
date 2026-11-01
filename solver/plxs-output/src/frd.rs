@@ -143,34 +143,39 @@ pub fn write_frd_to_as(
         writeln!(out, "    1UMAT{:>5}{:<58}", i + 1, material.name)?;
     }
 
-    // Nodes that belong to elements, ascending by id.
+    // Nodes that belong to elements, ascending by id; then the copies of further sectors
+    // of a cyclic symmetric model.
     let node_order = written_nodes(model);
+    let sectors = Sectors::of(model);
     writeln!(
         out,
         "    2C{:>30}{:>38}",
-        node_order.len(),
+        node_order.len() * sectors.count(),
         if binary { 3 } else { 1 }
     )?;
-    if binary {
+    for (j, rotation) in sectors.rotations.iter().enumerate() {
         for &i in &node_order {
-            out.write_all(&(model.nodes.ids[i] as i32).to_le_bytes())?;
-            for v in model.nodes.coordinates[i] {
-                out.write_all(&v.to_le_bytes())?;
+            let id = model.nodes.ids[i] + j as u32 * sectors.node_offset;
+            let x = sectors.rotate_point(rotation, model.nodes.coordinates[i]);
+            if binary {
+                out.write_all(&(id as i32).to_le_bytes())?;
+                for v in x {
+                    out.write_all(&v.to_le_bytes())?;
+                }
+                continue;
             }
+            // CalculiX writes the coordinates in single precision; rounding through f32
+            // keeps the last digit the same (2.02577507 is written as 2.02577).
+            let c = x.map(|v| f64::from(v as f32));
+            writeln!(
+                out,
+                " -1{:>10}{}{}{}",
+                id,
+                fortran_e12(c[0]),
+                fortran_e12(c[1]),
+                fortran_e12(c[2])
+            )?;
         }
-    }
-    for &i in node_order.iter().filter(|_| !binary) {
-        // CalculiX writes the coordinates in single precision; rounding through f32 keeps the
-        // last digit the same (2.02577507 is written as 2.02577).
-        let c = model.nodes.coordinates[i].map(|v| f64::from(v as f32));
-        writeln!(
-            out,
-            " -1{:>10}{}{}{}",
-            model.nodes.ids[i],
-            fortran_e12(c[0]),
-            fortran_e12(c[1]),
-            fortran_e12(c[2])
-        )?;
     }
     if !binary {
         writeln!(out, " -3")?;
@@ -195,59 +200,88 @@ pub fn write_frd_to_as(
     writeln!(
         out,
         "    3C{:>30}{:>38}",
-        written.len(),
+        written.len() * sectors.count(),
         if binary { 3 } else { 1 }
     )?;
-    for &i in &written {
-        let element = &model.elements[i];
-        let (kind, order) = frd_element(element.kind).unwrap();
-        if binary {
-            for v in [
-                element.id as i32,
-                i32::from(kind),
+    for j in 0..sectors.count() as u32 {
+        for &i in &written {
+            let element = &model.elements[i];
+            let (kind, order) = frd_element(element.kind).unwrap();
+            let id = element.id + j * sectors.element_offset;
+            if binary {
+                for v in [
+                    id as i32,
+                    i32::from(kind),
+                    0,
+                    material_number(element) as i32,
+                ] {
+                    out.write_all(&v.to_le_bytes())?;
+                }
+                for &k in order {
+                    out.write_all(
+                        &((element.nodes[k] + j * sectors.node_offset) as i32).to_le_bytes(),
+                    )?;
+                }
+                continue;
+            }
+            writeln!(
+                out,
+                " -1{:>10}{:>5}{:>5}{:>5}",
+                id,
+                kind,
                 0,
-                material_number(element) as i32,
-            ] {
-                out.write_all(&v.to_le_bytes())?;
+                material_number(element)
+            )?;
+            for chunk in order.chunks(10) {
+                write!(out, " -2")?;
+                for &k in chunk {
+                    write!(out, "{:>10}", element.nodes[k] + j * sectors.node_offset)?;
+                }
+                writeln!(out)?;
             }
-            for &k in order {
-                out.write_all(&(element.nodes[k] as i32).to_le_bytes())?;
-            }
-            continue;
-        }
-        writeln!(
-            out,
-            " -1{:>10}{:>5}{:>5}{:>5}",
-            element.id,
-            kind,
-            0,
-            material_number(element)
-        )?;
-        for chunk in order.chunks(10) {
-            write!(out, " -2")?;
-            for &k in chunk {
-                write!(out, "{:>10}", element.nodes[k])?;
-            }
-            writeln!(out)?;
         }
     }
     if !binary {
         writeln!(out, " -3")?;
     }
 
+    // `ordinal` counts the written increments over all steps (`100CL`); a mode of a cyclic
+    // symmetric model stands for the pair of its real and imaginary solutions, of which
+    // CalculiX writes only the first, so it counts twice. Its mode number in the header is
+    // its place within the nodal diameter, counted the same way.
     let mut set = 0u32;
-    for (ordinal, increment) in results.increments.iter().enumerate() {
-        for field in &increment.fields {
+    let mut ordinal = 0u32;
+    for (index, increment) in results.increments.iter().enumerate() {
+        ordinal += 1;
+        let mode = match increment.nodal_diameter {
+            Some(diameter) => {
+                let before = results.increments[..index]
+                    .iter()
+                    .rev()
+                    .take_while(|i| i.step == increment.step)
+                    .filter(|i| i.nodal_diameter == Some(diameter))
+                    .count() as u32;
+                2 * before + 1
+            }
+            None => increment.increment,
+        };
+        let fields = sectors.expand(increment);
+        for field in &fields {
             set += 1;
             write_block(
                 out,
                 set,
-                ordinal as u32 + 1,
+                ordinal,
+                mode,
+                sectors.axis.as_ref(),
                 increment,
                 field,
                 field.nodes.len(),
                 binary,
             )?;
+        }
+        if increment.nodal_diameter.is_some() {
+            ordinal += 1;
         }
     }
     writeln!(out, " 9999")?;
@@ -282,11 +316,15 @@ fn format_time(value: f64) -> String {
 }
 
 /// One result block. `ordinal` counts the written increments over all steps (CalculiX'
-/// `100CL` numbering); time increments carry the total time, as in CalculiX.
+/// `100CL` numbering); time increments carry the total time, as in CalculiX. `mode` is the
+/// mode number of the `1PMODE` line, `axis` the `1PAX` line of cyclic modes.
+#[allow(clippy::too_many_arguments)]
 fn write_block(
     out: &mut impl Write,
     set: u32,
     ordinal: u32,
+    mode: u32,
+    axis: Option<&[f64; 6]>,
     increment: &ResultsIncrement,
     field: &ResultField,
     node_count: usize,
@@ -335,8 +373,15 @@ fn write_block(
                     .map_or("-1".to_string(), |d| d.to_string())
             )
         )?;
+        if let (Some(axis), Some(_)) = (axis, increment.nodal_diameter) {
+            write!(out, "    1PAX{:13}", "")?;
+            for v in axis {
+                write!(out, "{}", fortran_e12(*v))?;
+            }
+            writeln!(out)?;
+        }
         writeln!(out, "{}", header("SUBC", "0".to_string()))?;
-        writeln!(out, "{}", header("MODE", increment.increment.to_string()))?;
+        writeln!(out, "{}", header("MODE", mode.to_string()))?;
     }
     let (analysis_name, trailer_width) = match increment.kind {
         IncrementKind::Frequency => ("MODAL", 7),
@@ -423,4 +468,183 @@ fn component_flags(field: &str, components: usize, k: usize) -> (u8, u8, u8) {
         }
         _ => (1, 0, 0),
     }
+}
+
+/// The name of the imaginary part of a field in the `.frd`: `I` appended (`DISPI`), in
+/// place of the last letter when the name has the eight letters the format allows
+/// (`TOSTRAIN` becomes `TOSTRAII`), as CalculiX names them.
+pub fn imaginary_field_name(name: &str) -> String {
+    let mut out: String = name.chars().take(7).collect();
+    out.push('I');
+    out
+}
+
+/// The sectors of a cyclic symmetric model written to the `.frd` (`NGRAPH`): sector `j`
+/// is the model rotated by `−jφ` about the axis (the axis points the way the slave side
+/// follows the master side, see `plxs_constraints::cyclic`), its node and element ids
+/// shifted by `j` times the largest id. Without cyclic symmetry there is one sector, the
+/// model itself.
+struct Sectors {
+    /// One rotation per sector, the identity first.
+    rotations: Vec<[[f64; 3]; 3]>,
+    origin: [f64; 3],
+    angle: f64,
+    node_offset: u32,
+    element_offset: u32,
+    /// The `1PAX` line of cyclic modes: a point on the axis and a second one along the
+    /// reference direction (the opposite of the axis).
+    axis: Option<[f64; 6]>,
+}
+
+impl Sectors {
+    fn of(model: &Model) -> Sectors {
+        const IDENTITY: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let mut sectors = Sectors {
+            rotations: vec![IDENTITY],
+            origin: [0.0; 3],
+            angle: 0.0,
+            node_offset: model.nodes.ids.iter().copied().max().unwrap_or(0),
+            element_offset: model.elements.iter().map(|e| e.id).max().unwrap_or(0),
+            axis: None,
+        };
+        let Some(cyclic) = &model.constraints.cyclic_symmetry else {
+            return sectors;
+        };
+        let [p, q] = cyclic.axis;
+        let d = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+        let length = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if length == 0.0 || cyclic.sectors == 0 {
+            return sectors;
+        }
+        let unit = d.map(|c| c / length);
+        sectors.origin = p;
+        sectors.angle = 2.0 * std::f64::consts::PI / f64::from(cyclic.sectors);
+        sectors.axis = Some([
+            p[0],
+            p[1],
+            p[2],
+            p[0] - unit[0],
+            p[1] - unit[1],
+            p[2] - unit[2],
+        ]);
+        for j in 1..cyclic.ngraph.min(cyclic.sectors) {
+            sectors
+                .rotations
+                .push(rotation_about(unit, -f64::from(j) * sectors.angle));
+        }
+        sectors
+    }
+
+    fn count(&self) -> usize {
+        self.rotations.len()
+    }
+
+    fn rotate_point(&self, r: &[[f64; 3]; 3], x: [f64; 3]) -> [f64; 3] {
+        let o = self.origin;
+        let v = apply(r, [x[0] - o[0], x[1] - o[1], x[2] - o[2]]);
+        [v[0] + o[0], v[1] + o[1], v[2] + o[2]]
+    }
+
+    /// The fields of an increment on all sectors. A real field is rotated with its sector;
+    /// a cyclic mode of nodal diameter `k` (fields `X` and `XI`, real and imaginary part
+    /// of `c`) is in sector `j` also shifted in phase: `c_j = e^{ikjφ} R(−jφ) c`. Vectors
+    /// (three components) and tensors (six) rotate, scalars are copied.
+    fn expand(&self, increment: &ResultsIncrement) -> Vec<ResultField> {
+        if self.count() == 1 {
+            return increment.fields.clone();
+        }
+        let fields = &increment.fields;
+        let mut out: Vec<ResultField> = Vec::with_capacity(fields.len());
+        for (index, field) in fields.iter().enumerate() {
+            let partner = |name: &str| fields.iter().position(|f| f.name == name);
+            // (real part, imaginary part, this field is the imaginary one)
+            let real_of = fields
+                .iter()
+                .position(|f| f.name != field.name && imaginary_field_name(&f.name) == field.name);
+            let (real, imaginary, is_imaginary) = match (increment.nodal_diameter, real_of) {
+                (Some(_), Some(r)) => (r, Some(index), true),
+                (Some(_), None) => (index, partner(&imaginary_field_name(&field.name)), false),
+                (None, _) => (index, None, false),
+            };
+            let mut expanded = field.clone();
+            for (j, rotation) in self.rotations.iter().enumerate().skip(1) {
+                let phase = increment
+                    .nodal_diameter
+                    .map_or(0.0, |k| f64::from(k) * j as f64 * self.angle);
+                let (sin, cos) = phase.sin_cos();
+                let shift = j as u32 * self.node_offset;
+                expanded.nodes.extend(field.nodes.iter().map(|n| n + shift));
+                let re = &fields[real];
+                let im = imaginary.map(|i| &fields[i]);
+                let count = field.nodes.len();
+                let mut values: Vec<Vec<f64>> = vec![Vec::with_capacity(count); field.values.len()];
+                for n in 0..count {
+                    let a: Vec<f64> = re.values.iter().map(|c| c[n]).collect();
+                    let b: Vec<f64> = match im {
+                        Some(f) => f.values.iter().map(|c| c[n]).collect(),
+                        None => vec![0.0; a.len()],
+                    };
+                    // c_j = (cos + i sin) R c: real part cos Ra − sin Rb, imaginary part
+                    // sin Ra + cos Rb.
+                    let (ra, rb) = (
+                        rotate_components(rotation, &a),
+                        rotate_components(rotation, &b),
+                    );
+                    for (k, column) in values.iter_mut().enumerate() {
+                        column.push(if is_imaginary {
+                            sin * ra[k] + cos * rb[k]
+                        } else {
+                            cos * ra[k] - sin * rb[k]
+                        });
+                    }
+                }
+                for (column, extra) in expanded.values.iter_mut().zip(values) {
+                    column.extend(extra);
+                }
+            }
+            out.push(expanded);
+        }
+        out
+    }
+}
+
+/// Rotates the components of a node: groups of three as vectors, six as a symmetric tensor
+/// (`xx, yy, zz, xy, yz, zx`), anything else unchanged.
+fn rotate_components(r: &[[f64; 3]; 3], v: &[f64]) -> Vec<f64> {
+    match v.len() {
+        3 => apply(r, [v[0], v[1], v[2]]).to_vec(),
+        6 => {
+            let s = [[v[0], v[3], v[5]], [v[3], v[1], v[4]], [v[5], v[4], v[2]]];
+            let mut t = [[0.0; 3]; 3];
+            for i in 0..3 {
+                for j in 0..3 {
+                    t[i][j] = (0..3)
+                        .map(|k| (0..3).map(|l| r[i][k] * s[k][l] * r[j][l]).sum::<f64>())
+                        .sum();
+                }
+            }
+            vec![t[0][0], t[1][1], t[2][2], t[0][1], t[1][2], t[2][0]]
+        }
+        _ => v.to_vec(),
+    }
+}
+
+/// The rotation by `angle` about the unit vector `axis` (Rodrigues).
+fn rotation_about(axis: [f64; 3], angle: f64) -> [[f64; 3]; 3] {
+    let (s, c) = angle.sin_cos();
+    let [x, y, z] = axis;
+    let t = 1.0 - c;
+    [
+        [t * x * x + c, t * x * y - s * z, t * x * z + s * y],
+        [t * x * y + s * z, t * y * y + c, t * y * z - s * x],
+        [t * x * z - s * y, t * y * z + s * x, t * z * z + c],
+    ]
+}
+
+fn apply(r: &[[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
+    [
+        r[0][0] * v[0] + r[0][1] * v[1] + r[0][2] * v[2],
+        r[1][0] * v[0] + r[1][1] * v[1] + r[1][2] * v[2],
+        r[2][0] * v[0] + r[2][1] * v[1] + r[2][2] * v[2],
+    ]
 }

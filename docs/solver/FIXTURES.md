@@ -13,7 +13,13 @@ solver/fixtures/<bereich>/<name>.inp          Eingabe (wie PrePoLix sie schreibt
 solver/fixtures/<bereich>/<name>.toml         Bereich, Toleranzklasse, Stufe, Features, Herkunft, Referenz
 solver/fixtures/<bereich>/<name>.ref.frd.gz   .frd von CalculiX, gzip (flate2, pure Rust; das Konzept nannte zstd)
 solver/fixtures/<bereich>/<name>.ref.dat      .dat von CalculiX, wenn die Eingabe History-Ausgaben hat
+solver/fixtures/<bereich>/<name>.files/        Dateien, die die Eingabe außer sich selbst liest (gzip, `.gz`)
 ```
+
+Eine Eingabe, die eine weitere Datei liest (`*SUBMODEL, INPUT="global.frd"`), bringt sie in
+`<name>.files/` mit; `plxs-fixtures run` und `reference` entpacken sie vor dem Lauf in das
+Jobverzeichnis. Ein Writer-Test legt sie mit `dump_fixture_file(name, datei, bytes)` neben
+seine Eingabe, `plxs-fixtures import` übernimmt sie.
 
 Herkunft: `scripts/solver_reference.sh` lässt die Writer-Tests von `plx-io` mit
 `PLXS_FIXTURE_DIR` laufen (jeder Test, der eine Eingabe an CalculiX gibt, legt sie dort ab;
@@ -72,7 +78,7 @@ Treffer gewinnt:
 | `contact` | M3 | T11 (N2S), T12 (S2S, Mortar) | *CONTACT PAIR, *SURFACE BEHAVIOR (HARD/LINEAR/TIED), *FRICTION, *CLEARANCE, *MODEL CHANGE, *CHANGE FRICTION, *CONTACT FILE/PRINT, schwache Federn |
 | `dynamic` | M3 | T13 | *DYNAMIC (implizit, Rayleigh), *INITIAL CONDITIONS, TYPE=VELOCITY |
 | `modal` | M3 | T14 | *MODAL DYNAMICS, *STEADY STATE DYNAMICS, *MODAL DAMPING, *COMPLEX FREQUENCY mit Coriolis (`.eig` aus *FREQUENCY, STORAGE=YES) |
-| `cyclic` | M3 | T15 | *CYCLIC SYMMETRY MODEL, *SELECT CYCLIC SYMMETRY MODES, *SUBMODEL (`submodel` hat kein Golden File, weil es die `.frd` des Globalmodells braucht; der Thread baut sich den Zweischritt lokal) |
+| `cyclic` | M3 | T15 | *CYCLIC SYMMETRY MODEL (statisch und *FREQUENCY), *SELECT CYCLIC SYMMETRY MODES, NGRAPH-Expansion, *SUBMODEL mit *BOUNDARY, SUBMODEL (die `.frd` des Globalmodells liegt in `<name>.files/`) |
 | `sensitivity` | M3 | T17 | *SENSITIVITY mit MASS, STRAINENERGY, EIGENFREQUENCY und linearem Filter (Klasse B: ccx differenziert per Finite Differenzen); STRAINENERGY weicht dokumentiert ab (`deviations`) |
 
 Drei Fixtures (`modal/modal`, `dynamic/dynamik`, `dynamic/dynamik_gedaempft`) haben kein
@@ -191,7 +197,10 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `contact/weak-springs-spalt-nlgeom` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE, NLGEOM |
 | `contact/weak-springs-spalt` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE |
 | `cyclic/cyclic_sector` | A | M3 | ccx 2.21 | C3D8, \*TIE, \*CYCLIC SYMMETRY MODEL, \*FREQUENCY, \*SELECT CYCLIC SYMMETRY MODES |
-| `cyclic/submodel` | A | M3 | none | \*SUBMODEL, C3D8, \*STATIC |
+| `cyclic/submodel-innen` | A | M3 | ccx 2.21 | \*SUBMODEL, C3D8, \*STATIC |
+| `cyclic/submodel` | A | M3 | ccx 2.21 | \*SUBMODEL, C3D8, \*STATIC |
+| `cyclic/zyklisch-sektor` | A | M3 | ccx 2.21 | C3D8, \*TIE, \*CYCLIC SYMMETRY MODEL, \*FREQUENCY, \*SELECT CYCLIC SYMMETRY MODES |
+| `cyclic/zyklisch-statisch` | A | M3 | ccx 2.21 | C3D8, \*TIE, \*CYCLIC SYMMETRY MODEL, \*STATIC |
 | `dynamic/anfangsdrehung` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*INITIAL CONDITIONS, \*DYNAMIC |
 | `dynamic/anfangsgeschwindigkeit` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*INITIAL CONDITIONS, \*DYNAMIC |
 | `dynamic/dynamik-automatisch` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*DYNAMIC |
