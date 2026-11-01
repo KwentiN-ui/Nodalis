@@ -57,10 +57,8 @@ fn block(name: &str, nx: usize, ny: usize, nz: usize, h: f64, x0: f64, offset: u
 fn options() -> JobOptions {
     JobOptions {
         threads: 1,
-        work_dir: std::env::temp_dir(),
-        name: "check".into(),
         write_files: false,
-        cancel: Default::default(),
+        ..JobOptions::new(std::env::temp_dir(), "check")
     }
 }
 

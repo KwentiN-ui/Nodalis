@@ -17,6 +17,7 @@ plxs-input.workspace = true
 plxs-elements.workspace = true
 postcard.workspace = true
 rayon.workspace = true
+serde.workspace = true
 
 [lints]
 workspace = true
