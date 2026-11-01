@@ -490,6 +490,7 @@ impl DynamicProcedure {
                 &reactions,
                 &stresses,
                 &strains,
+                None,
             );
             // CalculiX counts a linear increment as two iterations.
             ctx.sta.push(StaRow {

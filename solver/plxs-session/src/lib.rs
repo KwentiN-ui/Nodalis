@@ -14,7 +14,7 @@ use plxs_constraints::ModelConstraints;
 use plxs_core::state::Snapshot;
 use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Results, State, Step};
 use plxs_linalg::{LdltSolver, Pattern};
-use plxs_output::StaRow;
+use plxs_output::{CvgRow, StaRow};
 use plxs_procedures::{ProcedureContext, run_step};
 
 pub use plxs_procedures::StepOutcome;
@@ -49,6 +49,8 @@ pub struct Session {
     state: State,
     results: Results,
     sta: Vec<StaRow>,
+    cvg: Vec<CvgRow>,
+    average_force: Option<f64>,
     pool: rayon::ThreadPool,
     threads: usize,
     options: SessionOptions,
@@ -101,6 +103,8 @@ impl Session {
             state,
             results: Results::default(),
             sta: Vec::new(),
+            cvg: Vec::new(),
+            average_force: None,
             pool,
             threads,
             options,
@@ -126,6 +130,8 @@ impl Session {
             threads: self.threads,
             step_number,
             sta: std::mem::take(&mut self.sta),
+            cvg: std::mem::take(&mut self.cvg),
+            average_force: self.average_force,
             work_dir: self.options.work_dir.clone(),
         };
         // The procedure runs on the session's pool in a thread of its own; events come
@@ -133,7 +139,7 @@ impl Session {
         // sees them as they happen.
         let (tx, rx) = std::sync::mpsc::channel::<ProgressEvent>();
         let pool = &self.pool;
-        let (outcome, stiffness, solver, sta) = std::thread::scope(|scope| {
+        let (outcome, stiffness, solver, sta, cvg, average_force) = std::thread::scope(|scope| {
             let handle = scope.spawn(move || {
                 let mut ctx = ctx;
                 let mut sink = ChannelProgress(tx);
@@ -143,6 +149,8 @@ impl Session {
                     ctx.stiffness.take(),
                     ctx.solver,
                     std::mem::take(&mut ctx.sta),
+                    std::mem::take(&mut ctx.cvg),
+                    ctx.average_force,
                 )
             });
             for event in rx {
@@ -154,12 +162,16 @@ impl Session {
                     None,
                     LdltSolver::new(1),
                     Vec::new(),
+                    Vec::new(),
+                    None,
                 )
             })
         });
         self.stiffness = stiffness;
         self.solver = solver;
         self.sta = sta;
+        self.cvg = cvg;
+        self.average_force = average_force;
         let outcome = outcome?;
         progress.event(ProgressEvent::StepDone {
             step: step_number,
@@ -183,6 +195,11 @@ impl Session {
     /// Rows of the `.sta` file so far.
     pub fn sta_rows(&self) -> &[StaRow] {
         &self.sta
+    }
+
+    /// Rows of the `.cvg` file so far.
+    pub fn cvg_rows(&self) -> &[CvgRow] {
+        &self.cvg
     }
 
     /// The state with a fingerprint of the model, for `*RESTART, WRITE`.

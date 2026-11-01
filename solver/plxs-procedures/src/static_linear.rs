@@ -292,7 +292,7 @@ impl StaticLinear {
 
             if writes_increment(step, increment, count) {
                 write_increment(
-                    ctx, step, increment, time, total, &u, &reactions, &stresses, &strains,
+                    ctx, step, increment, time, total, &u, &reactions, &stresses, &strains, None,
                 )?;
                 crate::thermal::insert_temperatures(ctx, step, t.as_deref());
             }
@@ -308,6 +308,7 @@ impl StaticLinear {
                 &reactions,
                 &stresses,
                 &strains,
+                None,
             );
             ctx.sta.push(StaRow {
                 step: ctx.step_number,
@@ -337,6 +338,11 @@ impl StaticLinear {
 /// Whether the field output of an increment is written: every `FREQUENCY`-th increment
 /// (the smallest frequency of the requests), the last one always.
 pub(crate) fn writes_increment(step: &Step, increment: u32, count: u32) -> bool {
+    writes_increment_at(step, increment, increment == count)
+}
+
+/// Whether the field output of an increment is written when `last` says it is the last one.
+pub fn writes_increment_at(step: &Step, increment: u32, last: bool) -> bool {
     let frequency = step
         .outputs
         .node_file
@@ -346,7 +352,7 @@ pub(crate) fn writes_increment(step: &Step, increment: u32, count: u32) -> bool 
         .map(|o| o.frequency.max(1))
         .min()
         .unwrap_or(1);
-    increment == count || increment.is_multiple_of(frequency)
+    last || increment.is_multiple_of(frequency)
 }
 
 /// Strains and stresses at the integration points of every element.

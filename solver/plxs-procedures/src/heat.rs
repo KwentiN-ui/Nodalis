@@ -562,7 +562,7 @@ impl<'h> HeatRun<'h> {
             ctx.state.strains = strains.clone();
             if write {
                 write_increment(
-                    ctx, step, increment, time, total, &u, &forces, &stresses, &strains,
+                    ctx, step, increment, time, total, &u, &forces, &stresses, &strains, None,
                 )?;
             }
             crate::history::write_history(
@@ -577,6 +577,7 @@ impl<'h> HeatRun<'h> {
                 &forces,
                 &stresses,
                 &strains,
+                None,
             );
             Ok(())
         })();

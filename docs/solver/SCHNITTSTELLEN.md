@@ -657,12 +657,12 @@ ccx), dazu die Übernahmetests in `plxs-input/src/tests.rs`.
   Dehnungen konstant je Element, an den Knoten gemittelt (`ElementTable::membranes`,
   `fields::nodal_average_with`), Dickendehnung ε33 = −ν/(1 − ν)(ε11 + ε22). Quer zur Ebene
   keine Steifigkeit.
-- **Offen**: Membranen M3D4/M3D4R (weichen von jeder probierten Expansion und vom Q4 ab,
-  nur an belasteten Knoten), die genaue
+- **Offen**: M3D4R (expandiert, weicht ab), M3D4 in der Ebene um 1e-4 (siehe „Membranen
+  nativ“ unter M2 T8), die genaue
   BOX-Regel von ccx, die Knotenspannungen von PIPE (ccx extrapoliert anders als die lineare
   Querschnittsanpassung, bis 0,3 %),
   `*NODAL THICKNESS`, Druck auf Balken, U1 an Schalen-/Balkenknoten,
-  zylindrischer `*TRANSFORM` an Schalenknoten, edge-tie-m3d4 (wegen M3D4).
+  zylindrischer `*TRANSFORM` an Schalenknoten, edge-tie-m3d4 (Mechanismus, siehe unten).
 - Abnahmetest `solver/plxs-cli/tests/structural_corpus.rs` (27 von 33 grün, die offenen
   mit Grund gelistet).
 ## Stand nach M2 T6 (Constraints und MPCs)
@@ -727,6 +727,117 @@ Abnahme: `solver/plxs-cli/tests/constraints_corpus.rs` (alle `constraints/*` plu
 `held_dependent_dofs_are_repivoted` (Equations mit gehaltenem ersten Term ergeben dasselbe
 wie die vom Writer umgestellten). Gegencheck 30³-C3D8-Block mit Rigid Body und Moment:
 plxs 6,0 s, ccx 2.21 12,4 s (4 Threads), Verschiebungen auf 6,6e-6 gleich.
+
+## Stand nach M2 T8 (Nichtlinearität und Plastizität)
+
+Was T8 gebaut hat und wo es von den Signaturen oben abweicht:
+
+- `plxs-materials`: `MaterialLaw { state_size, is_nonlinear, stress(&MaterialInput, &mut
+  [f64]) -> MaterialOutput, elastic_matrix }` (kein `Result`, kein `thermal`: Wärme kommt mit
+  T9). `MaterialInput` trägt die Gesamtdehnung (klein oder Green-Lagrange), Temperatur, `dt`,
+  Gesamtzeit und `creep_active`; `MaterialOutput` Spannung und Tangente auf
+  Ingenieurdehnungen. `law_of(material, temperatur, finite_strain)` liefert `LinearElastic`,
+  `J2Plastic` oder `FiniteStrainJ2`. 14 Zustandsgrößen je Integrationspunkt: PEEQ, sechs
+  plastische Dehnungen (bzw. unter NLGEOM `C_p⁻¹ − 1`), sechs Rückspannungen, Kriechrate.
+- `J2Plastic` (Simo & Hughes, Box 3.2): Radial Return mit stückweise linearen Kurven,
+  isotrop/kinematisch (Prager, `ΔX = Δκ·√(2/3)·n̂`)/kombiniert, konsistente algorithmische
+  Tangente. Kombiniert: erste Zeile der Tabelle = Fließgrenze, Rest = kinematische Kurve
+  (`*CYCLIC HARDENING` kommt bei Bedarf). Kriechen als Perzyna-Überspannung mit Norton
+  `Δγ = Δt·A·t^m·(q − σ_y)^n`, implizit (geschachteltes Newton/Bisektion), nur unter `*VISCO`;
+  `*STATIC` schaltet es ab (ccx-Regel). Ohne `*PLASTIC` null Fließgrenze.
+- `FiniteStrainJ2`: multiplikative Zerlegung, logarithmische Dehnungen, Exponential-Return
+  (Simo 1992): `C = 1 + 2E`, `U = √C`, `b_e^tr = U·C_p⁻¹·U`, Hencky-Dehnung aus dem Spektrum,
+  kleine-Dehnungs-Kern darauf, `S = U⁻¹ τ U⁻¹`. Die Tangente `dS/dE` wird als zentrale
+  Differenz gebildet (12 Kernauswertungen; analytisch wäre die Ableitung der Tensorfunktionen
+  nötig). Die Fließkurve ist wahre Spannung über logarithmischer plastischer Dehnung; der
+  Zugstab trifft diese Lösung auf 1e-6.
+- `plxs-elements`: `SolidElement::nonlinear(coords, u, nlgeom, d_elastic, material, fe, ke)`:
+  Total-Lagrange, `K = ∫B_LᵀDB_L + Lᵀ(S⊗I)L`, Material-Callback je Integrationspunkt
+  (`PointKinematics`: F, E, Gewicht; `cauchy(&S)`). C3D8R mit mittleren Gradienten +
+  Hourglass, C3D8I mit effektivem Gradienten der inkompatiblen Moden (exakt für den linearen
+  Pfad; mit `nlgeom = false` reproduziert `nonlinear` genau `stiffness`).
+- `plxs-assembly`: `assemble_nonlinear(table, model, input, state, k)` liefert `f_int`,
+  Cauchy-Spannungen, Dehnungen, neue Zustandsgrößen, Flusssumme; der Zustand des
+  Inkrementanfangs bleibt unverändert, bis die Prozedur akzeptiert.
+- `plxs-procedures::nonlinear::NonlinearStatic` für `*STATIC` mit NLGEOM oder nichtlinearem
+  Material und für `*VISCO`: Newton-Raphson mit den `*CONTROLS`-Defaults (`Controls::of_step`
+  liest TIME INCREMENTATION und FIELD), automatische Inkrementierung (×1.5 nach zwei
+  schnellen Inkrementen ≤ 4 Iterationen, ×0.75 nach > 10, Cutback 0.25 bei Divergenz, 0.5
+  bei > 16 geschätzten Iterationen, maximal 5 Cutbacks, CETOL-Cutback für Kriechen), `.sta`
+  und `.cvg` je Iteration, Progress-Events Increment/Iteration/IncrementDone. SPCs und
+  MPCs (T6) werden wie in der linearen Prozedur eliminiert (`u = T v + g`, `Tᵀ K T Δv = Tᵀ r`);
+  Federn und Gaps (T6) gehen in Tangente und innere Kraft ein, ein Gap-Statuswechsel
+  erzwingt eine weitere Iteration. Vorgeschriebene Verschiebungen gehen als linearer
+  Prädiktor `Tᵀ K T Δv = Tᵀ (r − K Δg)` mit der Tangente des konvergierten Zustands in die
+  erste Iteration (sonst steht der erste Newton-Schritt auf einem stark verzerrten Zustand
+  und konvergiert nur linear). Ebene und achsensymmetrische Elemente (T4) sind in
+  nichtlinearen Steps noch nicht erlaubt (`not implemented yet`). Druck bleibt Totlast (keine
+  Folgelast); die Unterschiede zu ccx liegen bei 2 % Dehnung unter 1e-3.
+- Felder: `PE` (PEEQ, Knotenmittel), `ENER` (= ½σ:ε mit der Gesamtdehnung, wie ccx);
+  `.dat`-Blöcke `equivalent plastic strain (elem, integ.pnt.,pe)` und `internal energy
+  density (elem, integ.pnt.,energy)`, Elementblöcke vor Knotenblöcken (Reihenfolge des
+  PrePoLix-Writers; `compare_dat` vergleicht Sets nach Namen).
+- `plxs-verify`: Klasse B vergleicht nur noch das Step-Ende (auch bei gleicher
+  Inkrementanzahl: die Inkremente nach dem Fließbeginn liegen über der Toleranz), die
+  Inkrementanzahl nur als Größenordnung (Faktor 3). Skalierung je Feld über alle
+  Komponenten, nicht je Komponente.
+- Abnahmetest `solver/plxs-cli/tests/nonlinear_corpus.rs`: alle `nonlinear/*`-Fixtures
+  grün oder vom Solver mit `not implemented yet` abgelehnt; ein falsches Ergebnis fällt
+  durch. Seit dem Merge von master 14/14 grün.
+- Randbedingungen in nichtlinearen Folgeschritten laufen vom Wert am Ende des Vorschritts
+  zum neuen Wert (`Spc::start_from_previous`, aus dem Kontakt-Thread übernommen); vorher
+  wurde der Wert doppelt gezählt (`membran-vorgespannt`: U1 0,2 statt 0,1).
+
+### Membranen nativ (M3D3, M3D4)
+
+`membran-vorgespannt` (vorgespannter Streifen unter Druck, NLGEOM) lag mit der
+C3D8I-Expansion bei U3 0,0212 statt 0,0271: der expandierte Block trägt durch Biegung.
+ccx 2.21 als Blackbox (Version aus Debian, kein Quellcode gelesen):
+
+- Ein M3D4-Streifen, gelenkig gelagert, Querlast, linear: Verschiebungen 1e10, also
+  quer zur Ebene praktisch keine Steifigkeit. Die gleiche Schicht als C3D8 oder C3D8I mit
+  Mittelwert-Gleichungen trägt endlich.
+- In der Ebene ist M3D4 genau eine C3D8-Schicht, deren Dicke sich symmetrisch ändern darf
+  (Gleichungen oben + unten = 2 × Mitte, getestet für Dicke 0,01 bis 10 an einem
+  10 × 10-Element); für dünne Schichten also das Scheibenviereck mit 2 × 2 Punkten, die
+  Abweichung wächst mit (Dicke/Elementgröße)².
+- Unter NLGEOM trifft eine total-Lagrangesche Membran (Green-Lagrange, St. Venant-
+  Kirchhoff im ebenen Spannungszustand) mit **mitgehendem Druck** ccx auf 1e-5
+  (0,0270916 gegen 0,0270918); als Totlast 0,0270645.
+
+Umsetzung: `plxs_elements::membrane::Membrane` (M3D3 ein Punkt, M3D4 2 × 2), lineare
+Steifigkeit als `LinearBlock { membrane: true }`, in nichtlinearen Steps total Lagrange
+in `assemble_nonlinear` (dort jetzt auch die übrigen `LinearBlock`s wie U1, die vorher
+fehlten). Druck `P`/`P1` (+Normale) und `P2` (−Normale) über
+`plxs_assembly::membrane_pressures`; unter NLGEOM als Folgelast (Kraft auf der
+verformten Fläche, Laststeifigkeit nicht in der Tangente). Masse (konsistent) und
+GRAV/CENTRIF auf Membranen ebenfalls; vorher wurden Lasten auf M3D3 still ignoriert.
+Damit eine Membran ohne Vorspannung nicht singulär ist, bekommt sie eine winzige
+Steifigkeit gegen die Neigung der Normalverschiebung (`OUT_OF_PLANE` = 1e-9 E t
+∫∇N·∇N dA); ccx verhält sich genauso (in `edge-tie-m3d4` liegen die freien
+Membranknoten auf der Geraden zwischen festem und gekoppeltem Rand, plxs trifft sie auf
+1e-4). Der Block in `edge-tie-m3d4` hängt aber wie an einem Scharnier, seine Drehung
+legen nur diese winzigen Steifigkeiten fest; die Fixture bleibt offen.
+
+Offen: geometrische Steifigkeit der Membranen für `*BUCKLE`/Vorspannung in `*FREQUENCY`,
+M3D4R nativ, Druck auf Volumenelementen unter NLGEOM (bleibt Totlast, siehe oben).
+
+### Beobachtungen an CalculiX 2.21 (nur aus Ausgaben)
+
+- Mindestens zwei Iterationen je Inkrement, auch wenn die erste konvergiert.
+- `.frd`-Inkremente tragen die **Gesamtzeit** (100CL), nicht die Step-Zeit.
+- `ENER` ist ½σ:ε mit der Gesamtdehnung, nicht die elastische Energiedichte.
+- Kinematische Verfestigung: bei Entlastung bricht ccx 2.21 mit „too many cutbacks“ ab,
+  bei Lastumkehr liefert es je nach Rückkraft inkonsistente plastische Dehnungen; die
+  Fixture `plastisch-kinematisch` ist deshalb monoton (Bauschinger im Unit-Test).
+- Finite-Dehnungs-Plastizität: ccx’ Zugstab unter NLGEOM weicht von der exakten
+  Lösung (wahre Spannung über logarithmischer plastischer Dehnung) in zweiter Ordnung ab:
+  PE um +0,2 % bei 1 % Dehnung, +0,7 % bei 5 %; die Spannung auf 2e-4. plxs trifft die
+  exakte Lösung. Die Fixture `plastisch-nlgeom` lässt PEEQ deshalb aus der Feldausgabe
+  weg; S/E/U/RF stimmen auf 7e-4 (Cauchy aus Kirchhoff `τ/J`). Ein stark eingespannter
+  Biegebalken mit 1 % plastischer Dehnung weicht an der Einspannecke um 0,6 % im
+  hydrostatischen Anteil ab (Volumenänderung des plastischen Flusses zweiter Ordnung).
+- `.dat`: Blöcke in der Reihenfolge der `*EL PRINT`/`*NODE PRINT`-Karten der Eingabe.
 
 ## Stand nach M3 T13 (implizite Dynamik)
 
