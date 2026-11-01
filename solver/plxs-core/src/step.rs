@@ -494,6 +494,10 @@ pub struct HistoryOutput {
     pub totals: Totals,
     pub global: bool,
     pub time_points: Option<String>,
+    /// `*CONTACT PRINT, SLAVE=, MASTER=`: the slave and master surface of the pair the
+    /// statistics (`CF`) are printed for (upper case); `None` for all pairs.
+    #[serde(default)]
+    pub surfaces: Option<(String, String)>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

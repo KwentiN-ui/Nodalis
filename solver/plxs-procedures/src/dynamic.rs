@@ -369,6 +369,9 @@ impl DynamicProcedure {
         let mut size = initial;
         let mut increment = 0u32;
         while time < period * (1.0 - 1e-12) {
+            if ctx.cancel.is_cancelled() {
+                return Ok(StepOutcome::Cancelled);
+            }
             increment += 1;
             if increment > ctx_max_increments(step) {
                 return Err(Error::Numerical {

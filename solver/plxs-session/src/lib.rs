@@ -48,6 +48,8 @@ pub struct Session {
     model: Model,
     table: ElementTable,
     constraints: ModelConstraints,
+    /// Contact pairs, prepared once; moved into the procedure context for a step.
+    contact: plxs_contact::ContactModel,
     /// Warnings of the model preparation, reported with the first step.
     pending_warnings: Vec<String>,
     pattern: Arc<Pattern>,
@@ -82,7 +84,10 @@ impl Session {
         // Ties move their slave nodes before anything uses the coordinates.
         let mut model = model;
         let constraints = ModelConstraints::new(&mut model)?;
-        let pending_warnings = constraints.warnings.clone();
+        // Contact pairs with ADJUST move their slave nodes too.
+        let contact = plxs_contact::ContactModel::new(&mut model)?;
+        let mut pending_warnings = constraints.warnings.clone();
+        pending_warnings.extend(contact.warnings.iter().cloned());
         let (table, pattern) = pool.install(|| -> Result<_> {
             let mut table = ElementTable::new(&model, 0.0)?;
             // Nodes outside every element that constraints tie in (rigid body reference
@@ -107,6 +112,7 @@ impl Session {
             model,
             table,
             constraints,
+            contact,
             pending_warnings,
             pattern,
             stiffness: None,
@@ -147,6 +153,7 @@ impl Session {
             average_force: self.average_force,
             work_dir: self.options.work_dir.clone(),
             cancel: self.options.cancel.clone(),
+            contact: std::mem::take(&mut self.contact),
             profile: std::mem::take(&mut self.profile),
         };
         // The procedure runs on the session's pool in a thread of its own; events come
@@ -166,6 +173,7 @@ impl Session {
                     cvg: std::mem::take(&mut ctx.cvg),
                     average_force: ctx.average_force,
                     profile: std::mem::take(&mut ctx.profile),
+                    contact: std::mem::take(&mut ctx.contact),
                 };
                 (outcome, back)
             });
@@ -182,6 +190,7 @@ impl Session {
                         cvg: Vec::new(),
                         average_force: None,
                         profile: Default::default(),
+                        contact: plxs_contact::ContactModel::default(),
                     },
                 )
             })
@@ -192,6 +201,7 @@ impl Session {
         self.cvg = back.cvg;
         self.average_force = back.average_force;
         self.profile = back.profile;
+        self.contact = back.contact;
         let outcome = outcome?;
         progress.event(ProgressEvent::StepDone {
             step: step_number,
@@ -308,6 +318,7 @@ struct Carried {
     cvg: Vec<CvgRow>,
     average_force: Option<f64>,
     profile: plxs_procedures::profile::Profile,
+    contact: plxs_contact::ContactModel,
 }
 
 /// Forwards events into a channel.

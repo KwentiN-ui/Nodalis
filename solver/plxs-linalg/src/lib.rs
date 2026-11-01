@@ -14,10 +14,13 @@
 
 pub mod dense;
 pub mod eigen;
+pub mod gmres;
 pub mod ordering;
 pub mod pattern;
 pub mod solver;
 pub mod supernodal;
+
+pub use gmres::gmres;
 
 pub use eigen::{EigenPairs, EigenSolver, LanczosOptions, ShiftInvertLanczos};
 pub use pattern::{Pattern, SparseMatrix};
