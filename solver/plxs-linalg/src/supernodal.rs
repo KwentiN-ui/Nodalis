@@ -35,6 +35,8 @@ use faer::linalg::triangular_solve::solve_unit_lower_triangular_in_place;
 use faer::prelude::*;
 use faer::sparse::linalg::cholesky::supernodal::SymbolicSupernodalCholesky;
 use faer::{Accum, MatMut, Par};
+
+use crate::solver::FactorIndex;
 use rayon::prelude::*;
 use std::sync::{Mutex, OnceLock};
 
@@ -86,9 +88,9 @@ impl TreeSymbolic {
     /// Builds the tree for `faer`'s supernodal structure of `pattern` permuted by `perm`
     /// (`perm_inv[original] = permuted`; `None` when the natural order is used).
     pub fn new(
-        supernodal: &SymbolicSupernodalCholesky<u32>,
+        supernodal: &SymbolicSupernodalCholesky<FactorIndex>,
         pattern: &Pattern,
-        perm_inv: Option<&[u32]>,
+        perm_inv: Option<&[FactorIndex]>,
     ) -> Self {
         let n = pattern.dimension();
         let n_super = supernodal.n_supernodes();
@@ -175,7 +177,7 @@ impl TreeSymbolic {
         }
 
         // Lower triangle of the permuted matrix as positions into the pattern's values.
-        let permuted = |i: u32| perm_inv.map_or(i, |inv| inv[i as usize]);
+        let permuted = |i: u32| perm_inv.map_or(i, |inv| inv[i as usize] as u32);
         let mut a_col_ptr = vec![0u32; n + 1];
         for col in 0..n {
             let pc = permuted(col as u32);
@@ -235,7 +237,7 @@ impl TreeSymbolic {
 }
 
 struct Context<'a> {
-    supernodal: &'a SymbolicSupernodalCholesky<u32>,
+    supernodal: &'a SymbolicSupernodalCholesky<FactorIndex>,
     tree: &'a TreeSymbolic,
     values: &'a [f64],
     /// The factor's values split into the ranges of the supernodes; the task that
@@ -315,7 +317,7 @@ impl Workspace {
 /// pattern of the symbolic analysis) into `factor` in `faer`'s supernodal layout. Returns
 /// the number of regularized pivots.
 pub fn factorize<'a>(
-    supernodal: &'a SymbolicSupernodalCholesky<u32>,
+    supernodal: &'a SymbolicSupernodalCholesky<FactorIndex>,
     tree: &'a TreeSymbolic,
     values: &'a [f64],
     factor: &'a mut [f64],
@@ -415,7 +417,7 @@ fn node(ctx: &Context<'_>, s: usize) -> Result<usize, LdltError> {
                 row - s_start
             } else {
                 c + pattern
-                    .binary_search(&(row as u32))
+                    .binary_search(&(row as FactorIndex))
                     .expect("row in the structure")
             };
             ls[(i, j)] += ctx.values[tree.a_src[k] as usize];
@@ -474,8 +476,8 @@ fn apply_update(ctx: &Context<'_>, d: usize, s: usize, first: usize, mut target:
     let s_end = supernodal.supernode_end()[s] as usize;
     let c = s_end - s_start;
     let s_pattern = supernodal.supernode(s).pattern();
-    let col_lo = (s_start + first) as u32;
-    let col_hi = (s_start + first + target.ncols()) as u32;
+    let col_lo = (s_start + first) as FactorIndex;
+    let col_hi = (s_start + first + target.ncols()) as FactorIndex;
 
     let d_start = supernodal.supernode_begin()[d] as usize;
     let c_d = supernodal.supernode_end()[d] as usize - d_start;
