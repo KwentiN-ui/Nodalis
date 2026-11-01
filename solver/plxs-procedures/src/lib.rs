@@ -2,8 +2,9 @@
 //! (`*STATIC` without `NLGEOM`). M2: heat transfer and temperature-displacement steps
 //! ([`heat`], [`thermal`]), nonlinear static (`NLGEOM`, plastic and creeping materials,
 //! [`nonlinear`]) and `*VISCO`, `*FREQUENCY` and `*BUCKLE` ([`eigen`]), `*DYNAMIC`
-//! ([`dynamic`]), `*SENSITIVITY` ([`sensitivity`], T17). The remaining procedures follow
-//! in M3 (concept section 4.5).
+//! ([`dynamic`]), modal dynamics, steady state dynamics and complex frequency ([`modal`],
+//! [`complex`]), `*SENSITIVITY` ([`sensitivity`], T17). The remaining procedures follow in
+//! M3 (concept section 4.5).
 //!
 //! A procedure works on a [`ProcedureContext`]: the model, its element table, the assembled
 //! stiffness matrix and solver, the state it starts from, and the results it appends to.
@@ -12,13 +13,16 @@
 //!
 //! No CalculiX code was consulted.
 
+pub mod complex;
 pub mod contact;
 pub mod dynamic;
 pub mod eigen;
 pub mod fields;
 pub mod heat;
 pub mod history;
+pub mod modal;
 pub mod nonlinear;
+pub mod profile;
 pub mod sensitivity;
 pub mod static_linear;
 pub mod thermal;
@@ -66,6 +70,8 @@ pub struct ProcedureContext<'a> {
     pub work_dir: std::path::PathBuf,
     /// The contact pairs of the model, prepared once (empty without contact).
     pub contact: plxs_contact::ContactModel,
+    /// Time per phase, summed over the steps of the session.
+    pub profile: profile::Profile,
 }
 
 /// A procedure computes a step on the context.
@@ -98,6 +104,9 @@ pub fn run_step(
         | ProcedureKind::Buckle(_)
         | ProcedureKind::Dynamic(_)
         | ProcedureKind::Sensitivity(_)
+        | ProcedureKind::ComplexFrequency(_)
+        | ProcedureKind::ModalDynamics(_)
+        | ProcedureKind::SteadyStateDynamics(_)
             if !ctx.contact.is_empty() =>
         {
             Err(Error::Unsupported(format!(
@@ -109,6 +118,13 @@ pub fn run_step(
         ProcedureKind::Frequency(_) => eigen::FrequencyProcedure.run(ctx, step, progress),
         ProcedureKind::Buckle(_) => eigen::BuckleProcedure.run(ctx, step, progress),
         ProcedureKind::Dynamic(_) => dynamic::DynamicProcedure.run(ctx, step, progress),
+        ProcedureKind::ComplexFrequency(_) => {
+            complex::ComplexFrequencyProcedure.run(ctx, step, progress)
+        }
+        ProcedureKind::ModalDynamics(_) => modal::ModalDynamicsProcedure.run(ctx, step, progress),
+        ProcedureKind::SteadyStateDynamics(_) => {
+            modal::SteadyStateProcedure.run(ctx, step, progress)
+        }
         ProcedureKind::Sensitivity(_) => sensitivity::SensitivityProcedure.run(ctx, step, progress),
         ProcedureKind::HeatTransfer(_)
         | ProcedureKind::CoupledTemperatureDisplacement(_)

@@ -267,6 +267,25 @@ fn ccx_dir(name: &str) -> Option<PathBuf> {
     Some(dir)
 }
 
+/// Whether the installed CalculiX is at least version 2.23. Before it, the reaction force RF
+/// printed at a pre-tension node is zero (the preload is an external load there), so the bolt
+/// force can only be read from 2.23 on.
+fn ccx_prints_pretension_force() -> bool {
+    let Ok(output) = Command::new("ccx").arg("-v").output() else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let Some(version) = text.split("Version").nth(1) else {
+        return false;
+    };
+    let mut parts = version.trim().split('.').map(|p| {
+        let digits: String = p.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse::<u32>().unwrap_or(0)
+    });
+    let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    (major, minor) >= (2, 23)
+}
+
 /// Runs CalculiX on the input file in the directory and reads the results.
 fn run_ccx_in(dir: &std::path::Path, name: &str, text: &str) -> FrdImport {
     std::fs::write(dir.join(format!("{name}.inp")), text).unwrap();
@@ -2239,6 +2258,44 @@ fn a_buckle_step_is_written_like_prepomax_does() {
     );
 }
 
+/// Short modal runs that keep the golden files of the solver corpus small: four stored
+/// modes, a few increments of modal dynamics with Rayleigh damping and a coarse harmonic
+/// sweep with bias around the first bending pair, with magnitudes and phases (PU, PHS).
+#[test]
+fn calculix_runs_short_modal_steps() {
+    let damping = ModalDamping::Rayleigh(plx_model::RayleighDamping {
+        alpha: 300.0,
+        beta: 2e-6,
+    });
+    let (mesh, mut model) = modal_cantilever(Some(damping));
+    let node = |variables: &[&str]| FieldOutput::new("NF-Output-1", OutputKind::Node, variables);
+    let element =
+        |variables: &[&str]| FieldOutput::new("EF-Output-1", OutputKind::Element, variables);
+    let StepKind::Frequency(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.num_frequencies = 4;
+    model.steps[0].field_outputs = vec![node(&["U"])];
+    let StepKind::ModalDynamics(settings) = &mut model.steps[1].kind else {
+        unreachable!()
+    };
+    settings.time_period = 1e-4;
+    model.steps[1].field_outputs = vec![node(&["U", "V"]), element(&["S"])];
+    let StepKind::SteadyStateDynamics(settings) = &mut model.steps[2].kind else {
+        unreachable!()
+    };
+    settings.data_points = 3;
+    settings.bias = 2.0;
+    model.steps[2].field_outputs = vec![node(&["U", "PU"]), element(&["S", "PHS"])];
+    let Some(frd) = run_ccx("modal-kurz", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let count = |step: u32| frd.increments.iter().filter(|i| i.step == step).count();
+    assert_eq!((count(1), count(2)), (4, 4));
+    // 700 Hz, the first bending pair, 900 Hz: two intervals of three points.
+    assert_eq!(count(3), 5);
+}
+
 /// The modal superposition swings the tip like the direct integration does, damped by the
 /// modal damping ratio of 0.1 to about 1.73 times the static deflection; the harmonic
 /// sweep peaks near the first bending mode at about 1 / (2 zeta) = 5 times the static
@@ -3219,6 +3276,9 @@ fn calculix_preloads_the_bolt_across_two_blocks() {
         .sum();
     assert!((reaction + force).abs() < 1e-3 * force, "{reaction}");
     // The bolt force is printed under the bolt's name, in the preload step and while locked.
+    if !ccx_prints_pretension_force() {
+        return;
+    }
     let names: Vec<&str> = dat.sets.iter().map(|s| s.name.as_str()).collect();
     let bolt = (dat.sets.iter())
         .find(|s| s.name == "BOLT-1")
@@ -9332,6 +9392,9 @@ fn a_bolt_picked_by_its_shank_is_cut_across_its_middle() {
     // The bolt is in tension: the support at its start pulls it away from the middle.
     let axial: f64 = reaction.iter().zip(expected).map(|(a, b)| a * b).sum();
     assert!((axial + force).abs() < 1e-3 * force, "{reaction:?}");
+    if !ccx_prints_pretension_force() {
+        return;
+    }
     let bolt = dat.sets.iter().find(|s| s.name == "BOLT-1").unwrap();
     let forces = &bolt
         .field("FORCES")

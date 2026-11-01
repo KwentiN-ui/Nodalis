@@ -17,7 +17,7 @@ use plxs_core::material::{
     Plastic, PlasticRow, SpecificHeat, TemperatureValue,
 };
 use plxs_core::mesh::{ElementId, ElementRef, NodeId, NodeRef, Surface, SurfaceFace};
-use plxs_core::model::{DesignVariables, RestartRead};
+use plxs_core::model::{Analysis, DesignVariables, RestartRead};
 use plxs_core::section::{BeamProfile, Gap, Section, SectionKind, Spring, SpringStiffness};
 use plxs_core::step::{
     Boundary, Buckle, ComplexFrequency, ConcentratedFlux, ConcentratedLoad, ContactChange,
@@ -190,6 +190,21 @@ impl Reader {
             carried_heat: [0; 4],
             last_comment: None,
         }
+    }
+
+    /// A reader that goes on after the steps of `base` (`*RESTART, READ`): the model is
+    /// `base`'s, the steps it reads are numbered on and start with what the last step of
+    /// `base` carries over, as if they followed it in one input file.
+    pub(crate) fn continuing(base: Analysis) -> Self {
+        let mut reader = Self::new();
+        reader.reading.analysis = base;
+        reader.reading.analysis.model.rebuild_indices();
+        let steps = std::mem::take(&mut reader.reading.analysis.steps);
+        if let Some(last) = steps.last() {
+            reader.carry_on(last);
+        }
+        reader.reading.analysis.steps = steps;
+        reader
     }
 
     pub(crate) fn read(mut self, lines: &[Line]) -> Result<Reading, Error> {
@@ -1561,8 +1576,16 @@ impl Reader {
             )
             .at(&k.file, k.line));
         }
-        // A perturbation step does not carry its loads on; its boundaries it does. Step-time
-        // amplitudes end with the step: their loads go on with their final value.
+        self.carry_on(&step);
+        self.reading.analysis.steps.push(step);
+        self.friction_target = FrictionTarget::None;
+        Ok(())
+    }
+
+    /// What the next step starts with after `step`. A perturbation step does not carry its
+    /// loads on; its boundaries it does. Step-time amplitudes end with the step: their loads
+    /// go on with their final value.
+    fn carry_on(&mut self, step: &Step) {
         let step_time = crate::carry::step_period(&step.procedure);
         let mut boundaries = step.boundaries.clone();
         let mut loads = step.loads.clone();
@@ -1578,9 +1601,6 @@ impl Reader {
             self.carried.fields = step.fields.clone();
         }
         self.carried.outputs = step.outputs.clone();
-        self.reading.analysis.steps.push(step);
-        self.friction_target = FrictionTarget::None;
-        Ok(())
     }
 
     fn current_step(&mut self, k: &Keyword) -> Result<&mut Step, Error> {
@@ -1805,6 +1825,10 @@ impl Reader {
             period: v[1],
             damping: None,
         });
+        // Like *DYNAMIC: the loads act at once without AMPLITUDE= (ccx 2.21).
+        if !self.step_amplitude_given {
+            self.current_step(k)?.default_amplitude = DefaultAmplitude::Step;
+        }
         self.procedure(k, procedure)
     }
 

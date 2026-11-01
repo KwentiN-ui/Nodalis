@@ -5,6 +5,8 @@
 //! plxs -i <job>         the same
 //! plxs -v               print the version
 //! plxs --threads <n>    number of threads (default: OMP_NUM_THREADS, else all cores)
+//! plxs -o bin <job>     write the .frd with binary number blocks (-o asc: text, default)
+//! plxs --profile <job>  print the time per phase at the end (also PLXS_PROFILE=1)
 //! ```
 //!
 //! stdout follows CalculiX's lines (`STEP n`, `increment n attempt m`, `iteration n`, `Job
@@ -48,6 +50,9 @@ fn banner() {
 fn run(args: Vec<String>) -> i32 {
     let mut job: Option<String> = None;
     let mut threads: Option<usize> = None;
+    let mut frd_format = plxs_output::FrdFormat::Ascii;
+    let mut profile = std::env::var("PLXS_PROFILE").is_ok_and(|v| !v.is_empty() && v != "0");
+    let started = std::time::Instant::now();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -63,8 +68,23 @@ fn run(args: Vec<String>) -> i32 {
                 i += 1;
                 threads = args.get(i).and_then(|t| t.parse().ok());
             }
+            "--profile" => profile = true,
+            "-o" => {
+                i += 1;
+                frd_format = match args.get(i).map(|a| a.to_ascii_lowercase()).as_deref() {
+                    Some("bin" | "binary") => plxs_output::FrdFormat::Binary,
+                    Some("asc" | "ascii" | "frd") => plxs_output::FrdFormat::Ascii,
+                    other => {
+                        say(&format!(
+                            "*ERROR: unknown output format {}; use asc or bin",
+                            other.unwrap_or("")
+                        ));
+                        return 1;
+                    }
+                };
+            }
             "-h" | "--help" => {
-                say("usage: plxs [-i] <job> [--threads <n>] | plxs -v");
+                say("usage: plxs [-i] <job> [--threads <n>] [-o asc|bin] | plxs -v");
                 return 0;
             }
             other if !other.starts_with('-') => job = Some(other.to_string()),
@@ -76,7 +96,7 @@ fn run(args: Vec<String>) -> i32 {
         i += 1;
     }
     let Some(job) = job else {
-        say("usage: plxs [-i] <job> [--threads <n>] | plxs -v");
+        say("usage: plxs [-i] <job> [--threads <n>] [-o asc|bin] | plxs -v");
         return 1;
     };
     banner();
@@ -96,7 +116,52 @@ fn run(args: Vec<String>) -> i32 {
     say("");
 
     let path = input_path(&job);
-    let reading = match plxs_input::read_inp(&path) {
+    let job_dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| job.clone());
+    let output = |ext: &str| job_dir.join(format!("{stem}.{ext}"));
+
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) => {
+            report_error(&Error::Io {
+                path: path.display().to_string(),
+                message: e.to_string(),
+            });
+            return 1;
+        }
+    };
+    // `*RESTART, READ`: the model and the steps before come from `<job>.rin`.
+    let mut snapshot = None;
+    let reading = match plxs_input::restart_read(&text) {
+        None => plxs_input::read_inp_str(&text, Some(&path)),
+        Some(step) => {
+            let rin = output("rin");
+            let file = match plxs_session::restart::RestartFile::read(&rin) {
+                Ok(file) => file,
+                Err(error) => {
+                    report_error(&error);
+                    return 1;
+                }
+            };
+            let Some(found) = file.after(step).cloned() else {
+                say("");
+                say(&format!(
+                    "*ERROR in restartread: {} holds no state after step {}",
+                    rin.display(),
+                    step.map_or_else(|| "any".to_string(), |s| s.to_string())
+                ));
+                say("");
+                return 1;
+            };
+            let base = file.base(found.state.steps_done);
+            snapshot = Some(found);
+            plxs_input::read_inp_continuing(&text, Some(&path), base)
+        }
+    };
+    let reading = match reading {
         Ok(reading) => reading,
         Err(errors) => {
             for error in &errors {
@@ -109,29 +174,24 @@ fn run(args: Vec<String>) -> i32 {
         say(warning);
     }
     let analysis = reading.analysis;
+    // Steps already computed by the run the restart continues.
+    let first = snapshot.as_ref().map_or(0, |s| s.state.steps_done as usize);
     say(&format!(
         " number of nodes: {}\n number of elements: {}\n number of steps: {}",
         analysis.model.nodes.len(),
         analysis.model.elements.len(),
-        analysis.steps.len()
+        analysis.steps.len() - first
     ));
     say("");
 
     let mut progress = |event: ProgressEvent| print_event(&event);
-    let job_dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
-    let stem = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| job.clone());
-    let output = |ext: &str| job_dir.join(format!("{stem}.{ext}"));
 
     // A model check only reads the input.
-    if analysis
-        .steps
+    if analysis.steps[first..]
         .iter()
         .all(|s| matches!(s.procedure, Procedure::NoAnalysis))
     {
-        for (index, _) in analysis.steps.iter().enumerate() {
+        for index in first..analysis.steps.len() {
             plxs_core::Progress::event(
                 &mut progress,
                 ProgressEvent::Step {
@@ -145,6 +205,18 @@ fn run(args: Vec<String>) -> i32 {
         say("");
         return 0;
     }
+
+    // What `*RESTART, WRITE` stores: the analysis as read, before the expansion.
+    let mut restart_file = (analysis.steps[first..].iter())
+        .any(|s| s.restart_write.is_some_and(|w| w.frequency > 0))
+        .then(|| plxs_session::restart::RestartFile {
+            analysis: plxs_core::Analysis {
+                model: analysis.model.clone(),
+                steps: Vec::new(),
+            },
+            snapshots: Vec::new(),
+        });
+    let source_steps = restart_file.as_ref().map(|_| analysis.steps.clone());
 
     // Shells, membranes and beams are computed as the solids CalculiX expands them to.
     let expansion = match plxs_elements::expand::expand(analysis) {
@@ -161,14 +233,18 @@ fn run(args: Vec<String>) -> i32 {
         threads,
         work_dir: job_dir.clone(),
     };
-    let mut session = match plxs_session::Session::new(analysis.model, options) {
+    let session = match snapshot {
+        None => plxs_session::Session::new(analysis.model, options),
+        Some(snapshot) => plxs_session::Session::resume(analysis.model, snapshot, options),
+    };
+    let mut session = match session {
         Ok(s) => s,
         Err(error) => {
             report_error(&error);
             return 1;
         }
     };
-    for step in &analysis.steps {
+    for (index, step) in analysis.steps.iter().enumerate().skip(first) {
         for variable in plxs_procedures_unsupported(step) {
             say(&format!(
                 "*WARNING: output variable {variable} is not implemented yet and is left out"
@@ -180,7 +256,7 @@ fn run(args: Vec<String>) -> i32 {
                 say(&format!(
                     "*ERROR: no convergence in increment {increment}: {message}"
                 ));
-                let _ = write_results(&session, &output_map, &output);
+                let _ = write_results(&session, &output_map, &output, frd_format);
                 return 1;
             }
             Ok(plxs_session::StepOutcome::Partial { .. }) => {}
@@ -189,11 +265,36 @@ fn run(args: Vec<String>) -> i32 {
                 return 1;
             }
         }
+        if let (Some(file), Some(steps), Some(write)) = (
+            restart_file.as_mut(),
+            source_steps.as_ref(),
+            step.restart_write.filter(|w| w.frequency > 0),
+        ) {
+            // The state at the end of the step; CalculiX's FREQUENCY counts increments,
+            // a snapshot inside a step is not needed to continue with the next step.
+            file.analysis.steps = steps[..=index].to_vec();
+            file.push(session.snapshot(), write.overlay);
+            if let Err(error) = file.write(&output("rout")) {
+                report_error(&error);
+                return 1;
+            }
+        }
         say("");
     }
-    if let Err(error) = write_results(&session, &output_map, &output) {
+    let writing = std::time::Instant::now();
+    if let Err(error) = write_results(&session, &output_map, &output, frd_format) {
         report_error(&error);
         return 1;
+    }
+    if profile {
+        say("");
+        for line in session.profile().report(started.elapsed()) {
+            say(&line);
+        }
+        say(&format!(
+            "   (of which writing the result files {:.3} s)",
+            writing.elapsed().as_secs_f64()
+        ));
     }
     say("");
     say(" Job finished");
@@ -213,9 +314,10 @@ fn write_results(
     session: &plxs_session::Session,
     map: &plxs_elements::expand::OutputMap,
     output: &dyn Fn(&str) -> PathBuf,
+    frd_format: plxs_output::FrdFormat,
 ) -> Result<(), Error> {
     let (model, results) = map.apply(session.model(), session.results());
-    plxs_output::write_frd(&output("frd"), &model, &results, VERSION)?;
+    plxs_output::write_frd_as(&output("frd"), &model, &results, VERSION, frd_format)?;
     plxs_output::write_sta(&output("sta"), session.sta_rows())?;
     plxs_output::write_cvg(&output("cvg"), session.cvg_rows())?;
     if !session.results().history.is_empty() {

@@ -77,13 +77,37 @@ fn io(path: &Path, e: std::io::Error) -> Error {
     }
 }
 
+/// How the numbers of an `.frd` are written.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FrdFormat {
+    /// 12-column fixed-width text (`E12.5`), what CalculiX writes by default.
+    #[default]
+    Ascii,
+    /// Little-endian binary blocks inside the text frame (format flags of the frd
+    /// description: coordinates as 8-byte floats, flag 3; results as 4-byte floats, flag
+    /// 2). About a third of the size, read without parsing numbers; same precision for the
+    /// results, full precision for the coordinates.
+    Binary,
+}
+
 /// Writes the `.frd` of a model and its results. The mesh is the model's (expansion of
 /// shells and beams comes with those elements); nodes and elements are written in
 /// ascending id order as CalculiX does.
 pub fn write_frd(path: &Path, model: &Model, results: &Results, version: &str) -> Result<()> {
+    write_frd_as(path, model, results, version, FrdFormat::Ascii)
+}
+
+/// [`write_frd`] in the given format.
+pub fn write_frd_as(
+    path: &Path,
+    model: &Model,
+    results: &Results,
+    version: &str,
+    format: FrdFormat,
+) -> Result<()> {
     let file = std::fs::File::create(path).map_err(|e| io(path, e))?;
     let mut out = BufWriter::new(file);
-    write_frd_to(&mut out, model, results, version).map_err(|e| io(path, e))?;
+    write_frd_to_as(&mut out, model, results, version, format).map_err(|e| io(path, e))?;
     out.flush().map_err(|e| io(path, e))
 }
 
@@ -93,6 +117,17 @@ pub fn write_frd_to(
     results: &Results,
     version: &str,
 ) -> std::io::Result<()> {
+    write_frd_to_as(out, model, results, version, FrdFormat::Ascii)
+}
+
+pub fn write_frd_to_as(
+    out: &mut impl Write,
+    model: &Model,
+    results: &Results,
+    version: &str,
+    format: FrdFormat,
+) -> std::io::Result<()> {
+    let binary = format == FrdFormat::Binary;
     writeln!(out, "    1C")?;
     writeln!(out, "    1UUSER{:62}", "")?;
     writeln!(out, "    1UDATE{:62}", "")?;
@@ -109,8 +144,21 @@ pub fn write_frd_to(
 
     // Nodes that belong to elements, ascending by id.
     let node_order = written_nodes(model);
-    writeln!(out, "    2C{:>30}{:>38}", node_order.len(), 1)?;
-    for &i in &node_order {
+    writeln!(
+        out,
+        "    2C{:>30}{:>38}",
+        node_order.len(),
+        if binary { 3 } else { 1 }
+    )?;
+    if binary {
+        for &i in &node_order {
+            out.write_all(&(model.nodes.ids[i] as i32).to_le_bytes())?;
+            for v in model.nodes.coordinates[i] {
+                out.write_all(&v.to_le_bytes())?;
+            }
+        }
+    }
+    for &i in node_order.iter().filter(|_| !binary) {
         // CalculiX writes the coordinates in single precision; rounding through f32 keeps the
         // last digit the same (2.02577507 is written as 2.02577).
         let c = model.nodes.coordinates[i].map(|v| f64::from(v as f32));
@@ -123,7 +171,9 @@ pub fn write_frd_to(
             fortran_e12(c[2])
         )?;
     }
-    writeln!(out, " -3")?;
+    if !binary {
+        writeln!(out, " -3")?;
+    }
 
     // Elements, ascending by id, with the material number of their section.
     let mut element_order: Vec<usize> = (0..model.elements.len()).collect();
@@ -141,10 +191,29 @@ pub fn write_frd_to(
         .copied()
         .filter(|&i| frd_element(model.elements[i].kind).is_some())
         .collect();
-    writeln!(out, "    3C{:>30}{:>38}", written.len(), 1)?;
+    writeln!(
+        out,
+        "    3C{:>30}{:>38}",
+        written.len(),
+        if binary { 3 } else { 1 }
+    )?;
     for &i in &written {
         let element = &model.elements[i];
         let (kind, order) = frd_element(element.kind).unwrap();
+        if binary {
+            for v in [
+                element.id as i32,
+                i32::from(kind),
+                0,
+                material_number(element) as i32,
+            ] {
+                out.write_all(&v.to_le_bytes())?;
+            }
+            for &k in order {
+                out.write_all(&(element.nodes[k] as i32).to_le_bytes())?;
+            }
+            continue;
+        }
         writeln!(
             out,
             " -1{:>10}{:>5}{:>5}{:>5}",
@@ -161,7 +230,9 @@ pub fn write_frd_to(
             writeln!(out)?;
         }
     }
-    writeln!(out, " -3")?;
+    if !binary {
+        writeln!(out, " -3")?;
+    }
 
     let mut set = 0u32;
     for (ordinal, increment) in results.increments.iter().enumerate() {
@@ -174,6 +245,7 @@ pub fn write_frd_to(
                 increment,
                 field,
                 field.nodes.len(),
+                binary,
             )?;
         }
     }
@@ -217,10 +289,11 @@ fn write_block(
     increment: &ResultsIncrement,
     field: &ResultField,
     node_count: usize,
+    binary: bool,
 ) -> std::io::Result<()> {
     let analysis = match increment.kind {
         IncrementKind::Time => 0,
-        IncrementKind::Dynamic => 1,
+        IncrementKind::Dynamic | IncrementKind::SteadyState => 1,
         IncrementKind::Frequency => 2,
         IncrementKind::Buckling => 4,
         IncrementKind::ComplexFrequency | IncrementKind::Sensitivity => 3,
@@ -228,9 +301,21 @@ fn write_block(
     writeln!(
         out,
         "    1PSTEP{:>26}{:>12}{:>12}          ",
-        set, increment.increment, increment.step
+        set,
+        if matches!(
+            increment.kind,
+            IncrementKind::SteadyState | IncrementKind::ComplexFrequency
+        ) {
+            0
+        } else {
+            increment.increment
+        },
+        increment.step
     )?;
-    if matches!(increment.kind, IncrementKind::Frequency) {
+    if matches!(
+        increment.kind,
+        IncrementKind::Frequency | IncrementKind::ComplexFrequency
+    ) {
         // Generalized mass and stiffness of the (mass normalized) mode, nodal diameter,
         // subcase and mode number.
         let omega = 2.0 * std::f64::consts::PI * increment.value;
@@ -268,12 +353,12 @@ fn write_block(
         analysis,
         ordinal,
         analysis_name,
-        1,
+        if binary { 2 } else { 1 },
         width = trailer_width
     )?;
     let components = field.components.len();
     let (declared, trailer) = match field.name.as_str() {
-        "DISP" | "FORC" | "VELO" | "PDISP" | "FLUX" | "NORM" => (components + 1, true),
+        "DISP" | "FORC" | "VELO" | "FLUX" | "NORM" | "DISPI" | "FORCI" => (components + 1, true),
         _ => (components, false),
     };
     writeln!(out, " -4  {:<8}{:>5}{:>5}", field.name, declared, 1)?;
@@ -283,6 +368,15 @@ fn write_block(
     }
     if trailer {
         writeln!(out, " -5  ALL     {:>5}{:>5}{:>5}{:>5}    1ALL", 1, 2, 0, 0)?;
+    }
+    if binary {
+        for (n, &node) in field.nodes.iter().enumerate() {
+            out.write_all(&(node as i32).to_le_bytes())?;
+            for column in &field.values {
+                out.write_all(&(column[n] as f32).to_le_bytes())?;
+            }
+        }
+        return Ok(());
     }
     for (n, &node) in field.nodes.iter().enumerate() {
         write!(out, " -1{:>10}", node)?;
@@ -303,6 +397,14 @@ fn component_flags(field: &str, components: usize, k: usize) -> (u8, u8, u8) {
     // Contact results are six scalars.
     if field == "CONTACT" {
         return (1, 0, 0);
+    }
+    // Magnitudes and phases of complex displacements (MAG1..3, PHA1..3).
+    if field == "PDISP" {
+        return (12, k as u8 + 1, 0);
+    }
+    if field == "PSTRESS" {
+        const IJ: [(u8, u8); 6] = [(1, 1), (2, 2), (3, 3), (1, 2), (2, 3), (3, 1)];
+        return (14, IJ[k % 6].0, IJ[k % 6].1);
     }
     // Displacements and forces with rotations (U1 nodes): a vector and three scalars.
     if matches!(field, "DISP" | "FORC") && components == 6 {

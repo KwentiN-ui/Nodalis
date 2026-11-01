@@ -20,19 +20,6 @@ const OPEN: &[(&str, &str)] = &[
          tiny out-of-plane stiffness of the membranes fixes, differently in ccx and plxs",
     ),
     (
-        "membran-m3d4",
-        "membranes: ccx's M3D4 is stiffer in its plane than the plane stress quadrilateral by \
-         a term of the order (thickness / element size)² (1e-4 here)",
-    ),
-    (
-        "membran-m3d4r",
-        "membranes: M3D4R formulation of ccx 2.21 unknown",
-    ),
-    (
-        "membran-s4r",
-        "membranes: M3D4R formulation of ccx 2.21 unknown",
-    ),
-    (
         "rohr_b32r",
         "PIPE integration needs a section integration rule in the IR",
     ),

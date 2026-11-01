@@ -6,13 +6,19 @@
 //! with `u32` indices and `f64` values; it is computed once per step and reused over the
 //! iterations of that step, which is what makes a reused symbolic factorization possible.
 //!
-//! Sources: the sparse LDLᵀ factorization is `faer`'s (supernodal with AMD ordering); the
-//! matrix layout is the textbook compressed-column format. No CalculiX code was consulted.
+//! Sources: the symbolic analysis of the sparse LDLᵀ factorization is `faer`'s (ordered by
+//! the nested dissection of [`ordering`] for large systems, AMD for small ones); the numeric
+//! factorization of supernodal structures is the tree-parallel one of [`supernodal`] on
+//! `faer`'s dense kernels; the matrix layout is the textbook compressed-column format. No
+//! CalculiX code was consulted.
 
+pub mod dense;
 pub mod eigen;
 pub mod gmres;
+pub mod ordering;
 pub mod pattern;
 pub mod solver;
+pub mod supernodal;
 
 pub use gmres::gmres;
 

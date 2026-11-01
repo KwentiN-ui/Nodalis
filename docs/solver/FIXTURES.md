@@ -221,6 +221,7 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `loads/gravity` | A | M2 | ccx 2.21 | C3D8, \*STATIC |
 | `loads/gravity_c3d20r` | A | M2 | ccx 2.21 | C3D20R, \*STATIC |
 | `loads/moving` | A | M2 | ccx 2.21 | C3D8, \*STATIC |
+| `modal/modal-kurz` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*FREQUENCY, \*MODAL DYNAMICS, \*MODAL DAMPING, \*STEADY STATE DYNAMICS |
 | `modal/modal` | E | M3 | none | C3D20R, \*AMPLITUDE, \*FREQUENCY, \*MODAL DYNAMICS, \*MODAL DAMPING, \*STEADY STATE DYNAMICS |
 | `modal/rotor-perturbation-false` | A | M3 | ccx 2.21 | C3D8, \*STATIC, \*FREQUENCY, \*COMPLEX FREQUENCY |
 | `modal/rotor-perturbation-true` | A | M3 | ccx 2.21 | C3D8, \*STATIC, \*FREQUENCY, \*COMPLEX FREQUENCY |
