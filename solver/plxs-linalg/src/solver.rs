@@ -33,6 +33,11 @@ pub trait LinearSolver {
     fn inertia(&self) -> Option<usize>;
 }
 
+/// The index type of the factor's structure. The pattern of the matrix fits 32 bits, the
+/// factor of a large model does not: a million equations of quadratic tetrahedra fill it
+/// with more than 2³¹ entries, which `faer` refuses for `u32` (`IndexOverflow`).
+pub(crate) type FactorIndex = u64;
+
 /// Systems of at least this many equations are ordered by nested dissection.
 const DISSECTION_FROM: usize = 3000;
 
@@ -41,7 +46,9 @@ pub struct LdltSolver {
     par: faer::Par,
     /// Positions of the unknowns of the next `analyze`, for the geometric dissection.
     coordinates: Option<Vec<[f64; 3]>>,
-    symbolic: Option<SymbolicCholesky<u32>>,
+    symbolic: Option<SymbolicCholesky<FactorIndex>>,
+    /// The pattern of `analyzed` with indices of the factor's type, for `faer`.
+    wide: (Vec<FactorIndex>, Vec<FactorIndex>),
     /// The pattern `symbolic` belongs to: an `analyze` of the same pattern is skipped (the
     /// Newton iterations of a step and the steps of a model share one).
     analyzed: Option<Pattern>,
@@ -74,6 +81,7 @@ impl LdltSolver {
             par,
             coordinates: None,
             symbolic: None,
+            wide: (Vec::new(), Vec::new()),
             analyzed: None,
             reused: 0,
             tree: None,
@@ -159,14 +167,17 @@ impl LdltSolver {
         self.regularization = relative;
     }
 
-    fn symbolic_matrix(pattern: &Pattern) -> SymbolicSparseColMatRef<'_, u32> {
-        SymbolicSparseColMatRef::new_checked(
-            pattern.dimension(),
-            pattern.dimension(),
-            pattern.col_ptr(),
-            None,
-            pattern.row_idx(),
-        )
+    /// The pattern with the factor's index type.
+    fn widen(pattern: &Pattern) -> (Vec<FactorIndex>, Vec<FactorIndex>) {
+        let wide = |v: &[u32]| v.iter().map(|&i| i as FactorIndex).collect();
+        (wide(pattern.col_ptr()), wide(pattern.row_idx()))
+    }
+
+    fn symbolic_matrix(
+        n: usize,
+        (col_ptr, row_idx): &(Vec<FactorIndex>, Vec<FactorIndex>),
+    ) -> SymbolicSparseColMatRef<'_, FactorIndex> {
+        SymbolicSparseColMatRef::new_checked(n, n, col_ptr, None, row_idx)
     }
 }
 
@@ -187,7 +198,8 @@ impl LinearSolver for LdltSolver {
             self.reused += 1;
             return Ok(());
         }
-        let matrix = Self::symbolic_matrix(pattern);
+        let wide = Self::widen(pattern);
+        let matrix = Self::symbolic_matrix(pattern.dimension(), &wide);
         // Nested dissection for large systems (it fills three-dimensional meshes far less
         // than AMD, see `ordering`), AMD for small ones, where it is as good and cheaper.
         let coordinates = self.coordinates.take();
@@ -200,6 +212,9 @@ impl LinearSolver for LdltSolver {
         let dissection =
             dissect.then(|| crate::ordering::nested_dissection(pattern, coordinates.as_deref()));
         let inverse = dissection.as_deref().map(crate::ordering::inverse);
+        let wide_perm =
+            |p: Vec<u32>| -> Vec<FactorIndex> { p.into_iter().map(|i| i as FactorIndex).collect() };
+        let (dissection, inverse) = (dissection.map(wide_perm), inverse.map(wide_perm));
         let ordering =
             match (&dissection, &inverse) {
                 (Some(perm), Some(inv)) => SymmetricOrdering::Custom(
@@ -217,12 +232,22 @@ impl LinearSolver for LdltSolver {
             },
         )
         .map_err(|e| numerical(format!("symbolic factorization failed: {e:?}")))?;
-        self.values = vec![0.0; symbolic.len_val()];
-        // The zeroed allocation is mapped lazily; writing it once here takes its page faults
-        // in one thread. Taken by the threads of the factorization at once they cost several
-        // times more (the kernel serializes them; measured in the cloud VM: 1.9 GB of factor
-        // 1.1 s here against about 3 s inside the parallel factorization).
-        self.values.fill(0.0);
+        // A factor larger than the memory is an error the run reports, not an abort of the
+        // process (the built-in solver runs inside PrePoLix).
+        let len = symbolic.len_val();
+        self.values = Vec::new();
+        self.values.try_reserve_exact(len).map_err(|_| {
+            numerical(format!(
+                "not enough memory: the factor of the {} equations needs {:.1} GB",
+                pattern.dimension(),
+                len as f64 * 8.0 / 1e9
+            ))
+        })?;
+        // The allocation is mapped lazily; writing it once here takes its page faults in one
+        // thread. Taken by the threads of the factorization at once they cost several times
+        // more (the kernel serializes them; measured in the cloud VM: 1.9 GB of factor 1.1 s
+        // here against about 3 s inside the parallel factorization).
+        self.values.resize(len, 0.0);
         self.workspace.clear();
         self.tree = match symbolic.raw() {
             SymbolicCholeskyRaw::Supernodal(raw) => {
@@ -232,6 +257,7 @@ impl LinearSolver for LdltSolver {
             SymbolicCholeskyRaw::Simplicial(_) => None,
         };
         self.symbolic = Some(symbolic);
+        self.wide = wide;
         self.analyzed = Some(pattern.clone());
         self.factorized = false;
         Ok(())
@@ -275,7 +301,10 @@ impl LinearSolver for LdltSolver {
                 .map_err(|e| numerical(format!("the stiffness matrix is singular: {e:?}")))?;
             }
             _ => {
-                let a = SparseColMatRef::new(Self::symbolic_matrix(pattern), matrix.values());
+                let a = SparseColMatRef::new(
+                    Self::symbolic_matrix(pattern.dimension(), &self.wide),
+                    matrix.values(),
+                );
                 let scratch =
                     symbolic.factorize_numeric_ldlt_scratch::<f64>(self.par, Default::default());
                 let mut buffer = MemBuffer::try_new(scratch)
