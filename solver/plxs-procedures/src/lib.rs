@@ -1,7 +1,8 @@
 //! Procedures of the PrePoLix solver: what a step computes. M1: linear static analysis
 //! (`*STATIC` without `NLGEOM`). M2: heat transfer and temperature-displacement steps
-//! ([`heat`], [`thermal`]), `*FREQUENCY` and `*BUCKLE` ([`eigen`]). Nonlinear and dynamic
-//! procedures follow in M2/M3 (concept section 4.5).
+//! ([`heat`], [`thermal`]), `*FREQUENCY` and `*BUCKLE` ([`eigen`]), `*SENSITIVITY`
+//! ([`sensitivity`], T17). Nonlinear and dynamic procedures follow in M2/M3 (concept
+//! section 4.5).
 //!
 //! A procedure works on a [`ProcedureContext`]: the model, its element table, the assembled
 //! stiffness matrix and solver, the state it starts from, and the results it appends to.
@@ -15,6 +16,7 @@ pub mod eigen;
 pub mod fields;
 pub mod heat;
 pub mod history;
+pub mod sensitivity;
 pub mod static_linear;
 pub mod thermal;
 
@@ -80,6 +82,7 @@ pub fn run_step(
         ProcedureKind::Frequency(_) => eigen::FrequencyProcedure.run(ctx, step, progress),
         ProcedureKind::Buckle(_) => eigen::BuckleProcedure.run(ctx, step, progress),
         ProcedureKind::Dynamic(_) => dynamic::DynamicProcedure.run(ctx, step, progress),
+        ProcedureKind::Sensitivity(_) => sensitivity::SensitivityProcedure.run(ctx, step, progress),
         ProcedureKind::HeatTransfer(_)
         | ProcedureKind::CoupledTemperatureDisplacement(_)
         | ProcedureKind::UncoupledTemperatureDisplacement(_)

@@ -223,7 +223,7 @@ fn write_block(
         IncrementKind::Dynamic => 1,
         IncrementKind::Frequency => 2,
         IncrementKind::Buckling => 4,
-        IncrementKind::ComplexFrequency => 3,
+        IncrementKind::ComplexFrequency | IncrementKind::Sensitivity => 3,
     };
     writeln!(
         out,
@@ -273,7 +273,7 @@ fn write_block(
     )?;
     let components = field.components.len();
     let (declared, trailer) = match field.name.as_str() {
-        "DISP" | "FORC" | "VELO" | "PDISP" | "FLUX" => (components + 1, true),
+        "DISP" | "FORC" | "VELO" | "PDISP" | "FLUX" | "NORM" => (components + 1, true),
         _ => (components, false),
     };
     writeln!(out, " -4  {:<8}{:>5}{:>5}", field.name, declared, 1)?;

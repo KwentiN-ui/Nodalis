@@ -375,7 +375,7 @@ pub fn write_increment(
 pub fn unsupported_outputs(step: &Step) -> Vec<String> {
     // `V` only means something in dynamic steps; CalculiX ignores it in the others.
     let known = [
-        "U", "V", "S", "E", "RF", "ERR", "NOE", "ENER", "NT", "HFL", "RFL",
+        "U", "V", "S", "E", "RF", "ERR", "NOE", "ENER", "NT", "HFL", "RFL", "SEN",
     ];
     let mut out = Vec::new();
     for v in requested(step) {

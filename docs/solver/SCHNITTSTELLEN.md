@@ -78,7 +78,7 @@ gebaut und getestet werden kann; `plxs-verify` nutzt `plx-io` nur zum Lesen von 
 
 Was die IR heute schon abdeckt, das aber erst später gerechnet wird: alle Elementtypen des
 Inventars (`ElementType`), alle Prozeduren (`Procedure`), Kontakt, zyklische Symmetrie,
-Submodelle, `*SENSITIVITY` (nur geparst; rechnet weiter mit ccx), `*RESTART`, `*CONTROLS`.
+Submodelle, `*RESTART`, `*CONTROLS`. `*SENSITIVITY` rechnet plxs seit T17 (Abschnitt „Stand nach T17“).
 
 ## Session-API (`plxs-session`, M1 T3)
 
@@ -220,7 +220,7 @@ pub trait Procedure {
 // ProcedureContext: Modell, DofMap, Assembler, Solver, State, Results, Thread-Pool.
 // Static (linear), Nonlinear (Newton mit automatischer Inkrementierung nach *CONTROLS-Defaults),
 // Frequency, Buckle, Dynamic (HHT-α / explizit), HeatTransfer, Coupled/Uncoupled,
-// ModalDynamics, SteadyStateDynamics, ComplexFrequency, Visco.
+// ModalDynamics, SteadyStateDynamics, ComplexFrequency, Visco, Sensitivity (T17).
 ```
 
 ### `plxs-output` (M1 T3)
@@ -797,6 +797,64 @@ C3D20R/C3D4/C3D10/C3D6/C3D15/CPS8/CAX8 mit variiertem Δt und α) abgelesen, kei
   (4e-2) sowie **Schalen und Balken** (S8R 2,5e-4, S4-Kantenkopplung 5,6e-4, B32R 5,9e-4,
   S8 4e-5 mit Rampe) weichen in den Zeitschritten ab: die Massenkonvention der expandierten
   Elemente ist offen. Fixtures dafür gibt es noch nicht.
+## Stand nach T17 (Sensitivity)
+
+`plxs-procedures::sensitivity` rechnet `*SENSITIVITY` mit `*DESIGN VARIABLES, TYPE=COORDINATE`
+und den Design Responses, die PrePoLix schreibt: `MASS`, `STRAINENERGY` (beide mit Element-Set)
+und `EIGENFREQUENCY` (nach `*FREQUENCY, STORAGE=YES`, die Moden kommen aus
+`State::stored_modes`), dazu `*FILTER, TYPE=LINEAR`. Andere Responses (`STRESS`, `DISPLACEMENT`
+usw.), andere Filtertypen und `NLGEOM` melden `Unsupported`. `IncrementKind::Sensitivity` (IR,
+angehängt) kennzeichnet die Datensätze; die `.frd` schreibt sie als Analyseart 3, die `.dat`
+die Tabelle `D E S I G N   R E S P O N S E   I N F O R M A T I O N`
+(`plxs_output::dat::DESIGN_RESPONSE_TABLE`, Set = Response-Namen mit Komma).
+
+Ableitungen: je Designknoten zentrale Differenzen der Elementgrößen der umliegenden Elemente
+(Schritt 1e-6 der Elementgröße), projiziert auf die Knotennormale. `MASS`: ρ dV.
+`STRAINENERGY`: ½ uᵀ dK_S u + λᵀ (dF − dK u) mit K λ = K_S u (λ = u ohne Teilmenge), dF aus
+Druck auf bewegten Flächen und Volumenlasten (GRAV, CENTRIF). `EIGENFREQUENCY`:
+φᵀ (dK − λ dM) φ je gespeicherter Mode.
+
+### Was von CalculiX durch Beobachtung bekannt ist (T17)
+
+Abgeleitet aus Orakel-Läufen mit ccx 2.21 (Kragbalken C3D8, C3D20, C3D10, gekrümmte Platte mit
+ungleichmäßigem Netz, Teilmengen, Teil-SPCs, Druck, Schwerkraft, Filter mit lokalisierter
+Sensitivität):
+
+- **Designknoten**: Knoten des Sets auf Außenflächen (Fläche keines zweiten Elements). Normale =
+  normierte Summe der **Einheits**normalen aller angrenzenden Außenflächen (nicht flächen­
+  gewichtet; Eckknoten und Mittenknoten gleich); Komponenten von DOFs mit SPC im Step werden
+  vor dem Normieren gestrichen, ganz gehaltene Knoten haben die Normale 0 und keine
+  Sensitivität.
+- **DFDN** = Ableitung / Knotenfläche, Knotenfläche = Σ ∫ N_a dA über die Außenflächen (bei
+  C3D8 ein Viertel jeder angrenzenden Fläche). `SENMASS` ist damit auf ebenen Flächen genau ρ.
+  Eckknoten quadratischer Elemente (deren ∫ N_a dA verschwindet oder negativ ist) bekommen den
+  Mittelwert der Mittenknoten auf den angrenzenden Außenkanten (C3D20 und C3D10 auf 1e-6).
+- **LENGTH GRADIENT** in der `.dat` = 2-Norm von DFDN über alle Knoten.
+- **DFDNFIL** = gefiltertes Feld, auf Länge 1 normiert; ohne Filter DFDN normiert. Linearer
+  Filter: jeder Designknoten j verteilt seinen Wert auf die Designknoten i im Radius r mit
+  Gewicht (1 − d/r) / Σ_i (1 − d/r), also **spaltenweise** normiert (auf 1e-7 getroffen;
+  zeilenweise Normierung liegt 2 % daneben).
+- **Datensätze**: NORM (Wert 0), dann je Response ein Satz `SENMASS`/`SENENER`, bei
+  `EIGENFREQUENCY` je Mode ein Satz `SENFREQ` mit der Frequenz als Wert; alle mit Inkrement 1.
+  Die `.dat` druckt je Mode eine eigene Tabelle, die übrigen Responses gemeinsam.
+- **Eigenfrequenzen**: ccx differenziert jede Mode der gespeicherten Basis einzeln. Bei
+  doppelten Eigenwerten (quadratischer Querschnitt) hängen die Einzelwerte und ihre Längen von
+  der Basis ab, die der Eigenlöser wählt; nur die Summe über das Cluster (Spur) ist invariant.
+  `plxs-verify` vergleicht dort die Summe von DFDN und lässt DFDNFIL und die Länge weg. Ohne
+  Entartung (Rechteckquerschnitt) stimmt alles auf 1e-4 (ccx' Finite Differenzen und
+  Eigenvektoren auf 1e-5), daher Toleranzklasse B für den Bereich.
+
+### Bekannte Abweichung: STRAINENERGY
+
+ccx' Strain-Energy-Sensitivität ist nicht die Ableitung seiner eigenen Response. In allen acht
+Orakel-Modellen gilt auf 1e-5: ccx = exakt − Q mit Q = Σ_ip w_ip dV_ip/ds (Formänderungs­
+energiedichte mal Ableitung des Integrationspunktvolumens), d. h. im expliziten Teil
+½ uᵀ dK u fehlt die Volumenänderung. Finite Differenzen mit ccx selbst (Knoten verschieben,
+neu rechnen) bestätigen den exakten Wert, nicht ccx' Ausgabe. Mit Element-Set verwendet ccx
+außerdem λ = u statt der Adjungierten K λ = K_S u (PrePoLix schreibt immer alle Elemente).
+plxs rechnet die exakte Ableitung; die Fixtures führen `SENENER` und
+`GRADIENT_LENGTH STRAINENERGY` als `deviations` (die `.dat`-Vergleiche beachten sie seit T17),
+`plxs-cli/tests/sensitivity_corpus.rs` prüft die Ableitung gegen Finite Differenzen.
 
 ## Was M1 zu liefern hat (Abnahme)
 

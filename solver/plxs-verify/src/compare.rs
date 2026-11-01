@@ -245,6 +245,51 @@ pub fn compare_frd_with(
             i += 1;
             continue;
         };
+        if r.kind == AnalysisKind::Sensitivity {
+            let has_senfreq = |i: &Increment| i.fields.iter().any(|f| f.name == "SENFREQ");
+            let mut end = i + 1;
+            if has_senfreq(r) {
+                while end < count {
+                    let (next, kn) = (&reference.increments[end], &candidate.increments[end]);
+                    let close =
+                        (next.value - r.value).abs() <= MODE_CLUSTER_GAP * r.value.abs().max(1e-12);
+                    if !(next.kind == r.kind
+                        && next.step == r.step
+                        && has_senfreq(next)
+                        && close
+                        && (next.step, next.increment, next.kind)
+                            == (kn.step, kn.increment, kn.kind))
+                    {
+                        break;
+                    }
+                    end += 1;
+                }
+            }
+            let mut structured = true;
+            for j in i + 1..end {
+                let (rj, kj) = (&reference.increments[j], &candidate.increments[j]);
+                let label = format!("step {} increment {}", rj.step, rj.increment);
+                c.values(
+                    &format!("{label}: value"),
+                    &[rj.value],
+                    &[kj.value],
+                    tolerance,
+                    0.0,
+                );
+                structured &= same_fields(&mut c, &label, rj, kj, undetermined).is_some();
+            }
+            if structured {
+                compare_sensitivities(
+                    &mut c,
+                    &reference.increments[i..end],
+                    &candidate.increments[i..end],
+                    tolerance,
+                    undetermined,
+                );
+            }
+            i = end;
+            continue;
+        }
         if is_mode(r) {
             // The cluster: the following modes of the step whose eigenvalues agree with
             // this one within the tolerance (in the reference).
@@ -328,6 +373,100 @@ pub fn compare_frd_with(
         i += 1;
     }
     c
+}
+
+/// Compares the data sets of a sensitivity step: one set, or the sets of a cluster of
+/// repeated eigenfrequencies (`SENFREQ`). Sensitivities are relative quantities whose size
+/// depends on the unit system (mass sensitivities in mm and t are about 1e-9), so every
+/// component is compared after dividing both sides by the reference's largest value. In a
+/// cluster, the derivative of every single mode depends on the basis the eigensolver picked
+/// in the eigenspace; only their sum (the trace of the derivative matrix) does not, so the
+/// sum of `DFDN` over the cluster is compared and the normalized filtered fields are not.
+fn compare_sensitivities(
+    c: &mut Comparison,
+    reference: &[Increment],
+    candidate: &[Increment],
+    tolerance: f64,
+    undetermined: &[String],
+) {
+    let first = &reference[0];
+    let scaled =
+        |values: &[f64], scale: f64| -> Vec<f64> { values.iter().map(|v| v / scale).collect() };
+    let scale_of = |values: &[f64]| -> f64 {
+        let s = largest([values]);
+        if s > 0.0 { s } else { 1.0 }
+    };
+    if reference.len() == 1 {
+        let label = format!("step {} increment {}", first.step, first.increment);
+        for (rf, kf) in first.fields.iter().zip(&candidate[0].fields) {
+            if undetermined.contains(&rf.name) {
+                continue;
+            }
+            for rc in rf.components.iter().filter(|c| !c.derived) {
+                let Some(kc) = kf.component(&rc.name) else {
+                    c.fail(format!("{label}: {} has no component {}", rf.name, rc.name));
+                    continue;
+                };
+                if undetermined.contains(&format!("{} {}", rf.name, rc.name)) {
+                    continue;
+                }
+                let (rv, kv) = (to_f64(&rc.values), to_f64(&kc.values));
+                let scale = scale_of(&rv);
+                c.values(
+                    &format!(
+                        "{label}: {} {} (relative to its largest value)",
+                        rf.name, rc.name
+                    ),
+                    &scaled(&rv, scale),
+                    &scaled(&kv, scale),
+                    tolerance,
+                    0.0,
+                );
+            }
+        }
+        return;
+    }
+    let label = format!(
+        "step {} sensitivity sets {}-{} (repeated eigenvalue {})",
+        first.step,
+        first.increment,
+        reference[reference.len() - 1].increment,
+        first.value
+    );
+    if undetermined.iter().any(|u| u == "SENFREQ") {
+        return;
+    }
+    let sum = |increments: &[Increment]| -> Option<Vec<f64>> {
+        let mut total: Option<Vec<f64>> = None;
+        for increment in increments {
+            let field = increment.fields.iter().find(|f| f.name == "SENFREQ")?;
+            let values = to_f64(&field.component("DFDN")?.values);
+            match &mut total {
+                Some(t) if t.len() == values.len() => {
+                    t.iter_mut().zip(&values).for_each(|(a, b)| *a += b)
+                }
+                Some(_) => return None,
+                None => total = Some(values),
+            }
+        }
+        total
+    };
+    match (sum(reference), sum(candidate)) {
+        (Some(r), Some(k)) => {
+            let scale = scale_of(&r);
+            c.values(
+                &format!("{label}: sum of SENFREQ DFDN (relative to its largest value)"),
+                &scaled(&r, scale),
+                &scaled(&k, scale),
+                tolerance,
+                0.0,
+            );
+        }
+        _ => c.fail(format!("{label}: SENFREQ DFDN missing")),
+    }
+    c.notes.push(format!(
+        "{label}: DFDN of the single modes and DFDNFIL depend on the basis of the eigenspace; only the sum of DFDN is compared"
+    ));
 }
 
 fn to_f64(v: &[f32]) -> Vec<f64> {
@@ -607,6 +746,19 @@ pub fn compare_dat(
     class: Class,
     unmatched_modes: &[(u32, u32)],
 ) -> Comparison {
+    compare_dat_except(reference, candidate, class, unmatched_modes, &[])
+}
+
+/// [`compare_dat`] leaving out the history components named in `undetermined` as
+/// `"<FIELD> <COMPONENT>"` (`"GRADIENT_LENGTH STRAINENERGY"`, a fixture's documented
+/// deviations).
+pub fn compare_dat_except(
+    reference: &DatImport,
+    candidate: &DatImport,
+    class: Class,
+    unmatched_modes: &[(u32, u32)],
+    undetermined: &[String],
+) -> Comparison {
     let mut c = Comparison::default();
     let tolerance = class.tolerance();
     let names = |d: &DatImport| -> Vec<String> { d.sets.iter().map(|s| s.name.clone()).collect() };
@@ -673,6 +825,13 @@ pub fn compare_dat(
                     ));
                     continue;
                 }
+                if undetermined.contains(&format!("{} {}", rf.name, rc.name)) {
+                    c.notes.push(format!(
+                        "{label}: {} {} not compared (documented deviation)",
+                        rf.name, rc.name
+                    ));
+                    continue;
+                }
                 for (re, ke) in rc.entries.iter().zip(&kc.entries) {
                     let what = format!("{label}: {} {} {}", rf.name, rc.name, re.name);
                     match rf.name.as_str() {
@@ -694,6 +853,30 @@ pub fn compare_dat(
                                 &sums(&ke.values, &clusters),
                                 tolerance,
                                 floor,
+                            );
+                        }
+                        // The `.dat` reader averages the tables of all modes of an
+                        // EIGENFREQUENCY response into one row, and the gradient length of
+                        // a single one of repeated eigenvalues depends on the basis of the
+                        // eigenspace (see `compare_sensitivities`).
+                        "GRADIENT_LENGTH" if rc.name == "EIGENFREQUENCY" => {
+                            c.notes.push(format!(
+                                "{what}: not compared (mean over the modes, basis dependent for repeated eigenvalues)"
+                            ));
+                        }
+                        // Responses and gradient lengths relative to themselves: a mass
+                        // gradient in mm and t is about 1e-8.
+                        "DESIGN_RESPONSE" | "GRADIENT_LENGTH" => {
+                            let scale = largest([re.values.as_slice()]);
+                            let scale = if scale > 0.0 { scale } else { 1.0 };
+                            let rel =
+                                |v: &[f64]| -> Vec<f64> { v.iter().map(|x| x / scale).collect() };
+                            c.values(
+                                &format!("{what} (relative)"),
+                                &rel(&re.values),
+                                &rel(&ke.values),
+                                tolerance,
+                                0.0,
                             );
                         }
                         _ => {
