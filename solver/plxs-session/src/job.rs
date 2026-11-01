@@ -104,6 +104,18 @@ pub fn run_analysis(
         if !session.results().history.is_empty() {
             plxs_output::write_dat(&output("dat"), session.results())?;
         }
+        // A frequency step that stored its modes (`*FREQUENCY, STORAGE=YES`): the `.eig`
+        // file holds them in `postcard` encoding, an own format that only `plxs` reads
+        // (PrePoLix handles the file by name only).
+        if let Some(modes) = &session.state().stored_modes {
+            let path = output("eig");
+            let io = |message: String| Error::Io {
+                path: path.display().to_string(),
+                message,
+            };
+            let bytes = postcard::to_stdvec(modes).map_err(|e| io(e.to_string()))?;
+            std::fs::write(&path, bytes).map_err(|e| io(e.to_string()))?;
+        }
         Ok(())
     };
     for step in &analysis.steps {
