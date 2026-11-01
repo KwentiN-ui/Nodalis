@@ -81,7 +81,7 @@ impl SolidElement {
         coords: &[[f64; 3]],
         d_elastic: &[[f64; 6]; 6],
     ) -> (Vec<Gradient>, Option<Vec<f64>>) {
-        let ndof = self.dof_count();
+        let ndof = self.dof_count_3d();
         let nodal = |dndx: &[[f64; 3]], weight: f64| -> Gradient {
             let mut l = vec![0.0; 9 * ndof];
             for (a, g) in dndx.iter().enumerate() {
@@ -149,8 +149,49 @@ impl SolidElement {
     /// Piola-Kirchhoff under NLGEOM) and the tangent on engineering strains; the caller
     /// keeps whatever state it updates there. `d_elastic` serves the hourglass control and
     /// the incompatible modes.
+    ///
+    /// Plane and axisymmetric elements compute their expanded 3D element and condense its
+    /// forces and tangent on the 2D DOFs, as the linear stiffness does.
     #[allow(clippy::too_many_arguments)]
     pub fn nonlinear<M>(
+        &self,
+        coords: &[[f64; 3]],
+        u: &[f64],
+        nlgeom: bool,
+        d_elastic: &[[f64; 6]; 6],
+        material: M,
+        fe: &mut [f64],
+        ke: Option<&mut Vec<f64>>,
+    ) where
+        M: FnMut(usize, &PointKinematics) -> ([f64; 6], [[f64; 6]; 6]),
+    {
+        let Some(x) = self.expansion() else {
+            self.nonlinear_3d(coords, u, nlgeom, d_elastic, material, fe, ke);
+            return;
+        };
+        let mut f3 = vec![0.0; self.dof_count_3d()];
+        let mut k3 = Vec::new();
+        let want_k = ke.is_some();
+        self.nonlinear_3d(
+            &x.coordinates(coords),
+            &x.expand(u),
+            nlgeom,
+            d_elastic,
+            material,
+            &mut f3,
+            want_k.then_some(&mut k3),
+        );
+        x.condense_vector(&f3, fe);
+        if let Some(ke) = ke {
+            let n = self.dof_count();
+            ke.clear();
+            ke.resize(n * n, 0.0);
+            x.condense_matrix(&k3, ke);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn nonlinear_3d<M>(
         &self,
         coords: &[[f64; 3]],
         u: &[f64],
@@ -162,7 +203,7 @@ impl SolidElement {
     ) where
         M: FnMut(usize, &PointKinematics) -> ([f64; 6], [[f64; 6]; 6]),
     {
-        let ndof = self.dof_count();
+        let ndof = self.dof_count_3d();
         if let Some(ke) = ke.as_deref_mut() {
             ke.clear();
             ke.resize(ndof * ndof, 0.0);

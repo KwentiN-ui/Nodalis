@@ -2,7 +2,6 @@
 //! data directory (Linux `~/.local/share/nodalis`, Windows `%APPDATA%\nodalis\data`).
 
 use crate::numeric;
-pub use plx_solve::Engine;
 use serde::{Deserialize, Serialize};
 
 /// Key of the settings in eframe's storage.
@@ -56,9 +55,6 @@ impl Default for Settings {
 impl Settings {
     /// Brings settings stored by an older version up to date.
     pub fn upgrade(&mut self) {
-        if self.format < 1 {
-            self.solver.forget_old_default();
-        }
         if self.format < 2 && self.solver.threads == 1 {
             // The old default of one thread: now all cores.
             self.solver.threads = AUTOMATIC_THREADS;
@@ -131,28 +127,15 @@ impl Default for PostProcessing {
     }
 }
 
-/// Which solver computes the analyses and how it is run: the "Solver" settings page.
+/// How the solver runs: the "Solver" settings page.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Solver {
-    /// The built-in Nodalis solver or CalculiX as a process.
-    pub engine: Engine,
-    /// The CalculiX executable; a bare name is looked up on `PATH`, empty for the one shipped
-    /// with nodalis (see [`bundled_ccx`]).
-    pub executable: String,
-    /// Threads for the solver: the size of the one thread pool all analyses of the built-in
-    /// solver share ([`plx_solve::pool`]), or `OMP_NUM_THREADS` of each CalculiX process;
-    /// [`AUTOMATIC_THREADS`] for all cores.
+    /// Threads for the solver: the size of the one thread pool all analyses share
+    /// ([`plx_solve::pool`]); [`AUTOMATIC_THREADS`] for all cores.
     pub threads: u32,
     /// Where analyses run; empty for the default, see [`default_work_dir`].
     pub work_dir: String,
-    /// Keywords tested on the executable; tested again when it changes.
-    pub keywords: Option<DetectedKeywords>,
-    /// CalculiX writes the state after each step, so that a run after a change solves only
-    /// the steps from the first changed one; see [`plx_job::restart`].
-    pub keep_restart_files: bool,
-    /// Most the restart files of a project may take, in MB; the oldest are removed beyond.
-    pub restart_limit_mb: u64,
     /// Most analyses Update Project solves at the same time.
     pub parallel_runs: u32,
 }
@@ -165,26 +148,11 @@ pub fn cores() -> u32 {
     std::thread::available_parallelism().map_or(1, |n| n.get() as u32)
 }
 
-/// Result of [`crate::solver_check::known_keywords`] for one executable, by normalized
-/// keyword, collected over the self test and the analyses run with it.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct DetectedKeywords {
-    pub executable: String,
-    /// The version the executable reported, so that an update is tested again.
-    pub version: Option<String>,
-    pub known: std::collections::BTreeMap<String, bool>,
-}
-
 impl Default for Solver {
     fn default() -> Self {
         Self {
-            engine: Engine::default(),
-            executable: String::new(),
             threads: AUTOMATIC_THREADS,
             work_dir: String::new(),
-            keywords: None,
-            keep_restart_files: true,
-            restart_limit_mb: 4096,
             parallel_runs: 2,
         }
     }
@@ -197,107 +165,6 @@ impl Solver {
             dir => std::path::PathBuf::from(dir),
         }
     }
-
-    /// Those of `keywords` the executable does not know. Keywords not tested on it yet are
-    /// tested now, a few hundredths of a second each.
-    pub fn unknown_keywords(&mut self, keywords: &[String]) -> Vec<String> {
-        use plx_io::inp::keywords::normalized;
-        // The built-in solver reads everything the input file writer writes; what it cannot
-        // compute yet it reports when it runs.
-        if self.engine == Engine::Nodalis {
-            return Vec::new();
-        }
-        // An empty executable means the bundled CalculiX, see `job_solver`.
-        let solver = self.job_solver();
-        let version = crate::solver_check::version_text(&solver.executable);
-        if (self.keywords.as_ref())
-            .is_none_or(|k| k.executable != self.executable || k.version != version)
-        {
-            self.keywords = Some(DetectedKeywords {
-                executable: self.executable.clone(),
-                version,
-                known: Default::default(),
-            });
-        }
-        let Some(detected) = self.keywords.as_mut() else {
-            return Vec::new();
-        };
-        let untested = (keywords.iter())
-            .filter(|k| !detected.known.contains_key(&normalized(k)))
-            .cloned()
-            .collect::<Vec<_>>();
-        if !untested.is_empty() {
-            let work_dir = self.work_dir();
-            if let Some(known) =
-                crate::solver_check::known_keywords(&solver, &work_dir, &untested, &|_, _| {})
-                && let Some(detected) = self.keywords.as_mut()
-            {
-                detected.known.extend(known);
-            }
-        }
-        let known = self.keywords.as_ref().map(|k| &k.known);
-        known.map_or_else(Vec::new, |known| {
-            crate::solver_check::unknown_of(known, keywords.iter().map(String::as_str))
-        })
-    }
-
-    /// The executable restart states and tested keywords belong to: the resolved path with the file's size
-    /// and modification time, so that another CalculiX at the same path, such as an update of
-    /// the bundled one, is probed again.
-    pub fn executable_key(&self) -> String {
-        let executable = self.job_solver().executable;
-        let Ok(meta) = std::fs::metadata(&executable) else {
-            return executable.display().to_string();
-        };
-        let modified = (meta.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_secs());
-        format!(
-            "{} ({} bytes, {modified})",
-            executable.display(),
-            meta.len()
-        )
-    }
-
-    pub fn job_solver(&self) -> plx_job::Solver {
-        plx_job::Solver {
-            executable: match clean_path(&self.executable) {
-                "" => default_executable(),
-                path => path.into(),
-            },
-            threads: self.threads_of(1),
-        }
-    }
-
-    /// Threads of each of `concurrent` runs solved at the same time. The built-in solver
-    /// runs them all in one shared pool of the chosen size ([`AUTOMATIC_THREADS`] for all
-    /// cores), where they take the threads as they need them. CalculiX processes cannot
-    /// share; with [`AUTOMATIC_THREADS`] each gets an equal share of the cores, so that
-    /// together they do not ask for more than the computer has.
-    pub fn threads_of(&self, concurrent: usize) -> u32 {
-        match (self.engine, self.threads) {
-            (Engine::Nodalis, threads) => threads,
-            (Engine::CalculiX, AUTOMATIC_THREADS) => (cores() / concurrent.max(1) as u32).max(1),
-            (Engine::CalculiX, threads) => threads,
-        }
-    }
-
-    /// These settings for one of `concurrent` runs solved at the same time, see
-    /// [`Self::threads_of`].
-    pub fn shared_by(&self, concurrent: usize) -> Self {
-        Self {
-            threads: self.threads_of(concurrent),
-            ..self.clone()
-        }
-    }
-
-    /// Settings saved before CalculiX was shipped hold the old default `ccx`; empty means the
-    /// same where no CalculiX is bundled, and the bundled one where it is.
-    fn forget_old_default(&mut self) {
-        if self.executable.trim() == "ccx" {
-            self.executable.clear();
-        }
-    }
 }
 
 /// Automatic threads, or the number chosen.
@@ -305,7 +172,7 @@ fn threads_ui(ui: &mut egui::Ui, threads: &mut u32) {
     ui.horizontal(|ui| {
         let mut automatic = *threads == AUTOMATIC_THREADS;
         let tip = format!(
-            "Uses all {} cores of this computer. Analyses solved at the same time share them: the built-in solver hands them out as the analyses need them, CalculiX processes get an equal share each.",
+            "Uses all {} cores of this computer. Analyses solved at the same time share them: the solver hands them out as the analyses need them.",
             cores()
         );
         if ui
@@ -325,52 +192,6 @@ fn threads_ui(ui: &mut egui::Ui, threads: &mut u32) {
             ui.add(numeric::drag_value(threads).range(1..=256));
         }
     });
-}
-
-/// Where the shipped CalculiX lies relative to the directory of the executable: Windows
-/// installer, Linux AppImage (usr/bin next to usr/lib), and target/ccx/<platform> for
-/// target/<profile>/nodalis.
-const BUNDLED_LOCATIONS: [&str; 3] = [
-    "ccx/bin",
-    "../lib/nodalis/ccx/bin",
-    if cfg!(windows) {
-        "../ccx/windows/bin"
-    } else {
-        "../ccx/linux/bin"
-    },
-];
-
-/// The CalculiX shipped with nodalis, if there is one.
-pub fn bundled_ccx() -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    find_bundled_ccx(exe.parent()?)
-}
-
-fn find_bundled_ccx(exe_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    let name = if cfg!(windows) { "ccx.exe" } else { "ccx" };
-    BUNDLED_LOCATIONS
-        .iter()
-        .map(|dir| exe_dir.join(dir).join(name))
-        .find(|path| path.is_file())
-        // Without `..` in the path shown in the settings and the output.
-        .map(|path| {
-            std::fs::canonicalize(&path)
-                .map(strip_verbatim)
-                .unwrap_or(path)
-        })
-}
-
-/// `canonicalize` gives `\\?\C:\...` on Windows, which the settings would show as is.
-fn strip_verbatim(path: std::path::PathBuf) -> std::path::PathBuf {
-    match path.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
-        Some(plain) if !plain.starts_with("UNC") => plain.into(),
-        _ => path,
-    }
-}
-
-/// CalculiX when the setting is empty: the bundled one, else `ccx` on the `PATH`.
-pub fn default_executable() -> std::path::PathBuf {
-    bundled_ccx().unwrap_or_else(|| "ccx".into())
 }
 
 /// Where the Gmsh library comes from, for geometry import and meshing.
@@ -413,13 +234,6 @@ pub fn clean_path(text: &str) -> &str {
         .iter()
         .find_map(|&quote| text.strip_prefix(quote)?.strip_suffix(quote))
         .map_or(text, str::trim)
-}
-
-/// Why the executable cannot be started, if it is given as a path to a missing file;
-/// a bare name is left to the `PATH` lookup.
-pub fn missing_executable(executable: &std::path::Path) -> Option<String> {
-    let is_path = executable.components().count() > 1 || executable.is_absolute();
-    (is_path && !executable.is_file()).then(|| format!("File not found: {}", executable.display()))
 }
 
 /// PrePoMax's default work directory: a `Temp` folder next to the program. Where that is
@@ -476,7 +290,6 @@ pub struct SettingsWindow {
     page: Page,
     draft: Settings,
     default_work_dir: String,
-    default_executable: String,
     solver_check: SolverCheck,
     gmsh_check: GmshCheck,
     installation: crate::update::Installation,
@@ -491,7 +304,7 @@ enum GmshCheck {
     Done(Result<String, String>),
 }
 
-/// State of the CalculiX self test on the settings page.
+/// State of the solver self test on the settings page.
 #[derive(Default)]
 enum SolverCheck {
     #[default]
@@ -500,7 +313,7 @@ enum SolverCheck {
         std::sync::mpsc::Receiver<crate::solver_check::Report>,
         crate::solver_check::SharedProgress,
     ),
-    Done(Engine, Vec<crate::solver_check::CheckResult>),
+    Done(Vec<crate::solver_check::CheckResult>),
 }
 
 /// What the user decided in the settings window.
@@ -519,7 +332,6 @@ impl SettingsWindow {
             page: Page::PostProcessing,
             draft: settings.clone(),
             default_work_dir: default_work_dir().display().to_string(),
-            default_executable: default_executable().display().to_string(),
             solver_check: SolverCheck::NotRun,
             gmsh_check: GmshCheck::NotRun,
             installation: crate::update::Installation::detect(),
@@ -664,34 +476,10 @@ impl SettingsWindow {
             }
             Page::Solver => {
                 let solver = &mut self.draft.solver;
-                let calculix = solver.engine == Engine::CalculiX;
                 egui::Grid::new("solver settings")
                     .num_columns(2)
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| {
-                        ui.label("Solver");
-                        ui.horizontal(|ui| {
-                            for engine in Engine::ALL {
-                                let tip = match engine {
-                                    Engine::Nodalis => "The solver built into Nodalis: no external program, progress and results stay in the program. Steps it cannot compute yet are reported when the analysis runs.",
-                                    Engine::CalculiX => "CalculiX (ccx) as a separate program, the one shipped with Nodalis or your own.",
-                                };
-                                ui.radio_value(&mut solver.engine, engine, engine.name())
-                                    .on_hover_text(tip);
-                            }
-                        });
-                        ui.end_row();
-                        if calculix {
-                            ui.label("Executable");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut solver.executable)
-                                    .hint_text(self.default_executable.as_str()),
-                            )
-                            .on_hover_text(
-                                "Leave empty for the CalculiX shipped with Nodalis, or ccx on the PATH if there is none.",
-                            );
-                            ui.end_row();
-                        }
                         ui.label("Threads");
                         threads_ui(ui, &mut solver.threads);
                         ui.end_row();
@@ -701,24 +489,9 @@ impl SettingsWindow {
                                 .hint_text(self.default_work_dir.as_str()),
                         );
                         ui.end_row();
-                        if calculix {
-                            ui.label("Restart files");
-                            ui.checkbox(&mut solver.keep_restart_files, "Keep the state after each step")
-                                .on_hover_text("CalculiX writes the state after each static, dynamic, heat transfer or visco step. Solving again after a change then starts after the last unchanged step instead of from the beginning. Needs disk space next to the results.");
-                            ui.end_row();
-                            ui.label("Restart files per project");
-                            ui.add_enabled(
-                                solver.keep_restart_files,
-                                numeric::drag_value(&mut solver.restart_limit_mb)
-                                    .range(10..=1_000_000)
-                                    .suffix(" MB"),
-                            )
-                            .on_hover_text("Beyond this size the oldest restart files of the project are removed; an analysis without them is solved from the beginning.");
-                            ui.end_row();
-                        }
                         ui.label("Parallel analyses");
                         ui.add(numeric::drag_value(&mut solver.parallel_runs).range(1..=64))
-                            .on_hover_text("Update Project solves up to this many independent analyses at the same time; the Campbell sweep runs as many speeds at a time. The built-in solver runs them in one pool of the threads above, so a single large analysis gets all of them. Each analysis needs its own memory.");
+                            .on_hover_text("Update Project solves up to this many independent analyses at the same time; the Campbell sweep runs as many speeds at a time. The solver runs them in one pool of the threads above, so a single large analysis gets all of them. Each analysis needs its own memory.");
                         ui.end_row();
                     });
                 ui.add_space(8.0);
@@ -822,39 +595,28 @@ impl SettingsWindow {
         }
     }
 
-    /// Button and results of the CalculiX self test, run with the settings in the window.
+    /// Button and results of the solver self test, run with the settings in the window.
     fn solver_check_ui(&mut self, ui: &mut egui::Ui) {
         if let SolverCheck::Running(receiver, _) = &self.solver_check
             && let Ok(report) = receiver.try_recv()
         {
-            if let Some(known) = report.keywords {
-                self.draft.solver.keywords = Some(DetectedKeywords {
-                    executable: self.draft.solver.executable.clone(),
-                    version: report.version,
-                    known,
-                });
-            }
-            self.solver_check = SolverCheck::Done(self.draft.solver.engine, report.checks);
+            self.solver_check = SolverCheck::Done(report.checks);
         }
         let running = matches!(self.solver_check, SolverCheck::Running(..));
         ui.horizontal(|ui| {
-            let engine = self.draft.solver.engine;
-            let tip = match engine {
-                Engine::CalculiX => "Starts the executable, solves small cantilevers with the direct and the iterative equation solver, compares the results with beam theory and checks whether it knows every keyword Nodalis writes.",
-                Engine::Nodalis => "Solves small cantilevers with the built-in solver, direct and iterative, and compares the results with beam theory.",
-            };
             let button = ui
                 .add_enabled(!running, egui::Button::new("Test solver"))
-                .on_hover_text(tip);
+                .on_hover_text(
+                    "Solves small cantilevers, direct and iterative, and compares the results with beam theory.",
+                );
             if button.clicked() {
                 let (sender, receiver) = std::sync::mpsc::channel();
-                let (solver, work_dir) = (self.draft.solver.job_solver(), self.draft.solver.work_dir());
+                let (threads, work_dir) = (self.draft.solver.threads, self.draft.solver.work_dir());
                 let ctx = ui.ctx().clone();
                 let progress = crate::solver_check::SharedProgress::default();
                 let thread_progress = progress.clone();
                 std::thread::spawn(move || {
-                    let report =
-                        crate::solver_check::run(engine, &solver, &work_dir, &thread_progress);
+                    let report = crate::solver_check::run(threads, &work_dir, &thread_progress);
                     let _ = sender.send(report);
                     ctx.request_repaint();
                 });
@@ -867,9 +629,9 @@ impl SettingsWindow {
         });
         if let SolverCheck::Running(_, progress) = &self.solver_check {
             let progress = progress.lock().map(|p| p.clone()).unwrap_or_default();
-            running_modal(ui.ctx(), self.draft.solver.engine, &progress);
+            running_modal(ui.ctx(), &progress);
         }
-        if let SolverCheck::Done(engine, results) = &self.solver_check {
+        if let SolverCheck::Done(results) = &self.solver_check {
             egui::Grid::new("solver check")
                 .num_columns(2)
                 .spacing([8.0, 4.0])
@@ -888,7 +650,7 @@ impl SettingsWindow {
                     }
                 });
             if results.iter().all(|r| r.passed) {
-                ui.label(format!("The {} works correctly.", engine.name()));
+                ui.label("The solver works correctly.");
             }
         }
     }
@@ -896,10 +658,10 @@ impl SettingsWindow {
 
 /// Modal window over the application while the solver self test runs, which takes a while
 /// on some systems.
-fn running_modal(ctx: &egui::Context, engine: Engine, progress: &crate::solver_check::Progress) {
+fn running_modal(ctx: &egui::Context, progress: &crate::solver_check::Progress) {
     egui::Modal::new(crate::ids::window(ctx, "solver check running")).show(ctx, |ui| {
         ui.set_width(300.0);
-        ui.heading(format!("Testing the {}", engine.name()));
+        ui.heading("Testing the solver");
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.spinner();
@@ -924,37 +686,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unknown_keywords_are_remembered() {
-        if std::process::Command::new("ccx")
-            .arg("-v")
-            .output()
-            .is_err()
-        {
-            eprintln!("ccx not found, test skipped");
-            return;
-        }
-        let dir = std::env::temp_dir().join(format!("plx-keywords-{}", std::process::id()));
-        let mut solver = Solver {
-            work_dir: dir.display().to_string(),
-            ..Solver::default()
-        };
-        let keywords = ["*STATIC".to_string(), "*NOT A KEYWORD".into()];
-        assert_eq!(solver.unknown_keywords(&keywords), ["*NOT A KEYWORD"]);
-        let detected = solver.keywords.clone().unwrap();
-        assert!(detected.version.is_some());
-        assert_eq!(detected.known.get("*NOTAKEYWORD"), Some(&false));
-        // Tested keywords are not tested again: a cached verdict stands.
-        solver
-            .keywords
-            .as_mut()
-            .unwrap()
-            .known
-            .insert("*STATIC".into(), false);
-        assert_eq!(solver.unknown_keywords(&keywords[..1]), ["*STATIC"]);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn missing_fields_take_their_defaults() {
         // Settings files of older versions lack newer fields.
         let settings: Settings = ron::from_str("(post: (min_label: true))").unwrap();
@@ -968,47 +699,22 @@ mod tests {
     #[test]
     fn paths_lose_quotes_and_spaces() {
         assert_eq!(
-            clean_path(r#" "C:\Program Files\ccx.exe" "#),
-            r"C:\Program Files\ccx.exe"
+            clean_path(r#" "C:\Program Files\Temp" "#),
+            r"C:\Program Files\Temp"
         );
-        assert_eq!(clean_path("'/opt/ccx' "), "/opt/ccx");
-        assert_eq!(clean_path("ccx"), "ccx");
-        assert_eq!(clean_path("\"ccx"), "\"ccx");
+        assert_eq!(clean_path("'/opt/work' "), "/opt/work");
+        assert_eq!(clean_path("work"), "work");
+        assert_eq!(clean_path("\"work"), "\"work");
         let solver = Solver {
-            executable: "\"/opt/ccx\"".into(),
             work_dir: " \"/tmp/plx\" ".into(),
             ..Solver::default()
         };
-        assert_eq!(
-            solver.job_solver().executable,
-            std::path::Path::new("/opt/ccx")
-        );
         assert_eq!(solver.work_dir(), std::path::Path::new("/tmp/plx"));
     }
 
     #[test]
-    fn automatic_threads_share_the_cores() {
-        let solver = Solver {
-            engine: Engine::CalculiX,
-            ..Solver::default()
-        };
-        assert_eq!(solver.threads, AUTOMATIC_THREADS);
-        assert_eq!(solver.job_solver().threads, cores());
-        assert_eq!(solver.threads_of(2), (cores() / 2).max(1));
-        assert_eq!(solver.threads_of(10_000), 1);
-        let chosen = Solver {
-            threads: 3,
-            ..solver.clone()
-        };
-        assert_eq!(chosen.threads_of(4), 3);
-        assert_eq!(chosen.shared_by(4).job_solver().threads, 3);
-        // The built-in solver's analyses share one pool instead.
-        let builtin = Solver {
-            engine: Engine::Nodalis,
-            ..Solver::default()
-        };
-        assert_eq!(builtin.threads_of(4), AUTOMATIC_THREADS);
-        assert_eq!(builtin.shared_by(4).threads, AUTOMATIC_THREADS);
+    fn automatic_threads_are_the_default() {
+        assert_eq!(Solver::default().threads, AUTOMATIC_THREADS);
         // The old default of one thread becomes automatic, a later choice of one stays.
         let mut old: Settings = ron::from_str("(format: 1, solver: (threads: 1))").unwrap();
         old.upgrade();
@@ -1018,79 +724,6 @@ mod tests {
         let mut one: Settings = ron::from_str(&ron::to_string(&one).unwrap()).unwrap();
         one.upgrade();
         assert_eq!(one.solver.threads, 1);
-    }
-
-    #[test]
-    fn empty_executable_means_the_bundled_calculix() {
-        let solver = Solver::default();
-        assert_eq!(solver.job_solver().executable, default_executable());
-        // Settings of older versions stored the then default `ccx`.
-        let mut old: Settings = ron::from_str("(solver: (executable: \"ccx\"))").unwrap();
-        old.upgrade();
-        assert_eq!(old.solver.executable, "");
-        // Once upgraded, `ccx` is what the user chose, also after a round trip.
-        let mut chosen = Settings::default();
-        chosen.solver.executable = "ccx".into();
-        let mut chosen: Settings = ron::from_str(&ron::to_string(&chosen).unwrap()).unwrap();
-        chosen.upgrade();
-        assert_eq!(chosen.solver.executable, "ccx");
-        let mut own: Settings = ron::from_str("(solver: (executable: \"/opt/ccx\"))").unwrap();
-        own.upgrade();
-        assert_eq!(own.solver.executable, "/opt/ccx");
-    }
-
-    #[test]
-    fn replaced_executable_is_probed_again() {
-        let dir = std::env::temp_dir().join(format!("plx-ccx-key-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let exe = dir.join("ccx");
-        std::fs::write(&exe, "old").unwrap();
-        let solver = Solver {
-            executable: exe.display().to_string(),
-            ..Solver::default()
-        };
-        let old = solver.executable_key();
-        assert_eq!(solver.executable_key(), old);
-        // Same path and version, but another build, e.g. the bundled CalculiX of an update.
-        std::fs::write(&exe, "new build").unwrap();
-        assert_ne!(solver.executable_key(), old);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn bundled_calculix_is_found_next_to_the_program() {
-        let root = std::env::temp_dir().join(format!("plx-bundled-ccx-{}", std::process::id()));
-        let exe_dir = root.join("usr").join("bin");
-        std::fs::create_dir_all(&exe_dir).unwrap();
-        assert_eq!(find_bundled_ccx(&exe_dir), None);
-        // Where the AppImage carries it.
-        let bin = root.join("usr/lib/nodalis/ccx/bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let name = if cfg!(windows) { "ccx.exe" } else { "ccx" };
-        std::fs::write(bin.join(name), "").unwrap();
-        let found = find_bundled_ccx(&exe_dir).unwrap();
-        assert!(found.ends_with(std::path::Path::new("lib/nodalis/ccx/bin").join(name)));
-        assert!(!found.to_string_lossy().contains(".."));
-        // The Windows installer's folder next to the program wins.
-        let local = exe_dir.join("ccx").join("bin");
-        std::fs::create_dir_all(&local).unwrap();
-        std::fs::write(local.join(name), "").unwrap();
-        assert!(
-            find_bundled_ccx(&exe_dir)
-                .unwrap()
-                .starts_with(std::fs::canonicalize(&exe_dir).unwrap())
-        );
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn missing_files_are_reported_but_names_are_looked_up() {
-        assert!(missing_executable(std::path::Path::new("ccx")).is_none());
-        let missing = std::env::temp_dir().join("plx-does-not-exist").join("ccx");
-        let message = missing_executable(&missing).unwrap();
-        assert!(message.starts_with("File not found"), "{message}");
-        let exe = std::env::current_exe().unwrap();
-        assert!(missing_executable(&exe).is_none());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Solving from the project, as Ansys Workbench's Update Project does: every solve, from
 //! Update Project or from Solve in an analysis window, meshes and solves a copy of the
 //! analysis' data in the background, and the project window's solution monitor shows the
-//! runs with their CalculiX output. An open window shows the run in its Analysis tab and
+//! runs with their solver output. An open window shows the run in its Analysis tab and
 //! takes the new mesh and results once it is done.
 
 use std::path::PathBuf;
@@ -9,8 +9,8 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use plx_io::project::{BoundResults, ProjectAnalysis};
-use plx_job::JobStatus;
 use plx_model::{Finding, Severity};
+use plx_solve::JobStatus;
 
 use crate::analysis::Analysis;
 use crate::links::Continuation;
@@ -43,7 +43,7 @@ struct Loaded {
 pub enum Outcome {
     /// Solved and kept, or up to date already.
     Solved,
-    /// CalculiX reported errors, but its results are kept.
+    /// The solver reported errors, but its results are kept.
     SolvedWithErrors,
     Failed,
     Stopped,
@@ -66,7 +66,7 @@ pub struct Solved {
     /// meshed the geometry first.
     pub meshed: Option<(plx_mesh::FeMesh, std::collections::BTreeMap<String, u64>)>,
     pub results: Option<BoundResults>,
-    /// Problems CalculiX reported when the run failed.
+    /// Problems the solver reported when the run failed.
     pub findings: Vec<Finding>,
     /// Fingerprint of the mesh the solve started from: what it made belongs to the
     /// analysis only while its mesh is still that one.
@@ -83,7 +83,7 @@ pub struct BackgroundSolve {
     work_dir: PathBuf,
     continuation: Continuation,
     analysis: Option<Analysis>,
-    /// Lines before CalculiX runs (loading, meshing, model checks) and after (keeping the
+    /// Lines before the solver runs (loading, meshing, model checks) and after (keeping the
     /// results), around the solver output.
     before: Vec<String>,
     after: Vec<String>,
@@ -93,7 +93,7 @@ pub struct BackgroundSolve {
     results: Option<BoundResults>,
     findings: Vec<Finding>,
     mesh_print: Option<u64>,
-    /// Runs CalculiX even if the results are up to date: Solve Again.
+    /// Runs the solver even if the results are up to date: Solve Again.
     force: bool,
 }
 
@@ -174,11 +174,6 @@ impl BackgroundSolve {
         }
     }
 
-    /// The solver settings with what was found out about the executable on the way.
-    pub fn solver(&self) -> &Solver {
-        &self.solver
-    }
-
     /// What it does now, for the monitor.
     pub fn state_text(&self) -> &'static str {
         match &self.stage {
@@ -199,13 +194,13 @@ impl BackgroundSolve {
         (self.finished).unwrap_or_else(|| self.started.elapsed().as_secs_f32())
     }
 
-    /// Where CalculiX is, while it runs.
+    /// Where the solver is, while it runs.
     pub fn progress(&self) -> Option<String> {
         let analysis = self.analysis.as_ref()?;
         analysis.is_running().then(|| analysis.progress()).flatten()
     }
 
-    /// The output so far: nodalis's lines around CalculiX's.
+    /// The output so far: nodalis's lines around the solver's.
     pub fn output(&self) -> Vec<&str> {
         let solver = self.analysis.as_ref().map_or(&[][..], |a| a.output());
         (self.before.iter().chain(solver).chain(&self.after))
@@ -219,14 +214,14 @@ impl BackgroundSolve {
         self.before.len() + solver + self.after.len()
     }
 
-    /// The lines dropped from the front of CalculiX's output in a long run.
+    /// The lines dropped from the front of the solver's output in a long run.
     pub fn dropped(&self) -> usize {
         self.analysis
             .as_ref()
             .map_or(0, crate::analysis::Analysis::dropped)
     }
 
-    /// Stops it: CalculiX is killed, a model being built or meshed is dropped.
+    /// Stops it: the solver is stopped, a model being built or meshed is dropped.
     pub fn stop(&mut self) {
         if !self.active() {
             return;
@@ -268,7 +263,7 @@ impl BackgroundSolve {
         self.finish(Outcome::Failed);
     }
 
-    /// Works on: takes the built model or the new mesh, polls CalculiX and keeps its
+    /// Works on: takes the built model or the new mesh, polls the solver and keeps its
     /// results once it ends.
     pub fn poll(&mut self, ctx: &egui::Context) {
         match &mut self.stage {
@@ -350,7 +345,7 @@ impl BackgroundSolve {
     }
 
     /// Meshes the geometry first if the mesh is missing or out of date; else starts
-    /// CalculiX.
+    /// the solver.
     fn mesh_or_run(&mut self, ctx: &egui::Context, findings: Vec<Finding>) {
         let Some(model) = &self.model else {
             return;
@@ -390,7 +385,7 @@ impl BackgroundSolve {
         self.run(findings);
     }
 
-    /// Writes the input file and starts CalculiX.
+    /// Writes the input file and starts the solver.
     fn run(&mut self, findings: Vec<Finding>) {
         let Some(model) = &self.model else {
             return;
@@ -408,20 +403,12 @@ impl BackgroundSolve {
             Err(error) => return self.fail(error),
         };
         // Problems the checks found go first, so that an abort is explained even before
-        // CalculiX says anything.
+        // the solver says anything.
         for finding in findings.iter().filter(|f| f.severity() == Severity::Error) {
             analysis.note(format!(
                 "Model check: {}: {}",
                 finding.problem.title(),
                 finding.detail
-            ));
-        }
-        // CalculiX skips keywords it does not know with only a warning.
-        let unknown = self.solver.unknown_keywords(analysis.keywords());
-        if !unknown.is_empty() {
-            analysis.note(format!(
-                "Model check: CalculiX does not know {}",
-                crate::solver_check::by_feature(&unknown).join("; ")
             ));
         }
         self.analysis = Some(analysis);
@@ -523,14 +510,6 @@ impl BackgroundSolve {
 mod tests {
     use super::*;
 
-    fn ccx_installed() -> bool {
-        let found = std::process::Command::new("ccx").arg("-v").output().is_ok();
-        if !found {
-            eprintln!("ccx not found, test skipped");
-        }
-        found
-    }
-
     /// Polls the solve until it is done, as the project window does in every frame.
     fn finish(solve: &mut BackgroundSolve, ctx: &egui::Context) {
         let started = Instant::now();
@@ -543,19 +522,6 @@ mod tests {
 
     #[test]
     fn solves_and_keeps_the_results_without_a_window() {
-        if !ccx_installed() {
-            return;
-        }
-        solves_and_keeps_the_results(plx_solve::Engine::CalculiX);
-    }
-
-    /// The same with the built-in solver, which needs no program.
-    #[test]
-    fn solves_with_the_built_in_solver() {
-        solves_and_keeps_the_results(plx_solve::Engine::Nodalis);
-    }
-
-    fn solves_and_keeps_the_results(engine: plx_solve::Engine) {
         use crate::solver_check::{LENGTH, beam_mesh, beam_model, faces_where};
         let mesh = beam_mesh();
         let tip = faces_where(&mesh, |p| p[0] == LENGTH);
@@ -571,11 +537,8 @@ mod tests {
             model: fe,
             ..Default::default()
         };
-        let dir =
-            std::env::temp_dir().join(format!("nodalis-monitor-{engine:?}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nodalis-monitor-{}", std::process::id()));
         let solver = Solver {
-            engine,
-            executable: "ccx".into(),
             work_dir: dir.display().to_string(),
             ..Default::default()
         };
@@ -602,11 +565,10 @@ mod tests {
         let solved = solve.take_solved().expect("results");
         assert!(solved.meshed.is_none());
         let results = solved.results.expect("kept results");
-        // The built-in solver keeps its results without CalculiX's files, in the project
-        // as its own results file.
-        let calculix = engine == plx_solve::Engine::CalculiX;
-        assert_eq!(work_dir.join("Beam_1.frd").is_file(), calculix);
-        assert_eq!(results.solver.is_some(), !calculix);
+        // The solver keeps its results without CalculiX's files, in the project as its own
+        // results file.
+        assert!(!work_dir.join("Beam_1.frd").is_file());
+        assert!(results.solver.is_some());
         let read = results.read(&dir.join("read")).unwrap();
         assert!(read.results.increments[0].field("DISP").is_some());
         assert!(read.input.is_some());

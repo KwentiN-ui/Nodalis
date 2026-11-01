@@ -2,11 +2,11 @@
 Type=Application
 Name=Nodalis
 GenericName=FEM Pre- and Postprocessor
-Comment=Set up and evaluate CalculiX analyses
+Comment=Set up, solve and evaluate finite element analyses
 Exec=nodalis %F
 Icon=nodalis
 Terminal=false
 Categories=Science;Engineering;
 MimeType=application/x-nodalis-project;
-Keywords=FEM;FEA;CalculiX;Mesh;Gmsh;
+Keywords=FEM;FEA;Solver;Mesh;Gmsh;
 StartupWMClass=nodalis

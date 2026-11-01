@@ -291,7 +291,7 @@ wörtlich wie in `crates/plx-io/src/dat.rs` dokumentiert.
 
 `plxs_core::Progress` empfängt `ProgressEvent` (Step, Increment, Iteration, IncrementDone,
 Cutback, Eigenvalue, StepDone, Warning, Info, JobDone). `plxs-cli` druckt daraus CalculiX'
-Zeilen, die `plx-job` (`live.rs`) und `solver_check` lesen:
+Zeilen, die `plx-solve` (`live.rs`) und `solver_check` lesen:
 
 ```
 This is Version <x>            (plxs -v; die Startzeile enthält das Wort CalculiX)

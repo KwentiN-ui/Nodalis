@@ -11,7 +11,7 @@ shaft. Create it with #menu("Model", "Create Step ...") and choose the type in t
 #fields(
   [Coriolis forces of the rotation (CORIOLIS)], [Adds the Coriolis matrix of the rotation
     (default on). Without it the step repeats the frequencies of the frequency step.],
-  [Number of complex frequencies], [How many complex eigenfrequencies CalculiX computes
+  [Number of complex frequencies], [How many complex eigenfrequencies the solver computes
     (default 10).],
 )
 

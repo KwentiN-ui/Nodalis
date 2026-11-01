@@ -358,7 +358,7 @@ impl Reader {
             "*CONTACTPRINT" => self.history_output(k, data, FileKind::Contact)?,
             name if KNOWN_UNSUPPORTED.contains(&name) => {
                 return Err(Error::Unsupported(format!(
-                    "keyword {} is not supported by plxs (CalculiX computes it)",
+                    "keyword {} is not supported by the solver yet",
                     k.display_name()
                 )));
             }

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds the CalculiX solver (ccx) that the Nodalis releases ship, with the SPOOLES, PaStiX
+# Builds CalculiX (ccx), the reference the solver fixtures were made with (scripts/solver_reference.sh,
+# plxs-fixtures reference), with the SPOOLES, PaStiX
 # and ARPACK solvers, for Linux or (cross-compiled with MinGW) for Windows.
 #
 #     scripts/build_ccx.sh [linux|windows]
@@ -225,7 +226,7 @@ fi
 if ! done_marker pastix; then
     step PaStiX
     git_source pastix "$PASTIX_REPO" "$PASTIX_COMMIT"
-    for p in "$root"/installer/ccx/patches/pastix-*.patch; do
+    for p in "$root"/scripts/ccx/patches/pastix-*.patch; do
         patch -s -p1 -d "$src/pastix" -i "$p"
     done
     # The static OpenBLAS needs the Fortran runtime for its LAPACK part.
@@ -302,7 +303,7 @@ else
         "$($FC -print-file-name=libquadmath.a)" "$($FC -print-file-name=libgomp.a)"
         "$($CXX -print-file-name=libstdc++.a)" -lpthread -ldl -lrt)
 fi
-make -s -j"$jobs" -f "$root/installer/ccx/Makefile.nodalis" VERSION="$CCX_VERSION" \
+make -s -j"$jobs" -f "$root/scripts/ccx/Makefile.nodalis" VERSION="$CCX_VERSION" \
     CC="$CC" FC="$FC" AR="$AR" PREFIX="$prefix" LDOMP="$ldomp" LINK="${link[*]}" >"$work/calculix.log" 2>&1 ||
     { tail -30 "$work/calculix.log"; exit 1; }
 
@@ -323,8 +324,8 @@ cp "$src/openblas/LICENSE" "$out/licenses/OpenBLAS-LICENSE.txt"
 cp "$src/openblas/lapack-netlib/LICENSE" "$out/licenses/LAPACK-LICENSE.txt"
 cp "$src/scotch/LICENSE_en.txt" "$out/licenses/Scotch-CeCILL-C.txt"
 cp "$src/pastix/LICENSE" "$out/licenses/PaStiX-CeCILL-C.txt"
-cp "$root/installer/ccx/GCC-RUNTIME-LIBRARY-EXCEPTION.txt" "$out/licenses/"
-[ "$platform" = windows ] && cp "$root/installer/ccx/WINPTHREADS-LICENSE.txt" "$out/licenses/"
+cp "$root/scripts/ccx/GCC-RUNTIME-LIBRARY-EXCEPTION.txt" "$out/licenses/"
+[ "$platform" = windows ] && cp "$root/scripts/ccx/WINPTHREADS-LICENSE.txt" "$out/licenses/"
 {
     echo "CalculiX ccx $CCX_VERSION for $platform, built by scripts/build_ccx.sh of Nodalis"
     echo "Solvers: SPOOLES (multithreaded), PaStiX, ARPACK"
@@ -336,6 +337,6 @@ cp "$root/installer/ccx/GCC-RUNTIME-LIBRARY-EXCEPTION.txt" "$out/licenses/"
     echo "OpenBLAS:  $OPENBLAS_REPO/tree/$OPENBLAS_COMMIT"
     echo "Scotch:    $SCOTCH_URL"
     echo "PaStiX:    $PASTIX_REPO/tree/$PASTIX_COMMIT"
-    echo "  patches: installer/ccx/patches in https://github.com/KwentiN-ui/Nodalis"
+    echo "  patches: scripts/ccx/patches in https://github.com/KwentiN-ui/Nodalis"
 } >"$out/SOURCE.txt"
 echo "CalculiX: $out/bin/$exe ($(du -h "$out/bin/$exe" | cut -f1))"

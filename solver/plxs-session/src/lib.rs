@@ -26,8 +26,8 @@ use plxs_procedures::{ProcedureContext, run_step};
 
 pub use check::{Check, check_analysis, check_input, format_diagnostic};
 pub use job::{
-    JobOptions, JobOutcome, KeptResults, format_event, run_analysis_keeping, run_job,
-    run_job_keeping,
+    JobOptions, JobOutcome, KeptResults, format_event, run_analysis_keeping, run_input_file,
+    run_job, run_job_keeping,
 };
 pub use plxs_procedures::StepOutcome;
 pub use plxs_procedures::fields::unsupported_outputs;
@@ -129,10 +129,18 @@ impl Session {
             let pattern = build_pattern(&table);
             Ok((table, pattern))
         })?;
-        let state = State {
+        let mut state = State {
             displacements: plxs_core::state::NodalField::zeros(model.nodes.len(), 3),
             ..State::default()
         };
+        // Modes stored by an earlier run (`<job>.eig`) for modal steps without a frequency
+        // step of their own.
+        if let Some(path) = &model.stored_modes_file {
+            match read_stored_modes(path, &model) {
+                Ok(modes) => state.stored_modes = Some(modes),
+                Err(e) => pending_warnings.push(format!("{e}; the file is not used")),
+            }
+        }
         Ok(Session {
             model,
             table,
@@ -307,6 +315,33 @@ impl Session {
 }
 
 /// A state that does not fit the model would index out of bounds in the procedures.
+/// The modes of a `.eig` file that `plxs` wrote (`*FREQUENCY, STORAGE=YES`), checked against
+/// the nodes of the model.
+fn read_stored_modes(
+    path: &std::path::Path,
+    model: &Model,
+) -> Result<plxs_core::state::StoredModes> {
+    let io = |message: String| Error::Io {
+        path: path.display().to_string(),
+        message,
+    };
+    let bytes = std::fs::read(path).map_err(|e| io(e.to_string()))?;
+    let modes: plxs_core::state::StoredModes = postcard::from_bytes(&bytes)
+        .map_err(|e| io(format!("not a file of stored modes of this solver: {e}")))?;
+    let nodes = model.nodes.len();
+    if modes
+        .modes
+        .iter()
+        .any(|m| m.per_node == 0 || m.values.len() != nodes * m.per_node)
+    {
+        return Err(Error::Unsupported(format!(
+            "the stored modes of {} do not fit the model ({nodes} nodes)",
+            path.display()
+        )));
+    }
+    Ok(modes)
+}
+
 fn check_layout(model: &Model, state: &State) -> Result<()> {
     let nodes = model.nodes.len();
     let elements = model.elements.len();

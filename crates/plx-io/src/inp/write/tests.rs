@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::process::Command;
 
 use plx_mesh::CadEntity;
 use plx_model::{
@@ -138,14 +137,14 @@ fn field_outputs_are_written_with_their_options_like_prepomax_does() {
 }
 
 #[test]
-fn calculix_accepts_the_options_of_field_outputs() {
+fn solver_accepts_the_options_of_field_outputs() {
     let (mesh, mut model) = cantilever(tip_force());
     let outputs = &mut model.steps[0].field_outputs;
     outputs[0].last_iterations = true;
     outputs[0].global = false;
     outputs[1].dimension = OutputDimension::ThreeD;
     outputs[1].variables.push("ERR".into());
-    let Some(frd) = run_ccx("feldausgabe", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("feldausgabe", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     assert!(node_value(&frd, "DISP", "U3", 99) < 0.0);
@@ -221,12 +220,12 @@ fn empty_regions_and_unknown_materials_are_errors() {
     ));
 }
 
-/// Runs CalculiX on the input file, if it is installed; CI does not have it.
-fn run_ccx(name: &str, text: &str) -> Option<FrdImport> {
+/// Runs the solver on the input file and reads the results.
+fn run_solver(name: &str, text: &str) -> Option<FrdImport> {
     dump_fixture(name, text);
-    let dir = ccx_dir(name)?;
-    let frd = run_ccx_in(&dir, name, text);
-    remove_ccx_dir(&dir);
+    let dir = run_dir(name)?;
+    let frd = run_in(&dir, name, text);
+    remove_run_dir(&dir);
     Some(frd)
 }
 
@@ -262,53 +261,46 @@ fn dump_fixture_file(name: &str, file: &str, bytes: &[u8]) {
     std::fs::write(dir.join(file), bytes).unwrap();
 }
 
-/// A fresh directory for a CalculiX run, `None` without CalculiX.
-fn ccx_dir(name: &str) -> Option<PathBuf> {
-    if Command::new("ccx").arg("-v").output().is_err() {
-        eprintln!("ccx not found, test skipped");
-        return None;
-    }
+/// A fresh directory for a run of the solver.
+fn run_dir(name: &str) -> Option<PathBuf> {
     let dir = std::env::temp_dir().join(format!("plx-write-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     Some(dir)
 }
 
-/// Whether the installed CalculiX is at least version 2.23. Before it, the reaction force RF
-/// printed at a pre-tension node is zero (the preload is an external load there), so the bolt
-/// force can only be read from 2.23 on.
-fn ccx_prints_pretension_force() -> bool {
-    let Ok(output) = Command::new("ccx").arg("-v").output() else {
-        return false;
+/// Runs the solver on the input file in `dir`, writing its result files there as the
+/// command line `plxs` does; returns its output lines and whether the job finished.
+fn solve_in(dir: &std::path::Path, name: &str, text: &str) -> (Vec<String>, bool) {
+    std::fs::write(dir.join(format!("{name}.inp")), text).unwrap();
+    let options = plxs_session::JobOptions {
+        threads: 1,
+        ..plxs_session::JobOptions::new(dir, name)
     };
-    let text = String::from_utf8_lossy(&output.stdout);
-    let Some(version) = text.split("Version").nth(1) else {
-        return false;
-    };
-    let mut parts = version.trim().split('.').map(|p| {
-        let digits: String = p.chars().take_while(char::is_ascii_digit).collect();
-        digits.parse::<u32>().unwrap_or(0)
+    let mut lines = Vec::new();
+    let input = dir.join(format!("{name}.inp"));
+    let outcome = plxs_session::run_job(text, Some(&input), &options, &mut |event| {
+        lines.extend(plxs_session::format_event(&event));
     });
-    let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
-    (major, minor) >= (2, 23)
+    let finished = match outcome {
+        Ok(outcome) => outcome == plxs_session::JobOutcome::Finished,
+        Err(error) => {
+            lines.push(error.to_string());
+            false
+        }
+    };
+    (lines, finished)
 }
 
-/// Runs CalculiX on the input file in the directory and reads the results.
-fn run_ccx_in(dir: &std::path::Path, name: &str, text: &str) -> FrdImport {
-    std::fs::write(dir.join(format!("{name}.inp")), text).unwrap();
-    let output = Command::new("ccx")
-        .args(["-i", name])
-        .current_dir(dir)
-        .env("OMP_NUM_THREADS", "1")
-        .output()
-        .unwrap();
-    let log = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success() && !log.contains("*ERROR"), "{log}");
+/// Runs the solver on the input file in the directory and reads the results.
+fn run_in(dir: &std::path::Path, name: &str, text: &str) -> FrdImport {
+    let (log, finished) = solve_in(dir, name, text);
+    assert!(finished, "{}", log.join("\n"));
     read_frd(&dir.join(format!("{name}.frd"))).unwrap()
 }
 
-/// Removes the files of a run; PLX_KEEP_CCX keeps them for a look at them.
-fn remove_ccx_dir(dir: &std::path::Path) {
-    if std::env::var_os("PLX_KEEP_CCX").is_none() {
+/// Removes the files of a run; PLX_KEEP_RUN keeps them for a look at them.
+fn remove_run_dir(dir: &std::path::Path) {
+    if std::env::var_os("PLX_KEEP_RUN").is_none() {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
@@ -348,9 +340,9 @@ fn expanded_value(
 }
 
 #[test]
-fn calculix_reproduces_the_reference_cantilever() {
+fn solver_reproduces_the_reference_cantilever() {
     let (mesh, model) = cantilever(tip_force());
-    let Some(frd) = run_ccx("kragbalken", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("kragbalken", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let reference = read_frd(&testdata("kragbalken_c3d8.frd")).unwrap();
@@ -567,10 +559,10 @@ fn a_force_on_points_is_shared_by_the_nodes() {
 /// A moment at the reference point bends the beam: the reactions at the clamped end balance
 /// it and the rigid tip face stays plane.
 #[test]
-fn calculix_bends_the_cantilever_by_a_moment_on_the_rigid_tip() {
+fn solver_bends_the_cantilever_by_a_moment_on_the_rigid_tip() {
     let m = 10_000.0;
     let (mesh, model) = rigid_tip(Some(moment([0.0, 0.0, m])), None);
-    let Some(frd) = run_ccx("moment", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("moment", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let reaction: f64 = (mesh.node_sets["FIX"].iter())
@@ -604,7 +596,7 @@ fn calculix_bends_the_cantilever_by_a_moment_on_the_rigid_tip() {
 
 /// A rotation prescribed at the reference point turns the rigid tip face about it.
 #[test]
-fn calculix_turns_the_rigid_tip_by_the_rotation_of_its_reference_point() {
+fn solver_turns_the_rigid_tip_by_the_rotation_of_its_reference_point() {
     let angle = 0.01;
     let bc = BoundaryCondition {
         distribution: None,
@@ -616,7 +608,7 @@ fn calculix_turns_the_rigid_tip_by_the_rotation_of_its_reference_point() {
         amplitude: None,
     };
     let (mesh, model) = rigid_tip(None, Some(bc));
-    let Some(frd) = run_ccx("drehung", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("drehung", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     for id in (1..=99).filter(|&id| mesh.node(id).is_some_and(|c| c[0] == 100.0)) {
@@ -705,7 +697,7 @@ fn mean_rotation(mesh: &FeMesh, model: &FeModel, frd: &FrdImport, k: usize) -> f
 }
 
 #[test]
-fn calculix_turns_a_deformable_remote_point_with_the_mean_of_its_face() {
+fn solver_turns_a_deformable_remote_point_with_the_mean_of_its_face() {
     let angle = 0.01;
     let values = [Some(0.0), Some(0.0), Some(0.0), None, None, Some(angle)];
     let (mesh, model) = remote_cantilever(remote_with(values, |r| {
@@ -714,7 +706,7 @@ fn calculix_turns_a_deformable_remote_point_with_the_mean_of_its_face() {
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(!text.contains("*Rigid body"), "{text}");
     assert_eq!(text.matches("*Equation").count(), 6, "{text}");
-    let Some(frd) = run_ccx("remote-deformable", &text) else {
+    let Some(frd) = run_solver("remote-deformable", &text) else {
         return;
     };
     let turned = mean_rotation(&mesh, &model, &frd, 2);
@@ -725,7 +717,7 @@ fn calculix_turns_a_deformable_remote_point_with_the_mean_of_its_face() {
 /// supported: the faces turn about their centres. Held at each node, the same supports clamp
 /// the ends nearly.
 #[test]
-fn calculix_supports_a_solid_beam_on_two_hinged_faces() {
+fn solver_supports_a_solid_beam_on_two_hinged_faces() {
     // 100 x 10 x 10, 1000 N at midspan: F L^3 / (48 E I) plus shear F L / (4 k G A).
     let force = Load {
         region: Region::Nodes(vec![477, 508, 539, 570, 601]),
@@ -751,7 +743,7 @@ fn calculix_supports_a_solid_beam_on_two_hinged_faces() {
     });
     let text = write_inp(&mesh, &model, "").unwrap();
     assert_eq!(text.matches("*Rigid body").count(), 2, "{text}");
-    let Some(frd) = run_ccx("hinged-beam", &text) else {
+    let Some(frd) = run_solver("hinged-beam", &text) else {
         return;
     };
     let sag = -node_value(&frd, "DISP", "U3", 539);
@@ -765,14 +757,14 @@ fn calculix_supports_a_solid_beam_on_two_hinged_faces() {
         }
     }
     let text = write_inp(&mesh, &model, "").unwrap();
-    let frd = run_ccx("clamped-beam", &text).unwrap();
+    let frd = run_solver("clamped-beam", &text).unwrap();
     let sag = -node_value(&frd, "DISP", "U3", 539);
     assert!(sag < 0.6 * expected, "{sag} not stiffer than {expected}");
 }
 
 /// Each node held in a coordinate system of its own: a `*Transform` of the nodes.
 #[test]
-fn calculix_holds_each_node_in_its_coordinate_system() {
+fn solver_holds_each_node_in_its_coordinate_system() {
     let shift = 0.1;
     let values = [Some(shift), Some(0.0), Some(0.0), None, None, None];
     let (mesh, mut model) = remote_cantilever(remote_with(values, |r| {
@@ -787,7 +779,7 @@ fn calculix_holds_each_node_in_its_coordinate_system() {
         text.contains("*Transform, Nset=Internal-1_TIP, Type=R\n0, 1, 0, -1, 0, 0\n"),
         "{text}"
     );
-    let Some(frd) = run_ccx("each-node-system", &text) else {
+    let Some(frd) = run_solver("each-node-system", &text) else {
         return;
     };
     for id in [11, 22, 33, 44, 55, 66, 77, 88, 99] {
@@ -840,7 +832,7 @@ fn a_face_free_to_turn_follows_a_rigid_point() {
         text.contains("*Rigid body, Nset=Internal_Selection"),
         "{text}"
     );
-    let Some(_) = run_ccx("hinge-and-pin", &text) else {
+    let Some(_) = run_solver("hinge-and-pin", &text) else {
         return;
     };
 }
@@ -848,7 +840,7 @@ fn a_face_free_to_turn_follows_a_rigid_point() {
 /// In a coordinate system turned about z, U1 is the global y direction and UR1 a rotation
 /// about the global y axis, for rigid and deformable points alike.
 #[test]
-fn calculix_moves_a_remote_point_in_its_coordinate_system() {
+fn solver_moves_a_remote_point_in_its_coordinate_system() {
     let (mesh, mut model) = remote_cantilever(remote_with(
         [
             Some(0.1),
@@ -866,7 +858,7 @@ fn calculix_moves_a_remote_point_in_its_coordinate_system() {
         text.contains("*Transform, Nset=Internal_Selection-1_Remote-1_Point, Type=R\n"),
         "{text}"
     );
-    let Some(frd) = run_ccx("remote-system", &text) else {
+    let Some(frd) = run_solver("remote-system", &text) else {
         return;
     };
     for id in [11, 55, 99] {
@@ -890,7 +882,7 @@ fn calculix_moves_a_remote_point_in_its_coordinate_system() {
         ];
     }
     let text = write_inp(&mesh, &model, "").unwrap();
-    let Some(frd) = run_ccx("remote-system-deformable", &text) else {
+    let Some(frd) = run_solver("remote-system-deformable", &text) else {
         return;
     };
     let turned = mean_rotation(&mesh, &model, &frd, 1);
@@ -968,13 +960,13 @@ fn a_remote_displacement_drives_its_region_from_a_point_at_its_centre() {
 /// The region of a remote displacement moves rigidly with its point: turned about the
 /// centre of the tip face and shifted along y.
 #[test]
-fn calculix_moves_the_region_of_a_remote_displacement_rigidly() {
+fn solver_moves_the_region_of_a_remote_displacement_rigidly() {
     let (angle, shift) = (0.01, 0.1);
     let (mesh, mut model) = cantilever(tip_force());
     model.steps[0].loads.clear();
     let values = [None, Some(shift), None, None, None, Some(angle)];
     (model.steps[0].boundary_conditions).push(remote("Remote-1", values));
-    let Some(frd) = run_ccx("remote", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("remote", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let tip: Vec<_> = (1..=99)
@@ -1027,7 +1019,7 @@ fn a_plastic_material_is_written_like_prepomax_does() {
 /// A bar pulled beyond its yield stress: the stress stays on the hardening curve and the
 /// equivalent plastic strain is where the curve reaches the applied stress.
 #[test]
-fn calculix_yields_the_bar_pulled_beyond_its_yield_stress() {
+fn solver_yields_the_bar_pulled_beyond_its_yield_stress() {
     let stress = 300.0;
     let load = Load {
         distribution: None,
@@ -1067,7 +1059,7 @@ fn calculix_yields_the_bar_pulled_beyond_its_yield_stress() {
     model.steps[0].field_outputs[1]
         .variables
         .push("PEEQ".into());
-    let Some(frd) = run_ccx("plastisch", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("plastisch", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let nodes = nodes_at(0, max[0]);
@@ -1229,7 +1221,7 @@ fn a_membrane_section_is_written_for_membrane_elements() {
 /// A membrane strip under tension stretches by F L / (E A) at mid-length, away from the
 /// unevenly loaded tip, with each membrane element type a part can have.
 #[test]
-fn calculix_stretches_a_membrane_strip() {
+fn solver_stretches_a_membrane_strip() {
     // S4R is written as M3D4R.
     for (chosen, type_name) in [
         ("M3D3", "M3D3"),
@@ -1241,7 +1233,7 @@ fn calculix_stretches_a_membrane_strip() {
         let text = write_inp(&mesh, &model, "").unwrap();
         assert!(text.contains(&format!("Type={type_name},")), "{text}");
         let name = format!("membran-{}", chosen.to_ascii_lowercase());
-        let Some(frd) = run_ccx(&name, &text) else {
+        let Some(frd) = run_solver(&name, &text) else {
             return;
         };
         let expected = 50.0 / (210_000.0 * 10.0 * 2.0);
@@ -1259,7 +1251,7 @@ fn calculix_stretches_a_membrane_strip() {
 /// a taut string, sagging by p L^2 / (8 N) at mid-span with the tension N per width, in a
 /// geometrically nonlinear analysis.
 #[test]
-fn calculix_carries_pressure_on_a_pretensioned_membrane() {
+fn solver_carries_pressure_on_a_pretensioned_membrane() {
     let (length, width, thickness) = (100.0, 10.0, 2.0);
     let mesh = linear_rectangle(length, width, 20, 2, false);
     let (start, end) = (nodes_at(&mesh, 0, 0.0), nodes_at(&mesh, 0, length));
@@ -1304,7 +1296,7 @@ fn calculix_carries_pressure_on_a_pretensioned_membrane() {
     }
     model.steps.insert(0, stretch_step);
     let text = write_inp(&mesh, &model, "").unwrap();
-    let Some(frd) = run_ccx("membran-vorgespannt", &text) else {
+    let Some(frd) = run_solver("membran-vorgespannt", &text) else {
         return;
     };
     let (e, nu) = (210_000.0, 0.3);
@@ -1324,9 +1316,9 @@ fn calculix_carries_pressure_on_a_pretensioned_membrane() {
 
 /// The shell plate bends like a beam: F L^3 / (3 E I) at the tip.
 #[test]
-fn calculix_bends_the_shell_plate_like_a_beam() {
+fn solver_bends_the_shell_plate_like_a_beam() {
     let (mesh, model) = shell_plate();
-    let Some(frd) = run_ccx("schale", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("schale", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let inertia = 10.0 * 2.0f64.powi(3) / 12.0;
@@ -1377,14 +1369,14 @@ fn surface_traction_on_an_edge_spreads_the_total_force_by_length() {
 
 /// A total force on the tip edge bends the plate like the same force at the tip nodes.
 #[test]
-fn calculix_bends_the_shell_plate_by_a_traction_on_its_edge() {
+fn solver_bends_the_shell_plate_by_a_traction_on_its_edge() {
     let (mesh, mut model) = shell_plate();
     let load = &mut model.steps[0].loads[0];
     load.kind = LoadKind::force([0.0, 0.0, -1.0]);
     load.region = Region::Edges(shell_plate_tip_edge(&mesh));
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("*Cload"), "{text}");
-    let Some(frd) = run_ccx("schalenkante", &text) else {
+    let Some(frd) = run_solver("schalenkante", &text) else {
         return;
     };
     let reaction: f64 = (nodes_at(&mesh, 0, 0.0).iter())
@@ -1550,7 +1542,7 @@ fn tet_cut_faces(mesh: &FeMesh) -> Vec<(ElementId, u8)> {
 /// users add a thin layer of wedge elements for this). The cut through the mesh carries all
 /// of it, also across a cut whose normal is not along an axis of the bar.
 #[test]
-fn calculix_preloads_a_tetrahedral_bar_across_the_cut() {
+fn solver_preloads_a_tetrahedral_bar_across_the_cut() {
     let force = 1000.0;
     for (name, direction) in [
         ("tet-vorspannung", None),
@@ -1569,7 +1561,7 @@ fn calculix_preloads_a_tetrahedral_bar_across_the_cut() {
         };
         model.steps[0].boundary_conditions[1].region = Region::NodeSet("TIP".into());
         let text = write_inp(&mesh, &model, "").unwrap();
-        let Some(frd) = run_ccx(name, &text) else {
+        let Some(frd) = run_solver(name, &text) else {
             return;
         };
         let reaction: f64 = (mesh.node_sets["FIX"].iter())
@@ -1598,10 +1590,10 @@ fn calculix_preloads_a_tetrahedral_bar_across_the_cut() {
 
 /// A preload across the middle of the clamped bar puts the whole bar under that tension.
 #[test]
-fn calculix_preloads_the_clamped_bar_across_the_cut() {
+fn solver_preloads_the_clamped_bar_across_the_cut() {
     let force = 1000.0;
     let (mesh, model) = pre_tension(force, false);
-    let Some(frd) = run_ccx("vorspannung", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("vorspannung", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let reaction: f64 = (mesh.node_sets["FIX"].iter())
@@ -1618,7 +1610,7 @@ fn calculix_preloads_the_clamped_bar_across_the_cut() {
 /// A bolt locked in the step after its preload keeps its length and so its force; a
 /// shortening of 0 instead loosens it, as the shortening counts from the start.
 #[test]
-fn calculix_keeps_the_preload_of_a_locked_bolt() {
+fn solver_keeps_the_preload_of_a_locked_bolt() {
     let force = 1000.0;
     for (name, lock, expected) in [("verriegelt", true, force), ("gelockert", false, 0.0)] {
         let (mesh, mut model) = pre_tension(force, false);
@@ -1631,7 +1623,7 @@ fn calculix_keeps_the_preload_of_a_locked_bolt() {
             direction: None,
         };
         model.steps.push(second);
-        let Some(frd) = run_ccx(name, &write_inp(&mesh, &model, "").unwrap()) else {
+        let Some(frd) = run_solver(name, &write_inp(&mesh, &model, "").unwrap()) else {
             return;
         };
         let reaction: f64 = (mesh.node_sets["FIX"].iter())
@@ -1646,10 +1638,10 @@ fn calculix_keeps_the_preload_of_a_locked_bolt() {
 
 /// Shortening the bolt by a prescribed displacement stretches the bar by that much.
 #[test]
-fn calculix_shortens_the_bolt_by_the_prescribed_displacement() {
+fn solver_shortens_the_bolt_by_the_prescribed_displacement() {
     let shortening = 0.01;
     let (mesh, model) = pre_tension(shortening, true);
-    let Some(frd) = run_ccx("verkuerzung", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("verkuerzung", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     // The two halves overlap by the shortening: strain 0.01 / 100 in a bar held at both
@@ -1665,7 +1657,7 @@ fn calculix_shortens_the_bolt_by_the_prescribed_displacement() {
 }
 
 #[test]
-fn calculix_pressure_on_a_surface_balances_the_reactions() {
+fn solver_pressure_on_a_surface_balances_the_reactions() {
     let load = Load {
         distribution: None,
         name: "Pressure-1".into(),
@@ -1677,7 +1669,7 @@ fn calculix_pressure_on_a_surface_balances_the_reactions() {
         factor_amplitude: None,
     };
     let (mesh, model) = cantilever(load);
-    let Some(frd) = run_ccx("druck", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("druck", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let reaction: f64 = mesh.node_sets["FIX"]
@@ -1689,7 +1681,7 @@ fn calculix_pressure_on_a_surface_balances_the_reactions() {
 }
 
 #[test]
-fn calculix_reads_quadratic_elements_over_two_lines() {
+fn solver_reads_quadratic_elements_over_two_lines() {
     const NODE: NodeId = 141;
     const FORCE: [f64; 3] = [0.0, -500.0, 0.0];
     let load = Load {
@@ -1715,7 +1707,7 @@ fn calculix_reads_quadratic_elements_over_two_lines() {
         element[15..].join(", ")
     );
     assert!(text.contains(&first), "{first}");
-    let Some(frd) = run_ccx("block", &text) else {
+    let Some(frd) = run_solver("block", &text) else {
         return;
     };
     let reference = read_frd(&testdata("block_c3d20r.frd")).unwrap();
@@ -1762,7 +1754,7 @@ fn surface_traction_spreads_the_total_force_by_area() {
 }
 
 #[test]
-fn calculix_balances_a_surface_traction() {
+fn solver_balances_a_surface_traction() {
     let load = Load {
         distribution: None,
         name: "Surface_Traction-1".into(),
@@ -1775,7 +1767,7 @@ fn calculix_balances_a_surface_traction() {
     };
     let (mesh, model) = cantilever(load);
     let text = write_inp(&mesh, &model, "").unwrap();
-    let Some(frd) = run_ccx("traktion", &text) else {
+    let Some(frd) = run_solver("traktion", &text) else {
         return;
     };
     let reaction: f64 = mesh.node_sets["FIX"]
@@ -1792,50 +1784,14 @@ fn top_title(tree: &[Keyword], name: &str) -> usize {
         .unwrap()
 }
 
-/// Runs CalculiX like [`run_ccx`] and returns the `.dat` file.
-fn run_ccx_dat(name: &str, text: &str) -> Option<String> {
-    if Command::new("ccx").arg("-v").output().is_err() {
-        eprintln!("ccx not found, test skipped");
-        return None;
-    }
-    let dir = std::env::temp_dir().join(format!("plx-write-{name}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join(format!("{name}.inp")), text).unwrap();
-    let output = Command::new("ccx")
-        .args(["-i", name])
-        .current_dir(&dir)
-        .env("OMP_NUM_THREADS", "1")
-        .output()
-        .unwrap();
-    let log = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success() && !log.contains("*ERROR"), "{log}");
+/// Runs the solver like [`run_solver`] and returns the `.dat` file.
+fn run_dat(name: &str, text: &str) -> Option<String> {
+    let dir = run_dir(name)?;
+    let (log, finished) = solve_in(&dir, name, text);
+    assert!(finished, "{}", log.join("\n"));
     let dat = std::fs::read_to_string(dir.join(format!("{name}.dat"))).unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
+    remove_run_dir(&dir);
     Some(dat)
-}
-
-#[test]
-fn check_model_replaces_the_procedures_by_no_analysis() {
-    let (mesh, mut model) = cantilever(tip_force());
-    let text = write_check_inp(&mesh, &model, "").unwrap();
-    assert!(text.contains("*Step\n*No analysis\n"), "{text}");
-    assert!(!text.contains("*Static"), "{text}");
-    // The loads are still checked.
-    assert!(text.contains("*Cload\nInternal_Selection-1_Force-1, 3, -100\n"));
-    // A deactivated step stays a comment, and without an active step PrePoMax's CheckModel
-    // step is added.
-    model.steps[0].active = false;
-    let text = write_check_inp(&mesh, &model, "").unwrap();
-    assert!(
-        text.contains("** Name: StaticStep: Deactivated\n"),
-        "{text}"
-    );
-    assert!(text.contains("** CheckModel"), "{text}");
-    assert_eq!(text.matches("*No analysis").count(), 1, "{text}");
-    model.steps.clear();
-    let text = write_check_inp(&mesh, &model, "").unwrap();
-    let step = text.find("*Step\n*No analysis\n").expect(&text);
-    assert!(text[step..].contains("*End step\n"), "{text}");
 }
 
 /// The cantilever of `kragbalken_c3d20r.inp` with a frequency step after the static one.
@@ -1885,14 +1841,14 @@ fn a_frequency_step_is_written_like_prepomax_does() {
 }
 
 #[test]
-fn calculix_finds_the_bending_frequency_of_the_cantilever() {
+fn solver_finds_the_bending_frequency_of_the_cantilever() {
     let (mesh, mut model) = frequency_analysis();
     // The preload of the static step is small; CalculiX must accept the perturbation step.
     let StepKind::Frequency(settings) = &mut model.steps[1].kind else {
         unreachable!()
     };
     settings.perturbation = true;
-    let Some(frd) = run_ccx("eigenfrequenz", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("eigenfrequenz", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let modes: Vec<f64> = (frd.increments.iter())
@@ -1999,9 +1955,9 @@ fn tip_history(frd: &FrdImport) -> Vec<(f64, f64)> {
 /// start. Stiffness-proportional damping with a ratio of 0.1 lowers the trough to about
 /// 1 + e^(-0.1 pi) = 1.73 times the static deflection.
 #[test]
-fn calculix_swings_the_cantilever_about_its_static_deflection() {
+fn solver_swings_the_cantilever_about_its_static_deflection() {
     let (mesh, reference) = analysis("kragbalken_c3d20r.inp", tip_force());
-    let Some(frd) = run_ccx(
+    let Some(frd) = run_solver(
         "dynamik_statisch",
         &write_inp(&mesh, &reference, "").unwrap(),
     ) else {
@@ -2011,7 +1967,7 @@ fn calculix_swings_the_cantilever_about_its_static_deflection() {
     assert!(static_u3 < 0.0, "{static_u3}");
     // 60 increments over 1.25 periods of the 810 Hz bending mode.
     let (mesh, model) = dynamic_cantilever(1.5e-3, 2.5e-5, None);
-    let frd = run_ccx("dynamik", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let frd = run_solver("dynamik", &write_inp(&mesh, &model, "").unwrap()).unwrap();
     let history = tip_history(&frd);
     assert_eq!(history.len(), 60, "{history:?}");
     let (trough_time, trough) = (history.iter().copied())
@@ -2030,7 +1986,7 @@ fn calculix_swings_the_cantilever_about_its_static_deflection() {
         beta: 2.0 * 0.1 / omega,
     };
     let (mesh, model) = dynamic_cantilever(1.5e-3, 2.5e-5, Some(damping));
-    let frd = run_ccx("dynamik_gedaempft", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let frd = run_solver("dynamik_gedaempft", &write_inp(&mesh, &model, "").unwrap()).unwrap();
     let damped = (tip_history(&frd).iter()).map(|h| h.1).fold(0.0, f64::min);
     let damped_ratio = damped / static_u3;
     assert!(
@@ -2043,13 +1999,13 @@ fn calculix_swings_the_cantilever_about_its_static_deflection() {
 /// with Rayleigh damping, automatic incrementation, and a dynamic step that lets the
 /// cantilever swing back from a static preload.
 #[test]
-fn calculix_runs_short_dynamic_steps() {
+fn solver_runs_short_dynamic_steps() {
     let damping = plx_model::RayleighDamping {
         alpha: 50.0,
         beta: 2e-5,
     };
     let (mesh, model) = dynamic_cantilever(1.5e-4, 2.5e-5, Some(damping));
-    let Some(frd) = run_ccx("dynamik-kurz", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("dynamik-kurz", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     assert_eq!(tip_history(&frd).len(), 6);
@@ -2060,7 +2016,7 @@ fn calculix_runs_short_dynamic_steps() {
     };
     settings.increments.incrementation = Incrementation::Automatic;
     settings.increments.max_increment = 6e-5;
-    let frd = run_ccx(
+    let frd = run_solver(
         "dynamik-automatisch",
         &write_inp(&mesh, &model, "").unwrap(),
     )
@@ -2083,7 +2039,7 @@ fn calculix_runs_short_dynamic_steps() {
     preload.loads.push(tip_force());
     preload.field_outputs = release.field_outputs.clone();
     model.steps = vec![preload, release];
-    let frd = run_ccx("statisch-dynamisch", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let frd = run_solver("statisch-dynamisch", &write_inp(&mesh, &model, "").unwrap()).unwrap();
     let tip = frd.mesh.node_index(99).unwrap();
     let static_u3 = (frd.increments.iter())
         .find(|i| i.kind == plx_results::AnalysisKind::Static)
@@ -2262,7 +2218,7 @@ fn a_buckle_step_is_written_like_prepomax_does() {
 /// modes, a few increments of modal dynamics with Rayleigh damping and a coarse harmonic
 /// sweep with bias around the first bending pair, with magnitudes and phases (PU, PHS).
 #[test]
-fn calculix_runs_short_modal_steps() {
+fn solver_runs_short_modal_steps() {
     let damping = ModalDamping::Rayleigh(plx_model::RayleighDamping {
         alpha: 300.0,
         beta: 2e-6,
@@ -2287,7 +2243,7 @@ fn calculix_runs_short_modal_steps() {
     settings.data_points = 3;
     settings.bias = 2.0;
     model.steps[2].field_outputs = vec![node(&["U", "PU"]), element(&["S", "PHS"])];
-    let Some(frd) = run_ccx("modal-kurz", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("modal-kurz", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let count = |step: u32| frd.increments.iter().filter(|i| i.step == step).count();
@@ -2301,14 +2257,14 @@ fn calculix_runs_short_modal_steps() {
 /// sweep peaks near the first bending mode at about 1 / (2 zeta) = 5 times the static
 /// deflection, a little less where the 10 Hz grid misses the resonance.
 #[test]
-fn calculix_superposes_the_stored_modes_of_the_cantilever() {
+fn solver_superposes_the_stored_modes_of_the_cantilever() {
     let (mesh, reference) = analysis("kragbalken_c3d20r.inp", tip_force());
-    let Some(frd) = run_ccx("modal_statisch", &write_inp(&mesh, &reference, "").unwrap()) else {
+    let Some(frd) = run_solver("modal_statisch", &write_inp(&mesh, &reference, "").unwrap()) else {
         return;
     };
     let static_u3 = node_value(&frd, "DISP", "U3", 99);
     let (mesh, model) = modal_cantilever(Some(ModalDamping::Constant(0.1)));
-    let frd = run_ccx("modal", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let frd = run_solver("modal", &write_inp(&mesh, &model, "").unwrap()).unwrap();
     let index = frd.mesh.node_index(99).unwrap();
     let tip = |i: &plx_results::Increment| {
         f64::from(i.field("DISP").unwrap().component("U3").unwrap().values[index])
@@ -2359,13 +2315,13 @@ fn calculix_superposes_the_stored_modes_of_the_cantilever() {
 }
 
 #[test]
-fn calculix_finds_the_euler_load_of_the_cantilever() {
+fn solver_finds_the_euler_load_of_the_cantilever() {
     let (mesh, mut model) = buckle_analysis();
     let StepKind::Buckle(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
     settings.num_factors = 2;
-    let Some(frd) = run_ccx("beulen", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("beulen", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let buckling: Vec<_> = (frd.increments.iter())
@@ -2399,7 +2355,7 @@ fn calculix_finds_the_euler_load_of_the_cantilever() {
 #[test]
 fn the_buckling_mode_exports_as_a_deformed_mesh() {
     let (mesh, model) = buckle_analysis();
-    let Some(frd) = run_ccx("beulform", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("beulform", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let mode = frd.increments.iter().find(|i| i.increment == 1).unwrap();
@@ -2452,7 +2408,7 @@ fn a_preloaded_buckle_step_counts_its_modes_from_one() {
     // single mode of the pair carries a trace of the other, so both are requested.
     settings.accuracy = 1e-10;
     settings.num_factors = 2;
-    let Some(frd) = run_ccx("vorspannung-beulen", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("vorspannung-beulen", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let ids: Vec<_> = (frd.increments.iter())
@@ -2490,7 +2446,7 @@ fn a_buckle_step_eliminates_a_rigid_end() {
     settings.num_factors = 4;
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("*Rigid body"), "{text}");
-    let Some(frd) = run_ccx("beulen-starr", &text) else {
+    let Some(frd) = run_solver("beulen-starr", &text) else {
         return;
     };
     let ids: Vec<_> = (frd.increments.iter())
@@ -2548,7 +2504,7 @@ fn a_deactivated_step_is_written_as_comments_only() {
     // The node set of the load in the deactivated step is not written either.
     assert!(!text.contains("_Force-1"), "{text}");
     // CalculiX runs the remaining frequency step alone.
-    let Some(frd) = run_ccx("deaktiviert", &text) else {
+    let Some(frd) = run_solver("deaktiviert", &text) else {
         return;
     };
     assert!(
@@ -2731,7 +2687,7 @@ fn edge_tractions_follow_length_and_radius() {
 
 /// Plane stress: a strip pulled by a surface traction stretches by sigma L / E.
 #[test]
-fn calculix_stretches_a_plane_stress_strip() {
+fn solver_stretches_a_plane_stress_strip() {
     let (length, height, thickness, force) = (10.0, 2.0, 2.0, 400.0);
     let mesh = rectangle(0.0, length, height, 5, 2);
     let model = plane_model(
@@ -2741,7 +2697,7 @@ fn calculix_stretches_a_plane_stress_strip() {
         LoadKind::force([force, 0.0, 0.0]),
         Region::Faces(edges_at(&mesh, 0, length)),
     );
-    let Some(frd) = run_ccx(
+    let Some(frd) = run_solver(
         "ebener-spannungszustand",
         &write_inp(&mesh, &model, "").unwrap(),
     ) else {
@@ -2760,7 +2716,7 @@ fn calculix_stretches_a_plane_stress_strip() {
 /// Plane strain: the same strip under pressure is stiffer by 1 - nu^2 and has a stress
 /// nu sigma across its plane.
 #[test]
-fn calculix_stretches_a_plane_strain_strip() {
+fn solver_stretches_a_plane_strain_strip() {
     let (length, height, pressure) = (10.0, 2.0, -100.0);
     let mesh = rectangle(0.0, length, height, 5, 2);
     let model = plane_model(
@@ -2770,7 +2726,7 @@ fn calculix_stretches_a_plane_strain_strip() {
         LoadKind::Pressure(pressure),
         Region::Faces(edges_at(&mesh, 0, length)),
     );
-    let Some(frd) = run_ccx(
+    let Some(frd) = run_solver(
         "ebener-verzerrungszustand",
         &write_inp(&mesh, &model, "").unwrap(),
     ) else {
@@ -2892,7 +2848,7 @@ fn plane_patch(shape: plx_mesh::ElementShape, x0: f64) -> PlanePatch {
 /// distorted patch with an edge pressure and an edge force (one fixture per type for the
 /// Nodalis solver).
 #[test]
-fn calculix_runs_every_plane_element_type() {
+fn solver_runs_every_plane_element_type() {
     use plx_mesh::ElementShape::*;
     let types = [
         (Tri3, "S3"),
@@ -2938,7 +2894,7 @@ fn calculix_runs_every_plane_element_type() {
             let block = format!("*Element, Type={written}, Elset=PLATE\n");
             assert!(text.contains(&block), "{block:?} missing in\n{text}");
             let name = format!("ebene-{}", written.to_ascii_lowercase());
-            let Some(frd) = run_ccx(&name, &text) else {
+            let Some(frd) = run_solver(&name, &text) else {
                 return;
             };
             let increment = frd.increments.last().unwrap();
@@ -2952,7 +2908,7 @@ fn calculix_runs_every_plane_element_type() {
 /// Axisymmetric: a thick-walled tube under internal pressure, held axially, widens as Lamé's
 /// solution for plane strain says.
 #[test]
-fn calculix_widens_a_tube_under_internal_pressure() {
+fn solver_widens_a_tube_under_internal_pressure() {
     let (a, b, pressure) = (10.0, 20.0, 100.0);
     let mesh = rectangle(a, b - a, 2.0, 10, 1);
     let model = plane_model(
@@ -2962,7 +2918,7 @@ fn calculix_widens_a_tube_under_internal_pressure() {
         LoadKind::Pressure(pressure),
         Region::Faces(edges_at(&mesh, 0, a)),
     );
-    let Some(frd) = run_ccx("rohr-innendruck", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("rohr-innendruck", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let (e, nu) = (210_000.0, 0.3);
@@ -2984,7 +2940,7 @@ fn calculix_widens_a_tube_under_internal_pressure() {
 /// Axisymmetric: a total axial force on the end of a tube is the force on the whole
 /// revolution, so the axial stress is F / (pi (b^2 - a^2)).
 #[test]
-fn calculix_pulls_a_tube_by_its_total_force() {
+fn solver_pulls_a_tube_by_its_total_force() {
     let (a, b, height, force) = (10.0, 12.0, 5.0, 10_000.0);
     let mesh = rectangle(a, b - a, height, 2, 3);
     let model = plane_model(
@@ -2994,7 +2950,7 @@ fn calculix_pulls_a_tube_by_its_total_force() {
         LoadKind::force([0.0, force, 0.0]),
         Region::Faces(edges_at(&mesh, 1, height)),
     );
-    let Some(frd) = run_ccx("rohr-zug", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("rohr-zug", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let stress = force / (std::f64::consts::PI * (b * b - a * a));
@@ -3112,7 +3068,7 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
 /// side of it the pre-tension faces are on. A tie to the faces of the cut side would bind the
 /// other part to the copies of the cut nodes and bypass the preload.
 #[test]
-fn calculix_preloads_a_bolt_split_into_two_tied_parts() {
+fn solver_preloads_a_bolt_split_into_two_tied_parts() {
     let force = 1000.0;
     // Faces picked on the FE mesh, and on the CAD geometry, whose nodes are the original ones.
     for (cut_is_master, on_geometry) in [(true, false), (false, false), (true, true), (false, true)]
@@ -3167,7 +3123,7 @@ fn calculix_preloads_a_bolt_split_into_two_tied_parts() {
         // The cut nodes 19 to 27 of the lower block are the slave nodes.
         assert!(text.contains("Slave, Type=Node\n"), "{text}");
         let name = format!("geteilt-{cut_is_master}-{on_geometry}");
-        let Some(frd) = run_ccx(&name, &text) else {
+        let Some(frd) = run_solver(&name, &text) else {
             return;
         };
         let reaction: f64 = (ends.iter())
@@ -3294,11 +3250,11 @@ fn a_bolt_follows_the_actions_of_its_steps() {
 /// in full, and stays when the bolt is locked in the next step. The bonded contact region on
 /// the same faces would make CalculiX loop forever if it were written too.
 #[test]
-fn calculix_preloads_the_bolt_across_two_blocks() {
+fn solver_preloads_the_bolt_across_two_blocks() {
     let force = 1000.0;
     let (mesh, model, bottom) = bolted_blocks(force);
     let text = write_inp(&mesh, &model, "").unwrap();
-    let Some((frd, dat)) = run_ccx_frd_dat("schraube", &text) else {
+    let Some((frd, dat)) = run_frd_dat("schraube", &text) else {
         return;
     };
     let reaction: f64 = (bottom.iter())
@@ -3306,9 +3262,6 @@ fn calculix_preloads_the_bolt_across_two_blocks() {
         .sum();
     assert!((reaction + force).abs() < 1e-3 * force, "{reaction}");
     // The bolt force is printed under the bolt's name, in the preload step and while locked.
-    if !ccx_prints_pretension_force() {
-        return;
-    }
     let names: Vec<&str> = dat.sets.iter().map(|s| s.name.as_str()).collect();
     let bolt = (dat.sets.iter())
         .find(|s| s.name == "BOLT-1")
@@ -3328,7 +3281,7 @@ fn calculix_preloads_the_bolt_across_two_blocks() {
 
 /// A bolt meshed in one piece is cut at the faces inside it, without a tie.
 #[test]
-fn calculix_preloads_a_bolt_cut_inside_its_mesh() {
+fn solver_preloads_a_bolt_cut_inside_its_mesh() {
     let force = 1000.0;
     let (mesh, mut model) = pre_tension(force, false);
     let LoadKind::PreTension { .. } = model.steps[0].loads[0].kind else {
@@ -3343,7 +3296,7 @@ fn calculix_preloads_a_bolt_cut_inside_its_mesh() {
     assert_eq!(resolved.tied_to, None);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(!text.contains("*Tie"), "{text}");
-    let Some(frd) = run_ccx("schraube-ganz", &text) else {
+    let Some(frd) = run_solver("schraube-ganz", &text) else {
         return;
     };
     let reaction: f64 = (mesh.node_sets["FIX"].iter())
@@ -3462,7 +3415,7 @@ fn node_sum(frd: &FrdImport, field: &str, component: &str, nodes: &[NodeId]) -> 
 }
 
 #[test]
-fn calculix_carries_the_load_across_a_tie() {
+fn solver_carries_the_load_across_a_tie() {
     // A small gap within the position tolerance; adjust closes it.
     let (mesh, lower, upper) = two_blocks(0.01);
     let mut model = stacked_blocks(&mesh);
@@ -3471,7 +3424,7 @@ fn calculix_carries_the_load_across_a_tie() {
     tie.slave = Region::Faces(upper);
     tie.position_tolerance = Some(0.05);
     model.ties.push(tie);
-    let Some(frd) = run_ccx("tie", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("tie", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let bottom: Vec<NodeId> = (1..=9).collect();
@@ -3488,7 +3441,7 @@ fn calculix_carries_the_load_across_a_tie() {
 }
 
 #[test]
-fn calculix_carries_the_load_across_a_contact() {
+fn solver_carries_the_load_across_a_contact() {
     // PrePoMax's default hard contact and a linear spring.
     let linear = SurfaceBehavior::Linear {
         k: 1e7,
@@ -3518,7 +3471,7 @@ fn calculix_carries_the_load_across_a_contact() {
         pair.slave = Region::Faces(upper);
         model.contact_pairs.push(pair);
         let text = write_inp(&mesh, &model, "").unwrap();
-        let Some(frd) = run_ccx(&format!("kontakt-{name}"), &text) else {
+        let Some(frd) = run_solver(&format!("kontakt-{name}"), &text) else {
             return;
         };
         let bottom: Vec<NodeId> = (1..=9).collect();
@@ -3531,7 +3484,7 @@ fn calculix_carries_the_load_across_a_contact() {
 /// the friction; without one CalculiX 2.23 does not take its default (half Young's modulus of
 /// the first material) and gives up, so the writer puts in the stiffness of the tie.
 #[test]
-fn calculix_carries_shear_across_a_tied_contact_without_stick_slope() {
+fn solver_carries_shear_across_a_tied_contact_without_stick_slope() {
     let (mesh, lower, upper) = two_blocks(0.0);
     let mut model = stacked_blocks(&mesh);
     // The top of the upper block is pushed sideways.
@@ -3558,7 +3511,7 @@ fn calculix_carries_shear_across_a_tied_contact_without_stick_slope() {
     model.contact_pairs.push(pair);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("*Friction\n0.1, 10000000\n"), "{text}");
-    let Some(frd) = run_ccx("kontakt-tied", &text) else {
+    let Some(frd) = run_solver("kontakt-tied", &text) else {
         return;
     };
     let bottom: Vec<NodeId> = (1..=9).collect();
@@ -3637,7 +3590,7 @@ fn hard_contact_and_stick_slope_are_written_per_element_size() {
 /// The same model in mm and in SI units (as Nodalis writes) gives the same contact
 /// penetration and the same slip of a tied contact.
 #[test]
-fn calculix_gives_the_same_contact_in_mm_and_in_m() {
+fn solver_gives_the_same_contact_in_mm_and_in_m() {
     let hard = vec![InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)];
     let tied = vec![
         InteractionProperty::SurfaceBehavior(SurfaceBehavior::Tied { k: 1e7 }),
@@ -3679,7 +3632,7 @@ fn calculix_gives_the_same_contact_in_mm_and_in_m() {
         let mut gaps = Vec::new();
         for (unit, mesh, model) in [("mm", &mesh, &model), ("m", &mesh_m, &model_m)] {
             let text = write_inp(mesh, model, "").unwrap();
-            let Some(frd) = run_ccx(&format!("kontakt-{name}-{unit}"), &text) else {
+            let Some(frd) = run_solver(&format!("kontakt-{name}-{unit}"), &text) else {
                 return;
             };
             let component = if name == "hard" { "U3" } else { "U1" };
@@ -3707,7 +3660,7 @@ fn calculix_gives_the_same_contact_in_mm_and_in_m() {
 
 /// Mortar contact without a surface behavior is truly hard.
 #[test]
-fn calculix_carries_the_load_across_a_true_hard_mortar_contact() {
+fn solver_carries_the_load_across_a_true_hard_mortar_contact() {
     let hard = vec![InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)];
     let (mesh, mut model) = blocks_in_contact(hard, ContactMethod::Mortar);
     model.steps[0].boundary_conditions.push(BoundaryCondition {
@@ -3720,7 +3673,7 @@ fn calculix_carries_the_load_across_a_true_hard_mortar_contact() {
         amplitude: None,
     });
     let text = write_inp(&mesh, &model, "").unwrap();
-    let Some(frd) = run_ccx("kontakt-mortar", &text) else {
+    let Some(frd) = run_solver("kontakt-mortar", &text) else {
         return;
     };
     let bottom: Vec<NodeId> = (1..=9).collect();
@@ -3731,7 +3684,7 @@ fn calculix_carries_the_load_across_a_true_hard_mortar_contact() {
 /// Plane strain: a strip of 4 x 1 resting on another of the same size only by contact on
 /// their edges carries the pressure on its top into the supports of the lower one.
 #[test]
-fn calculix_carries_the_load_across_a_contact_in_2d() {
+fn solver_carries_the_load_across_a_contact_in_2d() {
     let (width, pressure) = (4.0, 50.0);
     let mut mesh = rectangle(0.0, width, 1.0, 4, 1);
     // The upper strip: the same rectangle with own nodes and elements, one higher.
@@ -3777,7 +3730,7 @@ fn calculix_carries_the_load_across_a_contact_in_2d() {
     pair.master = Region::Faces(lower_top);
     pair.slave = Region::Faces(upper_bottom);
     model.contact_pairs.push(pair);
-    let Some(frd) = run_ccx("kontakt-2d", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("kontakt-2d", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let reaction = node_sum(&frd, "FORC", "F2", &bottom);
@@ -3946,7 +3899,7 @@ fn spring(name: &str, region: Region, stiffness: [f64; 3]) -> plx_model::Spring 
 }
 
 #[test]
-fn calculix_carries_a_block_on_springs_between_two_surfaces() {
+fn solver_carries_a_block_on_springs_between_two_surfaces() {
     // Different meshes on the two sides: the springs end on points between nodes.
     let blocks = blocks(2, 3);
     let bearing = plx_model::Spring {
@@ -3965,7 +3918,7 @@ fn calculix_carries_a_block_on_springs_between_two_surfaces() {
         "{text}"
     );
     assert!(text.contains("*Equation\n"));
-    let Some(frd) = run_ccx("feder-flaeche", &text) else {
+    let Some(frd) = run_solver("feder-flaeche", &text) else {
         return;
     };
     // 100 N on 2000 N/mm, the steel itself barely stretches.
@@ -3978,7 +3931,7 @@ fn calculix_carries_a_block_on_springs_between_two_surfaces() {
         ..bearing
     };
     let model = blocks_model(&blocks, vec![Constraint::Spring(each)], load);
-    let frd = run_ccx(
+    let frd = run_solver(
         "feder-flaeche-einzeln",
         &write_inp(&blocks.mesh, &model, "").unwrap(),
     );
@@ -3988,7 +3941,7 @@ fn calculix_carries_a_block_on_springs_between_two_surfaces() {
 }
 
 #[test]
-fn calculix_carries_a_block_on_springs_to_ground() {
+fn solver_carries_a_block_on_springs_to_ground() {
     let blocks = blocks(2, 2);
     // 1000 N/mm of the whole face, spread by area.
     let face = spring(
@@ -4010,7 +3963,7 @@ fn calculix_carries_a_block_on_springs_to_ground() {
         text.contains("*Spring, Elset=Spring-2_DOF_3\n3\n100.\n"),
         "{text}"
     );
-    let Some(frd) = run_ccx("federn", &text) else {
+    let Some(frd) = run_solver("federn", &text) else {
         return;
     };
     let lift = mean_top(&blocks, &frd, "U3");
@@ -4023,7 +3976,7 @@ fn calculix_carries_a_block_on_springs_to_ground() {
         text.contains("*Spring, Elset=Spring-1_DOF_3\n3\n100.\n"),
         "{text}"
     );
-    let lift = mean_top(&blocks, &run_ccx("federn-knoten", &text).unwrap(), "U3");
+    let lift = mean_top(&blocks, &run_solver("federn-knoten", &text).unwrap(), "U3");
     assert!((lift - 0.1).abs() < 0.001, "{lift}");
 }
 
@@ -4072,7 +4025,7 @@ fn springs_of_a_2d_model_have_no_z_direction() {
 }
 
 #[test]
-fn calculix_compression_only_support_takes_only_pressure() {
+fn solver_compression_only_support_takes_only_pressure() {
     use plx_model::CompressionOnly;
     let blocks = blocks(2, 2);
     let support = |force: [f64; 3], edit: &dyn Fn(&mut CompressionOnly)| {
@@ -4107,13 +4060,13 @@ fn calculix_compression_only_support_takes_only_pressure() {
     let pulled = support(up, &|_| {});
     assert!(pulled.contains("*Element, Type=GAPUNI\n"));
     assert!(pulled.contains("*Plastic\n"));
-    let Some(frd) = run_ccx("druck-nur-zug", &pulled) else {
+    let Some(frd) = run_solver("druck-nur-zug", &pulled) else {
         return;
     };
     // Pulled away, only the springs hold the block.
     let lift = mean_top(&blocks, &frd, "U3");
     assert!((lift - 0.1).abs() < 0.002, "{lift}");
-    let frd = run_ccx("druck-nur-druck", &support(down, &|_| {})).unwrap();
+    let frd = run_solver("druck-nur-druck", &support(down, &|_| {})).unwrap();
     // Pushed down, the gaps carry the load.
     let sink = mean_top(&blocks, &frd, "U3");
     assert!(sink.abs() < 0.002, "{sink}");
@@ -4121,10 +4074,10 @@ fn calculix_compression_only_support_takes_only_pressure() {
     // Flipped, the support pushes the bottom face up from inside the block: it holds the
     // block pulled up and lets it sink.
     let flip = |c: &mut CompressionOnly| c.flipped = true;
-    let frd = run_ccx("druck-nur-umgedreht-zug", &support(up, &flip)).unwrap();
+    let frd = run_solver("druck-nur-umgedreht-zug", &support(up, &flip)).unwrap();
     let lift = mean_top(&blocks, &frd, "U3");
     assert!(lift.abs() < 0.002, "{lift}");
-    let frd = run_ccx("druck-nur-umgedreht-druck", &support(down, &flip)).unwrap();
+    let frd = run_solver("druck-nur-umgedreht-druck", &support(down, &flip)).unwrap();
     let sink = mean_top(&blocks, &frd, "U3");
     assert!((sink + 0.1).abs() < 0.002, "{sink}");
 
@@ -4132,7 +4085,7 @@ fn calculix_compression_only_support_takes_only_pressure() {
     // and 1000 of the springs.
     let soft = |c: &mut CompressionOnly| c.spring_stiffness = Some(1000.0);
     let text = support(down, &soft);
-    let frd = run_ccx("druck-nur-verteilt", &text).unwrap();
+    let frd = run_solver("druck-nur-verteilt", &text).unwrap();
     let sink = mean_top(&blocks, &frd, "U3");
     assert!((sink + 0.05).abs() < 0.001, "{sink}");
     // Applied to the 9 nodes individually, each gap has the whole stiffness. The gaps of
@@ -4146,7 +4099,7 @@ fn calculix_compression_only_support_takes_only_pressure() {
     assert_eq!(text.matches("*Gap, Elset=").count(), 1, "{text}");
     let gaps = text.split("*Element, Type=GAPUNI\n").nth(1).unwrap();
     assert_eq!(gaps.lines().take_while(|l| !l.starts_with('*')).count(), 9);
-    let frd = run_ccx("druck-nur-einzeln", &text).unwrap();
+    let frd = run_solver("druck-nur-einzeln", &text).unwrap();
     let sink = mean_top(&blocks, &frd, "U3");
     assert!((sink + 0.01).abs() < 0.001, "{sink}");
 }
@@ -4366,7 +4319,7 @@ fn general_profiles_are_written_for_user_element_u1() {
     let g = 210_000.0 / 2.6;
     let expected = 100.0 * 1000.0_f64.powi(3) / (3.0 * 210_000.0 * p.i22)
         + 100.0 * 1000.0 / (i_beam.shear_factor() * g * p.area);
-    if let Some(frd) = run_ccx("u1-beam", &text) {
+    if let Some(frd) = run_solver("u1-beam", &text) {
         let sag = node_value(&frd, "DISP", "U3", 11);
         assert!(
             (sag - expected).abs() < 0.02 * expected,
@@ -4394,7 +4347,7 @@ fn general_profiles_are_written_for_user_element_u1() {
     assert!(text.contains("; Normal: 0, 0, 1\n"), "{text}");
     let import = read_inp_str(&text, None).unwrap();
     assert_eq!(import.cross_sections[0].profile, angle);
-    if let Some(frd) = run_ccx("u1-angle", &text) {
+    if let Some(frd) = run_solver("u1-angle", &text) {
         // Skew bending: the force along u deflects by the inverse of the moment tensor.
         let p = angle.properties();
         let (uu, vv, uv) = (p.i22, p.i11, p.i12);
@@ -4445,7 +4398,7 @@ fn sketched_profiles_are_written_for_user_element_u1() {
     assert!(comment.is_some_and(|c| c.len() > 132), "{text}");
     let import = read_inp_str(&text, None).unwrap();
     assert_eq!(import.cross_sections[0].profile, sketch);
-    if let Some(frd) = run_ccx("u1-sketch", &text) {
+    if let Some(frd) = run_solver("u1-sketch", &text) {
         let p = sketch.properties();
         let g = 210_000.0 / 2.6;
         let expected = 100.0 * 1000.0_f64.powi(3) / (3.0 * 210_000.0 * p.i22)
@@ -4463,7 +4416,7 @@ fn sketched_profiles_are_written_for_user_element_u1() {
     let import = read_inp_str(&text, None).unwrap();
     assert_eq!(import.cross_sections[0].profile, round);
     // CalculiX skips the comment however long it is.
-    run_ccx("u1-round-sketch", &text);
+    run_solver("u1-round-sketch", &text);
 }
 
 #[test]
@@ -4682,7 +4635,7 @@ fn node_ties_merge_the_nodes_or_hinge_beams_with_equations() {
 
 /// Two beams of five elements each tied rigidly at their ends bend like one cantilever.
 #[test]
-fn calculix_bends_two_beams_tied_at_a_node_like_one() {
+fn solver_bends_two_beams_tied_at_a_node_like_one() {
     let expected = cantilever_deflection(100.0, 100.0, 10.0 * 125.0 / 12.0);
     let (mesh, model) = tied_chains(
         5,
@@ -4690,7 +4643,7 @@ fn calculix_bends_two_beams_tied_at_a_node_like_one() {
         rect_beam(BeamOrientation::Automatic),
         LoadKind::force([0.0, -100.0, 0.0]),
     );
-    let Some(frd) = run_ccx("balken_node_tie", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("balken_node_tie", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let deflection = -min_u2(&frd);
@@ -4703,7 +4656,7 @@ fn calculix_bends_two_beams_tied_at_a_node_like_one() {
 /// Two beams clamped at their far ends and hinged together at x = 50 move together there,
 /// but bend less stiffly than tied rigidly: a hinge carries no moment.
 #[test]
-fn calculix_hinges_two_beams_at_a_node() {
+fn solver_hinges_two_beams_at_a_node() {
     let deflection = |rotations: bool| {
         let (mesh, mut model) = tied_chains(
             5,
@@ -4720,7 +4673,7 @@ fn calculix_hinges_two_beams_at_a_node() {
         } else {
             "balken_gelenk"
         };
-        let frd = run_ccx(name, &write_inp(&mesh, &model, "").unwrap())?;
+        let frd = run_solver(name, &write_inp(&mesh, &model, "").unwrap())?;
         // The expanded nodes at x = 50 of both beams move alike; tied rigidly, the beams
         // share the node there and CalculiX expands it once.
         let at_joint: Vec<f64> = (frd.mesh.node_ids().iter().zip(frd.mesh.coords()))
@@ -4749,7 +4702,7 @@ fn calculix_hinges_two_beams_at_a_node() {
 
 /// Two trusses tied at their ends stretch like one bar of their whole length.
 #[test]
-fn calculix_stretches_two_trusses_tied_at_a_node_like_one() {
+fn solver_stretches_two_trusses_tied_at_a_node_like_one() {
     let (mesh, mut model) = tied_chains(
         5,
         true,
@@ -4769,7 +4722,7 @@ fn calculix_stretches_two_trusses_tied_at_a_node_like_one() {
         region: Region::Nodes(nodes),
         kind: BoundaryKind::displacement([None, Some(0.0), Some(0.0), None, None, None]),
     });
-    let Some(frd) = run_ccx("stab_node_tie", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("stab_node_tie", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let expected = 1000.0 * 100.0 / (210_000.0 * 50.0);
@@ -4793,7 +4746,7 @@ fn min_u2(frd: &FrdImport) -> f64 {
 }
 
 #[test]
-fn calculix_bends_a_rectangular_beam_like_beam_theory() {
+fn solver_bends_a_rectangular_beam_like_beam_theory() {
     // Rectangle 10 high (1-direction z) and 5 wide, loaded in y: I = 10 * 5^3 / 12.
     let expected = cantilever_deflection(100.0, 100.0, 10.0 * 125.0 / 12.0);
     for (quadratic, tolerance) in [(false, 0.005), (true, 0.03)] {
@@ -4808,7 +4761,7 @@ fn calculix_bends_a_rectangular_beam_like_beam_theory() {
         } else {
             "balken_b31"
         };
-        let Some(frd) = run_ccx(name, &write_inp(&mesh, &model, "").unwrap()) else {
+        let Some(frd) = run_solver(name, &write_inp(&mesh, &model, "").unwrap()) else {
             return;
         };
         // CalculiX expands the beam to solids with new node numbers.
@@ -4849,7 +4802,7 @@ fn a_rigid_remote_displacement_couples_beam_nodes_by_equations() {
     ] {
         assert!(text.contains(&expected), "{expected}\n{text}");
     }
-    if let Some(frd) = run_ccx("balken_remote_starr", &text) {
+    if let Some(frd) = run_solver("balken_remote_starr", &text) {
         let u2 = min_u2(&frd);
         assert!((u2 + 1.0).abs() < 1e-6, "{u2}");
     }
@@ -4913,7 +4866,7 @@ fn a_rigid_body_keeps_its_solid_nodes_and_couples_beam_nodes_by_equations() {
 }
 
 #[test]
-fn calculix_bends_a_pipe_like_beam_theory() {
+fn solver_bends_a_pipe_like_beam_theory() {
     let (r, t) = (5.0f64, 1.0f64);
     let inertia = std::f64::consts::PI * (r.powi(4) - (r - t).powi(4)) / 4.0;
     let expected = cantilever_deflection(100.0, 100.0, inertia);
@@ -4924,7 +4877,7 @@ fn calculix_bends_a_pipe_like_beam_theory() {
         SectionKind::Beam(beam("Pipe")),
         LoadKind::force([0.0, -100.0, 0.0]),
     );
-    let Some(frd) = run_ccx("rohr_b32r", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("rohr_b32r", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let deflection = -min_u2(&frd);
@@ -4935,7 +4888,7 @@ fn calculix_bends_a_pipe_like_beam_theory() {
 }
 
 #[test]
-fn calculix_stretches_a_truss_by_f_l_over_e_a() {
+fn solver_stretches_a_truss_by_f_l_over_e_a() {
     let mesh = line_chain(5, 0, 100.0, true);
     let mut model = line_model(
         &mesh,
@@ -4958,7 +4911,7 @@ fn calculix_stretches_a_truss_by_f_l_over_e_a() {
         kind: BoundaryKind::displacement([None, Some(0.0), Some(0.0), None, None, None]),
         amplitude: None,
     });
-    let Some(frd) = run_ccx("stab_t3d2", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("stab_t3d2", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let expected = 1000.0 * 100.0 / (210_000.0 * 50.0);
@@ -5122,7 +5075,7 @@ fn writes_heat_transfer_keywords() {
 /// Steady conduction along the bar, held at 0 at x = 0: a heat flux q into the far end
 /// gives T = q x / k.
 #[test]
-fn calculix_conducts_heat_along_a_bar() {
+fn solver_conducts_heat_along_a_bar() {
     let q = 1.0;
     let (mesh, model) = thermal_bar(
         steady(),
@@ -5137,7 +5090,7 @@ fn calculix_conducts_heat_along_a_bar() {
             LoadKind::SurfaceFlux(q),
         )],
     );
-    let Some(frd) = run_ccx("waermeleitung", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("waermeleitung", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     for x in [50.0, 100.0] {
@@ -5227,7 +5180,7 @@ fn a_defined_temperature_is_written_like_prepomax_does() {
 /// static run reads it from the frd file and the bar grows by alpha times the integral of
 /// T - 20 over its length, 1e-5 * 100^2 / 2.
 #[test]
-fn calculix_strains_the_bar_by_the_temperatures_of_a_result_file() {
+fn solver_strains_the_bar_by_the_temperatures_of_a_result_file() {
     let (mesh, heat) = thermal_bar(
         steady(),
         vec![
@@ -5236,10 +5189,10 @@ fn calculix_strains_the_bar_by_the_temperatures_of_a_result_file() {
         ],
         Vec::new(),
     );
-    let Some(dir) = ccx_dir("waermedehnung") else {
+    let Some(dir) = run_dir("waermedehnung") else {
         return;
     };
-    run_ccx_in(&dir, "heat", &write_inp(&mesh, &heat, "").unwrap());
+    run_in(&dir, "heat", &write_inp(&mesh, &heat, "").unwrap());
     let (_, mut model) = thermal_bar(
         StepKind::Static(StaticStep::default()),
         Vec::new(),
@@ -5290,8 +5243,8 @@ fn calculix_strains_the_bar_by_the_temperatures_of_a_result_file() {
         dir.join("heat.frd").to_str().unwrap(),
         1,
     )];
-    let frd = run_ccx_in(&dir, "static", &write_inp(&mesh, &model, "").unwrap());
-    remove_ccx_dir(&dir);
+    let frd = run_in(&dir, "static", &write_inp(&mesh, &model, "").unwrap());
+    remove_run_dir(&dir);
     assert_all_close(&temperatures_at(&mesh, &frd, 100.0), 120.0, 1e-6);
     let tip = nodes_at(&mesh, 0, 100.0);
     let growth: Vec<f64> = (tip.iter())
@@ -5302,7 +5255,7 @@ fn calculix_strains_the_bar_by_the_temperatures_of_a_result_file() {
 
 /// Heat generated in the bar flows out at x = 0: T = Q (L x - x^2 / 2) / k.
 #[test]
-fn calculix_conducts_body_heat() {
+fn solver_conducts_body_heat() {
     let (body, length) = (0.01, 100.0);
     let (mesh, model) = thermal_bar(
         steady(),
@@ -5317,7 +5270,7 @@ fn calculix_conducts_body_heat() {
             LoadKind::BodyFlux(body),
         )],
     );
-    let Some(frd) = run_ccx("koerperwaerme", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("koerperwaerme", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     for x in [50.0, 100.0] {
@@ -5328,7 +5281,7 @@ fn calculix_conducts_body_heat() {
 
 /// The far end gives its heat to the surroundings by convection: k T_L / L = h (T_s - T_L).
 #[test]
-fn calculix_cools_the_bar_by_convection() {
+fn solver_cools_the_bar_by_convection() {
     let (h, sink, length) = (0.5, 100.0, 100.0);
     let (mesh, model) = thermal_bar(
         steady(),
@@ -5346,7 +5299,7 @@ fn calculix_cools_the_bar_by_convection() {
             },
         )],
     );
-    let Some(frd) = run_ccx("konvektion", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("konvektion", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let expected = h * sink / (h + CONDUCTIVITY / length);
@@ -5360,7 +5313,7 @@ fn calculix_cools_the_bar_by_convection() {
 /// The far end radiates to the surroundings: k (T_0 - T_L) / L = e s (T_L^4 - T_s^4) in
 /// kelvin, with the physical constants of the model.
 #[test]
-fn calculix_cools_the_bar_by_radiation() {
+fn solver_cools_the_bar_by_radiation() {
     let (hot, sink, emissivity, length) = (500.0, 20.0, 0.8, 100.0);
     let (mesh, mut model) = thermal_bar(
         steady(),
@@ -5387,7 +5340,7 @@ fn calculix_cools_the_bar_by_radiation() {
         region: Region::Parts(vec!["EALL".into()]),
         kind: plx_model::InitialConditionKind::Temperature(hot),
     });
-    let Some(frd) = run_ccx("strahlung", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("strahlung", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let kelvin = |t: f64| t - zero;
@@ -5414,7 +5367,7 @@ fn calculix_cools_the_bar_by_radiation() {
 /// Without the physical constants CalculiX rejects the radiation, and the model check explains
 /// its message.
 #[test]
-fn calculix_without_physical_constants_rejects_radiation() {
+fn solver_without_physical_constants_rejects_radiation() {
     let (mesh, model) = thermal_bar(
         steady(),
         vec![temperature(
@@ -5431,24 +5384,11 @@ fn calculix_without_physical_constants_rejects_radiation() {
             },
         )],
     );
-    let Some(dir) = ccx_dir("ohne-konstanten") else {
+    let Some(dir) = run_dir("ohne-konstanten") else {
         return;
     };
-    std::fs::write(
-        dir.join("radiate.inp"),
-        write_inp(&mesh, &model, "").unwrap(),
-    )
-    .unwrap();
-    let output = Command::new("ccx")
-        .args(["-i", "radiate"])
-        .current_dir(&dir)
-        .env("OMP_NUM_THREADS", "1")
-        .output()
-        .unwrap();
-    remove_ccx_dir(&dir);
-    let lines: Vec<String> = (String::from_utf8_lossy(&output.stdout).lines())
-        .map(String::from)
-        .collect();
+    let (lines, _) = solve_in(&dir, "radiate", &write_inp(&mesh, &model, "").unwrap());
+    remove_run_dir(&dir);
     let findings = plx_model::diagnose_solver_output(&lines, &mesh);
     assert!(
         (findings.iter()).any(|f| f.problem == plx_model::Problem::NoPhysicalConstants),
@@ -5459,7 +5399,7 @@ fn calculix_without_physical_constants_rejects_radiation() {
 /// A bar heated at x = 0 and insulated elsewhere warms up as the series solution of the
 /// heat equation says: T(L, t) / T_0 = 1 - sum 4 (-1)^n / ((2n+1) pi) exp(-l_n^2 a t).
 #[test]
-fn calculix_warms_the_bar_transiently() {
+fn solver_warms_the_bar_transiently() {
     let (hot, length, density) = (100.0, 100.0, 7.85e-9);
     let mut settings = HeatTransferStep {
         steady_state: false,
@@ -5489,7 +5429,7 @@ fn calculix_warms_the_bar_transiently() {
         region: Region::Parts(vec!["EALL".into()]),
         kind: plx_model::InitialConditionKind::Temperature(0.0),
     });
-    let Some(frd) = run_ccx("instationaer", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("instationaer", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let series: f64 = (0..50)
@@ -5508,7 +5448,7 @@ fn calculix_warms_the_bar_transiently() {
 /// A bar held only against rigid body motion and heated evenly by 100 from its stress free
 /// temperature grows by alpha dT L and stays free of stress.
 #[test]
-fn calculix_expands_the_bar_in_a_coupled_step() {
+fn solver_expands_the_bar_in_a_coupled_step() {
     expand_bar(
         StepKind::CoupledTempDisp(HeatTransferStep::default()),
         "waermedehnung",
@@ -5518,7 +5458,7 @@ fn calculix_expands_the_bar_in_a_coupled_step() {
 /// The uncoupled step solves the temperatures first and the displacements from them; the
 /// bar grows as in the coupled step.
 #[test]
-fn calculix_expands_the_bar_in_an_uncoupled_step() {
+fn solver_expands_the_bar_in_an_uncoupled_step() {
     let inp = expand_bar(
         StepKind::UncoupledTempDisp(HeatTransferStep::default()),
         "waermedehnung-entkoppelt",
@@ -5577,7 +5517,7 @@ fn expand_bar(kind: StepKind, name: &str) -> String {
         kind: plx_model::InitialConditionKind::Temperature(20.0),
     });
     let inp = write_inp(&mesh, &model, "").unwrap();
-    let Some(frd) = run_ccx(name, &inp) else {
+    let Some(frd) = run_solver(name, &inp) else {
         return inp;
     };
     let expected = 1e-5 * 100.0 * length;
@@ -5593,7 +5533,7 @@ fn expand_bar(kind: StepKind, name: &str) -> String {
 /// In a plane stress model the faces are edges: a strip held at 0 at x = 0 and cooled by a
 /// film at its far edge reaches k T_L / L = h (T_s - T_L), as the bar does.
 #[test]
-fn calculix_cools_a_plane_strip_by_convection() {
+fn solver_cools_a_plane_strip_by_convection() {
     let (length, h, sink) = (10.0, 5.0, 100.0);
     let mesh = rectangle(0.0, length, 2.0, 5, 2);
     let mut model = plane_model(
@@ -5616,7 +5556,7 @@ fn calculix_cools_a_plane_strip_by_convection() {
         0.0,
     )];
     let text = write_inp(&mesh, &model, "").unwrap();
-    let Some(frd) = run_ccx("film-2d", &text) else {
+    let Some(frd) = run_solver("film-2d", &text) else {
         return;
     };
     let expected = h * sink / (h + CONDUCTIVITY / length);
@@ -5746,7 +5686,7 @@ fn writes_both_amplitudes_of_films_and_radiation() {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
     // CalculiX takes every one of them.
-    run_ccx("amplitudes_thermal", &text);
+    run_solver("amplitudes_thermal", &text);
 }
 
 /// A force that follows an amplitude up to its full value at half the step and back to half
@@ -5754,9 +5694,9 @@ fn writes_both_amplitudes_of_films_and_radiation() {
 /// The deflection is small, so the geometrically nonlinear steps stay within a percent of
 /// the linear solution.
 #[test]
-fn calculix_scales_a_load_by_its_amplitude() {
+fn solver_scales_a_load_by_its_amplitude() {
     let (mesh, reference) = cantilever(tip_force());
-    let Some(full) = run_ccx(
+    let Some(full) = run_solver(
         "amplitude_reference",
         &write_inp(&mesh, &reference, "").unwrap(),
     ) else {
@@ -5776,7 +5716,7 @@ fn calculix_scales_a_load_by_its_amplitude() {
     settings.nlgeom = true;
     settings.incrementation = Incrementation::Direct;
     settings.initial_increment = 0.25;
-    let frd = run_ccx("amplitude_force", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let frd = run_solver("amplitude_force", &write_inp(&mesh, &model, "").unwrap()).unwrap();
     let index = frd.mesh.node_index(99).unwrap();
     let u3: Vec<f64> = (frd.increments.iter())
         .filter_map(|i| i.field("DISP"))
@@ -5793,14 +5733,14 @@ fn calculix_scales_a_load_by_its_amplitude() {
 
 /// A temperature held by an amplitude that ends at half: the bar settles at half the value.
 #[test]
-fn calculix_scales_a_temperature_by_its_amplitude() {
+fn solver_scales_a_temperature_by_its_amplitude() {
     let mut held = temperature("Temperature-1", Region::NodeSet("FIX".into()), 100.0);
     held.amplitude = Some("Half".into());
     let (mesh, mut model) = thermal_bar(steady(), vec![held], Vec::new());
     model
         .amplitudes
         .push(amplitude("Half", vec![[0.0, 1.0], [1.0, 0.5]]));
-    let Some(frd) = run_ccx(
+    let Some(frd) = run_solver(
         "amplitude_temperature",
         &write_inp(&mesh, &model, "").unwrap(),
     ) else {
@@ -5812,9 +5752,9 @@ fn calculix_scales_a_temperature_by_its_amplitude() {
 /// Beyond its last point an amplitude keeps the last value, as [`plx_model::Amplitude::value_at`]
 /// assumes for the dialog's curve.
 #[test]
-fn calculix_holds_an_amplitude_after_its_last_point() {
+fn solver_holds_an_amplitude_after_its_last_point() {
     let (mesh, reference) = cantilever(tip_force());
-    let Some(full) = run_ccx(
+    let Some(full) = run_solver(
         "amplitude_hold_ref",
         &write_inp(&mesh, &reference, "").unwrap(),
     ) else {
@@ -5826,7 +5766,7 @@ fn calculix_holds_an_amplitude_after_its_last_point() {
         .amplitudes
         .push(amplitude("Early", vec![[0.0, 0.0], [0.5, 1.0]]));
     model.steps[0].loads[0].amplitude = Some("Early".into());
-    let frd = run_ccx("amplitude_hold", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let frd = run_solver("amplitude_hold", &write_inp(&mesh, &model, "").unwrap()).unwrap();
     let held = node_value(&frd, "DISP", "U3", 99);
     assert!(
         (held - full).abs() < 1e-6 * full.abs(),
@@ -5854,7 +5794,7 @@ fn tip_deflection_per_step(frd: &FrdImport) -> Vec<f64> {
 /// A `TIME=TOTAL TIME` amplitude with both shifts over three linear steps of different
 /// periods: each step is solved once at its end, with the amplitude read at the total time.
 #[test]
-fn calculix_reads_a_total_time_amplitude_with_shifts_across_steps() {
+fn solver_reads_a_total_time_amplitude_with_shifts_across_steps() {
     let (mesh, mut model) = cantilever(tip_force());
     let mut total = amplitude("Total", vec![[0.0, 0.0], [1.0, 0.5], [3.0, 1.0]]);
     total.time_span = plx_model::AmplitudeTime::Total;
@@ -5882,7 +5822,7 @@ fn calculix_reads_a_total_time_amplitude_with_shifts_across_steps() {
         text.contains("*Amplitude, Name=Total, Time=Total time, Shiftx=0.25, Shifty=0.1\n"),
         "{text}"
     );
-    let Some(frd) = run_ccx("amplitude_total_time", &text) else {
+    let Some(frd) = run_solver("amplitude_total_time", &text) else {
         return;
     };
     let u3 = tip_deflection_per_step(&frd);
@@ -5902,7 +5842,7 @@ fn calculix_reads_a_total_time_amplitude_with_shifts_across_steps() {
 /// step-time amplitude, in a step that ends before the amplitudes do; then a second step
 /// that writes them again and reads them at its own end.
 #[test]
-fn calculix_scales_distributed_loads_and_displacements_by_amplitudes() {
+fn solver_scales_distributed_loads_and_displacements_by_amplitudes() {
     let pressure = Load {
         distribution: None,
         name: "Pressure-1".into(),
@@ -5961,7 +5901,7 @@ fn calculix_scales_distributed_loads_and_displacements_by_amplitudes() {
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
-    let Some(frd) = run_ccx("amplitude_loads", &text) else {
+    let Some(frd) = run_solver("amplitude_loads", &text) else {
         return;
     };
     // The prescribed tip displacement follows its amplitude at each step's end.
@@ -5975,12 +5915,12 @@ fn calculix_scales_distributed_loads_and_displacements_by_amplitudes() {
 /// Gravity on quadratic elements: the consistent body force of the C3D20R cantilever adds up
 /// to its weight.
 #[test]
-fn calculix_weighs_a_quadratic_cantilever() {
+fn solver_weighs_a_quadratic_cantilever() {
     let (mesh, model) = analysis(
         "kragbalken_c3d20r.inp",
         body_load(LoadKind::Gravity([0.0, 0.0, -9810.0])),
     );
-    let Some(frd) = run_ccx("gravity_c3d20r", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("gravity_c3d20r", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let weight = 7.85e-9 * 100.0 * 100.0 * 9810.0;
@@ -6048,7 +5988,7 @@ fn contact_forces_need_an_active_contact_pair() {
 }
 
 #[test]
-fn calculix_prints_the_history_outputs_into_the_dat_file() {
+fn solver_prints_the_history_outputs_into_the_dat_file() {
     let (mesh, mut model) = cantilever(tip_force());
     let step = &mut model.steps[0];
     let mut reactions = HistoryOutput::node("NH_Output-1", Region::NodeSet("FIX".into()));
@@ -6061,7 +6001,7 @@ fn calculix_prints_the_history_outputs_into_the_dat_file() {
     volume.variables = vec!["S".into(), "EVOL".into()];
     volume.totals = Totals::Yes;
     step.history_outputs.push(volume);
-    let Some(dat) = run_ccx_dat("historie", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(dat) = run_dat("historie", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let import = crate::dat::parse_dat(&dat);
@@ -6092,7 +6032,7 @@ fn calculix_prints_the_history_outputs_into_the_dat_file() {
 }
 
 #[test]
-fn calculix_prints_the_contact_force_of_a_pair() {
+fn solver_prints_the_contact_force_of_a_pair() {
     let (mesh, lower, upper) = two_blocks(0.0);
     let mut model = stacked_blocks(&mesh);
     let top: Vec<NodeId> = (119..=127).collect();
@@ -6121,7 +6061,7 @@ fn calculix_prints_the_contact_force_of_a_pair() {
         "*Contact print, Master=Internal_Selection-1_Contact_Pair-1_Master, \
          Slave=Internal_Selection-1_Contact_Pair-1_Slave\nCDIS, CSTR, CNUM, CF\n"
     ));
-    let Some(dat) = run_ccx_dat("kontakt-historie", &text) else {
+    let Some(dat) = run_dat("kontakt-historie", &text) else {
         return;
     };
     let import = crate::dat::parse_dat(&dat);
@@ -6200,10 +6140,10 @@ fn initial_velocities_are_written_like_prepomax_does() {
 /// A free body keeps its initial velocity: after 1 ms at 1000 mm/s the tip has moved
 /// 1 mm; rotating at 10 rad/s about the root, the tip at the length L has moved 10 L t.
 #[test]
-fn calculix_starts_the_cantilever_from_its_initial_velocity() {
+fn solver_starts_the_cantilever_from_its_initial_velocity() {
     use plx_model::InitialConditionKind;
     let (mesh, model) = coasting_cantilever(InitialConditionKind::Velocity([0.0, 0.0, -1000.0]));
-    let Some(frd) = run_ccx(
+    let Some(frd) = run_solver(
         "anfangsgeschwindigkeit",
         &write_inp(&mesh, &model, "").unwrap(),
     ) else {
@@ -6217,7 +6157,7 @@ fn calculix_starts_the_cantilever_from_its_initial_velocity() {
         axis: [0.0, 1.0, 0.0],
         speed: 10.0,
     });
-    let frd = run_ccx("anfangsdrehung", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let frd = run_solver("anfangsdrehung", &write_inp(&mesh, &model, "").unwrap()).unwrap();
     let u3 = node_value(&frd, "DISP", "U3", 99);
     let expected = -10.0 * tip[0] * 1e-3;
     assert!(
@@ -6272,10 +6212,10 @@ fn fixed_nodes(mesh: &FeMesh) -> Vec<NodeId> {
 }
 
 #[test]
-fn calculix_reactions_balance_the_weight_and_the_centrifugal_force() {
+fn solver_reactions_balance_the_weight_and_the_centrifugal_force() {
     // Steel beam 10 x 10 x 100 mm, 7.85e-9 t/mm³: weight 0.077 N under 9810 mm/s².
     let (mesh, model) = cantilever(body_load(LoadKind::Gravity([0.0, 0.0, -9810.0])));
-    let Some(frd) = run_ccx("gravity", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("gravity", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let weight = 7.85e-9 * 100.0 * 100.0 * 9810.0;
@@ -6295,7 +6235,7 @@ fn calculix_reactions_balance_the_weight_and_the_centrifugal_force() {
         axis: [0.0, 0.0, 1.0],
         speed,
     }));
-    let Some(frd) = run_ccx("centrifugal", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("centrifugal", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let pull = 7.85e-9 * 100.0 * speed * speed * 100.0_f64.powi(2) / 2.0;
@@ -6443,7 +6383,7 @@ fn the_complex_frequency_step_takes_perturbation_from_the_stored_frequency_step(
             complex.contains(&format!("{header}*Complex frequency, Coriolis\n")),
             "{complex}"
         );
-        let Some(frd) = run_ccx(&format!("rotor-perturbation-{perturbation}"), &text) else {
+        let Some(frd) = run_solver(&format!("rotor-perturbation-{perturbation}"), &text) else {
             return;
         };
         let whirling = (frd.increments.iter())
@@ -6454,11 +6394,11 @@ fn the_complex_frequency_step_takes_perturbation_from_the_stored_frequency_step(
 }
 
 #[test]
-fn calculix_splits_the_bending_modes_of_the_rotating_cantilever() {
+fn solver_splits_the_bending_modes_of_the_rotating_cantilever() {
     // At 100 rad/s about its axis the two bending modes of the square beam split into a
     // backward and a forward whirl around the frequency of the standing beam.
     let (mesh, model) = rotor_analysis(100.0);
-    let Some(frd) = run_ccx("rotor", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("rotor", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let standing: Vec<f64> = (frd.increments.iter())
@@ -6492,9 +6432,9 @@ fn calculix_splits_the_bending_modes_of_the_rotating_cantilever() {
 }
 
 #[test]
-fn calculix_prints_the_complex_frequencies_and_the_whirl_direction() {
+fn solver_prints_the_complex_frequencies_and_the_whirl_direction() {
     let (mesh, model) = rotor_analysis(100.0);
-    let Some(dat) = run_ccx_dat("rotor_dat", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(dat) = run_dat("rotor_dat", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let import = crate::dat::parse_dat(&dat);
@@ -6539,7 +6479,7 @@ fn submodels_read_the_cut_displacements_of_the_global_results() {
 }
 
 #[test]
-fn calculix_submodel_follows_the_global_cantilever() {
+fn solver_submodel_follows_the_global_cantilever() {
     let (mesh, mut model) = cantilever_submodel([true, true, true, false, false, false]);
     let name = "submodel";
     let dir = std::env::temp_dir().join(format!("plx-write-{name}-{}", std::process::id()));
@@ -6551,7 +6491,7 @@ fn calculix_submodel_follows_the_global_cantilever() {
         "global.frd",
         &std::fs::read(testdata("kragbalken_c3d8.frd")).unwrap(),
     );
-    let Some(frd) = run_ccx(name, &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver(name, &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let global = read_frd(&testdata("kragbalken_c3d8.frd")).unwrap();
@@ -6573,7 +6513,7 @@ fn calculix_submodel_follows_the_global_cantilever() {
 /// 45 (its nodes at x = 0, 9, 18, ..., 45), driven at its cut by the global displacements
 /// interpolated there. Corpus fixture of the solver's submodel interpolation.
 #[test]
-fn calculix_submodel_interpolates_inside_the_global_elements() {
+fn solver_submodel_interpolates_inside_the_global_elements() {
     let (mut mesh, mut model) = cantilever_submodel([true, true, true, false, false, false]);
     for id in mesh.node_ids().to_vec() {
         let [x, y, z] = mesh.node(id).unwrap();
@@ -6589,7 +6529,7 @@ fn calculix_submodel_interpolates_inside_the_global_elements() {
         "global.frd",
         &std::fs::read(testdata("kragbalken_c3d8.frd")).unwrap(),
     );
-    let Some(frd) = run_ccx(name, &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver(name, &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let global = read_frd(&testdata("kragbalken_c3d8.frd")).unwrap();
@@ -6702,9 +6642,9 @@ fn a_symmetry_plane_holds_the_normal_displacement_and_the_in_plane_rotations() {
 /// Half the shell plate with a symmetry plane deflects like the full plate, also when the
 /// plane is no coordinate plane.
 #[test]
-fn calculix_bends_the_half_shell_plate_like_the_full_one() {
+fn solver_bends_the_half_shell_plate_like_the_full_one() {
     let (mesh, model) = shell_plate();
-    let Some(full) = run_ccx("symmetrie-voll", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(full) = run_solver("symmetrie-voll", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let corner = (nodes_at(&mesh, 0, 100.0).into_iter())
@@ -6716,7 +6656,7 @@ fn calculix_bends_the_half_shell_plate_like_the_full_one() {
     for (angle, tolerance) in [(0.0, 1e-4), (30.0, 1e-2)] {
         let (mesh, model, corner) = half_shell_plate(angle);
         let text = write_inp(&mesh, &model, "").unwrap();
-        let half = run_ccx(&format!("symmetrie-{angle}"), &text).unwrap();
+        let half = run_solver(&format!("symmetrie-{angle}"), &text).unwrap();
         let ours = expanded_value(&half, &mesh, ("DISP", "U3"), corner, false);
         assert!(
             (ours - expected).abs() < tolerance * expected.abs(),
@@ -6732,7 +6672,7 @@ fn calculix_bends_the_half_shell_plate_like_the_full_one() {
         ..model.steps[0].boundary_conditions[1].clone()
     };
     let text = write_inp(&mesh, &model, "").unwrap();
-    let free = run_ccx("symmetrie-frei", &text).unwrap();
+    let free = run_solver("symmetrie-frei", &text).unwrap();
     let softer = expanded_value(&free, &mesh, ("DISP", "U3"), corner, false);
     assert!(
         softer.abs() > 1.002 * expected.abs(),
@@ -6753,7 +6693,7 @@ fn turn(mesh: &mut FeMesh, angle: f64) {
 
 /// Solids have no rotations; a skewed symmetry plane holds them like a coordinate plane.
 #[test]
-fn calculix_holds_solids_in_a_skewed_symmetry_plane_alike() {
+fn solver_holds_solids_in_a_skewed_symmetry_plane_alike() {
     let mut deflections = Vec::new();
     for angle in [0.0, 30.0] {
         let (mut mesh, mut model) = cantilever(tip_force());
@@ -6770,7 +6710,7 @@ fn calculix_holds_solids_in_a_skewed_symmetry_plane_alike() {
         });
         let text = write_inp(&mesh, &model, "").unwrap();
         assert_eq!(text.contains("*Transform"), angle != 0.0, "{text}");
-        let Some(frd) = run_ccx(&format!("symmetrie-solid-{angle}"), &text) else {
+        let Some(frd) = run_solver(&format!("symmetrie-solid-{angle}"), &text) else {
             return;
         };
         deflections.push(node_value(&frd, "DISP", "U3", 99));
@@ -6786,7 +6726,7 @@ fn calculix_holds_solids_in_a_skewed_symmetry_plane_alike() {
 
 /// A 2D model holds the line of a symmetry plane in its normal direction only.
 #[test]
-fn calculix_holds_a_2d_model_in_a_skewed_symmetry_line_alike() {
+fn solver_holds_a_2d_model_in_a_skewed_symmetry_line_alike() {
     let mut tips = Vec::new();
     for angle in [0.0, 30.0] {
         let mut mesh = rectangle(0.0, 10.0, 2.0, 5, 1);
@@ -6819,7 +6759,7 @@ fn calculix_holds_a_2d_model_in_a_skewed_symmetry_line_alike() {
         if angle == 0.0 {
             assert!(text.contains("Symmetry-1, 2, 2, 0\n**"), "{text}");
         }
-        let Some(frd) = run_ccx(&format!("symmetrie-2d-{angle}"), &text) else {
+        let Some(frd) = run_solver(&format!("symmetrie-2d-{angle}"), &text) else {
             return;
         };
         let u = ["U1", "U2"].map(|c| node_value(&frd, "DISP", c, tip));
@@ -6838,7 +6778,7 @@ fn calculix_holds_a_2d_model_in_a_skewed_symmetry_line_alike() {
 /// The element types a part can be given instead of its own, see
 /// `plx_model::element_type_options`, are written and run in CalculiX.
 #[test]
-fn calculix_runs_the_element_types_chosen_for_a_part() {
+fn solver_runs_the_element_types_chosen_for_a_part() {
     let solid = |file: &str, load_node: NodeId| {
         let (mesh, mut model) = analysis(file, tip_force());
         model.steps[0].loads[0].region = Region::Nodes(vec![load_node]);
@@ -6872,7 +6812,7 @@ fn calculix_runs_the_element_types_chosen_for_a_part() {
         // The mesh itself is not changed by writing it.
         assert!(mesh.elements().iter().all(|e| e.type_name != type_name));
         let name = format!("elementtyp-{}", type_name.to_ascii_lowercase());
-        let Some(frd) = run_ccx(&name, &text) else {
+        let Some(frd) = run_solver(&name, &text) else {
             return;
         };
         let increment = frd.increments.last().unwrap();
@@ -6943,10 +6883,6 @@ fn a_moving_load_writes_a_step_per_position() {
     }
     // The node sets of other items are written once.
     assert_eq!(text.matches("*Nset, Nset=Internal_Selection").count(), 1);
-    // Check Model checks every position without solving it.
-    let check = write_check_inp(&mesh, &model, "").unwrap();
-    assert_eq!(check.matches("*No analysis").count(), 5);
-    assert!(!check.contains("*Static"));
 }
 
 #[test]
@@ -6992,10 +6928,10 @@ fn moving_load_stations_follow_the_steps_the_writer_gives() {
 }
 
 #[test]
-fn calculix_bends_the_cantilever_more_as_the_moving_load_drives_out() {
+fn solver_bends_the_cantilever_more_as_the_moving_load_drives_out() {
     let (mesh, mut model) = moving_cantilever();
     model.steps[0].loads.remove(0);
-    let Some(frd) = run_ccx("moving", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("moving", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let index = frd.mesh.node_index(99).unwrap();
@@ -7022,13 +6958,13 @@ fn sensitivity_cantilever(settings: SensitivityStep) -> (FeMesh, FeModel) {
     (mesh, model)
 }
 
-/// Runs CalculiX and reads the `.frd` and `.dat` files.
-fn run_ccx_frd_dat(name: &str, text: &str) -> Option<(FrdImport, crate::dat::DatImport)> {
+/// Runs the solver and reads the `.frd` and `.dat` files.
+fn run_frd_dat(name: &str, text: &str) -> Option<(FrdImport, crate::dat::DatImport)> {
     dump_fixture(name, text);
-    let dir = ccx_dir(name)?;
-    let frd = run_ccx_in(&dir, name, text);
+    let dir = run_dir(name)?;
+    let frd = run_in(&dir, name, text);
     let dat = crate::dat::read_dat(&dir.join(format!("{name}.dat"))).unwrap();
-    remove_ccx_dir(&dir);
+    remove_run_dir(&dir);
     Some((frd, dat))
 }
 
@@ -7075,9 +7011,9 @@ fn a_sensitivity_step_writes_design_variables_and_responses() {
 /// The mass is density times volume, the strain energy of the static step half the work of
 /// the tip force; CalculiX prints both with their gradients and writes the sensitivities.
 #[test]
-fn calculix_computes_the_sensitivities_of_mass_and_strain_energy() {
+fn solver_computes_the_sensitivities_of_mass_and_strain_energy() {
     let (mesh, model) = sensitivity_cantilever(SensitivityStep::default());
-    let Some((frd, dat)) = run_ccx_frd_dat("sensitivitaet", &write_inp(&mesh, &model, "").unwrap())
+    let Some((frd, dat)) = run_frd_dat("sensitivitaet", &write_inp(&mesh, &model, "").unwrap())
     else {
         return;
     };
@@ -7118,12 +7054,12 @@ fn calculix_computes_the_sensitivities_of_mass_and_strain_energy() {
 /// With a linear filter, CalculiX smooths the sensitivities (DFDNFIL) and keeps the raw
 /// ones (DFDN); the responses and their gradient lengths do not change.
 #[test]
-fn calculix_filters_the_sensitivities() {
+fn solver_filters_the_sensitivities() {
     let (mesh, model) = sensitivity_cantilever(SensitivityStep {
         filter_radius: Some(15.0),
         ..SensitivityStep::default()
     });
-    let Some((frd, dat)) = run_ccx_frd_dat(
+    let Some((frd, dat)) = run_frd_dat(
         "sensitivitaet-filter",
         &write_inp(&mesh, &model, "").unwrap(),
     ) else {
@@ -7143,7 +7079,7 @@ fn calculix_filters_the_sensitivities() {
 /// After a frequency step, the sensitivities of the eigenfrequencies come as one increment
 /// per mode with its frequency.
 #[test]
-fn calculix_computes_the_sensitivities_of_the_eigenfrequencies() {
+fn solver_computes_the_sensitivities_of_the_eigenfrequencies() {
     let (mesh, mut model) = cantilever(tip_force());
     let mut frequency = Step::new_frequency("Step-1");
     frequency.boundary_conditions = model.steps[0].boundary_conditions.clone();
@@ -7162,7 +7098,7 @@ fn calculix_computes_the_sensitivities_of_the_eigenfrequencies() {
         filter_radius: None,
     });
     model.steps = vec![frequency, step];
-    let Some(frd) = run_ccx(
+    let Some(frd) = run_solver(
         "sensitivitaet-frequenz",
         &write_inp(&mesh, &model, "").unwrap(),
     ) else {
@@ -7207,7 +7143,7 @@ fn a_visco_step_and_a_creep_law_are_written() {
 /// A bar under a constant stress creeps by Norton's law: after the time t of the visco
 /// step its creep strain is A stress^n t.
 #[test]
-fn calculix_creeps_the_bar_by_nortons_law() {
+fn solver_creeps_the_bar_by_nortons_law() {
     let stress = 100.0;
     let load = Load {
         distribution: None,
@@ -7253,7 +7189,7 @@ fn calculix_creeps_the_bar_by_nortons_law() {
     step.boundary_conditions = model.steps[0].boundary_conditions.clone();
     step.loads = model.steps[0].loads.clone();
     model.steps.push(step);
-    let Some(frd) = run_ccx("kriechen", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("kriechen", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let time = 1000.0;
@@ -7411,12 +7347,12 @@ fn a_cyclic_symmetry_tie_is_written_like_prepomax_does() {
 
 /// The sector computes the frequencies of the whole disk, sorted by nodal diameter.
 #[test]
-fn calculix_finds_the_disk_frequencies_on_a_sector() {
+fn solver_finds_the_disk_frequencies_on_a_sector() {
     let (mesh, mut model, _, _) = disk(12, true);
-    let Some(dir) = ccx_dir("zyklisch") else {
+    let Some(dir) = run_dir("zyklisch") else {
         return;
     };
-    let full = run_ccx_in(&dir, "voll", &write_inp(&mesh, &model, "").unwrap());
+    let full = run_in(&dir, "voll", &write_inp(&mesh, &model, "").unwrap());
     let whole: Vec<f64> = full.increments.iter().map(|i| i.value).collect();
     let (mesh, sector_model, left, right) = disk(12, false);
     model = sector_model;
@@ -7432,9 +7368,9 @@ fn calculix_finds_the_disk_frequencies_on_a_sector() {
     settings.nodal_diameters = Some([0, 2]);
     let text = write_inp(&mesh, &model, "").unwrap();
     dump_fixture("zyklisch-sektor", &text);
-    let frd = run_ccx_in(&dir, "sektor", &text);
+    let frd = run_in(&dir, "sektor", &text);
     let dat = std::fs::read_to_string(dir.join("sektor.dat")).unwrap();
-    remove_ccx_dir(&dir);
+    remove_run_dir(&dir);
     // The results are expanded to the whole disk.
     assert_eq!(frd.mesh.node_count(), 12 * mesh.node_count());
     let modes: Vec<(Option<u32>, u32, f64)> = (frd.increments.iter())
@@ -7468,7 +7404,7 @@ fn calculix_finds_the_disk_frequencies_on_a_sector() {
 /// sector everywhere (nodal diameter 0), and all sectors are written. Corpus fixture of the
 /// solver's cyclic symmetry in static steps.
 #[test]
-fn calculix_spins_the_disk_sector_in_a_static_step() {
+fn solver_spins_the_disk_sector_in_a_static_step() {
     let (mesh, mut model, left, right) = disk(12, false);
     let mut tie = plx_model::Tie::new("Tie-1");
     tie.master = Region::Faces(left);
@@ -7486,7 +7422,7 @@ fn calculix_spins_the_disk_sector_in_a_static_step() {
     };
     step.loads.push(load);
     model.steps = vec![step];
-    let Some(frd) = run_ccx("zyklisch-statisch", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("zyklisch-statisch", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     assert_eq!(frd.mesh.node_count(), 12 * mesh.node_count());
@@ -7665,7 +7601,7 @@ fn the_edge_of_a_shell_or_membrane_tied_to_a_solid_carries_its_load() {
             text.contains(slave),
             "{plate_type}: {slave:?} missing in\n{text}"
         );
-        let Some(frd) = run_ccx(&format!("edge-tie-{plate_type}"), &text) else {
+        let Some(frd) = run_solver(&format!("edge-tie-{plate_type}"), &text) else {
             return;
         };
         // 1000 N through 10 x 1 of plate 10 long, and the block: about 0.0052 down.
@@ -7675,7 +7611,7 @@ fn the_edge_of_a_shell_or_membrane_tied_to_a_solid_carries_its_load() {
 }
 
 #[test]
-fn calculix_bends_a_box_of_a_mesh_block_held_and_loaded_on_its_sides() {
+fn solver_bends_a_box_of_a_mesh_block_held_and_loaded_on_its_sides() {
     // A box 100 x 10 x 10 held at its side X- and pressed down on its side Z+ by 1 MPa:
     // a cantilever under q = 10 N/mm, whose tip sinks by q L^4 / (8 E I).
     let primitive = plx_model::MeshPrimitive::Box {
@@ -7700,7 +7636,7 @@ fn calculix_bends_a_box_of_a_mesh_block_held_and_loaded_on_its_sides() {
     model.steps[0].boundary_conditions[0].region = Region::NodeSet("X-".into());
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("*Surface, Name=Z+, Type=Element\n"), "{text}");
-    let Some(frd) = run_ccx("box-block", &text) else {
+    let Some(frd) = run_solver("box-block", &text) else {
         return;
     };
     let increment = frd.increments.last().unwrap();
@@ -7715,7 +7651,7 @@ fn calculix_bends_a_box_of_a_mesh_block_held_and_loaded_on_its_sides() {
 }
 
 #[test]
-fn calculix_bends_a_rectangle_of_a_mesh_block_held_and_loaded_on_its_edges() {
+fn solver_bends_a_rectangle_of_a_mesh_block_held_and_loaded_on_its_edges() {
     // The box above as a plate in plane stress, 10 thick, pressed down on its edge Y+.
     let primitive = plx_model::MeshPrimitive::Rectangle {
         origin: [0.0; 2],
@@ -7744,7 +7680,7 @@ fn calculix_bends_a_rectangle_of_a_mesh_block_held_and_loaded_on_its_edges() {
         amplitude: None,
     });
     let text = write_inp(&mesh, &model, "").unwrap();
-    let Some(frd) = run_ccx("rectangle-block", &text) else {
+    let Some(frd) = run_solver("rectangle-block", &text) else {
         return;
     };
     let inertia = 10.0 * 10.0_f64.powi(3) / 12.0;
@@ -7759,7 +7695,7 @@ fn calculix_bends_a_rectangle_of_a_mesh_block_held_and_loaded_on_its_edges() {
 /// The point of a remote displacement in a plane model turns about z: the right end of a
 /// strip held at its left end turns about its centre.
 #[test]
-fn calculix_turns_the_remote_point_of_a_plane_model() {
+fn solver_turns_the_remote_point_of_a_plane_model() {
     let angle = 0.01;
     let mesh = rectangle(0.0, 10.0, 2.0, 5, 2);
     let mut model = plane_model(
@@ -7787,7 +7723,7 @@ fn calculix_turns_the_remote_point_of_a_plane_model() {
         text.contains("** Name: Remote-1\n*Boundary\n56, 1, 2, 0\n57, 3, 3, 0.01\n**"),
         "{text}"
     );
-    let Some(frd) = run_ccx("remote-2d", &text) else {
+    let Some(frd) = run_solver("remote-2d", &text) else {
         return;
     };
     for node in nodes_at(&mesh, 0, 10.0) {
@@ -7803,7 +7739,7 @@ fn calculix_turns_the_remote_point_of_a_plane_model() {
 /// The reference point of a rigid body in a plane model turns about z with a Displacement/
 /// Rotation boundary condition: UR3 is the third degree of freedom of its rotation node.
 #[test]
-fn calculix_turns_the_reference_point_of_a_plane_model() {
+fn solver_turns_the_reference_point_of_a_plane_model() {
     let angle = 0.01;
     let mesh = rectangle(0.0, 10.0, 2.0, 5, 2);
     let mut model = plane_model(
@@ -7842,7 +7778,7 @@ fn calculix_turns_the_reference_point_of_a_plane_model() {
         text.contains("** Name: Turn-1\n*Boundary\n") && text.contains(", 3, 3, 0.01\n"),
         "{text}"
     );
-    let Some(frd) = run_ccx("referenzpunkt-2d", &text) else {
+    let Some(frd) = run_solver("referenzpunkt-2d", &text) else {
         return;
     };
     for node in nodes_at(&mesh, 0, 10.0) {
@@ -7857,7 +7793,7 @@ fn calculix_turns_the_reference_point_of_a_plane_model() {
 
 /// A deformable point of a plane model turns the end of the strip by the mean of its nodes.
 #[test]
-fn calculix_turns_a_deformable_remote_point_of_a_plane_model() {
+fn solver_turns_a_deformable_remote_point_of_a_plane_model() {
     let angle = 0.01;
     let mesh = rectangle(0.0, 10.0, 2.0, 5, 2);
     let mut model = plane_model(
@@ -7876,7 +7812,7 @@ fn calculix_turns_a_deformable_remote_point_of_a_plane_model() {
     model.steps[0].boundary_conditions.push(bc);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(!text.contains("*Rigid body"), "{text}");
-    let Some(frd) = run_ccx("remote-2d-deformable", &text) else {
+    let Some(frd) = run_solver("remote-2d-deformable", &text) else {
         return;
     };
     let nodes = nodes_at(&mesh, 0, 10.0);
@@ -7893,7 +7829,7 @@ fn calculix_turns_a_deformable_remote_point_of_a_plane_model() {
 /// Every behavior runs on the midside nodes of a quadratic mesh; the deformable point turns
 /// by the mean rotation of the end face.
 #[test]
-fn calculix_drives_a_quadratic_end_face_with_every_behavior() {
+fn solver_drives_a_quadratic_end_face_with_every_behavior() {
     let angle = 0.01;
     for behavior in [Behavior::Rigid, Behavior::Deformable, Behavior::EachNode] {
         let (mesh, mut model) = analysis("kragbalken_c3d20r.inp", tip_force());
@@ -7905,7 +7841,7 @@ fn calculix_drives_a_quadratic_end_face_with_every_behavior() {
         bc.region = Region::NodeSet("TIP".into());
         model.steps[0].boundary_conditions.push(bc);
         let text = write_inp(&mesh, &model, "").unwrap();
-        let Some(frd) = run_ccx(&format!("remote-c3d20r-{}", behavior.label()), &text) else {
+        let Some(frd) = run_solver(&format!("remote-c3d20r-{}", behavior.label()), &text) else {
             return;
         };
         // The shift along z: of every node, or of their weighted mean when deformable.
@@ -8029,7 +7965,7 @@ fn point_moment(
     let mut clamp = HistoryOutput::node("NH_Output-2", Region::NodeSet("FIX".into()));
     clamp.variables = vec!["RF".into()];
     step.history_outputs.push(clamp);
-    let dat = run_ccx_dat(name, &write_inp(mesh, &model, "").unwrap())?;
+    let dat = run_dat(name, &write_inp(mesh, &model, "").unwrap())?;
     let import = crate::dat::parse_dat(&dat);
     assert!(import.warnings.is_empty(), "{:?}", import.warnings);
     let set = |name: &str| import.sets.iter().find(|s| s.name == name).unwrap();
@@ -8063,7 +7999,7 @@ fn point_moment(
 /// A rotation prescribed at a reference point needs a moment, which its history output
 /// prints with the rotation; the reactions at the clamped end balance it.
 #[test]
-fn calculix_prints_the_moment_and_rotation_of_a_reference_point() {
+fn solver_prints_the_moment_and_rotation_of_a_reference_point() {
     let bc = BoundaryCondition {
         distribution: None,
         name: "Turn-1".into(),
@@ -8084,7 +8020,7 @@ fn calculix_prints_the_moment_and_rotation_of_a_reference_point() {
 }
 
 #[test]
-fn calculix_prints_the_moment_and_rotation_of_a_remote_point() {
+fn solver_prints_the_moment_and_rotation_of_a_remote_point() {
     let values = [None, None, None, None, None, Some(0.01)];
     let (mesh, model) = remote_cantilever(remote("Remote-1", values));
     let region = Region::RemotePoint("Remote-1".into());
@@ -8100,7 +8036,7 @@ fn calculix_prints_the_moment_and_rotation_of_a_remote_point() {
 /// CalculiX prints zero forces at the point of equations: a deformable remote point prints
 /// its displacements and rotations only.
 #[test]
-fn calculix_prints_the_rotation_of_a_deformable_remote_point() {
+fn solver_prints_the_rotation_of_a_deformable_remote_point() {
     let values = [None, None, None, None, None, Some(0.01)];
     let (mesh, mut model) = remote_cantilever(remote_with(values, |r| {
         r.behavior = Behavior::Deformable;
@@ -8117,7 +8053,7 @@ fn calculix_prints_the_rotation_of_a_deformable_remote_point() {
         ),
         "{text}"
     );
-    let Some(dat) = run_ccx_dat("remote-deformable-rotation", &text) else {
+    let Some(dat) = run_dat("remote-deformable-rotation", &text) else {
         return;
     };
     let import = crate::dat::parse_dat(&dat);
@@ -8196,7 +8132,7 @@ fn a_bonded_region_is_a_tie_with_a_tolerance_of_the_mesh_size() {
 /// its automatic tolerance: a detection on the geometry finds faces further apart than a
 /// quarter of the mesh size, and CalculiX would leave their nodes untied ("too far away").
 #[test]
-fn calculix_ties_a_detected_gap_wider_than_a_quarter_of_the_mesh_size() {
+fn solver_ties_a_detected_gap_wider_than_a_quarter_of_the_mesh_size() {
     let (mesh, mut model) = blocks_joined_by_region(1.5, plx_model::ContactBehavior::Bonded);
     let mut detection = plx_model::ContactDetection::new("Detection-1");
     detection.tolerance = Some(2.0);
@@ -8219,7 +8155,7 @@ fn calculix_ties_a_detected_gap_wider_than_a_quarter_of_the_mesh_size() {
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("Position tolerance=1.25\n"), "{text}");
     model.contact_regions[0].detected_by = Some("Detection-1".into());
-    let Some(frd) = run_ccx(
+    let Some(frd) = run_solver(
         "region-detected-gap",
         &write_inp(&mesh, &model, "").unwrap(),
     ) else {
@@ -8251,10 +8187,10 @@ fn bonded_regions_sharing_slave_nodes_become_one_tie() {
 }
 
 #[test]
-fn calculix_carries_the_load_across_a_bonded_region() {
+fn solver_carries_the_load_across_a_bonded_region() {
     // A small gap within the tolerance; the adjustment closes it.
     let (mesh, model) = blocks_joined_by_region(0.01, plx_model::ContactBehavior::Bonded);
-    let Some(frd) = run_ccx("region-bonded", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("region-bonded", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let bottom: Vec<NodeId> = (1..=9).collect();
@@ -8280,7 +8216,7 @@ fn penetration(frd: &FrdImport) -> f64 {
 /// stiffness 10 E / h, the same fraction of the elastic compression in millimetres and in
 /// metres.
 #[test]
-fn calculix_carries_the_load_across_a_frictionless_region_in_any_units() {
+fn solver_carries_the_load_across_a_frictionless_region_in_any_units() {
     let mut fractions = Vec::new();
     for (name, scale) in [("mm", 1.0), ("m", 1e-3)] {
         let (mut mesh, mut model) =
@@ -8305,7 +8241,7 @@ fn calculix_carries_the_load_across_a_frictionless_region_in_any_units() {
         let text = write_inp(&mesh, &model, "").unwrap();
         assert!(text.contains("*Surface behavior, Pressure-overclosure=Linear\n"));
         assert!(!text.contains("*Friction"));
-        let Some(frd) = run_ccx(&format!("region-frictionless-{name}"), &text) else {
+        let Some(frd) = run_solver(&format!("region-frictionless-{name}"), &text) else {
             return;
         };
         let bottom: Vec<NodeId> = (1..=9).collect();
@@ -8336,7 +8272,7 @@ fn calculix_carries_the_load_across_a_frictionless_region_in_any_units() {
 /// Pushed sideways under the pressure, a frictional region carries mu times the normal force,
 /// a rough one and a bonded one the whole shear.
 #[test]
-fn calculix_slides_frictional_regions_and_holds_rough_and_bonded_ones() {
+fn solver_slides_frictional_regions_and_holds_rough_and_bonded_ones() {
     use plx_model::{BondedMethod, ContactBehavior};
     let cases = [
         ("frictional", ContactBehavior::Frictional { mu: 0.15 }, None),
@@ -8351,7 +8287,7 @@ fn calculix_slides_frictional_regions_and_holds_rough_and_bonded_ones() {
         // Pressure and push grow together, so does the friction limit.
         let top = push_top(&mut model, 0.004);
         let text = write_inp(&mesh, &model, "").unwrap();
-        let Some(frd) = run_ccx(&format!("region-{name}"), &text) else {
+        let Some(frd) = run_solver(&format!("region-{name}"), &text) else {
             return;
         };
         let pushed = node_sum(&frd, "FORC", "F1", &top);
@@ -8374,7 +8310,7 @@ fn calculix_slides_frictional_regions_and_holds_rough_and_bonded_ones() {
 }
 
 #[test]
-fn calculix_takes_mortar_contact_regions() {
+fn solver_takes_mortar_contact_regions() {
     let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::Frictionless);
     model.contact_defaults.formulation = Some(ContactMethod::Mortar);
     model.steps[0].boundary_conditions.push(BoundaryCondition {
@@ -8390,7 +8326,7 @@ fn calculix_takes_mortar_contact_regions() {
     // Mortar contact is hard without a surface behavior.
     assert!(!text.contains("Pressure-overclosure=Hard"), "{text}");
     assert!(text.contains("Type=Mortar"));
-    let Some(frd) = run_ccx("region-mortar", &text) else {
+    let Some(frd) = run_solver("region-mortar", &text) else {
         return;
     };
     let bottom: Vec<NodeId> = (1..=9).collect();
@@ -8534,7 +8470,7 @@ fn a_detection_finds_the_touching_blocks_and_keeps_regions_the_user_changed() {
 }
 
 #[test]
-fn calculix_carries_the_load_across_detected_contacts() {
+fn solver_carries_the_load_across_detected_contacts() {
     let (mesh, mut model, skins) = detected_blocks(0.01);
     model.detect_contacts(0, &mesh, &skins, &[true, true]);
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -8542,7 +8478,7 @@ fn calculix_carries_the_load_across_detected_contacts() {
         text.contains("*Tie, Name=Bonded_-_LOWER_to_UPPER"),
         "{text}"
     );
-    let Some(frd) = run_ccx("detected-bonded", &text) else {
+    let Some(frd) = run_solver("detected-bonded", &text) else {
         return;
     };
     let bottom: Vec<NodeId> = (1..=9).collect();
@@ -8610,7 +8546,7 @@ fn contact_regions_write_contact_results() {
             .unwrap()
             .contains("*Contact file")
     );
-    let Some(frd) = run_ccx("region-contact-results", &text) else {
+    let Some(frd) = run_solver("region-contact-results", &text) else {
         return;
     };
     // 10 MPa on the upper block, carried by contact pressure at its bottom.
@@ -8622,7 +8558,7 @@ fn contact_regions_write_contact_results() {
 /// equation per slave node, while it slides freely along them: pulled up and pushed
 /// sideways at its top, the lower block takes the pull but no shear.
 #[test]
-fn calculix_holds_a_region_of_no_separation_together_and_lets_it_slide() {
+fn solver_holds_a_region_of_no_separation_together_and_lets_it_slide() {
     let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::NoSeparation);
     model.contact_regions[0].settings.sides = Some(plx_model::SideRoles::AIsMaster);
     model.steps[0].loads[0].kind = LoadKind::Pressure(-10.0);
@@ -8643,7 +8579,7 @@ fn calculix_holds_a_region_of_no_separation_together_and_lets_it_slide() {
         text.contains("*Equation\n2\n105, 3, -1, 14, 3, 1\n"),
         "{text}"
     );
-    let Some(frd) = run_ccx("region-no-separation", &text) else {
+    let Some(frd) = run_solver("region-no-separation", &text) else {
         return;
     };
     let bottom: Vec<NodeId> = (1..=9).collect();
@@ -8663,7 +8599,7 @@ fn calculix_holds_a_region_of_no_separation_together_and_lets_it_slide() {
 /// in z, also at the slave nodes on it. Their equations depend on the master node below
 /// instead, which the side holds then too, as the side itself is held.
 #[test]
-fn calculix_solves_no_separation_on_nodes_held_by_a_boundary_condition() {
+fn solver_solves_no_separation_on_nodes_held_by_a_boundary_condition() {
     let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::NoSeparation);
     model.contact_regions[0].settings.sides = Some(plx_model::SideRoles::AIsMaster);
     let side: Vec<NodeId> = [101, 104, 107, 110, 113, 116].into();
@@ -8692,7 +8628,7 @@ fn calculix_solves_no_separation_on_nodes_held_by_a_boundary_condition() {
         crate::inp::resolved_overlaps(&text),
         ["Region-1: 3 equations on another degree of freedom (the first one is held already)"]
     );
-    let Some(frd) = run_ccx("region-no-separation-held", &text) else {
+    let Some(frd) = run_solver("region-no-separation-held", &text) else {
         return;
     };
     assert!(node_value(&frd, "DISP", "U3", 10).abs() < 1e-12);
@@ -8709,7 +8645,7 @@ fn calculix_solves_no_separation_on_nodes_held_by_a_boundary_condition() {
 /// A rigid body leaves out the nodes a boundary condition holds, as the point of a remote
 /// displacement does: CalculiX refuses them in it.
 #[test]
-fn calculix_solves_a_rigid_body_on_nodes_held_by_a_boundary_condition() {
+fn solver_solves_a_rigid_body_on_nodes_held_by_a_boundary_condition() {
     let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::Bonded);
     model.steps[0].loads.clear();
     model
@@ -8746,7 +8682,7 @@ fn calculix_solves_a_rigid_body_on_nodes_held_by_a_boundary_condition() {
         crate::inp::resolved_overlaps(&text),
         ["Rigid_Body-1: 1 node left out (held already)"]
     );
-    let Some(frd) = run_ccx("rigid-body-held", &text) else {
+    let Some(frd) = run_solver("rigid-body-held", &text) else {
         return;
     };
     assert!(node_value(&frd, "DISP", "U3", 110).abs() < 1e-12);
@@ -8757,7 +8693,7 @@ fn calculix_solves_a_rigid_body_on_nodes_held_by_a_boundary_condition() {
 /// apart like an interference fit, the pressure from the overlap over the compliance of
 /// both blocks and the contact.
 #[test]
-fn calculix_presses_regions_apart_by_a_negative_offset() {
+fn solver_presses_regions_apart_by_a_negative_offset() {
     let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::Frictionless);
     model.contact_regions[0].settings.interface =
         Some(plx_model::InterfaceTreatment::Offset(-0.01));
@@ -8780,7 +8716,7 @@ fn calculix_presses_regions_apart_by_a_negative_offset() {
         "{text}"
     );
     assert!(!text.contains("Adjust="));
-    let Some(frd) = run_ccx("region-offset", &text) else {
+    let Some(frd) = run_solver("region-offset", &text) else {
         return;
     };
     // 0.01 = p (10/E + 10/E + h/(10 E)) without the lateral restraint, about 100 MPa.
@@ -8813,7 +8749,7 @@ fn an_offset_needs_a_surface_to_surface_contact() {
 /// so that the temperature hardly jumps at the contact. Hot at the bottom and cold at the
 /// top, the blocks meet at about the mean.
 #[test]
-fn calculix_conducts_heat_across_contact_regions_in_coupled_steps() {
+fn solver_conducts_heat_across_contact_regions_in_coupled_steps() {
     let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::Frictionless);
     let material = &mut model.materials[0];
     material.conductivity = Some(CONDUCTIVITY);
@@ -8848,7 +8784,7 @@ fn calculix_conducts_heat_across_contact_regions_in_coupled_steps() {
     assert_eq!(conductance, Some(100.0 * CONDUCTIVITY / 5.0));
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("*Gap conductance\n1000\n"), "{text}");
-    let Some(frd) = run_ccx("region-conductance", &text) else {
+    let Some(frd) = run_solver("region-conductance", &text) else {
         return;
     };
     let (below, above) = (
@@ -8900,7 +8836,7 @@ fn next_step(model: &FeModel, name: &str, extra: Vec<BoundaryCondition>) -> Step
 /// no longer loads the lower one. The next step switches it on again and the pressure gets
 /// through.
 #[test]
-fn calculix_switches_contact_regions_off_and_on_in_steps() {
+fn solver_switches_contact_regions_off_and_on_in_steps() {
     use plx_model::{ContactBehavior, ContactState};
     let (mesh, mut model) = blocks_joined_by_region(0.0, ContactBehavior::Frictionless);
     let side = |values| BoundaryCondition {
@@ -8942,7 +8878,7 @@ fn calculix_switches_contact_regions_off_and_on_in_steps() {
         "{text}"
     );
     let bottom: Vec<NodeId> = (1..=9).collect();
-    let Some(frd) = run_ccx("region-switched-off", &text) else {
+    let Some(frd) = run_solver("region-switched-off", &text) else {
         return;
     };
     let reaction = node_sum(&frd, "FORC", "F3", &bottom);
@@ -8950,7 +8886,7 @@ fn calculix_switches_contact_regions_off_and_on_in_steps() {
     model.steps.push(pressed);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("*Model change, Type=Contact pair, Add\n"));
-    let Some(frd) = run_ccx("region-switched-on", &text) else {
+    let Some(frd) = run_solver("region-switched-on", &text) else {
         return;
     };
     let reaction = node_sum(&frd, "FORC", "F3", &bottom);
@@ -8961,7 +8897,7 @@ fn calculix_switches_contact_regions_off_and_on_in_steps() {
 /// new coefficient times the normal force. The region gets an interaction of its own, as
 /// the change applies to the whole interaction.
 #[test]
-fn calculix_changes_the_friction_of_a_region_in_a_step() {
+fn solver_changes_the_friction_of_a_region_in_a_step() {
     use plx_model::{ContactBehavior, ContactState};
     let (mesh, mut model) = blocks_joined_by_region(0.0, ContactBehavior::Frictional { mu: 0.15 });
     let mut other = model.contact_regions[0].clone();
@@ -8994,7 +8930,7 @@ fn calculix_changes_the_friction_of_a_region_in_a_step() {
         text.contains("*Change friction, Interaction=PLX_Frictional\n*Friction\n0.3, 4200\n"),
         "{text}"
     );
-    let Some(frd) = run_ccx("region-friction-change", &text) else {
+    let Some(frd) = run_solver("region-friction-change", &text) else {
         return;
     };
     let pushed = node_sum(&frd, "FORC", "F1", &top);
@@ -9082,7 +9018,7 @@ fn long_set_names_are_shortened_and_restored_in_the_history_output() {
             }
         }
     }
-    let Some(dat) = run_ccx_dat("lange-namen", &text) else {
+    let Some(dat) = run_dat("lange-namen", &text) else {
         return;
     };
     let import = crate::dat::parse_dat(&crate::dat::restore_shortened_names(&dat, &text));
@@ -9124,7 +9060,7 @@ fn equation(name: &str, text: &str) -> plx_model::Distribution {
 /// A pressure scaled by a distribution takes its value at the center of every face: y / 10
 /// over the 10 x 10 tip face is 0.5 on average, so 2 MPa push with 100 N.
 #[test]
-fn calculix_pressure_follows_its_distribution() {
+fn solver_pressure_follows_its_distribution() {
     let load = Load {
         distribution: Some("Rising".into()),
         name: "Pressure-1".into(),
@@ -9146,7 +9082,7 @@ fn calculix_pressure_follows_its_distribution() {
     let center = face_center(&mesh, element, face).unwrap();
     let line = format!("\n{element}, P{face}, {}\n", number(2.0 * center[1] / 10.0));
     assert!(text.contains(&line), "{line}\n{text}");
-    let Some(frd) = run_ccx("druck-verteilt", &text) else {
+    let Some(frd) = run_solver("druck-verteilt", &text) else {
         return;
     };
     let reaction: f64 = mesh.node_sets["FIX"]
@@ -9204,7 +9140,7 @@ fn distributed_temperatures_are_written_per_node() {
 /// grow by alpha times the integral of T - 20, as the same field read from a heat transfer
 /// run does.
 #[test]
-fn calculix_strains_the_bar_by_a_distributed_temperature() {
+fn solver_strains_the_bar_by_a_distributed_temperature() {
     let (mesh, mut model) = thermal_bar(
         StepKind::Static(StaticStep::default()),
         Vec::new(),
@@ -9251,7 +9187,7 @@ fn calculix_strains_the_bar_by_a_distributed_temperature() {
         hold("Corner", vec![1], [false, true, true]),
         hold("Edge", vec![12], [false, false, true]),
     ];
-    let Some(frd) = run_ccx(
+    let Some(frd) = run_solver(
         "verteilte-temperatur",
         &write_inp(&mesh, &model, "").unwrap(),
     ) else {
@@ -9269,7 +9205,7 @@ fn calculix_strains_the_bar_by_a_distributed_temperature() {
 /// gives up on both with "too many cutbacks"; weak springs to ground hold the block and take
 /// about a millionth of the load.
 #[test]
-fn calculix_solves_a_part_held_only_by_contact_with_weak_springs() {
+fn solver_solves_a_part_held_only_by_contact_with_weak_springs() {
     for (name, gap, nlgeom) in [("spalt", 0.01, false), ("spalt-nlgeom", 0.01, true)] {
         let (mesh, mut model) =
             blocks_joined_by_region(gap, plx_model::ContactBehavior::Frictionless);
@@ -9290,7 +9226,7 @@ fn calculix_solves_a_part_held_only_by_contact_with_weak_springs() {
         let without = write_inp(&mesh, &model, "").unwrap();
         assert!(!without.contains("SPRING1"), "{without}");
         model.contact_defaults.weak_springs = true;
-        let Some(frd) = run_ccx(&format!("weak-springs-{name}"), &text) else {
+        let Some(frd) = run_solver(&format!("weak-springs-{name}"), &text) else {
             return;
         };
         let bottom: Vec<NodeId> = (1..=9).collect();
@@ -9302,7 +9238,7 @@ fn calculix_solves_a_part_held_only_by_contact_with_weak_springs() {
 /// A bonded region whose contact values a history output prints becomes a tied contact,
 /// since a tie has none: CalculiX prints the 1000 N the pressure pushes through it.
 #[test]
-fn calculix_prints_the_contact_forces_of_a_bonded_region() {
+fn solver_prints_the_contact_forces_of_a_bonded_region() {
     let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::Bonded);
     let mut output = HistoryOutput::contact("CH_Output-1", "Region-1");
     output.variables = ["CDIS", "CSTR", "CF"].map(String::from).to_vec();
@@ -9325,7 +9261,7 @@ fn calculix_prints_the_contact_forces_of_a_bonded_region() {
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(!text.contains("*Tie"), "{text}");
     assert!(text.contains("*Contact print, Master="), "{text}");
-    let Some(dat) = run_ccx_dat("region-kontaktkraft", &text) else {
+    let Some(dat) = run_dat("region-kontaktkraft", &text) else {
         return;
     };
     let import = crate::dat::parse_dat(&dat);
@@ -9514,7 +9450,7 @@ fn a_bolt_picked_by_its_shank_is_cut_across_its_middle() {
     }
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(!text.contains("*Tie"), "{text}");
-    let Some((frd, dat)) = run_ccx_frd_dat("schraube-schaft", &text) else {
+    let Some((frd, dat)) = run_frd_dat("schraube-schaft", &text) else {
         return;
     };
     let reaction: [f64; 3] = std::array::from_fn(|i| {
@@ -9525,9 +9461,6 @@ fn a_bolt_picked_by_its_shank_is_cut_across_its_middle() {
     // The bolt is in tension: the support at its start pulls it away from the middle.
     let axial: f64 = reaction.iter().zip(expected).map(|(a, b)| a * b).sum();
     assert!((axial + force).abs() < 1e-3 * force, "{reaction:?}");
-    if !ccx_prints_pretension_force() {
-        return;
-    }
     let bolt = dat.sets.iter().find(|s| s.name == "BOLT-1").unwrap();
     let forces = &bolt
         .field("FORCES")
@@ -9614,9 +9547,9 @@ fn uniaxial_bar(hardening: Hardening, stress: f64) -> (FeMesh, FeModel) {
 /// on reversal, depending on the reverse load, so there is nothing reliable to compare
 /// with. The Bauschinger effect is checked by the solver's own unit tests.)
 #[test]
-fn calculix_hardens_kinematically_in_tension() {
+fn solver_hardens_kinematically_in_tension() {
     let (mesh, model) = uniaxial_bar(Hardening::Kinematic, 300.0);
-    let Some(frd) = run_ccx(
+    let Some(frd) = run_solver(
         "plastisch-kinematisch",
         &write_inp(&mesh, &model, "").unwrap(),
     ) else {
@@ -9631,7 +9564,7 @@ fn calculix_hardens_kinematically_in_tension() {
 /// and stresses at the integration points of the tip elements, displacements and reaction
 /// forces of the clamped nodes.
 #[test]
-fn calculix_prints_the_plastic_strain_and_energy_of_the_bar() {
+fn solver_prints_the_plastic_strain_and_energy_of_the_bar() {
     let (mesh, mut model) = uniaxial_bar(Hardening::Isotropic, 300.0);
     model.steps[0].field_outputs[1]
         .variables
@@ -9643,7 +9576,7 @@ fn calculix_prints_the_plastic_strain_and_energy_of_the_bar() {
     let mut nodes = HistoryOutput::node("NH_Output-1", Region::NodeSet("FIX".into()));
     nodes.totals = Totals::Yes;
     model.steps[0].history_outputs.push(nodes);
-    let Some(frd) = run_ccx("plastisch-history", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("plastisch-history", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     // CalculiX's internal energy density is half the stress times the total strain.
@@ -9661,7 +9594,7 @@ fn calculix_prints_the_plastic_strain_and_energy_of_the_bar() {
 /// (its finite-strain plasticity differs in second order; see docs/solver/SCHNITTSTELLEN.md),
 /// so the fixture leaves the plastic strain out of the field output.
 #[test]
-fn calculix_stretches_the_bar_plastically_with_nlgeom() {
+fn solver_stretches_the_bar_plastically_with_nlgeom() {
     let (mesh, mut model) = uniaxial_bar(Hardening::Isotropic, 0.0);
     model.steps[0].loads.clear();
     model.steps[0].field_outputs[1].variables.pop();
@@ -9686,7 +9619,7 @@ fn calculix_stretches_the_bar_plastically_with_nlgeom() {
         kind: each_node(dofs),
         amplitude: None,
     });
-    let Some(frd) = run_ccx("plastisch-nlgeom", &write_inp(&mesh, &model, "").unwrap()) else {
+    let Some(frd) = run_solver("plastisch-nlgeom", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let strain = 1.02_f64.ln();

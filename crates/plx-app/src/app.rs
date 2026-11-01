@@ -3860,7 +3860,7 @@ impl Workbench {
         ) {
             Ok(mut analysis) => {
                 // Problems the checks found go into the monitor first, so that an abort is
-                // explained even before CalculiX says anything.
+                // explained even before the solver says anything.
                 for finding in
                     (findings.iter()).filter(|f| f.severity() == plx_model::Severity::Error)
                 {
@@ -3873,26 +3873,6 @@ impl Workbench {
                 self.output
                     .push(format!("Model check started: {}", work_dir.display()));
                 self.solver_findings.clear();
-                // CalculiX skips keywords it does not know with only a warning; tested on
-                // the executable while it already runs.
-                let unknown = self.settings.solver.unknown_keywords(analysis.keywords());
-                if !unknown.is_empty() {
-                    let finding = plx_model::Finding::unknown_keywords(format!(
-                        "CalculiX {}does not know {}",
-                        (self.settings.solver.keywords.as_ref())
-                            .and_then(|k| k.version.as_deref())
-                            .map_or_else(String::new, |v| format!("{v} ")),
-                        crate::solver_check::by_feature(&unknown).join("; ")
-                    ));
-                    let note = format!(
-                        "Model check: {}: {}",
-                        finding.problem.title(),
-                        finding.detail
-                    );
-                    analysis.note(note.clone());
-                    self.output.push(note);
-                    self.solver_findings.push(finding);
-                }
                 self.analysis = Some(analysis);
                 self.project_run = None;
                 // The run's output shows below the 3D view, which stays free for results.
@@ -3923,7 +3903,7 @@ impl Workbench {
                 note_solver_findings(analysis, &self.solver_findings);
             } else if matches!(
                 status,
-                plx_job::JobStatus::Failed | plx_job::JobStatus::FailedWithResults
+                plx_solve::JobStatus::Failed | plx_solve::JobStatus::FailedWithResults
             ) && let Some(model) = self.model.as_ref()
             {
                 self.solver_findings =

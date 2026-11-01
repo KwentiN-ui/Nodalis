@@ -2990,13 +2990,8 @@ mod tests {
     /// Meshes the plate with a hole, sets up a tension test and checks CalculiX's stress.
     #[test]
     fn generated_meshes_solve_with_calculix() {
-        if !gmsh_available()
-            || std::process::Command::new("ccx")
-                .arg("-v")
-                .output()
-                .is_err()
-        {
-            eprintln!("Gmsh or ccx missing, test skipped");
+        if !gmsh_available() {
+            eprintln!("Gmsh missing, test skipped");
             return;
         }
         use plx_model::{
@@ -3059,12 +3054,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nodalis-ccx-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("platte.inp"), inp).unwrap();
-        let status = std::process::Command::new("ccx")
-            .args(["-i", "platte"])
-            .current_dir(&dir)
-            .output()
-            .unwrap();
-        assert!(status.status.success(), "ccx: {status:?}");
+        plxs_session::run_input_file(&dir, "platte").unwrap_or_else(|e| panic!("{e}"));
         let results = read_frd(&dir.join("platte.frd")).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         // A strain of 0.1 / 100 gives about 210 MPa in the net section away from the hole;
@@ -3185,14 +3175,6 @@ mod tests {
     /// area of the input CalculiX ran, in the units they show, coloured by the results.
     #[test]
     fn results_draw_shells_beams_and_trusses_of_the_input_as_solids() {
-        if std::process::Command::new("ccx")
-            .arg("-v")
-            .output()
-            .is_err()
-        {
-            eprintln!("ccx not found, test skipped");
-            return;
-        }
         let dir = std::env::temp_dir().join(format!("plx-thick-results-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // A plate 1 by 1 m, 0.02 m thick with its nodes on the top face, and beside it a held
@@ -3243,13 +3225,7 @@ S
 *End step
 ";
         std::fs::write(dir.join("thick.inp"), input).unwrap();
-        let output = std::process::Command::new("ccx")
-            .args(["-i", "thick"])
-            .current_dir(&dir)
-            .env("OMP_NUM_THREADS", "1")
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
+        plxs_session::run_input_file(&dir, "thick").unwrap_or_else(|e| panic!("{e}"));
         let mut model = load(&dir.join("thick.frd"), UnitSystem::MmTonSC)
             .unwrap()
             .model;
@@ -3313,13 +3289,8 @@ S
     /// clamped at its rim and loaded by its weight it sags as a Kirchhoff plate does.
     #[test]
     fn surfaces_in_3d_models_solve_as_shells() {
-        if !gmsh_available()
-            || std::process::Command::new("ccx")
-                .arg("-v")
-                .output()
-                .is_err()
-        {
-            eprintln!("Gmsh or ccx missing, test skipped");
+        if !gmsh_available() {
+            eprintln!("Gmsh missing, test skipped");
             return;
         }
         use plx_model::{
@@ -3395,12 +3366,7 @@ S
         let dir = std::env::temp_dir().join(format!("nodalis-shell-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("membran.inp"), inp).unwrap();
-        let status = std::process::Command::new("ccx")
-            .args(["-i", "membran"])
-            .current_dir(&dir)
-            .output()
-            .unwrap();
-        assert!(status.status.success(), "ccx: {status:?}");
+        plxs_session::run_input_file(&dir, "membran").unwrap_or_else(|e| panic!("{e}"));
         let results = read_frd(&dir.join("membran.frd")).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         let disp = results.increments.last().unwrap().field("DISP").unwrap();
@@ -3421,14 +3387,6 @@ S
     /// elements by; the results take the parts of the input they were computed from.
     #[test]
     fn results_list_the_parts_of_their_input() {
-        if std::process::Command::new("ccx")
-            .arg("-v")
-            .output()
-            .is_err()
-        {
-            eprintln!("ccx missing, test skipped");
-            return;
-        }
         use plx_model::{
             BoundaryCondition, BoundaryKind, Elastic, Material, Region, Section, Step,
         };
@@ -3504,12 +3462,7 @@ S
         let dir = std::env::temp_dir().join(format!("nodalis-parts-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("bloecke.inp"), inp).unwrap();
-        let status = std::process::Command::new("ccx")
-            .args(["-i", "bloecke"])
-            .current_dir(&dir)
-            .output()
-            .unwrap();
-        assert!(status.status.success(), "ccx: {status:?}");
+        plxs_session::run_input_file(&dir, "bloecke").unwrap_or_else(|e| panic!("{e}"));
         let frd = dir.join("bloecke.frd");
         let alone = read_frd(&frd).unwrap().mesh;
         let parts = |mesh: &FeMesh| -> Vec<(String, Vec<ElementId>)> {

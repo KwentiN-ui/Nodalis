@@ -7,7 +7,7 @@
 
  forces (fx,fy,fz) for set INTERNAL_SELECTION-1_PRE_TENSION-1 and time  0.1000000E+01
 
-       551 -2.621212E-13  0.000000E+00  0.000000E+00
+       551  1.000000E+03  0.000000E+00  0.000000E+00
 
  displacements (vx,vy,vz) for set INTERNAL_SELECTION-1_PRE_TENSION-1 and time  0.1000000E+01
 

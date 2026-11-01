@@ -1,7 +1,7 @@
 name: Release
 
 # Baut den Windows-Installer auf Linux (MinGW + NSIS) samt portabler ZIP, das Linux-AppImage
-# (beide mit CalculiX) und das Benutzerhandbuch (Typst, PDF; Installer und AppImage enthalten
+# und das Benutzerhandbuch (Typst, PDF; Installer und AppImage enthalten
 # es als HTML für Help > User Guide), getrennt von der schnellen PR-CI. Läuft bei einem
 # Versions-Tag (v0.1.0 usw.) und hängt alles an das GitHub-Release, oder per Hand über
 # "Run workflow", dann nur als Artefakte.
@@ -19,8 +19,6 @@ env:
 
 jobs:
   windows-installer:
-    # Fest auf 24.04: ubuntu-latest ist im Oktober 2026 auf 26.04 gewechselt, dort (binutils 2.45,
-    # mingw-w64 13, CMake 4) scheitert der Windows-Build von OpenBLAS für ccx.
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -37,16 +35,11 @@ jobs:
             target/gmsh-windows
             target/typst
           key: gmsh-windows-${{ hashFiles('scripts/fetch_gmsh.py', 'scripts/build_user_guide.sh') }}
-      # CalculiX zu bauen dauert; neu nur, wenn sich Skript oder Patches ändern.
-      - uses: actions/cache@v4
-        with:
-          path: target/ccx/windows
-          key: ccx-windows-${{ hashFiles('scripts/build_ccx.sh', 'installer/ccx/**') }}
       - name: MinGW und NSIS
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends gcc-mingw-w64-x86-64 \
-            g++-mingw-w64-x86-64 gfortran-mingw-w64-x86-64 gfortran cmake flex bison zlib1g-dev wine nsis
+            g++-mingw-w64-x86-64 nsis
       - run: scripts/build_windows_installer.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -85,15 +78,11 @@ jobs:
             target/appimage/tools
             target/typst
           key: appimage-${{ hashFiles('scripts/fetch_gmsh.py', 'scripts/build_appimage.sh', 'scripts/build_user_guide.sh') }}
-      - uses: actions/cache@v4
-        with:
-          path: target/ccx/linux
-          key: ccx-linux-${{ hashFiles('scripts/build_ccx.sh', 'installer/ccx/**') }}
       - name: Systembibliotheken
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends libasound2-dev libglu1-mesa \
-            libxft2 libxcursor1 libxinerama1 libgomp1 file zsync gfortran cmake flex bison zlib1g-dev
+            libxft2 libxcursor1 libxinerama1 libgomp1 file zsync
       - run: scripts/build_appimage.sh
       - uses: actions/upload-artifact@v4
         with:

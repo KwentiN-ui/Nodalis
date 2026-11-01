@@ -3438,13 +3438,13 @@ dependencies = [
  "nucleo-matcher",
  "open",
  "plx-io",
- "plx-job",
  "plx-mesh",
  "plx-mesher",
  "plx-model",
  "plx-render",
  "plx-results",
  "plx-solve",
+ "plxs-session",
  "png",
  "rfd",
  "ron",
@@ -3474,16 +3474,6 @@ dependencies = [
  "ron",
  "serde",
  "thiserror 2.0.21",
-]
-
-[[package]]
-name = "plx-job"
-version = "0.1.0"
-dependencies = [
- "plx-core",
- "ron",
- "serde",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3528,6 +3518,7 @@ dependencies = [
  "plx-io",
  "plx-mesh",
  "plx-model",
+ "plxs-session",
  "pollster 1.0.1",
  "wgpu",
 ]
@@ -3550,12 +3541,11 @@ dependencies = [
 name = "plx-solve"
 version = "0.1.0"
 dependencies = [
- "plx-job",
  "plx-results",
  "plxs-core",
  "plxs-session",
  "rayon",
- "serde",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

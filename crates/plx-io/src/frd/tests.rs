@@ -216,14 +216,6 @@ fn gap_sections_of_the_same_name_make_one_part() {
 /// expands them to: the expanded nodes lie around it.
 #[test]
 fn expanded_nodes_surround_the_nodes_they_come_from() {
-    if std::process::Command::new("ccx")
-        .arg("-v")
-        .output()
-        .is_err()
-    {
-        eprintln!("ccx not found, test skipped");
-        return;
-    }
     // A strip of S8R bent into a quarter cylinder of radius 5, 1 thick, and a B32 beam.
     let mut text = String::from("*Node\n");
     let (nx, ny) = (4, 1);
@@ -263,13 +255,7 @@ fn expanded_nodes_surround_the_nodes_they_come_from() {
     let dir = std::env::temp_dir().join(format!("plx-expanded-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("strip.inp"), &text).unwrap();
-    let output = std::process::Command::new("ccx")
-        .args(["-i", "strip"])
-        .current_dir(&dir)
-        .env("OMP_NUM_THREADS", "1")
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
+    plxs_session::run_input_file(&dir, "strip").unwrap_or_else(|e| panic!("{e}"));
     let frd = read_frd(&dir.join("strip.frd")).unwrap();
     let input = crate::inp::read_inp(&dir.join("strip.inp")).unwrap().mesh;
     let _ = std::fs::remove_dir_all(&dir);

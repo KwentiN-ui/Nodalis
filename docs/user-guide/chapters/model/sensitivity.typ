@@ -3,7 +3,7 @@
 == Sensitivity step <sensitivity>
 
 A #ui("Sensitivity (shape)") step (`*SENSITIVITY`) shows where a change of the shape pays off
-most. For every node of a design region CalculiX computes how much a design response, such as
+most. For every node of a design region the solver computes how much a design response, such as
 the strain energy or an eigenfrequency, changes when the node moves a little along the surface
 normal. The step does not change the model: it is a guide for the next design change, for
 example whether a larger fillet or a thicker rib raises the stiffness more. Create it with
@@ -41,7 +41,7 @@ sensitivity step has another one.
 The step writes the surface normals `NORM` and one field per design response: `SENMASS`,
 `SENENER` (strain energy) or `SENFREQ` (eigenfrequencies, one increment per mode with its
 frequency). `DFDN` is the derivative of the response with respect to a shift of the node along
-its outward normal, `DFDNFIL` the same after the filter, scaled by CalculiX. A negative value
+its outward normal, `DFDNFIL` the same after the filter, scaled by the solver. A negative value
 of `SENENER` means that moving the surface outward there lowers the strain energy, that is,
 material added there stiffens the part most. Values near zero mark surfaces where material can
 be removed at little cost.

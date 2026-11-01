@@ -691,6 +691,65 @@ impl ContactModel {
     }
 }
 
+/// Heat conduction across a closed contact point: the temperature difference `Σ c_i T_i`
+/// (slave point minus master foot point) over the point's area, for `*GAP CONDUCTANCE`.
+#[derive(Clone, Debug)]
+pub struct ThermalLink {
+    /// Index into `model.contact.pairs`.
+    pub pair: usize,
+    pub nodes: Vec<u32>,
+    pub coefficients: Vec<f64>,
+    pub area: f64,
+    /// Contact pressure at the point.
+    pub pressure: f64,
+}
+
+impl ContactModel {
+    /// The closed contact points of an evaluation as heat conduction links (tied points
+    /// always conduct).
+    pub fn thermal_links(
+        &self,
+        coords: &[[f64; 3]],
+        u: &[f64],
+        evaluation: &Evaluation,
+    ) -> Vec<ThermalLink> {
+        let current = current_configuration(coords, u);
+        let mut out = Vec::new();
+        for (pi, pair) in self.pairs.iter().enumerate() {
+            if !pair.active {
+                continue;
+            }
+            let results = evaluation.points.get(pi);
+            for p in 0..pair.points.len() {
+                let Ok(kin) = pair.kinematics(p, &current, u) else {
+                    continue;
+                };
+                let (closed, pressure) = if pair.law.is_tied() {
+                    (true, 0.0)
+                } else if pair.mortar_nodes.is_empty() {
+                    match results.and_then(|r| r.get(p)) {
+                        Some(r) => (r.element && r.state.pressure > 0.0, r.state.pressure),
+                        None => (false, 0.0),
+                    }
+                } else {
+                    let pressure = pair.law.face_pressure(-kin.gap).0;
+                    (kin.gap <= 0.0 && pressure > 0.0, pressure)
+                };
+                if closed {
+                    out.push(ThermalLink {
+                        pair: pair.index,
+                        nodes: kin.nodes,
+                        coefficients: kin.coefficients,
+                        area: kin.area,
+                        pressure,
+                    });
+                }
+            }
+        }
+        out
+    }
+}
+
 impl Pair {
     /// The sorted DOFs of the slave nodes of `points` and the nodes of master face `face`.
     fn point_face_dofs(&self, points: &[u32], face: u32) -> Vec<u32> {
@@ -1019,7 +1078,12 @@ impl Pair {
         let t1 = normalized(sub(kin.tangent, scale(n, dot(kin.tangent, n))));
         let t2 = cross(n, t1);
         let relative = kin.relative;
-        let tangential = [dot(relative, t1), dot(relative, t2)];
+        // Edges of plane and axisymmetric elements slide in the plane only.
+        let planar = self.master.first().is_some_and(|f| f.planar.is_some());
+        let tangential = [
+            dot(relative, t1),
+            if planar { 0.0 } else { dot(relative, t2) },
+        ];
 
         // Friction: return mapping on the regularised Coulomb law.
         let mut shear = [0.0; 2];
@@ -1081,7 +1145,14 @@ impl Pair {
                 }
             }
         }
-        // CalculiX reports no slip for frictionless contact.
+        if planar {
+            shear[1] = 0.0;
+            slip[1] = 0.0;
+            coupling[1] = 0.0;
+            tangent[0][1] = 0.0;
+            tangent[1][0] = 0.0;
+            tangent[1][1] = 0.0;
+        }
         // CalculiX reports no slip for frictionless contact, except for mortar contact.
         let reported_tangential = if self.friction.is_some() || self.mortar {
             tangential

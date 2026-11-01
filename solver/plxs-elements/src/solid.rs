@@ -459,7 +459,7 @@ impl SolidElement {
         self.stiffness_3d(coords, d, out);
     }
 
-    fn dof_count_3d(&self) -> usize {
+    pub(crate) fn dof_count_3d(&self) -> usize {
         3 * self.family.node_count()
     }
 

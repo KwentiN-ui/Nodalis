@@ -48,7 +48,7 @@ pub fn cached_pattern(
 }
 
 /// Whether every pair of indices of a block is an entry of the pattern.
-fn covers(pattern: &Pattern, block: &[u32]) -> bool {
+pub(crate) fn covers(pattern: &Pattern, block: &[u32]) -> bool {
     block.iter().all(|&a| {
         block
             .iter()

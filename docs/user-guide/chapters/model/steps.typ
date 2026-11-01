@@ -30,7 +30,7 @@ A deactivated step shows the red no-entry sign instead; its tooltip still names 
 
 === Order of the steps
 
-CalculiX runs the steps in the order of the list, and a step starts from the state at the end of
+The solver runs the steps in the order of the list, and a step starts from the state at the end of
 the previous one. To change the order, right-click a step in the #ui("Steps") list and choose
 #ui("Move Up") or #ui("Move Down"). The step keeps its boundary conditions, loads, defined
 fields and outputs, and stays selected. #ui("Move Up") is disabled on the first step and
@@ -139,7 +139,7 @@ A static step over a creep time in which materials with a creep law creep (`*VIS
 
 === Field outputs <step-field-outputs>
 
-Field outputs control what CalculiX writes to the result file (`.frd`) as `*NODE FILE`,
+Field outputs control what the solver writes to the results as `*NODE FILE`,
 `*EL FILE` and `*CONTACT FILE`. A new step gets a node and an element field output whose
 variables depend on the step type. Create more with #ui("Create ...") on #ui("Field Outputs") of a
 step or with #menu("Model", "Create Field Output ..."). Edit one with a double-click. Hovering over
@@ -167,7 +167,7 @@ A deactivated field output is left out of the input file.
 
 #screenshot("field-output-tree.png", [A deactivated contact field output])
 
-#note[Field outputs of a step are what CalculiX computes. The field outputs on the #ui("Results")
+#note[Field outputs of a step are what the solver computes. The field outputs on the #ui("Results")
 tab derive new fields from opened results instead (@derived-fields).]
 
 === History outputs
@@ -207,6 +207,6 @@ exists only in the input file. The point's values appear under the name of the h
 #screenshot("history-output-point.png", [Node history output of the point of a
   displacement])
 
-CalculiX computes reaction forces and moments only at the point of a rigid body: a rigid body
+The solver computes reaction forces and moments only at the point of a rigid body: a rigid body
 constraint or a displacement on a #ui("Rigid") point. At a #ui("Deformable") point only the
 displacements and rotations are printed.

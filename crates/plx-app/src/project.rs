@@ -4699,11 +4699,8 @@ impl ProjectApp {
         let path = self.model_path();
         let mut work_dir = self.settings.solver.work_dir();
         work_dir.push(crate::analysis::job_name(&self.project_name()));
-        // The analyses solved at the same time share the cores (CalculiX: an equal share
-        // each, the built-in solver: its one pool).
-        let parallel = self.settings.solver.parallel_runs.max(1) as usize;
-        let concurrent = (self.updating.len() + self.update_queue.len() + 1).min(parallel);
-        let settings = self.settings.solver.shared_by(concurrent);
+        // The analyses solved at the same time share the solver's one pool.
+        let settings = self.settings.solver.clone();
         let force = self.forced.remove(&id);
         let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) else {
             return Start::Refused;
@@ -4788,15 +4785,6 @@ impl ProjectApp {
                 continue;
             };
             let solved = solve.take_solved();
-            // What running the executable found out about it is kept.
-            let probed = solve.solver();
-            let keywords = probed.keywords.clone();
-            if self.settings.solver.executable == probed.executable
-                && keywords != self.settings.solver.keywords
-            {
-                self.settings.solver.keywords = keywords;
-                self.share_settings();
-            }
             let Some(node) = self.node(id) else {
                 continue;
             };

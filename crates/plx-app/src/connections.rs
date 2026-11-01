@@ -1462,7 +1462,6 @@ mod tests {
 
     /// The largest displacement against `component` CalculiX computes, if ccx is installed.
     fn settlement(model: &Model, component: &str) -> Option<f32> {
-        std::process::Command::new("ccx").arg("-v").output().ok()?;
         let inp = plx_io::inp::write_inp(&model.mesh, &model.fe, "Block").unwrap();
         let dir = std::env::temp_dir().join(format!(
             "nodalis-geometry-detection-{}-{}",
@@ -1471,12 +1470,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("block.inp"), &inp).unwrap();
-        let status = std::process::Command::new("ccx")
-            .args(["-i", "block"])
-            .current_dir(&dir)
-            .output()
-            .unwrap();
-        assert!(status.status.success(), "ccx: {status:?}");
+        plxs_session::run_input_file(&dir, "block").unwrap_or_else(|e| panic!("{e}"));
         let results = read_frd(&dir.join("block.frd")).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         let disp = results.increments.last().unwrap().field("DISP").unwrap();

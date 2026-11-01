@@ -2,8 +2,10 @@
 
 = Introduction
 
-Nodalis is a pre- and post-processor for the finite element solver
-#link("http://www.calculix.de/")[CalculiX]. It runs on Linux and Windows.
+Nodalis is a finite element program with its own solver: it prepares the model, solves it and
+evaluates the results. Its input and result formats are those of
+#link("http://www.calculix.de/")[CalculiX], so models can be exchanged with it. Nodalis runs on
+Linux and Windows.
 
 With Nodalis you
 
@@ -12,13 +14,13 @@ With Nodalis you
 - define the finite element model: materials, sections, constraints, contacts, steps, boundary
   conditions and loads,
 - keep several analyses in one project, as in Ansys Workbench, and solve only what changed,
-- run CalculiX and watch its progress,
+- solve the analyses with the built-in solver and watch its progress,
 - view and evaluate the results (`.frd`, `.dat`): contour plots, deformed shapes, animations,
   derived fields, history plots, paths, planes and hot spot stresses.
 
 This guide is a reference. Each chapter describes one part of the program: where to find a
-function, what every field of its dialog means, and what Nodalis writes to the CalculiX input
-file. You do not need to read it from front to back.
+function, what every field of its dialog means, and what Nodalis writes to the input file of
+the solver (CalculiX format). You do not need to read it from front to back.
 
 == How Nodalis thinks about a model
 
@@ -43,10 +45,9 @@ The project, including geometry, mesh and model, is saved as a Nodalis project f
 
 == Requirements
 
-- *CalculiX* (`ccx`) is needed to run analyses. The Windows installer and the Linux AppImage
-  include CalculiX 2.23 with the PaStiX, SPOOLES and ARPACK solvers, so analyses run right after
-  installation. Another CalculiX, for example one built with Pardiso, can be set under
-  #menu("Tools", "Settings ...", "CalculiX"); #ui("Test CalculiX") checks it (@settings).
+- *No external solver* is needed: the solver is part of Nodalis, so analyses run right after
+  installation. #menu("Tools", "Settings ...", "Solver") sets its threads and work directory;
+  #ui("Test solver") checks it (@settings).
 - *Gmsh* is needed to import and mesh CAD geometry. The Windows installer and the Linux AppImage
   include it. Without
   Gmsh Nodalis still starts; only geometry import and meshing are unavailable. Its library path
@@ -58,17 +59,17 @@ The project, including geometry, mesh and model, is saved as a Nodalis project f
 == Installation
 
 *Windows.* Run `nodalis-<version>-setup.exe` from the release page. It installs Nodalis with
-Gmsh and CalculiX to `C:\Program Files\nodalis`, creates a start menu entry, optionally a desktop icon, and
+Gmsh to `C:\Program Files\nodalis`, creates a start menu entry, optionally a desktop icon, and
 can associate `.ndl` project files with Nodalis. Uninstall it under _Apps_ in the Windows
-settings. Because programs may not write to `C:\Program Files`, the CalculiX work directory then
-defaults to `%TEMP%\nodalis`.
+settings. Because programs may not write to `C:\Program Files`, the work directory of the analyses
+then defaults to `%TEMP%\nodalis`.
 
 *Linux.* Download `nodalis-<version>-x86_64.AppImage` from the release page, make it executable
-(`chmod +x nodalis-*-x86_64.AppImage`) and start it. It includes Gmsh and CalculiX and runs on x86_64
+(`chmod +x nodalis-*-x86_64.AppImage`) and start it. It includes Gmsh and runs on x86_64
 distributions with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and later). A tool
 such as Gear Lever or AppImageLauncher adds a menu entry, associates `.ndl` files and updates
-the AppImage when a new release is published. The CalculiX
-work directory defaults to `/tmp/nodalis`. Alternatively build Nodalis from source with a
+the AppImage when a new release is published. The work
+directory of the analyses defaults to `/tmp/nodalis`. Alternatively build Nodalis from source with a
 current stable Rust toolchain (`cargo run --release`), see the README of the repository.
 
 === Portable version for Windows <portable>
@@ -76,17 +77,17 @@ current stable Rust toolchain (`cargo run --release`), see the README of the rep
 Where installing is not possible, for example on a company computer without administrator
 rights, download `nodalis-<version>-windows-portable.zip` from the release page instead. Unpack
 it to any folder you can write to, for example in your documents or on a USB stick, and start `nodalis.exe` in the folder `Nodalis-<version>`. The
-folder contains the same program, Gmsh, CalculiX and this guide as the installer, but Nodalis
+folder contains the same program, Gmsh and this guide as the installer, but Nodalis
 does not register itself with Windows: there is no start menu entry and no file association, and
 nothing is written to the registry. Settings and the material library are kept in the folder
-`Settings` next to `nodalis.exe`, the CalculiX work directory defaults to the folder `Temp`
+`Settings` next to `nodalis.exe`, the work directory of the analyses defaults to the folder `Temp`
 there, and the settings window shows #ui("Portable mode") at its bottom. The file `portable.txt`
 switches this on; without it the settings go to `%APPDATA%\nodalis\data` as with the
 installer. To update, unpack the new version (the update window links to its ZIP file, see
 @updates) and copy the `Settings` folder over; to remove Nodalis, delete the folder.
 
-#screenshot("portable.png", [The portable version under Windows: CalculiX and its work directory
-in the unpacked folder, the note at the bottom])
+#screenshot("portable.png", [The portable version under Windows: the work directory in the
+unpacked folder, the note at the bottom])
 
 == Updates <updates>
 

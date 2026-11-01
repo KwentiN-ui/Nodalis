@@ -287,6 +287,9 @@ impl StaticLinear {
                     *a -= b;
                 }
             }
+            // The forces the constraints carry to their independent nodes.
+            ctx.constraints
+                .transfer_forces(&mut reactions, &spc.dofs, &active);
 
             progress.event(ProgressEvent::Iteration {
                 step: ctx.step_number,

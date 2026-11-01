@@ -1,0 +1,7 @@
+name = "region-conductance-table"
+area = "contact"
+class = "C"
+stage = "M3"
+features = ["*HEADING", "*NODE", "*ELEMENT", "C3D8", "SPRING1", "*NSET", "*ELSET", "*SURFACE", "*MATERIAL", "*ELASTIC", "*CONDUCTIVITY", "*SPECIFIC HEAT", "*SOLID SECTION", "*SPRING", "*SURFACE INTERACTION", "*SURFACE BEHAVIOR", "*GAP CONDUCTANCE", "*CONTACT PAIR", "*INITIAL CONDITIONS", "*STEP", "*COUPLED TEMPERATURE-DISPLACEMENT", "*BOUNDARY", "*CLOAD", "*DLOAD", "*CFLUX", "*NODE FILE", "*EL FILE", "*END STEP"]
+source = "plx-io writer test"
+reference = "ccx 2.23"

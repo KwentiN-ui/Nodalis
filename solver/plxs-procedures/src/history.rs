@@ -89,6 +89,18 @@ pub fn write_history_with_velocities(
             continue;
         };
         for variable in &request.variables {
+            if variable.trim().eq_ignore_ascii_case("EVOL") {
+                write_volumes(
+                    results,
+                    model,
+                    table,
+                    request,
+                    (step_number, increment, time),
+                    set,
+                    elements,
+                );
+                continue;
+            }
             let (quantity, field, reorder): (&str, &IntegrationPointField, bool) =
                 match variable.trim().to_ascii_uppercase().as_str() {
                     "S" => (
@@ -186,7 +198,46 @@ pub fn write_history_with_velocities(
             }
         }
     }
-    let _ = HistoryOutput::clone;
+}
+
+/// `EVOL` of an `*EL PRINT`: the volume of each element of the set (CalculiX's
+/// `volume (element, volume)`) and, with `TOTALS`, their sum.
+fn write_volumes(
+    results: &mut Results,
+    model: &Model,
+    table: &ElementTable,
+    request: &HistoryOutput,
+    (step, increment, time): (u32, u32, f64),
+    set: &str,
+    elements: &[u32],
+) {
+    let rows: Vec<(u32, Vec<f64>)> = elements
+        .iter()
+        .filter_map(|&id| {
+            let entry = table.entries.get(model.element_index(id)? as usize)?;
+            let coords = table.coordinates(model, entry);
+            Some((id, vec![table.formulation(entry).volume(&coords)]))
+        })
+        .collect();
+    let total: f64 = rows.iter().map(|r| r.1[0]).sum();
+    let block = |quantity: &str, rows| HistoryBlock {
+        step,
+        increment,
+        quantity: quantity.to_string(),
+        set: set.to_string(),
+        time,
+        rows,
+    };
+    if request.totals != Totals::Only {
+        results
+            .history
+            .push(block("volume (element, volume)", rows));
+    }
+    if request.totals != Totals::No {
+        results
+            .history
+            .push(block("total volume", vec![(0, vec![total])]));
+    }
 }
 
 /// Rows `(element, [point, values...])` for the elements of a set; CalculiX's `.dat` lists

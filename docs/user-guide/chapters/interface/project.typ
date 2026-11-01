@@ -52,7 +52,7 @@ at the moment:
     #ui("Constraints"), #ui("Contacts"), #ui("Amplitudes"), #ui("Initial Conditions"),
     #ui("Steps")), and those open to their single items, so that each can be linked on its
     own. A step opens to its inputs for results of other analyses (@results-links).],
-  [Solution], [The last CalculiX run whose results the analysis keeps.],
+  [Solution], [The last run whose results the analysis keeps.],
   [Results], [The results of that run, followed by one row per step. The row of a step gives
     the results of that step to other analyses (@results-links, @state-links); it takes
     nothing, so it has a pin on the right only.],
@@ -71,25 +71,24 @@ The symbol on the right of a cell shows its state; its tooltip says what it mean
 Nodalis keeps a fingerprint of the inputs each cell was made from, and only cells whose inputs
 changed are out of date. New meshing settings of one part make only the mesh of that part out
 of date, and with it the solution. A new load makes the solution out of date but not the mesh.
-Changes that CalculiX does not see, such as result paths or planes, leave the solution up to
-date. Within the solution, Nodalis also remembers which steps are unchanged, so that CalculiX
-can start after them (@restart).
+Changes that the solver does not see, such as result paths or planes, leave the solution up to
+date. Within the solution, Nodalis also remembers which steps are unchanged (see below).
 
 A mesh taken from a mesh block is out of date as soon as the block's parameters change, also in
 analyses that take it through another analysis: the analysis still holds the block's old mesh.
 #ui("Solve") in the analysis window then has the project window make the block's mesh anew and
-take it over before CalculiX runs, so the results always belong to the block's current mesh.
+take it over before the solver runs, so the results always belong to the block's current mesh.
 
 The same holds for results and states taken from another analysis: when the source analysis is
 out of date, so is the analysis that takes its results or continues from its state, and
 #ui("Solve") in its window solves the source again first instead of taking its old results.
 
-This is decided per step. CalculiX solves the steps one after the other, so the results of a step
+This is decided per step. The solver computes the steps one after the other, so the results of a step
 depend only on the model and the steps up to it. A link from the results or the state of a step
 therefore only turns out of date when the model, that step or a step before it changes: adding
 a frequency step after the static step a submodel takes its global results from makes the global
 analysis out of date, but the submodel stays up to date, and #ui("Update Project") solves only
-the global analysis. Eigenmodes are the exception: CalculiX writes them anew with every frequency
+the global analysis. Eigenmodes are the exception: the solver writes them anew with every frequency
 step, so an analysis that takes them is out of date with any change of the source.
 
 #screenshot("later-step-keeps-submodel.png", [#ui("Step-2") was added to #ui("Global") after
@@ -244,14 +243,14 @@ block with #key("Shift") held; with #key("Shift") a rectangle adds to the select
   [Project > Update Project (#key("F5"))], [Solves every analysis that is not up to date
     (@update-project). #key("F5") in an analysis window solves only that analysis.],
   [Project > Solution Monitor], [Shows the #ui("Analyses") tab of the output pane, with the
-    analyses being solved and the output of CalculiX (@solution-monitor).],
+    analyses being solved and the output of the solver (@solution-monitor).],
   [Tools > Settings ...], [The settings (@settings); they apply to all windows.],
   [Help], [#ui("User Guide") opens this guide, #ui("Check for Updates ...") looks
     for a new version.],
 )
 
 The toolbar holds #ui("New Project"), #ui("Open"), #ui("Save"), #ui("Update Project"), the
-button that stops the update and kills the running CalculiX jobs, and #ui("Solution Monitor").
+button that stops the update and kills the running analyses, and #ui("Solution Monitor").
 
 Closing the project window closes Nodalis with all analysis windows. Closing an analysis
 window (or #menu("File", "Close Analysis") in it) keeps the analysis in the project, with all
@@ -276,7 +275,7 @@ first (@mesh-block).
   processor cores.
 - An analysis whose window is closed is solved in the background, without opening its window:
   Nodalis meshes its geometry if the mesh is missing or out of date, writes the input file,
-  runs CalculiX and keeps the results in the project, as #ui("Solve") in the window does. The
+  runs the solver and keeps the results in the project, as #ui("Solve") in the window does. The
   cells of its block show the progress. An analysis whose window is open is solved in its
   window, which shows the new results when it is done.
 - If CalculiX fails, only the analyses that depend on the failed one are skipped, independent

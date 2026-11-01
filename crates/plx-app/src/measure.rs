@@ -693,14 +693,6 @@ mod tests {
     /// the mean displacement through the thickness.
     #[test]
     fn measures_on_expanded_shells_take_the_expanded_nodes() {
-        if std::process::Command::new("ccx")
-            .arg("-v")
-            .output()
-            .is_err()
-        {
-            eprintln!("ccx not found, test skipped");
-            return;
-        }
         // A cantilever strip 100 x 20 x 2 of S4 shells, clamped at x = 0, 10 N down at the
         // tip: 75 MPa bending stress at the clamp after beam theory.
         let mut text = String::from("*Node\n");
@@ -732,13 +724,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("plx-measure-shell-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("strip.inp"), &text).unwrap();
-        let output = std::process::Command::new("ccx")
-            .args(["-i", "strip"])
-            .current_dir(&dir)
-            .env("OMP_NUM_THREADS", "1")
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
+        plxs_session::run_input_file(&dir, "strip").unwrap_or_else(|e| panic!("{e}"));
         let frd = plx_io::frd::read_frd(&dir.join("strip.frd")).unwrap();
         let input = plx_io::inp::read_inp(&dir.join("strip.inp")).unwrap().mesh;
         let _ = std::fs::remove_dir_all(&dir);

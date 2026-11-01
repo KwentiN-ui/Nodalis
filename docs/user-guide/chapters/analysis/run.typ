@@ -1,11 +1,11 @@
 #import "../../template.typ": *
 
-= Running CalculiX <analysis>
+= Solving <analysis>
 
 == Solving an analysis
 
-Each analysis of the project is solved in its window. CalculiX uses the settings under
-#menu("Tools", "Settings ...", "CalculiX") (@settings) and runs in the folder
+Each analysis of the project is solved in its window. The solver uses the settings under
+#menu("Tools", "Settings ...", "Solver") (@settings) and runs in the folder
 `<work directory>/<project name>/<analysis name>`, so the analyses of a project never overwrite
 each other's files.
 
@@ -15,12 +15,12 @@ each other's files.
 #fields(
   [Solve (#key("F5"))], [Makes the analysis up to date, like #ui("Update") in Ansys
     Workbench: first it meshes the parts whose mesh is missing or out of date, then it runs
-    CalculiX if the results are missing or out of date, and keeps the new results. If nothing
+    the solver if the results are missing or out of date, and keeps the new results. If nothing
     changed since the last run, it only says so.],
-  [Solve Again], [Runs CalculiX even if the results are up to date.],
-  [Check Model], [Lets CalculiX only read and check the model (`*NO ANALYSIS`), without solving
-    it.],
-  [Stop], [Stops meshing for a solve, or the running CalculiX job.],
+  [Solve Again], [Runs the solver even if the results are up to date.],
+  [Check Model], [Lets the solver only read and check the model and its steps, without
+    solving it.],
+  [Stop], [Stops meshing for a solve, or the running solver.],
   [Monitor], [Shows the #ui("Analysis") tab of the output pane (@monitor).],
   [Open Results], [Opens the results the analysis keeps on the #ui("Results") tab.],
   [Remove Results], [Drops the results the analysis keeps (@bind-result).],
@@ -30,26 +30,26 @@ each other's files.
 solution; all commands are in the #ui("Analysis") menu. Which cells are out of date is decided
 as in the project schematic (@project-window): changing a load makes only the solution out of
 date, changing the meshing settings of a part makes its mesh out of date, and result paths or
-planes change nothing that CalculiX needs.
+planes change nothing that the solver needs.
 
 The input file is named after the analysis, for example `Cantilever.inp`. Old result files of
-the analysis in its folder are deleted before CalculiX starts. Nodalis refuses to run a model
+the analysis in its folder are deleted before the solver starts. Nodalis refuses to run a model
 without mesh, without step or with all steps deactivated, and it stops if the input file cannot
 be written (for example because a region is empty).
 
 === Monitor <monitor>
 
 The monitor is the #ui("Analysis") tab of the output pane below the 3D view; it comes to the
-front when a run starts, so the model and its results stay in view while CalculiX runs. Its
-top row has #ui("Kill") to stop CalculiX, #ui("Results") to open the results once the run is
+front when a run starts, so the model and its results stay in view while the solver runs.
+Its top row has #ui("Kill") to stop the solver, #ui("Results") to open the results once the run is
 finished, the #ui("Filter") field and the status with the running time and the current step,
-increment and iteration; below it is the output of CalculiX. The #ui("Output") tab goes back to
+increment and iteration; below it is the output of the solver. The #ui("Output") tab goes back to
 the messages, and the pane can be made taller by dragging its upper edge.
 
 #screenshot("monitor.png", [The Analysis tab after a completed run])
 
-The progress next to the running time follows the output of CalculiX from its first iteration
-on: the step, the increment, the attempt once CalculiX has cut the increment back (attempt 2
+The progress next to the running time follows the solver from its first iteration
+on: the step, the increment, the attempt once the solver has cut the increment back (attempt 2
 and later), the iteration, the size of the increment and the time reached in the step. So a
 nonlinear step that needs several cutbacks before its first increment converges still shows
 where it is, long before the status file has a line. After the run, the progress shows the
@@ -60,7 +60,7 @@ last converged increment from the status file (`.sta`).
 
 The #ui("Filter") field shows only the lines that contain the text you type,
 ignoring upper and lower case. With "average force", for example, you see the average force of
-every increment one below the other. The filter applies while CalculiX is still running, and
+every increment one below the other. The filter applies while the solver is still running, and
 #ui("Clear") or an empty field shows all lines again.
 
 #screenshot("monitor-filter.png", [The Analysis tab showing only the lines with "cpu"])
@@ -72,43 +72,17 @@ Once there are more, the oldest lines go and the top row tells how many, for exa
 #screenshot("monitor-long-output.png", [The end of a long run, its first lines dropped])
 
 The status at the end is #ui("completed"), #ui("finished with errors, results available"),
-#ui("failed") or #ui("killed"). If CalculiX failed, Nodalis looks for known error messages
-in the output and adds a line "Possible cause: ..." with a remedy, for example for distorted
+#ui("failed") or #ui("killed"). If the solver failed, it reports the causes it found
+and Nodalis adds a line "Possible cause: ..." with a remedy, for example for distorted
 elements, missing material data, rigid body motion or missing convergence.
 
-== Solving again from the last unchanged step <restart>
+== Analyses that continue others <restart>
 
-CalculiX can write the state of the model after each step over time (static, dynamic, heat
-transfer, coupled and uncoupled temperature-displacement, visco) into a restart file, and
-Nodalis asks it to (`*RESTART, WRITE` in every such step). When you change a later step of an
-analysis and solve again, CalculiX does not start from the beginning: it reads the state after
-the last unchanged step from the earlier run and solves only the rest. The monitor tells which
-of the two happened:
-
-#fields(
-  [Restart after step 2 of 3: ...], [The steps up to the second are unchanged; CalculiX reads
-    their state and solves the third. The results and the history output of the earlier steps are
-    joined with the new ones, so the results look as if all steps had been solved, and the input
-    file kept with the results is the full one, which runs on its own.],
-  [Full run: ...], [All steps are solved, with the reason: the model definition changed (a
-    material, a section, the mesh, a new set for a load), the first step changed, there is no
-    state of an earlier run, the states were written by another CalculiX, the restart files
-    are turned off, or the step to continue from is not a step over time (a frequency, buckle
-    or perturbation step leaves no state to continue from).],
-)
-
-A restart that CalculiX cannot finish is solved once more in full, so a changed analysis always
-ends up solved. The state files stay in the folder of the analysis in the work directory, next
-to its results; they are not saved in the project file, and after a move to another computer
-the first run is a full one.
-
-Under #menu("Tools", "Settings ...", "CalculiX") (@settings), #ui("Keep the state after each
-step") turns the restart files off, and #ui("Restart files per project") limits the disk space
-they take (4096 MB by default): beyond it, the oldest state files of the project are removed,
-which only costs time, never correctness.
-
-The same mechanism lets one analysis continue another one after a step, through a state link
-in the project schematic (@state-links).
+One analysis can continue another one after a step, through a state link in the project
+schematic (@state-links): it starts from the displacements, stresses and contact state the other
+analysis reached. When it runs, the solver computes the steps of the other analysis up to the
+linked one and then its own steps. Changing a later step of an analysis solves all its steps
+again.
 
 == Results kept with the project <bind-result>
 
@@ -119,22 +93,16 @@ output pane shows how much they add to the project file; they are stored compres
 large result takes a few seconds and runs in the background. A new run replaces the results the
 analysis keeps.
 
-What is kept depends on the solver (@settings):
-
-- The built-in *Nodalis solver* hands its results to Nodalis in memory. They are kept as one
-  binary results file (`.ndlr`, written next to the input file in the work directory) that
-  holds the mesh the results are on and every field and history output of the run. Opening
-  them reads the numbers directly, without a text file to parse, and with their full
-  precision. No `.frd` or `.dat` file is written.
-- *CalculiX* writes its result file (`.frd`), history output (`.dat`) and, for frequency
-  steps, the eigenmodes (`.eig`); these files are kept, at about a third of their size (a
-  236 MB result file adds about 100 MB).
+The solver hands its results to Nodalis in memory. They are kept as one binary results file
+(`.ndlr`, written next to the input file in the work directory) that holds the mesh the results
+are on and every field and history output of the run. Opening them reads the numbers directly,
+without a text file to parse, and with their full precision. No `.frd` or `.dat` file is
+written.
 
 When an analysis with kept results is opened, Nodalis writes them to `Kept_Results` in the
 folder of the analysis and opens the results on the #ui("Results") tab. The project schematic
 and the toolbar of the analysis window show whether they are still up to date. Measure blocks,
-the optimizer and the Campbell diagram take the results of the Nodalis solver straight from
-memory as well. Where a CalculiX file is still needed, for example the global results of a
+the optimizer and the Campbell diagram take the results straight from memory as well. Where a CalculiX file is still needed, for example the global results of a
 submodel or the temperatures a step takes from a heat transfer analysis, Nodalis writes the
 `.frd` file from the kept results when it needs it.
 
@@ -143,8 +111,7 @@ read: solve the analysis again.
 
 #menu("File", "Export CalculiX Results (.frd) ...") writes the current results as CalculiX's
 files, the `.frd` file and, if the run has history output, the `.dat` file next to it, for
-CalculiX GraphiX, PrePoMax or other programs that read them. Results of the Nodalis solver are
-converted, those of CalculiX copied.
+CalculiX GraphiX, PrePoMax or other programs that read them.
 
 #screenshot("export-calculix-results.png", [File menu of an analysis window with open results:
   Export CalculiX Results writes them as `.frd` and `.dat`])
@@ -192,24 +159,20 @@ body motion of a part in a static step, truss structures that are mechanisms, ra
 the physical constants (@model-properties) and missing references (a deleted material, part or set that an item still uses). Warnings include parts held
 only by contact (contact pairs without tied surface behavior; tied contact holds like a tie)
 when #ui("Weak springs") is turned off in the connection settings (@weak-springs), conflicting boundary conditions, loads on fixed nodes, rotations without effect,
-beam nodes with only some of their rotations given (CalculiX holds them all, and nonlinear steps
-mostly fail to converge), beams held by pins only, which are free to turn about the line
-through the pins (CalculiX solves them all the same), rigid bodies on nodes that a boundary
+beam nodes with only some of their rotations given (the solver holds them all, as CalculiX
+does, and nonlinear steps mostly fail to converge), beams held by pins only, which are free to turn about the line
+through the pins (the solver solves them all the same), rigid bodies on nodes that a boundary
 condition holds (@overlapping-constraints), steps without load and amplitudes that
 nothing uses.
 
 #screenshot("beam-rotations-partly-held.png", [A beam end that holds only the rotation about Z])
 
-When a run starts, Nodalis also checks that the configured CalculiX knows every keyword of the
-input file (see #ui("Test CalculiX") in @settings). An unknown keyword, for example of a step
-type that an older CalculiX lacks, appears as error "Keyword unknown to CalculiX" on the
-analysis and in the monitor, with the feature that needs it.
-
-When CalculiX aborts, Nodalis explains the error messages it knows in the same way, for
-example "*RADIATE card was selected but no *PHYSICAL CONSTANTS card encountered" as "Physical
-constants missing"; other messages appear as "CalculiX error" with the text of the monitor.
-
-#screenshot("model-check-solver-error.png", [A CalculiX error explained after the run])
+The solver checks the whole model again when a run starts (and with #ui("Check Model")) and
+reports what it finds on the items of the model: elements it cannot compute, missing material
+data, rigid body motion, a step type or feature it does not compute yet. When the solver
+aborts, Nodalis explains the messages it knows in the same way, for example radiation without
+physical constants as "Physical constants missing"; other messages appear as "Solver error"
+with the text of the monitor.
 
 The checks do not stop a run; their errors are listed at the top of the monitor. Missing
 references do stop it, because the input file cannot be written.
@@ -247,7 +210,7 @@ by itself and explains the cause in the monitor and the tree.
 
 Several items of a model are written as constraint equations (MPCs) that make some degrees of
 freedom follow others: regions of no separation, rigid bodies, displacements on a point, bolt
-pre-tension cuts, node ties between beams and springs to a surface. CalculiX aborts when a
+pre-tension cuts, node ties between beams and springs to a surface. The solver, like CalculiX, aborts when a
 boundary condition holds such a dependent degree of freedom ("dependent side of a MPC and a
 SPC") or when two equations depend on it. Nodalis keeps them apart when it writes the input
 file, so the items can overlap freely, for example a fixed support on a face that also lies in a
@@ -260,7 +223,7 @@ already depends on another of its terms instead: a free direction of the same no
 node on the other side, which then follows the held node, as Abaqus moves the constraint to
 the independent side. An equation whose terms are all held binds nothing new and is left out.
 A rigid body leaves out the nodes that are held already; the model check warns when a boundary
-condition holds nodes of a rigid body. Ties need nothing of this: CalculiX skips the held
+condition holds nodes of a rigid body. Ties need nothing of this: the solver skips the held
 directions of their slave nodes by itself.
 
 The input file lists the changes as comments at the top of the constraints, and the monitor
@@ -270,14 +233,14 @@ shows them when the run starts.
   separation in Z: its three equations there depend on the nodes of the master side])
 
 A slave node of a bonded region (a tie) that is further from the master side than the
-tolerance stays untied: CalculiX only warns about it. After every run the analysis gets the
+tolerance stays untied: the solver only warns about it. After every run the analysis gets the
 warning "Nodes of a bonded contact not tied" with the number of nodes and the largest distance;
 raise the #ui("Tolerance") of the region above it (@contact-regions) or close the gap.
 
 == Exporting the input file <export-inp>
 
 #menu("File", "Export CalculiX Input File ...") writes the same input file as a run, for example
-to run CalculiX by hand or on another computer. Deactivated items appear as comments.
+to run it with CalculiX or with the command line solver `plxs` on another computer. Deactivated items appear as comments.
 
 == Submodels <submodel>
 

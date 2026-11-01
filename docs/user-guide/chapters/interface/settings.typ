@@ -44,56 +44,28 @@ portable Windows version in the folder `Settings` next to `nodalis.exe` (@portab
 
 === Solver
 
-Nodalis computes analyses either with its built-in solver or with CalculiX as a separate
-program. The built-in solver runs inside Nodalis: nothing has to be installed, its progress
-and results stay in the program, and it stops at once when a run is killed. It is being built
-up step by step; a step it cannot compute yet is reported when the analysis runs, with the
-hint to switch to CalculiX for that model. CalculiX remains the default until the built-in
-solver covers every analysis.
+Nodalis computes every analysis with its own solver. It runs inside Nodalis: nothing has to be
+installed, its progress and results stay in the program, and it stops at once when a run is
+killed. A step it cannot compute yet is reported when the analysis runs (@model-check).
 
 #fields(
-  [Solver], [#ui("Nodalis solver") (built in) or #ui("CalculiX"). The rows below that only
-    concern CalculiX (executable, restart files) show for CalculiX.],
-  [Executable], [Path to `ccx`. Empty means the CalculiX shipped with Nodalis (shown greyed
-    in the field), or `ccx` on the system path if Nodalis was built without it. A bare name
-    such as `ccx` is looked up on the system path.],
   [Threads], [Number of threads the solver uses. #ui("Automatic") (the default) uses all
-    processor cores. The built-in solver computes every analysis in one shared pool of these
+    processor cores. The solver computes every analysis in one shared pool of these
     threads: a single large analysis gets all of them, and analyses or Campbell speeds solved
-    at the same time take them as they need them. CalculiX processes cannot share; each gets
-    an equal share of the cores (`OMP_NUM_THREADS`), or the fixed number set here.],
+    at the same time take them as they need them.],
   [Work directory], [Where input and result files of a run are written. Empty means a `Temp`
     folder next to the Nodalis program, or `<system temp>/nodalis` if that folder is not
     writable.],
-  [Restart files], [#ui("Keep the state after each step") (default on): CalculiX writes the
-    state after each step over time, so that solving again after a change starts after the
-    last unchanged step (@restart). Needs disk space next to the results.],
-  [Restart files per project], [Beyond this size (default 4096 MB) the oldest restart files
-    of the project are removed; an analysis without them is solved from the beginning.],
   [Parallel analyses], [How many independent analyses #ui("Update Project") solves at the same
     time (default 2, @update-project). It limits the memory they need together; the threads
     are shared as described above.],
-  [Test solver], [Computes a cantilever under a tip load and under pressure with the chosen
-    solver, and the tip load once more with the iterative equation solver (@equation-solver),
-    and compares the results with beam theory. For CalculiX it also starts the
-    executable and checks whether CalculiX knows every keyword
-    Nodalis writes. Each test shows OK or an error. While the test runs, a window over the
-    application shows the running step and, for the keyword check, how far it has come; the
-    CalculiX test can take a while, particularly on Windows.],
+  [Test solver], [Computes a cantilever under a tip load and under pressure, and the tip load
+    once more with the iterative equation solver (@equation-solver), and compares the results
+    with beam theory. Each test shows OK or an error; while the test runs, a window over the
+    application shows the running step.],
 )
 
-#screenshot("solver-builtin-test.png", [Result of #ui("Test solver") with the built-in solver])
-
-#screenshot("calculix-test-running.png", [While #ui("Test solver") runs for CalculiX])
-
-#screenshot("calculix-test.png", [Result of #ui("Test solver") for CalculiX])
-
-*Keywords.* Older CalculiX versions lack keywords of newer features, for example
-`*COMPLEX FREQUENCY` (complex frequency step) or `*CYCLIC SYMMETRY MODEL`. CalculiX does not stop
-at an unknown keyword: it skips the card with a warning and computes without it. The test
-therefore reads each keyword Nodalis can write on its own and lists the unknown ones by the
-feature that needs them, e.g. `Complex frequency step (*COMPLEX FREQUENCY)`. Every analysis
-checks the keywords of its own input file in the same way (@model-check).
+#screenshot("solver-builtin-test.png", [Result of #ui("Test solver")])
 
 === Gmsh
 

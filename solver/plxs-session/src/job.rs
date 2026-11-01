@@ -79,6 +79,28 @@ pub fn run_job(
     run_job_keeping(input, base, options, progress, &mut None)
 }
 
+/// Runs `<dir>/<name>.inp` as the command line `plxs -i <name>` does, on one thread: the
+/// result files `.frd`, `.dat` and `.sta` go to `dir`. Returns the output lines, as the error
+/// when the job failed or did not finish.
+pub fn run_input_file(dir: &Path, name: &str) -> std::result::Result<Vec<String>, String> {
+    let input_path = dir.join(format!("{name}.inp"));
+    let input = std::fs::read_to_string(&input_path)
+        .map_err(|e| format!("{}: {e}", input_path.display()))?;
+    let options = JobOptions {
+        threads: 1,
+        ..JobOptions::new(dir, name)
+    };
+    let mut lines = Vec::new();
+    let outcome = run_job(&input, Some(&input_path), &options, &mut |event| {
+        lines.extend(crate::format_event(&event));
+    });
+    match outcome {
+        Ok(JobOutcome::Finished) => Ok(lines),
+        Ok(other) => Err(format!("{other:?}\n{}", lines.join("\n"))),
+        Err(e) => Err(format!("{e}\n{}", lines.join("\n"))),
+    }
+}
+
 /// The output model and results of a job: the model with shells and beams expanded as the
 /// `.frd` file shows them, and the results on it.
 pub type KeptResults = (Model, Results);

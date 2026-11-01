@@ -25,7 +25,6 @@ glam.workspace = true
 log.workspace = true
 open.workspace = true
 plx-io.workspace = true
-plx-job.workspace = true
 plx-mesh.workspace = true
 plx-mesher.workspace = true
 plx-model.workspace = true
@@ -39,6 +38,9 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 ureq.workspace = true
+
+[dev-dependencies]
+plxs-session.workspace = true
 
 [lints]
 workspace = true

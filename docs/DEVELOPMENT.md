@@ -39,15 +39,13 @@ To distribute Nodalis, place `libgmsh.so.4.15` or `gmsh-4.15.dll` and `GMSH-LICE
 executable. Alternatively set the path to an existing library under *Tools > Settings > Gmsh*. On
 Linux the Gmsh library also needs `libGLU` and `libXft`.
 
-## CalculiX
+## CalculiX as a reference
 
-The releases ship CalculiX 2.23 with the SPOOLES, PaStiX and ARPACK solvers, built from pinned
-sources by `scripts/build_ccx.sh`: CalculiX from Guido Dhondt's repository with the fixes of
-conda-forge's CalculiX package, SPOOLES with conda-forge's fixes for its multithreaded solver,
-PaStiX4CalculiX with Scotch, ARPACK-NG and a single-threaded OpenBLAS (PaStiX and SPOOLES run
-their own threads). Everything is linked statically into one executable that needs only the C
-library, or nothing beyond Windows itself. The result lands in `target/ccx/<platform>`, where builds
-in `target/<profile>` find it when no executable is set:
+Nodalis solves with its own solver (see below) and ships no CalculiX. CalculiX 2.23 stays the
+reference the solver fixtures were made with: `scripts/build_ccx.sh` builds it from pinned
+sources (CalculiX from Guido Dhondt's repository with the fixes of conda-forge's CalculiX package,
+SPOOLES, PaStiX4CalculiX with Scotch, ARPACK-NG and OpenBLAS, linked statically) into
+`target/ccx/<platform>`:
 
 ```sh
 scripts/build_ccx.sh            # Linux
@@ -55,16 +53,15 @@ scripts/build_ccx.sh windows    # Windows, cross-compiled with MinGW
 ```
 
 The head of the script lists the packages it needs. A first build takes a while (OpenBLAS most of
-it); intermediate files stay in `target/ccx-build/<platform>`, and finished parts are not built
-again. The installer puts the result in `ccx` next to `nodalis.exe`, the AppImage in
-`usr/lib/nodalis/ccx`. Fixes to PaStiX' build scripts are in `installer/ccx/patches`.
+it); intermediate files stay in `target/ccx-build/<platform>`. Fixes to PaStiX' build scripts are
+in `scripts/ccx/patches`.
 
 ## Windows installer
 
 The installer (`nodalis-<version>-setup.exe`, NSIS) is built on Linux: `nodalis.exe` is
 cross-compiled with MinGW, plus the Gmsh DLL, the program icon and the license texts. It installs
 to `C:\Program Files\nodalis`, adds a Start menu entry (desktop icon optional), optionally
-associates `.ndl` projects and registers for uninstall. It includes CalculiX (see above).
+associates `.ndl` projects and registers for uninstall.
 
 ```sh
 sudo apt install gcc-mingw-w64-x86-64 nsis
@@ -73,7 +70,7 @@ scripts/build_windows_installer.sh     # -> target/windows-installer/
 
 A tag `v*` builds the installer, the Linux AppImage (below) and the user guide PDF with the
 *Release* workflow and attaches them to the GitHub release; *Run workflow* produces them as artifacts. Nodalis may not write to
-`C:\Program Files` without administrator rights, so the CalculiX work directory then lives in
+`C:\Program Files` without administrator rights, so the work directory of the analyses then lives in
 `%TEMP%\nodalis`.
 
 ## Linux AppImage
@@ -83,7 +80,7 @@ with the system libraries it needs that not every distribution has (GLU, Xft, li
 desktop entry, the icon and the `.ndl` file type (`installer/linux/`), plus the license texts in
 `usr/share/doc/nodalis`. [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy) collects the
 libraries, [appimagetool](https://github.com/AppImage/appimagetool) packs them; the script downloads
-both (pinned versions) into `target/appimage/tools`. It includes CalculiX (see above).
+both (pinned versions) into `target/appimage/tools`.
 
 ```sh
 sudo apt install libasound2-dev libglu1-mesa libxft2 libxcursor1 libxinerama1 libgomp1 curl file zsync
@@ -98,7 +95,7 @@ releases to be publicly downloadable.
 
 The AppImage only runs with a glibc at least as new as the build system's. The *Release* workflow
 therefore builds it on `ubuntu-22.04` (glibc 2.35) and attaches it to the release next to the Windows
-installer. Inside the AppImage `nodalis` lives in the read-only `usr/bin`, so the CalculiX work
+installer. Inside the AppImage `nodalis` lives in the read-only `usr/bin`, so the work
 directory defaults to `/tmp/nodalis`.
 
 ## User guide
@@ -137,10 +134,10 @@ and MinGW's `windres`, into `nodalis.exe` itself.
 | `plx-core` | units, formulas, selection recipes, shared types |
 | `plx-mesh` | FE mesh: nodes, elements, sets, surfaces, geometry topology |
 | `plx-model` | FE model: materials, sections, steps, boundary conditions, loads, commands |
-| `plx-io` | file formats: CalculiX `.inp`/`.frd`/`.dat` and others |
+| `plx-io` | file formats: CalculiX `.inp`/`.frd`/`.dat` (export and the fixture corpus) and others |
+| `plx-solve` | running an analysis on the solver in-process, helper processes |
 | `plx-results` | result data model and derived quantities |
 | `plx-mesher` | geometry import and meshing with Gmsh (loaded at run time) |
-| `plx-job` | starting and monitoring CalculiX |
 | `plx-render` | wgpu renderer and camera |
 | `plx-app` | user interface (egui), the `nodalis` executable |
 
@@ -149,7 +146,7 @@ The plan and architecture notes are in [PLANUNG_TECH_STACK.md](PLANUNG_TECH_STAC
 
 ## Nodalis solver (plxs)
 
-`solver/` holds the own solver that is to replace CalculiX (concept in the project folder,
+`solver/` holds the own solver that every analysis runs on (concept in the project folder,
 `KONZEPT_EIGENER_SOLVER.md`): a set of crates with the prefix `plxs-` and the binary `plxs`,
 called like `ccx` (`plxs -i <job>`, `plxs -v`). The interfaces between the crates are in
 [docs/solver/SCHNITTSTELLEN.md](solver/SCHNITTSTELLEN.md), the verification corpus in

@@ -111,6 +111,13 @@ fn read_with(
     let base = path.and_then(|p| p.parent()).map(Path::to_path_buf);
     let lines = lexer::lex(text, &file, base.as_deref()).map_err(|e| vec![e])?;
     let mut reading = reader.read(&lines).map_err(|e| vec![e])?;
+    // `<job>.eig` next to the input: modes of an earlier run, as CalculiX reads them.
+    if let Some(eig) = path
+        .map(|p| p.with_extension("eig"))
+        .filter(|p| p.is_file())
+    {
+        reading.analysis.model.stored_modes_file = Some(eig);
+    }
     let warnings = plxs_core::validate(&mut reading.analysis)?;
     reading.warnings.extend(warnings);
     Ok(reading)

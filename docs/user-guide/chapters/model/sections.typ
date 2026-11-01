@@ -72,7 +72,7 @@ and second moments of area. So:
 - The beams need lines with 2 nodes; mesh the lines linear.
 - An unsymmetric profile such as an angle is written about its principal axes: Nodalis turns
   the normal about each beam by the angle of axis I, so that it bends askew as it should.
-- CalculiX computes Static steps without large deformations (#ui("Nlgeom")) and Frequency steps
+- The solver computes Static steps without large deformations (#ui("Nlgeom")) and Frequency steps
   (from CalculiX 2.23, which Nodalis ships), and the modal and steady state dynamics built on
   them. The model check refuses other steps with "Step not possible with general beam profiles".
 - The shear stiffness is k G A with k the share of the area in the web (a leg of an angle), and

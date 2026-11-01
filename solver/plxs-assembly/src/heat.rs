@@ -38,7 +38,9 @@ impl HeatTable {
     pub fn new(model: &Model, table: &ElementTable) -> Result<Self> {
         let mut material = Vec::with_capacity(table.entries.len());
         let mut temperature_dependent = false;
-        for element in &model.elements {
+        // Continuum elements only: springs and gaps carry no heat.
+        for entry in &table.entries {
+            let element = &model.elements[entry.element as usize];
             let section = element
                 .section
                 .and_then(|s| model.sections.get(s as usize))
@@ -79,8 +81,9 @@ impl HeatTable {
 
     /// Checks that every element has what a heat transfer step needs: a conductivity, and
     /// for transient steps a density and a specific heat.
-    pub fn check(&self, model: &Model, transient: bool) -> Result<()> {
-        for (index, element) in model.elements.iter().enumerate() {
+    pub fn check(&self, model: &Model, table: &ElementTable, transient: bool) -> Result<()> {
+        for (index, entry) in table.entries.iter().enumerate() {
+            let element = &model.elements[entry.element as usize];
             let m = self.material(model, index);
             if m.conductivity.is_none() {
                 return Err(Error::input(

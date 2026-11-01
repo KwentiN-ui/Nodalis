@@ -163,15 +163,18 @@ impl ElementTable {
             let family = element.kind.family();
             if matches!(family, ElementFamily::Spring | ElementFamily::Gap) {
                 let nodes = Self::node_indices(model, element)?;
+                let made = crate::discrete::DiscreteElement::new(model, index as u32, &nodes)?;
+                // A spring on an in-plane DOF of a plane model leaves the out-of-plane DOF
+                // unused; a gap works along its direction.
+                let along_z = match &made.kind {
+                    crate::discrete::DiscreteKind::Gap { direction, .. } => direction[2] != 0.0,
+                    _ => made.dofs.iter().any(|d| d % 3 == 2),
+                };
                 for &n in &nodes {
                     connected[n as usize] = true;
-                    uses_z[n as usize] = true;
+                    uses_z[n as usize] |= along_z;
                 }
-                discrete.push(crate::discrete::DiscreteElement::new(
-                    model,
-                    index as u32,
-                    &nodes,
-                )?);
+                discrete.push(made);
                 entry_of.push(u32::MAX);
                 continue;
             }
