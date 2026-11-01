@@ -133,8 +133,10 @@ use serde::{Deserialize, Serialize};
 /// the geometry's entities, to find them again in changed shapes; format 12 reads as it is,
 /// without them. Format 14 drops the user keywords of the keyword editor; older formats read
 /// without them. Format 15 merges the remote displacement into the displacement, which
-/// chooses how it is written from its selection; older formats are refused.
-pub const PROJECT_FORMAT: u32 = 15;
+/// chooses how it is written from its selection; older formats are refused. Format 16 gives
+/// the equation solver of a step only the choice Direct or Iterative; older formats are
+/// refused.
+pub const PROJECT_FORMAT: u32 = 16;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
