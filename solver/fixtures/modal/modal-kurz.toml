@@ -1,0 +1,7 @@
+name = "modal-kurz"
+area = "modal"
+class = "E"
+stage = "M3"
+features = ["*HEADING", "*NODE", "*ELEMENT", "C3D20R", "*NSET", "*ELSET", "*MATERIAL", "*DENSITY", "*ELASTIC", "*SOLID SECTION", "*AMPLITUDE", "*STEP", "*FREQUENCY", "*BOUNDARY", "*NODE FILE", "*END STEP", "*MODAL DYNAMICS", "*MODAL DAMPING", "*CLOAD", "*DLOAD", "*EL FILE", "*STEADY STATE DYNAMICS"]
+source = "plx-io writer test"
+reference = "ccx 2.21"

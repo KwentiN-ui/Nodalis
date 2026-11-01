@@ -2238,6 +2238,44 @@ fn a_buckle_step_is_written_like_prepomax_does() {
     );
 }
 
+/// Short modal runs that keep the golden files of the solver corpus small: four stored
+/// modes, a few increments of modal dynamics with Rayleigh damping and a coarse harmonic
+/// sweep with bias around the first bending pair, with magnitudes and phases (PU, PHS).
+#[test]
+fn calculix_runs_short_modal_steps() {
+    let damping = ModalDamping::Rayleigh(plx_model::RayleighDamping {
+        alpha: 300.0,
+        beta: 2e-6,
+    });
+    let (mesh, mut model) = modal_cantilever(Some(damping));
+    let node = |variables: &[&str]| FieldOutput::new("NF-Output-1", OutputKind::Node, variables);
+    let element =
+        |variables: &[&str]| FieldOutput::new("EF-Output-1", OutputKind::Element, variables);
+    let StepKind::Frequency(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.num_frequencies = 4;
+    model.steps[0].field_outputs = vec![node(&["U"])];
+    let StepKind::ModalDynamics(settings) = &mut model.steps[1].kind else {
+        unreachable!()
+    };
+    settings.time_period = 1e-4;
+    model.steps[1].field_outputs = vec![node(&["U", "V"]), element(&["S"])];
+    let StepKind::SteadyStateDynamics(settings) = &mut model.steps[2].kind else {
+        unreachable!()
+    };
+    settings.data_points = 3;
+    settings.bias = 2.0;
+    model.steps[2].field_outputs = vec![node(&["U", "PU"]), element(&["S", "PHS"])];
+    let Some(frd) = run_ccx("modal-kurz", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let count = |step: u32| frd.increments.iter().filter(|i| i.step == step).count();
+    assert_eq!((count(1), count(2)), (4, 4));
+    // 700 Hz, the first bending pair, 900 Hz: two intervals of three points.
+    assert_eq!(count(3), 5);
+}
+
 /// The modal superposition swings the tip like the direct integration does, damped by the
 /// modal damping ratio of 0.1 to about 1.73 times the static deflection; the harmonic
 /// sweep peaks near the first bending mode at about 1 / (2 zeta) = 5 times the static

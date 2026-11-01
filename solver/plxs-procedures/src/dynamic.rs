@@ -78,10 +78,10 @@ impl Scheme {
 }
 
 /// The state of the time integration at the start of an increment.
-struct Motion {
-    u: Vec<f64>,
-    v: Vec<f64>,
-    a: Vec<f64>,
+pub(crate) struct Motion {
+    pub(crate) u: Vec<f64>,
+    pub(crate) v: Vec<f64>,
+    pub(crate) a: Vec<f64>,
 }
 
 /// Values given per node (or node set) and DOF, as `*INITIAL CONDITIONS` lists them.
@@ -107,7 +107,7 @@ fn initial_values(model: &Model, table: &ElementTable, entries: &[(NodeRef, u8, 
 }
 
 /// The linear combination `Σ cₖ xₖ` of vectors of length `n`.
-fn combine(terms: &[(f64, &[f64])], n: usize) -> Vec<f64> {
+pub(crate) fn combine(terms: &[(f64, &[f64])], n: usize) -> Vec<f64> {
     let mut out = vec![0.0; n];
     for (c, x) in terms {
         if *c == 0.0 {
@@ -120,7 +120,7 @@ fn combine(terms: &[(f64, &[f64])], n: usize) -> Vec<f64> {
     out
 }
 
-fn multiply(m: &SparseMatrix, x: &[f64]) -> Vec<f64> {
+pub(crate) fn multiply(m: &SparseMatrix, x: &[f64]) -> Vec<f64> {
     let mut y = vec![0.0; x.len()];
     m.multiply(x, &mut y);
     y
@@ -647,7 +647,7 @@ fn numerical(e: Error, step: u32, increment: u32) -> Error {
 /// Appends the fields of a dynamic increment: those of a static increment plus `VELO`
 /// after `DISP`, as CalculiX orders them, and `ENER` on top of the `carried` nodal energy.
 #[allow(clippy::too_many_arguments)]
-fn write_increment(
+pub(crate) fn write_increment(
     ctx: &mut ProcedureContext<'_>,
     step: &Step,
     increment: u32,

@@ -144,6 +144,10 @@ pub enum EigenTable {
     TotalEffectiveMass,
     /// Rows `(mode, [factor])`.
     BucklingFactors,
+    /// A complex frequency step: rows `(mode, [omega, frequency, imaginary part])`.
+    ComplexEigenvalues,
+    /// Rows `(mode, [+1 forward or −1 backward])` and a row `(0, [axis x, y, z])`.
+    TurningDirection,
 }
 
 impl EigenTable {
@@ -152,6 +156,8 @@ impl EigenTable {
     pub const EFFECTIVE_MODAL_MASS: &'static str = "EFFECTIVE MODAL MASS";
     pub const TOTAL_EFFECTIVE_MASS: &'static str = "TOTAL EFFECTIVE MASS";
     pub const BUCKLING: &'static str = "BUCKLING FACTOR OUTPUT";
+    pub const COMPLEX_EIGENVALUES: &'static str = "COMPLEX EIGENVALUE OUTPUT";
+    pub const TURNING_DIRECTION: &'static str = "EIGENMODE TURNING DIRECTION";
 
     pub fn of(block: &HistoryBlock) -> Option<EigenTable> {
         if !block.set.is_empty() {
@@ -163,6 +169,8 @@ impl EigenTable {
             Self::EFFECTIVE_MODAL_MASS => EigenTable::EffectiveModalMass,
             Self::TOTAL_EFFECTIVE_MASS => EigenTable::TotalEffectiveMass,
             Self::BUCKLING => EigenTable::BucklingFactors,
+            Self::COMPLEX_EIGENVALUES => EigenTable::ComplexEigenvalues,
+            Self::TURNING_DIRECTION => EigenTable::TurningDirection,
             _ => return None,
         })
     }
@@ -174,6 +182,8 @@ impl EigenTable {
             EigenTable::EffectiveModalMass => "E F F E C T I V E   M O D A L   M A S S",
             EigenTable::TotalEffectiveMass => "T O T A L   E F F E C T I V E   M A S S",
             EigenTable::BucklingFactors => "B U C K L I N G   F A C T O R   O U T P U T",
+            EigenTable::ComplexEigenvalues => "E I G E N V A L U E   O U T P U T",
+            EigenTable::TurningDirection => "E I G E N M O D E   T U R N I N G   D I R E C T I O N",
         }
     }
 }
@@ -207,6 +217,42 @@ fn write_eigen_table(
             writeln!(out, " MODE NO       BUCKLING")?;
             writeln!(out, "                FACTOR")?;
         }
+        EigenTable::ComplexEigenvalues => {
+            writeln!(
+                out,
+                " MODE NO                     FREQUENCY                   "
+            )?;
+            writeln!(
+                out,
+                "                      REAL PART         IMAGINARY PART"
+            )?;
+            writeln!(out, "             (RAD/TIME)   (CYCLES/TIME)   (RAD/TIME)")?;
+        }
+        EigenTable::TurningDirection => {
+            let axis = block
+                .rows
+                .iter()
+                .find(|r| r.0 == 0)
+                .map(|r| r.1.clone())
+                .unwrap_or_default();
+            write!(out, "    Axis reference direction:")?;
+            for v in &axis {
+                write!(out, "{:>12}", fortran_e10(*v))?;
+            }
+            writeln!(out)?;
+            writeln!(out)?;
+            writeln!(out, " MODE NO     TURNING DIRECTION (F=FORWARD,B=BACKWARD)")?;
+            writeln!(out)?;
+            for (id, values) in block.rows.iter().filter(|r| r.0 != 0) {
+                let direction = if values.first().copied().unwrap_or(1.0) >= 0.0 {
+                    'F'
+                } else {
+                    'B'
+                };
+                writeln!(out, "{id:>7}          {direction}")?;
+            }
+            return Ok(());
+        }
         _ => writeln!(out, "{RIGID_COLUMNS}")?,
     }
     writeln!(out)?;
@@ -226,4 +272,18 @@ fn write_eigen_table(
         writeln!(out)?;
     }
     Ok(())
+}
+
+/// `0.1000E+01`: the short layout of the axis in the turning direction table.
+fn fortran_e10(value: f64) -> String {
+    if value == 0.0 || !value.is_finite() {
+        return "0.0000E+00".to_string();
+    }
+    let text = format!("{:.3E}", value.abs());
+    let (mantissa, exponent) = text.split_once('E').unwrap();
+    let exponent: i32 = exponent.parse::<i32>().unwrap() + 1;
+    let digits: String = mantissa.chars().filter(|c| c.is_ascii_digit()).collect();
+    let sign = if value < 0.0 { "-" } else { "" };
+    let exp_sign = if exponent < 0 { "-" } else { "+" };
+    format!("{sign}0.{digits}E{exp_sign}{:02}", exponent.abs())
 }

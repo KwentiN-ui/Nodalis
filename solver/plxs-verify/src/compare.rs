@@ -337,11 +337,20 @@ pub fn compare_frd_with(
             i = end;
             continue;
         }
+        if r.kind == AnalysisKind::ComplexFrequency {
+            compare_complex_mode(&mut c, &label, r, k, tolerance * MODE_SHAPE_FACTOR);
+            i += 1;
+            continue;
+        }
         for (rf, kf) in r_fields.iter().zip(&k_fields) {
             // The stress error estimator is a CalculiX-internal heuristic (its numbers do
             // not follow the manual's description); only its presence is compared, see
             // docs/solver/SCHNITTSTELLEN.md.
             if rf.name == "ERROR" || undetermined.contains(&rf.name) {
+                continue;
+            }
+            if matches!(rf.name.as_str(), "PDISP" | "PSTRESS") {
+                compare_magnitude_phase(&mut c, &label, rf, kf, tolerance);
                 continue;
             }
             let to_f64 = |v: &[f32]| -> Vec<f64> { v.iter().map(|&x| f64::from(x)).collect() };
@@ -373,6 +382,158 @@ pub fn compare_frd_with(
         i += 1;
     }
     c
+}
+
+/// A complex mode is defined up to a complex factor, and where it comes from a degenerate
+/// pair of real modes its phase depends on the basis the eigensolver picked for the pair.
+/// The modes are compared as complex vectors from `PDISP` (magnitude and phase) after the
+/// best unit phase factor; `DISP` (the real part) against the real part of the rotated
+/// candidate. Stresses and strains are real parts of a phase the candidate does not write
+/// out and are not compared (docs/solver/SCHNITTSTELLEN.md, M3 T14).
+fn compare_complex_mode(
+    c: &mut Comparison,
+    label: &str,
+    reference: &Increment,
+    candidate: &Increment,
+    tolerance: f64,
+) {
+    let complex = |inc: &Increment| -> Option<Vec<(f64, f64)>> {
+        let field = inc.field("PDISP")?;
+        let mut out = Vec::new();
+        let mags: Vec<Vec<f64>> = ["MAG1", "MAG2", "MAG3"]
+            .iter()
+            .map(|n| field.component(n).map(|c| to_f64(&c.values)))
+            .collect::<Option<_>>()?;
+        let phases: Vec<Vec<f64>> = ["PHA1", "PHA2", "PHA3"]
+            .iter()
+            .map(|n| field.component(n).map(|c| to_f64(&c.values)))
+            .collect::<Option<_>>()?;
+        for node in 0..mags[0].len() {
+            for k in 0..3 {
+                let (m, p) = (mags[k][node], phases[k][node].to_radians());
+                out.push((m * p.cos(), m * p.sin()));
+            }
+        }
+        Some(out)
+    };
+    let (Some(xr), Some(xc)) = (complex(reference), complex(candidate)) else {
+        if reference.field("PDISP").is_some() {
+            c.fail(format!("{label}: PDISP missing in the candidate"));
+        }
+        return;
+    };
+    if xr.len() != xc.len() {
+        c.fail(format!("{label}: PDISP of different length"));
+        return;
+    }
+    // s = Σ conj(xc) xr / |Σ conj(xc) xr|.
+    let (mut sr, mut si) = (0.0, 0.0);
+    for (&(a, b), &(p, q)) in xc.iter().zip(&xr) {
+        sr += a * p + b * q;
+        si += a * q - b * p;
+    }
+    let norm = sr.hypot(si);
+    let (sr, si) = if norm > 0.0 {
+        (sr / norm, si / norm)
+    } else {
+        (1.0, 0.0)
+    };
+    let rotated: Vec<(f64, f64)> = xc
+        .iter()
+        .map(|&(a, b)| (a * sr - b * si, a * si + b * sr))
+        .collect();
+    let floor = xr.iter().map(|(a, b)| a.hypot(*b)).fold(0.0, f64::max);
+    let flat = |v: &[(f64, f64)], part: usize| -> Vec<f64> {
+        v.iter()
+            .map(|p| if part == 0 { p.0 } else { p.1 })
+            .collect()
+    };
+    c.values(
+        &format!("{label}: PDISP (real part after the phase factor)"),
+        &flat(&xr, 0),
+        &flat(&rotated, 0),
+        tolerance,
+        floor,
+    );
+    c.values(
+        &format!("{label}: PDISP (imaginary part after the phase factor)"),
+        &flat(&xr, 1),
+        &flat(&rotated, 1),
+        tolerance,
+        floor,
+    );
+    if let Some(disp) = reference.field("DISP") {
+        let values: Option<Vec<Vec<f64>>> = ["D1", "D2", "D3"]
+            .iter()
+            .map(|n| disp.component(n).map(|c| to_f64(&c.values)))
+            .collect();
+        if let Some(values) = values {
+            let reference_re: Vec<f64> = (0..values[0].len())
+                .flat_map(|node| (0..3).map(move |k| (node, k)))
+                .map(|(node, k)| values[k][node])
+                .collect();
+            c.values(
+                &format!("{label}: DISP (real part of the rotated candidate)"),
+                &reference_re,
+                &flat(&rotated, 0),
+                tolerance,
+                floor,
+            );
+        }
+    }
+}
+
+/// Magnitude and phase fields (`PDISP`, `PSTRESS`) as complex numbers: the phase of a
+/// component that is zero up to round-off is arbitrary in any solver, so components are
+/// compared as `MAG·e^{i PHA}` relative to the largest magnitude.
+fn compare_magnitude_phase(
+    c: &mut Comparison,
+    label: &str,
+    reference: &plx_results::Field,
+    candidate: &plx_results::Field,
+    tolerance: f64,
+) {
+    let parts = |f: &plx_results::Field| -> Vec<Vec<f64>> {
+        f.components
+            .iter()
+            .filter(|c| !c.derived)
+            .map(|c| to_f64(&c.values))
+            .collect()
+    };
+    let (r, k) = (parts(reference), parts(candidate));
+    if r.len() != k.len() || r.len() % 2 != 0 {
+        c.fail(format!("{label}: {} has other components", reference.name));
+        return;
+    }
+    let half = r.len() / 2;
+    let complex = |p: &[Vec<f64>], j: usize, part: usize| -> Vec<f64> {
+        p[j].iter()
+            .zip(&p[half + j])
+            .map(|(m, a)| {
+                let a = a.to_radians();
+                if part == 0 { m * a.cos() } else { m * a.sin() }
+            })
+            .collect()
+    };
+    let floor = r[..half]
+        .iter()
+        .flat_map(|v| v.iter().copied())
+        .fold(0.0, f64::max);
+    for j in 0..half {
+        for (part, what) in [(0, "real"), (1, "imaginary")] {
+            c.values(
+                &format!(
+                    "{label}: {} component {} ({what} part)",
+                    reference.name,
+                    j + 1
+                ),
+                &complex(&r, j, part),
+                &complex(&k, j, part),
+                tolerance,
+                floor,
+            );
+        }
+    }
 }
 
 /// Compares the data sets of a sensitivity step: one set, or the sets of a cluster of
