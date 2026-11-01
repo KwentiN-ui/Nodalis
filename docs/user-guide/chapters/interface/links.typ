@@ -198,7 +198,7 @@ node).
   When the source is solved again, the analyses that use its results are solved after it. A
   source whose results are out of date is not solved again on its own; its block shows the
   circular arrow, and #ui("Update Project") brings both up to date.
-- Before the run, PrePoLix copies the result files it needs next to the input file, because
+- Before the run, Nodalis copies the result files it needs next to the input file, because
   CalculiX reads them from there.
 - #ui("Unlink") takes back what the link set: the defined field, the eigenmodes or the initial
   temperatures.
@@ -208,7 +208,7 @@ node).
 CalculiX solves the steps of a run one after the other, each starting from the state the step
 before it left. A *state link* lets an analysis take that state from a step of another analysis
 and continue with steps of its own, as if they stood behind that step in one input file. Where
-Ansys Workbench links a static analysis to a pre-stressed modal analysis, PrePoLix links any
+Ansys Workbench links a static analysis to a pre-stressed modal analysis, Nodalis links any
 step to any following steps: a load history that branches after a pre-load into several load
 cases, a frequency step after a static step, or a modal dynamics step after the frequency step
 of another analysis.
@@ -255,7 +255,7 @@ results of the target contain all steps, those of the source and its own, as if 
 go.
 
 - When the source has no results yet, #ui("Solve") and #ui("Update Project") solve it first.
-- CalculiX takes no new sets after reading a state. PrePoLix therefore writes the sets the
+- CalculiX takes no new sets after reading a state. Nodalis therefore writes the sets the
   target's steps need into the input file of the source as well. If they are missing because
   the source was solved before the steps were added, the target is solved in full instead,
   with the source's steps repeated in its own run; the results are the same, it only takes

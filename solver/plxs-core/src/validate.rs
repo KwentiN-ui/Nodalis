@@ -1,7 +1,7 @@
 //! Validation of an analysis: every reference (set, surface, material, interaction,
 //! amplitude, node, element) points at something defined, every element has a section, and
 //! the sections are assigned to the elements. The reader calls it once the input is read;
-//! PrePoLix will call it on a model it built itself.
+//! Nodalis will call it on a model it built itself.
 
 use std::collections::{BTreeSet, HashSet};
 

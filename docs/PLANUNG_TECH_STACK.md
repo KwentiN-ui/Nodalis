@@ -1,7 +1,7 @@
-# prepolix – Analyse, Tech-Stack und Roadmap
+# nodalis – Analyse, Tech-Stack und Roadmap
 
 Stand: 2026-10-08 · Grundlage: PrePoMax `master` von gitlab.com/MatejB/PrePoMax (Commit `fb96810`, 2026-10-06).
-Deine lokale Checkout-Version kann davon leicht abweichen. Das prepolix-Repo enthielt zu Beginn nur ein `cargo init`-Gerüst.
+Deine lokale Checkout-Version kann davon leicht abweichen. Das nodalis-Repo enthielt zu Beginn nur ein `cargo init`-Gerüst.
 
 ---
 
@@ -26,7 +26,7 @@ Insgesamt rund **400 000 Zeilen C#** (.NET Framework 4.8, WinForms). Ein vollst�
 ### Architektur, die wir übernehmen sollten
 
 1. **Schichtung** `Globals → Mesh → Model → Results`, Solver-Job separat, GUI ganz oben. Das passt eins zu eins auf einen Cargo-Workspace.
-2. **Command-Pattern als Rückgrat.** Jede Benutzeraktion ist ein serialisierbares Command (`CAddLoad` usw.). Die History wird gespeichert, und *Edit → Regenerate* spielt die gesamte Sitzung von vorn ab (z. B. nach Geometrieänderung). Selektionen werden deshalb nicht als ID-Listen gespeichert, sondern als Rezept (`SelectionNodeMouse`, `SelectionNodeIds`, `SelectionNodeInvert`), das nach einem Neuvernetzen erneut aufgelöst wird. **Das ist die wichtigste Designentscheidung von PrePoMax und muss in prepolix von Anfang an drin sein.**
+2. **Command-Pattern als Rückgrat.** Jede Benutzeraktion ist ein serialisierbares Command (`CAddLoad` usw.). Die History wird gespeichert, und *Edit → Regenerate* spielt die gesamte Sitzung von vorn ab (z. B. nach Geometrieänderung). Selektionen werden deshalb nicht als ID-Listen gespeichert, sondern als Rezept (`SelectionNodeMouse`, `SelectionNodeIds`, `SelectionNodeInvert`), das nach einem Neuvernetzen erneut aufgelöst wird. **Das ist die wichtigste Designentscheidung von PrePoMax und muss in nodalis von Anfang an drin sein.**
 3. **Property-Wrapper** (`ViewCLoad` usw.): Jedes editierbare Objekt hat eine Ansichtsschicht mit Kategorie, Anzeigename, Einheit und Beschreibung. In Rust lässt sich das mit einem Trait plus Derive-Makro schlanker lösen.
 4. **Eingabewerte als Formeln mit Einheit** (`EquationString`), nicht als nackte `f64`.
 
@@ -58,7 +58,7 @@ Insgesamt rund **400 000 Zeilen C#** (.NET Framework 4.8, WinForms). Ein vollst�
 ### Cargo-Workspace (spiegelt die PrePoMax-Schichtung)
 
 ```
-prepolix/
+nodalis/
 ├─ crates/
 │  ├─ plx-core      Einheiten, Formeln, Selektions-Rezepte, IDs, Fehler
 │  ├─ plx-mesh      Knoten, Elementtypen, Sets, Surfaces, Skin-Extraktion, Geometrie-Topologie
@@ -109,7 +109,7 @@ PrePoMax trennt Geometriekern (OCC im NetGenMesher) und Mesher. Für den Anfang 
 - Gmsh enthält OpenCASCADE und importiert STEP/IGES/BREP.
 - Es liefert Topologie (Volumen, Flächen, Kanten, Punkte mit stabilen Tags), die wir für die Geometrie-Selektion im Viewport brauchen, und eine Tessellierung für die Anzeige.
 - Es vernetzt Tet (1. und 2. Ordnung, inklusive Netgen-Optimierer), Hex/Transfinite, Extrusion; lokale Netzgrößen pro Fläche/Kante.
-- Gmsh bietet ein offizielles SDK (`libgmsh.so` / `gmsh.dll` + `gmshc.h`) für Linux und Windows. Wir schreiben einen dünnen eigenen FFI-Layer über die stabile C-API (bestehende Crates wie `gmsh-sys` sind veraltet) und laden die Bibliothek zur Laufzeit (`libloading`), damit prepolix auch ohne Gmsh startet.
+- Gmsh bietet ein offizielles SDK (`libgmsh.so` / `gmsh.dll` + `gmshc.h`) für Linux und Windows. Wir schreiben einen dünnen eigenen FFI-Layer über die stabile C-API (bestehende Crates wie `gmsh-sys` sind veraltet) und laden die Bibliothek zur Laufzeit (`libloading`), damit nodalis auch ohne Gmsh startet.
 - Umgesetzt (Oktober 2026): Die offizielle Bibliothek kommt aus dem PyPI-Paket von Gmsh (`scripts/fetch_gmsh.py`, Linux und Windows, OCC/Netgen/TetGen eingebaut) und wird neben der Binary ausgeliefert. Lizenzen: Gmsh GPL-2.0-or-later mit OCC-Ausnahme, OCCT LGPL-2.1 – beides verträglich mit GPL-3.0. `opencascade-rs` ist für Import und Vernetzung nicht nötig und würde OCCT aus den Quellen bauen; es bleibt eine Option für spätere CAD-Operationen.
 - Lizenz: GPL-2.0-or-later mit Ausnahme, passt zu einem GPL-3-Projekt.
 
@@ -143,7 +143,7 @@ Mmg (Remeshing) lässt sich wie in PrePoMax als externes Programm einbinden, sob
 
 ### Lizenz
 
-PrePoMax ist GPL-3.0. Sobald wir Code oder nicht-triviale Logik portieren (z. B. `.frd`-Reader, Transfinite-Mapping), ist prepolix ein abgeleitetes Werk und muss ebenfalls **GPL-3.0** sein. Das ist für ein FOSS-Hobbyprojekt unproblematisch und passt zu Gmsh und Netgen. Eine freizügigere Lizenz (MIT/Apache) ginge nur mit strikt eigenständiger Neuimplementierung.
+PrePoMax ist GPL-3.0. Sobald wir Code oder nicht-triviale Logik portieren (z. B. `.frd`-Reader, Transfinite-Mapping), ist nodalis ein abgeleitetes Werk und muss ebenfalls **GPL-3.0** sein. Das ist für ein FOSS-Hobbyprojekt unproblematisch und passt zu Gmsh und Netgen. Eine freizügigere Lizenz (MIT/Apache) ginge nur mit strikt eigenständiger Neuimplementierung.
 
 ---
 
@@ -199,5 +199,5 @@ Strategischer Vorschlag: **mit dem Postprozessor beginnen.** Ein `.frd`-Viewer i
 | 3 | 3D-Rendering | eigener wgpu-Renderer |
 | 4 | CAD/Mesher für den Start | Gmsh über die C-API |
 | 5 | Reihenfolge | Postprozessor zuerst (M1/M2), dann Setup |
-| 6 | GitHub-Repo und CI | Repo für prepolix anlegen und hier im Projekt verbinden, dann CI mit Linux+Windows |
+| 6 | GitHub-Repo und CI | Repo für nodalis anlegen und hier im Projekt verbinden, dann CI mit Linux+Windows |
 | 7 | Mindest-Toolchain | aktuelles stabiles Rust, kein Nightly |

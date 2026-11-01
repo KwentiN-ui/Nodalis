@@ -33,7 +33,7 @@ date, changing the meshing settings of a part makes its mesh out of date, and re
 planes change nothing that CalculiX needs.
 
 The input file is named after the analysis, for example `Cantilever.inp`. Old result files of
-the analysis in its folder are deleted before CalculiX starts. PrePoLix refuses to run a model
+the analysis in its folder are deleted before CalculiX starts. Nodalis refuses to run a model
 without mesh, without step or with all steps deactivated, and it stops if the input file cannot
 be written (for example because a region is empty).
 
@@ -72,7 +72,7 @@ Once there are more, the oldest lines go and the top row tells how many, for exa
 #screenshot("monitor-long-output.png", [The end of a long run, its first lines dropped])
 
 The status at the end is #ui("completed"), #ui("finished with errors, results available"),
-#ui("failed") or #ui("killed"). If CalculiX failed, PrePoLix looks for known error messages
+#ui("failed") or #ui("killed"). If CalculiX failed, Nodalis looks for known error messages
 in the output and adds a line "Possible cause: ..." with a remedy, for example for distorted
 elements, missing material data, rigid body motion or missing convergence.
 
@@ -80,7 +80,7 @@ elements, missing material data, rigid body motion or missing convergence.
 
 CalculiX can write the state of the model after each step over time (static, dynamic, heat
 transfer, coupled and uncoupled temperature-displacement, visco) into a restart file, and
-PrePoLix asks it to (`*RESTART, WRITE` in every such step). When you change a later step of an
+Nodalis asks it to (`*RESTART, WRITE` in every such step). When you change a later step of an
 analysis and solve again, CalculiX does not start from the beginning: it reads the state after
 the last unchanged step from the earlier run and solves only the rest. The monitor tells which
 of the two happened:
@@ -121,8 +121,8 @@ analysis keeps.
 
 What is kept depends on the solver (@settings):
 
-- The built-in *PrePoLix solver* hands its results to PrePoLix in memory. They are kept as one
-  binary results file (`.plxr`, written next to the input file in the work directory) that
+- The built-in *Nodalis solver* hands its results to Nodalis in memory. They are kept as one
+  binary results file (`.ndlr`, written next to the input file in the work directory) that
   holds the mesh the results are on and every field and history output of the run. Opening
   them reads the numbers directly, without a text file to parse, and with their full
   precision. No `.frd` or `.dat` file is written.
@@ -130,20 +130,20 @@ What is kept depends on the solver (@settings):
   steps, the eigenmodes (`.eig`); these files are kept, at about a third of their size (a
   236 MB result file adds about 100 MB).
 
-When an analysis with kept results is opened, PrePoLix writes them to `Kept_Results` in the
+When an analysis with kept results is opened, Nodalis writes them to `Kept_Results` in the
 folder of the analysis and opens the results on the #ui("Results") tab. The project schematic
 and the toolbar of the analysis window show whether they are still up to date. Measure blocks,
-the optimizer and the Campbell diagram take the results of the PrePoLix solver straight from
+the optimizer and the Campbell diagram take the results of the Nodalis solver straight from
 memory as well. Where a CalculiX file is still needed, for example the global results of a
-submodel or the temperatures a step takes from a heat transfer analysis, PrePoLix writes the
+submodel or the temperatures a step takes from a heat transfer analysis, Nodalis writes the
 `.frd` file from the kept results when it needs it.
 
-Results of the PrePoLix solver kept by an earlier version of PrePoLix in another format are not
+Results of the Nodalis solver kept by an earlier version of Nodalis in another format are not
 read: solve the analysis again.
 
 #menu("File", "Export CalculiX Results (.frd) ...") writes the current results as CalculiX's
 files, the `.frd` file and, if the run has history output, the `.dat` file next to it, for
-CalculiX GraphiX, PrePoMax or other programs that read them. Results of the PrePoLix solver are
+CalculiX GraphiX, PrePoMax or other programs that read them. Results of the Nodalis solver are
 converted, those of CalculiX copied.
 
 #screenshot("export-calculix-results.png", [File menu of an analysis window with open results:
@@ -154,7 +154,7 @@ field and history outputs, transformations, hot spots, the reference points, coo
 and planes of the results, result paths and plane results, and the increment, field and component
 shown. The view comes back too: the camera of the #ui("Results") tab, #menu("View", "Mesh Edges"),
 the deformation and its factor, #ui("Show Undeformed"), the color levels, hidden parts, the
-annotations of the query tool and the plots of result paths. PrePoLix takes all of this from the
+annotations of the query tool and the plots of result paths. Nodalis takes all of this from the
 open result each time the project is saved.
 
 #screenshot("bound-result-restored.png", [Kept results reopened with their symmetry
@@ -174,12 +174,12 @@ from the file.
 
 To send only the meshes and the model definitions, use
 #menu("File", "Save Project Without Results ..."). It saves a copy without the kept results under
-a new name (proposed as `<project name>-without-results.plx`); the open project stays on its own
+a new name (proposed as `<project name>-without-results.ndl`); the open project stays on its own
 file and keeps its results.
 
 == Model check <model-check>
 
-PrePoLix checks the model continuously while you work. Items with a problem get a warning sign in
+Nodalis checks the model continuously while you work. Items with a problem get a warning sign in
 the tree; items with an error and their containers are shown in red. Click the warning sign to see
 what is wrong and how to fix it.
 
@@ -200,12 +200,12 @@ nothing uses.
 
 #screenshot("beam-rotations-partly-held.png", [A beam end that holds only the rotation about Z])
 
-When a run starts, PrePoLix also checks that the configured CalculiX knows every keyword of the
+When a run starts, Nodalis also checks that the configured CalculiX knows every keyword of the
 input file (see #ui("Test CalculiX") in @settings). An unknown keyword, for example of a step
 type that an older CalculiX lacks, appears as error "Keyword unknown to CalculiX" on the
 analysis and in the monitor, with the feature that needs it.
 
-When CalculiX aborts, PrePoLix explains the error messages it knows in the same way, for
+When CalculiX aborts, Nodalis explains the error messages it knows in the same way, for
 example "*RADIATE card was selected but no *PHYSICAL CONSTANTS card encountered" as "Physical
 constants missing"; other messages appear as "CalculiX error" with the text of the monitor.
 
@@ -214,9 +214,9 @@ constants missing"; other messages appear as "CalculiX error" with the text of t
 The checks do not stop a run; their errors are listed at the top of the monitor. Missing
 references do stop it, because the input file cannot be written.
 
-=== Check by the PrePoLix solver <solver-model-check>
+=== Check by the Nodalis solver <solver-model-check>
 
-With the PrePoLix solver (#ui("Solver") under #menu("Tools", "Settings ...") > #ui("Solver"),
+With the Nodalis solver (#ui("Solver") under #menu("Tools", "Settings ...") > #ui("Solver"),
 @settings), #ui("Check Model") in the context menu of the analysis lets the solver check the
 model itself instead of estimating from the geometry. It reads the whole model with its steps
 and factorizes the stiffness matrix once for every set of supports (a check takes about as long
@@ -237,10 +237,10 @@ Free motions in a frequency step are no problem (they are the modes with frequen
 are not reported. The monitor lists the findings with the first node numbers; the warning
 symbols in the tree mark the boundary conditions and the parts.
 
-When a run with the PrePoLix solver stops at a singular matrix, the solver runs the same check
+When a run with the Nodalis solver stops at a singular matrix, the solver runs the same check
 by itself and explains the cause in the monitor and the tree.
 
-#screenshot("solver-model-check.png", [Check Model by the PrePoLix solver: the beam, held in X
+#screenshot("solver-model-check.png", [Check Model by the Nodalis solver: the beam, held in X
   only at its end, can still slide and turn])
 
 === Overlapping constraints <overlapping-constraints>
@@ -249,7 +249,7 @@ Several items of a model are written as constraint equations (MPCs) that make so
 freedom follow others: regions of no separation, rigid bodies, displacements on a point, bolt
 pre-tension cuts, node ties between beams and springs to a surface. CalculiX aborts when a
 boundary condition holds such a dependent degree of freedom ("dependent side of a MPC and a
-SPC") or when two equations depend on it. PrePoLix keeps them apart when it writes the input
+SPC") or when two equations depend on it. Nodalis keeps them apart when it writes the input
 file, so the items can overlap freely, for example a fixed support on a face that also lies in a
 region of no separation.
 
@@ -304,7 +304,7 @@ linked in the schematic (@results-links):
   #screenshot("submodel-global-results.png", [The results of Step-1 of the global analysis
     linked to the Global results row of the submodel])
 + #ui("Solve") the submodel or #ui("Update Project"): the global model is solved first if it has
-  no results yet. PrePoLix copies the global results next to the input file and writes
+  no results yet. Nodalis copies the global results next to the input file and writes
   `*SUBMODEL` and `*BOUNDARY, SUBMODEL`.
 
 In the #ui("Results") tab of the submodel, #ui("Show Global Contours") in the results tool bar,

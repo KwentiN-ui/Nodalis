@@ -161,7 +161,7 @@ SUMMARY OF JOB INFORMATION
     assert_eq!(finished_steps(sta, 1, false), [(2, 2.0)]);
 }
 
-/// Runs the job as PrePoLix does: from a state if the index has one, recording the run.
+/// Runs the job as Nodalis does: from a state if the index has one, recording the run.
 fn run(dir: &Path, input: &str) -> (Plan, String) {
     run_after(dir, input, &[])
 }

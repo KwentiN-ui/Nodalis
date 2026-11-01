@@ -1,6 +1,6 @@
 [package]
 name = "plxs-verify"
-description = "PrePoLix solver: verification harness against CalculiX golden files"
+description = "Nodalis solver: verification harness against CalculiX golden files"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

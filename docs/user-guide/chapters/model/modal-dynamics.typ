@@ -19,7 +19,7 @@ check (@model-check) reports a missing one as "No stored eigenmodes". Create the
     within #ui("Relative error") (`STEADY STATE`), instead of over the time period.],
   [Time increment], [Fixed increment of the response (default 0.1).],
   [Time period], [Length of the step (default 1).],
-  [Max. increments], [Largest number of increments (default 100). PrePoLix raises it so that the
+  [Max. increments], [Largest number of increments (default 100). Nodalis raises it so that the
     time period fits.],
 )
 

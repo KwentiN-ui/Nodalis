@@ -79,7 +79,7 @@ pub fn write_history_with_velocities(
             values: m.values.chunks(m.per_point).map(|p| p[0]).collect(),
         });
     let energy = crate::fields::internal_energy_density(stresses, strains);
-    // The PrePoLix writer puts `*EL PRINT` before `*NODE PRINT`, and CalculiX prints the
+    // The Nodalis writer puts `*EL PRINT` before `*NODE PRINT`, and CalculiX prints the
     // blocks in request order; the element blocks come first here as well.
     for request in &step.outputs.el_print {
         let Some(set) = request.set.as_deref() else {

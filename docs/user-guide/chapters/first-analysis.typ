@@ -12,7 +12,7 @@ end and pulled at the other. Each step links to the chapter with the details.
 + *Import the geometry.* #menu("Geometry", "Import ...") reads the STEP file of the plate. It
   appears as part `SOLID-1` on the #ui("Geometry") tab (@geometry-import).
 + *Mesh it.* #menu("Mesh", "Default Mesh Parameters ...") sets the element size, #ui("Mesh All
-  Parts") creates quadratic tetrahedra. PrePoLix switches to the #ui("FE Model") tab
+  Parts") creates quadratic tetrahedra. Nodalis switches to the #ui("FE Model") tab
   (@meshing).
 + *Material and section.* #menu("Model", "Create Material ...") with density, Young's modulus
   210000 MPa and Poisson's ratio 0.3, or copy steel from the material library (@materials). Then
@@ -28,7 +28,7 @@ end and pulled at the other. Each step links to the chapter with the details.
 + *Look at the results.* The results open when the run is done; otherwise
   #ui("Results") in the #ui("Analysis") tab opens them. Select #ui("STRESS") >
   #ui("MISES") in the tree to see the von Mises stress around the hole (@results).
-+ *Save the project.* #menu("File", "Save Project") writes a `.plx` file with all analyses of
++ *Save the project.* #menu("File", "Save Project") writes a `.ndl` file with all analyses of
   the project: geometry, mesh, model and results. The project schematic now shows the analysis
   as up to date; change a load, and its solution turns out of date until you solve again.
 

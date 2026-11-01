@@ -297,7 +297,7 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
             rows.push((
                 "Computed",
                 if component.derived {
-                    "yes, by PrePoLix"
+                    "yes, by Nodalis"
                 } else {
                     "no, from the file"
                 }

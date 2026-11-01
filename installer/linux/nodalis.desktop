@@ -1,12 +1,12 @@
 [Desktop Entry]
 Type=Application
-Name=PrePoLix
+Name=Nodalis
 GenericName=FEM Pre- and Postprocessor
 Comment=Set up and evaluate CalculiX analyses
-Exec=prepolix %F
-Icon=prepolix
+Exec=nodalis %F
+Icon=nodalis
 Terminal=false
 Categories=Science;Engineering;
-MimeType=application/x-prepolix-project;
+MimeType=application/x-nodalis-project;
 Keywords=FEM;FEA;CalculiX;Mesh;Gmsh;
-StartupWMClass=prepolix
+StartupWMClass=nodalis

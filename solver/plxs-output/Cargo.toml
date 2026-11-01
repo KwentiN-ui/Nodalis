@@ -1,6 +1,6 @@
 [package]
 name = "plxs-output"
-description = "PrePoLix solver: .frd/.dat/.sta/.cvg writers"
+description = "Nodalis solver: .frd/.dat/.sta/.cvg writers"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

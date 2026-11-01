@@ -790,7 +790,7 @@ fn line_bytes(bytes: &[u8], at: usize) -> &[u8] {
     rest[..end].strip_suffix(b"\r").unwrap_or(&rest[..end])
 }
 
-/// FNV-1a: fingerprints that stay the same from one version of prepolix to the next, as the
+/// FNV-1a: fingerprints that stay the same from one version of nodalis to the next, as the
 /// index of the states is kept on disk.
 struct Fnv(u64);
 

@@ -3,7 +3,7 @@
 == Campbell diagram <campbell>
 
 A Campbell diagram shows the eigenfrequencies of a rotor over its speed of rotation. CalculiX
-computes the whirling modes for one speed per run, so PrePoLix runs the analysis once per speed
+computes the whirling modes for one speed per run, so Nodalis runs the analysis once per speed
 and collects the results.
 
 The sweep lives in a #ui("Campbell") block of the project schematic (@project-window), which

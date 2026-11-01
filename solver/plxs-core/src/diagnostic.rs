@@ -1,5 +1,5 @@
 //! What the model check of the solver finds: typed, with the nodes and the step it concerns,
-//! so that PrePoLix can point at the parts in its tree instead of reading the solver's text.
+//! so that Nodalis can point at the parts in its tree instead of reading the solver's text.
 
 use serde::{Deserialize, Serialize};
 

@@ -1,10 +1,10 @@
-//! Self test of the solver from the settings: the built-in PrePoLix solver, or the CalculiX
+//! Self test of the solver from the settings: the built-in Nodalis solver, or the CalculiX
 //! executable, the shipped one or the user's own. Checks that the solver runs and computes
 //! correct results.
 //!
 //! The test reads the version, solves small cantilevers through the same path as a real
 //! analysis (model, input file writer, run, results reader), comparing with beam theory, and
-//! for CalculiX checks that the executable knows every keyword PrePoLix writes.
+//! for CalculiX checks that the executable knows every keyword Nodalis writes.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -40,7 +40,7 @@ pub struct CheckResult {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Report {
     pub checks: Vec<CheckResult>,
-    /// Result of [`known_keywords`] for all keywords PrePoLix writes, if CalculiX started.
+    /// Result of [`known_keywords`] for all keywords Nodalis writes, if CalculiX started.
     pub keywords: Option<BTreeMap<String, bool>>,
     /// What [`version_text`] read, if CalculiX started.
     pub version: Option<String>,
@@ -77,10 +77,10 @@ pub fn run(
     set_step(progress, "Starting the solver", None);
     let version = match engine {
         Engine::CalculiX => version(&solver.executable),
-        Engine::PrePoLix => check(
+        Engine::Nodalis => check(
             "Start solver",
             true,
-            format!("PrePoLix solver {}, built in", plx_solve::VERSION),
+            format!("Nodalis solver {}, built in", plx_solve::VERSION),
         ),
     };
     let started = version.passed;
@@ -118,7 +118,7 @@ pub fn run(
         keywords,
         version: match engine {
             Engine::CalculiX => started.then(|| version_text(&solver.executable)).flatten(),
-            Engine::PrePoLix => Some(plx_solve::VERSION.to_owned()),
+            Engine::Nodalis => Some(plx_solve::VERSION.to_owned()),
         },
     }
 }
@@ -143,7 +143,7 @@ fn keyword_check(known: Option<&BTreeMap<String, bool>>, count: usize) -> CheckR
         return check(
             NAME,
             true,
-            format!("All {count} keywords PrePoLix writes are known"),
+            format!("All {count} keywords Nodalis writes are known"),
         );
     }
     check(
@@ -391,7 +391,7 @@ fn solve(
     mesh: &FeMesh,
     model: &FeModel,
 ) -> Result<FrdImport, String> {
-    let input = plx_io::inp::write_inp(mesh, model, "PrePoLix self-test")
+    let input = plx_io::inp::write_inp(mesh, model, "Nodalis self-test")
         .map_err(|e| format!("Input file not written: {e}"))?;
     let mut job =
         Run::start(engine, solver, dir, name, &input).map_err(|e| format!("Start: {e}"))?;
@@ -451,7 +451,7 @@ fn component_values(frd: &FrdImport, field: &str, component: &str, nodes: &[Node
 }
 
 /// Solves the beam under a tip load with the built-in solver in `dir`, with a history output
-/// of the fixed nodes; returns its results file (`.plxr`).
+/// of the fixed nodes; returns its results file (`.ndlr`).
 #[cfg(test)]
 pub(crate) fn solve_beam_built_in(dir: &Path) -> std::path::PathBuf {
     let mesh = beam_mesh();
@@ -465,7 +465,7 @@ pub(crate) fn solve_beam_built_in(dir: &Path) -> std::path::PathBuf {
         executable: "unused".into(),
         threads: 1,
     };
-    let mut run = Run::start(Engine::PrePoLix, &solver, dir, "Beam", &input).unwrap();
+    let mut run = Run::start(Engine::Nodalis, &solver, dir, "Beam", &input).unwrap();
     assert_eq!(run.wait(), JobStatus::Completed, "{:?}", run.new_output());
     run.results().unwrap()
 }
@@ -668,7 +668,7 @@ mod tests {
             executable: "unused".into(),
             threads: 1,
         };
-        let report = run(Engine::PrePoLix, &solver, &dir, &Default::default());
+        let report = run(Engine::Nodalis, &solver, &dir, &Default::default());
         let _ = std::fs::remove_dir_all(&dir);
         for result in &report.checks {
             eprintln!("{}: {}", result.name, result.message);
@@ -679,7 +679,7 @@ mod tests {
         assert_eq!(report.version.as_deref(), Some(plx_solve::VERSION));
     }
 
-    /// The self test with PrePoLix's own solver as a program (the CalculiX path):
+    /// The self test with Nodalis's own solver as a program (the CalculiX path):
     /// `PLXS=target/debug/plxs cargo test` after `cargo build -p plxs-cli` (skipped when the
     /// variable is not set).
     #[test]

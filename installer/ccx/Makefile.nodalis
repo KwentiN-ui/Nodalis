@@ -1,4 +1,4 @@
-# Builds ccx for PrePoLix, called by scripts/build_ccx.sh in the patched ccx_<VERSION>/src with
+# Builds ccx for Nodalis, called by scripts/build_ccx.sh in the patched ccx_<VERSION>/src with
 # PREFIX (the libraries built before), CC, FC, AR, LDOMP (OpenMP flag for linking, empty when
 # LINK names libgomp.a itself) and LINK (static linking flags).
 #
@@ -28,8 +28,8 @@ LIBS = $(PREFIX)/lib/libpastix.a $(PREFIX)/lib/libpastix_kernels.a $(PREFIX)/lib
 	$(PREFIX)/lib/spoolesMT.a $(PREFIX)/lib/spooles.a \
 	$(PREFIX)/lib/libarpack.a $(PREFIX)/lib/libopenblas.a -lpthread -lm
 
-ccx_$(VERSION)_prepolix: $(OCCXMAIN) ccx_$(VERSION)_prepolix.a
-	$(FC) $(LDOMP) -o $@ $(OCCXMAIN) ccx_$(VERSION)_prepolix.a $(LIBS) $(LINK)
+ccx_$(VERSION)_nodalis: $(OCCXMAIN) ccx_$(VERSION)_nodalis.a
+	$(FC) $(LDOMP) -o $@ $(OCCXMAIN) ccx_$(VERSION)_nodalis.a $(LIBS) $(LINK)
 
-ccx_$(VERSION)_prepolix.a: $(OCCXF) $(OCCXC)
+ccx_$(VERSION)_nodalis.a: $(OCCXF) $(OCCXC)
 	$(AR) r $@ $?

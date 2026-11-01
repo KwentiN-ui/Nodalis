@@ -1,6 +1,6 @@
 [package]
 name = "plxs-elements"
-description = "PrePoLix solver: element formulations, shape functions, integration"
+description = "Nodalis solver: element formulations, shape functions, integration"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

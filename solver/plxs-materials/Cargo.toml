@@ -1,6 +1,6 @@
 [package]
 name = "plxs-materials"
-description = "PrePoLix solver: material laws and their state variables"
+description = "Nodalis solver: material laws and their state variables"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

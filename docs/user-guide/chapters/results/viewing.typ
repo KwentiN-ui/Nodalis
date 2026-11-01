@@ -9,7 +9,7 @@ with #ui("Results") in the monitor, with #menu("Analysis", "Open Results") and w
 with kept results is opened (@bind-result). The `.dat` file of the run is read as well. Result
 files from elsewhere are not opened.
 
-When results are opened, PrePoLix shows the #ui("Results") tab with the last increment.
+When results are opened, Nodalis shows the #ui("Results") tab with the last increment.
 
 #screenshot("results.png", [von Mises stress of a static step])
 
@@ -18,15 +18,15 @@ When results are opened, PrePoLix shows the #ui("Results") tab with the last inc
 / Model: the mesh of the results with its parts and sets, and the features (reference points,
   coordinate systems, planes) used for result evaluation.
 / Field Outputs: the fields of the result file with their components. Click a component to show
-  it. Names follow the CalculiX result file (`U1`, `S11`, ...). PrePoLix adds the displacement magnitude `ALL`,
+  it. Names follow the CalculiX result file (`U1`, `S11`, ...). Nodalis adds the displacement magnitude `ALL`,
   `MISES`, `TRESCA`, the principal stresses and the signed maximum absolute principal stress.
 / History Outputs: values from the `.dat` file and history outputs you create (@history-outputs).
 / Hot Spot Stresses, Paths, Plane Results: evaluations described in the following sections.
 
 Results list the parts of the model they were computed from, as in the #ui("FE Model") tab, also
 when several parts share a section. A `.frd` file itself only groups the elements by material;
-PrePoLix reads the parts from the input file CalculiX ran, the `.inp` file of the same name next
-to the results. Results of an analysis run from PrePoLix always have it. The spring and gap
+Nodalis reads the parts from the input file CalculiX ran, the `.inp` file of the same name next
+to the results. Results of an analysis run from Nodalis always have it. The spring and gap
 elements that constraints become in the input file, such as the gaps of a compression only
 support (@compression-only), are left out of the results: CalculiX would list each gap as a
 material of its own, and they carry no results of their own.

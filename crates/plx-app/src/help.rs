@@ -12,8 +12,8 @@ use std::time::Duration;
 const FILE: &str = "user-guide.html";
 
 /// Where the guide lies relative to the directory of the executable: Windows installer, Linux
-/// AppImage (usr/bin next to usr/share), and target/user-guide for target/<profile>/prepolix.
-const LOCATIONS: [&str; 3] = ["doc", "../share/doc/prepolix", "../user-guide"];
+/// AppImage (usr/bin next to usr/share), and target/user-guide for target/<profile>/nodalis.
+const LOCATIONS: [&str; 3] = ["doc", "../share/doc/nodalis", "../user-guide"];
 
 /// The installed HTML guide, if there is one.
 pub fn local_guide() -> Option<PathBuf> {
@@ -30,7 +30,7 @@ fn find_guide(exe_dir: &Path) -> Option<PathBuf> {
 
 /// The user guide on GitHub Pages (.github/workflows/pages.yml).
 pub fn online_url() -> String {
-    "https://kwentin-ui.github.io/PrePoLix/".to_owned()
+    "https://kwentin-ui.github.io/Nodalis/".to_owned()
 }
 
 /// Opens the guide and returns a line for the output pane.
@@ -124,10 +124,10 @@ mod tests {
 
     #[test]
     fn finds_the_guide_of_each_install_layout() {
-        let root = std::env::temp_dir().join(format!("prepolix-help-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("nodalis-help-{}", std::process::id()));
         for (layout, exe_dir) in [
             ("doc", "."),
-            ("usr/share/doc/prepolix", "usr/bin"),
+            ("usr/share/doc/nodalis", "usr/bin"),
             ("target/user-guide", "target/release"),
         ] {
             let _ = std::fs::remove_dir_all(&root);
@@ -143,12 +143,12 @@ mod tests {
 
     #[test]
     fn online_url_points_to_github_pages() {
-        assert_eq!(online_url(), "https://kwentin-ui.github.io/PrePoLix/");
+        assert_eq!(online_url(), "https://kwentin-ui.github.io/Nodalis/");
     }
 
     #[test]
     fn server_answers_with_the_guide() {
-        let path = std::env::temp_dir().join(format!("prepolix-guide-{}.html", std::process::id()));
+        let path = std::env::temp_dir().join(format!("nodalis-guide-{}.html", std::process::id()));
         std::fs::write(&path, "<h1>Guide</h1>").unwrap();
         let port = serve(&path).unwrap();
         let get = |target: &str| {

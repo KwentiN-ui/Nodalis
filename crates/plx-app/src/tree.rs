@@ -1,5 +1,5 @@
 //! The model tree in PrePoMax's three views Geometry, FE Model and Results, with PrePoMax's
-//! node names. Nodes for features prepolix does not support yet are shown as empty
+//! node names. Nodes for features nodalis does not support yet are shown as empty
 //! placeholders, so that the structure is already the familiar one.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -440,7 +440,7 @@ const INVALID: Color32 = Color32::from_rgb(255, 0, 0);
 /// Text colour of deactivated items, PrePoMax's gray.
 const INACTIVE: Color32 = Color32::from_rgb(128, 128, 128);
 
-/// Items that can be deactivated, as far as prepolix has them; PrePoMax also deactivates
+/// Items that can be deactivated, as far as nodalis has them; PrePoMax also deactivates
 /// materials and surface interactions.
 fn can_deactivate(item: &TreeItem) -> bool {
     matches!(

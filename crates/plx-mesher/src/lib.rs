@@ -1,7 +1,7 @@
 //! Geometry import and meshing with Gmsh, which brings OpenCASCADE for STEP, IGES and BREP.
 //!
 //! Gmsh is not linked but loaded at run time from its shared library (see [`gmsh`]), so
-//! prepolix starts and works with meshes without it. Releases ship the library next to the
+//! nodalis starts and works with meshes without it. Releases ship the library next to the
 //! program; `scripts/fetch_gmsh.py` fetches it for development.
 
 mod extrude;
@@ -1522,7 +1522,7 @@ pub fn self_test() -> Result<(LibraryInfo, usize), GmshError> {
     })
 }
 
-/// The meshing options prepolix sets.
+/// The meshing options nodalis sets.
 struct MeshOptions {
     max_size: f64,
     min_size: f64,
@@ -1980,7 +1980,7 @@ impl TempFile {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         Self(std::env::temp_dir().join(format!(
-            "prepolix-gmsh-{}-{n}.{extension}",
+            "nodalis-gmsh-{}-{n}.{extension}",
             std::process::id()
         )))
     }

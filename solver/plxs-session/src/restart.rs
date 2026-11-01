@@ -2,7 +2,7 @@
 //! the restart file of the command line (`*RESTART, WRITE` into `<job>.rout`, `*RESTART,
 //! READ` from `<job>.rin`).
 //!
-//! In PrePoLix (in-process, KONZEPT_CCX_ABLOESUNG 3.5) a snapshot is taken after every step
+//! In Nodalis (in-process, KONZEPT_CCX_ABLOESUNG 3.5) a snapshot is taken after every step
 //! and kept in memory or as `<job>.s<n>.state` ([`encode_snapshot`]); the next run resumes
 //! from the snapshot of the last unchanged step. The command line keeps CalculiX's form: a
 //! restart input has no model definition, so the `.rout` file holds the model and the steps

@@ -83,7 +83,7 @@ pub fn expand(
     let mut lines = Vec::new();
     for (index, raw) in text.lines().enumerate() {
         let trimmed = raw.trim();
-        // Comments are dropped but PrePoLix's profile of a general beam section.
+        // Comments are dropped but Nodalis's profile of a general beam section.
         if trimmed.is_empty()
             || (trimmed.starts_with("**") && !trimmed.starts_with(super::PROFILE_COMMENT.trim()))
         {

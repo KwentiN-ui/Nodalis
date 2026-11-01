@@ -12,7 +12,7 @@
 //!
 //! The blocks become history sets named after the set, with PrePoMax's field and component
 //! names (`DISPLACEMENTS`, `U1`), one entry per node, element or integration point and one
-//! row per increment, or per mode of a frequency step. Sets prepolix writes for picked
+//! row per increment, or per mode of a frequency step. Sets nodalis writes for picked
 //! regions (`INTERNAL_SELECTION-1_NH_OUTPUT-1`) are shown under the name of the history
 //! output (`NH_OUTPUT-1`), as in PrePoMax.
 
@@ -715,7 +715,7 @@ fn header_parts(line: &str) -> Option<(String, f64)> {
     Some((set, time))
 }
 
-/// Start of the sets prepolix writes for the rotation node of a reference point
+/// Start of the sets nodalis writes for the rotation node of a reference point
 /// (`INTERNAL_ROTATION-2_NH_OUTPUT-1`): its displacements are the rotations of the point, its
 /// forces the moments.
 const ROTATION_PREFIX: &str = "INTERNAL_ROTATION-";

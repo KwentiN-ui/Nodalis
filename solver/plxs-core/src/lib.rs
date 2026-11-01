@@ -1,8 +1,8 @@
-//! The data model of the PrePoLix solver (`plxs`): the intermediate representation (IR) that
+//! The data model of the Nodalis solver (`plxs`): the intermediate representation (IR) that
 //! every other solver crate works on, and nothing else.
 //!
 //! The IR is the contract between the crates of `solver/`: `plxs-input` fills it from a
-//! CalculiX input file, PrePoLix itself will fill it directly from its model in phase 2, and
+//! CalculiX input file, Nodalis itself will fill it directly from its model in phase 2, and
 //! the elements, constraints, contact, procedures and output crates read it. It holds **data,
 //! validation and errors only**; no element matrix, no solver and no file format lives here.
 //!
@@ -11,10 +11,10 @@
 //! - User ids (node and element numbers of the input) stay; the solver computes on dense
 //!   indices ([`Nodes::index`], [`Model::element_index`]) and writes the ids out again.
 //! - Everything is `Clone + Serialize + Deserialize` so that models, states and results can be
-//!   handed between nodes of the PrePoLix graph and stored for a restart.
+//!   handed between nodes of the Nodalis graph and stored for a restart.
 //! - Names of sets, surfaces, materials, interactions and amplitudes are stored as CalculiX
 //!   reads them: upper case ([`normalized_name`]).
-//! - The IR covers the whole CalculiX inventory PrePoLix writes (concept section 1), also what
+//! - The IR covers the whole CalculiX inventory Nodalis writes (concept section 1), also what
 //!   is computed only in later milestones, so that the shape of the data does not change while
 //!   the crates fill up. Changing it is a PR of its own.
 //! - A step holds what is in force during it: the `OP=NEW` semantics of CalculiX are resolved

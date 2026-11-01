@@ -1,4 +1,4 @@
-//! The findings of the solver's model check (PrePoLix solver), attached to the tree: free
+//! The findings of the solver's model check (Nodalis solver), attached to the tree: free
 //! motions to the boundary conditions of their step and to the parts that move, untied
 //! nodes to the analysis and their parts. The solver found them exactly; the geometric
 //! estimates of [`crate::checks`] are only a quick hint while editing.

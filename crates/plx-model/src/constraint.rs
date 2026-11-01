@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Region;
 
-/// Nodes tied to each other, prepolix's node tie: the ends of beams or trusses meeting at a
+/// Nodes tied to each other, nodalis's node tie: the ends of beams or trusses meeting at a
 /// point, which have nodes of their own since parts share no nodes. Every node of the region
 /// moves with the first. Node ties are listed with the contact pairs, as the contact search
 /// finds them.

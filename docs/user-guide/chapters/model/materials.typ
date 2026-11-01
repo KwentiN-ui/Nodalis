@@ -47,4 +47,4 @@ materials are added, and the former S235 is renamed to Generic Steel if you have
 it. Materials you changed or deleted are not touched afterwards.
 
 The library is stored per user in `materials.ron` in the settings folder (@settings). When the
-dialog is closed, PrePoLix asks whether to save changes to the library.
+dialog is closed, Nodalis asks whether to save changes to the library.

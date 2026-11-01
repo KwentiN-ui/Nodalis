@@ -1,4 +1,4 @@
-//! Contact of the PrePoLix solver (concept section 4.4): penalty contact between a slave
+//! Contact of the Nodalis solver (concept section 4.4): penalty contact between a slave
 //! surface and a master surface, node-to-face (`TYPE=NODE TO SURFACE`: a spring per slave
 //! node) and face-to-face (`TYPE=SURFACE TO SURFACE`: a spring per integration point of the
 //! slave faces), with the pressure-overclosure relations of `*SURFACE BEHAVIOR`, Coulomb

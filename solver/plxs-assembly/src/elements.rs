@@ -410,7 +410,7 @@ impl ElementTable {
         let elastic = LinearElastic::of(mat, temperature)?;
         let nodes = Self::node_indices(model, element)?;
         let x = |i: usize| model.nodes.coordinates[nodes[i] as usize];
-        // The fifth value of the section is CalculiX's shear factor k (PrePoLix writes it
+        // The fifth value of the section is CalculiX's shear factor k (Nodalis writes it
         // so; the IR calls the field `torsion`).
         let u1 = plxs_elements::u1::U1Section {
             area: *area,

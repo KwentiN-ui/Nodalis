@@ -612,7 +612,7 @@ mod tests {
     /// written to the folder CalculiX's results are restored to.
     #[test]
     fn results_of_the_built_in_solver_are_measured_in_memory() {
-        let dir = std::env::temp_dir().join(format!("plx-measure-plxr-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plx-measure-ndlr-{}", std::process::id()));
         let file = crate::solver_check::solve_beam_built_in(&dir.join("run"));
         let files = [file.clone(), file.with_extension("inp")];
         let bound = plx_io::project::bind_results("Beam", &files, false).unwrap();

@@ -1,10 +1,10 @@
-PrePoLix - licenses and source code
+Nodalis - licenses and source code
 ===================================
 
-PrePoLix is licensed under the GNU General Public License, version 3 or later
+Nodalis is licensed under the GNU General Public License, version 3 or later
 (LICENSE.txt). The source code is at
 
-    https://github.com/KwentiN-ui/prepolix
+    https://github.com/KwentiN-ui/Nodalis
 
 SOURCE.txt names the commit this AppImage was built from.
 
@@ -23,7 +23,7 @@ Gmsh 4.15.2 (in usr/lib of the AppImage)
     Gmsh contains, among others:
 
     Open CASCADE Technology (OCCT)
-        PrePoLix uses functions of Open CASCADE Technology through Gmsh.
+        Nodalis uses functions of Open CASCADE Technology through Gmsh.
         GNU LGPL version 2.1 with the Open CASCADE exception, see
         licenses/OCCT-LGPL-2.1.txt and licenses/OCCT-LGPL-EXCEPTION.txt.
         Source: https://github.com/Open-Cascade-SAS/OCCT
@@ -36,18 +36,18 @@ System libraries (in usr/lib of the AppImage)
     are in usr/share/doc/<package>/copyright of the AppImage, the source is
     available from https://packages.ubuntu.com.
 
-Noto Sans (embedded in prepolix)
+Noto Sans (embedded in nodalis)
     SIL Open Font License 1.1, see licenses/NotoSans-OFL.txt.
 
-Rust libraries (compiled into prepolix)
+Rust libraries (compiled into nodalis)
     egui, eframe, wgpu, glam, cpal, rfd and more under the MIT or Apache-2.0
-    license. Cargo.lock in the PrePoLix source lists them with versions; the
+    license. Cargo.lock in the Nodalis source lists them with versions; the
     license texts are with each package on https://crates.io.
 
-CalculiX ccx 2.23 (in usr/lib/prepolix/ccx of the AppImage)
+CalculiX ccx 2.23 (in usr/lib/nodalis/ccx of the AppImage)
     The solver. Copyright (C) 1998-2025 Guido Dhondt. GNU GPL version 2 or
     later, see ccx/licenses/CalculiX-GPL-2.0.txt. Built by
-    scripts/build_ccx.sh of PrePoLix from CalculiX 2.23 with the fixes of
+    scripts/build_ccx.sh of Nodalis from CalculiX 2.23 with the fixes of
     conda-forge's CalculiX package, with the SPOOLES, PaStiX and ARPACK
     solvers linked in; ccx/SOURCE.txt lists the exact sources.
     Source: https://github.com/Dhondtguido/CalculiX with the fixes at
@@ -64,7 +64,7 @@ CalculiX ccx 2.23 (in usr/lib/prepolix/ccx of the AppImage)
         Bordeaux INP, CNRS, Inria and Université de Bordeaux; the version
         adapted for CalculiX.
         Source: https://github.com/Kabbone/PaStiX4CalculiX with the patches
-        in installer/ccx/patches of the PrePoLix source.
+        in installer/ccx/patches of the Nodalis source.
     Scotch 7.0.11
         CeCILL-C license, see ccx/licenses/Scotch-CeCILL-C.txt.
         Source: https://gitlab.inria.fr/scotch/scotch

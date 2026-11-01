@@ -596,7 +596,7 @@ impl Tie {
 /// Factor f of the normal stiffness K = f E / h of a penalty contact whose surface behavior
 /// leaves it open (Hard): E is the smaller Young's modulus of the two sides, h the mean edge
 /// length of the slave faces. CalculiX's own default, 50 E, is not a stiffness per length and
-/// so depends on the unit system: in SI (as PrePoLix writes) it is about 1000 times softer
+/// so depends on the unit system: in SI (as Nodalis writes) it is about 1000 times softer
 /// than in mm. f E / h is the same in every unit system.
 pub const NORMAL_STIFFNESS_FACTOR: f64 = 10.0;
 

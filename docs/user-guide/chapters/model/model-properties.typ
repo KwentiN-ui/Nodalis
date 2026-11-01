@@ -61,7 +61,7 @@ dragged there (@submodel). No result file is picked in the dialog.
 
 The dialog lists the base and derived units of the chosen system.
 
-*How values are stored.* PrePoLix stores every value of the mesh, the geometry and the model in
+*How values are stored.* Nodalis stores every value of the mesh, the geometry and the model in
 SI units (m, kg, s, N, Pa; temperatures in °C), whatever the unit system of the analysis. The
 unit system only decides how values are *shown and typed*: a dialog of an analysis in mm, ton,
 s shows lengths in mm and stresses in MPa, and converts what you type. A value typed with

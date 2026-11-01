@@ -1,6 +1,6 @@
 [package]
 name = "plxs-linalg"
-description = "PrePoLix solver: sparse matrices, direct and iterative linear solvers, eigensolvers (faer)"
+description = "Nodalis solver: sparse matrices, direct and iterative linear solvers, eigensolvers (faer)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -348,7 +348,7 @@ mod tests {
     fn gmsh_available() -> bool {
         match plx_mesher::self_test() {
             Ok(_) => true,
-            Err(error) if std::env::var_os("PREPOLIX_REQUIRE_GMSH").is_none() => {
+            Err(error) if std::env::var_os("NODALIS_REQUIRE_GMSH").is_none() => {
                 eprintln!("Gmsh not available, test skipped: {error}");
                 false
             }
@@ -561,7 +561,7 @@ mod tests {
         if !gmsh_available() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("prepolix-lines-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nodalis-lines-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("kragarm.brep");
         plx_mesher::gmsh::with_gmsh(|gmsh| {
@@ -750,7 +750,7 @@ mod tests {
         std::process::Command::new("ccx").arg("-v").output().ok()?;
         let inp = plx_io::inp::write_inp(&model.mesh, &model.fe, "Kragarm").unwrap();
         let dir = std::env::temp_dir().join(format!(
-            "prepolix-lines-remesh-{}-{}",
+            "nodalis-lines-remesh-{}-{}",
             std::process::id(),
             model.mesh.element_count()
         ));
@@ -774,7 +774,7 @@ mod tests {
         std::process::Command::new("ccx").arg("-v").output().ok()?;
         let inp = plx_io::inp::write_inp(&model.mesh, &model.fe, "Platte").unwrap();
         let dir = std::env::temp_dir().join(format!(
-            "prepolix-remesh-{}-{}",
+            "nodalis-remesh-{}-{}",
             std::process::id(),
             model.mesh.element_count()
         ));

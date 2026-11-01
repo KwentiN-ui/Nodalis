@@ -134,7 +134,7 @@ impl MeshSetupWindow {
     }
 }
 
-/// The item types of PrePoMax's "Create Mesh Setup Item" that prepolix supports.
+/// The item types of PrePoMax's "Create Mesh Setup Item" that nodalis supports.
 const TYPES: [&str; 4] = [
     "Meshing Parameters",
     "Local Mesh Size",
@@ -1081,8 +1081,7 @@ impl WorkerDir {
     fn new() -> std::io::Result<Self> {
         static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let count = COUNT.fetch_add(1, Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("prepolix-mesh-{}-{count}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nodalis-mesh-{}-{count}", std::process::id()));
         std::fs::create_dir_all(&dir)?;
         Ok(Self(dir))
     }
@@ -1220,7 +1219,7 @@ mod tests {
             .join("../../testdata/platte_mit_loch.step");
         match crate::model::load(&path, plx_model::UnitSystem::Unitless) {
             Ok(loaded) => Some((loaded.model.geometry?, loaded.geometry_view?)),
-            Err(error) if std::env::var_os("PREPOLIX_REQUIRE_GMSH").is_none() => {
+            Err(error) if std::env::var_os("NODALIS_REQUIRE_GMSH").is_none() => {
                 eprintln!("Gmsh not available, test skipped: {error}");
                 None
             }

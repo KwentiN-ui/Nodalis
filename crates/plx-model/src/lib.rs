@@ -897,7 +897,7 @@ impl LinearSolverChoice {
     /// The value of `SOLVER=` in the input file. Direct leaves the choice to the solver,
     /// which is its fastest direct one (CalculiX: Pardiso, PaStiX or SPOOLES, whichever it
     /// was built with); Iterative asks for conjugate gradients with an incomplete Cholesky
-    /// preconditioner, which CalculiX and the PrePoLix solver both have.
+    /// preconditioner, which CalculiX and the Nodalis solver both have.
     pub fn keyword(self) -> Option<&'static str> {
         match self {
             LinearSolverChoice::Direct => None,

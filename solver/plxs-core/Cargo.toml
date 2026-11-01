@@ -1,6 +1,6 @@
 [package]
 name = "plxs-core"
-description = "PrePoLix solver: data model (IR) of model, steps, state and results"
+description = "Nodalis solver: data model (IR) of model, steps, state and results"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

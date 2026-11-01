@@ -1,4 +1,4 @@
-; Windows-Installer für PrePoLix, gebaut mit NSIS 3 (makensis, läuft auch unter Linux).
+; Windows-Installer für Nodalis, gebaut mit NSIS 3 (makensis, läuft auch unter Linux).
 ; Normalerweise ruft scripts/build_windows_installer.sh das Skript auf und übergibt:
 ;   VERSION  Programmversion, z. B. 0.1.0
 ;   STAGE    Ordner mit allen Dateien der Installation
@@ -16,18 +16,18 @@ SetCompressor /SOLID lzma
 !insertmacro REQUIRE STAGE
 !insertmacro REQUIRE OUTFILE
 
-!define APP "prepolix"
-!define APPNAME "PrePoLix"
-!define PROGID "prepolix.Projekt"
+!define APP "nodalis"
+!define APPNAME "Nodalis"
+!define PROGID "nodalis.Projekt"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP}"
-!define SOURCE_URL "https://github.com/KwentiN-ui/prepolix"
+!define SOURCE_URL "https://github.com/KwentiN-ui/Nodalis"
 
 !include "MUI2.nsh"
 !include "x64.nsh"
 !include "FileFunc.nsh"
 !include "Sections.nsh"
 
-; 1 when PrePoLix runs the installer to update itself (Help > Check for Updates): /UPDATE.
+; 1 when Nodalis runs the installer to update itself (Help > Check for Updates): /UPDATE.
 Var Update
 
 Name "${APPNAME} ${VERSION}"
@@ -45,8 +45,8 @@ VIAddVersionKey /LANG=1033 "FileVersion" "${VERSION}"
 VIAddVersionKey /LANG=1033 "FileDescription" "${APPNAME} Installer"
 VIAddVersionKey /LANG=1033 "LegalCopyright" "GNU GPL 3.0 or later"
 
-!define MUI_ICON "${STAGE}\prepolix.ico"
-!define MUI_UNICON "${STAGE}\prepolix.ico"
+!define MUI_ICON "${STAGE}\nodalis.ico"
+!define MUI_UNICON "${STAGE}\nodalis.ico"
 !define MUI_ABORTWARNING
 !define MUI_COMPONENTSPAGE_SMALLDESC
 
@@ -85,7 +85,7 @@ Function .onInit
   ${IfNot} ${Errors}
     StrCpy $Update 1
     Call KeepChoices
-    Call WaitForPrepolix
+    Call WaitForNodalis
   ${EndIf}
 FunctionEnd
 
@@ -95,13 +95,13 @@ Function SkipIfUpdate
   ${EndIf}
 FunctionEnd
 
-; PrePoLix closes once it has started the update; prepolix.exe cannot be replaced before.
+; Nodalis closes once it has started the update; nodalis.exe cannot be replaced before.
 ; Waits up to 30 seconds until it can be opened for writing.
-Function WaitForPrepolix
+Function WaitForNodalis
   StrCpy $1 0
-  ${DoWhile} ${FileExists} "$INSTDIR\prepolix.exe"
+  ${DoWhile} ${FileExists} "$INSTDIR\nodalis.exe"
     ClearErrors
-    FileOpen $0 "$INSTDIR\prepolix.exe" a
+    FileOpen $0 "$INSTDIR\nodalis.exe" a
     ${IfNot} ${Errors}
       FileClose $0
       ${Break}
@@ -114,26 +114,26 @@ Function WaitForPrepolix
   ${Loop}
 FunctionEnd
 
-; After an update PrePoLix starts again, as the logged-in user like from the finish page.
+; After an update Nodalis starts again, as the logged-in user like from the finish page.
 Function .onInstSuccess
   ${If} $Update == 1
     Call StartWithoutAdminRights
   ${EndIf}
 FunctionEnd
 
-; The installer runs with administrator rights; prepolix itself should not, so it is started
+; The installer runs with administrator rights; nodalis itself should not, so it is started
 ; through Explorer, which runs it as the logged-in user.
 Function StartWithoutAdminRights
-  Exec '"$WINDIR\explorer.exe" "$INSTDIR\prepolix.exe"'
+  Exec '"$WINDIR\explorer.exe" "$INSTDIR\nodalis.exe"'
 FunctionEnd
 
 Section "${APPNAME} (required)" SecApp
   SectionIn RO
   SetShellVarContext all
   SetOutPath "$INSTDIR"
-  File "${STAGE}\prepolix.exe"
+  File "${STAGE}\nodalis.exe"
   File "${STAGE}\gmsh-4.15.dll"
-  File "${STAGE}\prepolix.ico"
+  File "${STAGE}\nodalis.ico"
   File "${STAGE}\LICENSE.txt"
   File "${STAGE}\THIRD-PARTY.txt"
   File "${STAGE}\SOURCE.txt"
@@ -152,7 +152,7 @@ Section "${APPNAME} (required)" SecApp
   WriteRegStr HKLM "Software\${APP}" "InstallDir" "$INSTDIR"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayName" "${APPNAME}"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"
-  WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\prepolix.ico"
+  WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\nodalis.ico"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "Publisher" "${APPNAME}"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "URLInfoAbout" "${SOURCE_URL}"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
@@ -163,13 +163,13 @@ Section "${APPNAME} (required)" SecApp
   SectionGetSize ${SecApp} $0
   WriteRegDWORD HKLM "${UNINSTALL_KEY}" "EstimatedSize" $0
 
-  ; "Open with" offers prepolix for the files it reads.
-  WriteRegStr HKLM "Software\Classes\Applications\prepolix.exe" "FriendlyAppName" "${APPNAME}"
-  WriteRegStr HKLM "Software\Classes\Applications\prepolix.exe\shell\open\command" "" '"$INSTDIR\prepolix.exe" "%1"'
+  ; "Open with" offers nodalis for the files it reads.
+  WriteRegStr HKLM "Software\Classes\Applications\nodalis.exe" "FriendlyAppName" "${APPNAME}"
+  WriteRegStr HKLM "Software\Classes\Applications\nodalis.exe\shell\open\command" "" '"$INSTDIR\nodalis.exe" "%1"'
   !macro SUPPORTED EXT
-    WriteRegStr HKLM "Software\Classes\Applications\prepolix.exe\SupportedTypes" "${EXT}" ""
+    WriteRegStr HKLM "Software\Classes\Applications\nodalis.exe\SupportedTypes" "${EXT}" ""
   !macroend
-  !insertmacro SUPPORTED ".plx"
+  !insertmacro SUPPORTED ".ndl"
   !insertmacro SUPPORTED ".inp"
   !insertmacro SUPPORTED ".frd"
   !insertmacro SUPPORTED ".step"
@@ -181,20 +181,20 @@ SectionEnd
 
 Section "Start Menu Shortcut" SecStartMenu
   SetShellVarContext all
-  CreateShortCut "$SMPROGRAMS\${APPNAME}.lnk" "$INSTDIR\prepolix.exe" "" "$INSTDIR\prepolix.ico"
+  CreateShortCut "$SMPROGRAMS\${APPNAME}.lnk" "$INSTDIR\nodalis.exe" "" "$INSTDIR\nodalis.ico"
 SectionEnd
 
 Section /o "Desktop Shortcut" SecDesktop
   SetShellVarContext all
-  CreateShortCut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\prepolix.exe" "" "$INSTDIR\prepolix.ico"
+  CreateShortCut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\nodalis.exe" "" "$INSTDIR\nodalis.ico"
 SectionEnd
 
-Section "Open .plx projects with ${APPNAME}" SecAssociation
-  WriteRegStr HKLM "Software\Classes\.plx" "" "${PROGID}"
-  WriteRegStr HKLM "Software\Classes\.plx\OpenWithProgids" "${PROGID}" ""
+Section "Open .ndl projects with ${APPNAME}" SecAssociation
+  WriteRegStr HKLM "Software\Classes\.ndl" "" "${PROGID}"
+  WriteRegStr HKLM "Software\Classes\.ndl\OpenWithProgids" "${PROGID}" ""
   WriteRegStr HKLM "Software\Classes\${PROGID}" "" "${APPNAME} project"
-  WriteRegStr HKLM "Software\Classes\${PROGID}\DefaultIcon" "" "$INSTDIR\prepolix.ico"
-  WriteRegStr HKLM "Software\Classes\${PROGID}\shell\open\command" "" '"$INSTDIR\prepolix.exe" "%1"'
+  WriteRegStr HKLM "Software\Classes\${PROGID}\DefaultIcon" "" "$INSTDIR\nodalis.ico"
+  WriteRegStr HKLM "Software\Classes\${PROGID}\shell\open\command" "" '"$INSTDIR\nodalis.exe" "%1"'
   ; SHCNE_ASSOCCHANGED: Explorer picks up the new icon and program right away.
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
 SectionEnd
@@ -208,7 +208,7 @@ Function KeepChoices
   ${If} ${FileExists} "$DESKTOP\${APPNAME}.lnk"
     !insertmacro SelectSection ${SecDesktop}
   ${EndIf}
-  ReadRegStr $0 HKLM "Software\Classes\.plx" ""
+  ReadRegStr $0 HKLM "Software\Classes\.ndl" ""
   ${If} $0 != "${PROGID}"
     !insertmacro UnselectSection ${SecAssociation}
   ${EndIf}
@@ -218,7 +218,7 @@ FunctionEnd
   !insertmacro MUI_DESCRIPTION_TEXT ${SecApp} "The program with the Gmsh library for geometry import and meshing and the CalculiX solver."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecStartMenu} "Start menu entry for all users."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecDesktop} "Desktop icon for all users."
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecAssociation} "Double-clicking a .plx file opens it in ${APPNAME}."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecAssociation} "Double-clicking a .ndl file opens it in ${APPNAME}."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 Function un.onInit
@@ -230,33 +230,33 @@ Section "Uninstall"
   Delete "$SMPROGRAMS\${APPNAME}.lnk"
   Delete "$DESKTOP\${APPNAME}.lnk"
 
-  Delete "$INSTDIR\prepolix.exe"
+  Delete "$INSTDIR\nodalis.exe"
   Delete "$INSTDIR\gmsh-4.15.dll"
-  Delete "$INSTDIR\prepolix.ico"
+  Delete "$INSTDIR\nodalis.ico"
   Delete "$INSTDIR\LICENSE.txt"
   Delete "$INSTDIR\THIRD-PARTY.txt"
   Delete "$INSTDIR\SOURCE.txt"
   RMDir /r "$INSTDIR\licenses"
   RMDir /r "$INSTDIR\doc"
   RMDir /r "$INSTDIR\ccx"
-  ; The work directory prepolix creates next to itself when it may write there.
+  ; The work directory nodalis creates next to itself when it may write there.
   RMDir /r "$INSTDIR\Temp"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
 
-  ; Only remove the .plx association if it still points to prepolix.
-  ReadRegStr $0 HKLM "Software\Classes\.plx" ""
+  ; Only remove the .ndl association if it still points to nodalis.
+  ReadRegStr $0 HKLM "Software\Classes\.ndl" ""
   ${If} $0 == "${PROGID}"
-    DeleteRegValue HKLM "Software\Classes\.plx" ""
+    DeleteRegValue HKLM "Software\Classes\.ndl" ""
   ${EndIf}
-  DeleteRegValue HKLM "Software\Classes\.plx\OpenWithProgids" "${PROGID}"
-  DeleteRegKey /ifempty HKLM "Software\Classes\.plx\OpenWithProgids"
-  DeleteRegKey /ifempty HKLM "Software\Classes\.plx"
+  DeleteRegValue HKLM "Software\Classes\.ndl\OpenWithProgids" "${PROGID}"
+  DeleteRegKey /ifempty HKLM "Software\Classes\.ndl\OpenWithProgids"
+  DeleteRegKey /ifempty HKLM "Software\Classes\.ndl"
   DeleteRegKey HKLM "Software\Classes\${PROGID}"
-  DeleteRegKey HKLM "Software\Classes\Applications\prepolix.exe"
+  DeleteRegKey HKLM "Software\Classes\Applications\nodalis.exe"
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
 
   DeleteRegKey HKLM "${UNINSTALL_KEY}"
   DeleteRegKey HKLM "Software\${APP}"
-  ; Settings in %APPDATA%\prepolix stay, like those of most programs.
+  ; Settings in %APPDATA%\nodalis stay, like those of most programs.
 SectionEnd

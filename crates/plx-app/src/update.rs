@@ -1,7 +1,7 @@
 //! Help > Check for Updates and the check at startup: asks GitHub for the latest release. A
 //! newer one shows a symbol next to the version in the menu bar; it opens a window with the
 //! release notes. The Windows installer is downloaded there and run with `/UPDATE`, which skips
-//! its pages, waits for PrePoLix to close and starts the new version. An AppImage is left to the
+//! its pages, waits for Nodalis to close and starts the new version. An AppImage is left to the
 //! system's AppImage manager; the portable ZIP gets a link to the new ZIP, other builds (from
 //! source) only point to the release page.
 
@@ -16,8 +16,8 @@ use serde::Deserialize;
 use sha2::Digest;
 
 /// The latest release that is neither a draft nor a pre-release.
-const LATEST_RELEASE: &str = "https://api.github.com/repos/KwentiN-ui/PrePoLix/releases/latest";
-pub const RELEASES_PAGE: &str = "https://github.com/KwentiN-ui/PrePoLix/releases/latest";
+const LATEST_RELEASE: &str = "https://api.github.com/repos/KwentiN-ui/Nodalis/releases/latest";
+pub const RELEASES_PAGE: &str = "https://github.com/KwentiN-ui/Nodalis/releases/latest";
 
 const CANCELLED: &str = "download cancelled";
 
@@ -52,7 +52,7 @@ impl std::fmt::Display for Version {
     }
 }
 
-/// How this copy of PrePoLix was installed, which decides how it is updated.
+/// How this copy of Nodalis was installed, which decides how it is updated.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Installation {
     /// Installed by the Windows installer (`uninstall.exe` next to the program).
@@ -92,12 +92,12 @@ impl Installation {
         }
     }
 
-    /// Whether PrePoLix installs the release's file itself ("Update Now").
+    /// Whether Nodalis installs the release's file itself ("Update Now").
     fn installs_itself(&self) -> bool {
         *self == Self::WindowsInstaller
     }
 
-    /// Whether PrePoLix asks for updates at startup: not in an AppImage, whose manager does.
+    /// Whether Nodalis asks for updates at startup: not in an AppImage, whose manager does.
     pub fn checks_at_startup(&self) -> bool {
         *self != Self::AppImage
     }
@@ -107,7 +107,7 @@ impl Installation {
         match self {
             Self::WindowsInstaller => {
                 "Installed with the Windows installer: updates are downloaded and installed from \
-                 within PrePoLix."
+                 within Nodalis."
             }
             Self::Portable => {
                 "Portable version: new versions are announced with a link to the new ZIP file, \
@@ -115,7 +115,7 @@ impl Installation {
             }
             Self::AppImage => {
                 "Running as AppImage: an AppImage manager such as Gear Lever or AppImageLauncher \
-                 updates it, so PrePoLix does not check at startup."
+                 updates it, so Nodalis does not check at startup."
             }
             Self::Other => {
                 "Not installed with the Windows installer: new versions are announced, but must \
@@ -198,7 +198,7 @@ fn agent(timeout: Option<Duration>) -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(timeout)
         .timeout_connect(Some(Duration::from_secs(20)))
-        .user_agent(concat!("PrePoLix/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("Nodalis/", env!("CARGO_PKG_VERSION")))
         // See `get`.
         .max_redirects(0)
         // The certificates of the system, so that a company proxy that inspects TLS works.
@@ -235,8 +235,12 @@ fn get(
 /// Asks GitHub for the latest release.
 fn fetch_latest(installation: &Installation) -> Result<Release, String> {
     let agent = agent(Some(Duration::from_secs(30)));
-    let mut response = get(&agent, LATEST_RELEASE, "application/vnd.github+json")
-        .map_err(|e| format!("GitHub not reachable: {e}"))?;
+    let mut response =
+        get(&agent, LATEST_RELEASE, "application/vnd.github+json").map_err(|e| match e {
+            // The repository has no release yet.
+            ureq::Error::StatusCode(404) => "No release published yet".to_owned(),
+            e => format!("GitHub not reachable: {e}"),
+        })?;
     let json = response
         .body_mut()
         .read_to_string()
@@ -359,7 +363,7 @@ fn download_and_install(
     progress: &AtomicU64,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
-    let dir = std::env::temp_dir().join("prepolix-update");
+    let dir = std::env::temp_dir().join("nodalis-update");
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let dest = dir.join(&asset.name);
     download(asset, &dest, progress, cancel)?;
@@ -437,7 +441,7 @@ impl Updater {
         let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
         let response = response
             .on_hover_text(format!(
-                "PrePoLix {} is available. Click for what's new and to update.",
+                "Nodalis {} is available. Click for what's new and to update.",
                 release.version
             ))
             .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -565,7 +569,7 @@ impl Updater {
                 self.state = State::Idle;
                 match result {
                     Ok(release) if release.version > Version::current() => {
-                        output.push(format!("PrePoLix {} is available", release.version));
+                        output.push(format!("Nodalis {} is available", release.version));
                         self.available = Some(release);
                         self.message = None;
                         self.window |= manual;
@@ -574,7 +578,7 @@ impl Updater {
                         self.available = None;
                         if manual {
                             self.message = Some(format!(
-                                "PrePoLix {} is the latest version.",
+                                "Nodalis {} is the latest version.",
                                 Version::current()
                             ));
                             self.window = true;
@@ -596,7 +600,7 @@ impl Updater {
                 match result {
                     Ok(()) => {
                         output.push(format!(
-                            "Installing PrePoLix {}",
+                            "Installing Nodalis {}",
                             version.unwrap_or_default()
                         ));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -623,7 +627,7 @@ fn release_ui(
     output: &mut Vec<String>,
 ) -> (bool, bool) {
     let (mut close, mut update) = (false, false);
-    ui.label(egui::RichText::new(format!("PrePoLix {} is available.", release.version)).strong());
+    ui.label(egui::RichText::new(format!("Nodalis {} is available.", release.version)).strong());
     ui.label(format!("You are using version {}.", Version::current()));
     if !release.notes.trim().is_empty() {
         ui.add_space(4.0);
@@ -641,7 +645,7 @@ fn release_ui(
     let installable = release.asset.is_some() && installation.installs_itself();
     let note = match installation {
         Installation::WindowsInstaller if installable => {
-            "PrePoLix closes to install the update and starts again afterwards. Save your \
+            "Nodalis closes to install the update and starts again afterwards. Save your \
              project first. Windows asks for administrator rights."
         }
         Installation::WindowsInstaller => {
@@ -657,7 +661,7 @@ fn release_ui(
         }
         Installation::AppImage => "Your AppImage manager installs the new version.",
         Installation::Other => {
-            "This copy of PrePoLix cannot update itself. Download the new version from the \
+            "This copy of Nodalis cannot update itself. Download the new version from the \
              release page."
         }
     };
@@ -689,7 +693,7 @@ fn release_ui(
 }
 
 fn installing_ui(ui: &mut egui::Ui, release: &Release, progress: &AtomicU64, cancel: &AtomicBool) {
-    ui.label(format!("Downloading PrePoLix {} …", release.version));
+    ui.label(format!("Downloading Nodalis {} …", release.version));
     let size = release.asset.as_ref().map_or(0, |a| a.size).max(1);
     let done = progress.load(Ordering::Relaxed);
     let fraction = (done as f32 / size as f32).clamp(0.0, 1.0);
@@ -796,19 +800,19 @@ mod tests {
 
     const RELEASE: &str = r###"{
         "tag_name": "v0.3.0",
-        "html_url": "https://github.com/KwentiN-ui/PrePoLix/releases/tag/v0.3.0",
+        "html_url": "https://github.com/KwentiN-ui/Nodalis/releases/tag/v0.3.0",
         "body": "## What's Changed\r\n* Self update",
         "assets": [
-            {"name": "prepolix-0.3.0-user-guide.pdf", "size": 10,
+            {"name": "nodalis-0.3.0-user-guide.pdf", "size": 10,
              "browser_download_url": "https://example.com/guide.pdf"},
-            {"name": "prepolix-0.3.0-setup.exe", "size": 1234,
+            {"name": "nodalis-0.3.0-setup.exe", "size": 1234,
              "browser_download_url": "https://example.com/setup.exe",
              "digest": "sha256:ABCDEF"},
-            {"name": "prepolix-0.3.0-x86_64.AppImage.zsync", "size": 5,
+            {"name": "nodalis-0.3.0-x86_64.AppImage.zsync", "size": 5,
              "browser_download_url": "https://example.com/a.zsync", "digest": null},
-            {"name": "prepolix-0.3.0-windows-portable.zip", "size": 77,
+            {"name": "nodalis-0.3.0-windows-portable.zip", "size": 77,
              "browser_download_url": "https://example.com/portable.zip"},
-            {"name": "prepolix-0.3.0-x86_64.AppImage", "size": 99,
+            {"name": "nodalis-0.3.0-x86_64.AppImage", "size": 99,
              "browser_download_url": "https://example.com/a.AppImage"}
         ]
     }"###;
@@ -819,7 +823,7 @@ mod tests {
         assert_eq!(windows.version, Version(0, 3, 0));
         assert_eq!(windows.notes, "## What's Changed\n* Self update");
         let asset = windows.asset.unwrap();
-        assert_eq!(asset.name, "prepolix-0.3.0-setup.exe");
+        assert_eq!(asset.name, "nodalis-0.3.0-setup.exe");
         assert_eq!(asset.size, 1234);
         assert_eq!(asset.sha256.as_deref(), Some("abcdef"));
         // The portable version links to the new ZIP, but does not install it.
@@ -884,11 +888,11 @@ mod tests {
         );
         assert_eq!(
             note_line(
-                "* Hexahedra for bodies of revolution by @KwentiN-ui in https://github.com/KwentiN-ui/PrePoLix/pull/211"
+                "* Hexahedra for bodies of revolution by @KwentiN-ui in https://github.com/KwentiN-ui/Nodalis/pull/211"
             ),
             NoteLine::Item(
                 "Hexahedra for bodies of revolution",
-                Some("https://github.com/KwentiN-ui/PrePoLix/pull/211")
+                Some("https://github.com/KwentiN-ui/Nodalis/pull/211")
             )
         );
         assert_eq!(
@@ -897,11 +901,11 @@ mod tests {
         );
         assert_eq!(
             note_line(
-                "**Full Changelog**: https://github.com/KwentiN-ui/PrePoLix/compare/v0.2.4...v0.2.5"
+                "**Full Changelog**: https://github.com/KwentiN-ui/Nodalis/compare/v0.2.4...v0.2.5"
             ),
             NoteLine::Link(
                 "Full Changelog",
-                "https://github.com/KwentiN-ui/PrePoLix/compare/v0.2.4...v0.2.5"
+                "https://github.com/KwentiN-ui/Nodalis/compare/v0.2.4...v0.2.5"
             )
         );
         assert_eq!(note_line("Some text"), NoteLine::Text("Some text"));

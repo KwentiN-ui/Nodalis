@@ -1,5 +1,5 @@
 //! Results of a run in memory: what the `.frd` and `.dat` writers serialize and what
-//! PrePoLix will read directly in phase 2.
+//! Nodalis will read directly in phase 2.
 
 use serde::{Deserialize, Serialize};
 

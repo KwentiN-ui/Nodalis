@@ -12,12 +12,12 @@ use std::sync::Mutex;
 
 use crate::ffi::Api;
 
-/// The Gmsh version prepolix is built and tested against; `scripts/fetch_gmsh.py` fetches it.
+/// The Gmsh version nodalis is built and tested against; `scripts/fetch_gmsh.py` fetches it.
 pub const TESTED_VERSION: (u32, u32) = (4, 15);
 
 /// Environment variable naming the Gmsh library, used when no path is configured. Tests and
 /// the CI use it.
-pub const LIBRARY_ENV: &str = "PREPOLIX_GMSH";
+pub const LIBRARY_ENV: &str = "NODALIS_GMSH";
 
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
 pub enum GmshError {
@@ -304,7 +304,7 @@ impl Gmsh {
 
     pub fn clear(&self) -> Result<(), GmshError> {
         self.call(|e| unsafe { (self.api.clear)(e) })?;
-        let name = c_string("prepolix")?;
+        let name = c_string("nodalis")?;
         self.call(|e| unsafe { (self.api.model_add)(name.as_ptr(), e) })
     }
 

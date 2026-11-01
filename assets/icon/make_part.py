@@ -6,7 +6,7 @@ Writes, next to this script:
   part/gear.val   one line "node value" per node, the result the icon is coloured with
                   (displacement magnitude, scaled to [0, 1])
 
-prepolix-icon.typ reads both. Only needed when the part changes, the outputs are checked in.
+nodalis-icon.typ reads both. Only needed when the part changes, the outputs are checked in.
 
     python3 assets/icon/make_part.py          # needs ccx on PATH
 """
@@ -155,7 +155,7 @@ def gear():
 
 def write_inp(path, mesh, fixed, loads, omega):
     nodes = mesh.by_id()
-    lines = ["** PrePoLix icon part, written by assets/icon/make_parts.py", "*NODE, NSET=NALL"]
+    lines = ["** Nodalis icon part, written by assets/icon/make_parts.py", "*NODE, NSET=NALL"]
     lines += [f"{n}, {x:.6f}, {y:.6f}, {z:.6f}" for n, (x, y, z) in sorted(nodes.items())]
     lines.append("*ELEMENT, TYPE=C3D8I, ELSET=EALL")
     lines += [f"{e}, " + ", ".join(map(str, ids)) for e, ids in enumerate(mesh.elements, 1)]

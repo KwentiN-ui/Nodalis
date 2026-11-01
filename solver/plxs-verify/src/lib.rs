@@ -1,17 +1,17 @@
-//! Verification of the PrePoLix solver against CalculiX: a corpus of fixtures (input files
-//! PrePoLix's writer produces, plus the examples of `testdata/`) with golden result files
+//! Verification of the Nodalis solver against CalculiX: a corpus of fixtures (input files
+//! Nodalis's writer produces, plus the examples of `testdata/`) with golden result files
 //! computed by CalculiX, and the comparison of what another solver computes for them.
 //!
 //! Layout (`solver/fixtures/<area>/`):
 //!
-//! - `<name>.inp`: the input, as PrePoLix writes it.
+//! - `<name>.inp`: the input, as Nodalis writes it.
 //! - `<name>.toml`: what the fixture tests ([`Meta`]): area, tolerance class, milestone,
 //!   the keywords and element types it uses, and where it came from.
 //! - `<name>.ref.frd.gz`: CalculiX's `.frd`, gzip-compressed (flate2 is pure Rust and in the
 //!   workspace already; the concept named zstd, which needs a C library).
 //! - `<name>.ref.dat`: CalculiX's `.dat`, when the input requests history output.
 //!
-//! Comparison works on what PrePoLix reads, not on text: both files go through
+//! Comparison works on what Nodalis reads, not on text: both files go through
 //! `plx_io::frd::read_frd_bytes` and `plx_io::dat::parse_dat`, then the meshes must match
 //! exactly (class D: node and element ids, element types, expansion), the increments must
 //! line up (step, increment, kind, value), and every raw component of every field must agree

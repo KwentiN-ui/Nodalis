@@ -1,10 +1,10 @@
-//! How CalculiX names and numbers what results hold, mapped to PrePoLix's (PrePoMax's)
+//! How CalculiX names and numbers what results hold, mapped to Nodalis's (PrePoMax's)
 //! names: shared by the `.frd` reader and the results of the built-in solver, so that both
 //! give the same fields, components and elements.
 
 use plx_mesh::ElementShape;
 
-/// The component name PrePoLix shows for a component name of the `.frd` file: `D1` becomes
+/// The component name Nodalis shows for a component name of the `.frd` file: `D1` becomes
 /// `U1`, `SXX` becomes `S11` and so on, as in PrePoMax.
 pub fn rename_component(name: &str) -> &str {
     match name {
@@ -54,7 +54,7 @@ pub fn element_kind(kind: i32) -> Option<(ElementShape, &'static str)> {
     })
 }
 
-/// The nodes of an element in PrePoLix's order from those in the `.frd` file's order, which
+/// The nodes of an element in Nodalis's order from those in the `.frd` file's order, which
 /// lists the vertical edge mid nodes of quadratic hexahedra and wedges before the top ones.
 pub fn reorder_nodes<T: Copy>(shape: ElementShape, frd: &[T]) -> Vec<T> {
     let mut nodes = frd.to_vec();

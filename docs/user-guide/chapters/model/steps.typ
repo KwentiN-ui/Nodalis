@@ -64,7 +64,7 @@ The built-in solver uses the iterative solver for linear static and heat transfe
 frequency, buckle, dynamic and modal steps always solve directly, so their dialogs do not
 offer the choice. The input file writes `SOLVER=ITERATIVE CHOLESKY` for #ui("Iterative") and
 nothing for #ui("Direct"), so that CalculiX takes its fastest direct solver (Pardiso, PaStiX or
-SPOOLES, whichever it was built with; the CalculiX shipped with PrePoLix uses PaStiX).
+SPOOLES, whichever it was built with; the CalculiX shipped with Nodalis uses PaStiX).
 
 The monitor shows how a solve went: for the direct solver the size of the factor and the
 times of ordering, factorization and solution; for the iterative one the size of the

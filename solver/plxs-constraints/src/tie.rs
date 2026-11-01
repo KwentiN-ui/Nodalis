@@ -235,7 +235,7 @@ impl MasterFace {
 /// Fraction of the typical master element size used as position tolerance when the tie
 /// gives none (CalculiX manual: "a default tolerance is calculated ... of the typical
 /// element size"; the fraction is not legible in the manual, 2.5 % reproduces the cases
-/// PrePoLix writes).
+/// Nodalis writes).
 const DEFAULT_TOLERANCE: f64 = 0.025;
 
 /// The couplings of a tie and the slave nodes that found no master face.

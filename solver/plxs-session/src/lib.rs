@@ -1,11 +1,11 @@
-//! The session API of the PrePoLix solver: load a model, run its steps one after another
+//! The session API of the Nodalis solver: load a model, run its steps one after another
 //! on a persistent state, keep the results, snapshot the state for a restart. The command
-//! line is its only user in phase 1; the PrePoLix node graph will call it directly in phase
+//! line is its only user in phase 1; the Nodalis node graph will call it directly in phase
 //! 2 (a state link is a [`State`] value, not a `.rout` file).
 //!
 //! A session computes on a rayon thread pool: the caller's ([`SessionOptions::pool`]), which
 //! several sessions may share, so that one large solve gets every thread and several small
-//! ones divide them as they need them (PrePoLix keeps one such pool), or one of its own with
+//! ones divide them as they need them (Nodalis keeps one such pool), or one of its own with
 //! `threads` threads (the command line). No global state, so several sessions can run in
 //! one process.
 

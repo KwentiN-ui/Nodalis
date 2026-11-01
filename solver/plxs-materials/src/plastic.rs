@@ -121,7 +121,7 @@ impl J2Plastic {
             match plastic.hardening {
                 Hardening::Isotropic => isotropic = Some(curve),
                 // Combined hardening takes its isotropic curve from *CYCLIC HARDENING, which
-                // PrePoLix does not write: the yield stress then stays at the first point.
+                // Nodalis does not write: the yield stress then stays at the first point.
                 Hardening::Kinematic | Hardening::Combined => {
                     let first = curve.points[0].1;
                     isotropic = Some(Curve {

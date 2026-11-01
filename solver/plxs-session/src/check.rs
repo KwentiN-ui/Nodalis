@@ -1,5 +1,5 @@
 //! The model check of the solver: everything that can be found before computing, as typed
-//! [`Diagnostic`]s. PrePoLix runs it for "Check Model" and when a run fails; it reads the
+//! [`Diagnostic`]s. Nodalis runs it for "Check Model" and when a run fails; it reads the
 //! model like a run, prepares the session and factorizes the stiffness matrix of every
 //! structural step with a distinct set of supports once, which finds every free motion
 //! exactly (no geometric guess) and names the nodes that move.

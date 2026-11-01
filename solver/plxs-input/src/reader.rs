@@ -46,7 +46,7 @@ impl Data<'_> {
     }
 }
 
-/// Keywords CalculiX knows that PrePoLix does not write; they get a clear message instead
+/// Keywords CalculiX knows that Nodalis does not write; they get a clear message instead
 /// of `cannot be interpreted`.
 const KNOWN_UNSUPPORTED: &[&str] = &[
     "*BASEMOTION",

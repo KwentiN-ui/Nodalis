@@ -19,7 +19,7 @@ in mm, ton, s). The material also needs #ui("Elasticity"); it can be plastic as 
 #screenshot("creep-material.png", [Material with Norton's creep law])
 
 #fields(
-  [A], [Creep constant, positive. Its unit depends on $n$ and $m$; PrePoLix converts it with
+  [A], [Creep constant, positive. Its unit depends on $n$ and $m$; Nodalis converts it with
     the model when the unit system changes.],
   [Stress exponent n], [Positive, often 3 to 8 for metals.],
   [Time exponent m], [0 for steady (secondary) creep; a negative value between -1 and 0 lets

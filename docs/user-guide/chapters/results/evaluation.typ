@@ -61,10 +61,10 @@ transformations.
 
 The direction of the largest principal stress shows the path the load takes through a part,
 its force flow; the direction of the smallest one shows the compression paths. A principal
-direction has no sign: the vector and its opposite are the same direction. PrePoLix turns each
+direction has no sign: the vector and its opposite are the same direction. Nodalis turns each
 vector so that its largest component is positive, which keeps the contours of `X`, `Y` and `Z`
 from jumping between neighbouring nodes. Where the principal value is repeated, as the two zero
-values of uniaxial tension, any direction in their plane is one; PrePoLix picks one normal to
+values of uniaxial tension, any direction in their plane is one; Nodalis picks one normal to
 the others. Where all three are equal, the direction is undefined and the node has no value.
 
 #screenshot("principal-direction.png", [The Y component of the Max principal direction of
@@ -185,7 +185,7 @@ the Results tree, or use #menu("Results", "Create Hot Spot ..."), and pick the w
   [Read-out points], [Shows the extrapolation formula.],
   [Stress], [#ui("Perpendicular to weld toe"), #ui("Max principal stress") or #ui("Signed max
     abs principal stress").],
-  [Path direction], [Points away from the weld toe; PrePoLix turns it into the plate surface.
+  [Path direction], [Points away from the weld toe; Nodalis turns it into the plate surface.
     #ui("Flip") reverses it.],
 )
 

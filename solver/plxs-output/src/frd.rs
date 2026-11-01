@@ -171,7 +171,7 @@ pub fn write_frd_to_as(
     writeln!(out, "    1UDATE{:62}", "")?;
     writeln!(out, "    1UTIME{:62}", "")?;
     writeln!(out, "    1UHOST{:62}", "")?;
-    writeln!(out, "    1UPGM{:15}PrePoLix{:40}", "", "")?;
+    writeln!(out, "    1UPGM{:15}Nodalis {:40}", "", "")?;
     writeln!(out, "    1UVERSION{:11}Version {version}", "")?;
     writeln!(out, "    1UCOMPILETIME{:55}", "")?;
     writeln!(out, "    1UDIR{:63}", "")?;

@@ -1227,7 +1227,7 @@ impl AnalysisWindow {
 }
 
 /// Writes the results file `source` as CalculiX's files `frd` and `.dat` beside it: results
-/// of the built-in solver (`.plxr`) are converted, CalculiX's own files copied.
+/// of the built-in solver (`.ndlr`) are converted, CalculiX's own files copied.
 pub fn export_calculix_results(
     source: &std::path::Path,
     frd: &std::path::Path,
@@ -1248,7 +1248,7 @@ pub fn export_calculix_results(
     Ok(())
 }
 
-/// Whether a file is a results file: CalculiX's (`.frd`) or the built-in solver's (`.plxr`).
+/// Whether a file is a results file: CalculiX's (`.frd`) or the built-in solver's (`.ndlr`).
 pub fn is_results_file(path: &std::path::Path) -> bool {
     path.extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("frd"))
@@ -3914,7 +3914,7 @@ impl Workbench {
         if let Some(status) = analysis.poll() {
             self.output
                 .push(format!("Analysis {}", Analysis::status_text(status)));
-            // The PrePoLix solver tells what it found, typed: no reading of its output.
+            // The Nodalis solver tells what it found, typed: no reading of its output.
             if let Some(diagnostics) = analysis.diagnostics()
                 && let Some(model) = self.model.as_ref()
             {
@@ -3968,7 +3968,7 @@ impl Workbench {
         let Some(model) = self.setup_model() else {
             return;
         };
-        let heading = format!("PrePoLix: {}", model.file_name());
+        let heading = format!("Nodalis: {}", model.file_name());
         let mut fe = model.fe.clone();
         // Checked before asking for the file; the global results are staged once it is known.
         if let Err(error) = plx_io::inp::write_inp(&model.mesh, &fe, &heading) {
@@ -4040,7 +4040,7 @@ impl Workbench {
             .map(|i| format!(", step {}, increment {}", i.step, i.increment))
             .unwrap_or_default();
         let heading = format!(
-            "PrePoLix: deformed mesh of {}{shown}, scale factor {scale}",
+            "Nodalis: deformed mesh of {}{shown}, scale factor {scale}",
             model.file_name()
         );
         let text = match plx_io::inp::write_deformed_mesh_inp(
@@ -4164,7 +4164,7 @@ impl Workbench {
                     with.push(format!(".{extension}"));
                     path = with.into();
                 }
-                let title = format!("PrePoLix results of {}", model.file_name());
+                let title = format!("Nodalis results of {}", model.file_name());
                 let result = plx_io::vtk::export(
                     &path,
                     format,
@@ -7465,7 +7465,7 @@ mod tests {
     #[test]
     fn import_into_saved_new_model_keeps_the_project_file() {
         let saved = Model::new(
-            std::path::Path::new("/tmp/neu.plx"),
+            std::path::Path::new("/tmp/neu.ndl"),
             plx_mesh::FeMesh::default(),
         );
         let mut imported = Model::new(
@@ -7473,7 +7473,7 @@ mod tests {
             plx_mesh::FeMesh::default(),
         );
         take_over_empty_model(&mut imported, &saved);
-        assert_eq!(imported.path, std::path::Path::new("/tmp/neu.plx"));
+        assert_eq!(imported.path, std::path::Path::new("/tmp/neu.ndl"));
         assert_eq!(imported.path, saved.path);
     }
 }

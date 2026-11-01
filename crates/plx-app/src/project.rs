@@ -1924,14 +1924,14 @@ impl ProjectApp {
         let render_state = cc
             .wgpu_render_state
             .clone()
-            .ok_or("PrePoLix requires the wgpu backend of eframe")?;
+            .ok_or("Nodalis requires the wgpu backend of eframe")?;
         crate::style::apply(&cc.egui_ctx);
         (cc.egui_ctx).add_plugin(crate::screenshot::ImmediateCapture::new(
             render_state.clone(),
         ));
         let adapter = render_state.adapter.get_info();
         let output = vec![format!(
-            "PrePoLix {} started, graphics: {} ({:?})",
+            "Nodalis {} started, graphics: {} ({:?})",
             env!("CARGO_PKG_VERSION"),
             adapter.name,
             adapter.backend
@@ -4258,7 +4258,7 @@ impl ProjectApp {
     fn open_dialog(&mut self, ctx: &egui::Context) {
         let picked = rfd::FileDialog::new()
             .set_title("Open Project")
-            .add_filter("PrePoLix project (*.plx)", &["plx", "PLX"])
+            .add_filter("Nodalis project (*.ndl)", &["ndl", "NDL"])
             .pick_file();
         if let Some(path) = picked {
             self.open(ctx, path);
@@ -5235,7 +5235,7 @@ impl ProjectApp {
                 let updater = &mut self.updater;
                 if ui
                     .add_enabled(!updater.busy(), egui::Button::new("Check for Updates …"))
-                    .on_hover_text("Asks GitHub whether a newer version of PrePoLix is available")
+                    .on_hover_text("Asks GitHub whether a newer version of Nodalis is available")
                     .clicked()
                 {
                     updater.check(ui.ctx(), true);
@@ -7392,8 +7392,8 @@ impl ProjectApp {
                 window.show_run(solve);
             }
             let mut builder = egui::ViewportBuilder::default()
-                .with_title(format!("{name} - {project} - PrePoLix"))
-                .with_app_id("prepolix")
+                .with_title(format!("{name} - {project} - Nodalis"))
+                .with_app_id("nodalis")
                 .with_inner_size([1400.0, 900.0])
                 .with_min_inner_size([640.0, 400.0])
                 .with_icon(crate::window_icon());
@@ -7540,7 +7540,7 @@ impl eframe::App for ProjectApp {
         let ctx = ui.ctx().clone();
         crate::style::sync(&ctx);
         self.poll_opening();
-        let title = format!("{} - PrePoLix", self.project_name());
+        let title = format!("{} - Nodalis", self.project_name());
         if title != self.shown_title {
             self.shown_title = title.clone();
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
@@ -11397,7 +11397,7 @@ fn pick_project_file(current: Option<&Path>, title: &str, suffix: &str) -> Optio
         .map_or_else(|| "Project".into(), |s| s.to_string_lossy().into_owned());
     let mut dialog = rfd::FileDialog::new()
         .set_title(title)
-        .add_filter("PrePoLix project (*.plx)", &[PROJECT_EXTENSION])
+        .add_filter("Nodalis project (*.ndl)", &[PROJECT_EXTENSION])
         .set_file_name(format!("{stem}{suffix}.{PROJECT_EXTENSION}"));
     if let Some(dir) = current.and_then(Path::parent) {
         dialog = dialog.set_directory(dir);
@@ -11506,7 +11506,7 @@ mod tests {
             panic_message(panic.as_ref()),
             "reading the file failed: index out of bounds"
         );
-        let file = std::env::temp_dir().join("prepolix-missing-project.plx");
+        let file = std::env::temp_dir().join("nodalis-missing-project.ndl");
         assert!(read_opened(&file).is_err());
     }
 
@@ -11663,7 +11663,7 @@ mod tests {
             .join("../../testdata/platte_mit_loch.step");
         let input = match plx_mesher::import_cad(&path, plx_model::UnitSystem::MmTonSC) {
             Ok(import) => import.geometry,
-            Err(error) if std::env::var_os("PREPOLIX_REQUIRE_GMSH").is_none() => {
+            Err(error) if std::env::var_os("NODALIS_REQUIRE_GMSH").is_none() => {
                 eprintln!("Gmsh not available, test skipped: {error}");
                 return;
             }
@@ -12526,7 +12526,7 @@ mod tests {
     fn the_parts_of_a_geometry_file_link_one_by_one() {
         match plx_mesher::self_test() {
             Ok(_) => {}
-            Err(error) if std::env::var_os("PREPOLIX_REQUIRE_GMSH").is_none() => {
+            Err(error) if std::env::var_os("NODALIS_REQUIRE_GMSH").is_none() => {
                 eprintln!("Gmsh not available, test skipped: {error}");
                 return;
             }
@@ -12846,7 +12846,7 @@ mod tests {
 
     #[test]
     fn the_project_stored_at_exit_is_read_back() {
-        let path = std::env::temp_dir().join("prepolix_test_last_project.plx");
+        let path = std::env::temp_dir().join("nodalis_test_last_project.ndl");
         std::fs::write(&path, "").unwrap();
         let mut storage = MemoryStorage::default();
         eframe::set_value(&mut storage, LAST_PROJECT_KEY, &Some(path.clone()));

@@ -1,4 +1,4 @@
-# Schnittstellen des PrePoLix-Solvers (`plxs`)
+# Schnittstellen des Nodalis-Solvers (`plxs`)
 
 Stand M0 (2026-10-31). Dieses Dokument legt fest, worauf sich die Threads der Meilensteine
 M1 bis M4 verlassen können: den Crate-Schnitt unter `solver/`, die IR in `plxs-core`, die
@@ -7,7 +7,7 @@ Trait-Signaturen der Fachcrates und die Regeln für Änderungen daran. Das Konze
 
 ## Grundregeln
 
-- **Kein CalculiX-Code.** CalculiX steht unter GPL-2.0-only, PrePoLix unter GPL-3.0-or-later;
+- **Kein CalculiX-Code.** CalculiX steht unter GPL-2.0-only, Nodalis unter GPL-3.0-or-later;
   die beiden sind nicht kompatibel. Es wird keine Zeile aus den Fortran- oder C-Quellen
   übernommen, übersetzt oder abgeschrieben, auch keine Tabellen. Erlaubt sind das
   CalculiX-Handbuch (Verfahrensbeschreibung), Lehrbücher und ccx als Black-Box-Orakel für
@@ -46,7 +46,7 @@ plxs-verify         Fixture-Korpus, Golden Files, Vergleich, Binary `plxs-fixtur
 
 `plxs-core`, `plxs-input`, `plxs-verify` und `plxs-cli` sind in M0 gefüllt; die übrigen Crates
 existieren leer mit einem `//!`-Kommentar und werden von den Threads der Stufen gefüllt.
-`plxs-core` hängt bewusst nicht von `plx-model`/`plx-mesh` ab, damit der Solver ohne PrePoLix
+`plxs-core` hängt bewusst nicht von `plx-model`/`plx-mesh` ab, damit der Solver ohne Nodalis
 gebaut und getestet werden kann; `plxs-verify` nutzt `plx-io` nur zum Lesen von `.frd`/`.dat`.
 
 ## Die IR (`plxs-core`) ist der Vertrag
@@ -110,7 +110,7 @@ darf solche ergänzen, siehe `KONZEPT_CCX_ABLOESUNG.md` 3.5).
 - `Session::snapshot()` liefert nach jedem Step den `Snapshot` (Kopie des `State`, Fingerprint,
   `average_force`); `Session::resume(model, snapshot, options)` setzt mit dem nächsten Step
   fort. Die Ergebnisse früherer Steps gehören nicht zur Session, sie bleiben beim Aufrufer
-  (PrePoLix hält sie gebunden, KONZEPT_CCX_ABLOESUNG 3.5).
+  (Nodalis hält sie gebunden, KONZEPT_CCX_ABLOESUNG 3.5).
 - `restart::model_fingerprint` ist FNV-1a über die postcard-Bytes von Knoten, Elementen,
   Materialien, Sections, Constraints, Kontakt, Anfangsbedingungen und physikalischen
   Konstanten: stabil über Prozesse und Rust-Versionen. Sets, Surfaces, Amplituden und
@@ -621,7 +621,7 @@ beobachtet, nicht aus dem Quelltext:
     derselben Fläche; innerhalb eines Steps addiert sich alles.
   - `OP=NEW` auf einer zweiten Karte derselben Art im Step lässt die erste Karte stehen (wie
     ccx).
-- PrePoLix selbst schreibt in jedem Step `OP=NEW` und alle Lasten neu; die Übernahmeregeln
+- Nodalis selbst schreibt in jedem Step `OP=NEW` und alle Lasten neu; die Übernahmeregeln
   greifen nur für Eingaben von Hand. Wandernde Lasten sind gewöhnliche Step-Folgen.
 
 Offen für andere Threads:
@@ -631,7 +631,7 @@ Offen für andere Threads:
   übernommene, unveränderte Lasten bleiben also konstant. Für lineare Steps egal, für NLGEOM
   nötig (Vorwert je Last im Zustand halten).
 - **T5/T6**: `*CLOAD` auf DOF 4-6 (Momente) läuft durch `load_vector`, sobald `DofMap` den
-  Knoten Rotations-DOFs gibt; bis dahin Warnung. Momente am Referenzpunkt schreibt PrePoLix
+  Knoten Rotations-DOFs gibt; bis dahin Warnung. Momente am Referenzpunkt schreibt Nodalis
   als DOF 1-3 des Rotationsknotens eines `*RIGID BODY` (T6).
 - Der Zähler im `100CL`-Kopf (ccx: 101, 102, ... je Ausgabezeitpunkt des Jobs) wird seit T9
   wie bei ccx hochgezählt.
@@ -832,7 +832,7 @@ Was T8 gebaut hat und wo es von den Signaturen oben abweicht:
 - Felder: `PE` (PEEQ, Knotenmittel), `ENER` (= ½σ:ε mit der Gesamtdehnung, wie ccx);
   `.dat`-Blöcke `equivalent plastic strain (elem, integ.pnt.,pe)` und `internal energy
   density (elem, integ.pnt.,energy)`, Elementblöcke vor Knotenblöcken (Reihenfolge des
-  PrePoLix-Writers; `compare_dat` vergleicht Sets nach Namen).
+  Nodalis-Writers; `compare_dat` vergleicht Sets nach Namen).
 - `plxs-verify`: Klasse B vergleicht nur noch das Step-Ende (auch bei gleicher
   Inkrementanzahl: die Inkremente nach dem Fließbeginn liegen über der Toleranz), die
   Inkrementanzahl nur als Größenordnung (Faktor 3). Skalierung je Feld über alle
@@ -972,7 +972,7 @@ konkretes `ContactModel`; Mortar siehe T12 unten):
   Slave-Knoten; CSLIP wird auch reibungsfrei geschrieben (ccx tut das; die ccx-Werte sind
   nicht identisch, aber gegen CPRESS vernachlässigbar). Getiedter Mortar-Kontakt läuft über die
   Integrationspunkte wie Face-to-Face.
-- Fixtures: `kontakt-mortar`, `region-mortar` (PrePoLix-Writer) und neu `mortar-frictional`,
+- Fixtures: `kontakt-mortar`, `region-mortar` (Nodalis-Writer) und neu `mortar-frictional`,
   `mortar-linear`, `mortar-rough`, `mortar-switched-on`; alle stimmen inklusive `CONTACT`.
 
 ### Beobachtungen an CalculiX 2.21 (Kontakt, nur aus Ausgaben)
@@ -1084,7 +1084,7 @@ C3D20R/C3D4/C3D10/C3D6/C3D15/CPS8/CAX8 mit variiertem Δt und α) abgelesen, kei
 ## Stand nach T17 (Sensitivity)
 
 `plxs-procedures::sensitivity` rechnet `*SENSITIVITY` mit `*DESIGN VARIABLES, TYPE=COORDINATE`
-und den Design Responses, die PrePoLix schreibt: `MASS`, `STRAINENERGY` (beide mit Element-Set)
+und den Design Responses, die Nodalis schreibt: `MASS`, `STRAINENERGY` (beide mit Element-Set)
 und `EIGENFREQUENCY` (nach `*FREQUENCY, STORAGE=YES`, die Moden kommen aus
 `State::stored_modes`), dazu `*FILTER, TYPE=LINEAR`. Andere Responses (`STRESS`, `DISPLACEMENT`
 usw.), andere Filtertypen und `NLGEOM` melden `Unsupported`. `IncrementKind::Sensitivity` (IR,
@@ -1135,7 +1135,7 @@ Orakel-Modellen gilt auf 1e-5: ccx = exakt − Q mit Q = Σ_ip w_ip dV_ip/ds (Fo
 energiedichte mal Ableitung des Integrationspunktvolumens), d. h. im expliziten Teil
 ½ uᵀ dK u fehlt die Volumenänderung. Finite Differenzen mit ccx selbst (Knoten verschieben,
 neu rechnen) bestätigen den exakten Wert, nicht ccx' Ausgabe. Mit Element-Set verwendet ccx
-außerdem λ = u statt der Adjungierten K λ = K_S u (PrePoLix schreibt immer alle Elemente).
+außerdem λ = u statt der Adjungierten K λ = K_S u (Nodalis schreibt immer alle Elemente).
 plxs rechnet die exakte Ableitung; die Fixtures führen `SENENER` und
 `GRADIENT_LENGTH STRAINENERGY` als `deviations` (die `.dat`-Vergleiche beachten sie seit T17),
 `plxs-cli/tests/sensitivity_corpus.rs` prüft die Ableitung gegen Finite Differenzen.
@@ -1295,7 +1295,7 @@ Was T15 gebaut hat:
 - `PLXS_ORDERING=amd|nd` erzwingt eine Ordnung (für Messungen).
 - Offen (T20): faer parallelisiert nur innerhalb eines Supernodes; eine baumparallele
   supernodale LDLᵀ auf faer's dichten Kernen soll den Rest (Faktor ~2 in der numerischen
-  Faktorisierung) holen. Benchmark-Eingaben: `/mnt/project-files/prepolix/workbench/benchmark/`
+  Faktorisierung) holen. Benchmark-Eingaben: `/mnt/project-files/nodalis/workbench/benchmark/`
   (Projektordner, nicht im Repo), Zahlen in `KONZEPT_CCX_ABLOESUNG.md` Abschnitt 7.
 
 ## Stand nach T20 (2026-11-01, Thread "Solver schneller als PaStiX machen")

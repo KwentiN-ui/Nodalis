@@ -23,12 +23,12 @@ rigid body is drawn in red; a deactivated one has no lines.
 
 #screenshot("rigid-body-symbol.png", [Rigid body on the end face of a cantilever, driven by RP-1])
 
-Written as `*RIGID BODY, NSET=..., REF NODE=..., ROT NODE=...`: PrePoLix adds a reference node at
+Written as `*RIGID BODY, NSET=..., REF NODE=..., ROT NODE=...`: Nodalis adds a reference node at
 the point for the translations and a rotation node for the rotations, as CalculiX requires.
 
 Nodes of beams, trusses, shells and membranes in the region are an exception: CalculiX expands
 these elements into solids internally and stops on such a node in a rigid body ("nodes
-belonging to beam elements must not be subject to a RIGID MPC"). PrePoLix couples these nodes
+belonging to beam elements must not be subject to a RIGID MPC"). Nodalis couples these nodes
 to the reference point with `*EQUATION`s instead, $u = u_"RP" + theta times (x - x_"RP")$, and
 keeps the other nodes in the `*RIGID BODY`. In a linear analysis this is the same as a rigid
 body. With large deformations (NLGEOM) the equations only hold for small rotations of the

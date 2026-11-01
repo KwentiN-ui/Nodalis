@@ -10,7 +10,7 @@
 //! The global results come from the ASCII `.frd` file named by `INPUT`, relative to the
 //! job's directory; its solid elements (also the expanded ones of shells, beams and plane
 //! elements) carry the interpolation. Only the displacement degrees of freedom 1 to 3 are
-//! supported (PrePoLix writes no thermal submodels).
+//! supported (Nodalis writes no thermal submodels).
 //!
 //! No CalculiX code was consulted.
 

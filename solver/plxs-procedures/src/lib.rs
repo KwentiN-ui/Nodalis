@@ -1,4 +1,4 @@
-//! Procedures of the PrePoLix solver: what a step computes. M1: linear static analysis
+//! Procedures of the Nodalis solver: what a step computes. M1: linear static analysis
 //! (`*STATIC` without `NLGEOM`). M2: heat transfer and temperature-displacement steps
 //! ([`heat`], [`thermal`]), nonlinear static (`NLGEOM`, plastic and creeping materials,
 //! [`nonlinear`]) and `*VISCO`, `*FREQUENCY` and `*BUCKLE` ([`eigen`]), `*DYNAMIC`

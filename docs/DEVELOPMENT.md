@@ -26,7 +26,7 @@ come from Gmsh. The models with a step can be run directly with `ccx`.
 ## Gmsh
 
 STEP, IGES and BREP files are imported and meshed with [Gmsh](https://gmsh.info/). It is not compiled
-in but loaded as a library at run time; without it PrePoLix starts normally, only import and meshing
+in but loaded as a library at run time; without it Nodalis starts normally, only import and meshing
 are missing. For development a script downloads the official library (Gmsh 4.15, from Gmsh's PyPI
 package) into `target/gmsh`, where debug builds and tests find it:
 
@@ -35,7 +35,7 @@ python3 scripts/fetch_gmsh.py                        # Linux
 python3 scripts/fetch_gmsh.py --platform windows     # Windows
 ```
 
-To distribute PrePoLix, place `libgmsh.so.4.15` or `gmsh-4.15.dll` and `GMSH-LICENSE.txt` next to the
+To distribute Nodalis, place `libgmsh.so.4.15` or `gmsh-4.15.dll` and `GMSH-LICENSE.txt` next to the
 executable. Alternatively set the path to an existing library under *Tools > Settings > Gmsh*. On
 Linux the Gmsh library also needs `libGLU` and `libXft`.
 
@@ -56,15 +56,15 @@ scripts/build_ccx.sh windows    # Windows, cross-compiled with MinGW
 
 The head of the script lists the packages it needs. A first build takes a while (OpenBLAS most of
 it); intermediate files stay in `target/ccx-build/<platform>`, and finished parts are not built
-again. The installer puts the result in `ccx` next to `prepolix.exe`, the AppImage in
-`usr/lib/prepolix/ccx`. Fixes to PaStiX' build scripts are in `installer/ccx/patches`.
+again. The installer puts the result in `ccx` next to `nodalis.exe`, the AppImage in
+`usr/lib/nodalis/ccx`. Fixes to PaStiX' build scripts are in `installer/ccx/patches`.
 
 ## Windows installer
 
-The installer (`prepolix-<version>-setup.exe`, NSIS) is built on Linux: `prepolix.exe` is
+The installer (`nodalis-<version>-setup.exe`, NSIS) is built on Linux: `nodalis.exe` is
 cross-compiled with MinGW, plus the Gmsh DLL, the program icon and the license texts. It installs
-to `C:\Program Files\prepolix`, adds a Start menu entry (desktop icon optional), optionally
-associates `.plx` projects and registers for uninstall. It includes CalculiX (see above).
+to `C:\Program Files\nodalis`, adds a Start menu entry (desktop icon optional), optionally
+associates `.ndl` projects and registers for uninstall. It includes CalculiX (see above).
 
 ```sh
 sudo apt install gcc-mingw-w64-x86-64 nsis
@@ -72,16 +72,16 @@ scripts/build_windows_installer.sh     # -> target/windows-installer/
 ```
 
 A tag `v*` builds the installer, the Linux AppImage (below) and the user guide PDF with the
-*Release* workflow and attaches them to the GitHub release; *Run workflow* produces them as artifacts. PrePoLix may not write to
+*Release* workflow and attaches them to the GitHub release; *Run workflow* produces them as artifacts. Nodalis may not write to
 `C:\Program Files` without administrator rights, so the CalculiX work directory then lives in
-`%TEMP%\prepolix`.
+`%TEMP%\nodalis`.
 
 ## Linux AppImage
 
-The AppImage (`prepolix-<version>-x86_64.AppImage`) contains the release build, the Gmsh library
+The AppImage (`nodalis-<version>-x86_64.AppImage`) contains the release build, the Gmsh library
 with the system libraries it needs that not every distribution has (GLU, Xft, libgomp, ...), the
-desktop entry, the icon and the `.plx` file type (`installer/linux/`), plus the license texts in
-`usr/share/doc/prepolix`. [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy) collects the
+desktop entry, the icon and the `.ndl` file type (`installer/linux/`), plus the license texts in
+`usr/share/doc/nodalis`. [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy) collects the
 libraries, [appimagetool](https://github.com/AppImage/appimagetool) packs them; the script downloads
 both (pinned versions) into `target/appimage/tools`. It includes CalculiX (see above).
 
@@ -91,15 +91,15 @@ scripts/build_appimage.sh     # -> target/appimage/
 ```
 
 The AppImage embeds the update information
-`gh-releases-zsync|KwentiN-ui|PrePoLix|latest|prepolix-*-x86_64.AppImage.zsync`, and the script writes
+`gh-releases-zsync|KwentiN-ui|Nodalis|latest|nodalis-*-x86_64.AppImage.zsync`, and the script writes
 the matching `.zsync` file next to it. Both are attached to the release, so AppImageUpdate, Gear Lever
 and similar tools find the latest release and only download the changed blocks. This needs the
 releases to be publicly downloadable.
 
 The AppImage only runs with a glibc at least as new as the build system's. The *Release* workflow
 therefore builds it on `ubuntu-22.04` (glibc 2.35) and attaches it to the release next to the Windows
-installer. Inside the AppImage `prepolix` lives in the read-only `usr/bin`, so the CalculiX work
-directory defaults to `/tmp/prepolix`.
+installer. Inside the AppImage `nodalis` lives in the read-only `usr/bin`, so the CalculiX work
+directory defaults to `/tmp/nodalis`.
 
 ## User guide
 
@@ -114,7 +114,7 @@ build finds it there too.
 
 ## Program icon
 
-The icon is drawn in Typst: [assets/icon/prepolix-icon.typ](../assets/icon/prepolix-icon.typ) reads a
+The icon is drawn in Typst: [assets/icon/nodalis-icon.typ](../assets/icon/nodalis-icon.typ) reads a
 hexahedral CalculiX mesh of a spur gear (`assets/icon/part/gear.inp`) together with its CalculiX
 result (`gear.val`), projects the outer faces, shades them and colours them with contour bands like
 a PrePoMax result plot. Variants: `color` (on the raised tile), `light` and `mono` (one colour,
@@ -125,10 +125,10 @@ python3 assets/icon/make_part.py   # only to change the gear: mesh it and solve 
 python3 scripts/make_icon.py       # export everything (typst 0.13 and Pillow)
 ```
 
-`make_icon.py` writes the vector icons `assets/icon/prepolix*.svg` (README, user guide) and the
-raster files window systems need, `crates/plx-app/assets/icon/prepolix.png` (window) and
-`prepolix.ico` (16 to 256 px). The `.ico` goes into the installer and, through `crates/plx-app/build.rs`
-and MinGW's `windres`, into `prepolix.exe` itself.
+`make_icon.py` writes the vector icons `assets/icon/nodalis*.svg` (README, user guide) and the
+raster files window systems need, `crates/plx-app/assets/icon/nodalis.png` (window) and
+`nodalis.ico` (16 to 256 px). The `.ico` goes into the installer and, through `crates/plx-app/build.rs`
+and MinGW's `windres`, into `nodalis.exe` itself.
 
 ## Crates
 
@@ -142,12 +142,12 @@ and MinGW's `windres`, into `prepolix.exe` itself.
 | `plx-mesher` | geometry import and meshing with Gmsh (loaded at run time) |
 | `plx-job` | starting and monitoring CalculiX |
 | `plx-render` | wgpu renderer and camera |
-| `plx-app` | user interface (egui), the `prepolix` executable |
+| `plx-app` | user interface (egui), the `nodalis` executable |
 
 The lower crates know nothing about the UI and can be tested on their own (`cargo test`).
 The plan and architecture notes are in [PLANUNG_TECH_STACK.md](PLANUNG_TECH_STACK.md).
 
-## PrePoLix solver (plxs)
+## Nodalis solver (plxs)
 
 `solver/` holds the own solver that is to replace CalculiX (concept in the project folder,
 `KONZEPT_EIGENER_SOLVER.md`): a set of crates with the prefix `plxs-` and the binary `plxs`,

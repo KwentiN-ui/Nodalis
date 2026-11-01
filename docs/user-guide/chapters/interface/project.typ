@@ -4,7 +4,7 @@
 
 == Projects and analyses <project-window>
 
-A PrePoLix project (`.plx`) holds several analyses, like a project of Ansys Workbench. PrePoLix
+A Nodalis project (`.ndl`) holds several analyses, like a project of Ansys Workbench. Nodalis
 starts with the *project window*. It shows each analysis as a block in the project schematic;
 each analysis opens in a window of its own (@main-window). Several analysis windows can be open at the same time, next to the project window.
 
@@ -68,11 +68,11 @@ The symbol on the right of a cell shows its state; its tooltip says what it mean
   [Red cross], [CalculiX reported errors; results may still be there.],
 )
 
-PrePoLix keeps a fingerprint of the inputs each cell was made from, and only cells whose inputs
+Nodalis keeps a fingerprint of the inputs each cell was made from, and only cells whose inputs
 changed are out of date. New meshing settings of one part make only the mesh of that part out
 of date, and with it the solution. A new load makes the solution out of date but not the mesh.
 Changes that CalculiX does not see, such as result paths or planes, leave the solution up to
-date. Within the solution, PrePoLix also remembers which steps are unchanged, so that CalculiX
+date. Within the solution, Nodalis also remembers which steps are unchanged, so that CalculiX
 can start after them (@restart).
 
 A mesh taken from a mesh block is out of date as soon as the block's parameters change, also in
@@ -156,7 +156,7 @@ the state of another analysis (@data-links).
 ==== Adding blocks by search <block-search>
 
 Like the add menu of Blender, a double-click or right-click into empty space of the schematic shows every kind
-of block PrePoLix can add, grouped as in the #menu("Project") menu. Just start typing: the search
+of block Nodalis can add, grouped as in the #menu("Project") menu. Just start typing: the search
 field has the focus and finds blocks by fuzzy matching, so letters in order are enough
 (#ui("rct") finds #ui("Rectangle")). It also knows other words for a block, such as
 #ui("hexahedra") for #ui("Box") or #ui("library") for #ui("Materials"). Search results show
@@ -253,7 +253,7 @@ block with #key("Shift") held; with #key("Shift") a rectangle adds to the select
 The toolbar holds #ui("New Project"), #ui("Open"), #ui("Save"), #ui("Update Project"), the
 button that stops the update and kills the running CalculiX jobs, and #ui("Solution Monitor").
 
-Closing the project window closes PrePoLix with all analysis windows. Closing an analysis
+Closing the project window closes Nodalis with all analysis windows. Closing an analysis
 window (or #menu("File", "Close Analysis") in it) keeps the analysis in the project, with all
 changes; save the project to write them to the file. An analysis window that is meshing or
 solving cannot be closed.
@@ -275,7 +275,7 @@ first (@mesh-block).
   a fixed number, set #ui("Threads") times #ui("Parallel analyses") to at most the number of
   processor cores.
 - An analysis whose window is closed is solved in the background, without opening its window:
-  PrePoLix meshes its geometry if the mesh is missing or out of date, writes the input file,
+  Nodalis meshes its geometry if the mesh is missing or out of date, writes the input file,
   runs CalculiX and keeps the results in the project, as #ui("Solve") in the window does. The
   cells of its block show the progress. An analysis whose window is open is solved in its
   window, which shows the new results when it is done.
@@ -287,7 +287,7 @@ first (@mesh-block).
 
 When the schematic holds independent branches, one of them can be brought up to date without
 the others: click the amber circular arrow of a block (or the blue question mark of a
-#ui("Solution") or #ui("Results") row that was never solved). PrePoLix updates that block and
+#ui("Solution") or #ui("Results") row that was never solved). Nodalis updates that block and
 every block it takes data from, directly or through others, the way #ui("Update Project") does:
 mesh blocks make their meshes anew, analyses are solved in the order of their links, Campbell
 blocks sweep and mesh export blocks write their files. Blocks that are neither the clicked one
@@ -316,7 +316,7 @@ The list shows each analysis being solved, queued or done, with its status (prep
 meshing, running, keeping results, solved, failed or stopped), its running time and the current
 step and increment of CalculiX. Analyses solved in their open window are marked
 #ui("(window)"). Right of the list is the output of the analysis picked in it: the lines of
-PrePoLix (meshing, model checks, restart, keeping the results) around those of CalculiX, which
+Nodalis (meshing, model checks, restart, keeping the results) around those of CalculiX, which
 #ui("Filter") narrows down to the lines containing a text.
 
 #fields(

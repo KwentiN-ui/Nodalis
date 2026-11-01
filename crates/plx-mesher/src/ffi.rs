@@ -1,4 +1,4 @@
-//! The part of Gmsh's C API (`gmshc.h`) prepolix uses, loaded from the shared library at run
+//! The part of Gmsh's C API (`gmshc.h`) nodalis uses, loaded from the shared library at run
 //! time. Every function reports errors through its last argument `ierr`; arrays and strings it
 //! returns are allocated by Gmsh and released with `gmshFree`.
 
