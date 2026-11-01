@@ -113,6 +113,13 @@ mod tests {
             "constraints",
             "heat",
             "loads",
+            "eigen",
+            "nonlinear",
+            "contact",
+            "dynamic",
+            "modal",
+            "cyclic",
+            "sensitivity",
         ];
         for input in areas.iter().flat_map(|a| fixtures(a)) {
             let Some((solved, frd)) = solve(&input, &dir) else {
@@ -172,7 +179,16 @@ mod tests {
                         };
                         let tolerance = if cb.derived { 1e-4 } else { 1e-5 };
                         assert_eq!(ca.derived, cb.derived, "{what}");
+                        // The signed largest principal value takes the sign of whichever of
+                        // two opposite principal values of (nearly) equal size the rounding
+                        // makes larger.
+                        let signed = ca.name.starts_with("SGN_");
                         for (&va, &vb) in ca.values.iter().zip(&cb.values) {
+                            let (va, vb) = if signed {
+                                (va.abs(), vb.abs())
+                            } else {
+                                (va, vb)
+                            };
                             assert!(
                                 close(va, vb) || (va - vb).abs() <= tolerance * scale,
                                 "{what} {} {}: {va} vs {vb}",

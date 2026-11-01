@@ -71,6 +71,43 @@ pub fn written_nodes(model: &Model) -> Vec<usize> {
     order
 }
 
+/// A cyclic symmetric model and its results expanded to the sectors the `.frd` file holds
+/// (`NGRAPH`): the nodes and elements of every further sector, ids shifted, and the fields
+/// on all of them, as [`write`] writes them. `None` without cyclic symmetry. The expanded
+/// model has no cyclic symmetry left, so it is not expanded twice.
+pub fn expand_sectors(model: &Model, results: &Results) -> Option<(Model, Results)> {
+    let sectors = Sectors::of(model);
+    if sectors.count() == 1 {
+        return None;
+    }
+    let mut expanded = model.clone();
+    expanded.constraints.cyclic_symmetry = None;
+    let nodes = written_nodes(model);
+    for (j, rotation) in sectors.rotations.iter().enumerate().skip(1) {
+        let j = j as u32;
+        for &i in &nodes {
+            expanded.nodes.insert(
+                model.nodes.ids[i] + j * sectors.node_offset,
+                sectors.rotate_point(rotation, model.nodes.coordinates[i]),
+            );
+        }
+        for element in (model.elements.iter()).filter(|e| frd_element(e.kind).is_some()) {
+            let mut copy = element.clone();
+            copy.id += j * sectors.element_offset;
+            for node in &mut copy.nodes {
+                *node += j * sectors.node_offset;
+            }
+            expanded.elements.push(copy);
+        }
+    }
+    expanded.rebuild_indices();
+    let mut results = results.clone();
+    for increment in &mut results.increments {
+        increment.fields = sectors.expand(increment);
+    }
+    Some((expanded, results))
+}
+
 fn io(path: &Path, e: std::io::Error) -> Error {
     Error::Io {
         path: path.display().to_string(),
