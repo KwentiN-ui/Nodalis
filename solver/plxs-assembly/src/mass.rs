@@ -38,14 +38,33 @@ where
     Ok(())
 }
 
+/// Which integration rule the consistent mass matrix takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MassRule {
+    /// The element's own rule, as CalculiX's eigenvalue procedures.
+    Element,
+    /// The full rule of the family, as CalculiX's direct time integration.
+    Full,
+}
+
 /// Assembles the consistent mass matrix. Every element needs a density.
 pub fn assemble_mass(table: &ElementTable, model: &Model, m: &mut SparseMatrix) -> Result<()> {
+    assemble_mass_with(table, model, MassRule::Element, m)
+}
+
+/// [`assemble_mass`] with the given choice of integration rule.
+pub fn assemble_mass_with(
+    table: &ElementTable,
+    model: &Model,
+    rule: MassRule,
+    m: &mut SparseMatrix,
+) -> Result<()> {
     assemble_blocks(table, m, |index, entry| {
         let rho = entry.density.ok_or_else(|| {
             Error::input(
                 "*DENSITY",
                 format!(
-                    "element {} has no density; a frequency analysis needs *DENSITY for every material",
+                    "element {} has no density; a frequency or dynamic analysis needs *DENSITY for every material",
                     model.elements[index].id
                 ),
             )
@@ -53,7 +72,12 @@ pub fn assemble_mass(table: &ElementTable, model: &Model, m: &mut SparseMatrix) 
         let formulation = table.formulation(entry);
         let coords = table.coordinates(model, entry);
         let mut me = Vec::new();
-        formulation.mass(&coords, rho, &mut me);
+        match rule {
+            MassRule::Element => formulation.mass(&coords, rho, &mut me),
+            MassRule::Full => {
+                formulation.mass_with(&coords, rho, &formulation.dynamic_mass_rule(), &mut me)
+            }
+        }
         Ok(me)
     })
 }

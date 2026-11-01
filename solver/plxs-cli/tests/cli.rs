@@ -35,9 +35,9 @@ fn a_static_fixture_is_computed_and_other_procedures_are_refused() {
         report.log
     );
     assert!(report.log.contains("This is Version"), "{}", report.log);
-    // A procedure of a later milestone on the same model.
+    // A procedure plxs does not compute (yet) on the same model.
     let text = std::fs::read_to_string(f.inp()).unwrap();
-    let dynamic = text.replacen("*Static", "*Dynamic", 1);
+    let dynamic = text.replacen("*Static", "*Dynamic, Explicit", 1);
     assert_ne!(dynamic, text);
     std::fs::write(work.join("dynamik.inp"), dynamic).unwrap();
     let output = Command::new(plxs())

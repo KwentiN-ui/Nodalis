@@ -11,6 +11,7 @@
 //!
 //! No CalculiX code was consulted.
 
+pub mod dynamic;
 pub mod eigen;
 pub mod fields;
 pub mod heat;
@@ -80,6 +81,7 @@ pub fn run_step(
         }
         ProcedureKind::Frequency(_) => eigen::FrequencyProcedure.run(ctx, step, progress),
         ProcedureKind::Buckle(_) => eigen::BuckleProcedure.run(ctx, step, progress),
+        ProcedureKind::Dynamic(_) => dynamic::DynamicProcedure.run(ctx, step, progress),
         ProcedureKind::Sensitivity(_) => sensitivity::SensitivityProcedure.run(ctx, step, progress),
         ProcedureKind::HeatTransfer(_)
         | ProcedureKind::CoupledTemperatureDisplacement(_)
