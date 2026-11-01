@@ -413,13 +413,14 @@ pub fn write_increment(
     );
     if let Some(evaluation) = &ctx.contact.last {
         let order = node_order(ctx.model);
-        fields.extend(crate::contact::contact_fields(
-            ctx.model,
-            step,
-            &ctx.contact,
-            evaluation,
-            &order,
-        ));
+        let contact =
+            crate::contact::contact_fields(ctx.model, step, &ctx.contact, evaluation, &order);
+        // CalculiX writes the contact fields before the error estimator.
+        let at = fields
+            .iter()
+            .position(|f| f.name == "ERROR")
+            .unwrap_or(fields.len());
+        fields.splice(at..at, contact);
     }
     ctx.results.increments.push(ResultsIncrement {
         step: ctx.step_number,

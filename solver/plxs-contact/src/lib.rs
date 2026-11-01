@@ -37,6 +37,11 @@ use plxs_core::{Error, Model, Result, State, Step};
 use geometry::{ContactFace, FaceGrid, cross, dot, normalized, scale, sub, surface_nodes};
 use law::{FrictionLaw, Law};
 
+/// How far (in typical master edge lengths) a face-to-face point may lie beside the closest
+/// master face and still touch it: points over a convex edge between two faces project
+/// onto the edge with a small sideways offset.
+const BESIDE_TOLERANCE: f64 = 0.01;
+
 /// A point of the slave side a spring acts on: a slave node (node-to-face) or an integration
 /// point of a slave face (face-to-face).
 #[derive(Clone, Debug)]
@@ -917,6 +922,19 @@ impl Pair {
         let face = &self.master[f as usize];
         let n = fp.normal;
         let geometric_gap = dot(sub(x, fp.x), n);
+        // A face-to-face point beside the master surface (its foot point clamped to an edge
+        // or corner of the closest face, the point itself off to the side) touches nothing:
+        // the distance along the normal of the clamped foot point is no overclosure. Without
+        // this a slave surface that reaches past the end of the master gets springs with a
+        // false overclosure of the order of its overhang. Node-to-face points are sorted out
+        // at the start of the increment instead (`prepare`).
+        if !tied && self.kind != ContactKind::NodeToSurface {
+            let r = sub(x, fp.x);
+            let lateral = geometry::norm(sub(r, scale(n, geometric_gap)));
+            if lateral > BESIDE_TOLERANCE * self.typical {
+                return Err((x, 0.0));
+            }
+        }
         let initial_gap = self.initial[p].map_or(0.0, |(_, g)| g);
         let gap = match self.clearance {
             Some(c) => geometric_gap - initial_gap + c,
