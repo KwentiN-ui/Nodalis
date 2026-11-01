@@ -670,7 +670,7 @@ pub fn save_project(path: &Path, project: &Project) -> Result<(), ProjectError> 
 
 /// The oldest format that can still be opened. While PrePoLix is being designed, a new
 /// format is not converted: older projects are refused.
-pub const FIRST_PROJECT_FORMAT: u32 = 15;
+pub const FIRST_PROJECT_FORMAT: u32 = 16;
 
 /// The format of a project file, read before the rest, which depends on it.
 #[derive(Deserialize)]
