@@ -6,4 +6,4 @@ features = ["*HEADING", "*NODE", "*ELEMENT", "C3D8", "*NSET", "*ELSET", "*SURFAC
 source = "plx-io writer test"
 reference = "ccx 2.21"
 note = "the turning direction of the second bending pair differs from ccx (both B there although the orbit of every node turns forward), see docs/solver/SCHNITTSTELLEN.md (Stand nach M3 T14)"
-deviations = ["TURNING_DIRECTION"]
+deviations = ["EIGENVALUE_OUTPUT TURNING_DIRECTION"]

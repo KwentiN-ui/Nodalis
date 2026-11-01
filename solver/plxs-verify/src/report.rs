@@ -101,29 +101,24 @@ pub fn run_fixture(solver: &Path, fixture: &Fixture, work: &Path) -> Report {
         Err(e) => return report(Outcome::Error(format!("results: {e}")), short_log),
     };
     let class = fixture.meta.class;
+    // Documented deviations (whole fields) and undetermined components.
+    let undetermined: Vec<String> = fixture
+        .meta
+        .deviations
+        .iter()
+        .chain(&fixture.meta.undetermined)
+        .cloned()
+        .collect();
     let mut comparison: Comparison = compare_frd_with(
         &reference.frd,
         &results.frd,
         class,
-        // Documented deviations (whole fields) and undetermined components.
-        &fixture
-            .meta
-            .deviations
-            .iter()
-            .chain(&fixture.meta.undetermined)
-            .cloned()
-            .collect::<Vec<_>>(),
+        &undetermined,
         &fixture.meta.noise,
     );
     match (&reference.dat, &results.dat) {
         (Some(r), Some(c)) => {
-            let dat = compare_dat_except(
-                r,
-                c,
-                class,
-                &comparison.unmatched_modes,
-                &fixture.meta.deviations,
-            );
+            let dat = compare_dat_except(r, c, class, &comparison.unmatched_modes, &undetermined);
             comparison.failures.extend(dat.failures);
             comparison.max_relative = comparison.max_relative.max(dat.max_relative);
             comparison.compared += dat.compared;

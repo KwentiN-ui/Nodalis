@@ -73,7 +73,7 @@ Treffer gewinnt:
 | `dynamic` | M3 | T13 | *DYNAMIC (implizit, Rayleigh), *INITIAL CONDITIONS, TYPE=VELOCITY |
 | `modal` | M3 | T14 | *MODAL DYNAMICS, *STEADY STATE DYNAMICS, *MODAL DAMPING, *COMPLEX FREQUENCY mit Coriolis (`.eig` aus *FREQUENCY, STORAGE=YES) |
 | `cyclic` | M3 | T15 | *CYCLIC SYMMETRY MODEL, *SELECT CYCLIC SYMMETRY MODES, *SUBMODEL (`submodel` hat kein Golden File, weil es die `.frd` des Globalmodells braucht; der Thread baut sich den Zweischritt lokal) |
-| `sensitivity` | ccx | – | *SENSITIVITY wurde für Phase 1 gestrichen; die Fixture prüft nur, dass der Parser sie liest |
+| `sensitivity` | M3 | T17 | *SENSITIVITY mit MASS, STRAINENERGY, EIGENFREQUENCY und linearem Filter (Klasse B: ccx differenziert per Finite Differenzen); STRAINENERGY weicht dokumentiert ab (`deviations`) |
 
 Drei Fixtures (`modal/modal`, `dynamic/dynamik`, `dynamic/dynamik_gedaempft`) haben kein
 Golden File im Repo, weil es mit Hunderten von Inkrementen 3 bis 7 MB groß wäre; der
@@ -250,7 +250,9 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `plane/rohr-innendruck` | A | M2 | ccx 2.21 | CAX8, \*STATIC |
 | `plane/rohr-zug` | A | M2 | ccx 2.21 | CAX8, \*STATIC |
 | `plane/symmetrie-2d-0` | A | M2 | ccx 2.21 | CPS8, \*STATIC |
-| `sensitivity/sensitivitaet-frequenz` | A | ccx | ccx 2.21 | C3D8, \*DESIGN VARIABLES, \*FREQUENCY, \*SENSITIVITY, \*DESIGN RESPONSE |
+| `sensitivity/sensitivitaet-filter` | B | M3 | ccx 2.21 | C3D8, \*DESIGN VARIABLES, \*STATIC, \*SENSITIVITY, \*DESIGN RESPONSE, \*FILTER |
+| `sensitivity/sensitivitaet-frequenz` | B | M3 | ccx 2.21 | C3D8, \*DESIGN VARIABLES, \*FREQUENCY, \*SENSITIVITY, \*DESIGN RESPONSE |
+| `sensitivity/sensitivitaet` | B | M3 | ccx 2.21 | C3D8, \*DESIGN VARIABLES, \*STATIC, \*SENSITIVITY, \*DESIGN RESPONSE |
 | `static/amplitude_hold_ref` | A | M1 | ccx 2.21 | C3D8, \*STATIC |
 | `static/amplitude_reference` | A | M1 | ccx 2.21 | C3D8, \*STATIC |
 | `static/block` | A | M1 | ccx 2.21 | C3D20R, \*STATIC |
