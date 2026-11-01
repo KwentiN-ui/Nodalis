@@ -189,6 +189,35 @@ constants missing"; other messages appear as "CalculiX error" with the text of t
 The checks do not stop a run; their errors are listed at the top of the monitor. Missing
 references do stop it, because the input file cannot be written.
 
+=== Check by the PrePoLix solver <solver-model-check>
+
+With the PrePoLix solver (#ui("Solver") under #menu("Tools", "Settings ...") > #ui("Solver"),
+@settings), #ui("Check Model") in the context menu of the analysis lets the solver check the
+model itself instead of estimating from the geometry. It reads the whole model with its steps
+and factorizes the stiffness matrix once for every set of supports (a check takes about as long
+as a linear static run, without results). Every direction in which the model can move without
+resistance is found exactly, and the nodes that move with it are named:
+
+- *Rigid body motion possible* on the boundary conditions of the step and on each part that
+  moves, with the free motions, for example "displacement in Y, displacement in Z, rotation
+  about X free". Parts that move apart from each other are reported separately.
+- *Truss structure is a mechanism* when the free motion deforms the structure instead of moving
+  it as a whole.
+- *Held only by contact* instead, when the model has contact: the check does not see what
+  contact will hold once it closes.
+- *Nodes of a bonded contact not tied* with the parts of the slave nodes that are farther from the
+  master side than the tolerance.
+
+Free motions in a frequency step are no problem (they are the modes with frequency zero) and
+are not reported. The monitor lists the findings with the first node numbers; the warning
+symbols in the tree mark the boundary conditions and the parts.
+
+When a run with the PrePoLix solver stops at a singular matrix, the solver runs the same check
+by itself and explains the cause in the monitor and the tree.
+
+#screenshot("solver-model-check.png", [Check Model by the PrePoLix solver: the beam, held in X
+  only at its end, can still slide and turn])
+
 === Overlapping constraints <overlapping-constraints>
 
 Several items of a model are written as constraint equations (MPCs) that make some degrees of

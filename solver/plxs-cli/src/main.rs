@@ -5,6 +5,7 @@
 //! plxs -i <job>         the same
 //! plxs -v               print the version
 //! plxs --threads <n>    number of threads (default: OMP_NUM_THREADS, else all cores)
+//! plxs --check <job>    model check only: free motions, untied nodes, size (no results)
 //! ```
 //!
 //! stdout follows CalculiX's lines (`STEP n`, `increment n attempt m`, `iteration n`, `Job
@@ -47,6 +48,7 @@ fn banner() {
 fn run(args: Vec<String>) -> i32 {
     let mut job: Option<String> = None;
     let mut threads: Option<usize> = None;
+    let mut check = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -62,8 +64,9 @@ fn run(args: Vec<String>) -> i32 {
                 i += 1;
                 threads = args.get(i).and_then(|t| t.parse().ok());
             }
+            "--check" => check = true,
             "-h" | "--help" => {
-                say("usage: plxs [-i] <job> [--threads <n>] | plxs -v");
+                say("usage: plxs [-i] <job> [--threads <n>] [--check] | plxs -v");
                 return 0;
             }
             other if !other.starts_with('-') => job = Some(other.to_string()),
@@ -122,6 +125,14 @@ fn run(args: Vec<String>) -> i32 {
             say(&line);
         }
     };
+    if check {
+        let found = plxs_session::check_input(&input, Some(&path), &options, &mut progress);
+        for diagnostic in &found.diagnostics {
+            say(&plxs_session::format_diagnostic(diagnostic));
+        }
+        say(&format!(" model check finished in {:.2} s", found.seconds));
+        return i32::from(found.has_errors());
+    }
     match plxs_session::run_job(&input, Some(&path), &options, &mut progress) {
         Ok(plxs_session::JobOutcome::Finished) => {
             say("");

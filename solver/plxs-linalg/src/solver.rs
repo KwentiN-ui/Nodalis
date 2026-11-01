@@ -6,7 +6,8 @@ use faer::Side;
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::ldlt::factor::LdltRegularization;
 use faer::sparse::linalg::cholesky::{
-    CholeskySymbolicParams, SymbolicCholesky, SymmetricOrdering, factorize_symbolic_cholesky,
+    CholeskySymbolicParams, SymbolicCholesky, SymbolicCholeskyRaw, SymmetricOrdering,
+    factorize_symbolic_cholesky, supernodal::SupernodalLdltRef,
 };
 use faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
 
@@ -39,6 +40,11 @@ pub struct LdltSolver {
     symbolic: Option<SymbolicCholesky<u32>>,
     values: Vec<f64>,
     factorized: bool,
+    /// Relative threshold below which a pivot is replaced by `±threshold · scale` (its sign
+    /// kept); `0.0` means none. Indefinite matrices (`K − σM` with `σ` inside the spectrum,
+    /// the Sturm checks of the eigensolvers) can meet pivots that are exactly zero without
+    /// being singular, which LDLᵀ without pivoting cannot pass otherwise.
+    regularization: f64,
 }
 
 impl LdltSolver {
@@ -55,7 +61,57 @@ impl LdltSolver {
             symbolic: None,
             values: Vec::new(),
             factorized: false,
+            regularization: 0.0,
         }
+    }
+
+    /// Replaces pivots smaller than `relative` times the largest diagonal entry by that
+    /// value with the pivot's sign (dynamic regularization), for indefinite matrices.
+    /// `0.0` switches it off (the default: a zero pivot is then an error).
+    pub fn set_regularization(&mut self, relative: f64) {
+        self.regularization = relative;
+    }
+
+    /// The pivots `D` of the last factorization, indexed like the unknowns of the matrix
+    /// (not in the elimination order). A pivot that is zero or tiny against the diagonal
+    /// entry of its unknown marks a singular direction: what is left of that unknown's
+    /// stiffness once the unknowns eliminated before it took theirs.
+    pub fn pivots(&self) -> Option<Vec<f64>> {
+        let symbolic = self.symbolic.as_ref().filter(|_| self.factorized)?;
+        let n = symbolic.nrows();
+        // D in the elimination order.
+        let mut eliminated = vec![0.0; n];
+        match symbolic.raw() {
+            SymbolicCholeskyRaw::Simplicial(simplicial) => {
+                // The first stored entry of every column of the factor is its diagonal, D_j.
+                let col_ptr = simplicial.col_ptr();
+                for (j, d) in eliminated.iter_mut().enumerate() {
+                    *d = self.values[col_ptr[j] as usize];
+                }
+            }
+            SymbolicCholeskyRaw::Supernodal(supernodal) => {
+                let ldlt = SupernodalLdltRef::new(supernodal, &self.values);
+                let begin = supernodal.supernode_begin();
+                for (s, &first) in begin.iter().enumerate().take(supernodal.n_supernodes()) {
+                    let block = ldlt.supernode(s).val();
+                    let first = first as usize;
+                    for j in 0..block.ncols() {
+                        eliminated[first + j] = block[(j, j)];
+                    }
+                }
+            }
+        }
+        Some(match symbolic.perm() {
+            Some(perm) => {
+                let (forward, _) = perm.arrays();
+                let mut pivots = vec![0.0; n];
+                for (new, &old) in forward.iter().enumerate() {
+                    pivots[old as usize] = eliminated[new];
+                }
+                pivots
+            }
+            None => eliminated,
+        })
     }
 
     /// Gives the positions of the unknowns (one per equation of the pattern analyzed next);
@@ -134,6 +190,16 @@ impl LinearSolver for LdltSolver {
         let scratch = symbolic.factorize_numeric_ldlt_scratch::<f64>(self.par, Default::default());
         let mut buffer = MemBuffer::try_new(scratch)
             .map_err(|_| numerical("out of memory in the factorization"))?;
+        let threshold = if self.regularization > 0.0 {
+            let largest = matrix
+                .diagonal()
+                .iter()
+                .fold(0.0_f64, |m, v| m.max(v.abs()))
+                .max(f64::MIN_POSITIVE);
+            self.regularization * largest
+        } else {
+            0.0
+        };
         symbolic
             .factorize_numeric_ldlt::<f64>(
                 &mut self.values,
@@ -141,8 +207,8 @@ impl LinearSolver for LdltSolver {
                 Side::Upper,
                 LdltRegularization {
                     dynamic_regularization_signs: None,
-                    dynamic_regularization_delta: 0.0,
-                    dynamic_regularization_epsilon: 0.0,
+                    dynamic_regularization_delta: threshold,
+                    dynamic_regularization_epsilon: threshold,
                 },
                 self.par,
                 MemStack::new(&mut buffer),
@@ -211,6 +277,33 @@ mod tests {
         for (x, expected) in b.iter().zip([1.0, 2.0, 3.0]) {
             assert!((x - expected).abs() < 1e-12, "{b:?}");
         }
+    }
+
+    #[test]
+    fn pivots_show_the_singular_unknown() {
+        // A chain of three springs, held at no end: singular once; regularization lets the
+        // factorization pass and the last pivot in the elimination order is zero.
+        let pattern = Arc::new(Pattern::from_blocks(3, [&[0u32, 1][..], &[1, 2][..]]));
+        let mut a = SparseMatrix::zeros(pattern.clone());
+        for (i, j) in [(0, 1), (1, 2)] {
+            a.add(i, i, 1.0);
+            a.add(j, j, 1.0);
+            a.add(i, j, -1.0);
+        }
+        let mut solver = LdltSolver::new(1);
+        solver.analyze(&pattern).unwrap();
+        solver.set_regularization(1e-14);
+        solver.factorize(&a).unwrap();
+        let pivots = solver.pivots().unwrap();
+        let diagonal = a.diagonal();
+        let zero = (0..3).filter(|&j| pivots[j] / diagonal[j] < 1e-10).count();
+        assert_eq!(zero, 1, "{pivots:?}");
+        // Held at one end: no zero pivot.
+        let mut held = a.clone();
+        held.add(0, 0, 1.0);
+        solver.factorize(&held).unwrap();
+        let pivots = solver.pivots().unwrap();
+        assert!((0..3).all(|j| pivots[j] > 0.1), "{pivots:?}");
     }
 
     #[test]

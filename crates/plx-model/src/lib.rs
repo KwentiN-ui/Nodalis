@@ -40,6 +40,7 @@ mod region;
 mod remote;
 mod section;
 mod signature;
+mod solver_diagnostics;
 mod study;
 mod symmetry;
 pub mod units;
@@ -105,6 +106,7 @@ pub use section::{
     BeamOrientation, BeamSection, Section, SectionKind, line_tangent, membrane_type, unit_thickness,
 };
 pub use signature::{EntitySignature, TagMap, match_entities};
+pub use solver_diagnostics::diagnose_solver_check;
 pub use study::{DesignPoint, FillMode, FillRule, PointRun, PointState, StudyColumn, StudyTable};
 pub use symmetry::{SymmetryError, SymmetryPlane, symmetry_dofs, symmetry_plane};
 pub use units::{BASE_QUANTITIES, DERIVED_QUANTITIES, Quantity, STORED, UnitSystem};

@@ -6,6 +6,7 @@
 //! Every session has its own rayon thread pool with `threads` threads; no global state, so
 //! several sessions can run in one process.
 
+pub mod check;
 pub mod job;
 
 use std::path::PathBuf;
@@ -19,6 +20,7 @@ use plxs_linalg::{LdltSolver, Pattern};
 use plxs_output::StaRow;
 use plxs_procedures::{ProcedureContext, run_step};
 
+pub use check::{Check, check_analysis, check_input, format_diagnostic};
 pub use job::{JobOptions, JobOutcome, format_event, run_job};
 pub use plxs_procedures::StepOutcome;
 pub use plxs_procedures::fields::unsupported_outputs;
