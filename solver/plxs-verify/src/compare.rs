@@ -980,6 +980,27 @@ pub fn compare_dat_except(
     unmatched_modes: &[(u32, u32)],
     undetermined: &[String],
 ) -> Comparison {
+    compare_dat_with_noise(
+        reference,
+        candidate,
+        class,
+        unmatched_modes,
+        undetermined,
+        &BTreeMap::new(),
+    )
+}
+
+/// [`compare_dat_except`] with absolute noise levels per history field name (`noise` of the
+/// fixture's `.toml`, e.g. `MOMENT_ABOUT_CG`, a difference of large moments that is pure
+/// round-off when the contact force acts at its centre).
+pub fn compare_dat_with_noise(
+    reference: &DatImport,
+    candidate: &DatImport,
+    class: Class,
+    unmatched_modes: &[(u32, u32)],
+    undetermined: &[String],
+    noise: &BTreeMap<String, f64>,
+) -> Comparison {
     let mut c = Comparison::default();
     let tolerance = class.tolerance();
     // CalculiX prints the blocks in the order of the `*NODE PRINT`/`*EL PRINT` requests;
@@ -1035,7 +1056,8 @@ pub fn compare_dat_except(
                 rf.components
                     .iter()
                     .flat_map(|c| c.entries.iter().map(|e| e.values.as_slice())),
-            );
+            )
+            .max(noise.get(&rf.name).map_or(0.0, |n| n / tolerance));
             for rc in &rf.components {
                 let Some(kc) = kf.component(&rc.name) else {
                     c.fail(format!("{label}: {} has no component {}", rf.name, rc.name));

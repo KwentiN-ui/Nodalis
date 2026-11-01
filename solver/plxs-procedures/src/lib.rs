@@ -14,6 +14,7 @@
 //! No CalculiX code was consulted.
 
 pub mod complex;
+pub mod contact;
 pub mod dynamic;
 pub mod eigen;
 pub mod equations;
@@ -77,6 +78,8 @@ pub struct ProcedureContext<'a> {
     pub work_dir: std::path::PathBuf,
     /// Set by the caller to stop the run between increments.
     pub cancel: plxs_core::CancelToken,
+    /// The contact pairs of the model, prepared once (empty without contact).
+    pub contact: plxs_contact::ContactModel,
     /// Time per phase, summed over the steps of the session.
     pub profile: profile::Profile,
 }
@@ -99,11 +102,28 @@ pub fn run_step(
 ) -> Result<StepOutcome> {
     match &step.procedure {
         ProcedureKind::NoAnalysis => Ok(StepOutcome::Converged),
-        ProcedureKind::Static(_) if !step.nlgeom && !ctx.table.has_nonlinear_material() => {
+        ProcedureKind::Static(_)
+            if !step.nlgeom && !ctx.table.has_nonlinear_material() && ctx.contact.is_empty() =>
+        {
             static_linear::StaticLinear.run(ctx, step, progress)
         }
         ProcedureKind::Static(_) | ProcedureKind::Visco(_) => {
             nonlinear::NonlinearStatic.run(ctx, step, progress)
+        }
+        ProcedureKind::Frequency(_)
+        | ProcedureKind::Buckle(_)
+        | ProcedureKind::Dynamic(_)
+        | ProcedureKind::Sensitivity(_)
+        | ProcedureKind::ComplexFrequency(_)
+        | ProcedureKind::ModalDynamics(_)
+        | ProcedureKind::SteadyStateDynamics(_)
+            if !ctx.contact.is_empty() =>
+        {
+            Err(Error::Unsupported(format!(
+                "contact in {} steps is not implemented yet (step {})",
+                step.procedure.keyword(),
+                step.name
+            )))
         }
         ProcedureKind::Frequency(_) => eigen::FrequencyProcedure.run(ctx, step, progress),
         ProcedureKind::Buckle(_) => eigen::BuckleProcedure.run(ctx, step, progress),
@@ -116,6 +136,17 @@ pub fn run_step(
             modal::SteadyStateProcedure.run(ctx, step, progress)
         }
         ProcedureKind::Sensitivity(_) => sensitivity::SensitivityProcedure.run(ctx, step, progress),
+        ProcedureKind::HeatTransfer(_)
+        | ProcedureKind::CoupledTemperatureDisplacement(_)
+        | ProcedureKind::UncoupledTemperatureDisplacement(_)
+            if !ctx.contact.is_empty() =>
+        {
+            Err(Error::Unsupported(format!(
+                "contact in {} steps is not implemented yet (step {})",
+                step.procedure.keyword(),
+                step.name
+            )))
+        }
         ProcedureKind::HeatTransfer(_)
         | ProcedureKind::CoupledTemperatureDisplacement(_)
         | ProcedureKind::UncoupledTemperatureDisplacement(_)
