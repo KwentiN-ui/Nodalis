@@ -9,17 +9,22 @@
 //! Gauss-Newton iteration on the face's natural coordinates (Wriggers, "Computational
 //! Contact Mechanics", chapter 4.1, closest point projection).
 //!
+//! Plane stress, plane strain and axisymmetric elements are tied along their edges (edge k
+//! from corner k to corner k + 1, midside node `corners + k`), in their plane only.
+//!
 //! No CalculiX code was consulted.
 
 use std::collections::{HashMap, HashSet};
 
 use plxs_core::constraints::Tie;
 use plxs_core::mesh::Surface;
+use plxs_core::{ElementFamily, ElementType};
 use plxs_core::{Error, Model, Result};
 use plxs_elements::shape::face_shape;
 use plxs_elements::solid;
 
-/// A master face: dense node indices (corners first, then midside nodes) and its shape.
+/// A master face: dense node indices (corners first, then midside nodes) and its shape. An
+/// edge of a plane or axisymmetric element has two corners.
 #[derive(Clone, Debug)]
 pub struct MasterFace {
     pub nodes: Vec<u32>,
@@ -36,6 +41,9 @@ pub struct Coupling {
     /// The projection on the master surface.
     pub point: [f64; 3],
     pub distance: f64,
+    /// Tied to an edge of a plane or axisymmetric element: only the two in-plane
+    /// displacements are coupled.
+    pub planar: bool,
 }
 
 /// The faces of an element surface as dense node lists.
@@ -56,14 +64,13 @@ pub fn surface_faces(model: &Model, keyword: &str, name: &str) -> Result<Vec<Mas
         let element = model
             .element(face.element)
             .ok_or_else(|| Error::undefined(keyword, "element", face.element.to_string()))?;
-        let family = solid(element.kind).map(|s| s.family).ok_or_else(|| {
+        let (table, quadratic) = face_table(element.kind).ok_or_else(|| {
             Error::Unsupported(format!(
                 "{keyword}: faces of {} elements cannot be tied yet (element {})",
                 element.kind, element.id
             ))
         })?;
-        let table = family.faces();
-        let f = table
+        let (corners, mids) = table
             .get((face.face as usize).wrapping_sub(1))
             .ok_or_else(|| {
                 Error::input(
@@ -74,12 +81,9 @@ pub fn surface_faces(model: &Model, keyword: &str, name: &str) -> Result<Vec<Mas
                     ),
                 )
             })?;
-        let quadratic = family.is_quadratic();
-        let local = f
-            .corners
+        let nodes = corners
             .iter()
-            .chain(if quadratic { f.mids } else { &[] }.iter());
-        let nodes = local
+            .chain(mids)
             .map(|&k| {
                 let id = element.nodes[k];
                 model
@@ -90,11 +94,51 @@ pub fn surface_faces(model: &Model, keyword: &str, name: &str) -> Result<Vec<Mas
             .collect::<Result<Vec<u32>>>()?;
         out.push(MasterFace {
             nodes,
-            corners: f.corners.len(),
+            corners: corners.len(),
             quadratic,
         });
     }
     Ok(out)
+}
+
+/// The faces of an element kind (local corner and midside nodes of each face) and whether
+/// they are quadratic; `None` for kinds without tieable faces.
+#[allow(clippy::type_complexity)]
+fn face_table(kind: ElementType) -> Option<(Vec<(Vec<usize>, Vec<usize>)>, bool)> {
+    if let Some(family) = solid(kind).map(|s| s.family) {
+        let quadratic = family.is_quadratic();
+        let faces = (family.faces().iter())
+            .map(|f| {
+                let mids = if quadratic {
+                    f.mids.to_vec()
+                } else {
+                    Vec::new()
+                };
+                (f.corners.to_vec(), mids)
+            })
+            .collect();
+        return Some((faces, quadratic));
+    }
+    if !matches!(
+        kind.family(),
+        ElementFamily::PlaneStress | ElementFamily::PlaneStrain | ElementFamily::Axisymmetric
+    ) {
+        return None;
+    }
+    let count = kind.node_count();
+    let corners = if count == 3 || count == 6 { 3 } else { 4 };
+    let quadratic = count > corners;
+    let faces = (0..corners)
+        .map(|k| {
+            let mids = if quadratic {
+                vec![corners + k]
+            } else {
+                Vec::new()
+            };
+            (vec![k, (k + 1) % corners], mids)
+        })
+        .collect();
+    Some((faces, quadratic))
 }
 
 /// The slave nodes of a surface (element faces or nodes), dense, in order, unique.
@@ -129,6 +173,23 @@ pub fn surface_nodes(model: &Model, keyword: &str, name: &str) -> Result<Vec<u32
     Ok(out)
 }
 
+/// Shape functions of an edge (2 corners, then the midside node) at `xi` in [-1, 1].
+fn line_shape(quadratic: bool, xi: f64, n: &mut [f64], dn: &mut [[f64; 2]]) {
+    if quadratic {
+        n[0] = 0.5 * xi * (xi - 1.0);
+        n[1] = 0.5 * xi * (xi + 1.0);
+        n[2] = 1.0 - xi * xi;
+        dn[0] = [xi - 0.5, 0.0];
+        dn[1] = [xi + 0.5, 0.0];
+        dn[2] = [-2.0 * xi, 0.0];
+    } else {
+        n[0] = 0.5 * (1.0 - xi);
+        n[1] = 0.5 * (1.0 + xi);
+        dn[0] = [-0.5, 0.0];
+        dn[1] = [0.5, 0.0];
+    }
+}
+
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
@@ -139,7 +200,9 @@ fn norm(a: [f64; 3]) -> f64 {
 
 impl MasterFace {
     fn clamp(&self, p: [f64; 2]) -> [f64; 2] {
-        if self.corners == 4 {
+        if self.corners == 2 {
+            [p[0].clamp(-1.0, 1.0), 0.0]
+        } else if self.corners == 4 {
             [p[0].clamp(-1.0, 1.0), p[1].clamp(-1.0, 1.0)]
         } else {
             let (mut x, mut y) = (p[0].max(0.0), p[1].max(0.0));
@@ -157,7 +220,11 @@ impl MasterFace {
         let m = self.nodes.len();
         let mut n = vec![0.0; m];
         let mut dn = vec![[0.0; 2]; m];
-        face_shape(self.corners, self.quadratic, p, &mut n, &mut dn);
+        if self.corners == 2 {
+            line_shape(self.quadratic, p[0], &mut n, &mut dn);
+        } else {
+            face_shape(self.corners, self.quadratic, p, &mut n, &mut dn);
+        }
         let mut x = [0.0; 3];
         let mut t = [[0.0; 3]; 2];
         for (i, &node) in self.nodes.iter().enumerate() {
@@ -173,7 +240,7 @@ impl MasterFace {
 
     /// Closest point projection of `x` on the face: natural coordinates, weights, point.
     pub fn project(&self, coords: &[[f64; 3]], x: [f64; 3]) -> (Vec<f64>, [f64; 3]) {
-        let mut p = if self.corners == 4 {
+        let mut p = if self.corners != 3 {
             [0.0, 0.0]
         } else {
             [1.0 / 3.0, 1.0 / 3.0]
@@ -188,11 +255,18 @@ impl MasterFace {
             let a = t[0].iter().map(|v| v * v).sum::<f64>();
             let b = (0..3).map(|d| t[0][d] * t[1][d]).sum::<f64>();
             let c = t[1].iter().map(|v| v * v).sum::<f64>();
-            let det = a * c - b * b;
-            if det.abs() < 1e-300 {
-                break;
-            }
-            let step = [(c * g[0] - b * g[1]) / det, (a * g[1] - b * g[0]) / det];
+            let step = if self.corners == 2 {
+                if a < 1e-300 {
+                    break;
+                }
+                [g[0] / a, 0.0]
+            } else {
+                let det = a * c - b * b;
+                if det.abs() < 1e-300 {
+                    break;
+                }
+                [(c * g[0] - b * g[1]) / det, (a * g[1] - b * g[0]) / det]
+            };
             let next = self.clamp([p[0] + step[0], p[1] + step[1]]);
             let moved = (next[0] - p[0]).abs() + (next[1] - p[1]).abs();
             p = next;
@@ -217,8 +291,14 @@ impl MasterFace {
         (lo, hi)
     }
 
-    /// Mean length of the corner edges.
+    /// Mean length of the corner edges (the length of an edge face).
     fn edge_length(&self, coords: &[[f64; 3]]) -> f64 {
+        if self.corners == 2 {
+            return norm(sub(
+                coords[self.nodes[0] as usize],
+                coords[self.nodes[1] as usize],
+            ));
+        }
         let k = self.corners;
         (0..k)
             .map(|i| {
@@ -298,6 +378,7 @@ pub fn couplings(
                     masters: face.nodes.iter().copied().zip(n).collect(),
                     point,
                     distance,
+                    planar: face.corners == 2,
                 });
             }
             _ => missed.push(slave),
