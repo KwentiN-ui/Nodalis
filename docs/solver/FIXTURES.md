@@ -194,6 +194,7 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `contact/region-switched-on` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE, \*MODEL CHANGE |
 | `contact/region-tied` | C | M3 | ccx 2.21 | C3D8, \*RIGID BODY, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*FRICTION, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE |
 | `contact/s2s-contact-print` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE, \*CONTACT PRINT |
+| `contact/s2s-overhang` | C | M3 | ccx 2.21 | C3D8, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE, \*NODE PRINT |
 | `contact/weak-springs-spalt-nlgeom` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE, NLGEOM |
 | `contact/weak-springs-spalt` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE |
 | `cyclic/cyclic_sector` | A | M3 | ccx 2.21 | C3D8, \*TIE, \*CYCLIC SYMMETRY MODEL, \*FREQUENCY, \*SELECT CYCLIC SYMMETRY MODES |

@@ -977,6 +977,13 @@ konkretes `ContactModel`; Mortar siehe T12 unten):
 
 ### Beobachtungen an CalculiX 2.21 (Kontakt, nur aus Ausgaben)
 
+- Face-to-Face: Ein Slave-Punkt neben der Master-Fläche (Fußpunkt auf Rand oder Ecke der
+  nächsten Face geklemmt, der Punkt selbst seitlich daneben) bekommt keine Feder
+  (`BESIDE_TOLERANCE` = 1 % der typischen Kantenlänge seitlicher Abstand). Vorher galt der
+  Normalabstand zum geklemmten Fußpunkt als Spalt: eine Slave-Fläche, die über das Ende der
+  Master-Fläche hinausragt, bekam Scheinüberschneidungen in der Größe ihres Überstands
+  (Smoke-Test 0.4.0, Lasche mit Bolzen, C3D10: bis 1,1 mm, ~10¹² Pa, Newton flatterte ohne
+  Ende). Fixture `s2s-overhang`.
 - Node-to-Face, LINEAR: geglättet `p = K d/2 + (K d/π)·atan(K d/(π σ∞))`, σ∞ ohne Angabe
   `E/70000` des Slave-Materials; Feder innerhalb `5 c0` (mit c0) bzw. `10⁻³ √A` (A
   Knotenfläche). EXPONENTIAL `p = p0·10^(2d/c0)` bis zum Cutoff c0. HARD = LINEAR mit
