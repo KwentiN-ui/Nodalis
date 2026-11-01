@@ -375,8 +375,18 @@ pub fn write_increment(
         let average = nodal_average_scalar(ctx.table, ctx.model, &energy);
         fields.push(scalar_field("ENER", "ENER", &order, &average));
     }
+    if let Some(evaluation) = &ctx.contact.last {
+        fields.extend(crate::contact::contact_fields(
+            ctx.model,
+            step,
+            &ctx.contact,
+            evaluation,
+            &order,
+        ));
+    }
     let known = [
-        "U", "S", "E", "RF", "ERR", "NOE", "PEEQ", "ENER", "NT", "HFL", "RFL",
+        "U", "S", "E", "RF", "ERR", "NOE", "PEEQ", "ENER", "NT", "HFL", "RFL", "CDIS", "CSTR",
+        "CELS",
     ];
     let mut reported = Vec::new();
     for v in &variables {
@@ -402,7 +412,8 @@ pub fn write_increment(
 /// The output variables of a step the solver does not produce yet, for a warning.
 pub fn unsupported_outputs(step: &Step) -> Vec<String> {
     let known = [
-        "U", "S", "E", "RF", "ERR", "NOE", "PEEQ", "ENER", "NT", "HFL", "RFL",
+        "U", "S", "E", "RF", "ERR", "NOE", "PEEQ", "ENER", "NT", "HFL", "RFL", "CDIS", "CSTR",
+        "CELS",
     ];
     let mut out = Vec::new();
     for v in requested(step) {

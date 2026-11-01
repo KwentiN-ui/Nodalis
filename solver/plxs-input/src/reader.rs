@@ -2517,6 +2517,8 @@ impl Reader {
             "TOTALS",
             "GLOBAL",
             "TIME POINTS",
+            "SLAVE",
+            "MASTER",
         ])?;
         let set = match kind {
             FileKind::Node => k.value("NSET"),
@@ -2542,6 +2544,12 @@ impl Reader {
             },
             global: k.value("GLOBAL") != Some("NO"),
             time_points: k.value("TIME POINTS").map(normalized_name),
+            surfaces: match (kind, k.value("SLAVE"), k.value("MASTER")) {
+                (FileKind::Contact, Some(slave), Some(master)) => {
+                    Some((normalized_name(slave), normalized_name(master)))
+                }
+                _ => None,
+            },
         };
         let seen = match kind {
             FileKind::Node => &mut self.flags.node_print,

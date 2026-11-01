@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 plxs-core.workspace = true
 plxs-constraints.workspace = true
+plxs-contact.workspace = true
 plxs-linalg.workspace = true
 plxs-elements.workspace = true
 plxs-assembly.workspace = true

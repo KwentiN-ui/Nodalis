@@ -11,6 +11,7 @@
 //!
 //! No CalculiX code was consulted.
 
+pub mod contact;
 pub mod fields;
 pub mod heat;
 pub mod history;
@@ -59,6 +60,8 @@ pub struct ProcedureContext<'a> {
     /// The job's directory: files the input refers to (`*TEMPERATURE, FILE=`) are read
     /// from here.
     pub work_dir: std::path::PathBuf,
+    /// The contact pairs of the model, prepared once (empty without contact).
+    pub contact: plxs_contact::ContactModel,
 }
 
 /// A procedure computes a step on the context.
@@ -79,11 +82,24 @@ pub fn run_step(
 ) -> Result<StepOutcome> {
     match &step.procedure {
         ProcedureKind::NoAnalysis => Ok(StepOutcome::Converged),
-        ProcedureKind::Static(_) if !step.nlgeom && !ctx.table.has_nonlinear_material() => {
+        ProcedureKind::Static(_)
+            if !step.nlgeom && !ctx.table.has_nonlinear_material() && ctx.contact.is_empty() =>
+        {
             static_linear::StaticLinear.run(ctx, step, progress)
         }
         ProcedureKind::Static(_) | ProcedureKind::Visco(_) => {
             nonlinear::NonlinearStatic.run(ctx, step, progress)
+        }
+        ProcedureKind::HeatTransfer(_)
+        | ProcedureKind::CoupledTemperatureDisplacement(_)
+        | ProcedureKind::UncoupledTemperatureDisplacement(_)
+            if !ctx.contact.is_empty() =>
+        {
+            Err(Error::Unsupported(format!(
+                "contact in {} steps is not implemented yet (step {})",
+                step.procedure.keyword(),
+                step.name
+            )))
         }
         ProcedureKind::HeatTransfer(_)
         | ProcedureKind::CoupledTemperatureDisplacement(_)
