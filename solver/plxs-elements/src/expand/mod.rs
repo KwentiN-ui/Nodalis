@@ -54,8 +54,8 @@ pub fn needs_expansion(model: &Model) -> bool {
 }
 
 fn expands(kind: ElementType) -> bool {
-    // M3D3 is computed natively (`crate::membrane`).
-    kind != ElementType::M3D3
+    // M3D3 and M3D4 are computed natively (`crate::membrane`).
+    !crate::membrane::is_native(kind)
         && matches!(
             kind.family(),
             ElementFamily::Shell

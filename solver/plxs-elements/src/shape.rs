@@ -419,6 +419,78 @@ impl IntegrationRule {
         }
         Self { points, weights }
     }
+
+    /// Fourteen points of the tetrahedron (degree 5, positive weights; Keast 1986), for
+    /// the consistent mass matrix of the quadratic tetrahedron whose integrand is of
+    /// degree four.
+    pub fn tet14() -> Self {
+        // Three orbits: two of four points (λ, λ, λ, 1 - 3λ) and one of six points
+        // (λ, λ, 1/2 - λ, 1/2 - λ); weights for the reference volume 1/6.
+        let orbit4 = |l: f64, w: f64, points: &mut Vec<[f64; 3]>, weights: &mut Vec<f64>| {
+            let m = 1.0 - 3.0 * l;
+            points.extend([[l, l, l], [m, l, l], [l, m, l], [l, l, m]]);
+            weights.extend([w / 6.0; 4]);
+        };
+        let orbit6 = |l: f64, w: f64, points: &mut Vec<[f64; 3]>, weights: &mut Vec<f64>| {
+            let m = 0.5 - l;
+            points.extend([
+                [l, l, m],
+                [l, m, l],
+                [m, l, l],
+                [l, m, m],
+                [m, l, m],
+                [m, m, l],
+            ]);
+            weights.extend([w / 6.0; 6]);
+        };
+        let mut points = Vec::with_capacity(14);
+        let mut weights = Vec::with_capacity(14);
+        orbit4(
+            0.310_885_919_263_300_6,
+            0.112_687_925_718_015_7,
+            &mut points,
+            &mut weights,
+        );
+        orbit4(
+            0.092_735_250_310_891_2,
+            0.073_493_043_116_361_95,
+            &mut points,
+            &mut weights,
+        );
+        orbit6(
+            0.454_496_295_874_350_4,
+            0.042_546_020_777_081_47,
+            &mut points,
+            &mut weights,
+        );
+        Self { points, weights }
+    }
+
+    /// Eighteen points of the wedge: the six-point triangle rule of degree four (Dunavant
+    /// 1985) times three Gauss points along ζ, for the consistent mass matrix of the
+    /// quadratic wedge.
+    pub fn wedge18() -> Self {
+        let (p, w) = gauss_legendre(3);
+        let (a, wa) = (0.445_948_490_915_965, 0.223_381_589_678_011);
+        let (b, wb) = (0.091_576_213_509_771, 0.109_951_743_655_322);
+        let tri = [
+            ([a, a], wa),
+            ([1.0 - 2.0 * a, a], wa),
+            ([a, 1.0 - 2.0 * a], wa),
+            ([b, b], wb),
+            ([1.0 - 2.0 * b, b], wb),
+            ([b, 1.0 - 2.0 * b], wb),
+        ];
+        let mut points = Vec::with_capacity(18);
+        let mut weights = Vec::with_capacity(18);
+        for k in 0..3 {
+            for (t, wt) in &tri {
+                points.push([t[0], t[1], p[k]]);
+                weights.push(w[k] * wt / 2.0);
+            }
+        }
+        Self { points, weights }
+    }
 }
 
 /// Gauss-Legendre points and weights on `[-1, 1]` for orders 1 to 3.
@@ -668,6 +740,66 @@ mod tests {
                             f + 1
                         );
                     }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod rule_tests {
+    use super::IntegrationRule;
+
+    fn factorial(n: usize) -> f64 {
+        (1..=n).map(|k| k as f64).product()
+    }
+
+    fn integrate(rule: &IntegrationRule, a: usize, b: usize, c: usize) -> f64 {
+        rule.points
+            .iter()
+            .zip(&rule.weights)
+            .map(|(p, w)| w * p[0].powi(a as i32) * p[1].powi(b as i32) * p[2].powi(c as i32))
+            .sum()
+    }
+
+    #[test]
+    fn tet14_integrates_degree_five_exactly() {
+        let rule = IntegrationRule::tet14();
+        assert!((rule.weights.iter().sum::<f64>() - 1.0 / 6.0).abs() < 1e-14);
+        for a in 0..=5 {
+            for b in 0..=5 - a {
+                for c in 0..=5 - a - b {
+                    let q = integrate(&rule, a, b, c);
+                    let exact =
+                        factorial(a) * factorial(b) * factorial(c) / factorial(a + b + c + 3);
+                    assert!(
+                        (q - exact).abs() < 1e-12,
+                        "x^{a} y^{b} z^{c}: {q} vs {exact}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wedge18_integrates_degree_four_exactly() {
+        let rule = IntegrationRule::wedge18();
+        assert!((rule.weights.iter().sum::<f64>() - 1.0).abs() < 1e-14);
+        for a in 0..=4 {
+            for b in 0..=4 - a {
+                for c in 0..=4 {
+                    let q = integrate(&rule, a, b, c);
+                    let tri = factorial(a) * factorial(b) / factorial(a + b + 2);
+                    let line = if c % 2 == 0 {
+                        2.0 / (c as f64 + 1.0)
+                    } else {
+                        0.0
+                    };
+                    let exact = tri * line;
+                    assert!(
+                        (q - exact).abs() < 1e-12,
+                        "x^{a} y^{b} z^{c}: {q} vs {exact}"
+                    );
                 }
             }
         }

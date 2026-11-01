@@ -1,7 +1,6 @@
 //! The M2 T8 acceptance test: every fixture of the `nonlinear` area that `plxs` can solve
-//! matches the CalculiX golden files within its class tolerance. Fixtures with element
-//! types of other M2 threads (springs, gaps, membranes) are allowed to be refused until
-//! those land; a wrong result is not.
+//! matches the CalculiX golden files within its class tolerance. A fixture the solver
+//! refuses with "not implemented yet" is allowed; a wrong result is not.
 
 use std::path::Path;
 

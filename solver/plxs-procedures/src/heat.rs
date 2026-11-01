@@ -97,6 +97,8 @@ struct HeatRun<'h> {
     c: Option<SparseMatrix>,
     tangent: SparseMatrix,
     solver: LdltSolver,
+    /// Node positions, for the ordering of the factorization.
+    coordinates: Vec<[f64; 3]>,
     /// Free set and matrix values of the last factorization.
     factorized: Option<(Vec<u32>, Vec<f64>)>,
     assembled: bool,
@@ -153,6 +155,7 @@ impl<'h> HeatRun<'h> {
             c: transient.then(|| SparseMatrix::zeros(heat.pattern.clone())),
             tangent: SparseMatrix::zeros(heat.pattern.clone()),
             solver: LdltSolver::new(ctx.threads),
+            coordinates: ctx.model.nodes.coordinates.clone(),
             factorized: None,
             assembled: false,
             mechanical_spc: None,
@@ -464,6 +467,8 @@ impl<'h> HeatRun<'h> {
         }
         let reduced = a.restrict(free);
         if !same_free {
+            let coordinates = free.iter().map(|&n| self.coordinates[n as usize]).collect();
+            self.solver.set_coordinates(Some(coordinates));
             self.solver.analyze(reduced.pattern())?;
         }
         self.solver.factorize(&reduced)?;
@@ -500,6 +505,10 @@ impl<'h> HeatRun<'h> {
             let reduction = Reduction::new(total_dofs, spc);
             if self.mechanical_spc.as_ref() != Some(&reduction.spc.dofs) {
                 let k_free = k.restrict(&reduction.free);
+                let coordinates = (reduction.free.iter())
+                    .map(|&dof| model.nodes.coordinates[dof as usize / 3])
+                    .collect();
+                ctx.solver.set_coordinates(Some(coordinates));
                 ctx.solver.analyze(k_free.pattern())?;
                 ctx.solver.factorize(&k_free).map_err(|e| match e {
                     Error::Numerical { message, .. } => Error::Numerical {

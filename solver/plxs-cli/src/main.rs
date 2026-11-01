@@ -275,7 +275,10 @@ fn plxs_procedures_unsupported(step: &plxs_core::Step) -> Vec<String> {
     plxs_session::unsupported_outputs(step)
 }
 
-/// Writes `.frd`, `.sta` and, when there is history output, `.dat`.
+/// Writes `.frd`, `.sta`, when there is history output `.dat`, and when a frequency step
+/// stored its modes (`*FREQUENCY, STORAGE=YES`) the `.eig` file: the stored modes in
+/// `postcard` encoding, an own format that only `plxs` reads (PrePoLix handles the file
+/// by name only).
 fn write_results(
     session: &plxs_session::Session,
     map: &plxs_elements::expand::OutputMap,
@@ -287,6 +290,17 @@ fn write_results(
     plxs_output::write_cvg(&output("cvg"), session.cvg_rows())?;
     if !session.results().history.is_empty() {
         plxs_output::write_dat(&output("dat"), session.results())?;
+    }
+    if let Some(modes) = &session.state().stored_modes {
+        let path = output("eig");
+        let bytes = postcard::to_stdvec(modes).map_err(|e| Error::Io {
+            path: path.display().to_string(),
+            message: e.to_string(),
+        })?;
+        std::fs::write(&path, bytes).map_err(|e| Error::Io {
+            path: path.display().to_string(),
+            message: e.to_string(),
+        })?;
     }
     Ok(())
 }

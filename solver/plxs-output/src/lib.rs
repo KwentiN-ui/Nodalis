@@ -11,7 +11,7 @@ pub mod dat;
 pub mod frd;
 pub mod sta;
 
-pub use dat::write_dat;
+pub use dat::{EigenTable, write_dat};
 pub use frd::write_frd;
 pub use sta::{CvgRow, StaRow, write_cvg, write_sta};
 

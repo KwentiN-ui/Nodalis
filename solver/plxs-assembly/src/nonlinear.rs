@@ -24,6 +24,10 @@ pub struct NonlinearInput<'a> {
     /// Whether creep acts (`*VISCO`).
     pub creep_active: bool,
     pub temperature: f64,
+    /// Pressures on native membranes that follow the deformed surface (`NLGEOM`):
+    /// (membrane index, pressure at the end of the increment). Their nodal forces enter
+    /// `f_int` with the opposite sign; their load stiffness is left out of the tangent.
+    pub follower: &'a [(u32, f64)],
 }
 
 /// What an assembly produced.
@@ -185,6 +189,55 @@ pub fn assemble_nonlinear(
             out.material.values[start * STATE_SIZE..(start + points) * STATE_SIZE]
                 .copy_from_slice(&result.material);
             out.max_creep_rate_change = out.max_creep_rate_change.max(result.creep_change);
+        }
+    }
+    // Native membranes (total Lagrangian under NLGEOM) and the other elements of constant
+    // stiffness (U1). Membranes have no integration points in the layout.
+    for block in table.linear_blocks.iter().filter(|b| !b.membrane) {
+        let n = block.dofs.len();
+        for (i, &dof) in block.dofs.iter().enumerate() {
+            let f: f64 = (0..n)
+                .map(|j| block.stiffness[i * n + j] * input.u[block.dofs[j] as usize])
+                .sum();
+            out.f_int[dof as usize] += f;
+            out.flux_sum += f.abs();
+        }
+        out.flux_count += n as u64;
+        if let Some(k) = k.as_deref_mut() {
+            k.add_block(&block.dofs, &block.stiffness);
+        }
+    }
+    let membranes: Vec<(Vec<f64>, Vec<f64>)> = table
+        .membranes
+        .par_iter()
+        .map(|m| {
+            let mut fe = vec![0.0; m.dofs.len()];
+            let mut ke = Vec::new();
+            m.formulation.internal(
+                &m.gather(input.u),
+                input.nlgeom,
+                &mut fe,
+                want_k.then_some(&mut ke),
+            );
+            (fe, ke)
+        })
+        .collect();
+    for (m, (fe, ke)) in table.membranes.iter().zip(&membranes) {
+        for (&dof, value) in m.dofs.iter().zip(fe) {
+            out.f_int[dof as usize] += value;
+            out.flux_sum += value.abs();
+        }
+        out.flux_count += fe.len() as u64;
+        if let Some(k) = k.as_deref_mut() {
+            k.add_block(&m.dofs, ke);
+        }
+    }
+    for &(index, p) in input.follower {
+        let m = &table.membranes[index as usize];
+        let mut fe = vec![0.0; m.dofs.len()];
+        m.formulation.pressure(Some(&m.gather(input.u)), p, &mut fe);
+        for (&dof, value) in m.dofs.iter().zip(fe) {
+            out.f_int[dof as usize] -= value;
         }
     }
     out
