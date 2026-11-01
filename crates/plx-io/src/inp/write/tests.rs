@@ -2017,6 +2017,64 @@ fn calculix_swings_the_cantilever_about_its_static_deflection() {
     );
 }
 
+/// Short dynamic runs that keep the golden files of the solver corpus small: a damped start
+/// with Rayleigh damping, automatic incrementation, and a dynamic step that lets the
+/// cantilever swing back from a static preload.
+#[test]
+fn calculix_runs_short_dynamic_steps() {
+    let damping = plx_model::RayleighDamping {
+        alpha: 50.0,
+        beta: 2e-5,
+    };
+    let (mesh, model) = dynamic_cantilever(1.5e-4, 2.5e-5, Some(damping));
+    let Some(frd) = run_ccx("dynamik-kurz", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    assert_eq!(tip_history(&frd).len(), 6);
+
+    let (mesh, mut model) = dynamic_cantilever(2e-4, 2.5e-5, None);
+    let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.increments.incrementation = Incrementation::Automatic;
+    settings.increments.max_increment = 6e-5;
+    let frd = run_ccx(
+        "dynamik-automatisch",
+        &write_inp(&mesh, &model, "").unwrap(),
+    )
+    .unwrap();
+    let history = tip_history(&frd);
+    assert!(history.len() > 3 && history.len() < 8, "{history:?}");
+    assert!(
+        (history.last().unwrap().0 - 2e-4).abs() < 1e-9,
+        "{history:?}"
+    );
+
+    // The preload of a static step, released at the start of the dynamic step. Both steps
+    // ask for ENER, which CalculiX wants in the first step when a later one is dynamic.
+    let (mesh, mut model) = dynamic_cantilever(1e-4, 2.5e-5, None);
+    let mut release = model.steps[0].clone();
+    release.name = "Release".into();
+    release.loads[0].active = false;
+    let mut preload = Step::new_static("Preload");
+    preload.boundary_conditions = release.boundary_conditions.clone();
+    preload.loads.push(tip_force());
+    preload.field_outputs = release.field_outputs.clone();
+    model.steps = vec![preload, release];
+    let frd = run_ccx("statisch-dynamisch", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let tip = frd.mesh.node_index(99).unwrap();
+    let static_u3 = (frd.increments.iter())
+        .find(|i| i.kind == plx_results::AnalysisKind::Static)
+        .map(|i| i.field("DISP").unwrap().component("U3").unwrap().values[tip])
+        .unwrap();
+    let swing = tip_history(&frd);
+    assert_eq!(swing.len(), 4, "{swing:?}");
+    assert!(
+        swing.iter().all(|s| s.1 > f64::from(static_u3)),
+        "released tip {swing:?} from {static_u3}"
+    );
+}
+
 /// The cantilever with a frequency step that stores its modes, a modal dynamics step with
 /// the tip force applied at once, and a steady state sweep of the tip force around the
 /// first bending mode; both modal steps damped as given.

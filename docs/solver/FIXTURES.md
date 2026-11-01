@@ -181,8 +181,11 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `cyclic/submodel` | A | M3 | none | \*SUBMODEL, C3D8, \*STATIC |
 | `dynamic/anfangsdrehung` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*INITIAL CONDITIONS, \*DYNAMIC |
 | `dynamic/anfangsgeschwindigkeit` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*INITIAL CONDITIONS, \*DYNAMIC |
+| `dynamic/dynamik-automatisch` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*DYNAMIC |
+| `dynamic/dynamik-kurz` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*DYNAMIC, \*DAMPING |
 | `dynamic/dynamik` | E | M3 | none | C3D20R, \*AMPLITUDE, \*DYNAMIC |
 | `dynamic/dynamik_gedaempft` | E | M3 | none | C3D20R, \*AMPLITUDE, \*DYNAMIC, \*DAMPING |
+| `dynamic/statisch-dynamisch` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*STATIC, \*DYNAMIC |
 | `eigen/beulen` | A | M2 | ccx 2.21 | C3D20R, \*BUCKLE |
 | `eigen/beulform` | A | M2 | ccx 2.21 | C3D20R, \*BUCKLE |
 | `eigen/deaktiviert` | A | M2 | ccx 2.21 | C3D20R, \*FREQUENCY |

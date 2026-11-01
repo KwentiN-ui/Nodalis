@@ -216,8 +216,61 @@ pub fn principal_stresses(s: &[f64; 6]) -> [f64; 3] {
     v
 }
 
+/// CalculiX's internal energy density `ENER`: half the double contraction of the stress
+/// with the total strain at every integration point (tensor shear strains in the state).
+pub fn internal_energy_density(
+    stresses: &IntegrationPointField,
+    strains: &IntegrationPointField,
+) -> IntegrationPointField {
+    IntegrationPointField {
+        per_point: 1,
+        offsets: stresses.offsets.clone(),
+        values: stresses
+            .values
+            .chunks(6)
+            .zip(strains.values.chunks(6))
+            .map(|(s, e)| {
+                0.5 * (s[0] * e[0]
+                    + s[1] * e[1]
+                    + s[2] * e[2]
+                    + 2.0 * (s[3] * e[3] + s[4] * e[4] + s[5] * e[5]))
+            })
+            .collect(),
+    }
+}
+
+/// Extrapolates a scalar integration-point field to the nodes and averages it there.
+pub fn nodal_average_scalar(
+    table: &ElementTable,
+    model: &Model,
+    field: &IntegrationPointField,
+) -> Vec<f64> {
+    let nodes = model.nodes.len();
+    let mut sum = vec![0.0; nodes];
+    let mut count = vec![0u32; nodes];
+    for (index, entry) in table.entries.iter().enumerate() {
+        let formulation = table.formulation(entry);
+        let ips = formulation.integration_points();
+        let start = table.layout.offsets[index] as usize;
+        let e = formulation.extrapolation();
+        for (a, &node) in entry.nodes.iter().enumerate() {
+            let v: f64 = (0..ips)
+                .map(|g| e[a * ips + g] * field.values[start + g])
+                .sum();
+            sum[node as usize] += v;
+            count[node as usize] += 1;
+        }
+    }
+    for (s, &c) in sum.iter_mut().zip(&count) {
+        if c > 0 {
+            *s /= f64::from(c);
+        }
+    }
+    sum
+}
+
 /// The nodal fields of a displacement state as the step's `*NODE FILE` / `*EL FILE`
-/// requests ask for them, in CalculiX's order: DISP, STRESS, TOSTRAIN, FORC, ERROR.
+/// requests ask for them, in CalculiX's order: DISP, STRESS, TOSTRAIN, FORC, ENER, ERROR.
 pub fn build_fields(
     table: &ElementTable,
     model: &Model,
@@ -266,6 +319,16 @@ pub fn build_fields(
     if has("RF") {
         fields.push(vector_field("FORC", ["F1", "F2", "F3"], &order, reactions));
     }
+    if has("ENER") {
+        let energy = internal_energy_density(stresses, strains);
+        let nodal = nodal_average_scalar(table, model, &energy);
+        fields.push(ResultField {
+            name: "ENER".into(),
+            components: vec!["ENER".into()],
+            nodes: order.iter().map(|&(id, _)| id).collect(),
+            values: vec![order.iter().map(|&(_, i)| nodal[i as usize]).collect()],
+        });
+    }
     // CalculiX writes the error estimator whenever stresses are requested, unless `NOE`
     // switches it off.
     if (has("S") || has("ERR")) && !has("NOE") {
@@ -310,7 +373,10 @@ pub fn write_increment(
 
 /// The output variables of a step the solver does not produce yet, for a warning.
 pub fn unsupported_outputs(step: &Step) -> Vec<String> {
-    let known = ["U", "S", "E", "RF", "ERR", "NOE", "NT", "HFL", "RFL"];
+    // `V` only means something in dynamic steps; CalculiX ignores it in the others.
+    let known = [
+        "U", "V", "S", "E", "RF", "ERR", "NOE", "ENER", "NT", "HFL", "RFL",
+    ];
     let mut out = Vec::new();
     for v in requested(step) {
         if !known.contains(&v.as_str()) && !out.contains(&v) {

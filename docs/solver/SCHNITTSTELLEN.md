@@ -728,6 +728,76 @@ Abnahme: `solver/plxs-cli/tests/constraints_corpus.rs` (alle `constraints/*` plu
 wie die vom Writer umgestellten). Gegencheck 30³-C3D8-Block mit Rigid Body und Moment:
 plxs 6,0 s, ccx 2.21 12,4 s (4 Threads), Verschiebungen auf 6,6e-6 gleich.
 
+## Stand nach M3 T13 (implizite Dynamik)
+
+Was T13 gebaut hat (`*DYNAMIC` ohne `EXPLICIT`, linear elastisch, ohne `NLGEOM`):
+
+- `plxs-procedures`: `dynamic::DynamicProcedure`, HHT-α in Verschiebungsform
+  (α aus `ALPHA=`, Vorgabe −0,05, auf [−1/3, 0] begrenzt; β = (1−α)²/4, γ = ½−α),
+  Systemmatrix `M/(βΔt²) + (1+α)γ/(βΔt) C + (1+α)K` mit Rayleigh-Dämpfung `C = αM + βK`
+  aus `*DAMPING`, Randbedingungen über `ModelConstraints::step_set` (u = T v + g, wie die
+  Statik). `DIRECT` und automatische Inkremente, Anfangsgeschwindigkeiten und -drehungen
+  (`*INITIAL CONDITIONS, TYPE=VELOCITY`), Step-Folgen statisch → dynamisch → dynamisch
+  (Verschiebungen, Geschwindigkeiten, Beschleunigungen und Energie in `State`).
+  Ausgaben `U`, `V` (`VELO`), `S`, `E`, `RF` (innere Kräfte `K u`), `ENER`, `ERR`; `.dat`
+  mit `U`, `V`, `RF`, `S`, `E` (`history::write_history_with_velocities`).
+- `plxs-elements`: `SolidElement::dynamic_mass_rule` und `fully_integrated` (C3D20R → 3×3×3,
+  C3D8R → C3D8), `mass_with` für eine gewählte Regel und für expandierte 2D-Elemente (Masse
+  am 3D-Ersatz, dann kondensiert wie die Steifigkeit).
+- `plxs-assembly`: `assemble_mass_with(.., MassRule::Full | Element, ..)`; die Eigenwerte
+  behalten `MassRule::Element`.
+- `plxs-procedures::fields`: `ENER` (½σ:ε, Knotenmittel) in `build_fields` für alle
+  Prozeduren; `V` gilt nicht mehr als unbekannte Ausgabe.
+- `plxs-input`: Steps ohne `AMPLITUDE=` bekommen in `*DYNAMIC` die Sprung-Amplitude.
+- Abnahmetest `solver/plxs-cli/tests/dynamic_corpus.rs`: alle `dynamic/*`-Fixtures mit
+  Referenz grün (Abweichung ≤ 7,5e-6 relativ zur Feldnorm). `dynamik` und
+  `dynamik_gedaempft` (60 Inkremente, Goldens zu groß fürs Repo) stimmen lokal auf 6e-6 bzw.
+  7,5e-6; neu sind die kleinen Writer-Fixtures `dynamik-kurz` (Rayleigh α und β),
+  `dynamik-automatisch` und `statisch-dynamisch`.
+
+### Was von CalculiX durch Beobachtung bekannt ist (T13)
+
+Aus ccx-2.21-Läufen (Fixtures, Ein-Freiheitsgrad-Decks, Einzelelemente C3D8/C3D8R/C3D20/
+C3D20R/C3D4/C3D10/C3D6/C3D15/CPS8/CAX8 mit variiertem Δt und α) abgelesen, kein Quelltext:
+
+- **Vorgabe-Amplitude** eines `*DYNAMIC`-Steps ohne `AMPLITUDE=` ist der Sprung (STEP), nicht
+  die Rampe der Statik.
+- **Anfangsbeschleunigung**: ccx löst nicht `M a₀ = f₀ − C v₀ − K u₀`, sondern
+  `(M + (1+α)β h² K) a₀ = f₀ − C v₀ − K u₀` mit `h = Δt/10` (dem Faktor von K auf sieben
+  Stellen), **ohne** Dämpfungsterm in der Matrix. In dieser Matrix stehen Steifigkeit und
+  Masse reduzierter Elemente **voll integriert** (C3D20R wie C3D20 mit 3×3×3, C3D8R wie
+  C3D8), C3D4 nur mit einem Viertel seiner Steifigkeit; `K u₀` auf der rechten Seite ist
+  ebenfalls voll integriert (ohne das Viertel). Das hält `a₀` auch dort endlich, wo die
+  reduzierte Masse von C3D20R allein singulär ist.
+- **Massenmatrix der Zeitschritte**: konsistent mit der vollen Regel (C3D20R 3×3×3) – anders
+  als bei den Eigenwerten (Regel des Elements, T7).
+- **Automatische Inkremente** eines linearen dynamischen Steps: die ersten beiden mit der
+  Anfangsgröße, ab dem dritten jeweils ×1,5 bis zur Maximalgröße, das letzte bis zum
+  Step-Ende gekürzt; jedes Inkrement zählt in der `.sta` als zwei Iterationen.
+- **`.frd`**: Analysetyp 1 (dynamisch), Wert = Gesamtzeit, Feldreihenfolge DISP, VELO,
+  STRESS, TOSTRAIN, FORC, ENER, ERROR; FORC ist `K u`.
+- **ENER über Steps**: ein dynamischer Step integriert die Energie von null an auf die
+  Energie des vorigen Steps drauf (nach statischer Vorlast: statische Energie plus ½σ:ε des
+  dynamischen Zustands). `State::energy` trägt sie weiter. ccx verlangt `ENER` schon im
+  ersten Step, wenn ein späterer Step dynamisch ist und `ENER` ausgibt.
+
+### Bekannte Abweichungen (T13)
+
+- `*DYNAMIC, EXPLICIT` wird abgelehnt (Unsupported): das zentrale-Differenzen-Schema von ccx
+  ist nicht identifiziert (an einem Ein-Freiheitsgrad-Deck passt weder Standard-CD noch
+  HHT mit α = 0). `NLGEOM` und nichtlineare Werkstoffe in der Dynamik kommen mit T8.
+- **Vorlast**: nach einem statischen Step weichen VELO, Spannungen und Kräfte im ersten
+  dynamischen Inkrement um etwa 2e-3 ab (DISP 2e-5); die rechte Seite der
+  Anfangsbeschleunigung bei `u₀ ≠ 0` ist nicht vollständig identifiziert (volle Integration
+  ist zehnmal näher als `K u₀` des Elements). Fixture `statisch-dynamisch` vergleicht diese
+  Felder deshalb nicht (`deviations`).
+- **Anfangsgeschwindigkeit zusammen mit Rayleigh-Dämpfung**: nicht identifiziert (die
+  Zeitschritte weichen auch bei freiem `a₀` ab).
+- **C3D8I** (inkompatible Moden tragen in ccx vermutlich Masse), **CPS4/CPE4/CAX4**
+  (4e-2) sowie **Schalen und Balken** (S8R 2,5e-4, S4-Kantenkopplung 5,6e-4, B32R 5,9e-4,
+  S8 4e-5 mit Rampe) weichen in den Zeitschritten ab: die Massenkonvention der expandierten
+  Elemente ist offen. Fixtures dafür gibt es noch nicht.
+
 ## Was M1 zu liefern hat (Abnahme)
 
 - `solver_check::run` aus `plx-app` besteht mit `plxs` als Executable (Kragbalken mit Kraft

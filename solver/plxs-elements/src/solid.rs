@@ -1296,14 +1296,75 @@ impl SolidElement {
         }
     }
 
+    /// The integration rule CalculiX's direct time integration (`*DYNAMIC`) takes for the
+    /// consistent mass matrix: the full rule of the family, also for reduced elements
+    /// (C3D20R with 3×3×3: the transient response of the C3D20R cantilever agrees with
+    /// ccx 2.21 to the digits of the `.frd` only so, while its eigenfrequencies need the
+    /// element's own 2×2×2 rule, see [`SolidElement::mass_rule`]; inferred from its output).
+    pub fn dynamic_mass_rule(&self) -> IntegrationRule {
+        match self.family {
+            Family::Hex8 => IntegrationRule::hex(2),
+            Family::Hex20 => IntegrationRule::hex(3),
+            _ => self.mass_rule(),
+        }
+    }
+
+    /// The element with the full integration of its family where it is reduced (C3D20R
+    /// with 3×3×3 points like C3D20, C3D8R with 2×2×2 like C3D8), `None` otherwise. CalculiX
+    /// takes these for the matrix of the initial accelerations of a `*DYNAMIC` step (the
+    /// accelerations of single-DOF C3D8R and C3D20R oracles agree with ccx 2.21 to all
+    /// printed digits only so; inferred from its output). Only stiffness and mass are
+    /// meaningful on the result.
+    pub fn fully_integrated(&self) -> Option<SolidElement> {
+        let (rule, formulation) = match (self.family, self.formulation) {
+            (Family::Hex20, Formulation::Standard) if self.rule.len() < 27 => {
+                (IntegrationRule::hex(3), Formulation::Standard)
+            }
+            (Family::Hex8, Formulation::Reduced) => {
+                (IntegrationRule::hex(2), Formulation::Standard)
+            }
+            _ => return None,
+        };
+        let mut full = self.clone();
+        full.extrapolation = vec![0.0; rule.len() * self.family.node_count()];
+        full.rule = rule;
+        full.formulation = formulation;
+        Some(full)
+    }
+
     /// Consistent mass matrix (row-major `3n × 3n`) for the density `rho`:
-    /// `M[(a,i),(b,j)] = δ_ij ∫ ρ N_a N_b dV`.
+    /// `M[(a,i),(b,j)] = δ_ij ∫ ρ N_a N_b dV`, with the rule of [`SolidElement::mass_rule`].
     pub fn mass(&self, coords: &[[f64; 3]], rho: f64, out: &mut Vec<f64>) {
-        let ndof = self.dof_count();
-        let nodes = self.node_count();
+        self.mass_with(coords, rho, &self.mass_rule(), out);
+    }
+
+    /// [`SolidElement::mass`] with another integration rule.
+    pub fn mass_with(
+        &self,
+        coords: &[[f64; 3]],
+        rho: f64,
+        rule: &IntegrationRule,
+        out: &mut Vec<f64>,
+    ) {
+        if let Some(x) = &self.expansion {
+            // Plane and axisymmetric elements: the mass of the expanded element, condensed
+            // onto the 2D nodes like the stiffness.
+            let mut m3 = Vec::new();
+            self.mass_3d(&x.coordinates(coords), rho, rule, &mut m3);
+            let n = self.dof_count();
+            out.clear();
+            out.resize(n * n, 0.0);
+            x.condense_matrix(&m3, out);
+            return;
+        }
+        self.mass_3d(coords, rho, rule, out);
+    }
+
+    fn mass_3d(&self, coords: &[[f64; 3]], rho: f64, rule: &IntegrationRule, out: &mut Vec<f64>) {
+        let ndof = self.dof_count_3d();
+        let nodes = self.family.node_count();
         out.clear();
         out.resize(ndof * ndof, 0.0);
-        let rule = self.mass_rule();
         for (&p, &w) in rule.points.iter().zip(&rule.weights) {
             let point = self.point(p, coords);
             let f = rho * point.det * w;

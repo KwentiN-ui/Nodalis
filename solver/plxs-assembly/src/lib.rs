@@ -26,5 +26,8 @@ pub use elements::{ElementTable, IntegrationPointLayout, LinearBlock};
 pub use heat::{HeatTable, assemble_heat, heat_loads, temperature_spc};
 pub use loads::load_vector;
 pub use local_loads::rotate_concentrated_loads;
-pub use mass::{assemble_geometric_stiffness, assemble_mass, assemble_tangent_stiffness};
+pub use mass::{
+    MassRule, assemble_geometric_stiffness, assemble_mass, assemble_mass_with,
+    assemble_tangent_stiffness,
+};
 pub use stiffness::{assemble_stiffness, build_pattern};
