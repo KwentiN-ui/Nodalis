@@ -3,6 +3,7 @@
 
 use crate::numeric;
 use plx_model::EquationSolver;
+pub use plx_solve::Engine;
 use serde::{Deserialize, Serialize};
 
 /// Key of the settings in eframe's storage.
@@ -131,10 +132,12 @@ impl Default for PostProcessing {
     }
 }
 
-/// How CalculiX is run, PrePoMax's "CalculiX" settings page.
+/// Which solver computes the analyses and how it is run: the "Solver" settings page.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Solver {
+    /// The built-in PrePoLix solver or CalculiX as a process.
+    pub engine: Engine,
     /// The CalculiX executable; a bare name is looked up on `PATH`, empty for the one shipped
     /// with prepolix (see [`bundled_ccx`]).
     pub executable: String,
@@ -184,6 +187,7 @@ pub struct DetectedKeywords {
 impl Default for Solver {
     fn default() -> Self {
         Self {
+            engine: Engine::default(),
             executable: String::new(),
             threads: AUTOMATIC_THREADS,
             work_dir: String::new(),
@@ -208,6 +212,10 @@ impl Solver {
     /// has it, else PaStiX, otherwise CalculiX's own choice. The executable is probed the
     /// first time.
     pub fn default_solver(&mut self) -> EquationSolver {
+        // The built-in solver chooses itself.
+        if self.engine == Engine::PrePoLix {
+            return EquationSolver::Default;
+        }
         if self.solvers().is_none()
             && let Some(solvers) = crate::solver_check::available_solvers(
                 &self.job_solver(),
@@ -227,6 +235,11 @@ impl Solver {
     /// tested now, a few hundredths of a second each.
     pub fn unknown_keywords(&mut self, keywords: &[String]) -> Vec<String> {
         use plx_io::inp::keywords::normalized;
+        // The built-in solver reads everything the input file writer writes; what it cannot
+        // compute yet it reports when it runs.
+        if self.engine == Engine::PrePoLix {
+            return Vec::new();
+        }
         // An empty executable means the bundled CalculiX, see `job_solver`.
         let solver = self.job_solver();
         let version = crate::solver_check::version_text(&solver.executable);
@@ -508,7 +521,7 @@ impl Page {
         match self {
             Page::Graphics => "Graphics",
             Page::PostProcessing => "Post-processing",
-            Page::Solver => "CalculiX",
+            Page::Solver => "Solver",
             Page::Gmsh => "Gmsh",
             Page::Updates => "Updates",
         }
@@ -544,7 +557,7 @@ enum SolverCheck {
         std::sync::mpsc::Receiver<crate::solver_check::Report>,
         crate::solver_check::SharedProgress,
     ),
-    Done(Vec<crate::solver_check::CheckResult>),
+    Done(Engine, Vec<crate::solver_check::CheckResult>),
 }
 
 /// What the user decided in the settings window.
@@ -708,19 +721,34 @@ impl SettingsWindow {
             }
             Page::Solver => {
                 let solver = &mut self.draft.solver;
+                let calculix = solver.engine == Engine::CalculiX;
                 egui::Grid::new("solver settings")
                     .num_columns(2)
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| {
-                        ui.label("Executable");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut solver.executable)
-                                .hint_text(self.default_executable.as_str()),
-                        )
-                        .on_hover_text(
-                            "Leave empty for the CalculiX shipped with PrePoLix, or ccx on the PATH if there is none.",
-                        );
+                        ui.label("Solver");
+                        ui.horizontal(|ui| {
+                            for engine in Engine::ALL {
+                                let tip = match engine {
+                                    Engine::PrePoLix => "The solver built into PrePoLix: no external program, progress and results stay in the program. Steps it cannot compute yet are reported when the analysis runs.",
+                                    Engine::CalculiX => "CalculiX (ccx) as a separate program, the one shipped with PrePoLix or your own.",
+                                };
+                                ui.radio_value(&mut solver.engine, engine, engine.name())
+                                    .on_hover_text(tip);
+                            }
+                        });
                         ui.end_row();
+                        if calculix {
+                            ui.label("Executable");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut solver.executable)
+                                    .hint_text(self.default_executable.as_str()),
+                            )
+                            .on_hover_text(
+                                "Leave empty for the CalculiX shipped with PrePoLix, or ccx on the PATH if there is none.",
+                            );
+                            ui.end_row();
+                        }
                         ui.label("Threads");
                         threads_ui(ui, &mut solver.threads);
                         ui.end_row();
@@ -730,27 +758,31 @@ impl SettingsWindow {
                                 .hint_text(self.default_work_dir.as_str()),
                         );
                         ui.end_row();
-                        ui.label("Restart files");
-                        ui.checkbox(&mut solver.keep_restart_files, "Keep the state after each step")
-                            .on_hover_text("CalculiX writes the state after each static, dynamic, heat transfer or visco step. Solving again after a change then starts after the last unchanged step instead of from the beginning. Needs disk space next to the results.");
-                        ui.end_row();
-                        ui.label("Restart files per project");
-                        ui.add_enabled(
-                            solver.keep_restart_files,
-                            numeric::drag_value(&mut solver.restart_limit_mb)
-                                .range(10..=1_000_000)
-                                .suffix(" MB"),
-                        )
-                        .on_hover_text("Beyond this size the oldest restart files of the project are removed; an analysis without them is solved from the beginning.");
-                        ui.end_row();
+                        if calculix {
+                            ui.label("Restart files");
+                            ui.checkbox(&mut solver.keep_restart_files, "Keep the state after each step")
+                                .on_hover_text("CalculiX writes the state after each static, dynamic, heat transfer or visco step. Solving again after a change then starts after the last unchanged step instead of from the beginning. Needs disk space next to the results.");
+                            ui.end_row();
+                            ui.label("Restart files per project");
+                            ui.add_enabled(
+                                solver.keep_restart_files,
+                                numeric::drag_value(&mut solver.restart_limit_mb)
+                                    .range(10..=1_000_000)
+                                    .suffix(" MB"),
+                            )
+                            .on_hover_text("Beyond this size the oldest restart files of the project are removed; an analysis without them is solved from the beginning.");
+                            ui.end_row();
+                        }
                         ui.label("Parallel analyses");
                         ui.add(numeric::drag_value(&mut solver.parallel_runs).range(1..=64))
                             .on_hover_text("Update Project solves up to this many independent analyses at the same time, each with the threads above (with automatic threads they share the cores); the Campbell sweep runs as many speeds at a time.");
                         ui.end_row();
-                        ui.label("Equation solvers");
-                        ui.label(solvers_text(solver.solvers()))
-                            .on_hover_text("Steps with the default solver use Pardiso if CalculiX includes it, else PaStiX. Checked at the first analysis and by \"Test CalculiX\".");
-                        ui.end_row();
+                        if calculix {
+                            ui.label("Equation solvers");
+                            ui.label(solvers_text(solver.solvers()))
+                                .on_hover_text("Steps with the default solver use Pardiso if CalculiX includes it, else PaStiX. Checked at the first analysis and by \"Test solver\".");
+                            ui.end_row();
+                        }
                     });
                 ui.add_space(8.0);
                 self.solver_check_ui(ui);
@@ -871,15 +903,18 @@ impl SettingsWindow {
                     known,
                 });
             }
-            self.solver_check = SolverCheck::Done(report.checks);
+            self.solver_check = SolverCheck::Done(self.draft.solver.engine, report.checks);
         }
         let running = matches!(self.solver_check, SolverCheck::Running(..));
         ui.horizontal(|ui| {
+            let engine = self.draft.solver.engine;
+            let tip = match engine {
+                Engine::CalculiX => "Starts the executable, solves small cantilevers whose results are compared with beam theory, checks which equation solvers are available and whether it knows every keyword PrePoLix writes.",
+                Engine::PrePoLix => "Solves small cantilevers with the built-in solver and compares the results with beam theory.",
+            };
             let button = ui
-                .add_enabled(!running, egui::Button::new("Test CalculiX"))
-                .on_hover_text(
-                    "Starts the executable, solves small cantilevers whose results are compared with beam theory, checks which equation solvers are available and whether it knows every keyword PrePoLix writes.",
-                );
+                .add_enabled(!running, egui::Button::new("Test solver"))
+                .on_hover_text(tip);
             if button.clicked() {
                 let (sender, receiver) = std::sync::mpsc::channel();
                 let (solver, work_dir) = (self.draft.solver.job_solver(), self.draft.solver.work_dir());
@@ -887,7 +922,8 @@ impl SettingsWindow {
                 let progress = crate::solver_check::SharedProgress::default();
                 let thread_progress = progress.clone();
                 std::thread::spawn(move || {
-                    let report = crate::solver_check::run(&solver, &work_dir, &thread_progress);
+                    let report =
+                        crate::solver_check::run(engine, &solver, &work_dir, &thread_progress);
                     let _ = sender.send(report);
                     ctx.request_repaint();
                 });
@@ -900,9 +936,9 @@ impl SettingsWindow {
         });
         if let SolverCheck::Running(_, progress) = &self.solver_check {
             let progress = progress.lock().map(|p| p.clone()).unwrap_or_default();
-            running_modal(ui.ctx(), &progress);
+            running_modal(ui.ctx(), self.draft.solver.engine, &progress);
         }
-        if let SolverCheck::Done(results) = &self.solver_check {
+        if let SolverCheck::Done(engine, results) = &self.solver_check {
             egui::Grid::new("solver check")
                 .num_columns(2)
                 .spacing([8.0, 4.0])
@@ -921,18 +957,18 @@ impl SettingsWindow {
                     }
                 });
             if results.iter().all(|r| r.passed) {
-                ui.label("CalculiX works correctly.");
+                ui.label(format!("The {} works correctly.", engine.name()));
             }
         }
     }
 }
 
-/// Modal window over the application while the CalculiX self test runs, which takes a while
+/// Modal window over the application while the solver self test runs, which takes a while
 /// on some systems.
-fn running_modal(ctx: &egui::Context, progress: &crate::solver_check::Progress) {
+fn running_modal(ctx: &egui::Context, engine: Engine, progress: &crate::solver_check::Progress) {
     egui::Modal::new(crate::ids::window(ctx, "solver check running")).show(ctx, |ui| {
         ui.set_width(300.0);
-        ui.heading("Testing CalculiX");
+        ui.heading(format!("Testing the {}", engine.name()));
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.spinner();

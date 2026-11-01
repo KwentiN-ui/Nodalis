@@ -18,6 +18,7 @@ plx-results = { path = "crates/plx-results" }
 plx-mesher = { path = "crates/plx-mesher" }
 plx-job = { path = "crates/plx-job" }
 plx-render = { path = "crates/plx-render" }
+plx-solve = { path = "crates/plx-solve" }
 
 # The PrePoLix solver (solver/, prefix plxs-). Numerics come from one ecosystem only: faer for
 # dense and sparse linear algebra and rayon for parallelism; no second numerics crate beside them.

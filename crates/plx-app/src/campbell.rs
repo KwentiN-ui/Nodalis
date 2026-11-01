@@ -18,9 +18,10 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
 use egui::{Color32, Ui};
-use plx_job::{Job, JobStatus};
+use plx_job::JobStatus;
 pub use plx_model::campbell::{Mode, Setup, SpeedPoint, Whirl};
 use plx_model::{EquationSolver, FeModel, LoadKind, StepKind};
+use plx_solve::{Engine, Run};
 
 use crate::numeric;
 use crate::table_export;
@@ -575,6 +576,7 @@ impl Drop for Sweep {
 
 /// What the sweep threads work on.
 struct SweepInput {
+    engine: Engine,
     solver: plx_job::Solver,
     work_dir: std::path::PathBuf,
     mesh: Arc<plx_mesh::FeMesh>,
@@ -635,8 +637,8 @@ fn run_speed(
     let text = plx_io::inp::write_inp(&input.mesh, &fe, &heading)
         .map_err(|e| format!("{label}: input file not written: {e}"))?;
     let name = job_name(index);
-    let mut job = Job::start(&input.solver, &input.work_dir, &name, &text)
-        .map_err(|e| format!("{label}: CalculiX not started: {e}"))?;
+    let mut job = Run::start(input.engine, &input.solver, &input.work_dir, &name, &text)
+        .map_err(|e| format!("{label}: solver not started: {e}"))?;
     let status = loop {
         let status = job.poll();
         if status != JobStatus::Running {
@@ -889,7 +891,9 @@ impl CampbellWindow {
         let job_solver = solver
             .shared_by(solver.parallel_runs.max(1) as usize)
             .job_solver();
-        if let Some(message) = crate::settings::missing_executable(&job_solver.executable) {
+        if solver.engine == Engine::CalculiX
+            && let Some(message) = crate::settings::missing_executable(&job_solver.executable)
+        {
             return Err(format!("CalculiX not started: {message}"));
         }
         let mut fe = fe.clone();
@@ -926,6 +930,7 @@ impl CampbellWindow {
         };
         self.sweep = Some(Sweep {
             input: Arc::new(SweepInput {
+                engine: solver.engine,
                 solver: job_solver,
                 work_dir,
                 mesh: Arc::new(mesh.clone()),
@@ -1820,6 +1825,7 @@ mod tests {
 
         let work_dir = std::env::temp_dir().join(format!("plx-campbell-{}", std::process::id()));
         let input = SweepInput {
+            engine: Engine::CalculiX,
             solver: plx_job::Solver::default(),
             work_dir: work_dir.clone(),
             mesh: Arc::new(mesh),

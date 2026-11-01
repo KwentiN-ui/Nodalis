@@ -188,6 +188,9 @@ impl<'h> HeatRun<'h> {
         let mut done: Vec<u32> = Vec::new();
         let end = self.period * (1.0 - 1e-9);
         while step_time < end {
+            if ctx.cancel.is_cancelled() {
+                return Ok(StepOutcome::Cancelled);
+            }
             increment += 1;
             if increment > step.max_increments {
                 return Err(Error::Numerical {

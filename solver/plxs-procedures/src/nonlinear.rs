@@ -282,6 +282,9 @@ impl Procedure for NonlinearStatic {
         let mut previous_fast = false;
         let mut warned = false;
         while time < period * (1.0 - 1e-12) {
+            if ctx.cancel.is_cancelled() {
+                return Ok(StepOutcome::Cancelled);
+            }
             increment += 1;
             if increment > step.max_increments {
                 return Ok(StepOutcome::Diverged {

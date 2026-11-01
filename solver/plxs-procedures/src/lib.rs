@@ -39,8 +39,15 @@ use plxs_output::{CvgRow, StaRow};
 #[derive(Clone, Debug, PartialEq)]
 pub enum StepOutcome {
     Converged,
-    Diverged { increment: u32, message: String },
-    Partial { increments: u32 },
+    Diverged {
+        increment: u32,
+        message: String,
+    },
+    Partial {
+        increments: u32,
+    },
+    /// The caller cancelled the run; the state is that of the last converged increment.
+    Cancelled,
 }
 
 /// Everything a procedure works on.
@@ -68,6 +75,8 @@ pub struct ProcedureContext<'a> {
     /// The job's directory: files the input refers to (`*TEMPERATURE, FILE=`) are read
     /// from here.
     pub work_dir: std::path::PathBuf,
+    /// Set by the caller to stop the run between increments.
+    pub cancel: plxs_core::CancelToken,
     /// The contact pairs of the model, prepared once (empty without contact).
     pub contact: plxs_contact::ContactModel,
     /// Time per phase, summed over the steps of the session.

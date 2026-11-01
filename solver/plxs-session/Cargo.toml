@@ -14,8 +14,10 @@ plxs-linalg.workspace = true
 plxs-assembly.workspace = true
 plxs-procedures.workspace = true
 plxs-output.workspace = true
-rayon.workspace = true
+plxs-input.workspace = true
+plxs-elements.workspace = true
 postcard.workspace = true
+rayon.workspace = true
 serde.workspace = true
 
 [lints]

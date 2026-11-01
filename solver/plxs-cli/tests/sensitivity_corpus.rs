@@ -44,6 +44,7 @@ fn solve(analysis: &plxs_core::Analysis) -> Results {
         SessionOptions {
             threads: 2,
             work_dir: std::env::temp_dir(),
+            ..Default::default()
         },
     )
     .expect("session");

@@ -6,6 +6,7 @@
 //! Every session has its own rayon thread pool with `threads` threads; no global state, so
 //! several sessions can run in one process.
 
+pub mod job;
 pub mod restart;
 
 use std::path::PathBuf;
@@ -14,11 +15,12 @@ use std::sync::Arc;
 use plxs_assembly::{ElementTable, build_pattern};
 use plxs_constraints::ModelConstraints;
 use plxs_core::state::Snapshot;
-use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Results, State, Step};
+use plxs_core::{CancelToken, Error, Model, Progress, ProgressEvent, Result, Results, State, Step};
 use plxs_linalg::{LdltSolver, Pattern};
 use plxs_output::{CvgRow, StaRow};
 use plxs_procedures::{ProcedureContext, run_step};
 
+pub use job::{JobOptions, JobOutcome, format_event, run_job};
 pub use plxs_procedures::StepOutcome;
 pub use plxs_procedures::fields::unsupported_outputs;
 
@@ -28,6 +30,8 @@ pub struct SessionOptions {
     pub threads: usize,
     /// Where the job's files go (restart, eigenmodes).
     pub work_dir: PathBuf,
+    /// Stops the run between increments when cancelled.
+    pub cancel: CancelToken,
 }
 
 impl Default for SessionOptions {
@@ -35,6 +39,7 @@ impl Default for SessionOptions {
         Self {
             threads: 0,
             work_dir: PathBuf::from("."),
+            cancel: CancelToken::new(),
         }
     }
 }
@@ -147,6 +152,7 @@ impl Session {
             cvg: std::mem::take(&mut self.cvg),
             average_force: self.average_force,
             work_dir: self.options.work_dir.clone(),
+            cancel: self.options.cancel.clone(),
             contact: std::mem::take(&mut self.contact),
             profile: std::mem::take(&mut self.profile),
         };

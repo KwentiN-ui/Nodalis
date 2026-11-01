@@ -531,6 +531,16 @@ mod tests {
         if !ccx_installed() {
             return;
         }
+        solves_and_keeps_the_results(plx_solve::Engine::CalculiX);
+    }
+
+    /// The same with the built-in solver, which needs no program.
+    #[test]
+    fn solves_with_the_built_in_solver() {
+        solves_and_keeps_the_results(plx_solve::Engine::PrePoLix);
+    }
+
+    fn solves_and_keeps_the_results(engine: plx_solve::Engine) {
         use crate::solver_check::{LENGTH, beam_mesh, beam_model, faces_where};
         let mesh = beam_mesh();
         let tip = faces_where(&mesh, |p| p[0] == LENGTH);
@@ -546,8 +556,12 @@ mod tests {
             model: fe,
             ..Default::default()
         };
-        let dir = std::env::temp_dir().join(format!("prepolix-monitor-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "prepolix-monitor-{engine:?}-{}",
+            std::process::id()
+        ));
         let solver = Solver {
+            engine,
             executable: "ccx".into(),
             work_dir: dir.display().to_string(),
             ..Default::default()
