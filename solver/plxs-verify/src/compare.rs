@@ -34,6 +34,22 @@ const MODE_SHAPE_FACTOR: f64 = 10.0;
 /// e.g. reaction forces of 1e-14 where plxs computes exact zeros).
 pub const ABSOLUTE_FLOOR: f64 = 1e-7;
 
+/// The increments of a list with only the last static increment of every step: the
+/// increments of the nonlinear path may differ from CalculiX's, its end may not. Eigenvalue,
+/// sensitivity and other increments stay.
+fn static_step_ends(list: &[Increment]) -> Vec<&Increment> {
+    let mut out: Vec<&Increment> = Vec::new();
+    for i in list {
+        match out.last_mut() {
+            Some(l) if i.kind == AnalysisKind::Static && l.kind == i.kind && l.step == i.step => {
+                *l = i
+            }
+            _ => out.push(i),
+        }
+    }
+    out
+}
+
 /// The largest finite absolute value of several lists.
 fn largest<'a>(lists: impl IntoIterator<Item = &'a [f64]>) -> f64 {
     lists
@@ -210,19 +226,63 @@ pub fn compare_frd_with(
         }
     }
 
-    // Increments.
-    if reference.increments.len() != candidate.increments.len() {
-        c.fail(format!(
-            "{} increments in the reference, {} in the candidate",
-            reference.increments.len(),
-            candidate.increments.len()
-        ));
-    }
-    let count = reference.increments.len().min(candidate.increments.len());
+    // Increments. Class B (nonlinear) fixtures compare static steps at their end only: the
+    // path there may need another number of increments than CalculiX (the concept asks for
+    // the same order of magnitude), and the increments after the onset of yielding differ
+    // by more than the tolerance even when their number happens to agree. The other classes
+    // and the other kinds of increments compare every increment.
+    let step_ends;
+    let (references, candidates): (&[Increment], &[Increment]) = if class == Class::B {
+        let (rn, kn) = (reference.increments.len(), candidate.increments.len());
+        if rn > 3 * kn.max(1) || kn > 3 * rn.max(1) {
+            c.fail(format!(
+                "{rn} increments in the reference, {kn} in the candidate (more than a factor of 3 apart)"
+            ));
+        }
+        let (r, k) = (
+            static_step_ends(&reference.increments),
+            static_step_ends(&candidate.increments),
+        );
+        let steps = |list: &[&Increment]| -> Vec<(u32, AnalysisKind)> {
+            list.iter().map(|i| (i.step, i.kind)).collect()
+        };
+        if steps(&r) != steps(&k) {
+            c.fail(format!(
+                "increments {:?} in the reference, {:?} in the candidate",
+                steps(&r),
+                steps(&k)
+            ));
+            return c;
+        }
+        // The increment numbers of a step end may differ; the candidate takes the
+        // reference's so that the structure compares equal.
+        step_ends = (
+            r.iter().map(|&i| i.clone()).collect::<Vec<_>>(),
+            k.iter()
+                .zip(&r)
+                .map(|(&k, r)| {
+                    let mut k = k.clone();
+                    k.increment = r.increment;
+                    k
+                })
+                .collect::<Vec<_>>(),
+        );
+        (&step_ends.0, &step_ends.1)
+    } else {
+        if reference.increments.len() != candidate.increments.len() {
+            c.fail(format!(
+                "{} increments in the reference, {} in the candidate",
+                reference.increments.len(),
+                candidate.increments.len()
+            ));
+        }
+        (&reference.increments, &candidate.increments)
+    };
+    let count = references.len().min(candidates.len());
     let mut i = 0;
     while i < count {
-        let r = &reference.increments[i];
-        let k = &candidate.increments[i];
+        let r = &references[i];
+        let k = &candidates[i];
         let label = format!("step {} increment {}", r.step, r.increment);
         if (r.step, r.increment, r.kind, r.nodal_diameter)
             != (k.step, k.increment, k.kind, k.nodal_diameter)
@@ -250,7 +310,7 @@ pub fn compare_frd_with(
             let mut end = i + 1;
             if has_senfreq(r) {
                 while end < count {
-                    let (next, kn) = (&reference.increments[end], &candidate.increments[end]);
+                    let (next, kn) = (&references[end], &candidates[end]);
                     let close =
                         (next.value - r.value).abs() <= MODE_CLUSTER_GAP * r.value.abs().max(1e-12);
                     if !(next.kind == r.kind
@@ -267,7 +327,7 @@ pub fn compare_frd_with(
             }
             let mut structured = true;
             for j in i + 1..end {
-                let (rj, kj) = (&reference.increments[j], &candidate.increments[j]);
+                let (rj, kj) = (&references[j], &candidates[j]);
                 let label = format!("step {} increment {}", rj.step, rj.increment);
                 c.values(
                     &format!("{label}: value"),
@@ -281,8 +341,8 @@ pub fn compare_frd_with(
             if structured {
                 compare_sensitivities(
                     &mut c,
-                    &reference.increments[i..end],
-                    &candidate.increments[i..end],
+                    &references[i..end],
+                    &candidates[i..end],
                     tolerance,
                     undetermined,
                 );
@@ -295,13 +355,13 @@ pub fn compare_frd_with(
             // this one within the tolerance (in the reference).
             let mut end = i + 1;
             while end < count {
-                let next = &reference.increments[end];
+                let next = &references[end];
                 let close =
                     (next.value - r.value).abs() <= MODE_CLUSTER_GAP * r.value.abs().max(1e-12);
                 if !(is_mode(next) && next.step == r.step && next.kind == r.kind && close) {
                     break;
                 }
-                let kn = &candidate.increments[end];
+                let kn = &candidates[end];
                 if (next.step, next.increment, next.kind) != (kn.step, kn.increment, kn.kind) {
                     break;
                 }
@@ -309,7 +369,7 @@ pub fn compare_frd_with(
             }
             let mut all_structured = true;
             for j in i + 1..end {
-                let (rj, kj) = (&reference.increments[j], &candidate.increments[j]);
+                let (rj, kj) = (&references[j], &candidates[j]);
                 let label = format!("step {} increment {}", rj.step, rj.increment);
                 c.values(
                     &format!("{label}: value"),
@@ -321,13 +381,13 @@ pub fn compare_frd_with(
                 all_structured &= same_fields(&mut c, &label, rj, kj, undetermined).is_some();
             }
             if all_structured {
-                let last_of_step = reference.increments.get(end).is_none_or(|next| {
+                let last_of_step = references.get(end).is_none_or(|next| {
                     next.step != r.step || next.kind != r.kind || !is_mode(next)
                 });
                 compare_mode_cluster(
                     &mut c,
-                    &reference.increments[i..end],
-                    &candidate.increments[i..end],
+                    &references[i..end],
+                    &candidates[i..end],
                     tolerance * MODE_SHAPE_FACTOR,
                     last_of_step,
                     undetermined,
@@ -922,7 +982,13 @@ pub fn compare_dat_except(
 ) -> Comparison {
     let mut c = Comparison::default();
     let tolerance = class.tolerance();
-    let names = |d: &DatImport| -> Vec<String> { d.sets.iter().map(|s| s.name.clone()).collect() };
+    // CalculiX prints the blocks in the order of the `*NODE PRINT`/`*EL PRINT` requests;
+    // the order carries no information, so the sets are matched by name.
+    let names = |d: &DatImport| -> Vec<String> {
+        let mut names: Vec<String> = d.sets.iter().map(|s| s.name.clone()).collect();
+        names.sort();
+        names
+    };
     if names(reference) != names(candidate) {
         c.fail(format!(
             "history sets {:?} in the reference, {:?} in the candidate",
@@ -931,7 +997,10 @@ pub fn compare_dat_except(
         ));
         return c;
     }
-    for (rs, ks) in reference.sets.iter().zip(&candidate.sets) {
+    for rs in &reference.sets {
+        let Some(ks) = candidate.sets.iter().find(|s| s.name == rs.name) else {
+            continue;
+        };
         let label = format!("history {}", rs.name);
         let rows = |s: &plx_results::history_output::HistorySet| -> Vec<(u32, u32)> {
             s.rows.iter().map(|r| (r.0, r.1)).collect()

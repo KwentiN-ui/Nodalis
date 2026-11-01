@@ -86,3 +86,24 @@ fn a_model_check_finishes_and_an_unknown_keyword_cannot_be_interpreted() {
     assert!(text.contains("cannot be interpreted"), "{text}");
     let _ = std::fs::remove_dir_all(&work);
 }
+
+#[test]
+fn the_profile_names_the_phases_and_the_reused_analyses() {
+    let work = std::env::temp_dir().join(format!("plxs-cli-profile-{}", std::process::id()));
+    std::fs::create_dir_all(&work).unwrap();
+    let source = fixtures_root().join("nonlinear").join("plastisch.inp");
+    std::fs::copy(source, work.join("p.inp")).unwrap();
+    let output = Command::new(plxs())
+        .args(["--profile", "p"])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{text}");
+    for phase in ["assembly", "factorization", "symbolic analysis", "total"] {
+        assert!(text.contains(phase), "{text}");
+    }
+    // Newton iterations on one pattern analyze it once.
+    assert!(text.contains(" reused)"), "{text}");
+    let _ = std::fs::remove_dir_all(&work);
+}

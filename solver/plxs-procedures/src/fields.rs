@@ -67,13 +67,13 @@ pub fn nodal_average(
     nodal_average_with(table, model, field, &[])
 }
 
-/// [`nodal_average`] with further elements of constant value (native membranes): dense
-/// nodes and value.
+/// [`nodal_average`] with further elements given by their nodal values (native
+/// membranes): dense nodes and the value at each.
 pub fn nodal_average_with(
     table: &ElementTable,
     model: &Model,
     field: &IntegrationPointField,
-    constant: &[([u32; 3], [f64; 6])],
+    extra: &[(&[u32], Vec<[f64; 6]>)],
 ) -> (Vec<[f64; 6]>, Vec<Vec<[f64; 6]>>) {
     let nodes = model.nodes.len();
     let mut sum = vec![[0.0; 6]; nodes];
@@ -102,8 +102,8 @@ pub fn nodal_average_with(
         }
         per_element.push(nodal);
     }
-    for (nodes, value) in constant {
-        for &n in nodes {
+    for (nodes, values) in extra {
+        for (&n, value) in nodes.iter().zip(values) {
             for k in 0..6 {
                 sum[n as usize][k] += value[k];
             }
@@ -130,6 +130,82 @@ pub fn nodal_average_with(
         }
     }
     (sum, per_element)
+}
+
+/// One component of an integration-point field as a scalar field.
+fn scalar_of(field: &IntegrationPointField, component: usize) -> IntegrationPointField {
+    IntegrationPointField {
+        per_point: 1,
+        offsets: field.offsets.clone(),
+        values: field
+            .values
+            .chunks(field.per_point)
+            .map(|p| p[component])
+            .collect(),
+    }
+}
+
+/// CalculiX's internal energy density `ENER`: half the double contraction of the stress
+/// with the total strain at every integration point (observed on its output; the plastic
+/// work is not accumulated).
+pub fn internal_energy_density(
+    stresses: &IntegrationPointField,
+    strains: &IntegrationPointField,
+) -> IntegrationPointField {
+    IntegrationPointField {
+        per_point: 1,
+        offsets: stresses.offsets.clone(),
+        values: stresses
+            .values
+            .chunks(6)
+            .zip(strains.values.chunks(6))
+            .map(|(s, e)| {
+                0.5 * (s[0] * e[0]
+                    + s[1] * e[1]
+                    + s[2] * e[2]
+                    + 2.0 * (s[3] * e[3] + s[4] * e[4] + s[5] * e[5]))
+            })
+            .collect(),
+    }
+}
+
+/// Extrapolates a scalar integration-point field to the nodes and averages it there.
+pub fn nodal_average_scalar(
+    table: &ElementTable,
+    model: &Model,
+    field: &IntegrationPointField,
+) -> Vec<f64> {
+    let nodes = model.nodes.len();
+    let mut sum = vec![0.0; nodes];
+    let mut count = vec![0u32; nodes];
+    for (index, entry) in table.entries.iter().enumerate() {
+        let formulation = table.formulation(entry);
+        let ips = formulation.integration_points();
+        let start = table.layout.offsets[index] as usize;
+        let e = formulation.extrapolation();
+        for (a, &n) in entry.nodes.iter().enumerate() {
+            let v: f64 = (0..ips)
+                .map(|g| e[a * ips + g] * field.values[start + g])
+                .sum();
+            sum[n as usize] += v;
+            count[n as usize] += 1;
+        }
+    }
+    for (s, &c) in sum.iter_mut().zip(&count) {
+        if c > 0 {
+            *s /= f64::from(c);
+        }
+    }
+    sum
+}
+
+fn scalar_field(name: &str, component: &str, order: &[(u32, u32)], values: &[f64]) -> ResultField {
+    ResultField {
+        name: name.to_string(),
+        components: vec![component.to_string()],
+        nodes: order.iter().map(|&(id, _)| id).collect(),
+        values: vec![order.iter().map(|&(_, i)| values[i as usize]).collect()],
+    }
 }
 
 fn tensor_field(
@@ -216,59 +292,6 @@ pub fn principal_stresses(s: &[f64; 6]) -> [f64; 3] {
     v
 }
 
-/// CalculiX's internal energy density `ENER`: half the double contraction of the stress
-/// with the total strain at every integration point (tensor shear strains in the state).
-pub fn internal_energy_density(
-    stresses: &IntegrationPointField,
-    strains: &IntegrationPointField,
-) -> IntegrationPointField {
-    IntegrationPointField {
-        per_point: 1,
-        offsets: stresses.offsets.clone(),
-        values: stresses
-            .values
-            .chunks(6)
-            .zip(strains.values.chunks(6))
-            .map(|(s, e)| {
-                0.5 * (s[0] * e[0]
-                    + s[1] * e[1]
-                    + s[2] * e[2]
-                    + 2.0 * (s[3] * e[3] + s[4] * e[4] + s[5] * e[5]))
-            })
-            .collect(),
-    }
-}
-
-/// Extrapolates a scalar integration-point field to the nodes and averages it there.
-pub fn nodal_average_scalar(
-    table: &ElementTable,
-    model: &Model,
-    field: &IntegrationPointField,
-) -> Vec<f64> {
-    let nodes = model.nodes.len();
-    let mut sum = vec![0.0; nodes];
-    let mut count = vec![0u32; nodes];
-    for (index, entry) in table.entries.iter().enumerate() {
-        let formulation = table.formulation(entry);
-        let ips = formulation.integration_points();
-        let start = table.layout.offsets[index] as usize;
-        let e = formulation.extrapolation();
-        for (a, &node) in entry.nodes.iter().enumerate() {
-            let v: f64 = (0..ips)
-                .map(|g| e[a * ips + g] * field.values[start + g])
-                .sum();
-            sum[node as usize] += v;
-            count[node as usize] += 1;
-        }
-    }
-    for (s, &c) in sum.iter_mut().zip(&count) {
-        if c > 0 {
-            *s /= f64::from(c);
-        }
-    }
-    sum
-}
-
 /// The nodal fields of a displacement state as the step's `*NODE FILE` / `*EL FILE`
 /// requests ask for them, in CalculiX's order: DISP, STRESS, TOSTRAIN, FORC, ENER, ERROR.
 pub fn build_fields(
@@ -280,17 +303,33 @@ pub fn build_fields(
     stresses: &IntegrationPointField,
     strains: &IntegrationPointField,
 ) -> Vec<ResultField> {
+    build_fields_with(table, model, step, u, reactions, stresses, strains, None)
+}
+
+/// [`build_fields`] with the material state of the integration points (equivalent plastic
+/// strain first), which gives `PE`; without it `PE` is zero.
+#[allow(clippy::too_many_arguments)]
+pub fn build_fields_with(
+    table: &ElementTable,
+    model: &Model,
+    step: &Step,
+    u: &[f64],
+    reactions: &[f64],
+    stresses: &IntegrationPointField,
+    strains: &IntegrationPointField,
+    material: Option<&IntegrationPointField>,
+) -> Vec<ResultField> {
     let variables = requested(step);
     let has = |v: &str| variables.iter().any(|x| x == v);
     let order = node_order(model);
     let mut fields = Vec::new();
-    // Native membranes: constant strain and stress per element.
+    // Native membranes: their values at the nodes.
     let (membrane_strains, membrane_stresses): (Vec<_>, Vec<_>) = table
         .membranes
         .iter()
         .map(|m| {
-            let (e, s) = m.strain_stress(u);
-            ((m.nodes, e), (m.nodes, s))
+            let (e, s): (Vec<_>, Vec<_>) = m.nodal_values(u, step.nlgeom).into_iter().unzip();
+            ((m.nodes.as_slice(), e), (m.nodes.as_slice(), s))
         })
         .unzip();
     // Internal unknowns (thickness change of plane stress nodes) are no displacements.
@@ -318,6 +357,18 @@ pub fn build_fields(
     }
     if has("RF") {
         fields.push(vector_field("FORC", ["F1", "F2", "F3"], &order, reactions));
+    }
+    if has("PEEQ") {
+        let peeq = match material {
+            Some(m) if m.per_point > 0 => scalar_of(m, 0),
+            _ => IntegrationPointField {
+                per_point: 1,
+                offsets: stresses.offsets.clone(),
+                values: vec![0.0; stresses.offsets.last().copied().unwrap_or(0) as usize],
+            },
+        };
+        let nodal = nodal_average_scalar(table, model, &peeq);
+        fields.push(scalar_field("PE", "PE", &order, &nodal));
     }
     if has("ENER") {
         let energy = internal_energy_density(stresses, strains);
@@ -355,8 +406,11 @@ pub fn write_increment(
     reactions: &[f64],
     stresses: &IntegrationPointField,
     strains: &IntegrationPointField,
+    material: Option<&IntegrationPointField>,
 ) -> Result<()> {
-    let fields = build_fields(ctx.table, ctx.model, step, u, reactions, stresses, strains);
+    let fields = build_fields_with(
+        ctx.table, ctx.model, step, u, reactions, stresses, strains, material,
+    );
     ctx.results.increments.push(ResultsIncrement {
         step: ctx.step_number,
         increment,
@@ -376,7 +430,8 @@ pub fn unsupported_outputs(step: &Step) -> Vec<String> {
     // `V` only means something in dynamic steps, `PU`/`PHS` in steady state and complex
     // frequency steps; CalculiX ignores them in the others.
     let known = [
-        "U", "V", "S", "E", "RF", "ERR", "NOE", "ENER", "NT", "HFL", "RFL", "PU", "PHS", "SEN",
+        "U", "V", "S", "E", "RF", "ERR", "NOE", "PEEQ", "ENER", "NT", "HFL", "RFL", "PU", "PHS",
+        "SEN",
     ];
     let mut out = Vec::new();
     for v in requested(step) {

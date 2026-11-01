@@ -79,7 +79,21 @@ pub fn assemble_mass_with(
             }
         }
         Ok(me)
-    })
+    })?;
+    // Native membranes, after the solid blocks (`assemble_blocks` starts from zero).
+    for membrane in &table.membranes {
+        let rho = membrane.density.ok_or_else(|| {
+            Error::input(
+                "*DENSITY",
+                format!(
+                    "element {} has no density; a frequency or dynamic analysis needs *DENSITY for every material",
+                    model.elements[membrane.element as usize].id
+                ),
+            )
+        })?;
+        m.add_block(&membrane.dofs, &membrane.formulation.mass(rho));
+    }
+    Ok(())
 }
 
 /// Assembles the initial stress stiffness `K_σ` for the stresses at the integration
@@ -133,5 +147,34 @@ pub fn assemble_tangent_stiffness(
             *a += b;
         }
         Ok(ke)
-    })
+    })?;
+    // Constant stiffness blocks (U1) and native membranes (total Lagrangian tangent).
+    for block in table.linear_blocks.iter().filter(|b| !b.membrane) {
+        k.add_block(&block.dofs, &block.stiffness);
+    }
+    for membrane in &table.membranes {
+        let ue = membrane.gather(u);
+        let mut f = vec![0.0; ue.len()];
+        let mut ke = Vec::new();
+        membrane
+            .formulation
+            .internal(&ue, true, &mut f, Some(&mut ke));
+        k.add_block(&membrane.dofs, &ke);
+    }
+    Ok(())
+}
+
+/// Adds the initial stress stiffness of the native membranes for the displacements `u`
+/// to `k_sigma` (after [`assemble_geometric_stiffness`], which covers the solids).
+pub fn add_membrane_geometric_stiffness(
+    table: &ElementTable,
+    u: &[f64],
+    k_sigma: &mut SparseMatrix,
+) {
+    for membrane in &table.membranes {
+        let ke = membrane
+            .formulation
+            .initial_stress_stiffness(&membrane.gather(u));
+        k_sigma.add_block(&membrane.dofs, &ke);
+    }
 }

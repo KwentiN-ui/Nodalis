@@ -383,6 +383,7 @@ impl Procedure for ModalDynamicsProcedure {
                 &reactions,
                 &stresses,
                 &strains,
+                None,
             );
             progress.event(ProgressEvent::IncrementDone {
                 step: ctx.step_number,
@@ -616,6 +617,7 @@ impl Procedure for SteadyStateProcedure {
                         &reactions,
                         &stresses,
                         &strains,
+                        None,
                     );
                 }
             }

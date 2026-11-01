@@ -401,7 +401,7 @@ impl SolidElement {
 
     /// Fills the strain-displacement matrix `b` (6 × 3n, row-major) from Cartesian
     /// derivatives.
-    fn fill_b(dndx: &[[f64; 3]], b: &mut [f64]) {
+    pub(crate) fn fill_b(dndx: &[[f64; 3]], b: &mut [f64]) {
         let cols = 3 * dndx.len();
         b.iter_mut().for_each(|v| *v = 0.0);
         for (i, g) in dndx.iter().enumerate() {
@@ -423,7 +423,13 @@ impl SolidElement {
     /// the centroid. CalculiX does not scale them by `det J0 / det J` (Taylor's patch-test
     /// fix): the oracle stiffness of a distorted element matches the unscaled form to 4e-6
     /// and differs from the scaled one by 2e-3, so the scaling is left out.
-    fn fill_g(p: [f64; 3], inv0: &[[f64; 3]; 3], _det0: f64, _det: f64, g: &mut [f64]) {
+    fn fill_g(p: [f64; 3], inv0: &[[f64; 3]; 3], g: &mut [f64]) {
+        let dndx = Self::mode_gradients(p, inv0);
+        Self::fill_b(&dndx, g);
+    }
+
+    /// Cartesian derivatives of the three incompatible modes at a point (see `fill_g`).
+    pub(crate) fn mode_gradients(p: [f64; 3], inv0: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
         let dmodes = [
             [-2.0 * p[0], 0.0, 0.0],
             [0.0, -2.0 * p[1], 0.0],
@@ -435,7 +441,7 @@ impl SolidElement {
                 dndx[m][c] = d[0] * inv0[c][0] + d[1] * inv0[c][1] + d[2] * inv0[c][2];
             }
         }
-        Self::fill_b(&dndx, g);
+        dndx
     }
 
     /// Stiffness matrix (row-major `3n × 3n`) for the material matrix `d` (6 × 6, acting
@@ -494,8 +500,20 @@ impl SolidElement {
         let (volume, mean) = self.mean_gradients(coords);
         Self::fill_b(&mean, b);
         accumulate_btdb(b, d, ndof, volume, out);
+        self.hourglass_stiffness(coords, d, &mean, volume, out);
+    }
 
-        // Hourglass control. Young's modulus from the isotropic material matrix.
+    /// Adds the hourglass control stiffness of the uniform-strain hexahedron to `out`
+    /// (Young's modulus from the isotropic material matrix).
+    pub(crate) fn hourglass_stiffness(
+        &self,
+        coords: &[[f64; 3]],
+        d: &[[f64; 6]; 6],
+        mean: &[[f64; 3]],
+        volume: f64,
+        out: &mut [f64],
+    ) {
+        let ndof = self.dof_count_3d();
         let mu = d[3][3];
         let lambda = d[0][1];
         let young = mu * (3.0 * lambda + 2.0 * mu) / (lambda + mu);
@@ -539,7 +557,7 @@ impl SolidElement {
     /// Volume and volume-averaged Cartesian shape function derivatives (the uniform-strain
     /// `B` of Flanagan and Belytschko), integrated with 2×2×2 points (exact for the
     /// trilinear hexahedron).
-    fn mean_gradients(&self, coords: &[[f64; 3]]) -> (f64, Vec<[f64; 3]>) {
+    pub(crate) fn mean_gradients(&self, coords: &[[f64; 3]]) -> (f64, Vec<[f64; 3]>) {
         let full = IntegrationRule::hex(2);
         let mut volume = 0.0;
         let mut mean = vec![[0.0; 3]; 8];
@@ -563,11 +581,11 @@ impl SolidElement {
 
     /// Condensation data of the incompatible modes: `K_aa^-1 K_au` (9 × 3n) so that the
     /// mode amplitudes are `α = -K_aa^-1 K_au u`.
-    fn incompatible_coupling(
+    pub(crate) fn incompatible_coupling(
         &self,
         coords: &[[f64; 3]],
         d: &[[f64; 6]; 6],
-    ) -> (Vec<f64>, [[f64; 3]; 3], f64) {
+    ) -> (Vec<f64>, [[f64; 3]; 3]) {
         let ndof = self.dof_count_3d();
         let mut b = vec![0.0; 6 * ndof];
         let mut g = vec![0.0; 6 * 9];
@@ -578,13 +596,13 @@ impl SolidElement {
             self.family.shape([0.0; 3], &mut n, &mut dn);
             jacobian(&dn, coords)
         };
-        let (det0, inv0) = invert3(&j0);
+        let (_, inv0) = invert3(&j0);
         let mut kaa = vec![0.0; 81];
         let mut kau = vec![0.0; 9 * ndof];
         for (&p, &w) in self.rule.points.iter().zip(&self.rule.weights) {
             let point = self.point(p, coords);
             Self::fill_b(&point.dndx, &mut b);
-            Self::fill_g(p, &inv0, det0, point.det, &mut g);
+            Self::fill_g(p, &inv0, &mut g);
             let f = point.det * w;
             accumulate_btdb(&g, d, 9, f, &mut kaa);
             accumulate_atdb(&g, 9, &b, ndof, d, f, &mut kau);
@@ -592,7 +610,7 @@ impl SolidElement {
         let _ = centre;
         // Solve K_aa X = K_au for X (9 × ndof) by Gaussian elimination with pivoting.
         let x = solve_dense(&mut kaa, 9, &kau, ndof);
-        (x, inv0, det0)
+        (x, inv0)
     }
 
     fn stiffness_incompatible(
@@ -603,13 +621,13 @@ impl SolidElement {
         b: &mut [f64],
     ) {
         let ndof = self.dof_count_3d();
-        let (x, inv0, det0) = self.incompatible_coupling(coords, d);
+        let (x, inv0) = self.incompatible_coupling(coords, d);
         let mut g = vec![0.0; 6 * 9];
         let mut kau = vec![0.0; 9 * ndof];
         for (&p, &w) in self.rule.points.iter().zip(&self.rule.weights) {
             let point = self.point(p, coords);
             Self::fill_b(&point.dndx, b);
-            Self::fill_g(p, &inv0, det0, point.det, &mut g);
+            Self::fill_g(p, &inv0, &mut g);
             let f = point.det * w;
             accumulate_btdb(b, d, ndof, f, out);
             accumulate_atdb(&g, 9, b, ndof, d, f, &mut kau);
@@ -647,12 +665,12 @@ impl SolidElement {
             return vec![e];
         }
         let incompatible = (self.formulation == Formulation::Incompatible).then(|| {
-            let (x, inv0, det0) = self.incompatible_coupling(coords, d);
+            let (x, inv0) = self.incompatible_coupling(coords, d);
             let mut alpha = [0.0; 9];
             for (m, a) in alpha.iter_mut().enumerate() {
                 *a = -(0..ndof).map(|j| x[m * ndof + j] * u[j]).sum::<f64>();
             }
-            (alpha, inv0, det0)
+            (alpha, inv0)
         });
         let mut g = vec![0.0; 6 * 9];
         self.rule
@@ -665,8 +683,8 @@ impl SolidElement {
                 for (r, er) in e.iter_mut().enumerate() {
                     *er = (0..ndof).map(|c| b[r * ndof + c] * u[c]).sum();
                 }
-                if let Some((alpha, inv0, det0)) = &incompatible {
-                    Self::fill_g(p, inv0, *det0, point.det, &mut g);
+                if let Some((alpha, inv0)) = &incompatible {
+                    Self::fill_g(p, inv0, &mut g);
                     for (r, er) in e.iter_mut().enumerate() {
                         *er += (0..9).map(|c| g[r * 9 + c] * alpha[c]).sum::<f64>();
                     }
@@ -1447,12 +1465,12 @@ impl SolidElement {
         let nodes = self.node_count();
         let mut bl = vec![0.0; 6 * ndof];
         let incompatible = (self.formulation == Formulation::Incompatible).then(|| {
-            let (x, inv0, det0) = self.incompatible_coupling(coords, d);
+            let (x, inv0) = self.incompatible_coupling(coords, d);
             let mut alpha = [0.0; 9];
             for (m, a) in alpha.iter_mut().enumerate() {
                 *a = -(0..ndof).map(|j| x[m * ndof + j] * du[j]).sum::<f64>();
             }
-            (alpha, inv0, det0)
+            (alpha, inv0)
         });
         let mut g = vec![0.0; 6 * 9];
         self.rule
@@ -1466,8 +1484,8 @@ impl SolidElement {
                 for (r, er) in e.iter_mut().enumerate() {
                     *er = (0..ndof).map(|c| bl[r * ndof + c] * du[c]).sum();
                 }
-                if let Some((alpha, inv0, det0)) = &incompatible {
-                    Self::fill_g(p, inv0, *det0, point.det, &mut g);
+                if let Some((alpha, inv0)) = &incompatible {
+                    Self::fill_g(p, inv0, &mut g);
                     for (r, er) in e.iter_mut().enumerate() {
                         *er += (0..9).map(|c| g[r * 9 + c] * alpha[c]).sum::<f64>();
                     }
