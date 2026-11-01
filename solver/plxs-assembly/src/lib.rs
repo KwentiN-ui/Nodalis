@@ -28,8 +28,8 @@ pub use heat::{HeatTable, assemble_heat, heat_loads, temperature_spc};
 pub use loads::{add_membrane_pressures, load_vector, membrane_pressures};
 pub use local_loads::rotate_concentrated_loads;
 pub use mass::{
-    MassRule, assemble_geometric_stiffness, assemble_mass, assemble_mass_with,
-    assemble_tangent_stiffness,
+    MassRule, add_membrane_geometric_stiffness, assemble_geometric_stiffness, assemble_mass,
+    assemble_mass_with, assemble_tangent_stiffness,
 };
 pub use nonlinear::{NonlinearInput, NonlinearOutput, assemble_nonlinear};
 pub use stiffness::{assemble_stiffness, build_pattern};

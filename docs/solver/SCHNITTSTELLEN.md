@@ -657,8 +657,7 @@ ccx), dazu die Übernahmetests in `plxs-input/src/tests.rs`.
   Dehnungen konstant je Element, an den Knoten gemittelt (`ElementTable::membranes`,
   `fields::nodal_average_with`), Dickendehnung ε33 = −ν/(1 − ν)(ε11 + ε22). Quer zur Ebene
   keine Steifigkeit.
-- **Offen**: M3D4R (expandiert, weicht ab), M3D4 in der Ebene um 1e-4 (siehe „Membranen
-  nativ“ unter M2 T8), die genaue
+- **Offen**: die genaue
   BOX-Regel von ccx, die Knotenspannungen von PIPE (ccx extrapoliert anders als die lineare
   Querschnittsanpassung, bis 0,3 %),
   `*NODAL THICKNESS`, Druck auf Balken, U1 an Schalen-/Balkenknoten,
@@ -819,8 +818,27 @@ Membranknoten auf der Geraden zwischen festem und gekoppeltem Rand, plxs trifft 
 1e-4). Der Block in `edge-tie-m3d4` hängt aber wie an einem Scharnier, seine Drehung
 legen nur diese winzigen Steifigkeiten fest; die Fixture bleibt offen.
 
-Offen: geometrische Steifigkeit der Membranen für `*BUCKLE`/Vorspannung in `*FREQUENCY`,
-M3D4R nativ, Druck auf Volumenelementen unter NLGEOM (bleibt Totlast, siehe oben).
+Nachtrag (Membranen II): In der Ebene ist M3D4 (M3D4R) in ccx exakt eine C3D8- (C3D8R-)
+Schicht der Membrandicke, deren Ober- und Unterseite sich in der Ebene gleich und entlang
+der Normalen symmetrisch bewegen (geprüft für Dicke 0,01 bis 10). plxs baut diese Schicht
+je Viereck auf (auf die Ebene durch den Mittelpunkt projiziert), kondensiert die
+Dickenänderung und nimmt ihre Steifigkeit für kleine Dehnungen; die Spannungen kommen aus
+den Punkten der Schicht, mit den C3D8-Gewichten extrapoliert und über die Dicke gemittelt.
+`membran-m3d4`, `membran-m3d4r` und `membran-s4r` sind damit exakt grün (3e-7). Unter
+NLGEOM bleibt die total-Lagrangesche Membran; die Differenz Schicht minus eigene
+Integration (Hourglass von M3D4R, (t/h)²-Term von M3D4) kommt als konstante Steifigkeit
+dazu, vorher von linearen Feldern wegprojiziert (sonst kostet eine Starrkörperdrehung
+eines verzerrten C3D8R Kraft).
+
+Vorspannung: `*BUCKLE` nimmt die Anfangsspannungssteifigkeit der Membranen
+(`add_membrane_geometric_stiffness`), `*FREQUENCY`/`*BUCKLE` mit PERTURBATION die
+total-Lagrangesche Tangente der Membranen und die U1-Blöcke (fehlten vorher). Gegen ccx
+2.21: vorgespannter Streifen (`membran-vorgespannt` + `*FREQUENCY, PERTURBATION`)
+858,38 statt 858,24 Hz (2e-4), Mode 3 1,5e-3; C3D8I-Platte mit M3D4-Haut unter Druck,
+Beulfaktor 1,16104 statt 1,16069 (3e-4; ohne Haut weicht plxs bei C3D8I schon um 5e-4
+ab).
+
+Offen: Druck auf Volumenelementen unter NLGEOM (bleibt Totlast, siehe oben).
 
 ### Beobachtungen an CalculiX 2.21 (nur aus Ausgaben)
 
