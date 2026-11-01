@@ -266,6 +266,25 @@ fn ccx_dir(name: &str) -> Option<PathBuf> {
     Some(dir)
 }
 
+/// Whether the installed CalculiX is at least version 2.23. Before it, the reaction force RF
+/// printed at a pre-tension node is zero (the preload is an external load there), so the bolt
+/// force can only be read from 2.23 on.
+fn ccx_prints_pretension_force() -> bool {
+    let Ok(output) = Command::new("ccx").arg("-v").output() else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let Some(version) = text.split("Version").nth(1) else {
+        return false;
+    };
+    let mut parts = version.trim().split('.').map(|p| {
+        let digits: String = p.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse::<u32>().unwrap_or(0)
+    });
+    let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    (major, minor) >= (2, 23)
+}
+
 /// Runs CalculiX on the input file in the directory and reads the results.
 fn run_ccx_in(dir: &std::path::Path, name: &str, text: &str) -> FrdImport {
     std::fs::write(dir.join(format!("{name}.inp")), text).unwrap();
@@ -3256,6 +3275,9 @@ fn calculix_preloads_the_bolt_across_two_blocks() {
         .sum();
     assert!((reaction + force).abs() < 1e-3 * force, "{reaction}");
     // The bolt force is printed under the bolt's name, in the preload step and while locked.
+    if !ccx_prints_pretension_force() {
+        return;
+    }
     let names: Vec<&str> = dat.sets.iter().map(|s| s.name.as_str()).collect();
     let bolt = (dat.sets.iter())
         .find(|s| s.name == "BOLT-1")
@@ -9369,6 +9391,9 @@ fn a_bolt_picked_by_its_shank_is_cut_across_its_middle() {
     // The bolt is in tension: the support at its start pulls it away from the middle.
     let axial: f64 = reaction.iter().zip(expected).map(|(a, b)| a * b).sum();
     assert!((axial + force).abs() < 1e-3 * force, "{reaction:?}");
+    if !ccx_prints_pretension_force() {
+        return;
+    }
     let bolt = dat.sets.iter().find(|s| s.name == "BOLT-1").unwrap();
     let forces = &bolt
         .field("FORCES")
