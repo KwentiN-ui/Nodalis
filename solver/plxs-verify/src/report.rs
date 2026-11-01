@@ -5,7 +5,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::corpus::load_results;
-use crate::{Comparison, Fixture, compare_dat, compare_frd_with, load_reference};
+use crate::{Comparison, Fixture, compare_dat_with_noise, compare_frd_with, load_reference};
 
 /// How a fixture went.
 #[derive(Clone, Debug, PartialEq)]
@@ -104,28 +104,31 @@ pub fn run_fixture(solver: &Path, fixture: &Fixture, work: &Path) -> Report {
         Err(e) => return report(Outcome::Error(format!("results: {e}")), short_log),
     };
     let class = fixture.meta.class;
+    // Documented deviations (whole fields) and undetermined components.
+    let undetermined: Vec<String> = fixture
+        .meta
+        .deviations
+        .iter()
+        .chain(&fixture.meta.undetermined)
+        .cloned()
+        .collect();
     let mut comparison: Comparison = compare_frd_with(
         &reference.frd,
         &results.frd,
         class,
-        // Documented deviations (whole fields) and undetermined components.
-        &fixture
-            .meta
-            .deviations
-            .iter()
-            .chain(&fixture.meta.undetermined)
-            .cloned()
-            .collect::<Vec<_>>(),
+        &undetermined,
         &fixture.meta.noise,
     );
     match (&reference.dat, &results.dat) {
         (Some(r), Some(c)) => {
-            let dat = compare_dat(
+            let dat = compare_dat_with_noise(
                 r,
                 c,
                 class,
                 &comparison.unmatched_modes,
                 &comparison.standing_modes,
+                &undetermined,
+                &fixture.meta.noise,
             );
             comparison.failures.extend(dat.failures);
             comparison.notes.extend(dat.notes);

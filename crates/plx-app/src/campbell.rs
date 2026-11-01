@@ -18,9 +18,10 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
 use egui::{Color32, Ui};
-use plx_job::{Job, JobStatus};
+use plx_job::JobStatus;
 pub use plx_model::campbell::{Mode, Setup, SpeedPoint, Whirl};
 use plx_model::{EquationSolver, FeModel, LoadKind, StepKind};
+use plx_solve::{Engine, Run};
 
 use crate::numeric;
 use crate::table_export;
@@ -129,7 +130,11 @@ fn is_unstable(real: f64, imaginary: f64) -> bool {
 
 /// The complex frequencies and whirls of step `step` in the text of a `.dat` file.
 pub fn modes_of(dat: &str, step: u32) -> Vec<Mode> {
-    let import = plx_io::dat::parse_dat(dat);
+    modes_of_history(&plx_io::dat::parse_dat(dat), step)
+}
+
+/// The complex frequencies and whirls of step `step` in history output.
+pub fn modes_of_history(import: &plx_io::dat::DatImport, step: u32) -> Vec<Mode> {
     let name = format!("STEP_{step}");
     let Some(set) = import.sets.iter().find(|s| s.name == name) else {
         return Vec::new();
@@ -575,6 +580,7 @@ impl Drop for Sweep {
 
 /// What the sweep threads work on.
 struct SweepInput {
+    engine: Engine,
     solver: plx_job::Solver,
     work_dir: std::path::PathBuf,
     mesh: Arc<plx_mesh::FeMesh>,
@@ -635,8 +641,8 @@ fn run_speed(
     let text = plx_io::inp::write_inp(&input.mesh, &fe, &heading)
         .map_err(|e| format!("{label}: input file not written: {e}"))?;
     let name = job_name(index);
-    let mut job = Job::start(&input.solver, &input.work_dir, &name, &text)
-        .map_err(|e| format!("{label}: CalculiX not started: {e}"))?;
+    let mut job = Run::start(input.engine, &input.solver, &input.work_dir, &name, &text)
+        .map_err(|e| format!("{label}: solver not started: {e}"))?;
     let status = loop {
         let status = job.poll();
         if status != JobStatus::Running {
@@ -648,13 +654,29 @@ fn run_speed(
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    let dat = std::fs::read_to_string(job.file("dat")).unwrap_or_default();
-    let mut modes = modes_of(&dat, input.step);
-    if modes.is_empty()
-        && let Ok(frd) = plx_io::frd::read_frd(&job.file("frd"))
-    {
-        modes = modes_of_frd(&frd, input.step);
-    }
+    // The built-in solver's results are taken in memory, CalculiX's from its files.
+    let modes = match job.solver_results() {
+        Some(solved) => {
+            let history = plx_io::solver::history(&solved, None);
+            let modes = history.map_or_else(Vec::new, |h| modes_of_history(&h, input.step));
+            if modes.is_empty() {
+                modes_of_frd(&plx_io::solver::import(&solved), input.step)
+            } else {
+                modes
+            }
+        }
+        None => {
+            let dat = std::fs::read_to_string(job.file("dat")).unwrap_or_default();
+            let modes = modes_of(&dat, input.step);
+            if modes.is_empty()
+                && let Ok(frd) = plx_io::frd::read_frd(&job.file("frd"))
+            {
+                modes_of_frd(&frd, input.step)
+            } else {
+                modes
+            }
+        }
+    };
     if modes.is_empty() {
         let output = job.new_output();
         let error = output
@@ -663,8 +685,8 @@ fn run_speed(
             .cloned()
             .unwrap_or_else(|| {
                 format!(
-                    "CalculiX {status:?}, no complex frequencies of step {} in {name}.dat \
-                     or {name}.frd",
+                    "Solver {status:?}, no complex frequencies of step {} in the results \
+                     of {name}",
                     input.step
                 )
             });
@@ -889,7 +911,9 @@ impl CampbellWindow {
         let job_solver = solver
             .shared_by(solver.parallel_runs.max(1) as usize)
             .job_solver();
-        if let Some(message) = crate::settings::missing_executable(&job_solver.executable) {
+        if solver.engine == Engine::CalculiX
+            && let Some(message) = crate::settings::missing_executable(&job_solver.executable)
+        {
             return Err(format!("CalculiX not started: {message}"));
         }
         let mut fe = fe.clone();
@@ -926,6 +950,7 @@ impl CampbellWindow {
         };
         self.sweep = Some(Sweep {
             input: Arc::new(SweepInput {
+                engine: solver.engine,
                 solver: job_solver,
                 work_dir,
                 mesh: Arc::new(mesh.clone()),
@@ -1820,6 +1845,7 @@ mod tests {
 
         let work_dir = std::env::temp_dir().join(format!("plx-campbell-{}", std::process::id()));
         let input = SweepInput {
+            engine: Engine::CalculiX,
             solver: plx_job::Solver::default(),
             work_dir: work_dir.clone(),
             mesh: Arc::new(mesh),

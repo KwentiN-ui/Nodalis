@@ -87,6 +87,10 @@ pub struct State {
     /// Which steps stored modes (`*FREQUENCY, STORAGE=YES`) and how many: what later modal
     /// steps need.
     pub stored_modes: Option<StoredModes>,
+    /// Internal energy density at the integration points at the end of a dynamic step,
+    /// which CalculiX carries over into the `ENER` of the next dynamic step.
+    #[serde(default)]
+    pub energy: Option<IntegrationPointField>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -101,11 +105,18 @@ pub struct StoredModes {
     pub nodal_diameters: Option<Vec<u32>>,
 }
 
-/// A snapshot for a restart: the state with a fingerprint of the model it belongs to, so
-/// that a changed model is not resumed with a stale state.
+/// A snapshot for a restart or a state link: the state with a fingerprint of the model it
+/// belongs to, so that a changed model is not resumed with a stale state, and what the
+/// session carries from one step to the next besides the state.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
-    /// Hash of the serialized model; a session refuses a snapshot of another model.
+    /// Stable hash of the model without its sets, surfaces and amplitudes (the parts a
+    /// continuing model may add to); a session refuses a snapshot of another model.
     pub model_fingerprint: u64,
     pub state: State,
+    /// The time-average force of the steps so far, the scale of the residual check of the
+    /// next nonlinear step; `None` before the first nonlinear step. Without it a resumed
+    /// run would not converge exactly as the run from the start.
+    #[serde(default)]
+    pub average_force: Option<f64>,
 }

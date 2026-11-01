@@ -10,6 +10,7 @@ repository.workspace = true
 glam.workspace = true
 plx-core.workspace = true
 plx-mesh.workspace = true
+plxs-core.workspace = true
 serde.workspace = true
 
 [lints]

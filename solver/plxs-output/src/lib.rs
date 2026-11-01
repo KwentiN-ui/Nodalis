@@ -4,15 +4,15 @@
 //!
 //! The formats are taken from the files CalculiX writes (column layout observed on the
 //! golden files of the fixture corpus) and from PrePoLix's own readers in `plx-io`; no
-//! CalculiX code was consulted. The ASCII variant with 12-column fixed-width numbers is
-//! written; the binary variant follows later.
+//! CalculiX code was consulted. The `.frd` is written as ASCII with 12-column fixed-width
+//! numbers or with binary number blocks ([`FrdFormat`]).
 
 pub mod dat;
 pub mod frd;
 pub mod sta;
 
 pub use dat::{EigenTable, write_dat};
-pub use frd::{imaginary_field_name, write_frd};
+pub use frd::{FrdFormat, imaginary_field_name, write_frd, write_frd_as};
 pub use sta::{CvgRow, StaRow, write_cvg, write_sta};
 
 /// A number in Fortran's `E12.5` layout: `-1.77481E-03`, `0.00000E+00`, three-digit

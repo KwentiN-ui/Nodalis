@@ -112,17 +112,42 @@ in the project schematic (@state-links).
 
 == Results kept with the project <bind-result>
 
-When a run is finished, its analysis keeps the results: the input file, the result file
-(`.frd`) and the history output (`.dat`) of the run are saved in the project file with the next
-#menu("File", "Save Project"), together with a fingerprint of what the run was made from. The
-results open on the #ui("Results") tab. The output pane shows how much the files add to the
-project file; they are stored compressed, at about a third of their size (a 236 MB result file
-adds about 100 MB). Keeping a large result takes a few seconds and runs in the background. A new
-run replaces the results the analysis keeps.
+When a run is finished, its analysis keeps the results: the input file and the results of the
+run are saved in the project file with the next #menu("File", "Save Project"), together with a
+fingerprint of what the run was made from. The results open on the #ui("Results") tab. The
+output pane shows how much they add to the project file; they are stored compressed. Keeping a
+large result takes a few seconds and runs in the background. A new run replaces the results the
+analysis keeps.
 
-When an analysis with kept results is opened, PrePoLix writes the files to `Kept_Results` in
-the folder of the analysis and opens the results on the #ui("Results") tab. The project
-schematic and the toolbar of the analysis window show whether they are still up to date.
+What is kept depends on the solver (@settings):
+
+- The built-in *PrePoLix solver* hands its results to PrePoLix in memory. They are kept as one
+  binary results file (`.plxr`, written next to the input file in the work directory) that
+  holds the mesh the results are on and every field and history output of the run. Opening
+  them reads the numbers directly, without a text file to parse, and with their full
+  precision. No `.frd` or `.dat` file is written.
+- *CalculiX* writes its result file (`.frd`), history output (`.dat`) and, for frequency
+  steps, the eigenmodes (`.eig`); these files are kept, at about a third of their size (a
+  236 MB result file adds about 100 MB).
+
+When an analysis with kept results is opened, PrePoLix writes them to `Kept_Results` in the
+folder of the analysis and opens the results on the #ui("Results") tab. The project schematic
+and the toolbar of the analysis window show whether they are still up to date. Measure blocks,
+the optimizer and the Campbell diagram take the results of the PrePoLix solver straight from
+memory as well. Where a CalculiX file is still needed, for example the global results of a
+submodel or the temperatures a step takes from a heat transfer analysis, PrePoLix writes the
+`.frd` file from the kept results when it needs it.
+
+Results of the PrePoLix solver kept by an earlier version of PrePoLix in another format are not
+read: solve the analysis again.
+
+#menu("File", "Export CalculiX Results (.frd) ...") writes the current results as CalculiX's
+files, the `.frd` file and, if the run has history output, the `.dat` file next to it, for
+CalculiX GraphiX, PrePoMax or other programs that read them. Results of the PrePoLix solver are
+converted, those of CalculiX copied.
+
+#screenshot("export-calculix-results.png", [File menu of an analysis window with open results:
+  Export CalculiX Results writes them as `.frd` and `.dat`])
 
 What you defined on the kept results is saved with them and comes back as you left it: derived
 field and history outputs, transformations, hot spots, the reference points, coordinate systems
@@ -188,6 +213,35 @@ constants missing"; other messages appear as "CalculiX error" with the text of t
 
 The checks do not stop a run; their errors are listed at the top of the monitor. Missing
 references do stop it, because the input file cannot be written.
+
+=== Check by the PrePoLix solver <solver-model-check>
+
+With the PrePoLix solver (#ui("Solver") under #menu("Tools", "Settings ...") > #ui("Solver"),
+@settings), #ui("Check Model") in the context menu of the analysis lets the solver check the
+model itself instead of estimating from the geometry. It reads the whole model with its steps
+and factorizes the stiffness matrix once for every set of supports (a check takes about as long
+as a linear static run, without results). Every direction in which the model can move without
+resistance is found exactly, and the nodes that move with it are named:
+
+- *Rigid body motion possible* on the boundary conditions of the step and on each part that
+  moves, with the free motions, for example "displacement in Y, displacement in Z, rotation
+  about X free". Parts that move apart from each other are reported separately.
+- *Truss structure is a mechanism* when the free motion deforms the structure instead of moving
+  it as a whole.
+- *Held only by contact* instead, when the model has contact: the check does not see what
+  contact will hold once it closes.
+- *Nodes of a bonded contact not tied* with the parts of the slave nodes that are farther from the
+  master side than the tolerance.
+
+Free motions in a frequency step are no problem (they are the modes with frequency zero) and
+are not reported. The monitor lists the findings with the first node numbers; the warning
+symbols in the tree mark the boundary conditions and the parts.
+
+When a run with the PrePoLix solver stops at a singular matrix, the solver runs the same check
+by itself and explains the cause in the monitor and the tree.
+
+#screenshot("solver-model-check.png", [Check Model by the PrePoLix solver: the beam, held in X
+  only at its end, can still slide and turn])
 
 === Overlapping constraints <overlapping-constraints>
 

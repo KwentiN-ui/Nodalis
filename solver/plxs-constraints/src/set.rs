@@ -39,6 +39,8 @@ pub struct ModelConstraints {
     /// Its nodal diameter 0 constraints (`u_s = R u_m`), which every step but a frequency
     /// step with `*SELECT CYCLIC SYMMETRY MODES` uses.
     pub cyclic_real: Vec<LinearConstraint>,
+    /// Slave nodes (dense indices) of each tie that are too far from its master surface.
+    pub untied: Vec<(String, Vec<u32>)>,
 }
 
 impl ModelConstraints {
@@ -68,6 +70,7 @@ impl ModelConstraints {
                     ids.join(", "),
                     if missed.len() > 10 { ", ..." } else { "" }
                 ));
+                mc.untied.push((t.name.clone(), missed.clone()));
             }
             if t.adjust {
                 for c in &couplings {

@@ -6,7 +6,8 @@ use plx_model::{
     BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition, CrossSection,
     DefinedField, DefinedFieldKind, Displacement, DynamicStep, Elastic, EquationSolver, Hardening,
     Load, Material, ModalDamping, ModalDynamicsStep, NodeTie, Plastic, PlasticPoint,
-    ReferencePoint, RigidBody, Section, SectionKind, SteadyStateDynamicsStep, UnitSystem,
+    ReferencePoint, RigidBody, Section, SectionKind, StaticStep, SteadyStateDynamicsStep,
+    UnitSystem,
 };
 
 use super::*;
@@ -276,6 +277,25 @@ fn ccx_dir(name: &str) -> Option<PathBuf> {
     let dir = std::env::temp_dir().join(format!("plx-write-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     Some(dir)
+}
+
+/// Whether the installed CalculiX is at least version 2.23. Before it, the reaction force RF
+/// printed at a pre-tension node is zero (the preload is an external load there), so the bolt
+/// force can only be read from 2.23 on.
+fn ccx_prints_pretension_force() -> bool {
+    let Ok(output) = Command::new("ccx").arg("-v").output() else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let Some(version) = text.split("Version").nth(1) else {
+        return false;
+    };
+    let mut parts = version.trim().split('.').map(|p| {
+        let digits: String = p.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse::<u32>().unwrap_or(0)
+    });
+    let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    (major, minor) >= (2, 23)
 }
 
 /// Runs CalculiX on the input file in the directory and reads the results.
@@ -2029,6 +2049,64 @@ fn calculix_swings_the_cantilever_about_its_static_deflection() {
     );
 }
 
+/// Short dynamic runs that keep the golden files of the solver corpus small: a damped start
+/// with Rayleigh damping, automatic incrementation, and a dynamic step that lets the
+/// cantilever swing back from a static preload.
+#[test]
+fn calculix_runs_short_dynamic_steps() {
+    let damping = plx_model::RayleighDamping {
+        alpha: 50.0,
+        beta: 2e-5,
+    };
+    let (mesh, model) = dynamic_cantilever(1.5e-4, 2.5e-5, Some(damping));
+    let Some(frd) = run_ccx("dynamik-kurz", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    assert_eq!(tip_history(&frd).len(), 6);
+
+    let (mesh, mut model) = dynamic_cantilever(2e-4, 2.5e-5, None);
+    let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.increments.incrementation = Incrementation::Automatic;
+    settings.increments.max_increment = 6e-5;
+    let frd = run_ccx(
+        "dynamik-automatisch",
+        &write_inp(&mesh, &model, "").unwrap(),
+    )
+    .unwrap();
+    let history = tip_history(&frd);
+    assert!(history.len() > 3 && history.len() < 8, "{history:?}");
+    assert!(
+        (history.last().unwrap().0 - 2e-4).abs() < 1e-9,
+        "{history:?}"
+    );
+
+    // The preload of a static step, released at the start of the dynamic step. Both steps
+    // ask for ENER, which CalculiX wants in the first step when a later one is dynamic.
+    let (mesh, mut model) = dynamic_cantilever(1e-4, 2.5e-5, None);
+    let mut release = model.steps[0].clone();
+    release.name = "Release".into();
+    release.loads[0].active = false;
+    let mut preload = Step::new_static("Preload");
+    preload.boundary_conditions = release.boundary_conditions.clone();
+    preload.loads.push(tip_force());
+    preload.field_outputs = release.field_outputs.clone();
+    model.steps = vec![preload, release];
+    let frd = run_ccx("statisch-dynamisch", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let tip = frd.mesh.node_index(99).unwrap();
+    let static_u3 = (frd.increments.iter())
+        .find(|i| i.kind == plx_results::AnalysisKind::Static)
+        .map(|i| i.field("DISP").unwrap().component("U3").unwrap().values[tip])
+        .unwrap();
+    let swing = tip_history(&frd);
+    assert_eq!(swing.len(), 4, "{swing:?}");
+    assert!(
+        swing.iter().all(|s| s.1 > f64::from(static_u3)),
+        "released tip {swing:?} from {static_u3}"
+    );
+}
+
 /// The cantilever with a frequency step that stores its modes, a modal dynamics step with
 /// the tip force applied at once, and a steady state sweep of the tip force around the
 /// first bending mode; both modal steps damped as given.
@@ -2190,6 +2268,44 @@ fn a_buckle_step_is_written_like_prepomax_does() {
         text.contains("*Step, Perturbation\n*Buckle, Solver=Spooles\n3, 0.01\n"),
         "{text}"
     );
+}
+
+/// Short modal runs that keep the golden files of the solver corpus small: four stored
+/// modes, a few increments of modal dynamics with Rayleigh damping and a coarse harmonic
+/// sweep with bias around the first bending pair, with magnitudes and phases (PU, PHS).
+#[test]
+fn calculix_runs_short_modal_steps() {
+    let damping = ModalDamping::Rayleigh(plx_model::RayleighDamping {
+        alpha: 300.0,
+        beta: 2e-6,
+    });
+    let (mesh, mut model) = modal_cantilever(Some(damping));
+    let node = |variables: &[&str]| FieldOutput::new("NF-Output-1", OutputKind::Node, variables);
+    let element =
+        |variables: &[&str]| FieldOutput::new("EF-Output-1", OutputKind::Element, variables);
+    let StepKind::Frequency(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.num_frequencies = 4;
+    model.steps[0].field_outputs = vec![node(&["U"])];
+    let StepKind::ModalDynamics(settings) = &mut model.steps[1].kind else {
+        unreachable!()
+    };
+    settings.time_period = 1e-4;
+    model.steps[1].field_outputs = vec![node(&["U", "V"]), element(&["S"])];
+    let StepKind::SteadyStateDynamics(settings) = &mut model.steps[2].kind else {
+        unreachable!()
+    };
+    settings.data_points = 3;
+    settings.bias = 2.0;
+    model.steps[2].field_outputs = vec![node(&["U", "PU"]), element(&["S", "PHS"])];
+    let Some(frd) = run_ccx("modal-kurz", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let count = |step: u32| frd.increments.iter().filter(|i| i.step == step).count();
+    assert_eq!((count(1), count(2)), (4, 4));
+    // 700 Hz, the first bending pair, 900 Hz: two intervals of three points.
+    assert_eq!(count(3), 5);
 }
 
 /// The modal superposition swings the tip like the direct integration does, damped by the
@@ -3172,6 +3288,9 @@ fn calculix_preloads_the_bolt_across_two_blocks() {
         .sum();
     assert!((reaction + force).abs() < 1e-3 * force, "{reaction}");
     // The bolt force is printed under the bolt's name, in the preload step and while locked.
+    if !ccx_prints_pretension_force() {
+        return;
+    }
     let names: Vec<&str> = dat.sets.iter().map(|s| s.name.as_str()).collect();
     let bolt = (dat.sets.iter())
         .find(|s| s.name == "BOLT-1")
@@ -6887,6 +7006,7 @@ fn sensitivity_cantilever(settings: SensitivityStep) -> (FeMesh, FeModel) {
 
 /// Runs CalculiX and reads the `.frd` and `.dat` files.
 fn run_ccx_frd_dat(name: &str, text: &str) -> Option<(FrdImport, crate::dat::DatImport)> {
+    dump_fixture(name, text);
     let dir = ccx_dir(name)?;
     let frd = run_ccx_in(&dir, name, text);
     let dat = crate::dat::read_dat(&dir.join(format!("{name}.dat"))).unwrap();
@@ -6975,6 +7095,31 @@ fn calculix_computes_the_sensitivities_of_mass_and_strain_energy() {
         .component("DFDN")
         .unwrap();
     assert!(sen.values.iter().any(|v| *v != 0.0));
+}
+
+/// With a linear filter, CalculiX smooths the sensitivities (DFDNFIL) and keeps the raw
+/// ones (DFDN); the responses and their gradient lengths do not change.
+#[test]
+fn calculix_filters_the_sensitivities() {
+    let (mesh, model) = sensitivity_cantilever(SensitivityStep {
+        filter_radius: Some(15.0),
+        ..SensitivityStep::default()
+    });
+    let Some((frd, dat)) = run_ccx_frd_dat(
+        "sensitivitaet-filter",
+        &write_inp(&mesh, &model, "").unwrap(),
+    ) else {
+        return;
+    };
+    let set = dat.sets.iter().find(|s| s.name == "STEP_2").unwrap();
+    assert!(set.field("GRADIENT_LENGTH").is_some());
+    let sensitivity = (frd.increments.iter())
+        .find(|i| i.step == 2 && i.field("SENENER").is_some())
+        .unwrap();
+    let field = sensitivity.field("SENENER").unwrap();
+    let filtered = &field.component("DFDNFIL").unwrap().values;
+    let length: f32 = filtered.iter().map(|v| v * v).sum::<f32>().sqrt();
+    assert!((length - 1.0).abs() < 1e-3, "{length}");
 }
 
 /// After a frequency step, the sensitivities of the eigenfrequencies come as one increment
@@ -9362,6 +9507,9 @@ fn a_bolt_picked_by_its_shank_is_cut_across_its_middle() {
     // The bolt is in tension: the support at its start pulls it away from the middle.
     let axial: f64 = reaction.iter().zip(expected).map(|(a, b)| a * b).sum();
     assert!((axial + force).abs() < 1e-3 * force, "{reaction:?}");
+    if !ccx_prints_pretension_force() {
+        return;
+    }
     let bolt = dat.sets.iter().find(|s| s.name == "BOLT-1").unwrap();
     let forces = &bolt
         .field("FORCES")
@@ -9398,4 +9546,141 @@ fn the_model_check_warns_of_a_shank_bonded_into_its_hole() {
     // Sliding in its hole, the shank stretches.
     model.contact_regions[0].behavior = plx_model::ContactBehavior::Frictionless;
     assert_eq!(problems(&model), []);
+}
+
+/// The bar of `calculix_yields_the_bar_pulled_beyond_its_yield_stress`: symmetry supports
+/// on three faces, a pressure on the tip face, a plastic material.
+fn uniaxial_bar(hardening: Hardening, stress: f64) -> (FeMesh, FeModel) {
+    let load = Load {
+        distribution: None,
+        name: "Pressure-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Surface("TIP".into()),
+        kind: LoadKind::Pressure(-stress),
+        amplitude: None,
+        factor_amplitude: None,
+    };
+    let (mesh, mut model) = cantilever(load);
+    s235(&mut model);
+    model.materials[0].plastic.as_mut().unwrap().hardening = hardening;
+    let (min, _) = mesh.bounds().unwrap();
+    let nodes_at = |axis: usize, value: f64| -> Vec<NodeId> {
+        (1..=99)
+            .filter(|&id| mesh.node(id).is_some_and(|c| c[axis] == value))
+            .collect()
+    };
+    let hold = |axis: usize| {
+        let mut dofs = [None; 6];
+        dofs[axis] = Some(0.0);
+        BoundaryCondition {
+            distribution: None,
+            name: format!("Symmetry-{}", axis + 1),
+            active: true,
+            visible: true,
+            region: Region::Nodes(nodes_at(axis, min[axis])),
+            kind: each_node(dofs),
+            amplitude: None,
+        }
+    };
+    model.steps[0].boundary_conditions = vec![hold(0), hold(1), hold(2)];
+    model.steps[0].field_outputs[1]
+        .variables
+        .push("PEEQ".into());
+    (mesh, model)
+}
+
+/// Kinematic hardening in tension follows the table like isotropic hardening does. (A
+/// second step unloading or reversing the load is not part of the fixture: CalculiX 2.21
+/// failed with too many cutbacks on elastic unloading and gave inconsistent plastic strains
+/// on reversal, depending on the reverse load, so there is nothing reliable to compare
+/// with. The Bauschinger effect is checked by the solver's own unit tests.)
+#[test]
+fn calculix_hardens_kinematically_in_tension() {
+    let (mesh, model) = uniaxial_bar(Hardening::Kinematic, 300.0);
+    let Some(frd) = run_ccx(
+        "plastisch-kinematisch",
+        &write_inp(&mesh, &model, "").unwrap(),
+    ) else {
+        return;
+    };
+    let peeq = node_value(&frd, "PE", "PE", 99);
+    let tension = (300.0 - 235.0) / (400.0 - 235.0) * 0.2;
+    assert!((peeq - tension).abs() < 0.05 * tension, "{peeq}");
+}
+
+/// The plastic bar with history output: equivalent plastic strain, internal energy density
+/// and stresses at the integration points of the tip elements, displacements and reaction
+/// forces of the clamped nodes.
+#[test]
+fn calculix_prints_the_plastic_strain_and_energy_of_the_bar() {
+    let (mesh, mut model) = uniaxial_bar(Hardening::Isotropic, 300.0);
+    model.steps[0].field_outputs[1]
+        .variables
+        .push("ENER".into());
+    let mut elements =
+        HistoryOutput::element("EH_Output-1", Region::ElementSet("TIP_ELEMENTS".into()));
+    elements.variables = vec!["S".into(), "PEEQ".into(), "ENER".into()];
+    model.steps[0].history_outputs.push(elements);
+    let mut nodes = HistoryOutput::node("NH_Output-1", Region::NodeSet("FIX".into()));
+    nodes.totals = Totals::Yes;
+    model.steps[0].history_outputs.push(nodes);
+    let Some(frd) = run_ccx("plastisch-history", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    // CalculiX's internal energy density is half the stress times the total strain.
+    let strain = 300.0 / 210_000.0 + (300.0 - 235.0) / (400.0 - 235.0) * 0.2;
+    let energy = node_value(&frd, "ENER", "ENER", 99);
+    assert!(
+        (energy - 0.5 * 300.0 * strain).abs() < 0.02 * energy,
+        "{energy}"
+    );
+}
+
+/// The bar stretched by 2 % under NLGEOM: the hardening curve is true stress over
+/// logarithmic plastic strain, so the solution follows from the logarithmic strain
+/// `ln(1.02)`. CalculiX reproduces the stress to 0.02 %, the plastic strain only to 0.4 %
+/// (its finite-strain plasticity differs in second order; see docs/solver/SCHNITTSTELLEN.md),
+/// so the fixture leaves the plastic strain out of the field output.
+#[test]
+fn calculix_stretches_the_bar_plastically_with_nlgeom() {
+    let (mesh, mut model) = uniaxial_bar(Hardening::Isotropic, 0.0);
+    model.steps[0].loads.clear();
+    model.steps[0].field_outputs[1].variables.pop();
+    model.steps[0].kind = StepKind::Static(StaticStep {
+        nlgeom: true,
+        incrementation: Incrementation::Automatic,
+        initial_increment: 0.2,
+        ..StaticStep::default()
+    });
+    let (_, max) = mesh.bounds().unwrap();
+    let tip: Vec<NodeId> = (1..=99)
+        .filter(|&id| mesh.node(id).is_some_and(|c| c[0] == max[0]))
+        .collect();
+    let mut dofs = [None; 6];
+    dofs[0] = Some(2.0);
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        distribution: None,
+        name: "Stretch".into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes(tip),
+        kind: each_node(dofs),
+        amplitude: None,
+    });
+    let Some(frd) = run_ccx("plastisch-nlgeom", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let strain = 1.02_f64.ln();
+    let plastic = (strain - 235.0 / 210_000.0) / (1.0 + 825.0 / 210_000.0);
+    let stress = 235.0 + 825.0 * plastic;
+    let s11 = node_value(&frd, "STRESS", "S11", 99);
+    assert!((s11 - stress).abs() < 1e-3 * stress, "{s11} vs {stress}");
+    // Lateral contraction: elastic by Poisson's ratio, plastic at constant volume.
+    let lateral = 10.0 * ((-0.3 * stress / 210_000.0 - 0.5 * plastic).exp() - 1.0);
+    let u2 = node_value(&frd, "DISP", "U2", 99);
+    assert!(
+        (u2 - lateral).abs() < 1e-3 * lateral.abs(),
+        "{u2} vs {lateral}"
+    );
 }

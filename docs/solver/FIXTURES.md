@@ -79,7 +79,7 @@ Treffer gewinnt:
 | `dynamic` | M3 | T13 | *DYNAMIC (implizit, Rayleigh), *INITIAL CONDITIONS, TYPE=VELOCITY |
 | `modal` | M3 | T14 | *MODAL DYNAMICS, *STEADY STATE DYNAMICS, *MODAL DAMPING, *COMPLEX FREQUENCY mit Coriolis (`.eig` aus *FREQUENCY, STORAGE=YES) |
 | `cyclic` | M3 | T15 | *CYCLIC SYMMETRY MODEL (statisch und *FREQUENCY), *SELECT CYCLIC SYMMETRY MODES, NGRAPH-Expansion, *SUBMODEL mit *BOUNDARY, SUBMODEL (die `.frd` des Globalmodells liegt in `<name>.files/`) |
-| `sensitivity` | ccx | – | *SENSITIVITY wurde für Phase 1 gestrichen; die Fixture prüft nur, dass der Parser sie liest |
+| `sensitivity` | M3 | T17 | *SENSITIVITY mit MASS, STRAINENERGY, EIGENFREQUENCY und linearem Filter (Klasse B: ccx differenziert per Finite Differenzen); STRAINENERGY weicht dokumentiert ab (`deviations`) |
 
 Drei Fixtures (`modal/modal`, `dynamic/dynamik`, `dynamic/dynamik_gedaempft`) haben kein
 Golden File im Repo, weil es mit Hunderten von Inkrementen 3 bis 7 MB groß wäre; der
@@ -169,6 +169,18 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `contact/kontakt-tied-m` | C | M3 | ccx 2.21 | C3D8, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*FRICTION, \*CONTACT PAIR, \*STATIC |
 | `contact/kontakt-tied-mm` | C | M3 | ccx 2.21 | C3D8, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*FRICTION, \*CONTACT PAIR, \*STATIC |
 | `contact/kontakt-tied` | C | M3 | ccx 2.21 | C3D8, \*RIGID BODY, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*FRICTION, \*CONTACT PAIR, \*STATIC |
+| `contact/mortar-frictional` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*RIGID BODY, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*FRICTION, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE |
+| `contact/mortar-linear` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE |
+| `contact/mortar-rough` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*RIGID BODY, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*FRICTION, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE |
+| `contact/mortar-switched-on` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE, \*MODEL CHANGE |
+| `contact/n2s-exponential` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE |
+| `contact/n2s-frictional` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*RIGID BODY, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*FRICTION, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE, \*CONTACT PRINT |
+| `contact/n2s-hard` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE |
+| `contact/n2s-linear-c0` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE |
+| `contact/n2s-linear` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE |
+| `contact/n2s-offset` | C | M3 | ccx 2.21 | C3D8, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*CLEARANCE, \*STATIC, \*CONTACT FILE |
+| `contact/n2s-rough` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*RIGID BODY, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*FRICTION, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE |
+| `contact/n2s-switched-on` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE, \*MODEL CHANGE |
 | `contact/region-conductance` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*CONDUCTIVITY, \*SPECIFIC HEAT, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*GAP CONDUCTANCE, \*CONTACT PAIR, \*INITIAL CONDITIONS, \*COUPLED TEMPERATURE-DISPLACEMENT, \*CFLUX |
 | `contact/region-contact-results` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE |
 | `contact/region-friction-change` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*RIGID BODY, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*FRICTION, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE, \*CHANGE FRICTION |
@@ -181,6 +193,7 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `contact/region-switched-off` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE, \*MODEL CHANGE |
 | `contact/region-switched-on` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE, \*MODEL CHANGE |
 | `contact/region-tied` | C | M3 | ccx 2.21 | C3D8, \*RIGID BODY, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*FRICTION, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE |
+| `contact/s2s-contact-print` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE, \*CONTACT PRINT |
 | `contact/weak-springs-spalt-nlgeom` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE, NLGEOM |
 | `contact/weak-springs-spalt` | C | M3 | ccx 2.21 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC, \*CONTACT FILE |
 | `cyclic/cyclic_sector` | A | M3 | ccx 2.21 | C3D8, \*TIE, \*CYCLIC SYMMETRY MODEL, \*FREQUENCY, \*SELECT CYCLIC SYMMETRY MODES |
@@ -190,8 +203,11 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `cyclic/zyklisch-statisch` | A | M3 | ccx 2.21 | C3D8, \*TIE, \*CYCLIC SYMMETRY MODEL, \*STATIC |
 | `dynamic/anfangsdrehung` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*INITIAL CONDITIONS, \*DYNAMIC |
 | `dynamic/anfangsgeschwindigkeit` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*INITIAL CONDITIONS, \*DYNAMIC |
+| `dynamic/dynamik-automatisch` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*DYNAMIC |
+| `dynamic/dynamik-kurz` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*DYNAMIC, \*DAMPING |
 | `dynamic/dynamik` | E | M3 | none | C3D20R, \*AMPLITUDE, \*DYNAMIC |
 | `dynamic/dynamik_gedaempft` | E | M3 | none | C3D20R, \*AMPLITUDE, \*DYNAMIC, \*DAMPING |
+| `dynamic/statisch-dynamisch` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*STATIC, \*DYNAMIC |
 | `eigen/beulen` | A | M2 | ccx 2.21 | C3D20R, \*BUCKLE |
 | `eigen/beulform` | A | M2 | ccx 2.21 | C3D20R, \*BUCKLE |
 | `eigen/deaktiviert` | A | M2 | ccx 2.21 | C3D20R, \*FREQUENCY |
@@ -214,6 +230,7 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `loads/gravity` | A | M2 | ccx 2.21 | C3D8, \*STATIC |
 | `loads/gravity_c3d20r` | A | M2 | ccx 2.21 | C3D20R, \*STATIC |
 | `loads/moving` | A | M2 | ccx 2.21 | C3D8, \*STATIC |
+| `modal/modal-kurz` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*FREQUENCY, \*MODAL DYNAMICS, \*MODAL DAMPING, \*STEADY STATE DYNAMICS |
 | `modal/modal` | E | M3 | none | C3D20R, \*AMPLITUDE, \*FREQUENCY, \*MODAL DYNAMICS, \*MODAL DAMPING, \*STEADY STATE DYNAMICS |
 | `modal/rotor-perturbation-false` | A | M3 | ccx 2.21 | C3D8, \*STATIC, \*FREQUENCY, \*COMPLEX FREQUENCY |
 | `modal/rotor-perturbation-true` | A | M3 | ccx 2.21 | C3D8, \*STATIC, \*FREQUENCY, \*COMPLEX FREQUENCY |
@@ -228,6 +245,9 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `nonlinear/gap_stuetzen` | B | M2 | ccx 2.21 | C3D8, GAPUNI, \*GAP, \*STATIC, NLGEOM |
 | `nonlinear/kriechen` | B | M2 | ccx 2.21 | C3D8, \*CREEP, \*STATIC, \*VISCO |
 | `nonlinear/membran-vorgespannt` | B | M2 | ccx 2.21 | M3D4, \*MEMBRANE SECTION, \*STATIC, NLGEOM |
+| `nonlinear/plastisch-history` | B | M2 | ccx 2.21 | C3D8, \*PLASTIC, \*STATIC, \*EL PRINT, \*NODE PRINT |
+| `nonlinear/plastisch-kinematisch` | B | M2 | ccx 2.21 | C3D8, \*PLASTIC, \*STATIC |
+| `nonlinear/plastisch-nlgeom` | B | M2 | ccx 2.21 | C3D8, \*PLASTIC, \*STATIC, NLGEOM |
 | `nonlinear/plastisch` | B | M2 | ccx 2.21 | C3D8, \*PLASTIC, \*STATIC |
 | `plane/ebene-cax3` | A | M2 | ccx 2.21 | CAX3, \*STATIC |
 | `plane/ebene-cax4` | A | M2 | ccx 2.21 | CAX4, \*STATIC |
@@ -255,7 +275,9 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `plane/rohr-innendruck` | A | M2 | ccx 2.21 | CAX8, \*STATIC |
 | `plane/rohr-zug` | A | M2 | ccx 2.21 | CAX8, \*STATIC |
 | `plane/symmetrie-2d-0` | A | M2 | ccx 2.21 | CPS8, \*STATIC |
-| `sensitivity/sensitivitaet-frequenz` | A | ccx | ccx 2.21 | C3D8, \*DESIGN VARIABLES, \*FREQUENCY, \*SENSITIVITY, \*DESIGN RESPONSE |
+| `sensitivity/sensitivitaet-filter` | B | M3 | ccx 2.21 | C3D8, \*DESIGN VARIABLES, \*STATIC, \*SENSITIVITY, \*DESIGN RESPONSE, \*FILTER |
+| `sensitivity/sensitivitaet-frequenz` | B | M3 | ccx 2.21 | C3D8, \*DESIGN VARIABLES, \*FREQUENCY, \*SENSITIVITY, \*DESIGN RESPONSE |
+| `sensitivity/sensitivitaet` | B | M3 | ccx 2.21 | C3D8, \*DESIGN VARIABLES, \*STATIC, \*SENSITIVITY, \*DESIGN RESPONSE |
 | `static/amplitude_hold_ref` | A | M1 | ccx 2.21 | C3D8, \*STATIC |
 | `static/amplitude_reference` | A | M1 | ccx 2.21 | C3D8, \*STATIC |
 | `static/block` | A | M1 | ccx 2.21 | C3D20R, \*STATIC |

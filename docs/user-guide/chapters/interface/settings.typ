@@ -7,7 +7,7 @@
 user (`~/.local/share/prepolix` on Linux, `%APPDATA%\prepolix\data` on Windows), by the
 portable Windows version in the folder `Settings` next to `prepolix.exe` (@portable).
 
-#screenshot("settings.png", [Settings, CalculiX page])
+#screenshot("settings.png", [Settings, Solver page])
 
 === Graphics
 
@@ -42,9 +42,18 @@ portable Windows version in the folder `Settings` next to `prepolix.exe` (@porta
     empty for `ffmpeg` on the `PATH`.],
 )
 
-=== CalculiX
+=== Solver
+
+PrePoLix computes analyses either with its built-in solver or with CalculiX as a separate
+program. The built-in solver runs inside PrePoLix: nothing has to be installed, its progress
+and results stay in the program, and it stops at once when a run is killed. It is being built
+up step by step; a step it cannot compute yet is reported when the analysis runs, with the
+hint to switch to CalculiX for that model. CalculiX remains the default until the built-in
+solver covers every analysis.
 
 #fields(
+  [Solver], [#ui("PrePoLix solver") (built in) or #ui("CalculiX"). The rows below that only
+    concern CalculiX (executable, restart files, equation solvers) show for CalculiX.],
   [Executable], [Path to `ccx`. Empty means the CalculiX shipped with PrePoLix (shown greyed
     in the field), or `ccx` on the system path if PrePoLix was built without it. A bare name
     such as `ccx` is looked up on the system path.],
@@ -65,16 +74,19 @@ portable Windows version in the folder `Settings` next to `prepolix.exe` (@porta
   [Equation solvers], [The direct solvers found in the CalculiX executable, for example
     PARDISO. Steps with the solver #ui("Default") use Pardiso when it is available, otherwise
     PaStiX, otherwise CalculiX's own choice.],
-  [Test CalculiX], [Starts CalculiX, computes a cantilever under a tip load and under pressure,
-    compares the results with beam theory, checks which solvers are available and whether
-    CalculiX knows every keyword PrePoLix writes. Each test shows OK or an error. While the test runs, a window over the
+  [Test solver], [Computes a cantilever under a tip load and under pressure with the chosen
+    solver and compares the results with beam theory. For CalculiX it also starts the
+    executable, checks which solvers are available and whether CalculiX knows every keyword
+    PrePoLix writes. Each test shows OK or an error. While the test runs, a window over the
     application shows the running step and, for the keyword check, how far it has come; the
-    test can take a while, particularly on Windows.],
+    CalculiX test can take a while, particularly on Windows.],
 )
 
-#screenshot("calculix-test-running.png", [While #ui("Test CalculiX") runs])
+#screenshot("solver-builtin-test.png", [Result of #ui("Test solver") with the built-in solver])
 
-#screenshot("calculix-test.png", [Result of #ui("Test CalculiX")])
+#screenshot("calculix-test-running.png", [While #ui("Test solver") runs for CalculiX])
+
+#screenshot("calculix-test.png", [Result of #ui("Test solver") for CalculiX])
 
 *Keywords.* Older CalculiX versions lack keywords of newer features, for example
 `*COMPLEX FREQUENCY` (complex frequency step) or `*CYCLIC SYMMETRY MODEL`. CalculiX does not stop

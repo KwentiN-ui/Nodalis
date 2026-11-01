@@ -3444,6 +3444,7 @@ dependencies = [
  "plx-model",
  "plx-render",
  "plx-results",
+ "plx-solve",
  "png",
  "rfd",
  "ron",
@@ -3467,6 +3468,9 @@ dependencies = [
  "plx-mesh",
  "plx-model",
  "plx-results",
+ "plxs-core",
+ "plxs-output",
+ "plxs-session",
  "ron",
  "serde",
  "thiserror 2.0.21",
@@ -3510,6 +3514,7 @@ dependencies = [
  "glam",
  "plx-core",
  "plx-mesh",
+ "plxs-core",
  "ron",
  "serde",
 ]
@@ -3535,6 +3540,20 @@ dependencies = [
  "plx-core",
  "plx-mesh",
  "plx-model",
+ "plxs-core",
+ "plxs-output",
+ "postcard",
+ "serde",
+]
+
+[[package]]
+name = "plx-solve"
+version = "0.3.15"
+dependencies = [
+ "plx-job",
+ "plx-results",
+ "plxs-core",
+ "plxs-session",
  "serde",
 ]
 
@@ -3554,13 +3573,13 @@ dependencies = [
 name = "plxs-cli"
 version = "0.3.15"
 dependencies = [
+ "plx-io",
  "plxs-core",
  "plxs-elements",
  "plxs-input",
  "plxs-output",
  "plxs-session",
  "plxs-verify",
- "postcard",
 ]
 
 [[package]]
@@ -3575,6 +3594,11 @@ dependencies = [
 [[package]]
 name = "plxs-contact"
 version = "0.3.15"
+dependencies = [
+ "plxs-core",
+ "plxs-elements",
+ "plxs-materials",
+]
 
 [[package]]
 name = "plxs-core"
@@ -3629,6 +3653,7 @@ version = "0.3.15"
 dependencies = [
  "plxs-assembly",
  "plxs-constraints",
+ "plxs-contact",
  "plxs-core",
  "plxs-elements",
  "plxs-linalg",
@@ -3642,11 +3667,16 @@ version = "0.3.15"
 dependencies = [
  "plxs-assembly",
  "plxs-constraints",
+ "plxs-contact",
  "plxs-core",
+ "plxs-elements",
+ "plxs-input",
  "plxs-linalg",
  "plxs-output",
  "plxs-procedures",
+ "postcard",
  "rayon",
+ "serde",
 ]
 
 [[package]]

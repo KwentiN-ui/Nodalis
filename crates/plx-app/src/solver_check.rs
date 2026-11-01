@@ -1,9 +1,10 @@
-//! Self test of the CalculiX executable from the settings, the shipped one or the user's own:
-//! checks that the program runs and computes correct results.
+//! Self test of the solver from the settings: the built-in PrePoLix solver, or the CalculiX
+//! executable, the shipped one or the user's own. Checks that the solver runs and computes
+//! correct results.
 //!
 //! The test reads the version, solves small cantilevers through the same path as a real
-//! analysis (model, input file writer, job, results reader), comparing with beam theory, and
-//! checks that the executable knows every keyword PrePoLix writes.
+//! analysis (model, input file writer, run, results reader), comparing with beam theory, and
+//! for CalculiX checks that the executable knows every keyword PrePoLix writes.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -16,6 +17,7 @@ use plx_model::{
     BoundaryCondition, BoundaryKind, Elastic, EquationSolver, FeModel, Load, LoadKind, Material,
     Region, Section, SectionKind, Step,
 };
+use plx_solve::{Engine, Run};
 
 pub(crate) const LENGTH: f64 = 100.0;
 const WIDTH: f64 = 10.0;
@@ -66,10 +68,23 @@ fn set_step(progress: &SharedProgress, step: &str, count: Option<(usize, usize)>
 }
 
 /// Runs all checks one after another; stops after the version check if CalculiX does not
-/// start at all.
-pub fn run(solver: &plx_job::Solver, work_dir: &Path, progress: &SharedProgress) -> Report {
-    set_step(progress, "Starting CalculiX", None);
-    let version = version(&solver.executable);
+/// start at all. The built-in solver has no executable and no keyword probe: it solves the
+/// cantilevers only.
+pub fn run(
+    engine: Engine,
+    solver: &plx_job::Solver,
+    work_dir: &Path,
+    progress: &SharedProgress,
+) -> Report {
+    set_step(progress, "Starting the solver", None);
+    let version = match engine {
+        Engine::CalculiX => version(&solver.executable),
+        Engine::PrePoLix => check(
+            "Start solver",
+            true,
+            format!("PrePoLix solver {}, built in", plx_solve::VERSION),
+        ),
+    };
     let started = version.passed;
     let mut checks = vec![version];
     let mut solvers = None;
@@ -77,10 +92,12 @@ pub fn run(solver: &plx_job::Solver, work_dir: &Path, progress: &SharedProgress)
     if started {
         let dir = work_dir.join("SelfTest");
         set_step(progress, "Solving cantilever with end load", None);
-        checks.push(tip_force(solver, &dir));
+        checks.push(tip_force(engine, solver, &dir));
         set_step(progress, "Solving cantilever with pressure", None);
-        checks.push(pressure(solver, &dir));
+        checks.push(pressure(engine, solver, &dir));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    if started && engine == Engine::CalculiX {
         let on_solver = |done, total| {
             set_step(progress, "Checking equation solvers", Some((done, total)));
         };
@@ -107,7 +124,10 @@ pub fn run(solver: &plx_job::Solver, work_dir: &Path, progress: &SharedProgress)
         checks,
         solvers,
         keywords,
-        version: started.then(|| version_text(&solver.executable)).flatten(),
+        version: match engine {
+            Engine::CalculiX => started.then(|| version_text(&solver.executable)).flatten(),
+            Engine::PrePoLix => Some(plx_solve::VERSION.to_owned()),
+        },
     }
 }
 
@@ -367,7 +387,7 @@ fn version(executable: &Path) -> CheckResult {
 
 /// Cantilever with a surface traction on the free end: the tip deflection must match
 /// Timoshenko beam theory and the reactions must balance the load.
-fn tip_force(solver: &plx_job::Solver, dir: &Path) -> CheckResult {
+fn tip_force(engine: Engine, solver: &plx_job::Solver, dir: &Path) -> CheckResult {
     const NAME: &str = "Cantilever with end load";
     let mesh = beam_mesh();
     let tip = faces_where(&mesh, |p| p[0] == LENGTH);
@@ -376,7 +396,7 @@ fn tip_force(solver: &plx_job::Solver, dir: &Path) -> CheckResult {
         LoadKind::force([0.0, 0.0, -TIP_FORCE]),
         Region::Faces(tip),
     );
-    let frd = match solve(solver, dir, "Cantilever", &mesh, &model) {
+    let frd = match solve(engine, solver, dir, "Cantilever", &mesh, &model) {
         Ok(frd) => frd,
         Err(message) => return check(NAME, false, message),
     };
@@ -402,12 +422,12 @@ fn tip_force(solver: &plx_job::Solver, dir: &Path) -> CheckResult {
 
 /// Pressure on the free end: the axial reactions must balance pressure times area. (Loads on
 /// clamped nodes do not show up as reactions, so the end face is used, not the top.)
-fn pressure(solver: &plx_job::Solver, dir: &Path) -> CheckResult {
+fn pressure(engine: Engine, solver: &plx_job::Solver, dir: &Path) -> CheckResult {
     const NAME: &str = "Cantilever with pressure";
     let mesh = beam_mesh();
     let tip = faces_where(&mesh, |p| p[0] == LENGTH);
     let model = beam_model(&mesh, LoadKind::Pressure(PRESSURE), Region::Faces(tip));
-    let frd = match solve(solver, dir, "Pressure", &mesh, &model) {
+    let frd = match solve(engine, solver, dir, "Pressure", &mesh, &model) {
         Ok(frd) => frd,
         Err(message) => return check(NAME, false, message),
     };
@@ -422,6 +442,7 @@ fn pressure(solver: &plx_job::Solver, dir: &Path) -> CheckResult {
 }
 
 fn solve(
+    engine: Engine,
     solver: &plx_job::Solver,
     dir: &Path,
     name: &str,
@@ -430,7 +451,8 @@ fn solve(
 ) -> Result<FrdImport, String> {
     let input = plx_io::inp::write_inp(mesh, model, "PrePoLix self-test")
         .map_err(|e| format!("Input file not written: {e}"))?;
-    let mut job = Job::start(solver, dir, name, &input).map_err(|e| format!("Start: {e}"))?;
+    let mut job =
+        Run::start(engine, solver, dir, name, &input).map_err(|e| format!("Start: {e}"))?;
     let status = job.wait();
     let output = job.new_output();
     if status != JobStatus::Completed {
@@ -442,6 +464,10 @@ fn solve(
             "Analysis {}{error}",
             crate::analysis::Analysis::status_text(status)
         ));
+    }
+    // The built-in solver's results in memory, CalculiX's from its file.
+    if let Some(solved) = job.solver_results() {
+        return Ok(plx_io::solver::import(&solved));
     }
     let path = job.results().ok_or("no results file written")?;
     read_frd(&path).map_err(|e| format!("Results not readable: {e}"))
@@ -480,6 +506,26 @@ fn component_values(frd: &FrdImport, field: &str, component: &str, nodes: &[Node
                 .map_or(f64::NAN, |&v| f64::from(v))
         })
         .collect()
+}
+
+/// Solves the beam under a tip load with the built-in solver in `dir`, with a history output
+/// of the fixed nodes; returns its results file (`.plxr`).
+#[cfg(test)]
+pub(crate) fn solve_beam_built_in(dir: &Path) -> std::path::PathBuf {
+    let mesh = beam_mesh();
+    let tip = faces_where(&mesh, |p| p[0] == LENGTH);
+    let mut fe = beam_model(&mesh, LoadKind::force([0.0, 0.0, -1.0]), Region::Faces(tip));
+    let fixed = (mesh.node_ids().iter().copied()).filter(|&n| mesh.node(n).unwrap()[0] == 0.0);
+    let output = plx_model::HistoryOutput::node("H-Output-1", Region::Nodes(fixed.collect()));
+    fe.steps[0].history_outputs.push(output);
+    let input = plx_io::inp::write_inp(&mesh, &fe, "built-in").unwrap();
+    let solver = plx_job::Solver {
+        executable: "unused".into(),
+        threads: 1,
+    };
+    let mut run = Run::start(Engine::PrePoLix, &solver, dir, "Beam", &input).unwrap();
+    assert_eq!(run.wait(), JobStatus::Completed, "{:?}", run.new_output());
+    run.results().unwrap()
 }
 
 pub(crate) fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeModel {
@@ -640,7 +686,12 @@ mod tests {
             executable: "plx-does-not-exist".into(),
             threads: 1,
         };
-        let report = run(&solver, &std::env::temp_dir(), &Default::default());
+        let report = run(
+            Engine::CalculiX,
+            &solver,
+            &std::env::temp_dir(),
+            &Default::default(),
+        );
         assert_eq!(report.checks.len(), 1);
         assert!(!report.checks[0].passed);
         assert_eq!(report.solvers, None);
@@ -658,7 +709,12 @@ mod tests {
             return;
         }
         let dir = std::env::temp_dir().join(format!("plx-selftest-{}", std::process::id()));
-        let report = run(&plx_job::Solver::default(), &dir, &Default::default());
+        let report = run(
+            Engine::CalculiX,
+            &plx_job::Solver::default(),
+            &dir,
+            &Default::default(),
+        );
         let _ = std::fs::remove_dir_all(&dir);
         for result in &report.checks {
             eprintln!("{}: {}", result.name, result.message);
@@ -670,8 +726,29 @@ mod tests {
         assert!(solvers.contains(&EquationSolver::Spooles), "{solvers:?}");
     }
 
-    /// The self test with PrePoLix's own solver: `PLXS=target/debug/plxs cargo test` after
-    /// `cargo build -p plxs-cli` (skipped when the variable is not set).
+    /// The self test with the built-in solver needs no program and runs everywhere.
+    #[test]
+    fn built_in_solver_passes() {
+        let dir = std::env::temp_dir().join(format!("plx-selftest-builtin-{}", std::process::id()));
+        let solver = plx_job::Solver {
+            executable: "unused".into(),
+            threads: 1,
+        };
+        let report = run(Engine::PrePoLix, &solver, &dir, &Default::default());
+        let _ = std::fs::remove_dir_all(&dir);
+        for result in &report.checks {
+            eprintln!("{}: {}", result.name, result.message);
+        }
+        assert_eq!(report.checks.len(), 3, "{report:#?}");
+        assert!(report.checks.iter().all(|r| r.passed), "{report:#?}");
+        assert_eq!(report.solvers, None);
+        assert_eq!(report.keywords, None);
+        assert_eq!(report.version.as_deref(), Some(plx_solve::VERSION));
+    }
+
+    /// The self test with PrePoLix's own solver as a program (the CalculiX path):
+    /// `PLXS=target/debug/plxs cargo test` after `cargo build -p plxs-cli` (skipped when the
+    /// variable is not set).
     #[test]
     fn plxs_passes() {
         let Ok(executable) = std::env::var("PLXS") else {
@@ -683,7 +760,7 @@ mod tests {
             threads: 1,
         };
         let dir = std::env::temp_dir().join(format!("plx-selftest-plxs-{}", std::process::id()));
-        let report = run(&solver, &dir, &Default::default());
+        let report = run(Engine::CalculiX, &solver, &dir, &Default::default());
         let _ = std::fs::remove_dir_all(&dir);
         for result in &report.checks {
             eprintln!("{}: {}", result.name, result.message);

@@ -274,7 +274,7 @@ pub(crate) fn cyclic_frequency(
         write_table(
             ctx.results,
             ctx.step_number,
-            EigenTable::TURNING_DIRECTION,
+            EigenTable::CYCLIC_TURNING_DIRECTION,
             turning_rows,
         );
     }

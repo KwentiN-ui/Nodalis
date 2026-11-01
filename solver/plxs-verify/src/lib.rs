@@ -35,8 +35,8 @@ mod tests;
 
 pub use classify::{Class, Meta, Stage, classify};
 pub use compare::{
-    Comparison, compare_dat, compare_frd, compare_frd_except, compare_frd_with,
-    compare_frd_with_noise,
+    Comparison, compare_dat, compare_dat_except, compare_dat_with_noise, compare_frd,
+    compare_frd_except, compare_frd_with, compare_frd_with_noise,
 };
 pub use corpus::{Fixture, FixtureResults, corpus, fixtures_root, load_reference};
 pub use report::{Outcome, Report, run_corpus, run_fixture};

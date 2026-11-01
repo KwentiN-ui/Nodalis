@@ -41,7 +41,89 @@ pub fn write_history(
     forces: &[f64],
     stresses: &IntegrationPointField,
     strains: &IntegrationPointField,
+    material: Option<&IntegrationPointField>,
 ) {
+    write_history_with_velocities(
+        results,
+        model,
+        table,
+        step,
+        (step_number, increment, time),
+        (u, None),
+        forces,
+        stresses,
+        strains,
+        material,
+    );
+}
+
+/// [`write_history`] of a dynamic increment, which also prints the velocities (`V`).
+#[allow(clippy::too_many_arguments)]
+pub fn write_history_with_velocities(
+    results: &mut Results,
+    model: &Model,
+    table: &ElementTable,
+    step: &Step,
+    (step_number, increment, time): (u32, u32, f64),
+    (u, velocities): (&[f64], Option<&[f64]>),
+    forces: &[f64],
+    stresses: &IntegrationPointField,
+    strains: &IntegrationPointField,
+    material: Option<&IntegrationPointField>,
+) {
+    let peeq = material
+        .filter(|m| m.per_point > 0)
+        .map(|m| IntegrationPointField {
+            per_point: 1,
+            offsets: m.offsets.clone(),
+            values: m.values.chunks(m.per_point).map(|p| p[0]).collect(),
+        });
+    let energy = crate::fields::internal_energy_density(stresses, strains);
+    // The PrePoLix writer puts `*EL PRINT` before `*NODE PRINT`, and CalculiX prints the
+    // blocks in request order; the element blocks come first here as well.
+    for request in &step.outputs.el_print {
+        let Some(set) = request.set.as_deref() else {
+            continue;
+        };
+        let Some(elements) = model.sets.element_sets.get(set) else {
+            continue;
+        };
+        for variable in &request.variables {
+            let (quantity, field, reorder): (&str, &IntegrationPointField, bool) =
+                match variable.trim().to_ascii_uppercase().as_str() {
+                    "S" => (
+                        "stresses (elem, integ.pnt.,sxx,syy,szz,sxy,sxz,syz)",
+                        stresses,
+                        true,
+                    ),
+                    "E" => (
+                        "strains (elem, integ.pnt.,exx,eyy,ezz,exy,exz,eyz)",
+                        strains,
+                        true,
+                    ),
+                    "PEEQ" => match &peeq {
+                        Some(p) => ("equivalent plastic strain (elem, integ.pnt.,pe)", p, false),
+                        None => continue,
+                    },
+                    "ENER" => (
+                        "internal energy density (elem, integ.pnt.,energy)",
+                        &energy,
+                        false,
+                    ),
+                    _ => continue,
+                };
+            let rows = integration_point_rows(model, table, elements, field, reorder);
+            results.history.push(HistoryBlock {
+                step: step_number,
+                increment,
+                quantity: quantity.to_string(),
+                set: set.to_string(),
+                time,
+                rows,
+            });
+        }
+    }
+    let velocities = velocities.map(|v| table.reported(model, v, &vec![0.0; v.len()]).0);
     let (u, forces) = &table.reported(model, u, forces);
     for request in &step.outputs.node_print {
         let Some(set) = request.set.as_deref() else {
@@ -79,6 +161,15 @@ pub fn write_history(
                             .push(block("displacements (vx,vy,vz)", rows_of(u)));
                     }
                 }
+                "V" => {
+                    if let Some(v) = &velocities
+                        && request.totals != Totals::Only
+                    {
+                        results
+                            .history
+                            .push(block("velocities (vx,vy,vz)", rows_of(v)));
+                    }
+                }
                 "RF" => {
                     let rows = rows_of(forces);
                     let sum = totals(&rows);
@@ -93,39 +184,6 @@ pub fn write_history(
                 }
                 _ => {}
             }
-        }
-    }
-    for request in &step.outputs.el_print {
-        let Some(set) = request.set.as_deref() else {
-            continue;
-        };
-        let Some(elements) = model.sets.element_sets.get(set) else {
-            continue;
-        };
-        for variable in &request.variables {
-            let (quantity, field, reorder): (&str, &IntegrationPointField, bool) =
-                match variable.trim().to_ascii_uppercase().as_str() {
-                    "S" => (
-                        "stresses (elem, integ.pnt.,sxx,syy,szz,sxy,sxz,syz)",
-                        stresses,
-                        true,
-                    ),
-                    "E" => (
-                        "strains (elem, integ.pnt.,exx,eyy,ezz,exy,exz,eyz)",
-                        strains,
-                        true,
-                    ),
-                    _ => continue,
-                };
-            let rows = integration_point_rows(model, table, elements, field, reorder);
-            results.history.push(HistoryBlock {
-                step: step_number,
-                increment,
-                quantity: quantity.to_string(),
-                set: set.to_string(),
-                time,
-                rows,
-            });
         }
     }
     let _ = HistoryOutput::clone;
@@ -148,9 +206,10 @@ fn integration_point_rows(
         let start = table.layout.offsets[index as usize] as usize;
         let end = table.layout.offsets[index as usize + 1] as usize;
         for (p, point) in (start..end).enumerate() {
-            let v = &field.values[point * 6..point * 6 + 6];
+            let n = field.per_point;
+            let v = &field.values[point * n..point * n + n];
             let mut values = vec![(p + 1) as f64];
-            if reorder_shear {
+            if reorder_shear && n == 6 {
                 values.extend_from_slice(&[v[0], v[1], v[2], v[3], v[5], v[4]]);
             } else {
                 values.extend_from_slice(v);

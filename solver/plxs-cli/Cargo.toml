@@ -16,10 +16,10 @@ plxs-input.workspace = true
 plxs-session.workspace = true
 plxs-output.workspace = true
 plxs-elements.workspace = true
-postcard.workspace = true
 
 [dev-dependencies]
 plxs-verify.workspace = true
+plx-io.workspace = true
 
 [lints]
 workspace = true

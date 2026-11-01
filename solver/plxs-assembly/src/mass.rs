@@ -38,14 +38,33 @@ where
     Ok(())
 }
 
+/// Which integration rule the consistent mass matrix takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MassRule {
+    /// The element's own rule, as CalculiX's eigenvalue procedures.
+    Element,
+    /// The full rule of the family, as CalculiX's direct time integration.
+    Full,
+}
+
 /// Assembles the consistent mass matrix. Every element needs a density.
 pub fn assemble_mass(table: &ElementTable, model: &Model, m: &mut SparseMatrix) -> Result<()> {
+    assemble_mass_with(table, model, MassRule::Element, m)
+}
+
+/// [`assemble_mass`] with the given choice of integration rule.
+pub fn assemble_mass_with(
+    table: &ElementTable,
+    model: &Model,
+    rule: MassRule,
+    m: &mut SparseMatrix,
+) -> Result<()> {
     assemble_blocks(table, m, |index, entry| {
         let rho = entry.density.ok_or_else(|| {
             Error::input(
                 "*DENSITY",
                 format!(
-                    "element {} has no density; a frequency analysis needs *DENSITY for every material",
+                    "element {} has no density; a frequency or dynamic analysis needs *DENSITY for every material",
                     model.elements[index].id
                 ),
             )
@@ -53,9 +72,28 @@ pub fn assemble_mass(table: &ElementTable, model: &Model, m: &mut SparseMatrix) 
         let formulation = table.formulation(entry);
         let coords = table.coordinates(model, entry);
         let mut me = Vec::new();
-        formulation.mass(&coords, rho, &mut me);
+        match rule {
+            MassRule::Element => formulation.mass(&coords, rho, &mut me),
+            MassRule::Full => {
+                formulation.mass_with(&coords, rho, &formulation.dynamic_mass_rule(), &mut me)
+            }
+        }
         Ok(me)
-    })
+    })?;
+    // Native membranes, after the solid blocks (`assemble_blocks` starts from zero).
+    for membrane in &table.membranes {
+        let rho = membrane.density.ok_or_else(|| {
+            Error::input(
+                "*DENSITY",
+                format!(
+                    "element {} has no density; a frequency or dynamic analysis needs *DENSITY for every material",
+                    model.elements[membrane.element as usize].id
+                ),
+            )
+        })?;
+        m.add_block(&membrane.dofs, &membrane.formulation.mass(rho));
+    }
+    Ok(())
 }
 
 /// Assembles the initial stress stiffness `K_σ` for the stresses at the integration
@@ -109,5 +147,34 @@ pub fn assemble_tangent_stiffness(
             *a += b;
         }
         Ok(ke)
-    })
+    })?;
+    // Constant stiffness blocks (U1) and native membranes (total Lagrangian tangent).
+    for block in table.linear_blocks.iter().filter(|b| !b.membrane) {
+        k.add_block(&block.dofs, &block.stiffness);
+    }
+    for membrane in &table.membranes {
+        let ue = membrane.gather(u);
+        let mut f = vec![0.0; ue.len()];
+        let mut ke = Vec::new();
+        membrane
+            .formulation
+            .internal(&ue, true, &mut f, Some(&mut ke));
+        k.add_block(&membrane.dofs, &ke);
+    }
+    Ok(())
+}
+
+/// Adds the initial stress stiffness of the native membranes for the displacements `u`
+/// to `k_sigma` (after [`assemble_geometric_stiffness`], which covers the solids).
+pub fn add_membrane_geometric_stiffness(
+    table: &ElementTable,
+    u: &[f64],
+    k_sigma: &mut SparseMatrix,
+) {
+    for membrane in &table.membranes {
+        let ke = membrane
+            .formulation
+            .initial_stress_stiffness(&membrane.gather(u));
+        k_sigma.add_block(&membrane.dofs, &ke);
+    }
 }

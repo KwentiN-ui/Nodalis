@@ -34,6 +34,22 @@ const MODE_SHAPE_FACTOR: f64 = 10.0;
 /// e.g. reaction forces of 1e-14 where plxs computes exact zeros).
 pub const ABSOLUTE_FLOOR: f64 = 1e-7;
 
+/// The increments of a list with only the last static increment of every step: the
+/// increments of the nonlinear path may differ from CalculiX's, its end may not. Eigenvalue,
+/// sensitivity and other increments stay.
+fn static_step_ends(list: &[Increment]) -> Vec<&Increment> {
+    let mut out: Vec<&Increment> = Vec::new();
+    for i in list {
+        match out.last_mut() {
+            Some(l) if i.kind == AnalysisKind::Static && l.kind == i.kind && l.step == i.step => {
+                *l = i
+            }
+            _ => out.push(i),
+        }
+    }
+    out
+}
+
 /// The largest finite absolute value of several lists.
 fn largest<'a>(lists: impl IntoIterator<Item = &'a [f64]>) -> f64 {
     lists
@@ -214,19 +230,63 @@ pub fn compare_frd_with(
         }
     }
 
-    // Increments.
-    if reference.increments.len() != candidate.increments.len() {
-        c.fail(format!(
-            "{} increments in the reference, {} in the candidate",
-            reference.increments.len(),
-            candidate.increments.len()
-        ));
-    }
-    let count = reference.increments.len().min(candidate.increments.len());
+    // Increments. Class B (nonlinear) fixtures compare static steps at their end only: the
+    // path there may need another number of increments than CalculiX (the concept asks for
+    // the same order of magnitude), and the increments after the onset of yielding differ
+    // by more than the tolerance even when their number happens to agree. The other classes
+    // and the other kinds of increments compare every increment.
+    let step_ends;
+    let (references, candidates): (&[Increment], &[Increment]) = if class == Class::B {
+        let (rn, kn) = (reference.increments.len(), candidate.increments.len());
+        if rn > 3 * kn.max(1) || kn > 3 * rn.max(1) {
+            c.fail(format!(
+                "{rn} increments in the reference, {kn} in the candidate (more than a factor of 3 apart)"
+            ));
+        }
+        let (r, k) = (
+            static_step_ends(&reference.increments),
+            static_step_ends(&candidate.increments),
+        );
+        let steps = |list: &[&Increment]| -> Vec<(u32, AnalysisKind)> {
+            list.iter().map(|i| (i.step, i.kind)).collect()
+        };
+        if steps(&r) != steps(&k) {
+            c.fail(format!(
+                "increments {:?} in the reference, {:?} in the candidate",
+                steps(&r),
+                steps(&k)
+            ));
+            return c;
+        }
+        // The increment numbers of a step end may differ; the candidate takes the
+        // reference's so that the structure compares equal.
+        step_ends = (
+            r.iter().map(|&i| i.clone()).collect::<Vec<_>>(),
+            k.iter()
+                .zip(&r)
+                .map(|(&k, r)| {
+                    let mut k = k.clone();
+                    k.increment = r.increment;
+                    k
+                })
+                .collect::<Vec<_>>(),
+        );
+        (&step_ends.0, &step_ends.1)
+    } else {
+        if reference.increments.len() != candidate.increments.len() {
+            c.fail(format!(
+                "{} increments in the reference, {} in the candidate",
+                reference.increments.len(),
+                candidate.increments.len()
+            ));
+        }
+        (&reference.increments, &candidate.increments)
+    };
+    let count = references.len().min(candidates.len());
     let mut i = 0;
     while i < count {
-        let r = &reference.increments[i];
-        let k = &candidate.increments[i];
+        let r = &references[i];
+        let k = &candidates[i];
         let label = format!("step {} increment {}", r.step, r.increment);
         if (r.step, r.increment, r.kind, r.nodal_diameter)
             != (k.step, k.increment, k.kind, k.nodal_diameter)
@@ -262,18 +322,63 @@ pub fn compare_frd_with(
             i += 1;
             continue;
         }
+        if r.kind == AnalysisKind::Sensitivity {
+            let has_senfreq = |i: &Increment| i.fields.iter().any(|f| f.name == "SENFREQ");
+            let mut end = i + 1;
+            if has_senfreq(r) {
+                while end < count {
+                    let (next, kn) = (&references[end], &candidates[end]);
+                    let close =
+                        (next.value - r.value).abs() <= MODE_CLUSTER_GAP * r.value.abs().max(1e-12);
+                    if !(next.kind == r.kind
+                        && next.step == r.step
+                        && has_senfreq(next)
+                        && close
+                        && (next.step, next.increment, next.kind)
+                            == (kn.step, kn.increment, kn.kind))
+                    {
+                        break;
+                    }
+                    end += 1;
+                }
+            }
+            let mut structured = true;
+            for j in i + 1..end {
+                let (rj, kj) = (&references[j], &candidates[j]);
+                let label = format!("step {} increment {}", rj.step, rj.increment);
+                c.values(
+                    &format!("{label}: value"),
+                    &[rj.value],
+                    &[kj.value],
+                    tolerance,
+                    0.0,
+                );
+                structured &= same_fields(&mut c, &label, rj, kj, undetermined).is_some();
+            }
+            if structured {
+                compare_sensitivities(
+                    &mut c,
+                    &references[i..end],
+                    &candidates[i..end],
+                    tolerance,
+                    undetermined,
+                );
+            }
+            i = end;
+            continue;
+        }
         if is_mode(r) {
             // The cluster: the following modes of the step whose eigenvalues agree with
             // this one within the tolerance (in the reference).
             let mut end = i + 1;
             while end < count {
-                let next = &reference.increments[end];
+                let next = &references[end];
                 let close =
                     (next.value - r.value).abs() <= MODE_CLUSTER_GAP * r.value.abs().max(1e-12);
                 if !(is_mode(next) && next.step == r.step && next.kind == r.kind && close) {
                     break;
                 }
-                let kn = &candidate.increments[end];
+                let kn = &candidates[end];
                 if (next.step, next.increment, next.kind) != (kn.step, kn.increment, kn.kind) {
                     break;
                 }
@@ -281,7 +386,7 @@ pub fn compare_frd_with(
             }
             let mut all_structured = true;
             for j in i + 1..end {
-                let (rj, kj) = (&reference.increments[j], &candidate.increments[j]);
+                let (rj, kj) = (&references[j], &candidates[j]);
                 let label = format!("step {} increment {}", rj.step, rj.increment);
                 c.values(
                     &format!("{label}: value"),
@@ -293,13 +398,13 @@ pub fn compare_frd_with(
                 all_structured &= same_fields(&mut c, &label, rj, kj, undetermined).is_some();
             }
             if all_structured {
-                let last_of_step = reference.increments.get(end).is_none_or(|next| {
+                let last_of_step = references.get(end).is_none_or(|next| {
                     next.step != r.step || next.kind != r.kind || !is_mode(next)
                 });
                 compare_mode_cluster(
                     &mut c,
-                    &reference.increments[i..end],
-                    &candidate.increments[i..end],
+                    &references[i..end],
+                    &candidates[i..end],
                     tolerance * MODE_SHAPE_FACTOR,
                     last_of_step,
                     undetermined,
@@ -309,11 +414,20 @@ pub fn compare_frd_with(
             i = end;
             continue;
         }
+        if r.kind == AnalysisKind::ComplexFrequency {
+            compare_complex_mode(&mut c, &label, r, k, tolerance * MODE_SHAPE_FACTOR);
+            i += 1;
+            continue;
+        }
         for (rf, kf) in r_fields.iter().zip(&k_fields) {
             // The stress error estimator is a CalculiX-internal heuristic (its numbers do
             // not follow the manual's description); only its presence is compared, see
             // docs/solver/SCHNITTSTELLEN.md.
             if rf.name == "ERROR" || undetermined.contains(&rf.name) {
+                continue;
+            }
+            if matches!(rf.name.as_str(), "PDISP" | "PSTRESS") {
+                compare_magnitude_phase(&mut c, &label, rf, kf, tolerance);
                 continue;
             }
             let to_f64 = |v: &[f32]| -> Vec<f64> { v.iter().map(|&x| f64::from(x)).collect() };
@@ -345,6 +459,252 @@ pub fn compare_frd_with(
         i += 1;
     }
     c
+}
+
+/// A complex mode is defined up to a complex factor, and where it comes from a degenerate
+/// pair of real modes its phase depends on the basis the eigensolver picked for the pair.
+/// The modes are compared as complex vectors from `PDISP` (magnitude and phase) after the
+/// best unit phase factor; `DISP` (the real part) against the real part of the rotated
+/// candidate. Stresses and strains are real parts of a phase the candidate does not write
+/// out and are not compared (docs/solver/SCHNITTSTELLEN.md, M3 T14).
+fn compare_complex_mode(
+    c: &mut Comparison,
+    label: &str,
+    reference: &Increment,
+    candidate: &Increment,
+    tolerance: f64,
+) {
+    let complex = |inc: &Increment| -> Option<Vec<(f64, f64)>> {
+        let field = inc.field("PDISP")?;
+        let mut out = Vec::new();
+        let mags: Vec<Vec<f64>> = ["MAG1", "MAG2", "MAG3"]
+            .iter()
+            .map(|n| field.component(n).map(|c| to_f64(&c.values)))
+            .collect::<Option<_>>()?;
+        let phases: Vec<Vec<f64>> = ["PHA1", "PHA2", "PHA3"]
+            .iter()
+            .map(|n| field.component(n).map(|c| to_f64(&c.values)))
+            .collect::<Option<_>>()?;
+        for node in 0..mags[0].len() {
+            for k in 0..3 {
+                let (m, p) = (mags[k][node], phases[k][node].to_radians());
+                out.push((m * p.cos(), m * p.sin()));
+            }
+        }
+        Some(out)
+    };
+    let (Some(xr), Some(xc)) = (complex(reference), complex(candidate)) else {
+        if reference.field("PDISP").is_some() {
+            c.fail(format!("{label}: PDISP missing in the candidate"));
+        }
+        return;
+    };
+    if xr.len() != xc.len() {
+        c.fail(format!("{label}: PDISP of different length"));
+        return;
+    }
+    // s = Σ conj(xc) xr / |Σ conj(xc) xr|.
+    let (mut sr, mut si) = (0.0, 0.0);
+    for (&(a, b), &(p, q)) in xc.iter().zip(&xr) {
+        sr += a * p + b * q;
+        si += a * q - b * p;
+    }
+    let norm = sr.hypot(si);
+    let (sr, si) = if norm > 0.0 {
+        (sr / norm, si / norm)
+    } else {
+        (1.0, 0.0)
+    };
+    let rotated: Vec<(f64, f64)> = xc
+        .iter()
+        .map(|&(a, b)| (a * sr - b * si, a * si + b * sr))
+        .collect();
+    let floor = xr.iter().map(|(a, b)| a.hypot(*b)).fold(0.0, f64::max);
+    let flat = |v: &[(f64, f64)], part: usize| -> Vec<f64> {
+        v.iter()
+            .map(|p| if part == 0 { p.0 } else { p.1 })
+            .collect()
+    };
+    c.values(
+        &format!("{label}: PDISP (real part after the phase factor)"),
+        &flat(&xr, 0),
+        &flat(&rotated, 0),
+        tolerance,
+        floor,
+    );
+    c.values(
+        &format!("{label}: PDISP (imaginary part after the phase factor)"),
+        &flat(&xr, 1),
+        &flat(&rotated, 1),
+        tolerance,
+        floor,
+    );
+    if let Some(disp) = reference.field("DISP") {
+        let values: Option<Vec<Vec<f64>>> = ["D1", "D2", "D3"]
+            .iter()
+            .map(|n| disp.component(n).map(|c| to_f64(&c.values)))
+            .collect();
+        if let Some(values) = values {
+            let reference_re: Vec<f64> = (0..values[0].len())
+                .flat_map(|node| (0..3).map(move |k| (node, k)))
+                .map(|(node, k)| values[k][node])
+                .collect();
+            c.values(
+                &format!("{label}: DISP (real part of the rotated candidate)"),
+                &reference_re,
+                &flat(&rotated, 0),
+                tolerance,
+                floor,
+            );
+        }
+    }
+}
+
+/// Magnitude and phase fields (`PDISP`, `PSTRESS`) as complex numbers: the phase of a
+/// component that is zero up to round-off is arbitrary in any solver, so components are
+/// compared as `MAG·e^{i PHA}` relative to the largest magnitude.
+fn compare_magnitude_phase(
+    c: &mut Comparison,
+    label: &str,
+    reference: &plx_results::Field,
+    candidate: &plx_results::Field,
+    tolerance: f64,
+) {
+    let parts = |f: &plx_results::Field| -> Vec<Vec<f64>> {
+        f.components
+            .iter()
+            .filter(|c| !c.derived)
+            .map(|c| to_f64(&c.values))
+            .collect()
+    };
+    let (r, k) = (parts(reference), parts(candidate));
+    if r.len() != k.len() || r.len() % 2 != 0 {
+        c.fail(format!("{label}: {} has other components", reference.name));
+        return;
+    }
+    let half = r.len() / 2;
+    let complex = |p: &[Vec<f64>], j: usize, part: usize| -> Vec<f64> {
+        p[j].iter()
+            .zip(&p[half + j])
+            .map(|(m, a)| {
+                let a = a.to_radians();
+                if part == 0 { m * a.cos() } else { m * a.sin() }
+            })
+            .collect()
+    };
+    let floor = r[..half]
+        .iter()
+        .flat_map(|v| v.iter().copied())
+        .fold(0.0, f64::max);
+    for j in 0..half {
+        for (part, what) in [(0, "real"), (1, "imaginary")] {
+            c.values(
+                &format!(
+                    "{label}: {} component {} ({what} part)",
+                    reference.name,
+                    j + 1
+                ),
+                &complex(&r, j, part),
+                &complex(&k, j, part),
+                tolerance,
+                floor,
+            );
+        }
+    }
+}
+
+/// Compares the data sets of a sensitivity step: one set, or the sets of a cluster of
+/// repeated eigenfrequencies (`SENFREQ`). Sensitivities are relative quantities whose size
+/// depends on the unit system (mass sensitivities in mm and t are about 1e-9), so every
+/// component is compared after dividing both sides by the reference's largest value. In a
+/// cluster, the derivative of every single mode depends on the basis the eigensolver picked
+/// in the eigenspace; only their sum (the trace of the derivative matrix) does not, so the
+/// sum of `DFDN` over the cluster is compared and the normalized filtered fields are not.
+fn compare_sensitivities(
+    c: &mut Comparison,
+    reference: &[Increment],
+    candidate: &[Increment],
+    tolerance: f64,
+    undetermined: &[String],
+) {
+    let first = &reference[0];
+    let scaled =
+        |values: &[f64], scale: f64| -> Vec<f64> { values.iter().map(|v| v / scale).collect() };
+    let scale_of = |values: &[f64]| -> f64 {
+        let s = largest([values]);
+        if s > 0.0 { s } else { 1.0 }
+    };
+    if reference.len() == 1 {
+        let label = format!("step {} increment {}", first.step, first.increment);
+        for (rf, kf) in first.fields.iter().zip(&candidate[0].fields) {
+            if undetermined.contains(&rf.name) {
+                continue;
+            }
+            for rc in rf.components.iter().filter(|c| !c.derived) {
+                let Some(kc) = kf.component(&rc.name) else {
+                    c.fail(format!("{label}: {} has no component {}", rf.name, rc.name));
+                    continue;
+                };
+                if undetermined.contains(&format!("{} {}", rf.name, rc.name)) {
+                    continue;
+                }
+                let (rv, kv) = (to_f64(&rc.values), to_f64(&kc.values));
+                let scale = scale_of(&rv);
+                c.values(
+                    &format!(
+                        "{label}: {} {} (relative to its largest value)",
+                        rf.name, rc.name
+                    ),
+                    &scaled(&rv, scale),
+                    &scaled(&kv, scale),
+                    tolerance,
+                    0.0,
+                );
+            }
+        }
+        return;
+    }
+    let label = format!(
+        "step {} sensitivity sets {}-{} (repeated eigenvalue {})",
+        first.step,
+        first.increment,
+        reference[reference.len() - 1].increment,
+        first.value
+    );
+    if undetermined.iter().any(|u| u == "SENFREQ") {
+        return;
+    }
+    let sum = |increments: &[Increment]| -> Option<Vec<f64>> {
+        let mut total: Option<Vec<f64>> = None;
+        for increment in increments {
+            let field = increment.fields.iter().find(|f| f.name == "SENFREQ")?;
+            let values = to_f64(&field.component("DFDN")?.values);
+            match &mut total {
+                Some(t) if t.len() == values.len() => {
+                    t.iter_mut().zip(&values).for_each(|(a, b)| *a += b)
+                }
+                Some(_) => return None,
+                None => total = Some(values),
+            }
+        }
+        total
+    };
+    match (sum(reference), sum(candidate)) {
+        (Some(r), Some(k)) => {
+            let scale = scale_of(&r);
+            c.values(
+                &format!("{label}: sum of SENFREQ DFDN (relative to its largest value)"),
+                &scaled(&r, scale),
+                &scaled(&k, scale),
+                tolerance,
+                0.0,
+            );
+        }
+        _ => c.fail(format!("{label}: SENFREQ DFDN missing")),
+    }
+    c.notes.push(format!(
+        "{label}: DFDN of the single modes and DFDNFIL depend on the basis of the eigenspace; only the sum of DFDN is compared"
+    ));
 }
 
 fn to_f64(v: &[f32]) -> Vec<f64> {
@@ -787,9 +1147,59 @@ pub fn compare_dat(
     unmatched_modes: &[(u32, u32)],
     standing_modes: &[(u32, u32)],
 ) -> Comparison {
+    compare_dat_with_noise(
+        reference,
+        candidate,
+        class,
+        unmatched_modes,
+        standing_modes,
+        &[],
+        &BTreeMap::new(),
+    )
+}
+
+/// [`compare_dat`] leaving out the history components named in `undetermined` as
+/// `"<FIELD> <COMPONENT>"` (`"GRADIENT_LENGTH STRAINENERGY"`, a fixture's documented
+/// deviations).
+pub fn compare_dat_except(
+    reference: &DatImport,
+    candidate: &DatImport,
+    class: Class,
+    unmatched_modes: &[(u32, u32)],
+    undetermined: &[String],
+) -> Comparison {
+    compare_dat_with_noise(
+        reference,
+        candidate,
+        class,
+        unmatched_modes,
+        &[],
+        undetermined,
+        &BTreeMap::new(),
+    )
+}
+
+/// [`compare_dat_except`] with absolute noise levels per history field name (`noise` of the
+/// fixture's `.toml`, e.g. `MOMENT_ABOUT_CG`, a difference of large moments that is pure
+/// round-off when the contact force acts at its centre).
+pub fn compare_dat_with_noise(
+    reference: &DatImport,
+    candidate: &DatImport,
+    class: Class,
+    unmatched_modes: &[(u32, u32)],
+    standing_modes: &[(u32, u32)],
+    undetermined: &[String],
+    noise: &BTreeMap<String, f64>,
+) -> Comparison {
     let mut c = Comparison::default();
     let tolerance = class.tolerance();
-    let names = |d: &DatImport| -> Vec<String> { d.sets.iter().map(|s| s.name.clone()).collect() };
+    // CalculiX prints the blocks in the order of the `*NODE PRINT`/`*EL PRINT` requests;
+    // the order carries no information, so the sets are matched by name.
+    let names = |d: &DatImport| -> Vec<String> {
+        let mut names: Vec<String> = d.sets.iter().map(|s| s.name.clone()).collect();
+        names.sort();
+        names
+    };
     if names(reference) != names(candidate) {
         c.fail(format!(
             "history sets {:?} in the reference, {:?} in the candidate",
@@ -798,7 +1208,10 @@ pub fn compare_dat(
         ));
         return c;
     }
-    for (rs, ks) in reference.sets.iter().zip(&candidate.sets) {
+    for rs in &reference.sets {
+        let Some(ks) = candidate.sets.iter().find(|s| s.name == rs.name) else {
+            continue;
+        };
         let label = format!("history {}", rs.name);
         let rows = |s: &plx_results::history_output::HistorySet| -> Vec<(u32, u32)> {
             s.rows.iter().map(|r| (r.0, r.1)).collect()
@@ -848,7 +1261,8 @@ pub fn compare_dat(
                 rf.components
                     .iter()
                     .flat_map(|c| c.entries.iter().map(|e| e.values.as_slice())),
-            );
+            )
+            .max(noise.get(&rf.name).map_or(0.0, |n| n / tolerance));
             for rc in &rf.components {
                 let Some(kc) = kf.component(&rc.name) else {
                     c.fail(format!("{label}: {} has no component {}", rf.name, rc.name));
@@ -865,6 +1279,13 @@ pub fn compare_dat(
                         rc.name,
                         entries(rc),
                         entries(kc)
+                    ));
+                    continue;
+                }
+                if undetermined.contains(&format!("{} {}", rf.name, rc.name)) {
+                    c.notes.push(format!(
+                        "{label}: {} {} not compared (documented deviation)",
+                        rf.name, rc.name
                     ));
                     continue;
                 }
@@ -905,6 +1326,30 @@ pub fn compare_dat(
                                 &sums(&ke.values, &clusters),
                                 tolerance,
                                 floor,
+                            );
+                        }
+                        // The `.dat` reader averages the tables of all modes of an
+                        // EIGENFREQUENCY response into one row, and the gradient length of
+                        // a single one of repeated eigenvalues depends on the basis of the
+                        // eigenspace (see `compare_sensitivities`).
+                        "GRADIENT_LENGTH" if rc.name == "EIGENFREQUENCY" => {
+                            c.notes.push(format!(
+                                "{what}: not compared (mean over the modes, basis dependent for repeated eigenvalues)"
+                            ));
+                        }
+                        // Responses and gradient lengths relative to themselves: a mass
+                        // gradient in mm and t is about 1e-8.
+                        "DESIGN_RESPONSE" | "GRADIENT_LENGTH" => {
+                            let scale = largest([re.values.as_slice()]);
+                            let scale = if scale > 0.0 { scale } else { 1.0 };
+                            let rel =
+                                |v: &[f64]| -> Vec<f64> { v.iter().map(|x| x / scale).collect() };
+                            c.values(
+                                &format!("{what} (relative)"),
+                                &rel(&re.values),
+                                &rel(&ke.values),
+                                tolerance,
+                                0.0,
                             );
                         }
                         _ => {

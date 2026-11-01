@@ -35,9 +35,9 @@ fn a_static_fixture_is_computed_and_other_procedures_are_refused() {
         report.log
     );
     assert!(report.log.contains("This is Version"), "{}", report.log);
-    // A procedure of a later milestone on the same model.
+    // A procedure plxs does not compute (yet) on the same model.
     let text = std::fs::read_to_string(f.inp()).unwrap();
-    let dynamic = text.replacen("*Static", "*Dynamic", 1);
+    let dynamic = text.replacen("*Static", "*Dynamic, Explicit", 1);
     assert_ne!(dynamic, text);
     std::fs::write(work.join("dynamik.inp"), dynamic).unwrap();
     let output = Command::new(plxs())
@@ -84,5 +84,26 @@ fn a_model_check_finishes_and_an_unknown_keyword_cannot_be_interpreted() {
     let text = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(1));
     assert!(text.contains("cannot be interpreted"), "{text}");
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+#[test]
+fn the_profile_names_the_phases_and_the_reused_analyses() {
+    let work = std::env::temp_dir().join(format!("plxs-cli-profile-{}", std::process::id()));
+    std::fs::create_dir_all(&work).unwrap();
+    let source = fixtures_root().join("nonlinear").join("plastisch.inp");
+    std::fs::copy(source, work.join("p.inp")).unwrap();
+    let output = Command::new(plxs())
+        .args(["--profile", "p"])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{text}");
+    for phase in ["assembly", "factorization", "symbolic analysis", "total"] {
+        assert!(text.contains(phase), "{text}");
+    }
+    // Newton iterations on one pattern analyze it once.
+    assert!(text.contains(" reused)"), "{text}");
     let _ = std::fs::remove_dir_all(&work);
 }
