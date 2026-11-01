@@ -6504,11 +6504,9 @@ impl ProjectApp {
                     }
                     return Some(Payload::Results(global, file));
                 }
-                let frd = bound.files.iter().find(|f| {
-                    Path::new(&f.name)
-                        .extension()
-                        .is_some_and(|e| e.eq_ignore_ascii_case("frd"))
-                })?;
+                // CalculiX's results file, which results of the built-in solver are
+                // written as for this.
+                let frd = bound.calculix_results_name()?;
                 let dir = (self.settings.solver.work_dir())
                     .join(crate::analysis::job_name(&self.project_name()))
                     .join(crate::analysis::job_name(&target.name))
@@ -6517,7 +6515,7 @@ impl ProjectApp {
                         crate::analysis::job_name(&source.name),
                         key
                     ));
-                let file = dir.join(&frd.name);
+                let file = dir.join(&frd);
                 if !file.is_file() {
                     match self.restoring.get(&dir) {
                         Some(Some(_)) => upstream.missing_results.push(source.name.clone()),
@@ -6526,8 +6524,9 @@ impl ProjectApp {
                             let (sender, receiver) = std::sync::mpsc::channel();
                             let (bound, folder) = (bound.clone(), dir.clone());
                             std::thread::spawn(move || {
-                                let written = plx_io::project::restore_results(&bound, &folder)
-                                    .map_err(|e| e.to_string());
+                                let written =
+                                    plx_io::project::restore_calculix_results(&bound, &folder)
+                                        .map_err(|e| e.to_string());
                                 let _ = sender.send(written);
                             });
                             self.restoring.insert(dir, Some(receiver));

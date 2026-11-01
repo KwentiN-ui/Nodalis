@@ -130,7 +130,11 @@ fn is_unstable(real: f64, imaginary: f64) -> bool {
 
 /// The complex frequencies and whirls of step `step` in the text of a `.dat` file.
 pub fn modes_of(dat: &str, step: u32) -> Vec<Mode> {
-    let import = plx_io::dat::parse_dat(dat);
+    modes_of_history(&plx_io::dat::parse_dat(dat), step)
+}
+
+/// The complex frequencies and whirls of step `step` in history output.
+pub fn modes_of_history(import: &plx_io::dat::DatImport, step: u32) -> Vec<Mode> {
     let name = format!("STEP_{step}");
     let Some(set) = import.sets.iter().find(|s| s.name == name) else {
         return Vec::new();
@@ -650,13 +654,29 @@ fn run_speed(
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    let dat = std::fs::read_to_string(job.file("dat")).unwrap_or_default();
-    let mut modes = modes_of(&dat, input.step);
-    if modes.is_empty()
-        && let Ok(frd) = plx_io::frd::read_frd(&job.file("frd"))
-    {
-        modes = modes_of_frd(&frd, input.step);
-    }
+    // The built-in solver's results are taken in memory, CalculiX's from its files.
+    let modes = match job.solver_results() {
+        Some(solved) => {
+            let history = plx_io::solver::history(&solved, None);
+            let modes = history.map_or_else(Vec::new, |h| modes_of_history(&h, input.step));
+            if modes.is_empty() {
+                modes_of_frd(&plx_io::solver::import(&solved), input.step)
+            } else {
+                modes
+            }
+        }
+        None => {
+            let dat = std::fs::read_to_string(job.file("dat")).unwrap_or_default();
+            let modes = modes_of(&dat, input.step);
+            if modes.is_empty()
+                && let Ok(frd) = plx_io::frd::read_frd(&job.file("frd"))
+            {
+                modes_of_frd(&frd, input.step)
+            } else {
+                modes
+            }
+        }
+    };
     if modes.is_empty() {
         let output = job.new_output();
         let error = output
@@ -665,8 +685,8 @@ fn run_speed(
             .cloned()
             .unwrap_or_else(|| {
                 format!(
-                    "CalculiX {status:?}, no complex frequencies of step {} in {name}.dat \
-                     or {name}.frd",
+                    "Solver {status:?}, no complex frequencies of step {} in the results \
+                     of {name}",
                     input.step
                 )
             });

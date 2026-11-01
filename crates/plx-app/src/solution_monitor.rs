@@ -490,7 +490,7 @@ impl BackgroundSolve {
         let results = analysis
             .results()
             .filter(|_| matches!(status, JobStatus::Completed | JobStatus::FailedWithResults));
-        let Some(frd) = results else {
+        let Some(results_file) = results else {
             let outcome = if status == JobStatus::Killed {
                 Outcome::Stopped
             } else {
@@ -500,8 +500,15 @@ impl BackgroundSolve {
         };
         // Kept as the analysis window keeps them, beside the GUI.
         let (sender, receiver) = std::sync::mpsc::channel();
-        // The eigenmodes of a frequency step go with them, for analyses that take them.
-        let files = ["inp", "frd", "dat", "eig"].map(|e| frd.with_extension(e));
+        // The eigenmodes of a frequency step go with them, for analyses that take them; the
+        // built-in solver's results file holds the fields and the history output.
+        let extensions: &[&str] = if plx_results::solver::is_solver_results(&results_file) {
+            &["inp", "eig"]
+        } else {
+            &["inp", "dat", "eig"]
+        };
+        let mut files = vec![results_file.clone()];
+        files.extend(extensions.iter().map(|e| results_file.with_extension(e)));
         let (name, input) = (self.name.clone(), analysis.input);
         let steps = analysis.steps.clone();
         let with_errors = status == JobStatus::FailedWithResults;
@@ -603,10 +610,17 @@ mod tests {
             output.contains("Job finished") || output.contains("completed"),
             "{output}"
         );
-        assert!(work_dir.join("Beam_1.frd").is_file());
         let solved = solve.take_solved().expect("results");
         assert!(solved.meshed.is_none());
         let results = solved.results.expect("kept results");
+        // The built-in solver keeps its results without CalculiX's files, in the project
+        // as its own results file.
+        let calculix = engine == plx_solve::Engine::CalculiX;
+        assert_eq!(work_dir.join("Beam_1.frd").is_file(), calculix);
+        assert_eq!(results.solver.is_some(), !calculix);
+        let read = results.read(&dir.join("read")).unwrap();
+        assert!(read.results.increments[0].field("DISP").is_some());
+        assert!(read.input.is_some());
         // With them the analysis is up to date: a second solve has nothing to do.
         let status = crate::status::analysis_status(
             None,
