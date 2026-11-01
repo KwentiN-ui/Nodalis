@@ -24,10 +24,10 @@
 //! No CalculiX code was consulted.
 
 use plxs_assembly::{
-    ElementTable, Reduction, Spc, add_membrane_geometric_stiffness, assemble_geometric_stiffness,
+    ElementTable, Spc, add_membrane_geometric_stiffness, assemble_geometric_stiffness,
     assemble_mass, assemble_stiffness, assemble_tangent_stiffness, load_vector,
 };
-use plxs_constraints::ConstraintSet;
+use plxs_constraints::{ConstraintSet, ModelConstraints};
 use plxs_core::results::{IncrementKind, ResultsIncrement};
 use plxs_core::state::{IntegrationPointField, NodalField, StoredModes};
 use plxs_core::step::Procedure as ProcedureKind;
@@ -46,7 +46,7 @@ pub struct BuckleProcedure;
 /// The stiffness matrix a perturbation step linearizes about: the tangent stiffness of
 /// the state when a step was computed before, the linear stiffness otherwise (which is
 /// also what a non-perturbative step uses; it is cached in the context).
-fn reference_stiffness(
+pub(crate) fn reference_stiffness(
     ctx: &mut ProcedureContext<'_>,
     step: &Step,
     progress: &mut dyn Progress,
@@ -88,7 +88,7 @@ fn reference_stiffness(
 
 /// The displacements a perturbation step linearizes about; empty when the step is not
 /// perturbed (the strains are then the linear ones).
-fn preload_displacements(ctx: &ProcedureContext<'_>, perturbed: bool) -> Vec<f64> {
+pub(crate) fn preload_displacements(ctx: &ProcedureContext<'_>, perturbed: bool) -> Vec<f64> {
     if perturbed {
         ctx.state.displacements.values.clone()
     } else {
@@ -106,7 +106,7 @@ type ElementResults = (Vec<([f64; 6], [f64; 6])>, Vec<f64>);
 /// both cases (for the reference solution of a preloaded buckling step this is not the load
 /// vector: the initial stress stiffness of the preload is missing, which CalculiX's output
 /// shares to all printed digits). The fields are returned in the state's layout.
-fn increment_results(
+pub(crate) fn increment_results(
     table: &ElementTable,
     model: &Model,
     u: &[f64],
@@ -167,11 +167,14 @@ fn increment_results(
     }
 }
 
-/// Homogeneous single-point constraints of an eigenvalue step.
-fn homogeneous_reduction(ctx: &ProcedureContext<'_>, step: &Step) -> Result<Reduction> {
-    let mut spc = Spc::of_step(ctx.model, step, &ctx.table.dofs, 1.0, 1.0, 1.0)?;
-    spc.values.iter_mut().for_each(|v| *v = 0.0);
-    Ok(Reduction::new(ctx.table.dofs.len(), spc))
+fn lanczos_options(accuracy: Option<f64>) -> LanczosOptions {
+    let mut options = LanczosOptions::default();
+    if let Some(accuracy) = accuracy {
+        // CalculiX's "accuracy" is ARPACK's tolerance; the Ritz residual criterion here is
+        // stricter, so never loosen it beyond the default.
+        options.tolerance = options.tolerance.min(accuracy.abs().max(1e-14));
+    }
+    options
 }
 
 /// The homogeneous constraints of an eigenvalue step: its single-point constraints set to
@@ -196,19 +199,100 @@ pub(crate) fn homogeneous_constraints(
     Ok(set)
 }
 
-fn lanczos_options(accuracy: Option<f64>) -> LanczosOptions {
-    let mut options = LanczosOptions::default();
-    if let Some(accuracy) = accuracy {
-        // CalculiX's "accuracy" is ARPACK's tolerance; the Ritz residual criterion here is
-        // stricter, so never loosen it beyond the default.
-        options.tolerance = options.tolerance.min(accuracy.abs().max(1e-14));
+/// A vector on all primary DOFs (global components) restricted to the reduced unknowns of
+/// a constraint set: the value of every independent DOF, in the local system of a
+/// transformed node. `values` may cover several copies of the model (cyclic symmetry).
+pub(crate) fn restrict_to_free(
+    set: &ConstraintSet,
+    constraints: &ModelConstraints,
+    values: &[f64],
+) -> Vec<f64> {
+    let nodes = (values.len() / 3).max(1) as u32;
+    set.free
+        .iter()
+        .map(|&dof| {
+            let (node, k) = (dof / 3, (dof % 3) as usize);
+            match constraints.rotation(node % nodes) {
+                None => values[dof as usize],
+                Some(r) => (0..3)
+                    .map(|d| r[d][k] * values[(node * 3) as usize + d])
+                    .sum(),
+            }
+        })
+        .collect()
+}
+
+/// The lowest `count` eigenpairs of `K φ = λ M φ` (above the lower frequency bound when
+/// given) by shift-invert Lanczos; a singular stiffness (free structure) moves the shift
+/// below the spectrum.
+pub(crate) fn lanczos_modes(
+    ctx: &ProcedureContext<'_>,
+    k_free: &SparseMatrix,
+    m_free: &SparseMatrix,
+    count: usize,
+    lower: Option<f64>,
+    progress: &mut dyn Progress,
+) -> Result<plxs_linalg::EigenPairs> {
+    let lower_shift = lower
+        .filter(|f| *f > 0.0)
+        .map(|f| (2.0 * std::f64::consts::PI * f).powi(2));
+    let mut lanczos = ShiftInvertLanczos::new(ctx.threads, lanczos_options(None));
+    let started = std::time::Instant::now();
+    let mut pairs = None;
+    let mut shifts = vec![lower_shift.unwrap_or(0.0)];
+    if lower_shift.is_none() {
+        let scale = k_free.diagonal().iter().sum::<f64>()
+            / m_free.diagonal().iter().sum::<f64>().max(f64::MIN_POSITIVE);
+        shifts.extend([-1e-6 * scale, -1e-4 * scale, -1e-2 * scale]);
     }
-    options
+    let mut last_error = None;
+    for shift in shifts {
+        match lanczos.frequencies(k_free, m_free, count, shift) {
+            Ok(p) => {
+                pairs = Some(p);
+                break;
+            }
+            Err(Error::Numerical { message, .. })
+                if message.contains("singular") && lower_shift.is_none() =>
+            {
+                progress.event(ProgressEvent::Info(format!(
+                    "shift {shift:e}: {message}; trying a negative shift"
+                )));
+                last_error = Some(message);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    let Some(pairs) = pairs else {
+        return Err(Error::Numerical {
+            step: ctx.step_number,
+            increment: 1,
+            message: last_error.unwrap_or_else(|| "no eigenvalues found".into()),
+        });
+    };
+    progress.event(ProgressEvent::Info(format!(
+        "{} eigenvalues in {:.2} s ({} Lanczos steps, residual {:.1e}{})",
+        pairs.values.len(),
+        started.elapsed().as_secs_f64(),
+        pairs.steps,
+        pairs.residual,
+        if pairs.sturm_confirmed {
+            ", Sturm check passed"
+        } else {
+            ", Sturm check NOT confirmed"
+        }
+    )));
+    if !pairs.sturm_confirmed {
+        progress.event(ProgressEvent::Warning(
+            "the Sturm sequence check could not confirm that no eigenvalue was missed".into(),
+        ));
+    }
+    Ok(pairs)
 }
 
 /// The six unit rigid body motions on the full DOF vector: translations along the axes
 /// and rotations about the axes through the origin.
-fn rigid_body_motions(model: &Model, dofs: usize) -> Vec<Vec<f64>> {
+pub(crate) fn rigid_body_motions(model: &Model, dofs: usize) -> Vec<Vec<f64>> {
     let mut motions = vec![vec![0.0; dofs]; 6];
     for (i, x) in model.nodes.coordinates.iter().enumerate() {
         let at = 3 * i;
@@ -238,90 +322,34 @@ impl Procedure for FrequencyProcedure {
                 "FrequencyProcedure needs a *FREQUENCY step".into(),
             ));
         };
-        if parameters.cyclic_modes.is_some() {
-            return Err(Error::Unsupported(
-                "cyclic symmetry in a *FREQUENCY step is not implemented yet (M3)".into(),
-            ));
+        if parameters.cyclic_modes.is_some() && ctx.constraints.cyclic.is_some() {
+            return crate::cyclic::cyclic_frequency(ctx, step, parameters, progress);
         }
         let count = parameters.count.max(1) as usize;
         let (k, perturbed) = reference_stiffness(ctx, step, progress)?;
         let u_pre = preload_displacements(ctx, perturbed);
         let mut m = SparseMatrix::zeros(ctx.pattern.clone());
         assemble_mass(ctx.table, ctx.model, &mut m)?;
-        let reduction = homogeneous_reduction(ctx, step)?;
-        let k_free = k.restrict(&reduction.free);
-        let m_free = m.restrict(&reduction.free);
+        let reduction = homogeneous_constraints(ctx, step, progress)?;
+        let k_free = reduction.reduce(&k);
+        let m_free = reduction.reduce(&m);
         progress.event(ProgressEvent::Info(format!(
             "number of equations: {}; {count} eigenvalues requested",
-            reduction.free.len()
+            reduction.reduced_len()
         )));
-
-        // Shift: the lower frequency bound when given, else zero; a singular stiffness
-        // (free structure) moves the shift below the spectrum.
-        let lower_shift = parameters
-            .lower
-            .filter(|f| *f > 0.0)
-            .map(|f| (2.0 * std::f64::consts::PI * f).powi(2));
-        let mut lanczos = ShiftInvertLanczos::new(ctx.threads, lanczos_options(None));
-        let started = std::time::Instant::now();
-        let mut pairs = None;
-        let mut shifts = vec![lower_shift.unwrap_or(0.0)];
-        if lower_shift.is_none() {
-            let scale = k_free.diagonal().iter().sum::<f64>()
-                / m_free.diagonal().iter().sum::<f64>().max(f64::MIN_POSITIVE);
-            shifts.extend([-1e-6 * scale, -1e-4 * scale, -1e-2 * scale]);
-        }
-        let mut last_error = None;
-        for shift in shifts {
-            match lanczos.frequencies(&k_free, &m_free, count, shift) {
-                Ok(p) => {
-                    pairs = Some(p);
-                    break;
-                }
-                Err(Error::Numerical { message, .. })
-                    if message.contains("singular") && lower_shift.is_none() =>
-                {
-                    progress.event(ProgressEvent::Info(format!(
-                        "shift {shift:e}: {message}; trying a negative shift"
-                    )));
-                    last_error = Some(message);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        let Some(pairs) = pairs else {
-            return Err(Error::Numerical {
-                step: ctx.step_number,
-                increment: 1,
-                message: last_error.unwrap_or_else(|| "no eigenvalues found".into()),
-            });
-        };
-        progress.event(ProgressEvent::Info(format!(
-            "{} eigenvalues in {:.2} s ({} Lanczos steps, residual {:.1e}{})",
-            pairs.values.len(),
-            started.elapsed().as_secs_f64(),
-            pairs.steps,
-            pairs.residual,
-            if pairs.sturm_confirmed {
-                ", Sturm check passed"
-            } else {
-                ", Sturm check NOT confirmed"
-            }
-        )));
-        if !pairs.sturm_confirmed {
-            progress.event(ProgressEvent::Warning(
-                "the Sturm sequence check could not confirm that no eigenvalue was missed".into(),
-            ));
-        }
+        let pairs = lanczos_modes(ctx, &k_free, &m_free, count, parameters.lower, progress)?;
 
         // Keep the modes within the requested range.
         let upper = parameters.upper.filter(|f| *f > 0.0);
         let total_dofs = ctx.table.dofs.len();
         let rigid = rigid_body_motions(ctx.model, total_dofs);
-        let rigid_free: Vec<Vec<f64>> = rigid.iter().map(|r| reduction.reduce_vector(r)).collect();
+        let rigid_free: Vec<Vec<f64>> = rigid
+            .iter()
+            .map(|r| restrict_to_free(&reduction, ctx.constraints, r))
+            .collect();
         let mut m_r: Vec<Vec<f64>> = Vec::with_capacity(6);
         for r in &rigid_free {
-            let mut mr = vec![0.0; reduction.free.len()];
+            let mut mr = vec![0.0; reduction.reduced_len()];
             m_free.multiply(r, &mut mr);
             m_r.push(mr);
         }
@@ -341,6 +369,7 @@ impl Procedure for FrequencyProcedure {
         let mut strains = ctx.table.layout.field(6);
         let mut forces = vec![0.0; total_dofs];
         let mut mode_number = 0u32;
+        let zeros = vec![0.0; total_dofs];
         for (lambda, phi_free) in pairs.values.iter().zip(&pairs.vectors) {
             let (omega, omega_im) = if *lambda >= 0.0 {
                 (lambda.sqrt(), 0.0)
@@ -369,8 +398,7 @@ impl Procedure for FrequencyProcedure {
             participation_rows.push((mode_number, gamma));
             modal_mass_rows.push((mode_number, effective));
 
-            let mut phi = vec![0.0; total_dofs];
-            reduction.expand_into(phi_free, &mut phi);
+            let phi = reduction.expand(phi_free, &zeros);
             increment_results(
                 ctx.table,
                 ctx.model,

@@ -15,6 +15,7 @@
 
 pub mod complex;
 pub mod contact;
+pub mod cyclic;
 pub mod dynamic;
 pub mod eigen;
 pub mod equations;
@@ -26,6 +27,7 @@ pub mod nonlinear;
 pub mod profile;
 pub mod sensitivity;
 pub mod static_linear;
+pub mod submodel;
 pub mod thermal;
 
 use std::sync::Arc;

@@ -77,7 +77,7 @@ fn every_golden_file_decodes_and_matches_itself() {
         assert!(comparison.compared > 0);
         if let Some(dat) = &reference.dat {
             with_dat += 1;
-            let comparison = compare_dat(dat, dat, Class::A, &[]);
+            let comparison = compare_dat(dat, dat, Class::A, &[], &[]);
             assert!(comparison.ok(), "{}: {:?}", f.id(), comparison.failures);
         }
     }

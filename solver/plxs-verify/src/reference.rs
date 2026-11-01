@@ -23,6 +23,7 @@ pub fn make_reference(ccx: &str, fixture: &Fixture, work: &Path) -> Result<Strin
     let name = &fixture.meta.name;
     let text = std::fs::read_to_string(fixture.inp()).map_err(|e| e.to_string())?;
     std::fs::write(work.join(format!("{name}.inp")), text).map_err(|e| e.to_string())?;
+    crate::corpus::stage_files(fixture, work)?;
     let output = Command::new(ccx)
         .args(["-i", name])
         .current_dir(work)

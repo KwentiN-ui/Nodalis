@@ -16,11 +16,13 @@
 //! Applications of Finite Element Analysis", 4th ed., chapter 9; Wriggers, "Computational
 //! Contact Mechanics", chapter 4. No CalculiX code was consulted.
 
+pub mod cyclic;
 pub mod elimination;
 pub mod set;
 pub mod tie;
 pub mod transform;
 
+pub use cyclic::CyclicSymmetry;
 pub use elimination::{ConstraintSet, Eliminator, LinearConstraint, Policy};
 pub use set::ModelConstraints;
 pub use transform::Rotation;
