@@ -357,12 +357,18 @@ impl Procedure for NonlinearStatic {
                     temperature,
                     follower: &follower,
                 };
-                // Contact: candidate master faces from the start of the increment and the
-                // matrix pattern with every spring they allow.
+                // Contact: candidate master faces from the start of the increment and a
+                // matrix pattern with every spring they allow (the last one while it does,
+                // so that the solver keeps its symbolic analysis).
                 if has_contact {
                     let u0 = ctx.state.displacements.values.clone();
                     let blocks = ctx.contact.prepare(&ctx.model.nodes.coordinates, &u0);
-                    k = SparseMatrix::zeros(crate::contact::pattern_with(ctx.table, &blocks));
+                    let pattern = crate::contact::cached_pattern(
+                        ctx.table,
+                        &blocks,
+                        &mut ctx.contact_pattern,
+                    );
+                    k = SparseMatrix::zeros(pattern);
                 }
                 let result = Self::attempt(
                     ctx,

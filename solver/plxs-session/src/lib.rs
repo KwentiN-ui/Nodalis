@@ -62,6 +62,9 @@ pub struct Session {
     constraints: ModelConstraints,
     /// Contact pairs, prepared once; moved into the procedure context for a step.
     contact: plxs_contact::ContactModel,
+    /// The matrix pattern with the contact springs of the last increment, kept over the
+    /// steps so that the next one can reuse it.
+    contact_pattern: Option<Arc<Pattern>>,
     /// Warnings of the model preparation, reported with the first step.
     pending_warnings: Vec<String>,
     pattern: Arc<Pattern>,
@@ -135,6 +138,7 @@ impl Session {
             table,
             constraints,
             contact,
+            contact_pattern: None,
             pending_warnings,
             pattern,
             stiffness: None,
@@ -176,6 +180,7 @@ impl Session {
             work_dir: self.options.work_dir.clone(),
             cancel: self.options.cancel.clone(),
             contact: std::mem::take(&mut self.contact),
+            contact_pattern: self.contact_pattern.take(),
             profile: std::mem::take(&mut self.profile),
         };
         // The procedure runs on the session's pool in a thread of its own; events come
@@ -196,6 +201,7 @@ impl Session {
                     average_force: ctx.average_force,
                     profile: std::mem::take(&mut ctx.profile),
                     contact: std::mem::take(&mut ctx.contact),
+                    contact_pattern: ctx.contact_pattern.take(),
                 };
                 (outcome, back)
             });
@@ -213,6 +219,7 @@ impl Session {
                         average_force: None,
                         profile: Default::default(),
                         contact: plxs_contact::ContactModel::default(),
+                        contact_pattern: None,
                     },
                 )
             })
@@ -224,6 +231,7 @@ impl Session {
         self.average_force = back.average_force;
         self.profile = back.profile;
         self.contact = back.contact;
+        self.contact_pattern = back.contact_pattern;
         let outcome = outcome?;
         progress.event(ProgressEvent::StepDone {
             step: step_number,
@@ -341,6 +349,7 @@ struct Carried {
     average_force: Option<f64>,
     profile: plxs_procedures::profile::Profile,
     contact: plxs_contact::ContactModel,
+    contact_pattern: Option<Arc<Pattern>>,
 }
 
 /// Forwards events into a channel.

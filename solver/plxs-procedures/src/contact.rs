@@ -24,6 +24,38 @@ pub fn pattern_with(table: &ElementTable, extra: &[Vec<u32>]) -> Arc<Pattern> {
     ))
 }
 
+/// The pattern with the contact springs of `extra`. The pattern of an earlier increment
+/// (or step) in `cached` is kept as long as it holds every entry of `extra`: candidate
+/// master faces change from increment to increment, and a pattern that stays the same lets
+/// the solver keep its symbolic analysis (ordering, elimination tree); the entries of
+/// springs that are gone stay zero. Otherwise a pattern of `extra` alone replaces it (a
+/// union over all increments would couple a sliding surface with every face it has passed
+/// and fill the factor).
+pub fn cached_pattern(
+    table: &ElementTable,
+    extra: &[Vec<u32>],
+    cached: &mut Option<Arc<Pattern>>,
+) -> Arc<Pattern> {
+    if let Some(current) = cached.as_ref()
+        && current.dimension() == table.dofs.len()
+        && extra.iter().all(|block| covers(current, block))
+    {
+        return current.clone();
+    }
+    let pattern = pattern_with(table, extra);
+    *cached = Some(pattern.clone());
+    pattern
+}
+
+/// Whether every pair of indices of a block is an entry of the pattern.
+fn covers(pattern: &Pattern, block: &[u32]) -> bool {
+    block.iter().all(|&a| {
+        block
+            .iter()
+            .all(|&b| a > b || pattern.position(a, b).is_some())
+    })
+}
+
 /// The `CONTACT` (CDIS, CSTR) and `CELS` fields a step asks for, over all nodes in `order`.
 pub fn contact_fields(
     model: &Model,
@@ -71,4 +103,20 @@ pub fn contact_fields(
         });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pattern_covers_the_blocks_it_was_built_from_and_their_parts() {
+        let pattern = Pattern::from_blocks(6, [[0u32, 1, 2].as_slice(), &[3, 4]]);
+        assert!(covers(&pattern, &[0, 1, 2]));
+        assert!(covers(&pattern, &[0, 2]));
+        assert!(covers(&pattern, &[4, 3]));
+        assert!(covers(&pattern, &[5]));
+        assert!(!covers(&pattern, &[2, 3]));
+        assert!(!covers(&pattern, &[1, 5]));
+    }
 }

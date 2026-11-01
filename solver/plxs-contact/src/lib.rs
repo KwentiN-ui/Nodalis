@@ -616,11 +616,13 @@ impl ContactModel {
                 dofs
             };
             if pair.mortar_nodes.is_empty() {
+                // A point's spring couples it with one master face: a block per candidate
+                // face (not one over all candidates, which would couple the master faces
+                // among each other and fill the factor for nothing).
                 for p in 0..pair.points.len() {
-                    let mut dofs = point_dofs(p);
-                    dofs.sort_unstable();
-                    dofs.dedup();
-                    blocks.push(dofs);
+                    for &f in &pair.candidates[p] {
+                        blocks.push(pair.point_face_dofs(&[p as u32], f));
+                    }
                 }
             } else {
                 // A mortar node couples all its integration points.
@@ -635,6 +637,9 @@ impl ContactModel {
                 }
             }
         }
+        // The integration points of one slave face share their blocks.
+        blocks.sort_unstable();
+        blocks.dedup();
         blocks
     }
 
@@ -682,6 +687,19 @@ impl ContactModel {
 }
 
 impl Pair {
+    /// The sorted DOFs of the slave nodes of `points` and the nodes of master face `face`.
+    fn point_face_dofs(&self, points: &[u32], face: u32) -> Vec<u32> {
+        let mut dofs: Vec<u32> = points
+            .iter()
+            .flat_map(|&p| self.points[p as usize].nodes.iter())
+            .chain(&self.master[face as usize].nodes)
+            .flat_map(|&n| (0..3).map(move |d| n * 3 + d))
+            .collect();
+        dofs.sort_unstable();
+        dofs.dedup();
+        dofs
+    }
+
     /// Natural coordinates of a slave point's current position and the slave face normal
     /// there (face-to-face), or the node's position.
     fn position(&self, p: usize, current: &[[f64; 3]]) -> [f64; 3] {
