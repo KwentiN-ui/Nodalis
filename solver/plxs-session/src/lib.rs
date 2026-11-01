@@ -7,6 +7,7 @@
 //! several sessions can run in one process.
 
 pub mod job;
+pub mod restart;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,7 +17,7 @@ use plxs_constraints::ModelConstraints;
 use plxs_core::state::Snapshot;
 use plxs_core::{CancelToken, Error, Model, Progress, ProgressEvent, Result, Results, State, Step};
 use plxs_linalg::{LdltSolver, Pattern};
-use plxs_output::StaRow;
+use plxs_output::{CvgRow, StaRow};
 use plxs_procedures::{ProcedureContext, run_step};
 
 pub use job::{
@@ -58,9 +59,14 @@ pub struct Session {
     state: State,
     results: Results,
     sta: Vec<StaRow>,
+    cvg: Vec<CvgRow>,
+    average_force: Option<f64>,
+    profile: plxs_procedures::profile::Profile,
     pool: rayon::ThreadPool,
     threads: usize,
     options: SessionOptions,
+    /// [`restart::model_fingerprint`] of the model as given, before ties moved nodes.
+    fingerprint: u64,
 }
 
 impl Session {
@@ -75,6 +81,7 @@ impl Session {
             .num_threads(threads)
             .build()
             .map_err(|e| Error::Unsupported(format!("thread pool: {e}")))?;
+        let fingerprint = restart::model_fingerprint(&model);
         // Ties move their slave nodes before anything uses the coordinates.
         let mut model = model;
         let constraints = ModelConstraints::new(&mut model)?;
@@ -110,9 +117,13 @@ impl Session {
             state,
             results: Results::default(),
             sta: Vec::new(),
+            cvg: Vec::new(),
+            average_force: None,
+            profile: Default::default(),
             pool,
             threads,
             options,
+            fingerprint,
         })
     }
 
@@ -135,25 +146,31 @@ impl Session {
             threads: self.threads,
             step_number,
             sta: std::mem::take(&mut self.sta),
+            cvg: std::mem::take(&mut self.cvg),
+            average_force: self.average_force,
             work_dir: self.options.work_dir.clone(),
             cancel: self.options.cancel.clone(),
+            profile: std::mem::take(&mut self.profile),
         };
         // The procedure runs on the session's pool in a thread of its own; events come
         // through a channel so that the caller's (not necessarily `Send`) progress sink
         // sees them as they happen.
         let (tx, rx) = std::sync::mpsc::channel::<ProgressEvent>();
         let pool = &self.pool;
-        let (outcome, stiffness, solver, sta) = std::thread::scope(|scope| {
+        let (outcome, back) = std::thread::scope(|scope| {
             let handle = scope.spawn(move || {
                 let mut ctx = ctx;
                 let mut sink = ChannelProgress(tx);
                 let outcome = pool.install(|| run_step(&mut ctx, step, &mut sink));
-                (
-                    outcome,
-                    ctx.stiffness.take(),
-                    ctx.solver,
-                    std::mem::take(&mut ctx.sta),
-                )
+                let back = Carried {
+                    stiffness: ctx.stiffness.take(),
+                    solver: ctx.solver,
+                    sta: std::mem::take(&mut ctx.sta),
+                    cvg: std::mem::take(&mut ctx.cvg),
+                    average_force: ctx.average_force,
+                    profile: std::mem::take(&mut ctx.profile),
+                };
+                (outcome, back)
             });
             for event in rx {
                 progress.event(event);
@@ -161,15 +178,23 @@ impl Session {
             handle.join().unwrap_or_else(|_| {
                 (
                     Err(Error::Unsupported("the solver thread panicked".into())),
-                    None,
-                    LdltSolver::new(1),
-                    Vec::new(),
+                    Carried {
+                        stiffness: None,
+                        solver: LdltSolver::new(1),
+                        sta: Vec::new(),
+                        cvg: Vec::new(),
+                        average_force: None,
+                        profile: Default::default(),
+                    },
                 )
             })
         });
-        self.stiffness = stiffness;
-        self.solver = solver;
-        self.sta = sta;
+        self.stiffness = back.stiffness;
+        self.solver = back.solver;
+        self.sta = back.sta;
+        self.cvg = back.cvg;
+        self.average_force = back.average_force;
+        self.profile = back.profile;
         let outcome = outcome?;
         progress.event(ProgressEvent::StepDone {
             step: step_number,
@@ -190,30 +215,102 @@ impl Session {
         &self.results
     }
 
+    /// Time per phase of the steps so far, with the symbolic analyses the direct solver
+    /// reused.
+    pub fn profile(&self) -> plxs_procedures::profile::Profile {
+        let mut profile = self.profile.clone();
+        profile.analyses_reused = self.solver.analyses_reused();
+        profile
+    }
+
     /// Rows of the `.sta` file so far.
     pub fn sta_rows(&self) -> &[StaRow] {
         &self.sta
     }
 
-    /// The state with a fingerprint of the model, for `*RESTART, WRITE`.
+    /// Rows of the `.cvg` file so far.
+    pub fn cvg_rows(&self) -> &[CvgRow] {
+        &self.cvg
+    }
+
+    /// Number of steps computed so far, including those of a resumed snapshot.
+    pub fn steps_done(&self) -> u32 {
+        self.state.steps_done
+    }
+
+    /// The state after the last step with the model's fingerprint and what the session
+    /// carries to the next step: what `*RESTART, WRITE` stores and a state link hands on.
+    /// Taken after every step it costs a copy of the state.
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
-            model_fingerprint: fingerprint(&self.model),
+            model_fingerprint: self.fingerprint,
             state: self.state.clone(),
+            average_force: self.average_force,
         }
     }
 
-    /// Continues from a snapshot of the same model.
+    /// Continues from a snapshot: the model must be the one the snapshot was taken of (sets,
+    /// surfaces and amplitudes may be new), the next step is the one after the snapshot's.
+    /// The results of the earlier steps are not part of the session; they stay with the
+    /// caller.
     pub fn resume(model: Model, snapshot: Snapshot, options: SessionOptions) -> Result<Session> {
-        if fingerprint(&model) != snapshot.model_fingerprint {
+        if restart::model_fingerprint(&model) != snapshot.model_fingerprint {
             return Err(Error::Unsupported(
-                "the restart file belongs to another model".into(),
+                "the restart state belongs to another model: nodes, elements, materials, \
+                 sections, constraints or contact changed"
+                    .into(),
             ));
         }
         let mut session = Session::new(model, options)?;
+        check_layout(&session.model, &snapshot.state)?;
         session.state = snapshot.state;
+        session.average_force = snapshot.average_force;
         Ok(session)
     }
+}
+
+/// A state that does not fit the model would index out of bounds in the procedures.
+fn check_layout(model: &Model, state: &State) -> Result<()> {
+    let nodes = model.nodes.len();
+    let elements = model.elements.len();
+    let nodal = |name: &str, field: Option<&plxs_core::state::NodalField>| -> Result<()> {
+        match field {
+            Some(f) if f.per_node == 0 || f.values.len() != nodes * f.per_node => {
+                Err(Error::Unsupported(format!(
+                    "the restart state does not fit the model: {name} for {} nodes, the model has {nodes}",
+                    f.values.len() / f.per_node.max(1)
+                )))
+            }
+            _ => Ok(()),
+        }
+    };
+    nodal("displacements", Some(&state.displacements))?;
+    nodal("velocities", state.velocities.as_ref())?;
+    nodal("accelerations", state.accelerations.as_ref())?;
+    nodal("temperatures", state.temperatures.as_ref())?;
+    for (name, field) in [
+        ("stresses", &state.stresses),
+        ("strains", &state.strains),
+        ("material state", &state.material),
+    ] {
+        if !field.offsets.is_empty() && field.offsets.len() != elements + 1 {
+            return Err(Error::Unsupported(format!(
+                "the restart state does not fit the model: {name} of {} elements, the model has {elements}",
+                field.offsets.len() - 1
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// What a step hands back to the session besides its outcome.
+struct Carried {
+    stiffness: Option<plxs_linalg::SparseMatrix>,
+    solver: LdltSolver,
+    sta: Vec<StaRow>,
+    cvg: Vec<CvgRow>,
+    average_force: Option<f64>,
+    profile: plxs_procedures::profile::Profile,
 }
 
 /// Forwards events into a channel.
@@ -223,23 +320,4 @@ impl Progress for ChannelProgress {
     fn event(&mut self, event: ProgressEvent) {
         let _ = self.0.send(event);
     }
-}
-
-/// A hash of the model's nodes, elements and sections.
-fn fingerprint(model: &Model) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    model.nodes.ids.hash(&mut h);
-    for c in &model.nodes.coordinates {
-        for v in c {
-            v.to_bits().hash(&mut h);
-        }
-    }
-    for e in &model.elements {
-        e.id.hash(&mut h);
-        e.kind.name().hash(&mut h);
-        e.nodes.hash(&mut h);
-    }
-    model.sections.len().hash(&mut h);
-    h.finish()
 }

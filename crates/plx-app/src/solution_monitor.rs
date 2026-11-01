@@ -483,10 +483,10 @@ impl BackgroundSolve {
         };
         // Kept as the analysis window keeps them, beside the GUI.
         let (sender, receiver) = std::sync::mpsc::channel();
-        // The eigenmodes of a frequency step go with CalculiX's results, for analyses that
-        // take them; the built-in solver's results file holds all it computed.
+        // The eigenmodes of a frequency step go with them, for analyses that take them; the
+        // built-in solver's results file holds the fields and the history output.
         let extensions: &[&str] = if plx_results::solver::is_solver_results(&results_file) {
-            &["inp"]
+            &["inp", "eig"]
         } else {
             &["inp", "dat", "eig"]
         };

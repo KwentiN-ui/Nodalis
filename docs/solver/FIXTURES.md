@@ -73,7 +73,7 @@ Treffer gewinnt:
 | `dynamic` | M3 | T13 | *DYNAMIC (implizit, Rayleigh), *INITIAL CONDITIONS, TYPE=VELOCITY |
 | `modal` | M3 | T14 | *MODAL DYNAMICS, *STEADY STATE DYNAMICS, *MODAL DAMPING, *COMPLEX FREQUENCY mit Coriolis (`.eig` aus *FREQUENCY, STORAGE=YES) |
 | `cyclic` | M3 | T15 | *CYCLIC SYMMETRY MODEL, *SELECT CYCLIC SYMMETRY MODES, *SUBMODEL (`submodel` hat kein Golden File, weil es die `.frd` des Globalmodells braucht; der Thread baut sich den Zweischritt lokal) |
-| `sensitivity` | ccx | – | *SENSITIVITY wurde für Phase 1 gestrichen; die Fixture prüft nur, dass der Parser sie liest |
+| `sensitivity` | M3 | T17 | *SENSITIVITY mit MASS, STRAINENERGY, EIGENFREQUENCY und linearem Filter (Klasse B: ccx differenziert per Finite Differenzen); STRAINENERGY weicht dokumentiert ab (`deviations`) |
 
 Drei Fixtures (`modal/modal`, `dynamic/dynamik`, `dynamic/dynamik_gedaempft`) haben kein
 Golden File im Repo, weil es mit Hunderten von Inkrementen 3 bis 7 MB groß wäre; der
@@ -181,13 +181,16 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `cyclic/submodel` | A | M3 | none | \*SUBMODEL, C3D8, \*STATIC |
 | `dynamic/anfangsdrehung` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*INITIAL CONDITIONS, \*DYNAMIC |
 | `dynamic/anfangsgeschwindigkeit` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*INITIAL CONDITIONS, \*DYNAMIC |
+| `dynamic/dynamik-automatisch` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*DYNAMIC |
+| `dynamic/dynamik-kurz` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*DYNAMIC, \*DAMPING |
 | `dynamic/dynamik` | E | M3 | none | C3D20R, \*AMPLITUDE, \*DYNAMIC |
 | `dynamic/dynamik_gedaempft` | E | M3 | none | C3D20R, \*AMPLITUDE, \*DYNAMIC, \*DAMPING |
+| `dynamic/statisch-dynamisch` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*STATIC, \*DYNAMIC |
 | `eigen/beulen` | A | M2 | ccx 2.21 | C3D20R, \*BUCKLE |
 | `eigen/beulform` | A | M2 | ccx 2.21 | C3D20R, \*BUCKLE |
 | `eigen/deaktiviert` | A | M2 | ccx 2.21 | C3D20R, \*FREQUENCY |
 | `eigen/eigenfrequenz` | A | M2 | ccx 2.21 | C3D20R, \*STATIC, \*FREQUENCY |
-| `eigen/vorspannung-beulen` | A | M2 | ccx 2.21 | C3D20R, \*STATIC, \*BUCKLE |
+| `eigen/vorspannung-beulen` | B | M2 | ccx 2.21 | C3D20R, \*STATIC, \*BUCKLE |
 | `heat/amplitude_temperature` | A | M2 | ccx 2.21 | C3D8, \*EXPANSION, \*CONDUCTIVITY, \*SPECIFIC HEAT, \*AMPLITUDE, \*HEAT TRANSFER, \*CFLUX |
 | `heat/amplitudes_thermal` | B | M2 | ccx 2.21 | C3D8, \*PHYSICAL CONSTANTS, \*EXPANSION, \*CONDUCTIVITY, \*SPECIFIC HEAT, \*AMPLITUDE, \*HEAT TRANSFER, \*CFLUX, \*DFLUX, \*FILM, \*RADIATE |
 | `heat/film-2d` | A | M2 | ccx 2.21 | CPS8, \*CONDUCTIVITY, \*HEAT TRANSFER, \*CFLUX, \*FILM |
@@ -205,6 +208,7 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `loads/gravity` | A | M2 | ccx 2.21 | C3D8, \*STATIC |
 | `loads/gravity_c3d20r` | A | M2 | ccx 2.21 | C3D20R, \*STATIC |
 | `loads/moving` | A | M2 | ccx 2.21 | C3D8, \*STATIC |
+| `modal/modal-kurz` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*FREQUENCY, \*MODAL DYNAMICS, \*MODAL DAMPING, \*STEADY STATE DYNAMICS |
 | `modal/modal` | E | M3 | none | C3D20R, \*AMPLITUDE, \*FREQUENCY, \*MODAL DYNAMICS, \*MODAL DAMPING, \*STEADY STATE DYNAMICS |
 | `modal/rotor-perturbation-false` | A | M3 | ccx 2.21 | C3D8, \*STATIC, \*FREQUENCY, \*COMPLEX FREQUENCY |
 | `modal/rotor-perturbation-true` | A | M3 | ccx 2.21 | C3D8, \*STATIC, \*FREQUENCY, \*COMPLEX FREQUENCY |
@@ -219,6 +223,9 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `nonlinear/gap_stuetzen` | B | M2 | ccx 2.21 | C3D8, GAPUNI, \*GAP, \*STATIC, NLGEOM |
 | `nonlinear/kriechen` | B | M2 | ccx 2.21 | C3D8, \*CREEP, \*STATIC, \*VISCO |
 | `nonlinear/membran-vorgespannt` | B | M2 | ccx 2.21 | M3D4, \*MEMBRANE SECTION, \*STATIC, NLGEOM |
+| `nonlinear/plastisch-history` | B | M2 | ccx 2.21 | C3D8, \*PLASTIC, \*STATIC, \*EL PRINT, \*NODE PRINT |
+| `nonlinear/plastisch-kinematisch` | B | M2 | ccx 2.21 | C3D8, \*PLASTIC, \*STATIC |
+| `nonlinear/plastisch-nlgeom` | B | M2 | ccx 2.21 | C3D8, \*PLASTIC, \*STATIC, NLGEOM |
 | `nonlinear/plastisch` | B | M2 | ccx 2.21 | C3D8, \*PLASTIC, \*STATIC |
 | `plane/ebene-cax3` | A | M2 | ccx 2.21 | CAX3, \*STATIC |
 | `plane/ebene-cax4` | A | M2 | ccx 2.21 | CAX4, \*STATIC |
@@ -246,7 +253,9 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `plane/rohr-innendruck` | A | M2 | ccx 2.21 | CAX8, \*STATIC |
 | `plane/rohr-zug` | A | M2 | ccx 2.21 | CAX8, \*STATIC |
 | `plane/symmetrie-2d-0` | A | M2 | ccx 2.21 | CPS8, \*STATIC |
-| `sensitivity/sensitivitaet-frequenz` | A | ccx | ccx 2.21 | C3D8, \*DESIGN VARIABLES, \*FREQUENCY, \*SENSITIVITY, \*DESIGN RESPONSE |
+| `sensitivity/sensitivitaet-filter` | B | M3 | ccx 2.21 | C3D8, \*DESIGN VARIABLES, \*STATIC, \*SENSITIVITY, \*DESIGN RESPONSE, \*FILTER |
+| `sensitivity/sensitivitaet-frequenz` | B | M3 | ccx 2.21 | C3D8, \*DESIGN VARIABLES, \*FREQUENCY, \*SENSITIVITY, \*DESIGN RESPONSE |
+| `sensitivity/sensitivitaet` | B | M3 | ccx 2.21 | C3D8, \*DESIGN VARIABLES, \*STATIC, \*SENSITIVITY, \*DESIGN RESPONSE |
 | `static/amplitude_hold_ref` | A | M1 | ccx 2.21 | C3D8, \*STATIC |
 | `static/amplitude_reference` | A | M1 | ccx 2.21 | C3D8, \*STATIC |
 | `static/block` | A | M1 | ccx 2.21 | C3D20R, \*STATIC |

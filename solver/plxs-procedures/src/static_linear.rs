@@ -1,6 +1,7 @@
 //! `*STATIC` without geometric nonlinearity: one linear solve at the end of the step, loads
 //! and prescribed displacements scaled by their amplitudes at the step's end time.
 
+use crate::profile::Phase;
 use plxs_assembly::discrete::{DiscreteElement, DiscreteKind};
 use plxs_assembly::{
     ElementTable, Spc, assemble_stiffness, load_vector, rotate_concentrated_loads,
@@ -45,6 +46,7 @@ impl Procedure for StaticLinear {
             let mut k = SparseMatrix::zeros(ctx.pattern.clone());
             ctx.table.require_elastic()?;
             assemble_stiffness(ctx.table, ctx.model, &mut k);
+            ctx.profile.add(crate::profile::Phase::Assembly, started);
             ctx.stiffness = Some(k);
             progress.event(ProgressEvent::Info(format!(
                 "stiffness assembled in {:.2} s",
@@ -203,16 +205,20 @@ impl StaticLinear {
                 if factored.as_ref() != Some(&closed) {
                     let started = std::time::Instant::now();
                     let k_red = set.reduce(k_now);
+                    ctx.profile.add(Phase::Reduction, started);
+                    let analysis = std::time::Instant::now();
                     let coordinates = (set.free.iter())
                         .map(|&dof| ctx.model.nodes.coordinates[dof as usize / 3])
                         .collect();
                     ctx.solver.set_coordinates(Some(coordinates));
                     ctx.solver.analyze(k_red.pattern())?;
+                    ctx.profile.add(Phase::Analysis, analysis);
                     progress.event(ProgressEvent::Info(format!(
                         "factor: {} nonzeros, ordered in {:.2} s",
                         ctx.solver.factor_nonzeros().unwrap_or(0),
                         started.elapsed().as_secs_f64()
                     )));
+                    let factorization = std::time::Instant::now();
                     ctx.solver.factorize(&k_red).map_err(|e| match e {
                         Error::Numerical { message, .. } => Error::Numerical {
                             step: ctx.step_number,
@@ -223,6 +229,7 @@ impl StaticLinear {
                         },
                         other => other,
                     })?;
+                    ctx.profile.add(Phase::Factorization, factorization);
                     progress.event(ProgressEvent::Info(format!(
                         "stiffness factorized in {:.2} s",
                         started.elapsed().as_secs_f64()
@@ -241,6 +248,7 @@ impl StaticLinear {
                 v = set.reduce_rhs(&rhs_full);
                 let started = std::time::Instant::now();
                 ctx.solver.solve(&mut v)?;
+                ctx.profile.add(Phase::Solve, started);
                 progress.event(ProgressEvent::Info(format!(
                     "solved in {:.2} s",
                     started.elapsed().as_secs_f64()
@@ -277,6 +285,7 @@ impl StaticLinear {
                 converged: true,
             });
 
+            let results_started = std::time::Instant::now();
             integration_point_results(ctx.table, ctx.model, &u, &mut strains, &mut stresses);
             if let (Some(th), Some(e)) = (&thermal, &thermal_strains) {
                 th.correct_stresses(e, &mut stresses);
@@ -295,7 +304,7 @@ impl StaticLinear {
 
             if writes_increment(step, increment, count) {
                 write_increment(
-                    ctx, step, increment, time, total, &u, &reactions, &stresses, &strains,
+                    ctx, step, increment, time, total, &u, &reactions, &stresses, &strains, None,
                 )?;
                 crate::thermal::insert_temperatures(ctx, step, t.as_deref());
             }
@@ -311,7 +320,9 @@ impl StaticLinear {
                 &reactions,
                 &stresses,
                 &strains,
+                None,
             );
+            ctx.profile.add(Phase::Results, results_started);
             ctx.sta.push(StaRow {
                 step: ctx.step_number,
                 increment,
@@ -340,6 +351,11 @@ impl StaticLinear {
 /// Whether the field output of an increment is written: every `FREQUENCY`-th increment
 /// (the smallest frequency of the requests), the last one always.
 pub(crate) fn writes_increment(step: &Step, increment: u32, count: u32) -> bool {
+    writes_increment_at(step, increment, increment == count)
+}
+
+/// Whether the field output of an increment is written when `last` says it is the last one.
+pub fn writes_increment_at(step: &Step, increment: u32, last: bool) -> bool {
     let frequency = step
         .outputs
         .node_file
@@ -349,7 +365,7 @@ pub(crate) fn writes_increment(step: &Step, increment: u32, count: u32) -> bool 
         .map(|o| o.frequency.max(1))
         .min()
         .unwrap_or(1);
-    increment == count || increment.is_multiple_of(frequency)
+    last || increment.is_multiple_of(frequency)
 }
 
 /// Strains and stresses at the integration points of every element.

@@ -182,25 +182,64 @@ pub fn from_solver(solved: &SolverResults) -> SolverImport {
     }
 
     let mesh = &import.mesh;
+    // The step, set and increment of the last buckling data set, see `buckling` below.
+    let mut buckling: Option<(u32, usize, u32)> = None;
+    // Eigenfrequency sensitivities of each step so far.
+    let mut senfreq: BTreeMap<u32, u32> = BTreeMap::new();
     for (ordinal, written) in solved.results.increments.iter().enumerate() {
-        let kind = match written.kind {
-            IncrementKind::Time => AnalysisKind::Static,
-            IncrementKind::Dynamic => AnalysisKind::Dynamic,
-            IncrementKind::Frequency => AnalysisKind::Frequency,
-            IncrementKind::Buckling => AnalysisKind::Buckling,
-            IncrementKind::ComplexFrequency => AnalysisKind::ComplexFrequency,
-        };
-        // Time increments carry the total time, modes their frequency or load factor.
+        // The `.frd` block header: time increments carry the total time, the others their
+        // frequency, load factor or value; the data sets are counted from 1.
         let value = match written.kind {
             IncrementKind::Time | IncrementKind::Dynamic => written.total_time,
             _ => written.value,
         };
-        // An increment counted 0 takes the number the `.frd` block header gives it.
-        let increment = match (written.increment, written.kind) {
-            (0, IncrementKind::Time | IncrementKind::Dynamic) => ordinal as u32 + 1,
-            (number, _) => number,
-        };
-        let fields = written.fields.iter().map(|field| {
+        let set = ordinal as u32 + 1;
+        let modal = matches!(
+            written.kind,
+            IncrementKind::Frequency | IncrementKind::ComplexFrequency
+        );
+        let nodal_diameter = written.nodal_diameter.filter(|_| modal);
+        for field in &written.fields {
+            // Numbered as the `.frd` reader numbers the blocks (`plx-io::frd`).
+            let sensitivity = field.name == "NORM" || field.name.starts_with("SEN");
+            let kind = match written.kind {
+                IncrementKind::Time => AnalysisKind::Static,
+                IncrementKind::Dynamic | IncrementKind::SteadyState => AnalysisKind::Dynamic,
+                IncrementKind::Frequency => AnalysisKind::Frequency,
+                IncrementKind::Buckling => AnalysisKind::Buckling,
+                IncrementKind::ComplexFrequency => AnalysisKind::ComplexFrequency,
+                IncrementKind::Sensitivity if sensitivity => AnalysisKind::Sensitivity,
+                IncrementKind::Sensitivity => AnalysisKind::Other(3),
+            };
+            let header_increment = match written.kind {
+                IncrementKind::SteadyState | IncrementKind::ComplexFrequency => 0,
+                _ => written.increment,
+            };
+            let increment = match kind {
+                // Each nodal diameter counts its modes anew; cosine and sine part come in
+                // pairs, of which the first is kept.
+                AnalysisKind::Frequency if nodal_diameter.is_some() => set.div_ceil(2),
+                AnalysisKind::Frequency | AnalysisKind::ComplexFrequency => written.increment,
+                // The static solution of a buckle step (value 0) is increment 0, the modes
+                // count from 1 by data set.
+                AnalysisKind::Buckling => {
+                    let number = match buckling {
+                        Some((step, at, number)) if step == written.step && at == ordinal => number,
+                        Some((step, _, number)) if step == written.step => number + 1,
+                        _ => u32::from(value != 0.0),
+                    };
+                    buckling = Some((written.step, ordinal, number));
+                    number
+                }
+                AnalysisKind::Sensitivity if field.name == "SENFREQ" => {
+                    let count = senfreq.entry(written.step).or_default();
+                    *count += 1;
+                    *count
+                }
+                // Steady state points are told apart by the data set number only.
+                _ if header_increment == 0 => set,
+                _ => header_increment,
+            };
             let index: Vec<Option<usize>> =
                 field.nodes.iter().map(|&id| mesh.node_index(id)).collect();
             let components = (field.components.iter().zip(&field.values))
@@ -218,22 +257,26 @@ pub fn from_solver(solved: &SolverResults) -> SolverImport {
                     }
                 })
                 .collect();
-            let mut field = Field::new(field.name.clone(), components);
-            add_derived_components(&mut field);
-            field
-        });
-        let target = (import.increments.iter_mut())
-            .find(|i| i.step == written.step && i.increment == increment && i.kind == kind);
-        match target {
-            Some(target) => target.fields.extend(fields),
-            None => import.increments.push(Increment {
-                step: written.step,
-                increment,
-                kind,
-                value,
-                fields: fields.collect(),
-                nodal_diameter: written.nodal_diameter,
-            }),
+            let mut converted = Field::new(field.name.clone(), components);
+            add_derived_components(&mut converted);
+            let target = (import.increments.iter_mut())
+                .find(|i| i.step == written.step && i.increment == increment && i.kind == kind);
+            match target {
+                Some(target) => {
+                    if target.value == 0.0 {
+                        target.value = value;
+                    }
+                    target.fields.push(converted);
+                }
+                None => import.increments.push(Increment {
+                    step: written.step,
+                    increment,
+                    kind,
+                    value,
+                    fields: vec![converted],
+                    nodal_diameter,
+                }),
+            }
         }
     }
     import

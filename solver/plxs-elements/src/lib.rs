@@ -12,12 +12,14 @@
 pub mod expand;
 pub mod heat;
 pub mod membrane;
+pub mod nonlinear;
 pub mod plane;
 pub mod shape;
 pub mod solid;
 pub mod u1;
 
 pub use heat::FacePoint;
+pub use nonlinear::PointKinematics;
 pub use plane::{PlaneKind, expanded_type, plane};
 pub use shape::{Face, Family, IntegrationRule};
 pub use solid::{Formulation, ReportedNodal, SolidElement, solid};

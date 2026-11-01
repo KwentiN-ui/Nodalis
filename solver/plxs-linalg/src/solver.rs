@@ -1,17 +1,22 @@
-//! Direct solvers on `faer`: LDLᵀ for symmetric systems. The symbolic analysis (AMD
-//! ordering, elimination tree, supernodes) is done once per pattern and reused for every
-//! numeric factorization with the same pattern.
+//! Direct solvers on `faer`: LDLᵀ for symmetric systems. The symbolic analysis (ordering,
+//! elimination tree, supernodes; `faer`'s) is done once per pattern and reused for every
+//! numeric factorization with the same pattern. Supernodal structures are factorized by the
+//! tree-parallel method of [`crate::supernodal`], small (simplicial) ones by
+//! `faer`.
 
 use faer::Side;
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::ldlt::factor::LdltRegularization;
+use faer::sparse::linalg::SupernodalThreshold;
 use faer::sparse::linalg::cholesky::{
-    CholeskySymbolicParams, SymbolicCholesky, SymmetricOrdering, factorize_symbolic_cholesky,
+    CholeskySymbolicParams, SymbolicCholesky, SymbolicCholeskyRaw, SymmetricOrdering,
+    factorize_symbolic_cholesky, supernodal::SupernodalLdltRef,
 };
 use faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
 
 use plxs_core::{Error, Result};
 
+use crate::supernodal::{self, Regularization, TreeSymbolic, Workspace};
 use crate::{Pattern, SparseMatrix};
 
 /// A direct or iterative solver of `K x = b`.
@@ -37,8 +42,24 @@ pub struct LdltSolver {
     /// Positions of the unknowns of the next `analyze`, for the geometric dissection.
     coordinates: Option<Vec<[f64; 3]>>,
     symbolic: Option<SymbolicCholesky<u32>>,
+    /// The pattern `symbolic` belongs to: an `analyze` of the same pattern is skipped (the
+    /// Newton iterations of a step and the steps of a model share one).
+    analyzed: Option<Pattern>,
+    reused: u32,
+    /// Elimination tree and permuted structure for the tree-parallel factorization, when
+    /// the symbolic analysis chose the supernodal structure.
+    tree: Option<TreeSymbolic>,
+    /// Scratch buffers of the factorization, reused over refactorizations.
+    workspace: Workspace,
+    /// When `faer` chooses the supernodal over the simplicial structure.
+    supernodal_threshold: SupernodalThreshold,
     values: Vec<f64>,
     factorized: bool,
+    /// Relative threshold below which a pivot is replaced by `±threshold · scale` (its sign
+    /// kept); `0.0` means none. Indefinite matrices (`K − σM` with `σ` inside the spectrum,
+    /// the Sturm checks of the eigensolvers) can meet pivots that are exactly zero without
+    /// being singular, which LDLᵀ without pivoting cannot pass otherwise.
+    regularization: f64,
 }
 
 impl LdltSolver {
@@ -53,9 +74,28 @@ impl LdltSolver {
             par,
             coordinates: None,
             symbolic: None,
+            analyzed: None,
+            reused: 0,
+            tree: None,
+            workspace: Workspace::default(),
+            supernodal_threshold: SupernodalThreshold::AUTO,
             values: Vec::new(),
             factorized: false,
+            regularization: 0.0,
         }
+    }
+
+    /// How many `analyze` calls were skipped because the pattern was the analyzed one.
+    pub fn analyses_reused(&self) -> u32 {
+        self.reused
+    }
+
+    /// Always uses the supernodal (tree-parallel) factorization, also for systems that
+    /// `faer` would factorize column by column; for tests of the supernodal path on small
+    /// matrices.
+    pub fn force_supernodal(mut self) -> Self {
+        self.supernodal_threshold = SupernodalThreshold::FORCE_SUPERNODAL;
+        self
     }
 
     /// Gives the positions of the unknowns (one per equation of the pattern analyzed next);
@@ -68,6 +108,13 @@ impl LdltSolver {
     /// Nonzeros of the factor after `analyze`, a measure of the work of a factorization.
     pub fn factor_nonzeros(&self) -> Option<usize> {
         self.symbolic.as_ref().map(|s| s.len_val())
+    }
+
+    /// Replaces pivots smaller than `relative` times the largest diagonal entry by that
+    /// value with the pivot's sign (dynamic regularization), for indefinite matrices.
+    /// `0.0` switches it off (the default: a zero pivot is then an error).
+    pub fn set_regularization(&mut self, relative: f64) {
+        self.regularization = relative;
     }
 
     fn symbolic_matrix(pattern: &Pattern) -> SymbolicSparseColMatRef<'_, u32> {
@@ -91,6 +138,13 @@ fn numerical(message: impl Into<String>) -> Error {
 
 impl LinearSolver for LdltSolver {
     fn analyze(&mut self, pattern: &Pattern) -> Result<()> {
+        if self.symbolic.is_some() && self.analyzed.as_ref() == Some(pattern) {
+            // The factor of the previous values stays valid until the next factorize; the
+            // ordering of the pattern stays too.
+            self.coordinates = None;
+            self.reused += 1;
+            return Ok(());
+        }
         let matrix = Self::symbolic_matrix(pattern);
         // Nested dissection for large systems (it fills three-dimensional meshes far less
         // than AMD, see `ordering`), AMD for small ones, where it is as good and cheaper.
@@ -115,11 +169,28 @@ impl LinearSolver for LdltSolver {
             matrix,
             Side::Upper,
             ordering,
-            CholeskySymbolicParams::default(),
+            CholeskySymbolicParams {
+                supernodal_flop_ratio_threshold: self.supernodal_threshold,
+                ..Default::default()
+            },
         )
         .map_err(|e| numerical(format!("symbolic factorization failed: {e:?}")))?;
         self.values = vec![0.0; symbolic.len_val()];
+        // The zeroed allocation is mapped lazily; writing it once here takes its page faults
+        // in one thread. Taken by the threads of the factorization at once they cost several
+        // times more (the kernel serializes them; measured in the cloud VM: 1.9 GB of factor
+        // 1.1 s here against about 3 s inside the parallel factorization).
+        self.values.fill(0.0);
+        self.workspace.clear();
+        self.tree = match symbolic.raw() {
+            SymbolicCholeskyRaw::Supernodal(raw) => {
+                let inverse = symbolic.perm().map(|perm| perm.arrays().1);
+                Some(TreeSymbolic::new(raw, pattern, inverse))
+            }
+            SymbolicCholeskyRaw::Simplicial(_) => None,
+        };
         self.symbolic = Some(symbolic);
+        self.analyzed = Some(pattern.clone());
         self.factorized = false;
         Ok(())
     }
@@ -130,25 +201,60 @@ impl LinearSolver for LdltSolver {
             .as_ref()
             .ok_or_else(|| numerical("factorize before analyze"))?;
         let pattern = matrix.pattern();
-        let a = SparseColMatRef::new(Self::symbolic_matrix(pattern), matrix.values());
-        let scratch = symbolic.factorize_numeric_ldlt_scratch::<f64>(self.par, Default::default());
-        let mut buffer = MemBuffer::try_new(scratch)
-            .map_err(|_| numerical("out of memory in the factorization"))?;
-        symbolic
-            .factorize_numeric_ldlt::<f64>(
-                &mut self.values,
-                a,
-                Side::Upper,
-                LdltRegularization {
-                    dynamic_regularization_signs: None,
-                    dynamic_regularization_delta: 0.0,
-                    dynamic_regularization_epsilon: 0.0,
-                },
-                self.par,
-                MemStack::new(&mut buffer),
-                Default::default(),
-            )
-            .map_err(|e| numerical(format!("the stiffness matrix is singular: {e:?}")))?;
+        let threshold = if self.regularization > 0.0 {
+            let largest = matrix
+                .diagonal()
+                .iter()
+                .fold(0.0_f64, |m, v| m.max(v.abs()))
+                .max(f64::MIN_POSITIVE);
+            self.regularization * largest
+        } else {
+            0.0
+        };
+        // The tree-parallel factorization for supernodal structures (`PLXS_FACTOR=faer`
+        // falls back to faer's own, for measurements);
+        // faer's simplicial factorization for the small systems it chose that for.
+        let own = std::env::var("PLXS_FACTOR").as_deref() != Ok("faer");
+        match (symbolic.raw(), &self.tree) {
+            (SymbolicCholeskyRaw::Supernodal(raw), Some(tree)) if own => {
+                supernodal::factorize(
+                    raw,
+                    tree,
+                    matrix.values(),
+                    &mut self.values,
+                    Regularization {
+                        signs: None,
+                        delta: threshold,
+                        epsilon: threshold,
+                    },
+                    self.par,
+                    &self.workspace,
+                )
+                .map_err(|e| numerical(format!("the stiffness matrix is singular: {e:?}")))?;
+            }
+            _ => {
+                let a = SparseColMatRef::new(Self::symbolic_matrix(pattern), matrix.values());
+                let scratch =
+                    symbolic.factorize_numeric_ldlt_scratch::<f64>(self.par, Default::default());
+                let mut buffer = MemBuffer::try_new(scratch)
+                    .map_err(|_| numerical("out of memory in the factorization"))?;
+                symbolic
+                    .factorize_numeric_ldlt::<f64>(
+                        &mut self.values,
+                        a,
+                        Side::Upper,
+                        LdltRegularization {
+                            dynamic_regularization_signs: None,
+                            dynamic_regularization_delta: threshold,
+                            dynamic_regularization_epsilon: threshold,
+                        },
+                        self.par,
+                        MemStack::new(&mut buffer),
+                        Default::default(),
+                    )
+                    .map_err(|e| numerical(format!("the stiffness matrix is singular: {e:?}")))?;
+            }
+        }
         self.factorized = true;
         Ok(())
     }
@@ -175,8 +281,31 @@ impl LinearSolver for LdltSolver {
         Ok(())
     }
 
+    /// The number of negative entries of `D`: by Sylvester's law of inertia the number of
+    /// negative eigenvalues of the factorized matrix, which is what the Sturm sequence
+    /// check of the eigensolvers counts (`K − σM` has as many negative pivots as there are
+    /// eigenvalues below `σ`).
     fn inertia(&self) -> Option<usize> {
-        None
+        let symbolic = self.symbolic.as_ref().filter(|_| self.factorized)?;
+        let negative = match symbolic.raw() {
+            SymbolicCholeskyRaw::Simplicial(simplicial) => {
+                // The first stored entry of every column of the factor is its diagonal, D_j.
+                let col_ptr = simplicial.col_ptr();
+                (0..simplicial.nrows())
+                    .filter(|&j| self.values[col_ptr[j] as usize] < 0.0)
+                    .count()
+            }
+            SymbolicCholeskyRaw::Supernodal(supernodal) => {
+                let ldlt = SupernodalLdltRef::new(supernodal, &self.values);
+                (0..supernodal.n_supernodes())
+                    .map(|s| {
+                        let block = ldlt.supernode(s).val();
+                        (0..block.ncols()).filter(|&j| block[(j, j)] < 0.0).count()
+                    })
+                    .sum()
+            }
+        };
+        Some(negative)
     }
 }
 
@@ -203,7 +332,10 @@ mod tests {
         for (x, expected) in b.iter().zip([1.0, 2.0, 3.0]) {
             assert!((x - expected).abs() < 1e-12, "{b:?}");
         }
-        // Refactorize with the same pattern and other values.
+        // Refactorize with the same pattern and other values; analyzing the same pattern
+        // again keeps the symbolic factorization.
+        solver.analyze(&pattern).unwrap();
+        assert_eq!(solver.analyses_reused(), 1);
         a.add(0, 0, 4.0);
         solver.factorize(&a).unwrap();
         let mut b = vec![10.0, 10.0, 8.0];
@@ -211,6 +343,55 @@ mod tests {
         for (x, expected) in b.iter().zip([1.0, 2.0, 3.0]) {
             assert!((x - expected).abs() < 1e-12, "{b:?}");
         }
+    }
+
+    #[test]
+    fn inertia_counts_negative_eigenvalues() {
+        // A = [[1, 2, 0], [2, -3, 1], [0, 1, 2]]: eigenvalues -3.98, 1.33, 2.65 -> one negative.
+        let pattern = Arc::new(Pattern::from_blocks(3, [&[0u32, 1][..], &[1, 2][..]]));
+        let mut a = SparseMatrix::zeros(pattern.clone());
+        a.add(0, 0, 1.0);
+        a.add(1, 1, -3.0);
+        a.add(2, 2, 2.0);
+        a.add(0, 1, 2.0);
+        a.add(1, 2, 1.0);
+        let mut solver = LdltSolver::new(1);
+        solver.analyze(&pattern).unwrap();
+        solver.factorize(&a).unwrap();
+        assert_eq!(solver.inertia(), Some(1));
+        // Shifted by -5: all eigenvalues negative.
+        let mut b = a.clone();
+        for i in 0..3 {
+            b.add(i, i, -5.0);
+        }
+        solver.factorize(&b).unwrap();
+        assert_eq!(solver.inertia(), Some(3));
+        // A larger banded matrix that faer factorizes supernodally: tridiagonal with 2 on
+        // the diagonal and -1 off it has eigenvalues 2 - 2 cos(kπ/(n+1)) > 0; shifted by -1
+        // the eigenvalues below 1 are those with k < (n+1)/3.
+        let n = 400usize;
+        let blocks: Vec<[u32; 2]> = (0..n as u32 - 1).map(|i| [i, i + 1]).collect();
+        let pattern = Arc::new(Pattern::from_blocks(n, blocks.iter().map(|b| &b[..])));
+        let mut t = SparseMatrix::zeros(pattern.clone());
+        for i in 0..n as u32 {
+            t.add(i, i, 1.0);
+            if i + 1 < n as u32 {
+                t.add(i, i + 1, -1.0);
+            }
+        }
+        let mut solver = LdltSolver::new(1);
+        // Without pivoting the natural order meets an exact zero pivot (1 - 1/1 = 0);
+        // regularization lets the factorization pass with the right signs.
+        solver.analyze(&pattern).unwrap();
+        assert!(solver.factorize(&t).is_err());
+        solver.set_regularization(1e-12);
+        solver.factorize(&t).unwrap();
+        let expected = (1..=n)
+            .filter(|&k| {
+                2.0 - 2.0 * (k as f64 * std::f64::consts::PI / (n as f64 + 1.0)).cos() < 1.0
+            })
+            .count();
+        assert_eq!(solver.inertia(), Some(expected));
     }
 
     #[test]

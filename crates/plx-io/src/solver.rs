@@ -82,10 +82,7 @@ mod tests {
         let name = input.file_stem().unwrap().to_string_lossy().into_owned();
         let options = plxs_session::JobOptions {
             threads: 1,
-            work_dir: dir.to_owned(),
-            name: name.clone(),
-            write_files: true,
-            cancel: plxs_core::CancelToken::new(),
+            ..plxs_session::JobOptions::new(dir, name.clone())
         };
         let text = std::fs::read_to_string(input).unwrap();
         let mut kept = None;

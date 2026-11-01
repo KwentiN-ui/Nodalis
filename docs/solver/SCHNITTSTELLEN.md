@@ -78,7 +78,7 @@ gebaut und getestet werden kann; `plxs-verify` nutzt `plx-io` nur zum Lesen von 
 
 Was die IR heute schon abdeckt, das aber erst später gerechnet wird: alle Elementtypen des
 Inventars (`ElementType`), alle Prozeduren (`Procedure`), Kontakt, zyklische Symmetrie,
-Submodelle, `*SENSITIVITY` (nur geparst; rechnet weiter mit ccx), `*RESTART`, `*CONTROLS`.
+Submodelle, `*RESTART`, `*CONTROLS`. `*SENSITIVITY` rechnet plxs seit T17 (Abschnitt „Stand nach T17“).
 
 ## Session-API (`plxs-session`, M1 T3)
 
@@ -98,6 +98,57 @@ impl Session {
 
 pub enum StepOutcome { Converged, Diverged { increment: u32, message: String }, Partial { increments: u32 } }
 ```
+
+`Snapshot { model_fingerprint, state, average_force }` (M3 T16): `average_force` ist der
+zeitgemittelte Kraftmaßstab der Residuenprüfung, den die Session von Step zu Step trägt;
+ohne ihn konvergiert ein fortgesetzter Lauf nicht genau wie der Lauf von vorn. Der
+Fingerprint deckt das Modell ohne Sets, Surfaces und Amplituden ab (ein fortsetzendes Modell
+darf solche ergänzen, siehe `KONZEPT_CCX_ABLOESUNG.md` 3.5).
+
+### Restart und Zustand (M3 T16)
+
+- `Session::snapshot()` liefert nach jedem Step den `Snapshot` (Kopie des `State`, Fingerprint,
+  `average_force`); `Session::resume(model, snapshot, options)` setzt mit dem nächsten Step
+  fort. Die Ergebnisse früherer Steps gehören nicht zur Session, sie bleiben beim Aufrufer
+  (PrePoLix hält sie gebunden, KONZEPT_CCX_ABLOESUNG 3.5).
+- `restart::model_fingerprint` ist FNV-1a über die postcard-Bytes von Knoten, Elementen,
+  Materialien, Sections, Constraints, Kontakt, Anfangsbedingungen und physikalischen
+  Konstanten: stabil über Prozesse und Rust-Versionen. Sets, Surfaces, Amplituden und
+  `*HEADING` zählen nicht, ein fortsetzendes Modell darf sie ergänzen. Der Fingerprint wird in
+  `Session::new` vom Modell genommen, wie es übergeben wird (bevor Ties Knoten verschieben).
+  `resume` prüft zusätzlich, dass die Felder des Zustands zur Knoten- und Elementzahl passen.
+- `restart::encode_snapshot`/`decode_snapshot`: Binärform (`PLXSSNAP`, Formatnummer,
+  postcard) für `<job>.s<n>.state` und gebundene Ergebnisse. Eine andere Formatnummer wird
+  abgelehnt, nicht umgewandelt (keine Migration).
+- Kommandozeile: `*RESTART, WRITE` in einem Step schreibt `<job>.rout` (`PLXSROUT`):
+  `RestartFile { analysis, snapshots }` mit dem Modell und den Steps bis zum letzten Snapshot,
+  wie gelesen (vor der Expansion von Schalen und Balken), weil eine Restart-Eingabe wie bei
+  CalculiX keine Modelldefinition hat. Gespeichert wird der Zustand am Step-Ende (`FREQUENCY`
+  > 0), `OVERLAY` behält nur den letzten. `*RESTART, READ, STEP=n` liest `<job>.rin`, liest die
+  Eingabe mit `plxs_input::read_inp_continuing` weiter (Steps ab n+1 nummeriert, Carry-over
+  vom Step n, neue Sets erlaubt), rechnet nur die neuen Steps und schreibt eine
+  eigenständige `.frd` mit absoluten Step-Nummern, wie ccx. Das Format ist plxs-eigen, eine
+  ccx-`.rout` liest plxs nicht.
+- Abnahme: `solver/plxs-cli/tests/restart.rs` setzt Kriechen, wandernde Lasten, Amplituden
+  über die Gesamtzeit und gelockerte/verriegelte Constraints nach jedem Step fort; die
+  Ergebnisse stimmen mit dem Lauf von vorn auf 1e-6 überein (praktisch bitgleich).
+
+### Profiling und Muster-Wiederverwendung (M3 T16)
+
+- `plxs_procedures::profile::Profile` misst die Wandzeit je Phase (Assemblierung,
+  Constraint-Reduktion, symbolische Analyse, Faktorisierung, Lösen, Ergebnisse) über alle
+  Steps einer Session; `ProcedureContext::profile`, `Session::profile()`. `plxs --profile`
+  oder `PLXS_PROFILE=1` druckt die Tabelle am Ende des Jobs.
+- `LdltSolver::analyze` überspringt die symbolische Analyse, wenn das Muster dasselbe ist
+  wie beim letzten Aufruf (Newton-Iterationen eines Steps, Steps desselben Modells);
+  `analyses_reused()` zählt das. Das Muster-Superset bei Kontakt (Kontaktelemente ändern das
+  Muster je Iteration) kommt mit T11.
+- Messung (Container, 4 Kerne, 24³ C3D8, 45 000 Gleichungen, NLGEOM, 4 Inkremente, 8
+  Iterationen). 2026-10-31 mit AMD: Faktorisierung 16,2 s von 20,3 s, symbolische Analyse
+  0,2 s. 2026-11-01 mit Nested Dissection und baumparallelem LDLᵀ (master): Faktorisierung
+  9,0 s von 15,3 s, die Analyse kostet einmal 2,2 s (ND ist teurer als AMD), die anderen 7
+  werden wiederverwendet; ohne Wiederverwendung wären es rund 15 s mehr. Assemblierung 2,2 s,
+  Reduktion 0,6 s, Lösen 0,6 s. Der Hebel bleibt die Faktorisierung.
 
 Ein `rayon`-Pool je Session mit `threads` Threads (Default: `OMP_NUM_THREADS`, sonst alle
 Kerne). Kein globaler Zustand: mehrere Sessions pro Prozess müssen möglich sein.
@@ -220,7 +271,7 @@ pub trait Procedure {
 // ProcedureContext: Modell, DofMap, Assembler, Solver, State, Results, Thread-Pool.
 // Static (linear), Nonlinear (Newton mit automatischer Inkrementierung nach *CONTROLS-Defaults),
 // Frequency, Buckle, Dynamic (HHT-α / explizit), HeatTransfer, Coupled/Uncoupled,
-// ModalDynamics, SteadyStateDynamics, ComplexFrequency, Visco.
+// ModalDynamics, SteadyStateDynamics, ComplexFrequency, Visco, Sensitivity (T17).
 ```
 
 ### `plxs-output` (M1 T3)
@@ -281,7 +332,8 @@ Was M1 gebaut hat und wo es von den Signaturen oben abweicht (Entscheidungen des
 - `plxs-procedures`: `run_step` verteilt auf `StaticLinear` (feste Inkremente aus
   `initial`/`period`, K und Faktorisierung einmal je Step, Reaktionen = K·u); `fields` und
   `history` bauen die Felder der `.frd` und die Blöcke der `.dat` in CalculiX-Reihenfolge.
-- `plxs-output`: `write_frd(path, model, results, version)` schreibt ASCII (binär folgt),
+- `plxs-output`: `write_frd(path, model, results, version)` schreibt ASCII, `write_frd_as(.., FrdFormat::Binary)`
+  binär (Koordinaten f64 Flag 3, Ergebnisse f32 Flag 2; CLI `plxs -o bin`, M3 T16),
   `write_dat`, `write_sta`, `write_cvg`.
 - `plxs-session`: wie oben; `run_step` führt die Prozedur auf dem Pool in einem Scoped Thread
   aus und reicht `ProgressEvent`s über einen Kanal an das (nicht `Send`-pflichtige) `progress`.
@@ -332,6 +384,75 @@ Verschiebungen stimmen auf 2e-6 überein. Die Faktorisierung dominiert: AMD erze
 (Minimum-Fill für 3D-Gitter typisch 3–5× weniger) ist der Hebel für M4, nicht die
 Assemblierung. Die Messlatte des Konzepts (ccx/PaStiX 8,7 s) stammt von anderer Hardware.
 
+## Stand nach M2 T7 (Eigenwerte und Buckling)
+
+Was T7 gebaut hat (`*FREQUENCY`, `*BUCKLE`, beide auch mit `PERTURBATION`):
+
+- `plxs-linalg`: `ShiftInvertLanczos` (`eigen.rs`) implementiert `EigenSolver` auf faer:
+  Shift-Invert-Lanczos mit voller Reorthogonalisierung (DGKS), dickem Restart und **Locking**
+  konvergierter Vektoren mit frischem Startvektor (so werden exakt entartete Eigenwerte wie die
+  beiden Biegemoden eines quadratischen Stabs alle gefunden); Sturm-Check über die Trägheit
+  der LDLᵀ-Faktorisierung (`LdltSolver::inertia`, negative Pivots). `LdltSolver` kennt jetzt
+  eine dynamische Regularisierung winziger Pivots (`set_regularization`), weil faer ohne
+  Bunch-Kaufman-Pivotisierung bei indefinitem `K − σM` an exakten Nullpivots scheitert;
+  Shifts dicht an einem Eigenwert bleiben zu vermeiden. `SparseMatrix::add_scaled` und
+  `linear_combination` für `K − σM` auf gleichem Muster.
+- `plxs-elements`: `SolidElement::mass` (konsistent, mit der **Integrationsregel des
+  Elements selbst**: C3D20R mit 2×2×2, nicht voll – nur so stimmen die ccx-Eigenwerte auf
+  7 Stellen), `geometric_stiffness` (Anfangsspannungsmatrix aus IP-Spannungen),
+  `initial_displacement_stiffness` und `linearized_strains` (total-lagrangesch, Bathe 6.3.4,
+  `B_L = B_0 + B_1(u)`); neue Regeln `tet14`, `wedge18` für Massenmatrizen von C3D10/C3D15.
+- `plxs-assembly`: `assemble_mass` (Fehler ohne `*DENSITY`), `assemble_geometric_stiffness`,
+  `assemble_tangent_stiffness` (`K + K_u(u) + K_σ(σ)`).
+- `plxs-procedures`: `eigen::FrequencyProcedure` (Shift 0 bzw. `(2π·untere Grenze)²`,
+  negative Ersatzshifts bei singulärem `K`, obere Grenze als Filter, Massennormierung,
+  Partizipationsfaktoren `Γ = φᵀ M r` für sechs Starrkörperbewegungen um den globalen
+  Ursprung auf den **freien** DOFs, effektive Modalmasse `Γ²`, STORAGE → `state.stored_modes`)
+  und `eigen::BuckleProcedure` (statische Referenzlösung als Inkrement 0, `K_σ` der
+  Beullast, `(K + λK_σ)φ = 0` über den Operator `K⁻¹K_σ` im `K`-Skalarprodukt, kleinstes
+  positives λ). `fields::build_fields` und `history::write_table` sind herausgelöst, damit
+  Prozeduren ihre Felder und `.dat`-Tabellen selbst zusammensetzen.
+- `plxs-output`: Eigenwerttabellen der `.dat` (`EigenTable`, Überschriften und Spalten wie
+  ccx, TOTAL-Zeile) als `HistoryBlock`s mit leerem `set`; `.frd` mit Lastfallnummern,
+  Modalkopfzeilen (`1PGM`/`1PGK`/`1PHID`/`1PSUBC`/`1PMODE`) und Analysetext `MODAL`.
+- `plxs-cli` schreibt `<job>.eig` (postcard von `StoredModes`), wenn ein Step STORAGE=YES
+  verlangt; `plxs-verify` vergleicht Moden als Unterräume (Vorzeichen, entartete Paare,
+  Partizipationsfaktoren invariant, siehe `compare.rs`).
+- Abnahmetest `solver/plxs-cli/tests/eigen_corpus.rs`: alle `eigen/*`-Fixtures grün.
+
+### Was von CalculiX nur durch Beobachtung bekannt ist (T7)
+
+Aus ccx-2.21-Läufen (Fixtures und Orakel-Decks mit variierter Vorlast und rechteckigem
+Querschnitt) abgelesen, kein Quelltext:
+
+- **Lastfallnummern** der `.frd`: 100 + laufende Nummer des geschriebenen Inkrements über
+  alle Steps (jeder Frequenzmode, die Beul-Referenzlösung und jeder Beulmode zählen wie ein
+  statisches Inkrement); die fünfte Spalte der `100CL`-Zeile trägt dieselbe laufende Nummer.
+  Wertspalte mit 10 signifikanten Stellen.
+- **Massenmatrix** mit der Integrationsregel des Elements (reduziert für C3D20R).
+- **Beulmoden** sind auf Einheits-Formänderungsenergie normiert: `φᵀ K φ = 1` mit der
+  Referenzsteifigkeit (Euklid-Norm der ccx-Moden exakt `1/√(φᵀKφ)` der unnormierten).
+- **Perturbation**: `K_ref = K + K_u(u_pre) + K_σ(σ_pre)` (beide Terme nötig: die
+  Eigenfrequenzen von `eigenfrequenz` stimmen nur so auf 7 Stellen). Beim Beulen mit Vorlast
+  wird die Beullast statisch mit `K_ref` gelöst (Verschiebungen auf 6 Stellen gleich), die
+  Spannung der Beullast ist das **linearisierte Inkrement** `σ_b = D B_L(u_pre) u_b`
+  (mit `B_0 u_b` liegt der Beulwert bei Vorlast 0,8 % daneben, so auf 7 Stellen: fünf
+  Orakel-Fälle mit axialer, seitlicher und Zug-Vorlast). Die Spannungen und Dehnungen der
+  Referenzlösung und der Moden eines perturbierten `*FREQUENCY` sind ebenfalls
+  `D B_L(u_pre) φ`; die **Beulformen** dagegen bekommen die linearen Dehnungen `B_0 φ`
+  (mit `B_L` wären Schubspannungen um ein Viertel falsch). Ein Restterm bis 1e-3 an den
+  Lastknoten des freien Endes ist nicht identifiziert (Fixture `vorspannung-beulen` deshalb
+  Klasse B; Eigenwerte, Referenzlösung und Modenformen stimmen auf 1e-5).
+- **FORC** von Referenzlösung und Moden ist die innere Kraft `∫ B_0ᵀ σ dV` (bei Vorlast nicht
+  der Lastvektor: die Anfangsspannungsmatrix der Vorlast fehlt darin, ccx-Werte an freien
+  Knoten entsprechend ungleich null).
+- **Lanczos-Genauigkeit**: der zweite Parameter von `*BUCKLE` (Writer: 1e-4) stoppt ccx bei
+  dicht liegenden Beulwerten bis 2e-5 vom Eigenwert entfernt; die Eigenvektoren von ccx sind
+  auf etwa 1e-5 konvergiert (Modenformen bekommen in `plxs-verify` zehnfache Toleranz). Der
+  Writer-Test `vorspannung-beulen` verlangt deshalb Genauigkeit 1e-10 und beide Moden des
+  fast entarteten Paars.
+- **Partizipationsfaktoren** werden mit den Starrkörperbewegungen um den globalen Ursprung auf
+  den freien DOFs gebildet (feste DOFs tragen nicht bei).
 ## Stand nach M2 T4 (2D-Elemente, restliche Volumenelemente)
 
 - **2D-Elemente** (`plxs-elements/src/plane.rs`): CPS/CPE/CAX 3, 4, 4R, 6, 8, 8R werden wie
@@ -588,12 +709,11 @@ ccx), dazu die Übernahmetests in `plxs-input/src/tests.rs`.
   Dehnungen konstant je Element, an den Knoten gemittelt (`ElementTable::membranes`,
   `fields::nodal_average_with`), Dickendehnung ε33 = −ν/(1 − ν)(ε11 + ε22). Quer zur Ebene
   keine Steifigkeit.
-- **Offen**: Membranen M3D4/M3D4R (weichen von jeder probierten Expansion und vom Q4 ab,
-  nur an belasteten Knoten), die genaue
+- **Offen**: die genaue
   BOX-Regel von ccx, die Knotenspannungen von PIPE (ccx extrapoliert anders als die lineare
   Querschnittsanpassung, bis 0,3 %),
   `*NODAL THICKNESS`, Druck auf Balken, U1 an Schalen-/Balkenknoten,
-  zylindrischer `*TRANSFORM` an Schalenknoten, edge-tie-m3d4 (wegen M3D4).
+  zylindrischer `*TRANSFORM` an Schalenknoten, edge-tie-m3d4 (Mechanismus, siehe unten).
 - Abnahmetest `solver/plxs-cli/tests/structural_corpus.rs` (27 von 33 grün, die offenen
   mit Grund gelistet).
 ## Stand nach M2 T6 (Constraints und MPCs)
@@ -659,6 +779,330 @@ Abnahme: `solver/plxs-cli/tests/constraints_corpus.rs` (alle `constraints/*` plu
 wie die vom Writer umgestellten). Gegencheck 30³-C3D8-Block mit Rigid Body und Moment:
 plxs 6,0 s, ccx 2.21 12,4 s (4 Threads), Verschiebungen auf 6,6e-6 gleich.
 
+## Stand nach M2 T8 (Nichtlinearität und Plastizität)
+
+Was T8 gebaut hat und wo es von den Signaturen oben abweicht:
+
+- `plxs-materials`: `MaterialLaw { state_size, is_nonlinear, stress(&MaterialInput, &mut
+  [f64]) -> MaterialOutput, elastic_matrix }` (kein `Result`, kein `thermal`: Wärme kommt mit
+  T9). `MaterialInput` trägt die Gesamtdehnung (klein oder Green-Lagrange), Temperatur, `dt`,
+  Gesamtzeit und `creep_active`; `MaterialOutput` Spannung und Tangente auf
+  Ingenieurdehnungen. `law_of(material, temperatur, finite_strain)` liefert `LinearElastic`,
+  `J2Plastic` oder `FiniteStrainJ2`. 14 Zustandsgrößen je Integrationspunkt: PEEQ, sechs
+  plastische Dehnungen (bzw. unter NLGEOM `C_p⁻¹ − 1`), sechs Rückspannungen, Kriechrate.
+- `J2Plastic` (Simo & Hughes, Box 3.2): Radial Return mit stückweise linearen Kurven,
+  isotrop/kinematisch (Prager, `ΔX = Δκ·√(2/3)·n̂`)/kombiniert, konsistente algorithmische
+  Tangente. Kombiniert: erste Zeile der Tabelle = Fließgrenze, Rest = kinematische Kurve
+  (`*CYCLIC HARDENING` kommt bei Bedarf). Kriechen als Perzyna-Überspannung mit Norton
+  `Δγ = Δt·A·t^m·(q − σ_y)^n`, implizit (geschachteltes Newton/Bisektion), nur unter `*VISCO`;
+  `*STATIC` schaltet es ab (ccx-Regel). Ohne `*PLASTIC` null Fließgrenze.
+- `FiniteStrainJ2`: multiplikative Zerlegung, logarithmische Dehnungen, Exponential-Return
+  (Simo 1992): `C = 1 + 2E`, `U = √C`, `b_e^tr = U·C_p⁻¹·U`, Hencky-Dehnung aus dem Spektrum,
+  kleine-Dehnungs-Kern darauf, `S = U⁻¹ τ U⁻¹`. Die Tangente `dS/dE` wird als zentrale
+  Differenz gebildet (12 Kernauswertungen; analytisch wäre die Ableitung der Tensorfunktionen
+  nötig). Die Fließkurve ist wahre Spannung über logarithmischer plastischer Dehnung; der
+  Zugstab trifft diese Lösung auf 1e-6.
+- `plxs-elements`: `SolidElement::nonlinear(coords, u, nlgeom, d_elastic, material, fe, ke)`:
+  Total-Lagrange, `K = ∫B_LᵀDB_L + Lᵀ(S⊗I)L`, Material-Callback je Integrationspunkt
+  (`PointKinematics`: F, E, Gewicht; `cauchy(&S)`). C3D8R mit mittleren Gradienten +
+  Hourglass, C3D8I mit effektivem Gradienten der inkompatiblen Moden (exakt für den linearen
+  Pfad; mit `nlgeom = false` reproduziert `nonlinear` genau `stiffness`).
+- `plxs-assembly`: `assemble_nonlinear(table, model, input, state, k)` liefert `f_int`,
+  Cauchy-Spannungen, Dehnungen, neue Zustandsgrößen, Flusssumme; der Zustand des
+  Inkrementanfangs bleibt unverändert, bis die Prozedur akzeptiert.
+- `plxs-procedures::nonlinear::NonlinearStatic` für `*STATIC` mit NLGEOM oder nichtlinearem
+  Material und für `*VISCO`: Newton-Raphson mit den `*CONTROLS`-Defaults (`Controls::of_step`
+  liest TIME INCREMENTATION und FIELD), automatische Inkrementierung (×1.5 nach zwei
+  schnellen Inkrementen ≤ 4 Iterationen, ×0.75 nach > 10, Cutback 0.25 bei Divergenz, 0.5
+  bei > 16 geschätzten Iterationen, maximal 5 Cutbacks, CETOL-Cutback für Kriechen), `.sta`
+  und `.cvg` je Iteration, Progress-Events Increment/Iteration/IncrementDone. SPCs und
+  MPCs (T6) werden wie in der linearen Prozedur eliminiert (`u = T v + g`, `Tᵀ K T Δv = Tᵀ r`);
+  Federn und Gaps (T6) gehen in Tangente und innere Kraft ein, ein Gap-Statuswechsel
+  erzwingt eine weitere Iteration. Vorgeschriebene Verschiebungen gehen als linearer
+  Prädiktor `Tᵀ K T Δv = Tᵀ (r − K Δg)` mit der Tangente des konvergierten Zustands in die
+  erste Iteration (sonst steht der erste Newton-Schritt auf einem stark verzerrten Zustand
+  und konvergiert nur linear). Ebene und achsensymmetrische Elemente (T4) sind in
+  nichtlinearen Steps noch nicht erlaubt (`not implemented yet`). Druck bleibt Totlast (keine
+  Folgelast); die Unterschiede zu ccx liegen bei 2 % Dehnung unter 1e-3.
+- Felder: `PE` (PEEQ, Knotenmittel), `ENER` (= ½σ:ε mit der Gesamtdehnung, wie ccx);
+  `.dat`-Blöcke `equivalent plastic strain (elem, integ.pnt.,pe)` und `internal energy
+  density (elem, integ.pnt.,energy)`, Elementblöcke vor Knotenblöcken (Reihenfolge des
+  PrePoLix-Writers; `compare_dat` vergleicht Sets nach Namen).
+- `plxs-verify`: Klasse B vergleicht nur noch das Step-Ende (auch bei gleicher
+  Inkrementanzahl: die Inkremente nach dem Fließbeginn liegen über der Toleranz), die
+  Inkrementanzahl nur als Größenordnung (Faktor 3). Skalierung je Feld über alle
+  Komponenten, nicht je Komponente.
+- Abnahmetest `solver/plxs-cli/tests/nonlinear_corpus.rs`: alle `nonlinear/*`-Fixtures
+  grün oder vom Solver mit `not implemented yet` abgelehnt; ein falsches Ergebnis fällt
+  durch. Seit dem Merge von master 14/14 grün.
+- Randbedingungen in nichtlinearen Folgeschritten laufen vom Wert am Ende des Vorschritts
+  zum neuen Wert (`Spc::start_from_previous`, aus dem Kontakt-Thread übernommen); vorher
+  wurde der Wert doppelt gezählt (`membran-vorgespannt`: U1 0,2 statt 0,1).
+
+### Membranen nativ (M3D3, M3D4)
+
+`membran-vorgespannt` (vorgespannter Streifen unter Druck, NLGEOM) lag mit der
+C3D8I-Expansion bei U3 0,0212 statt 0,0271: der expandierte Block trägt durch Biegung.
+ccx 2.21 als Blackbox (Version aus Debian, kein Quellcode gelesen):
+
+- Ein M3D4-Streifen, gelenkig gelagert, Querlast, linear: Verschiebungen 1e10, also
+  quer zur Ebene praktisch keine Steifigkeit. Die gleiche Schicht als C3D8 oder C3D8I mit
+  Mittelwert-Gleichungen trägt endlich.
+- In der Ebene ist M3D4 genau eine C3D8-Schicht, deren Dicke sich symmetrisch ändern darf
+  (Gleichungen oben + unten = 2 × Mitte, getestet für Dicke 0,01 bis 10 an einem
+  10 × 10-Element); für dünne Schichten also das Scheibenviereck mit 2 × 2 Punkten, die
+  Abweichung wächst mit (Dicke/Elementgröße)².
+- Unter NLGEOM trifft eine total-Lagrangesche Membran (Green-Lagrange, St. Venant-
+  Kirchhoff im ebenen Spannungszustand) mit **mitgehendem Druck** ccx auf 1e-5
+  (0,0270916 gegen 0,0270918); als Totlast 0,0270645.
+
+Umsetzung: `plxs_elements::membrane::Membrane` (M3D3 ein Punkt, M3D4 2 × 2), lineare
+Steifigkeit als `LinearBlock { membrane: true }`, in nichtlinearen Steps total Lagrange
+in `assemble_nonlinear` (dort jetzt auch die übrigen `LinearBlock`s wie U1, die vorher
+fehlten). Druck `P`/`P1` (+Normale) und `P2` (−Normale) über
+`plxs_assembly::membrane_pressures`; unter NLGEOM als Folgelast (Kraft auf der
+verformten Fläche, Laststeifigkeit nicht in der Tangente). Masse (konsistent) und
+GRAV/CENTRIF auf Membranen ebenfalls; vorher wurden Lasten auf M3D3 still ignoriert.
+Damit eine Membran ohne Vorspannung nicht singulär ist, bekommt sie eine winzige
+Steifigkeit gegen die Neigung der Normalverschiebung (`OUT_OF_PLANE` = 1e-9 E t
+∫∇N·∇N dA); ccx verhält sich genauso (in `edge-tie-m3d4` liegen die freien
+Membranknoten auf der Geraden zwischen festem und gekoppeltem Rand, plxs trifft sie auf
+1e-4). Der Block in `edge-tie-m3d4` hängt aber wie an einem Scharnier, seine Drehung
+legen nur diese winzigen Steifigkeiten fest; die Fixture bleibt offen.
+
+Nachtrag (Membranen II): In der Ebene ist M3D4 (M3D4R) in ccx exakt eine C3D8- (C3D8R-)
+Schicht der Membrandicke, deren Ober- und Unterseite sich in der Ebene gleich und entlang
+der Normalen symmetrisch bewegen (geprüft für Dicke 0,01 bis 10). plxs baut diese Schicht
+je Viereck auf (auf die Ebene durch den Mittelpunkt projiziert), kondensiert die
+Dickenänderung und nimmt ihre Steifigkeit für kleine Dehnungen; die Spannungen kommen aus
+den Punkten der Schicht, mit den C3D8-Gewichten extrapoliert und über die Dicke gemittelt.
+`membran-m3d4`, `membran-m3d4r` und `membran-s4r` sind damit exakt grün (3e-7). Unter
+NLGEOM bleibt die total-Lagrangesche Membran; die Differenz Schicht minus eigene
+Integration (Hourglass von M3D4R, (t/h)²-Term von M3D4) kommt als konstante Steifigkeit
+dazu, vorher von linearen Feldern wegprojiziert (sonst kostet eine Starrkörperdrehung
+eines verzerrten C3D8R Kraft).
+
+Vorspannung: `*BUCKLE` nimmt die Anfangsspannungssteifigkeit der Membranen
+(`add_membrane_geometric_stiffness`), `*FREQUENCY`/`*BUCKLE` mit PERTURBATION die
+total-Lagrangesche Tangente der Membranen und die U1-Blöcke (fehlten vorher). Gegen ccx
+2.21: vorgespannter Streifen (`membran-vorgespannt` + `*FREQUENCY, PERTURBATION`)
+858,38 statt 858,24 Hz (2e-4), Mode 3 1,5e-3; C3D8I-Platte mit M3D4-Haut unter Druck,
+Beulfaktor 1,16104 statt 1,16069 (3e-4; ohne Haut weicht plxs bei C3D8I schon um 5e-4
+ab).
+
+Offen: Druck auf Volumenelementen unter NLGEOM (bleibt Totlast, siehe oben).
+
+### Beobachtungen an CalculiX 2.21 (nur aus Ausgaben)
+
+- Mindestens zwei Iterationen je Inkrement, auch wenn die erste konvergiert.
+- `.frd`-Inkremente tragen die **Gesamtzeit** (100CL), nicht die Step-Zeit.
+- `ENER` ist ½σ:ε mit der Gesamtdehnung, nicht die elastische Energiedichte.
+- Kinematische Verfestigung: bei Entlastung bricht ccx 2.21 mit „too many cutbacks“ ab,
+  bei Lastumkehr liefert es je nach Rückkraft inkonsistente plastische Dehnungen; die
+  Fixture `plastisch-kinematisch` ist deshalb monoton (Bauschinger im Unit-Test).
+- Finite-Dehnungs-Plastizität: ccx’ Zugstab unter NLGEOM weicht von der exakten
+  Lösung (wahre Spannung über logarithmischer plastischer Dehnung) in zweiter Ordnung ab:
+  PE um +0,2 % bei 1 % Dehnung, +0,7 % bei 5 %; die Spannung auf 2e-4. plxs trifft die
+  exakte Lösung. Die Fixture `plastisch-nlgeom` lässt PEEQ deshalb aus der Feldausgabe
+  weg; S/E/U/RF stimmen auf 7e-4 (Cauchy aus Kirchhoff `τ/J`). Ein stark eingespannter
+  Biegebalken mit 1 % plastischer Dehnung weicht an der Einspannecke um 0,6 % im
+  hydrostatischen Anteil ab (Volumenänderung des plastischen Flusses zweiter Ordnung).
+- `.dat`: Blöcke in der Reihenfolge der `*EL PRINT`/`*NODE PRINT`-Karten der Eingabe.
+
+## Stand nach M3 T13 (implizite Dynamik)
+
+Was T13 gebaut hat (`*DYNAMIC` ohne `EXPLICIT`, linear elastisch, ohne `NLGEOM`):
+
+- `plxs-procedures`: `dynamic::DynamicProcedure`, HHT-α in Verschiebungsform
+  (α aus `ALPHA=`, Vorgabe −0,05, auf [−1/3, 0] begrenzt; β = (1−α)²/4, γ = ½−α),
+  Systemmatrix `M/(βΔt²) + (1+α)γ/(βΔt) C + (1+α)K` mit Rayleigh-Dämpfung `C = αM + βK`
+  aus `*DAMPING`, Randbedingungen über `ModelConstraints::step_set` (u = T v + g, wie die
+  Statik). `DIRECT` und automatische Inkremente, Anfangsgeschwindigkeiten und -drehungen
+  (`*INITIAL CONDITIONS, TYPE=VELOCITY`), Step-Folgen statisch → dynamisch → dynamisch
+  (Verschiebungen, Geschwindigkeiten, Beschleunigungen und Energie in `State`).
+  Ausgaben `U`, `V` (`VELO`), `S`, `E`, `RF` (innere Kräfte `K u`), `ENER`, `ERR`; `.dat`
+  mit `U`, `V`, `RF`, `S`, `E` (`history::write_history_with_velocities`).
+- `plxs-elements`: `SolidElement::dynamic_mass_rule` und `fully_integrated` (C3D20R → 3×3×3,
+  C3D8R → C3D8), `mass_with` für eine gewählte Regel und für expandierte 2D-Elemente (Masse
+  am 3D-Ersatz, dann kondensiert wie die Steifigkeit).
+- `plxs-assembly`: `assemble_mass_with(.., MassRule::Full | Element, ..)`; die Eigenwerte
+  behalten `MassRule::Element`.
+- `plxs-procedures::fields`: `ENER` (½σ:ε, Knotenmittel) in `build_fields` für alle
+  Prozeduren; `V` gilt nicht mehr als unbekannte Ausgabe.
+- `plxs-input`: Steps ohne `AMPLITUDE=` bekommen in `*DYNAMIC` die Sprung-Amplitude.
+- Abnahmetest `solver/plxs-cli/tests/dynamic_corpus.rs`: alle `dynamic/*`-Fixtures mit
+  Referenz grün (Abweichung ≤ 7,5e-6 relativ zur Feldnorm). `dynamik` und
+  `dynamik_gedaempft` (60 Inkremente, Goldens zu groß fürs Repo) stimmen lokal auf 6e-6 bzw.
+  7,5e-6; neu sind die kleinen Writer-Fixtures `dynamik-kurz` (Rayleigh α und β),
+  `dynamik-automatisch` und `statisch-dynamisch`.
+
+### Was von CalculiX durch Beobachtung bekannt ist (T13)
+
+Aus ccx-2.21-Läufen (Fixtures, Ein-Freiheitsgrad-Decks, Einzelelemente C3D8/C3D8R/C3D20/
+C3D20R/C3D4/C3D10/C3D6/C3D15/CPS8/CAX8 mit variiertem Δt und α) abgelesen, kein Quelltext:
+
+- **Vorgabe-Amplitude** eines `*DYNAMIC`-Steps ohne `AMPLITUDE=` ist der Sprung (STEP), nicht
+  die Rampe der Statik.
+- **Anfangsbeschleunigung**: ccx löst nicht `M a₀ = f₀ − C v₀ − K u₀`, sondern
+  `(M + (1+α)β h² K) a₀ = f₀ − C v₀ − K u₀` mit `h = Δt/10` (dem Faktor von K auf sieben
+  Stellen), **ohne** Dämpfungsterm in der Matrix. In dieser Matrix stehen Steifigkeit und
+  Masse reduzierter Elemente **voll integriert** (C3D20R wie C3D20 mit 3×3×3, C3D8R wie
+  C3D8), C3D4 nur mit einem Viertel seiner Steifigkeit; `K u₀` auf der rechten Seite ist
+  ebenfalls voll integriert (ohne das Viertel). Das hält `a₀` auch dort endlich, wo die
+  reduzierte Masse von C3D20R allein singulär ist.
+- **Massenmatrix der Zeitschritte**: konsistent mit der vollen Regel (C3D20R 3×3×3) – anders
+  als bei den Eigenwerten (Regel des Elements, T7).
+- **Automatische Inkremente** eines linearen dynamischen Steps: die ersten beiden mit der
+  Anfangsgröße, ab dem dritten jeweils ×1,5 bis zur Maximalgröße, das letzte bis zum
+  Step-Ende gekürzt; jedes Inkrement zählt in der `.sta` als zwei Iterationen.
+- **`.frd`**: Analysetyp 1 (dynamisch), Wert = Gesamtzeit, Feldreihenfolge DISP, VELO,
+  STRESS, TOSTRAIN, FORC, ENER, ERROR; FORC ist `K u`.
+- **ENER über Steps**: ein dynamischer Step integriert die Energie von null an auf die
+  Energie des vorigen Steps drauf (nach statischer Vorlast: statische Energie plus ½σ:ε des
+  dynamischen Zustands). `State::energy` trägt sie weiter. ccx verlangt `ENER` schon im
+  ersten Step, wenn ein späterer Step dynamisch ist und `ENER` ausgibt.
+
+### Bekannte Abweichungen (T13)
+
+- `*DYNAMIC, EXPLICIT` wird abgelehnt (Unsupported): das zentrale-Differenzen-Schema von ccx
+  ist nicht identifiziert (an einem Ein-Freiheitsgrad-Deck passt weder Standard-CD noch
+  HHT mit α = 0). `NLGEOM` und nichtlineare Werkstoffe in der Dynamik kommen mit T8.
+- **Vorlast**: nach einem statischen Step weichen VELO, Spannungen und Kräfte im ersten
+  dynamischen Inkrement um etwa 2e-3 ab (DISP 2e-5); die rechte Seite der
+  Anfangsbeschleunigung bei `u₀ ≠ 0` ist nicht vollständig identifiziert (volle Integration
+  ist zehnmal näher als `K u₀` des Elements). Fixture `statisch-dynamisch` vergleicht diese
+  Felder deshalb nicht (`deviations`).
+- **Anfangsgeschwindigkeit zusammen mit Rayleigh-Dämpfung**: nicht identifiziert (die
+  Zeitschritte weichen auch bei freiem `a₀` ab).
+- **C3D8I** (inkompatible Moden tragen in ccx vermutlich Masse), **CPS4/CPE4/CAX4**
+  (4e-2) sowie **Schalen und Balken** (S8R 2,5e-4, S4-Kantenkopplung 5,6e-4, B32R 5,9e-4,
+  S8 4e-5 mit Rampe) weichen in den Zeitschritten ab: die Massenkonvention der expandierten
+  Elemente ist offen. Fixtures dafür gibt es noch nicht.
+## Stand nach T17 (Sensitivity)
+
+`plxs-procedures::sensitivity` rechnet `*SENSITIVITY` mit `*DESIGN VARIABLES, TYPE=COORDINATE`
+und den Design Responses, die PrePoLix schreibt: `MASS`, `STRAINENERGY` (beide mit Element-Set)
+und `EIGENFREQUENCY` (nach `*FREQUENCY, STORAGE=YES`, die Moden kommen aus
+`State::stored_modes`), dazu `*FILTER, TYPE=LINEAR`. Andere Responses (`STRESS`, `DISPLACEMENT`
+usw.), andere Filtertypen und `NLGEOM` melden `Unsupported`. `IncrementKind::Sensitivity` (IR,
+angehängt) kennzeichnet die Datensätze; die `.frd` schreibt sie als Analyseart 3, die `.dat`
+die Tabelle `D E S I G N   R E S P O N S E   I N F O R M A T I O N`
+(`plxs_output::dat::DESIGN_RESPONSE_TABLE`, Set = Response-Namen mit Komma).
+
+Ableitungen: je Designknoten zentrale Differenzen der Elementgrößen der umliegenden Elemente
+(Schritt 1e-6 der Elementgröße), projiziert auf die Knotennormale. `MASS`: ρ dV.
+`STRAINENERGY`: ½ uᵀ dK_S u + λᵀ (dF − dK u) mit K λ = K_S u (λ = u ohne Teilmenge), dF aus
+Druck auf bewegten Flächen und Volumenlasten (GRAV, CENTRIF). `EIGENFREQUENCY`:
+φᵀ (dK − λ dM) φ je gespeicherter Mode.
+
+### Was von CalculiX durch Beobachtung bekannt ist (T17)
+
+Abgeleitet aus Orakel-Läufen mit ccx 2.21 (Kragbalken C3D8, C3D20, C3D10, gekrümmte Platte mit
+ungleichmäßigem Netz, Teilmengen, Teil-SPCs, Druck, Schwerkraft, Filter mit lokalisierter
+Sensitivität):
+
+- **Designknoten**: Knoten des Sets auf Außenflächen (Fläche keines zweiten Elements). Normale =
+  normierte Summe der **Einheits**normalen aller angrenzenden Außenflächen (nicht flächen­
+  gewichtet; Eckknoten und Mittenknoten gleich); Komponenten von DOFs mit SPC im Step werden
+  vor dem Normieren gestrichen, ganz gehaltene Knoten haben die Normale 0 und keine
+  Sensitivität.
+- **DFDN** = Ableitung / Knotenfläche, Knotenfläche = Σ ∫ N_a dA über die Außenflächen (bei
+  C3D8 ein Viertel jeder angrenzenden Fläche). `SENMASS` ist damit auf ebenen Flächen genau ρ.
+  Eckknoten quadratischer Elemente (deren ∫ N_a dA verschwindet oder negativ ist) bekommen den
+  Mittelwert der Mittenknoten auf den angrenzenden Außenkanten (C3D20 und C3D10 auf 1e-6).
+- **LENGTH GRADIENT** in der `.dat` = 2-Norm von DFDN über alle Knoten.
+- **DFDNFIL** = gefiltertes Feld, auf Länge 1 normiert; ohne Filter DFDN normiert. Linearer
+  Filter: jeder Designknoten j verteilt seinen Wert auf die Designknoten i im Radius r mit
+  Gewicht (1 − d/r) / Σ_i (1 − d/r), also **spaltenweise** normiert (auf 1e-7 getroffen;
+  zeilenweise Normierung liegt 2 % daneben).
+- **Datensätze**: NORM (Wert 0), dann je Response ein Satz `SENMASS`/`SENENER`, bei
+  `EIGENFREQUENCY` je Mode ein Satz `SENFREQ` mit der Frequenz als Wert; alle mit Inkrement 1.
+  Die `.dat` druckt je Mode eine eigene Tabelle, die übrigen Responses gemeinsam.
+- **Eigenfrequenzen**: ccx differenziert jede Mode der gespeicherten Basis einzeln. Bei
+  doppelten Eigenwerten (quadratischer Querschnitt) hängen die Einzelwerte und ihre Längen von
+  der Basis ab, die der Eigenlöser wählt; nur die Summe über das Cluster (Spur) ist invariant.
+  `plxs-verify` vergleicht dort die Summe von DFDN und lässt DFDNFIL und die Länge weg. Ohne
+  Entartung (Rechteckquerschnitt) stimmt alles auf 1e-4 (ccx' Finite Differenzen und
+  Eigenvektoren auf 1e-5), daher Toleranzklasse B für den Bereich.
+
+### Bekannte Abweichung: STRAINENERGY
+
+ccx' Strain-Energy-Sensitivität ist nicht die Ableitung seiner eigenen Response. In allen acht
+Orakel-Modellen gilt auf 1e-5: ccx = exakt − Q mit Q = Σ_ip w_ip dV_ip/ds (Formänderungs­
+energiedichte mal Ableitung des Integrationspunktvolumens), d. h. im expliziten Teil
+½ uᵀ dK u fehlt die Volumenänderung. Finite Differenzen mit ccx selbst (Knoten verschieben,
+neu rechnen) bestätigen den exakten Wert, nicht ccx' Ausgabe. Mit Element-Set verwendet ccx
+außerdem λ = u statt der Adjungierten K λ = K_S u (PrePoLix schreibt immer alle Elemente).
+plxs rechnet die exakte Ableitung; die Fixtures führen `SENENER` und
+`GRADIENT_LENGTH STRAINENERGY` als `deviations` (die `.dat`-Vergleiche beachten sie seit T17),
+`plxs-cli/tests/sensitivity_corpus.rs` prüft die Ableitung gegen Finite Differenzen.
+
+## Stand nach M3 T14 (Modalverfahren, komplexe Eigenwerte)
+
+Was T14 gebaut hat, alles auf den Moden eines vorangehenden `*FREQUENCY, STORAGE=YES`
+(`state.stored_modes`, massennormiert):
+
+- `plxs-procedures::modal::ModalDynamicsProcedure` (`*MODAL DYNAMICS`): jede Mode
+  `q̈ + 2ζω q̇ + ω² q = φᵀ f(t)`, die Last zwischen den Inkrementenden linear, jedes Inkrement
+  **exakt** integriert (Matrixexponential des Zustands `(q, q̇, p, Δp)`, gilt auch für
+  ω = 0 und überkritische Dämpfung). `U`, `V`, `S`, `E`, `RF` (`K u`), `ENER` wie in T13.
+- `modal::SteadyStateProcedure` (`*STEADY STATE DYNAMICS`, harmonisch):
+  `q = φᵀ f / (ω² − Ω² + 2iζωΩ)`, Real- und Imaginärteil als `DISP`…`FORC` und
+  `DISPI`, `STRESSI`, `TOSTRAII`, `FORCI`; `PU` → `PDISP`, `PHS` → `PSTRESS` (Betrag und
+  Phase). Amplituden sind Funktionen der Frequenz.
+- `*MODAL DAMPING`: Bereiche (Moden außerhalb ungedämpft) und Rayleigh
+  `ζ = α/(2ω) + βω/2`.
+- `complex::ComplexFrequencyProcedure` (`*COMPLEX FREQUENCY, CORIOLIS`): Coriolis-Matrix
+  `G = 2∫ρ Nᵀ Ω̃ N dV` der Elemente der `CENTRIF`-Last, `Γ = Φᵀ G Φ`, das gyroskopische
+  Problem `q̈ + Γ q̇ + Λ q = 0` über die reell schiefsymmetrische Zustandsmatrix
+  `[[0, Λ^½], [−Λ^½, −Γ]]` und deren symmetrische Einbettung doppelter Größe
+  (`plxs_linalg::dense::symmetric_eigen`, faer).
+- `eigen`: ein perturbierter Frequenzschritt bekommt zu `K + K_u + K_σ` das **Spin
+  Softening** `−ω² ∫ρ Nᵀ(I − aaᵀ)N dV` jeder `CENTRIF`-Last (`complex::add_spin_softening`).
+- `plxs-output`: `IncrementKind::SteadyState` (Analysetyp 1, Inkrement 0 im `1PSTEP`),
+  komplexe Moden mit `1PGM`/`1PGK`/… Kopf und Inkrement 0, `PDISP`/`PSTRESS`-Komponenten
+  (Typ 12 bzw. 14), `DISPI`/`FORCI` mit ALL-Zeile; `.dat`-Tabellen `COMPLEX EIGENVALUE
+  OUTPUT` und `EIGENMODE TURNING DIRECTION` (`EigenTable`).
+- `plxs-verify`: komplexe Moden werden als komplexe Vektoren aus `PDISP` nach dem besten
+  Einheits-Phasenfaktor verglichen, `DISP` als Realteil des gedrehten Kandidaten; Spannungen
+  und Dehnungen komplexer Moden nicht (Realteil einer Phase, die keiner ausschreibt).
+  `PDISP`/`PSTRESS` werden überall als `MAG·e^{iPHA}` verglichen (die Phase einer
+  Rundungsnull ist beliebig). `deviations` gilt jetzt auch für `.dat`-Komponenten.
+- Abnahmetest `solver/plxs-cli/tests/modal_corpus.rs`: alle `modal/*`-Fixtures mit Referenz
+  grün; neu ist die kleine Writer-Fixture `modal-kurz` (4 Moden, Modaldynamik mit Rayleigh,
+  Sweep mit Bias, PU/PHS). `modal` (ohne Golden im Repo) stimmt lokal auf 5e-6.
+
+### Was von CalculiX durch Beobachtung bekannt ist (T14)
+
+- `*MODAL DYNAMICS` und `*STEADY STATE DYNAMICS` stimmen mit exakter Modalintegration bzw.
+  der harmonischen Modalformel auf 5e-6; ccx schreibt keine `.sta`-Zeilen für sie.
+  Ohne `AMPLITUDE=` wirken die Lasten der Modaldynamik sofort (wie `*DYNAMIC`).
+- **Frequenzraster** des Steady State: der Bereich wird an den Eigenfrequenzen darin
+  geteilt, jedes Intervall bekommt `points` Frequenzen (Enden geteilt),
+  `f = (f₁+f₂)/2 + (f₂−f₁)/2 · sign(y)|y|^(1/bias)` mit `y` gleichmäßig in [−1, 1]
+  (Bias 1 und 2,5 nachgeprüft).
+- **Phase** in `PDISP`/`PSTRESS`: `atan(Im/Re)` in Grad, plus 180° bei negativem Realteil
+  (Wertebereich −90° … 270°); Rundungsnullen haben Phase 0.
+- **Komplexe Moden**: die „Partizipationsfaktoren“ der `.dat` sind die Modalkoordinaten mit
+  der betragsgrößten auf 1 gesetzt; die `.frd`-Mode ist dieselbe Kombination,
+  massennormiert (`‖c‖ = 1`). `1PGK` = (2π f)², Wert = Frequenz.
+- Ein **perturbierter** `*FREQUENCY` nach einer statischen `CENTRIF`-Last enthält das Spin
+  Softening (ohne liegen die Rotor-Frequenzen 1,3e-4 zu hoch); ohne `PERTURBATION` rechnet
+  ccx mit der linearen Steifigkeit, die Coriolis-Kopplung nimmt `*COMPLEX FREQUENCY` aber
+  in beiden Fällen aus der `CENTRIF`-Last des Steps.
+
+### Bekannte Abweichungen (T14)
+
+- **Drehrichtung** (`TURNING DIRECTION`): plxs nimmt den Umlaufsinn der Bahn
+  `Re(x e^{iμt})` um die Achse (alle Knoten einig). ccx gibt für das zweite Biegepaar des
+  Rotors bei beiden Moden B aus, obwohl die Knoten der ersten vorwärts laufen; das Kriterium
+  von ccx ist nicht identifiziert. Die Rotor-Fixtures vergleichen die Komponente nicht
+  (`deviations`).
+- Nicht gebaut: `*MODAL DYNAMICS, STEADY STATE`, `*STEADY STATE DYNAMICS, HARMONIC=NO`,
+  Fußpunkterregung (vorgeschriebene Verschiebungen ≠ 0), `*COMPLEX FREQUENCY, FLUID`,
+  zyklisch symmetrische Moden in den Modalverfahren, `PNT`; Coriolis nur für
+  Volumenelemente. Diese Fälle werden mit `Unsupported` abgelehnt.
+
 ## Was M1 zu liefern hat (Abnahme)
 
 - `solver_check::run` aus `plx-app` besteht mit `plxs` als Executable (Kragbalken mit Kraft
@@ -683,3 +1127,31 @@ plxs 6,0 s, ccx 2.21 12,4 s (4 Threads), Verschiebungen auf 6,6e-6 gleich.
   supernodale LDLᵀ auf faer's dichten Kernen soll den Rest (Faktor ~2 in der numerischen
   Faktorisierung) holen. Benchmark-Eingaben: `/mnt/project-files/prepolix/workbench/benchmark/`
   (Projektordner, nicht im Repo), Zahlen in `KONZEPT_CCX_ABLOESUNG.md` Abschnitt 7.
+
+## Stand nach T20 (2026-11-01, Thread "Solver schneller als PaStiX machen")
+
+- `plxs-linalg::supernodal`: eigene numerische Faktorisierung für supernodale Strukturen,
+  parallel über den Eliminationsbaum. faer liefert weiter die symbolische Analyse (Ordnung,
+  Supernodes, Struktur und Speicherlayout des Faktors), deshalb bleiben `solve` und die
+  Inertia-Zählung faer's. Left-looking wie faer: ein Supernode holt die Updates aller
+  Nachfahren, deren Zeilen in seine Spalten reichen, direkt aus deren fertigen Spalten (ein
+  dichtes Produkt je Nachfahre, dann Scatter); dann faer's dichte LDLᵀ des Diagonalblocks und
+  die Dreieckslösung des Blocks darunter (transponiert in einem zusammenhängenden Puffer,
+  faer's Kerne sind darauf deutlich schneller). Teilbäume laufen ab genug Arbeit parallel
+  (rayon), kleine sequentiell ohne Rekursion; große Supernodes nahe der Wurzel teilen ihre
+  Spalten in Blöcke, die ihre Updates parallel holen. Kein Speicher über den Faktor hinaus;
+  Puffer der Produkte (`Workspace`) bleiben über Refaktorisierungen erhalten.
+- Kleine Systeme, für die faer die simpliziale Struktur wählt, rechnet weiter faer.
+  `LdltSolver::force_supernodal()` erzwingt den neuen Pfad (Tests); `PLXS_FACTOR=faer`
+  schaltet für Messungen auf faer's supernodale Faktorisierung zurück.
+- Der Faktor wird in `analyze` einmal sequentiell beschrieben: Page-Faults, die mehrere
+  Threads gleichzeitig nehmen, kosten in der Cloud-VM ein Vielfaches.
+- Verworfen: eine multifrontale Variante. Sie war mit warmem Speicher 20 % schneller (6,4 s
+  gegen 8,0 s für den 173k-Block, 4 Threads), brauchte aber 1,7 GB Update-Matrizen zusätzlich
+  zum 1,9-GB-Faktor; bei großen Modellen (1 Mio. Gleichungen) ein Speicherrisiko, und in der VM
+  war die erste Faktorisierung dadurch langsamer.
+- Ergebnisse unverändert (Fixture-Korpus grün; Block-Ergebnisse bis auf die letzte Stelle der
+  `.frd` gleich). Zahlen gegen ccx/PaStiX in `KONZEPT_CCX_ABLOESUNG.md` Abschnitt 7.4.
+- Offen: faer's dichte Kerne erreichen in der VM 40-50 GFlop/s je Kern (OpenBLAS in PaStiX
+  ca. 55-60); Dreieckslösung und dichte LDLᵀ ca. 25-35. Multithreaded Vorwärts-/
+  Rückwärtseinsetzen; Separator-Verfeinerung im Ordering (Scotch füllt 11 % weniger).
