@@ -143,11 +143,12 @@ darf solche ergänzen, siehe `KONZEPT_CCX_ABLOESUNG.md` 3.5).
   wie beim letzten Aufruf (Newton-Iterationen eines Steps, Steps desselben Modells);
   `analyses_reused()` zählt das. Das Muster-Superset bei Kontakt (Kontaktelemente ändern das
   Muster je Iteration) kommt mit T11.
-- Messung 2026-10-31 (Container, 4 Kerne, 24³ C3D8, 45 000 Gleichungen, NLGEOM, 4
-  Inkremente, 8 Iterationen): Faktorisierung 16,2 s von 20,3 s (80 %), Assemblierung 2,2 s,
-  Reduktion 0,5 s, Lösen 0,6 s, symbolische Analyse 0,2 s (7 von 8 wiederverwendet).
-  Der Hebel ist die Faktorisierung (Nested Dissection #408, baumparalleles LDLᵀ T20), nicht
-  die Assemblierung.
+- Messung (Container, 4 Kerne, 24³ C3D8, 45 000 Gleichungen, NLGEOM, 4 Inkremente, 8
+  Iterationen). 2026-10-31 mit AMD: Faktorisierung 16,2 s von 20,3 s, symbolische Analyse
+  0,2 s. 2026-11-01 mit Nested Dissection und baumparallelem LDLᵀ (master): Faktorisierung
+  9,0 s von 15,3 s, die Analyse kostet einmal 2,2 s (ND ist teurer als AMD), die anderen 7
+  werden wiederverwendet; ohne Wiederverwendung wären es rund 15 s mehr. Assemblierung 2,2 s,
+  Reduktion 0,6 s, Lösen 0,6 s. Der Hebel bleibt die Faktorisierung.
 
 Ein `rayon`-Pool je Session mit `threads` Threads (Default: `OMP_NUM_THREADS`, sonst alle
 Kerne). Kein globaler Zustand: mehrere Sessions pro Prozess müssen möglich sein.
