@@ -28,11 +28,19 @@ use plxs_core::contact::{Friction, SurfaceBehavior};
 #[derive(Clone, Debug, PartialEq)]
 pub enum Law {
     /// `K`, `σ∞` (resolved, used for node-to-face only).
-    Linear { k: f64, sigma_inf: f64 },
-    Exponential { c0: f64, p0: f64 },
+    Linear {
+        k: f64,
+        sigma_inf: f64,
+    },
+    Exponential {
+        c0: f64,
+        p0: f64,
+    },
     /// `(overclosure, pressure)` sorted by overclosure.
     Tabular(Vec<(f64, f64)>),
-    Tied { k: f64 },
+    Tied {
+        k: f64,
+    },
 }
 
 impl Law {
@@ -74,8 +82,7 @@ impl Law {
                 let kd = k * d;
                 let x = kd / (std::f64::consts::PI * sigma_inf);
                 let p = 0.5 * kd + kd / std::f64::consts::PI * x.atan();
-                let dp = 0.5 * k
-                    + k / std::f64::consts::PI * (x.atan() + x / (1.0 + x * x));
+                let dp = 0.5 * k + k / std::f64::consts::PI * (x.atan() + x / (1.0 + x * x));
                 (p, dp)
             }
             Law::Exponential { c0, p0 } => exponential(*c0, *p0, d),
@@ -204,21 +211,32 @@ mod tests {
             (0.0005, 0.255063),
         ] {
             let (got, _) = law.node_pressure(d);
-            assert!((got - p).abs() < 2e-3 * p.abs().max(0.1), "d={d}: {got} vs {p}");
+            assert!(
+                (got - p).abs() < 2e-3 * p.abs().max(0.1),
+                "d={d}: {got} vs {p}"
+            );
         }
         // The derivative is the slope of the relation.
         let h = 1e-7;
         for d in [-0.03, -0.001, 0.0, 0.004, 0.05] {
             let (_, dp) = law.node_pressure(d);
             let fd = (law.node_pressure(d + h).0 - law.node_pressure(d - h).0) / (2.0 * h);
-            assert!((dp - fd).abs() < 1e-4 * dp.abs().max(1.0), "d={d}: {dp} vs {fd}");
+            assert!(
+                (dp - fd).abs() < 1e-4 * dp.abs().max(1.0),
+                "d={d}: {dp} vs {fd}"
+            );
         }
     }
 
     #[test]
     fn exponential_relation_matches_calculix_samples() {
         let law = Law::Exponential { c0: 0.5, p0: 10.0 };
-        for (d, p) in [(0.1, 25.1188), (-0.1, 3.98107), (0.3, 158.487), (-0.49, 0.109648)] {
+        for (d, p) in [
+            (0.1, 25.1188),
+            (-0.1, 3.98107),
+            (0.3, 158.487),
+            (-0.49, 0.109648),
+        ] {
             let (got, _) = law.node_pressure(d);
             assert!((got - p).abs() < 1e-4 * p, "d={d}: {got} vs {p}");
         }

@@ -146,36 +146,37 @@ impl Session {
         // sees them as they happen.
         let (tx, rx) = std::sync::mpsc::channel::<ProgressEvent>();
         let pool = &self.pool;
-        let (outcome, stiffness, solver, sta, cvg, average_force, contact) = std::thread::scope(|scope| {
-            let handle = scope.spawn(move || {
-                let mut ctx = ctx;
-                let mut sink = ChannelProgress(tx);
-                let outcome = pool.install(|| run_step(&mut ctx, step, &mut sink));
-                (
-                    outcome,
-                    ctx.stiffness.take(),
-                    ctx.solver,
-                    std::mem::take(&mut ctx.sta),
-                    std::mem::take(&mut ctx.cvg),
-                    ctx.average_force,
-                    std::mem::take(&mut ctx.contact),
-                )
+        let (outcome, stiffness, solver, sta, cvg, average_force, contact) =
+            std::thread::scope(|scope| {
+                let handle = scope.spawn(move || {
+                    let mut ctx = ctx;
+                    let mut sink = ChannelProgress(tx);
+                    let outcome = pool.install(|| run_step(&mut ctx, step, &mut sink));
+                    (
+                        outcome,
+                        ctx.stiffness.take(),
+                        ctx.solver,
+                        std::mem::take(&mut ctx.sta),
+                        std::mem::take(&mut ctx.cvg),
+                        ctx.average_force,
+                        std::mem::take(&mut ctx.contact),
+                    )
+                });
+                for event in rx {
+                    progress.event(event);
+                }
+                handle.join().unwrap_or_else(|_| {
+                    (
+                        Err(Error::Unsupported("the solver thread panicked".into())),
+                        None,
+                        LdltSolver::new(1),
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        plxs_contact::ContactModel::default(),
+                    )
+                })
             });
-            for event in rx {
-                progress.event(event);
-            }
-            handle.join().unwrap_or_else(|_| {
-                (
-                    Err(Error::Unsupported("the solver thread panicked".into())),
-                    None,
-                    LdltSolver::new(1),
-                    Vec::new(),
-                    Vec::new(),
-                    None,
-                    plxs_contact::ContactModel::default(),
-                )
-            })
-        });
         self.contact = contact;
         self.stiffness = stiffness;
         self.solver = solver;

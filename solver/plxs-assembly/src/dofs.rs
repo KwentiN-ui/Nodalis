@@ -71,6 +71,26 @@ pub fn amplitude_factor(
     }
 }
 
+/// The displacement component `k` of a node at the end of the previous step, in the node's
+/// local system when it has one.
+fn previous_component(
+    dofs: &DofMap,
+    previous: &[f64],
+    rotation: &dyn Fn(u32) -> Option<[[f64; 3]; 3]>,
+    index: u32,
+    k: usize,
+) -> f64 {
+    let global = |c: usize| {
+        dofs.dof(index, c)
+            .and_then(|g| previous.get(g as usize).copied())
+            .unwrap_or(0.0)
+    };
+    match rotation(index) {
+        Some(r) if k < 3 => (0..3).map(|c| r[c][k] * global(c)).sum(),
+        _ => global(k),
+    }
+}
+
 impl Spc {
     /// The single-point constraints of a step at step time `time`. DOFs a node does not
     /// have (rotations of solid nodes, DOF 11 in a mechanical step) are skipped, as CalculiX
@@ -131,6 +151,66 @@ impl Spc {
         }
     }
 
+    /// The path of the prescribed values from the end of the previous step (`previous`,
+    /// global components, read like [`Spc::apply_fixed`] does) in an incremental procedure:
+    /// at the start of the step every DOF still has its previous displacement, a boundary
+    /// on the default `RAMP` amplitude goes linearly from there to its value, one on the
+    /// `STEP` amplitude or an amplitude of its own takes the value from the first
+    /// increment on. `time` is the step time the values of `self` were computed for.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_from_previous(
+        &mut self,
+        model: &Model,
+        step: &Step,
+        dofs: &DofMap,
+        previous: &[f64],
+        rotation: &dyn Fn(u32) -> Option<[[f64; 3]; 3]>,
+        time: f64,
+        period: f64,
+    ) {
+        let ramp = if period > 0.0 {
+            (time / period).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        // (DOF, previous value, ramped); the last definition of a DOF wins, as in `of_step`.
+        let mut starts: Vec<(u32, f64, bool)> = Vec::new();
+        for boundary in step.boundaries.iter().filter(|b| !b.fixed) {
+            let ramped =
+                boundary.amplitude.is_none() && step.default_amplitude == DefaultAmplitude::Ramp;
+            for node in Self::nodes(model, boundary) {
+                let Some(index) = model.nodes.index(node) else {
+                    continue;
+                };
+                for d in boundary.first_dof..=boundary.last_dof {
+                    let Some(dof) = (1..=6)
+                        .contains(&d)
+                        .then(|| dofs.dof(index, d as usize - 1))
+                        .flatten()
+                    else {
+                        continue;
+                    };
+                    let from = previous_component(dofs, previous, rotation, index, d as usize - 1);
+                    starts.push((dof, from, ramped));
+                }
+            }
+        }
+        starts.reverse();
+        let mut seen = std::collections::HashSet::new();
+        for (dof, from, ramped) in starts {
+            if !seen.insert(dof) || dofs.unused.binary_search(&dof).is_ok() {
+                continue;
+            }
+            if let Ok(pos) = self.dofs.binary_search(&dof) {
+                if time <= 0.0 {
+                    self.values[pos] = from;
+                } else if ramped {
+                    self.values[pos] += from * (1.0 - ramp);
+                }
+            }
+        }
+    }
+
     /// `*BOUNDARY, FIXED`: the DOFs keep the displacement they had at the end of the previous
     /// step (`previous`, global components; at nodes with a local system the local
     /// component, `rotation` gives the system).
@@ -155,16 +235,7 @@ impl Spc {
                     else {
                         continue;
                     };
-                    let k = d as usize - 1;
-                    let global = |c: usize| {
-                        dofs.dof(index, c)
-                            .and_then(|g| previous.get(g as usize).copied())
-                            .unwrap_or(0.0)
-                    };
-                    let value = match rotation(index) {
-                        Some(r) if k < 3 => (0..3).map(|c| r[c][k] * global(c)).sum(),
-                        _ => global(k),
-                    };
+                    let value = previous_component(dofs, previous, rotation, index, d as usize - 1);
                     if let Ok(pos) = self.dofs.binary_search(&dof) {
                         self.values[pos] = value;
                     }

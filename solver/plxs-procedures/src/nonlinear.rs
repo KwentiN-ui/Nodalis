@@ -257,6 +257,15 @@ impl Procedure for NonlinearStatic {
             |ctx: &ProcedureContext<'_>, step_time: f64, total: f64| -> Result<Vec<f64>> {
                 let mut spc =
                     Spc::of_step(ctx.model, step, &ctx.table.dofs, step_time, total, period)?;
+                spc.start_from_previous(
+                    ctx.model,
+                    step,
+                    &ctx.table.dofs,
+                    &previous,
+                    &rotation,
+                    step_time,
+                    period,
+                );
                 spc.apply_fixed(ctx.model, step, &ctx.table.dofs, &previous, &rotation);
                 Ok(set.particular(&spc.values))
             };
@@ -598,11 +607,12 @@ impl NonlinearStatic {
                 .count() as u32;
             // Contact springs at the current displacements; a change of the contact status
             // (closed, sticking, sliding) needs another iteration like a gap that changed.
-            let contact = if ctx.contact.is_active() {
+            let contact = if !ctx.contact.is_empty() {
                 let evaluation = ctx.contact.evaluate(
                     &ctx.model.nodes.coordinates,
                     &u,
                     &ctx.state.contact,
+                    iteration == 0,
                 );
                 for element in &evaluation.elements {
                     k.add_block(&element.dofs, &element.ke);
@@ -611,12 +621,27 @@ impl NonlinearStatic {
                     }
                 }
                 status.extend(evaluation.status_key());
+                if std::env::var_os("PLXS_DEBUG_CONTACT").is_some() {
+                    let mut c = [0usize; 3];
+                    let mut pmax = 0.0_f64;
+                    for r in evaluation.points.iter().flatten() {
+                        match r.state.status {
+                            plxs_core::state::ContactStatus::Open => c[0] += 1,
+                            plxs_core::state::ContactStatus::Stick => c[1] += 1,
+                            plxs_core::state::ContactStatus::Slip => c[2] += 1,
+                        }
+                        pmax = pmax.max(r.state.pressure);
+                    }
+                    eprintln!(
+                        "DEBUG contact open {} stick {} slip {} pmax {pmax:e}",
+                        c[0], c[1], c[2]
+                    );
+                }
                 Some(evaluation)
             } else {
                 None
             };
-            let contact_elements =
-                closed_gaps + contact.as_ref().map_or(0, |e| e.active as u32);
+            let contact_elements = closed_gaps + contact.as_ref().map_or(0, |e| e.active as u32);
             let gaps_changed = acting.as_ref().is_some_and(|a| *a != status);
             acting = Some(status);
             let flux = if output.flux_count > 0 {
@@ -757,8 +782,38 @@ impl NonlinearStatic {
                 },
                 other => other,
             })?;
-            let mut dv = residual;
-            ctx.solver.solve(&mut dv)?;
+            let unsymmetric: Vec<&plxs_contact::ContactElement> = contact
+                .as_ref()
+                .map(|e| {
+                    e.elements
+                        .iter()
+                        .filter(|e| !e.unsymmetric.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let dv = if unsymmetric.is_empty() {
+                let mut dv = residual;
+                ctx.solver.solve(&mut dv)?;
+                dv
+            } else {
+                // Sliding friction makes the tangent unsymmetric: GMRES on the full
+                // tangent, preconditioned by the factorized symmetric part.
+                let zero = vec![0.0; total_dofs];
+                let solver = &ctx.solver;
+                let apply = |v: &[f64], out: &mut [f64]| {
+                    k_reduced.multiply(v, out);
+                    let full = set.expand(v, &zero);
+                    let mut e = vec![0.0; total_dofs];
+                    for element in &unsymmetric {
+                        element.apply_unsymmetric(&full, &mut e);
+                    }
+                    for (o, r) in out.iter_mut().zip(set.reduce_rhs(&e)) {
+                        *o += r;
+                    }
+                };
+                let precondition = |v: &mut [f64]| solver.solve(v);
+                plxs_linalg::gmres(&apply, &precondition, &residual, 1e-10, 60, 300)?.0
+            };
             let du = set.expand(&dv, &vec![0.0; total_dofs]);
             previous_correction = last_correction;
             last_correction = du.iter().fold(0.0_f64, |m, v| m.max(v.abs()));

@@ -110,8 +110,30 @@ pub struct PointResult {
 #[derive(Clone, Debug)]
 pub struct ContactElement {
     pub dofs: Vec<u32>,
+    /// The symmetric part of the tangent (row-major, `dofs.len()²`).
     pub ke: Vec<f64>,
     pub fe: Vec<f64>,
+    /// The unsymmetric rest of the consistent tangent (sliding friction: the shear follows
+    /// the pressure, `μ dp/dd`), row-major like `ke`; empty when there is none.
+    pub unsymmetric: Vec<f64>,
+}
+
+impl ContactElement {
+    /// `out += E v` for the unsymmetric rest `E` (`v`, `out` in global numbering).
+    pub fn apply_unsymmetric(&self, v: &[f64], out: &mut [f64]) {
+        let m = self.dofs.len();
+        if self.unsymmetric.is_empty() {
+            return;
+        }
+        for (a, &i) in self.dofs.iter().enumerate() {
+            let row = &self.unsymmetric[a * m..(a + 1) * m];
+            out[i as usize] += row
+                .iter()
+                .zip(&self.dofs)
+                .map(|(e, &j)| e * v[j as usize])
+                .sum::<f64>();
+        }
+    }
 }
 
 /// What an evaluation produced.
@@ -220,8 +242,8 @@ impl ContactModel {
                 ));
             }
             let coords = model.nodes.coordinates.clone();
-            let typical = master.iter().map(|f| f.edge_length(&coords)).sum::<f64>()
-                / master.len() as f64;
+            let typical =
+                master.iter().map(|f| f.edge_length(&coords)).sum::<f64>() / master.len() as f64;
 
             // Slave side.
             let is_node_surface = matches!(
@@ -279,7 +301,11 @@ impl ContactModel {
                         ));
                     }
                     for n in nodes {
-                        let a = if area[n as usize] > 0.0 { area[n as usize] } else { 1.0 };
+                        let a = if area[n as usize] > 0.0 {
+                            area[n as usize]
+                        } else {
+                            1.0
+                        };
                         points.push(SlavePoint {
                             nodes: vec![n],
                             weights: vec![1.0],
@@ -343,18 +369,25 @@ impl ContactModel {
                 None => None,
             };
             if let Some((distance, set)) = adjust_distance {
-                let allowed: Option<HashSet<u32>> = set.map(|ids| {
-                    ids.iter()
-                        .filter_map(|id| model.nodes.index(*id))
-                        .collect()
-                });
+                let allowed: Option<HashSet<u32>> =
+                    set.map(|ids| ids.iter().filter_map(|id| model.nodes.index(*id)).collect());
                 let slave_nodes = surface_nodes(model, keyword, &pair.slave)?;
-                let master_nodes: HashSet<u32> =
-                    prepared.master.iter().flat_map(|f| f.nodes.iter().copied()).collect();
-                let grid = FaceGrid::new(&prepared.master, &coords, typical.max(distance.min(1e6)), distance.min(1e6));
+                let master_nodes: HashSet<u32> = prepared
+                    .master
+                    .iter()
+                    .flat_map(|f| f.nodes.iter().copied())
+                    .collect();
+                let grid = FaceGrid::new(
+                    &prepared.master,
+                    &coords,
+                    typical.max(distance.min(1e6)),
+                    distance.min(1e6),
+                );
                 let mut moved = 0;
                 for n in slave_nodes {
-                    if master_nodes.contains(&n) || allowed.as_ref().is_some_and(|a| !a.contains(&n)) {
+                    if master_nodes.contains(&n)
+                        || allowed.as_ref().is_some_and(|a| !a.contains(&n))
+                    {
                         continue;
                     }
                     let x = coords[n as usize];
@@ -509,6 +542,7 @@ impl ContactModel {
         coords: &[[f64; 3]],
         u: &[f64],
         start: &[Vec<ContactPointState>],
+        predictor: bool,
     ) -> Evaluation {
         let mut evaluation = Evaluation::default();
         let current = current_configuration(coords, u);
@@ -520,7 +554,7 @@ impl ContactModel {
                     .and_then(|s| s.get(p))
                     .copied()
                     .unwrap_or_default();
-                let (result, element) = pair.evaluate_point(p, &current, u, &previous);
+                let (result, element) = pair.evaluate_point(p, &current, u, &previous, predictor);
                 if let Some(element) = element {
                     evaluation.elements.push(element);
                     if result.element {
@@ -609,6 +643,7 @@ impl Pair {
         current: &[[f64; 3]],
         u: &[f64],
         previous: &ContactPointState,
+        predictor: bool,
     ) -> (PointResult, Option<ContactElement>) {
         let point = &self.points[p];
         let x = self.position(p, current);
@@ -667,7 +702,7 @@ impl Pair {
         // the relation at zero overclosure, without a force: the first iteration of a step
         // that starts touching then sees the contact instead of a floating body.
         let open_face = !tied && !node_to_face && overclosure <= 0.0;
-        if !exists {
+        if !exists || (open_face && !predictor) {
             return (open(x, gap), None);
         }
         let (pressure, dp) = if tied {
@@ -676,7 +711,10 @@ impl Pair {
         } else if node_to_face {
             self.law.node_pressure(overclosure)
         } else if open_face {
-            (0.0, self.law.face_pressure(1e-12 * self.typical.max(1e-300)).1)
+            (
+                0.0,
+                self.law.face_pressure(1e-12 * self.typical.max(1e-300)).1,
+            )
         } else {
             self.law.face_pressure(overclosure)
         };
@@ -703,6 +741,8 @@ impl Pair {
         let mut status = ContactStatus::Stick;
         let mut tangent = [[0.0; 2]; 2];
         let mut tangential_energy = 0.0;
+        // Sliding: d(shear)/d(overclosure) = μ dp/dd along the slip direction.
+        let mut coupling = [0.0; 2];
         match self.friction {
             Some(friction) if tied || pressure > 0.0 => {
                 let lambda = friction.stick;
@@ -711,7 +751,11 @@ impl Pair {
                     lambda * (tangential[1] - slip[1]),
                 ];
                 let size = (trial[0] * trial[0] + trial[1] * trial[1]).sqrt();
-                let limit = if tied { f64::INFINITY } else { friction.mu * pressure };
+                let limit = if tied {
+                    f64::INFINITY
+                } else {
+                    friction.mu * pressure
+                };
                 if size <= limit || size == 0.0 {
                     shear = trial;
                     tangent = [[lambda, 0.0], [0.0, lambda]];
@@ -730,7 +774,15 @@ impl Pair {
                         [-a * dir[0] * dir[1], a * (1.0 - dir[1] * dir[1])],
                     ];
                     tangential_energy = 0.5 * limit * limit / lambda;
+                    coupling = [friction.mu * dp * dir[0], friction.mu * dp * dir[1]];
                 }
+            }
+            Some(friction) if open_face => {
+                // Within the cutoff but not touching: the stick stiffness as a predictor,
+                // without a force, like the normal stiffness above.
+                slip = tangential;
+                status = ContactStatus::Open;
+                tangent = [[friction.stick, 0.0], [0.0, friction.stick]];
             }
             _ => {
                 // No friction or no pressure: slides freely, the slip follows the motion.
@@ -801,6 +853,29 @@ impl Pair {
                 }
             }
         }
+        // Unsymmetric rest: d(τ_k t_k)/dΔ through the overclosure d = -Δ·n, i.e.
+        // -(coupling_k t_k) nᵀ.
+        let unsymmetric = if coupling != [0.0; 2] {
+            let s3 = [
+                coupling[0] * t1[0] + coupling[1] * t2[0],
+                coupling[0] * t1[1] + coupling[1] * t2[1],
+                coupling[0] * t1[2] + coupling[1] * t2[2],
+            ];
+            let mut e = vec![0.0; 9 * m * m];
+            for a in 0..m {
+                for b in 0..m {
+                    let cab = coefficients[a] * coefficients[b] * area;
+                    for i in 0..3 {
+                        for j in 0..3 {
+                            e[(a * 3 + i) * n3 + b * 3 + j] = -cab * s3[i] * n[j];
+                        }
+                    }
+                }
+            }
+            e
+        } else {
+            Vec::new()
+        };
         let energy = area
             * (if node_to_face && !tied {
                 node_energy(&self.law, overclosure)
@@ -810,7 +885,11 @@ impl Pair {
             } else {
                 self.law.face_energy(overclosure)
             } + tangential_energy);
-        let force = [-area * traction[0], -area * traction[1], -area * traction[2]];
+        let force = [
+            -area * traction[0],
+            -area * traction[1],
+            -area * traction[2],
+        ];
         let result = PointResult {
             state: ContactPointState {
                 status,
@@ -829,7 +908,15 @@ impl Pair {
             position: x,
             element: !open_face,
         };
-        (result, Some(ContactElement { dofs, ke, fe }))
+        (
+            result,
+            Some(ContactElement {
+                dofs,
+                ke,
+                fe,
+                unsymmetric,
+            }),
+        )
     }
 }
 

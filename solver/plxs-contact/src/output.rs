@@ -215,8 +215,19 @@ pub fn history_blocks(
                         ),
                         "",
                         vec![
-                            (0, vec![force[0], force[1], force[2], moment[0], moment[1], moment[2]]),
-                            (0, vec![centre[0], centre[1], centre[2], normal[0], normal[1], normal[2]]),
+                            (
+                                0,
+                                vec![
+                                    force[0], force[1], force[2], moment[0], moment[1], moment[2],
+                                ],
+                            ),
+                            (
+                                0,
+                                vec![
+                                    centre[0], centre[1], centre[2], normal[0], normal[1],
+                                    normal[2],
+                                ],
+                            ),
                             (0, moment_cg.to_vec()),
                             (0, vec![area, normal_force, shear]),
                         ],

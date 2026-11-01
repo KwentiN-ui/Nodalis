@@ -144,7 +144,11 @@ impl ContactFace {
             let Some(family) = solid(element.kind).map(|s| s.family) else {
                 continue;
             };
-            let dense: Option<Vec<u32>> = element.nodes.iter().map(|&id| model.nodes.index(id)).collect();
+            let dense: Option<Vec<u32>> = element
+                .nodes
+                .iter()
+                .map(|&id| model.nodes.index(id))
+                .collect();
             let Some(dense) = dense else { continue };
             if !dense.iter().any(|n| set.contains(n)) {
                 continue;
@@ -196,7 +200,11 @@ impl ContactFace {
         }
         let c = cross(t[0], t[1]);
         let jacobian = norm(c);
-        let normal = if jacobian > 0.0 { scale(c, 1.0 / jacobian) } else { [0.0, 0.0, 1.0] };
+        let normal = if jacobian > 0.0 {
+            scale(c, 1.0 / jacobian)
+        } else {
+            [0.0, 0.0, 1.0]
+        };
         FacePoint {
             n,
             x,
