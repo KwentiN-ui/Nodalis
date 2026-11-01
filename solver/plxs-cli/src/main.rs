@@ -1,4 +1,4 @@
-//! `plxs`: the PrePoLix solver on the command line, called like CalculiX:
+//! `plxs`: the Nodalis solver on the command line, called like CalculiX:
 //!
 //! ```text
 //! plxs <job>            read <job>.inp, compute, write <job>.frd/.dat/.sta/.cvg
@@ -11,11 +11,11 @@
 //! ```
 //!
 //! stdout follows CalculiX's lines (`STEP n`, `increment n attempt m`, `iteration n`, `Job
-//! finished`, `*ERROR ...`), because PrePoLix's job monitor and solver self-test read them;
+//! finished`, `*ERROR ...`), because Nodalis's job monitor and solver self-test read them;
 //! the start line carries the word `CalculiX` for the self-test. stdout is written line by
 //! line without buffering so that the monitor sees progress as it happens.
 //!
-//! The run itself is [`plxs_session::run_job`], shared with PrePoLix's built-in solver. Exit
+//! The run itself is [`plxs_session::run_job`], shared with Nodalis's built-in solver. Exit
 //! code 0 when the job finished, 1 otherwise.
 
 use std::io::Write;
@@ -40,7 +40,7 @@ fn say(line: &str) {
 fn banner() {
     say("************************************************************");
     say(&format!(
-        "PrePoLix solver plxs {VERSION}, CalculiX-compatible input"
+        "Nodalis solver plxs {VERSION}, CalculiX-compatible input"
     ));
     say(&format!("This is Version {VERSION}"));
     say("************************************************************");

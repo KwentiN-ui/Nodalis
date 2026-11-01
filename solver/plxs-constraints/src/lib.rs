@@ -1,4 +1,4 @@
-//! Constraints of the PrePoLix solver: single-point constraints, `*EQUATION`, `*RIGID BODY`
+//! Constraints of the Nodalis solver: single-point constraints, `*EQUATION`, `*RIGID BODY`
 //! (linearized, small rotations), `*TIE` (tied contact, not cyclic) and `*TRANSFORM`, all
 //! eliminated by a transformation `u = T v + g` (concept section 4.3): `K_red = Tᵀ K T`
 //! stays symmetric positive definite, so the LDLᵀ solver applies unchanged.

@@ -1,10 +1,10 @@
-PrePoLix - Lizenzen und Quelltext
+Nodalis - Lizenzen und Quelltext
 =================================
 
-PrePoLix steht unter der GNU General Public License, Version 3 oder neuer
+Nodalis steht unter der GNU General Public License, Version 3 oder neuer
 (LICENSE.txt). Der Quelltext liegt unter
 
-    https://github.com/KwentiN-ui/prepolix
+    https://github.com/KwentiN-ui/Nodalis
 
 Welcher Stand dieser Installation zugrunde liegt, steht in SOURCE.txt.
 
@@ -23,26 +23,26 @@ Gmsh 4.15.2 (gmsh-4.15.dll)
     In Gmsh enthalten sind unter anderem:
 
     Open CASCADE Technology (OCCT)
-        PrePoLix nutzt über Gmsh Funktionen von Open CASCADE Technology.
+        Nodalis nutzt über Gmsh Funktionen von Open CASCADE Technology.
         GNU LGPL Version 2.1 mit der Open-CASCADE-Ausnahme, siehe
         licenses\OCCT-LGPL-2.1.txt und licenses\OCCT-LGPL-EXCEPTION.txt.
         Quelltext: https://github.com/Open-Cascade-SAS/OCCT
 
     Netgen, TetGen/BR, HXT und weitere, siehe licenses\GMSH-CREDITS.txt.
 
-Noto Sans (in prepolix.exe eingebettet)
+Noto Sans (in nodalis.exe eingebettet)
     SIL Open Font License 1.1, siehe licenses\NotoSans-OFL.txt.
 
-Rust-Bibliotheken (in prepolix.exe einkompiliert)
+Rust-Bibliotheken (in nodalis.exe einkompiliert)
     egui, eframe, wgpu, glam, cpal, rfd und weitere unter MIT- oder
     Apache-2.0-Lizenz. Die vollständige Liste mit Versionen steht in
-    Cargo.lock im Quelltext von PrePoLix; die Lizenztexte liegen bei den
+    Cargo.lock im Quelltext von Nodalis; die Lizenztexte liegen bei den
     jeweiligen Paketen auf https://crates.io.
 
 CalculiX ccx 2.23 (Ordner ccx)
     Der Solver. Copyright (C) 1998-2025 Guido Dhondt. GNU GPL Version 2 oder
     neuer, siehe ccx\licenses\CalculiX-GPL-2.0.txt. Gebaut von
-    scripts/build_ccx.sh von PrePoLix aus CalculiX 2.23 mit den Korrekturen
+    scripts/build_ccx.sh von Nodalis aus CalculiX 2.23 mit den Korrekturen
     des CalculiX-Pakets von conda-forge, mit den Solvern SPOOLES, PaStiX und
     ARPACK; welche Quelltexte genau, steht in ccx\SOURCE.txt.
     Quelltext: https://github.com/Dhondtguido/CalculiX mit den Korrekturen unter
@@ -60,7 +60,7 @@ CalculiX ccx 2.23 (Ordner ccx)
         Bordeaux INP, CNRS, Inria und Université de Bordeaux; die für
         CalculiX angepasste Fassung.
         Quelltext: https://github.com/Kabbone/PaStiX4CalculiX mit den Patches
-        in installer/ccx/patches des PrePoLix-Quelltexts.
+        in installer/ccx/patches des Nodalis-Quelltexts.
     Scotch 7.0.11
         CeCILL-C-Lizenz, siehe ccx\licenses\Scotch-CeCILL-C.txt.
         Quelltext: https://gitlab.inria.fr/scotch/scotch

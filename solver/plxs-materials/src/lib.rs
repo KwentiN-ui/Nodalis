@@ -1,4 +1,4 @@
-//! Material laws of the PrePoLix solver: isotropic linear elasticity (Hooke), rate-independent
+//! Material laws of the Nodalis solver: isotropic linear elasticity (Hooke), rate-independent
 //! J2 plasticity with isotropic, kinematic and combined hardening (`*PLASTIC`), and Norton
 //! creep (`*CREEP`) as the viscous part of the same law (concept section 4.2).
 //!

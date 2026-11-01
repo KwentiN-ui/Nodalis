@@ -16,7 +16,7 @@ pub enum LibraryError {
     },
     #[error("{path}: not a valid material library: {message}")]
     Format { path: PathBuf, message: String },
-    #[error("{path} comes from a newer PrePoLix version (format {format})")]
+    #[error("{path} comes from a newer Nodalis version (format {format})")]
     Newer { path: PathBuf, format: u32 },
 }
 

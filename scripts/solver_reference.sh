@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the fixture corpus of the PrePoLix solver (solver/fixtures) and its golden files:
+# Builds the fixture corpus of the Nodalis solver (solver/fixtures) and its golden files:
 #
 #   1. runs the plx-io writer tests with PLXS_FIXTURE_DIR set, which makes every test that
 #      hands an input file to CalculiX keep it,

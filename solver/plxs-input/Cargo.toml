@@ -1,6 +1,6 @@
 [package]
 name = "plxs-input"
-description = "PrePoLix solver: CalculiX input file (.inp) reader into the IR"
+description = "Nodalis solver: CalculiX input file (.inp) reader into the IR"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

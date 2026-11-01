@@ -60,7 +60,7 @@ created from it.
 === Split faces
 
 It is common to split faces in the CAD program, for example a ring on a shaft where a bearing
-sits, so that a boundary condition can be applied to exactly that area. PrePoLix keeps such
+sits, so that a boundary condition can be applied to exactly that area. Nodalis keeps such
 faces: the mesh follows their borders, and on the #ui("FE Model") tab their outline is drawn
 like any other edge although the surface does not bend there. Pick them with the geometry based
 selection (@selection) like any other face.

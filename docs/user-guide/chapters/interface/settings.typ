@@ -4,8 +4,8 @@
 
 #menu("Tools", "Settings ...") opens the settings window. The pages are listed on the left.
 #ui("Defaults") resets all pages, #ui("Apply") applies without closing. Settings are stored per
-user (`~/.local/share/prepolix` on Linux, `%APPDATA%\prepolix\data` on Windows), by the
-portable Windows version in the folder `Settings` next to `prepolix.exe` (@portable).
+user (`~/.local/share/nodalis` on Linux, `%APPDATA%\nodalis\data` on Windows), by the
+portable Windows version in the folder `Settings` next to `nodalis.exe` (@portable).
 
 #screenshot("settings.png", [Settings, Solver page])
 
@@ -44,18 +44,18 @@ portable Windows version in the folder `Settings` next to `prepolix.exe` (@porta
 
 === Solver
 
-PrePoLix computes analyses either with its built-in solver or with CalculiX as a separate
-program. The built-in solver runs inside PrePoLix: nothing has to be installed, its progress
+Nodalis computes analyses either with its built-in solver or with CalculiX as a separate
+program. The built-in solver runs inside Nodalis: nothing has to be installed, its progress
 and results stay in the program, and it stops at once when a run is killed. It is being built
 up step by step; a step it cannot compute yet is reported when the analysis runs, with the
 hint to switch to CalculiX for that model. CalculiX remains the default until the built-in
 solver covers every analysis.
 
 #fields(
-  [Solver], [#ui("PrePoLix solver") (built in) or #ui("CalculiX"). The rows below that only
+  [Solver], [#ui("Nodalis solver") (built in) or #ui("CalculiX"). The rows below that only
     concern CalculiX (executable, restart files) show for CalculiX.],
-  [Executable], [Path to `ccx`. Empty means the CalculiX shipped with PrePoLix (shown greyed
-    in the field), or `ccx` on the system path if PrePoLix was built without it. A bare name
+  [Executable], [Path to `ccx`. Empty means the CalculiX shipped with Nodalis (shown greyed
+    in the field), or `ccx` on the system path if Nodalis was built without it. A bare name
     such as `ccx` is looked up on the system path.],
   [Threads], [Number of threads the solver uses. #ui("Automatic") (the default) uses all
     processor cores. The built-in solver computes every analysis in one shared pool of these
@@ -63,7 +63,7 @@ solver covers every analysis.
     at the same time take them as they need them. CalculiX processes cannot share; each gets
     an equal share of the cores (`OMP_NUM_THREADS`), or the fixed number set here.],
   [Work directory], [Where input and result files of a run are written. Empty means a `Temp`
-    folder next to the PrePoLix program, or `<system temp>/prepolix` if that folder is not
+    folder next to the Nodalis program, or `<system temp>/nodalis` if that folder is not
     writable.],
   [Restart files], [#ui("Keep the state after each step") (default on): CalculiX writes the
     state after each step over time, so that solving again after a change starts after the
@@ -77,7 +77,7 @@ solver covers every analysis.
     solver, and the tip load once more with the iterative equation solver (@equation-solver),
     and compares the results with beam theory. For CalculiX it also starts the
     executable and checks whether CalculiX knows every keyword
-    PrePoLix writes. Each test shows OK or an error. While the test runs, a window over the
+    Nodalis writes. Each test shows OK or an error. While the test runs, a window over the
     application shows the running step and, for the keyword check, how far it has come; the
     CalculiX test can take a while, particularly on Windows.],
 )
@@ -91,7 +91,7 @@ solver covers every analysis.
 *Keywords.* Older CalculiX versions lack keywords of newer features, for example
 `*COMPLEX FREQUENCY` (complex frequency step) or `*CYCLIC SYMMETRY MODEL`. CalculiX does not stop
 at an unknown keyword: it skips the card with a warning and computes without it. The test
-therefore reads each keyword PrePoLix can write on its own and lists the unknown ones by the
+therefore reads each keyword Nodalis can write on its own and lists the unknown ones by the
 feature that needs them, e.g. `Complex frequency step (*COMPLEX FREQUENCY)`. Every analysis
 checks the keywords of its own input file in the same way (@model-check).
 
@@ -106,10 +106,10 @@ checks the keywords of its own input file in the same way (@model-check).
 === Updates
 
 #fields(
-  [Check for updates at startup], [Asks GitHub for the latest release each time PrePoLix
+  [Check for updates at startup], [Asks GitHub for the latest release each time Nodalis
     starts and shows a symbol next to the version number if it is newer (default on; not in the
     AppImage). Turn it off to work without any request to the internet;
     #menu("Help", "Check for Updates ...") still asks on demand.],
 )
 
-Below, the page says how this copy of PrePoLix is updated (@updates).
+Below, the page says how this copy of Nodalis is updated (@updates).

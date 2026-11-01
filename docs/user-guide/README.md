@@ -1,13 +1,13 @@
-# PrePoLix User Guide
+# Nodalis User Guide
 
-The user guide is a reference for people who *use* PrePoLix: where to find a function, what each
-field of its dialog means and what PrePoLix writes to the CalculiX input file. It is written in
+The user guide is a reference for people who *use* Nodalis: where to find a function, what each
+field of its dialog means and what Nodalis writes to the CalculiX input file. It is written in
 English with [Typst](https://typst.app) and does not describe the code.
 
 ## Building
 
 ```sh
-typst compile --root . --ignore-system-fonts docs/user-guide/main.typ prepolix-user-guide.pdf
+typst compile --root . --ignore-system-fonts docs/user-guide/main.typ nodalis-user-guide.pdf
 ```
 
 Run it from the repository root: `--root .` lets the document read the version from the
@@ -15,14 +15,14 @@ workspace `Cargo.toml`, so the title page always shows the current version.
 `--ignore-system-fonts` uses only the fonts built into Typst, so the PDF looks the same
 everywhere. The release workflow builds the PDF for every tag `v*` and attaches it to the GitHub
 release. The workflow `pages.yml` publishes the HTML guide on GitHub Pages
-(<https://kwentin-ui.github.io/PrePoLix/>) whenever the guide changes on `master`.
+(<https://kwentin-ui.github.io/Nodalis/>) whenever the guide changes on `master`.
 
 The same source also compiles to a single HTML page, which the Windows installer and the AppImage
 ship for Help > User Guide:
 
 ```sh
 scripts/build_user_guide.sh html   # target/user-guide/user-guide.html
-scripts/build_user_guide.sh pdf    # target/user-guide/prepolix-<version>-user-guide.pdf
+scripts/build_user_guide.sh pdf    # target/user-guide/nodalis-<version>-user-guide.pdf
 ```
 
 The script downloads the pinned Typst version (0.14, needed for HTML export) to `target/typst`.
@@ -74,6 +74,6 @@ docs/user-guide/screenshot.sh stop
 Graphics run on Mesa's software renderer (`mesa-vulkan-drivers`). The window is 1400 x 900;
 dialogs open at the same place each time, so crop them by their pixel box. Typing into egui
 fields with xdotool does not work reliably; for a model with materials, steps and loads, build a
-`.plx` project in code (a temporary `#[ignore]` test that calls `plx_io::project::save_project`)
+`.ndl` project in code (a temporary `#[ignore]` test that calls `plx_io::project::save_project`)
 and open it, or use the example files in `testdata/`. Open files from their own folder so that
 the output pane shows short paths.

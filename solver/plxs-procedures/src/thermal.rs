@@ -203,7 +203,7 @@ pub fn insert_temperatures(ctx: &mut crate::ProcedureContext<'_>, step: &Step, t
 }
 
 /// The nodal temperatures of the last `NDTEMP` block of step `step` in an ASCII `.frd`
-/// file (CalculiX' format, which PrePoLix and plxs write). Binary files are not read.
+/// file (CalculiX' format, which Nodalis and plxs write). Binary files are not read.
 pub fn frd_temperatures(bytes: &[u8], step: u32) -> Option<Vec<(u32, f64)>> {
     let text = std::str::from_utf8(bytes).ok()?;
     let mut block_step = 0u32;

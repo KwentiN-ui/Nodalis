@@ -50,10 +50,10 @@ jobs:
       - run: scripts/build_windows_installer.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: prepolix-windows-installer
+          name: nodalis-windows-installer
           path: |
-            target/windows-installer/prepolix-*-setup.exe
-            target/windows-installer/prepolix-*-windows-portable.zip
+            target/windows-installer/nodalis-*-setup.exe
+            target/windows-installer/nodalis-*-windows-portable.zip
           if-no-files-found: error
       - name: An das Release hängen
         if: startsWith(github.ref, 'refs/tags/')
@@ -64,8 +64,8 @@ jobs:
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
             || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes \
             || gh release view "$GITHUB_REF_NAME" >/dev/null
-          gh release upload "$GITHUB_REF_NAME" target/windows-installer/prepolix-*-setup.exe \
-            target/windows-installer/prepolix-*-windows-portable.zip --clobber
+          gh release upload "$GITHUB_REF_NAME" target/windows-installer/nodalis-*-setup.exe \
+            target/windows-installer/nodalis-*-windows-portable.zip --clobber
 
   linux-appimage:
     # Das älteste unterstützte Ubuntu: das AppImage läuft nur mit einer glibc, die mindestens so
@@ -97,10 +97,10 @@ jobs:
       - run: scripts/build_appimage.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: prepolix-linux-appimage
+          name: nodalis-linux-appimage
           path: |
-            target/appimage/prepolix-*-x86_64.AppImage
-            target/appimage/prepolix-*-x86_64.AppImage.zsync
+            target/appimage/nodalis-*-x86_64.AppImage
+            target/appimage/nodalis-*-x86_64.AppImage.zsync
           if-no-files-found: error
       - name: An das Release hängen
         if: startsWith(github.ref, 'refs/tags/')
@@ -110,8 +110,8 @@ jobs:
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
             || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes \
             || gh release view "$GITHUB_REF_NAME" >/dev/null
-          gh release upload "$GITHUB_REF_NAME" target/appimage/prepolix-*-x86_64.AppImage \
-            target/appimage/prepolix-*-x86_64.AppImage.zsync --clobber
+          gh release upload "$GITHUB_REF_NAME" target/appimage/nodalis-*-x86_64.AppImage \
+            target/appimage/nodalis-*-x86_64.AppImage.zsync --clobber
 
   user-guide:
     runs-on: ubuntu-latest
@@ -126,8 +126,8 @@ jobs:
         run: scripts/build_user_guide.sh pdf
       - uses: actions/upload-artifact@v4
         with:
-          name: prepolix-user-guide
-          path: target/user-guide/prepolix-*-user-guide.pdf
+          name: nodalis-user-guide
+          path: target/user-guide/nodalis-*-user-guide.pdf
           if-no-files-found: error
       - name: An das Release hängen
         if: startsWith(github.ref, 'refs/tags/')
@@ -137,4 +137,4 @@ jobs:
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
             || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes \
             || gh release view "$GITHUB_REF_NAME" >/dev/null
-          gh release upload "$GITHUB_REF_NAME" target/user-guide/prepolix-*-user-guide.pdf --clobber
+          gh release upload "$GITHUB_REF_NAME" target/user-guide/nodalis-*-user-guide.pdf --clobber

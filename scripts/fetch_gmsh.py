@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Fetches the Gmsh library that prepolix loads at run time.
+"""Fetches the Gmsh library that nodalis loads at run time.
 
 The official Gmsh builds on PyPI contain the shared library with OpenCASCADE, Netgen and
 TetGen built in (libgmsh.so on Linux, gmsh-X.Y.dll on Windows). This script downloads the
 wheel for the platform, checks its SHA-256 against PyPI and unpacks the library together with
 Gmsh's licence into a folder, by default target/gmsh, where development builds find it.
-For a release, put the files next to the prepolix executable.
+For a release, put the files next to the nodalis executable.
 
     python3 scripts/fetch_gmsh.py [--platform linux|windows] [--dest DIR]
 

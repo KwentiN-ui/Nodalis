@@ -1,10 +1,10 @@
-//! Running an analysis with either solver engine behind one interface: the PrePoLix solver
+//! Running an analysis with either solver engine behind one interface: the Nodalis solver
 //! `plxs` as a library in this process ([`BuiltinJob`]), or CalculiX as a child process
 //! ([`plx_job::Job`]). [`Run`] hides which one it is from the monitor and the project.
 //!
 //! The built-in run takes the same input text as CalculiX would. Its results stay in memory
-//! ([`Run::solver_results`]) and are written as one binary file `<name>.plxr`
-//! ([`plx_results::SolverResults`]) instead of CalculiX's `.frd` and `.dat`, which PrePoLix
+//! ([`Run::solver_results`]) and are written as one binary file `<name>.ndlr`
+//! ([`plx_results::SolverResults`]) instead of CalculiX's `.frd` and `.dat`, which Nodalis
 //! reads without parsing text; the `.sta` file is written as by CalculiX. Its progress comes
 //! as typed events, which are rendered into CalculiX's lines for the monitor.
 
@@ -49,18 +49,18 @@ pub enum Engine {
     /// CalculiX `ccx` as a child process, the shipped one or the user's own.
     #[default]
     CalculiX,
-    /// The PrePoLix solver `plxs`, built in.
-    PrePoLix,
+    /// The Nodalis solver `plxs`, built in.
+    Nodalis,
 }
 
 impl Engine {
-    pub const ALL: [Engine; 2] = [Engine::PrePoLix, Engine::CalculiX];
+    pub const ALL: [Engine; 2] = [Engine::Nodalis, Engine::CalculiX];
 
     /// The name shown in the interface.
     pub fn name(self) -> &'static str {
         match self {
             Engine::CalculiX => "CalculiX",
-            Engine::PrePoLix => "PrePoLix solver",
+            Engine::Nodalis => "Nodalis solver",
         }
     }
 }
@@ -69,7 +69,7 @@ impl Engine {
 const MIN_RESULT_SIZE: u64 = 300;
 
 /// Files of a previous run that would be mistaken for results of this one.
-const OLD_FILES: [&str; 8] = ["inp", "dat", "sta", "cvg", "12d", "cel", "frd", "plxr"];
+const OLD_FILES: [&str; 8] = ["inp", "dat", "sta", "cvg", "12d", "cel", "frd", "ndlr"];
 
 /// An analysis running or finished on either engine.
 pub enum Run {
@@ -90,14 +90,14 @@ impl Run {
     ) -> std::io::Result<Run> {
         match engine {
             Engine::CalculiX => Job::start(solver, work_dir, name, input).map(Run::Process),
-            Engine::PrePoLix => {
+            Engine::Nodalis => {
                 BuiltinJob::start(solver.threads, work_dir, name, input).map(Run::Builtin)
             }
         }
     }
 
     /// Starts the model check of `input`: CalculiX reads an input without steps
-    /// (`*NO ANALYSIS`), the PrePoLix solver checks the whole input including its steps
+    /// (`*NO ANALYSIS`), the Nodalis solver checks the whole input including its steps
     /// (free motions per step) without computing results, see [`Run::diagnostics`].
     pub fn check(
         engine: Engine,
@@ -108,13 +108,13 @@ impl Run {
     ) -> std::io::Result<Run> {
         match engine {
             Engine::CalculiX => Job::start(solver, work_dir, name, input).map(Run::Process),
-            Engine::PrePoLix => {
+            Engine::Nodalis => {
                 BuiltinJob::start_check(solver.threads, work_dir, name, input).map(Run::Builtin)
             }
         }
     }
 
-    /// What the PrePoLix solver found, typed, once the run has finished: the findings of a
+    /// What the Nodalis solver found, typed, once the run has finished: the findings of a
     /// model check, or the error of a failed run with its causes. `None` for CalculiX, whose
     /// output is text.
     pub fn diagnostics(&self) -> Option<Vec<Diagnostic>> {
@@ -127,7 +127,7 @@ impl Run {
     pub fn engine(&self) -> Engine {
         match self {
             Run::Process(_) => Engine::CalculiX,
-            Run::Builtin(_) => Engine::PrePoLix,
+            Run::Builtin(_) => Engine::Nodalis,
         }
     }
 
@@ -184,7 +184,7 @@ impl Run {
         plx_job::parse_sta(&text)
     }
 
-    /// The results file, once results have been written to it: `.frd` of CalculiX, `.plxr`
+    /// The results file, once results have been written to it: `.frd` of CalculiX, `.ndlr`
     /// of the built-in solver.
     pub fn results(&self) -> Option<PathBuf> {
         match self {
@@ -272,7 +272,7 @@ impl BuiltinJob {
         std::fs::write(&input_path, input)?;
         let output = Arc::new(Mutex::new(vec![
             "************************************************************".to_owned(),
-            format!("PrePoLix solver plxs {VERSION}"),
+            format!("Nodalis solver plxs {VERSION}"),
             "************************************************************".to_owned(),
         ]));
         let cancel = CancelToken::new();
@@ -401,7 +401,7 @@ impl BuiltinJob {
                         }
                         if let Error::Unsupported(_) = error {
                             say(
-                                " The PrePoLix solver does not compute this yet; CalculiX does: \
+                                " The Nodalis solver does not compute this yet; CalculiX does: \
                                  Tools > Settings > Solver."
                                     .into(),
                             );
@@ -491,7 +491,7 @@ impl BuiltinJob {
         &self.live
     }
 
-    /// The results file `<name>.plxr`.
+    /// The results file `<name>.ndlr`.
     pub fn results_file(&self) -> PathBuf {
         self.file(plx_results::solver::EXTENSION)
     }
@@ -594,8 +594,8 @@ S
             executable: PathBuf::from("unused"),
             threads: 1,
         };
-        let mut run = Run::start(Engine::PrePoLix, &solver, &dir, "Cube", CUBE).unwrap();
-        assert_eq!(run.engine(), Engine::PrePoLix);
+        let mut run = Run::start(Engine::Nodalis, &solver, &dir, "Cube", CUBE).unwrap();
+        assert_eq!(run.engine(), Engine::Nodalis);
         let status = run.wait();
         let output = run.new_output();
         assert_eq!(status, JobStatus::Completed, "{output:#?}");
@@ -604,8 +604,8 @@ S
             "{output:#?}"
         );
         assert!(output.iter().any(|l| l.trim() == "STEP 1"), "{output:#?}");
-        // The results stay in memory and in the `.plxr` file, without a `.frd` file.
-        assert_eq!(run.results(), Some(run.file("plxr")));
+        // The results stay in memory and in the `.ndlr` file, without a `.frd` file.
+        assert_eq!(run.results(), Some(run.file("ndlr")));
         assert!(!run.file("frd").exists());
         let solved = run.solver_results().unwrap();
         let import = plx_results::from_solver(&solved);
@@ -614,7 +614,7 @@ S
         let u1 = disp.component("U1").unwrap();
         assert!(u1.values.iter().all(|v| v.is_finite()));
         assert!(u1.values.iter().any(|&v| v > 0.0));
-        let read = SolverResults::read(&run.file("plxr")).unwrap();
+        let read = SolverResults::read(&run.file("ndlr")).unwrap();
         assert_eq!(read, *solved);
         assert!(run.file("inp").is_file());
         assert!(run.file("sta").is_file());

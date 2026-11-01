@@ -1,5 +1,5 @@
 //! These tests need the Gmsh library, see [`gmsh::candidates`]. Without it they pass with a
-//! note, unless `PREPOLIX_REQUIRE_GMSH` is set, as in the CI.
+//! note, unless `NODALIS_REQUIRE_GMSH` is set, as in the CI.
 
 use std::path::PathBuf;
 
@@ -20,7 +20,7 @@ fn testdata(name: &str) -> PathBuf {
 fn gmsh_available() -> bool {
     match self_test() {
         Ok(_) => true,
-        Err(error) if std::env::var_os("PREPOLIX_REQUIRE_GMSH").is_none() => {
+        Err(error) if std::env::var_os("NODALIS_REQUIRE_GMSH").is_none() => {
             eprintln!("Gmsh not available, test skipped: {error}");
             false
         }
@@ -137,13 +137,13 @@ fn several_files_import_into_one_geometry() {
         "platte_mit_loch.step, zwei_bloecke.step"
     );
     // A file without geometry names itself in the error.
-    let empty = std::env::temp_dir().join("prepolix-leer.brep");
+    let empty = std::env::temp_dir().join("nodalis-leer.brep");
     std::fs::write(&empty, "").unwrap();
     let error = import_cad_files(&[paths[0].clone(), empty.clone()], UnitSystem::Unitless)
         .unwrap_err()
         .to_string();
     let _ = std::fs::remove_file(&empty);
-    assert!(error.contains("prepolix-leer.brep"), "{error}");
+    assert!(error.contains("nodalis-leer.brep"), "{error}");
 }
 
 #[test]

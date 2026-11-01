@@ -28,10 +28,10 @@ const FEATURE_ANGLE_DEG: f64 = 30.0;
 /// angle between neighbouring faces; shading still blends across such folds.
 const SMOOTH_ANGLE_DEG: f64 = 60.0;
 
-/// Extension of prepolix project files.
-pub const PROJECT_EXTENSION: &str = "plx";
+/// Extension of nodalis project files.
+pub const PROJECT_EXTENSION: &str = "ndl";
 
-/// Whether a file is a prepolix project, by its extension.
+/// Whether a file is a nodalis project, by its extension.
 pub fn is_project_file(path: &Path) -> bool {
     path.extension()
         .is_some_and(|e| e.eq_ignore_ascii_case(PROJECT_EXTENSION))
@@ -2364,12 +2364,12 @@ fn ray_triangle(origin: Vec3, direction: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Opt
 mod tests {
     use super::*;
 
-    /// Results of the built-in solver open from their `.plxr` file like CalculiX's from the
+    /// Results of the built-in solver open from their `.ndlr` file like CalculiX's from the
     /// `.frd`: with the parts of the input file beside them and the history output, without
     /// any `.frd` or `.dat` file.
     #[test]
     fn results_of_the_built_in_solver_open_without_a_frd_file() {
-        let dir = std::env::temp_dir().join(format!("plx-plxr-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plx-ndlr-{}", std::process::id()));
         let path = crate::solver_check::solve_beam_built_in(&dir);
         assert!(plx_results::solver::is_solver_results(&path));
         assert!(!path.with_extension("frd").exists() && !path.with_extension("dat").exists());
@@ -2552,9 +2552,9 @@ mod tests {
             .unwrap()
             .model;
         model.fe.steps.push(plx_model::Step::new_static("Step-1"));
-        let dir = std::env::temp_dir().join(format!("prepolix-model-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nodalis-model-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("platte.plx");
+        let path = dir.join("platte.ndl");
         let loaded = save_and_reopen(&path, &model);
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(loaded.model.path, path);
@@ -2617,7 +2617,7 @@ mod tests {
 
     #[test]
     fn contact_in_the_input_next_to_the_results_opens_them_in_true_scale() {
-        let dir = std::env::temp_dir().join("prepolix_contact_results");
+        let dir = std::env::temp_dir().join("nodalis_contact_results");
         std::fs::create_dir_all(&dir).unwrap();
         let frd = dir.join("job.frd");
         std::fs::copy(testdata("kragbalken_c3d8.frd"), &frd).unwrap();
@@ -2737,13 +2737,13 @@ mod tests {
     }
 
     /// Times a click on a part of a large assembly and the redrawn scene with it
-    /// highlighted: `PREPOLIX_PICK_BENCH=file.step cargo test --release -p plx-app
+    /// highlighted: `NODALIS_PICK_BENCH=file.step cargo test --release -p plx-app
     /// pick_bench -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn pick_bench() {
         use std::time::Instant;
-        let Some(path) = std::env::var_os("PREPOLIX_PICK_BENCH") else {
+        let Some(path) = std::env::var_os("NODALIS_PICK_BENCH") else {
             return;
         };
         let start = Instant::now();
@@ -2808,13 +2808,13 @@ mod tests {
     }
 
     /// Times deleting half the parts of a large assembly from its geometry:
-    /// `PREPOLIX_DELETE_BENCH=file.step cargo test --release -p plx-app delete_bench --
+    /// `NODALIS_DELETE_BENCH=file.step cargo test --release -p plx-app delete_bench --
     /// --ignored --nocapture`.
     #[test]
     #[ignore]
     fn delete_bench() {
         use std::time::Instant;
-        let Some(path) = std::env::var_os("PREPOLIX_DELETE_BENCH") else {
+        let Some(path) = std::env::var_os("NODALIS_DELETE_BENCH") else {
             return;
         };
         let start = Instant::now();
@@ -2902,11 +2902,11 @@ mod tests {
     }
 
     /// Whether Gmsh can be used; tests that need it pass with a note otherwise, unless
-    /// `PREPOLIX_REQUIRE_GMSH` is set.
+    /// `NODALIS_REQUIRE_GMSH` is set.
     fn gmsh_available() -> bool {
         match plx_mesher::self_test() {
             Ok(_) => true,
-            Err(error) if std::env::var_os("PREPOLIX_REQUIRE_GMSH").is_none() => {
+            Err(error) if std::env::var_os("NODALIS_REQUIRE_GMSH").is_none() => {
                 eprintln!("Gmsh not available, test skipped: {error}");
                 false
             }
@@ -2940,9 +2940,9 @@ mod tests {
         assert!(model.visible_bounds().is_some());
 
         // The project keeps geometry and mesh; it opens on its mesh with the geometry beside.
-        let dir = std::env::temp_dir().join(format!("prepolix-geometry-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nodalis-geometry-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("bloecke.plx");
+        let path = dir.join("bloecke.ndl");
         let reopened = save_and_reopen(&path, &model);
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(reopened.model.geometry, Some(geometry));
@@ -3056,7 +3056,7 @@ mod tests {
             ..FeModel::default()
         };
         let inp = plx_io::inp::write_inp(&model.mesh, &model.fe, "Platte").unwrap();
-        let dir = std::env::temp_dir().join(format!("prepolix-ccx-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nodalis-ccx-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("platte.inp"), inp).unwrap();
         let status = std::process::Command::new("ccx")
@@ -3392,7 +3392,7 @@ S
         };
         let inp = plx_io::inp::write_inp(&model.mesh, &model.fe, "Membran").unwrap();
         assert!(inp.contains("*Shell section"), "{inp}");
-        let dir = std::env::temp_dir().join(format!("prepolix-shell-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nodalis-shell-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("membran.inp"), inp).unwrap();
         let status = std::process::Command::new("ccx")
@@ -3501,7 +3501,7 @@ S
             ..FeModel::default()
         };
         let inp = plx_io::inp::write_inp(&mesh, &fe, "Bloecke").unwrap();
-        let dir = std::env::temp_dir().join(format!("prepolix-parts-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nodalis-parts-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("bloecke.inp"), inp).unwrap();
         let status = std::process::Command::new("ccx")
@@ -3534,7 +3534,7 @@ S
     /// CalculiX makes a material of each `*Gap` section; the gaps are not parts of the results.
     #[test]
     fn results_leave_out_the_gaps_of_their_input() {
-        let dir = std::env::temp_dir().join(format!("prepolix-gaps-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nodalis-gaps-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         for extension in ["inp", "frd"] {
             let name = format!("gap_stuetzen.{extension}");

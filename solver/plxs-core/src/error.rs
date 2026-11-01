@@ -1,5 +1,5 @@
 //! Errors of the solver, with the name of the item of the input they refer to, so that
-//! PrePoLix can point at the tree entry and the command line can print them in CalculiX's
+//! Nodalis can point at the tree entry and the command line can print them in CalculiX's
 //! wording (`*ERROR reading *BOUNDARY: ...`).
 
 use serde::{Deserialize, Serialize};

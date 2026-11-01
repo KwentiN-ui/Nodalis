@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Exports the program icon from its Typst source, assets/icon/prepolix-icon.typ.
+"""Exports the program icon from its Typst source, assets/icon/nodalis-icon.typ.
 
 Writes to assets/icon/:
-  prepolix.svg          colour icon on its tile (README, user guide)
-  prepolix-light.svg    light grey with dark mesh lines, for light backgrounds
-  prepolix-mono.svg     dark grey with light mesh lines
+  nodalis.svg          colour icon on its tile (README, user guide)
+  nodalis-light.svg    light grey with dark mesh lines, for light backgrounds
+  nodalis-mono.svg     dark grey with light mesh lines
 
 and the raster files that window systems need, to crates/plx-app/assets/icon/:
-  prepolix.png          256 px window and task bar icon
-  prepolix.ico          16 to 256 px for the Windows program, installer and file association
+  nodalis.png          256 px window and task bar icon
+  nodalis.ico          16 to 256 px for the Windows program, installer and file association
 
     python3 scripts/make_icon.py
 
@@ -25,7 +25,7 @@ import tempfile
 from PIL import Image
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SOURCE = ROOT / "assets/icon/prepolix-icon.typ"
+SOURCE = ROOT / "assets/icon/nodalis-icon.typ"
 VECTOR = ROOT / "assets/icon"
 RASTER = ROOT / "crates/plx-app/assets/icon"
 ICO_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
@@ -66,7 +66,7 @@ def render(size, tmp):
 
 
 def main():
-    for name, variant in (("prepolix", "color"), ("prepolix-light", "light"), ("prepolix-mono", "mono")):
+    for name, variant in (("nodalis", "color"), ("nodalis-light", "light"), ("nodalis-mono", "mono")):
         path = VECTOR / f"{name}.svg"
         typst(path, "svg", variant=variant)
         path.write_text(minify_svg(path.read_text()))
@@ -75,14 +75,14 @@ def main():
     RASTER.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
         images = {size: render(size, pathlib.Path(tmp)) for size in ICO_SIZES}
-    images[256].save(RASTER / "prepolix.png", optimize=True)
+    images[256].save(RASTER / "nodalis.png", optimize=True)
     # Each size of the .ico is its own rendering, so the small ones keep the simpler drawing.
     images[256].save(
-        RASTER / "prepolix.ico",
+        RASTER / "nodalis.ico",
         sizes=[(s, s) for s in ICO_SIZES],
         append_images=[images[s] for s in ICO_SIZES[:-1]],
     )
-    print(f"{RASTER.relative_to(ROOT)}: prepolix.png, prepolix.ico ({len(ICO_SIZES)} sizes)")
+    print(f"{RASTER.relative_to(ROOT)}: nodalis.png, nodalis.ico ({len(ICO_SIZES)} sizes)")
 
 
 if __name__ == "__main__":

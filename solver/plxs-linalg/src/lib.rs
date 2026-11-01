@@ -1,4 +1,4 @@
-//! Sparse linear algebra of the PrePoLix solver: the sparsity pattern of a symmetric
+//! Sparse linear algebra of the Nodalis solver: the sparsity pattern of a symmetric
 //! system, the matrix that fills it, the direct solver on top of `faer` and the iterative
 //! one (conjugate gradients with an incomplete Cholesky preconditioner, [`pcg`]).
 //!

@@ -135,7 +135,7 @@ pub enum Line {
         file: String,
         line: usize,
     },
-    /// A comment, kept for the names PrePoLix writes (`** Name: Force-1`, `** Step-1 ++`).
+    /// A comment, kept for the names Nodalis writes (`** Name: Force-1`, `** Step-1 ++`).
     Comment {
         text: String,
         #[allow(dead_code)]

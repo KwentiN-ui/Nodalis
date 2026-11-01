@@ -1,24 +1,24 @@
 #!/bin/bash
-# Starts prepolix on a virtual X display and takes screenshots for the user guide.
+# Starts nodalis on a virtual X display and takes screenshots for the user guide.
 #
-#   docs/user-guide/screenshot.sh start [files...]   start prepolix (1400x900) with these files
+#   docs/user-guide/screenshot.sh start [files...]   start nodalis (1400x900) with these files
 #   docs/user-guide/screenshot.sh shot NAME [WxH+X+Y] save the window (or a crop) as images/NAME.png
-#   docs/user-guide/screenshot.sh stop               stop prepolix and the display
+#   docs/user-guide/screenshot.sh stop               stop nodalis and the display
 #
 # Drive the program in between with xdotool, e.g. `DISPLAY=:5 xdotool mousemove 246 13 click 1`
 # opens the Model menu. Needs Xvfb, xdotool and ImageMagick; pngquant shrinks the PNGs if present.
-# PREPOLIX defaults to target/release/prepolix of this checkout.
+# NODALIS defaults to target/release/nodalis of this checkout.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 export DISPLAY="${DISPLAY_NUMBER:-:5}"
-prepolix="${PREPOLIX:-$here/../../target/release/prepolix}"
+nodalis="${NODALIS:-$here/../../target/release/nodalis}"
 
 case "${1:-}" in
 start)
     shift
     pgrep -f "Xvfb $DISPLAY" >/dev/null || { Xvfb "$DISPLAY" -screen 0 1500x950x24 &>/dev/null & sleep 2; }
-    pkill -x prepolix || true
-    "$prepolix" "$@" &>/tmp/prepolix-screenshot.log &
+    pkill -x nodalis || true
+    "$nodalis" "$@" &>/tmp/nodalis-screenshot.log &
     sleep 6
     ;;
 shot)
@@ -34,7 +34,7 @@ shot)
     echo "$out"
     ;;
 stop)
-    pkill -x prepolix || true
+    pkill -x nodalis || true
     pkill -f "Xvfb $DISPLAY" || true
     ;;
 *)

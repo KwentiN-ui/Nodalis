@@ -88,8 +88,8 @@ fn main() -> eframe::Result {
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("PrePoLix")
-            .with_app_id("prepolix")
+            .with_title("Nodalis")
+            .with_app_id("nodalis")
             .with_inner_size([1400.0, 900.0])
             .with_min_inner_size([640.0, 400.0])
             .with_icon(window_icon()),
@@ -99,14 +99,14 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "prepolix",
+        "nodalis",
         options,
         Box::new(|cc| Ok(Box::new(project::ProjectApp::new(cc)?))),
     )
 }
 
 /// The program icon for the window and the task bar, exported from
-/// `assets/icon/prepolix-icon.typ` by `scripts/make_icon.py`. Decoded once: the analysis
+/// `assets/icon/nodalis-icon.typ` by `scripts/make_icon.py`. Decoded once: the analysis
 /// windows ask for it in every frame.
 fn window_icon() -> std::sync::Arc<egui::IconData> {
     static ICON: std::sync::LazyLock<std::sync::Arc<egui::IconData>> =
@@ -116,7 +116,7 @@ fn window_icon() -> std::sync::Arc<egui::IconData> {
 
 fn decode_window_icon() -> egui::IconData {
     let decoder = png::Decoder::new(std::io::Cursor::new(include_bytes!(
-        "../assets/icon/prepolix.png"
+        "../assets/icon/nodalis.png"
     )));
     let mut reader = decoder.read_info().expect("Icon is a valid PNG");
     let mut rgba = vec![0; reader.output_buffer_size().expect("Icon fits into memory")];

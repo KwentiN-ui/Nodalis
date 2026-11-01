@@ -1,5 +1,5 @@
 //! Results of the built-in solver `plxs`, taken from memory instead of a `.frd` file
-//! ([`from_solver`]), and kept as a compact binary file (`.plxr`, postcard) in the work
+//! ([`from_solver`]), and kept as a compact binary file (`.ndlr`, postcard) in the work
 //! directory and in projects.
 //!
 //! [`from_solver`] gives the same mesh, increments, fields and components as reading the
@@ -19,13 +19,13 @@ use crate::names::{element_kind, rename_component, reorder_nodes};
 use crate::{AnalysisKind, Component, Field, Increment, add_derived_components};
 
 /// The extension of a results file of the built-in solver.
-pub const EXTENSION: &str = "plxr";
+pub const EXTENSION: &str = "ndlr";
 
-/// The first bytes of a `.plxr` file; the last two count the format, which is not converted:
+/// The first bytes of a `.ndlr` file; the last two count the format, which is not converted:
 /// results of another format are solved again.
 const MAGIC: &[u8; 8] = b"PLXRES\x00\x01";
 
-/// What a run of the built-in solver computed, as PrePoLix keeps it.
+/// What a run of the built-in solver computed, as Nodalis keeps it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SolverResults {
     /// The mesh the results are on: nodes, elements, sections and materials of the solver's
@@ -37,7 +37,7 @@ pub struct SolverResults {
     pub version: String,
 }
 
-/// Why a `.plxr` file could not be read.
+/// Why a `.ndlr` file could not be read.
 #[derive(Debug)]
 pub struct ReadError(pub String);
 
@@ -69,7 +69,7 @@ impl SolverResults {
         }
     }
 
-    /// The results as the bytes of a `.plxr` file.
+    /// The results as the bytes of a `.ndlr` file.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = MAGIC.to_vec();
         // Serializing plain data into memory does not fail.
@@ -77,11 +77,11 @@ impl SolverResults {
         bytes
     }
 
-    /// Reads the bytes of a `.plxr` file.
+    /// Reads the bytes of a `.ndlr` file.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ReadError> {
         let data = bytes
             .strip_prefix(MAGIC.as_slice())
-            .ok_or_else(|| ReadError("not results of this PrePoLix version: solve again".into()))?;
+            .ok_or_else(|| ReadError("not results of this Nodalis version: solve again".into()))?;
         let mut results: SolverResults = postcard::from_bytes(data)
             .map_err(|e| ReadError(format!("results not readable: {e}")))?;
         results.model.rebuild_indices();
@@ -99,7 +99,7 @@ impl SolverResults {
     }
 }
 
-/// Whether a file is a results file of the built-in solver (`.plxr`).
+/// Whether a file is a results file of the built-in solver (`.ndlr`).
 pub fn is_solver_results(path: &Path) -> bool {
     path.extension()
         .is_some_and(|e| e.eq_ignore_ascii_case(EXTENSION))

@@ -1,4 +1,4 @@
-//! Assembly of the PrePoLix solver: degree-of-freedom numbering, the element table of a
+//! Assembly of the Nodalis solver: degree-of-freedom numbering, the element table of a
 //! model (formulation, nodes, material of every element), the sparsity pattern, parallel
 //! assembly of the stiffness matrix and of the load vector, single-point constraints and
 //! the reduction to the free degrees of freedom.

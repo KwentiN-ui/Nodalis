@@ -13,7 +13,7 @@ pub struct Constraints {
     pub cyclic_symmetry: Option<CyclicSymmetryModel>,
     pub transforms: Vec<Transform>,
     pub submodel: Option<Submodel>,
-    /// Beam and shell normals given explicitly (`*NORMAL`), none from PrePoLix.
+    /// Beam and shell normals given explicitly (`*NORMAL`), none from Nodalis.
     pub normals: Vec<crate::section::NodeNormal>,
 }
 
@@ -59,7 +59,7 @@ pub struct Tie {
     pub adjust: bool,
     /// The tie couples the two sides of a cyclic symmetry sector (`CYCLIC SYMMETRY`).
     pub cyclic_symmetry: bool,
-    /// `MULTISTAGE`, not written by PrePoLix.
+    /// `MULTISTAGE`, not written by Nodalis.
     pub multistage: bool,
 }
 

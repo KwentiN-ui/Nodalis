@@ -36,4 +36,4 @@ shell or solid section on membranes, as an error #ui("Section does not fit its e
 
 A membrane strip of 100 × 10 × 2 stretched by 0.1 in a first step and loaded with a pressure
 in a second one sags at mid-span as a taut string does, $p L^2 / (8 N)$ with the tension $N$
-per width; PrePoLix's tests check this with CalculiX.
+per width; Nodalis's tests check this with CalculiX.

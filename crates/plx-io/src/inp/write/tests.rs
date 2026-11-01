@@ -2890,7 +2890,7 @@ fn plane_patch(shape: plx_mesh::ElementShape, x0: f64) -> PlanePatch {
 
 /// Every plane stress, plane strain and axisymmetric element type runs in CalculiX on a
 /// distorted patch with an edge pressure and an edge force (one fixture per type for the
-/// PrePoLix solver).
+/// Nodalis solver).
 #[test]
 fn calculix_runs_every_plane_element_type() {
     use plx_mesh::ElementShape::*;
@@ -3634,7 +3634,7 @@ fn hard_contact_and_stick_slope_are_written_per_element_size() {
     );
 }
 
-/// The same model in mm and in SI units (as PrePoLix writes) gives the same contact
+/// The same model in mm and in SI units (as Nodalis writes) gives the same contact
 /// penetration and the same slip of a tied contact.
 #[test]
 fn calculix_gives_the_same_contact_in_mm_and_in_m() {

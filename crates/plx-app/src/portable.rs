@@ -1,5 +1,5 @@
 //! The portable Windows ZIP, like PrePoMax's: a `portable.txt` next to the program makes
-//! prepolix keep its settings and material library in a `Settings` folder beside it instead
+//! nodalis keep its settings and material library in a `Settings` folder beside it instead
 //! of the user's data directory, so the whole folder can be copied, run from a USB stick or
 //! deleted without leaving anything behind.
 
@@ -11,7 +11,7 @@ pub const MARKER: &str = "portable.txt";
 /// Folder next to the executable for settings and the material library in portable mode.
 const DATA_DIR: &str = "Settings";
 
-/// The program folder, if prepolix runs from the portable ZIP.
+/// The program folder, if nodalis runs from the portable ZIP.
 pub fn portable_root() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     portable_root_of(exe.parent()?)
@@ -24,19 +24,19 @@ fn portable_root_of(exe_dir: &Path) -> Option<PathBuf> {
         .then(|| exe_dir.to_path_buf())
 }
 
-/// Whether prepolix runs from the portable ZIP, e.g. so an update offers the ZIP and not
+/// Whether nodalis runs from the portable ZIP, e.g. so an update offers the ZIP and not
 /// the installer.
 pub fn is_portable() -> bool {
     portable_root().is_some()
 }
 
 /// Where settings and the material library are kept: `Settings` next to the program in
-/// portable mode, else eframe's data directory (Linux `~/.local/share/prepolix`, Windows
-/// `%APPDATA%\prepolix\data`).
+/// portable mode, else eframe's data directory (Linux `~/.local/share/nodalis`, Windows
+/// `%APPDATA%\nodalis\data`).
 pub fn data_dir() -> Option<PathBuf> {
     match portable_root() {
         Some(root) => Some(root.join(DATA_DIR)),
-        None => eframe::storage_dir("prepolix"),
+        None => eframe::storage_dir("nodalis"),
     }
 }
 
@@ -51,7 +51,7 @@ mod tests {
 
     #[test]
     fn marker_file_switches_on_portable_mode() {
-        let dir = std::env::temp_dir().join(format!("prepolix-portable-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nodalis-portable-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(portable_root_of(&dir), None);
         std::fs::write(dir.join(MARKER), "portable").unwrap();
@@ -62,7 +62,7 @@ mod tests {
     #[test]
     fn development_builds_are_not_portable() {
         assert!(!is_portable());
-        assert_eq!(data_dir(), eframe::storage_dir("prepolix"));
+        assert_eq!(data_dir(), eframe::storage_dir("nodalis"));
         assert_eq!(persistence_path(), None);
     }
 }

@@ -15,7 +15,7 @@ Create a tie (@contacts) between the two cut faces of the sector and tick
 axis onto the slave face (`*TIE, CYCLIC SYMMETRY` and `*CYCLIC SYMMETRY MODEL`); which face is
 which does not matter.
 
-The number of sectors is not entered: PrePoLix measures the angle between the two cut faces
+The number of sectors is not entered: Nodalis measures the angle between the two cut faces
 about the axis and divides 360° by it, 12 sectors for a 30° sector. CalculiX solves only sectors
 that close the full circle, so an angle that does not divide 360° (such as 25°) is an error in
 the dialog and in the model check; it usually means a wrong axis or a wrong face. While the
@@ -34,7 +34,7 @@ sector; the wireframe previews the other eleven sectors])
 )
 
 Only 3D models can be cyclic symmetric. The nodes of the slave face follow the master face, so
-PrePoLix leaves them out of the boundary conditions: CalculiX refuses a node that is both bound
+Nodalis leaves them out of the boundary conditions: CalculiX refuses a node that is both bound
 and fixed ("dependent side of a MPC and a SPC").
 
 === Frequency steps by nodal diameter

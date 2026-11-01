@@ -233,7 +233,7 @@ impl LinearSolver for LdltSolver {
         )
         .map_err(|e| numerical(format!("symbolic factorization failed: {e:?}")))?;
         // A factor larger than the memory is an error the run reports, not an abort of the
-        // process (the built-in solver runs inside PrePoLix).
+        // process (the built-in solver runs inside Nodalis).
         let len = symbolic.len_val();
         self.values = Vec::new();
         self.values.try_reserve_exact(len).map_err(|_| {

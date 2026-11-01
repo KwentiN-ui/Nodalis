@@ -1,10 +1,10 @@
 # Modellprüfung: typische Abbruchursachen von CalculiX
 
-Was prepolix vor dem Lauf prüft (`crates/plx-model/src/checks.rs`) und nach einem
+Was nodalis vor dem Lauf prüft (`crates/plx-model/src/checks.rs`) und nach einem
 fehlgeschlagenen Lauf aus der Ausgabe von CalculiX erkennt. Nachgestellt mit CalculiX 2.21
 (Debian-Paket `calculix-ccx`, Spooles als Löser).
 
-| Problem | Meldung von CalculiX 2.21 | Verhalten | Prüfung in prepolix |
+| Problem | Meldung von CalculiX 2.21 | Verhalten | Prüfung in nodalis |
 |---|---|---|---|
 | Teile nicht oder unvollständig gelagert (Starrkörperbewegung), z. B. Part ohne Tie | Spooles: keine, Lauf "erfolgreich" mit unbrauchbaren Werten; Pardiso/PaStiX: `zero pivot` | stiller Unsinn oder Abbruch | Rang der Lagerung je zusammenhängendem Teil (Ties verbinden, Kontakte nur lose), nur statische Steps |
 | Stabwerk beweglich: Stab (Truss Section) aus mehreren Elementen, ebenes Fachwerk ohne Halt senkrecht zur Ebene | keine, Lauf "erfolgreich" mit beliebigen Verschiebungen an den freien Knoten (Pardiso: riesige Werte) | stiller Unsinn | Stäbe, Lager und Federn je Stabknoten müssen alle drei Richtungen aufspannen (Node Ties zählen als ein Knoten), nur statische Steps |

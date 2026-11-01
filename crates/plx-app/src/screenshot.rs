@@ -206,7 +206,7 @@ impl ImmediateCapture {
             pixels_per_point: output.pixels_per_point,
         };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("prepolix_screenshot"),
+            label: Some("nodalis_screenshot"),
             size: wgpu::Extent3d {
                 width,
                 height,
@@ -233,7 +233,7 @@ impl ImmediateCapture {
         let [r, g, b, _] = ctx.global_style().visuals.panel_fill.to_array();
         let mut pass = encoder
             .begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("prepolix_screenshot"),
+                label: Some("nodalis_screenshot"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -257,7 +257,7 @@ impl ImmediateCapture {
         let row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("prepolix_screenshot"),
+            label: Some("nodalis_screenshot"),
             size: u64::from(row * height),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,

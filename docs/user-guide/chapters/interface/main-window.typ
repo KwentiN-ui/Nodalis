@@ -24,7 +24,7 @@ From top to bottom the window contains:
   or saved, warnings, keywords of an imported `.inp` that were skipped ("Not yet evaluated:
   ..."), unit conversions and the output of the query tool. #ui("Analysis") is the monitor of
   CalculiX (@monitor); it comes to the front when a run starts.
-/ Status bar: on the left what is loaded ("bracket.plx: 12345 nodes, 6789 elements, 3 parts") or
+/ Status bar: on the left what is loaded ("bracket.ndl: 12345 nodes, 6789 elements, 3 parts") or
   what is running ("Meshing ..."), on the right the unit system and the model space of the
   analysis.
 

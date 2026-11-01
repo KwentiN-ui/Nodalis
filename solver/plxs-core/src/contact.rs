@@ -74,7 +74,7 @@ pub enum ContactKind {
     NodeToSurface,
     SurfaceToSurface,
     Mortar,
-    /// `TYPE=LINMORTAR`, `PGLINMORTAR`: not written by PrePoLix, kept for completeness.
+    /// `TYPE=LINMORTAR`, `PGLINMORTAR`: not written by Nodalis, kept for completeness.
     LinearMortar,
 }
 

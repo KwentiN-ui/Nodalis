@@ -1,5 +1,5 @@
 //! Creating and editing the FE model: PrePoMax's item dialogs for materials, sections, steps,
-//! boundary conditions, loads and field outputs, and prepolix's hot spot definitions.
+//! boundary conditions, loads and field outputs, and nodalis's hot spot definitions.
 //!
 //! Regions are picked in the 3D view while a dialog is open. As in PrePoMax the user does not
 //! need node or element sets for this; the input file writer derives them. Sets can still be

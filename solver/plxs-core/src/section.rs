@@ -26,7 +26,7 @@ pub enum SectionKind {
         thickness: f64,
         /// Offset of the reference surface in units of the thickness.
         offset: f64,
-        /// Thickness read from the nodes (`NODAL THICKNESS`) instead; not written by PrePoLix.
+        /// Thickness read from the nodes (`NODAL THICKNESS`) instead; not written by Nodalis.
         nodal_thickness: bool,
     },
     /// `*MEMBRANE SECTION`.
@@ -35,7 +35,7 @@ pub enum SectionKind {
         thickness: f64,
         offset: f64,
     },
-    /// `*BEAM SECTION`, also with `SECTION=GENERAL` on PrePoLix's `U1` user elements
+    /// `*BEAM SECTION`, also with `SECTION=GENERAL` on Nodalis's `U1` user elements
     /// ([`BeamProfile::General`]).
     Beam {
         material: String,
@@ -66,7 +66,7 @@ impl SectionKind {
 }
 
 /// Beam profiles, with the dimensions of CalculiX's `SECTION=` types and the general values
-/// of PrePoLix's `U1` beam.
+/// of Nodalis's `U1` beam.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum BeamProfile {
     /// `SECTION=RECT`: widths in the two local directions.
@@ -106,7 +106,7 @@ pub struct Spring {
     pub dof1: u8,
     pub dof2: u8,
     pub stiffness: SpringStiffness,
-    /// `ORIENTATION` is not written by PrePoLix; springs act along global axes.
+    /// `ORIENTATION` is not written by Nodalis; springs act along global axes.
     pub orientation: Option<String>,
 }
 
@@ -130,7 +130,7 @@ pub struct Gap {
     pub friction: Option<f64>,
 }
 
-/// `*NORMAL`, which PrePoLix does not write: a normal at a node of a beam or shell element.
+/// `*NORMAL`, which Nodalis does not write: a normal at a node of a beam or shell element.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NodeNormal {
     pub element: crate::mesh::ElementId,

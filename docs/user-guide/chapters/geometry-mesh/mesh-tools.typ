@@ -42,7 +42,7 @@ example halves of an imported mesh. The output pane reports how many nodes were 
 
 #screenshot("merge-nodes.png", [Merge coincident nodes])
 
-#note[Parts meshed from geometry in PrePoLix do not share nodes and their nodes rarely coincide
+#note[Parts meshed from geometry in Nodalis do not share nodes and their nodes rarely coincide
 exactly; connect them with ties or contacts (@constraints) instead.]
 
 === Renumber nodes and elements

@@ -3422,7 +3422,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "plx-app"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "chrono",
  "cpal",
@@ -3456,11 +3456,11 @@ dependencies = [
 
 [[package]]
 name = "plx-core"
-version = "0.3.15"
+version = "0.1.0"
 
 [[package]]
 name = "plx-io"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -3478,7 +3478,7 @@ dependencies = [
 
 [[package]]
 name = "plx-job"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "plx-core",
  "ron",
@@ -3488,7 +3488,7 @@ dependencies = [
 
 [[package]]
 name = "plx-mesh"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "plx-core",
  "ron",
@@ -3498,7 +3498,7 @@ dependencies = [
 
 [[package]]
 name = "plx-mesher"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "libloading 0.9.0",
  "log",
@@ -3509,7 +3509,7 @@ dependencies = [
 
 [[package]]
 name = "plx-model"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "glam",
  "plx-core",
@@ -3521,7 +3521,7 @@ dependencies = [
 
 [[package]]
 name = "plx-render"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam",
@@ -3534,7 +3534,7 @@ dependencies = [
 
 [[package]]
 name = "plx-results"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "glam",
  "plx-core",
@@ -3548,7 +3548,7 @@ dependencies = [
 
 [[package]]
 name = "plx-solve"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "plx-job",
  "plx-results",
@@ -3560,7 +3560,7 @@ dependencies = [
 
 [[package]]
 name = "plxs-assembly"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "plxs-constraints",
  "plxs-core",
@@ -3572,7 +3572,7 @@ dependencies = [
 
 [[package]]
 name = "plxs-cli"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "plx-io",
  "plxs-core",
@@ -3585,7 +3585,7 @@ dependencies = [
 
 [[package]]
 name = "plxs-constraints"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "plxs-core",
  "plxs-elements",
@@ -3594,7 +3594,7 @@ dependencies = [
 
 [[package]]
 name = "plxs-contact"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "plxs-core",
  "plxs-elements",
@@ -3603,7 +3603,7 @@ dependencies = [
 
 [[package]]
 name = "plxs-core"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -3611,14 +3611,14 @@ dependencies = [
 
 [[package]]
 name = "plxs-elements"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "plxs-core",
 ]
 
 [[package]]
 name = "plxs-input"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "plx-io",
  "plx-mesh",
@@ -3627,7 +3627,7 @@ dependencies = [
 
 [[package]]
 name = "plxs-linalg"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "faer",
  "plxs-core",
@@ -3636,21 +3636,21 @@ dependencies = [
 
 [[package]]
 name = "plxs-materials"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "plxs-core",
 ]
 
 [[package]]
 name = "plxs-output"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "plxs-core",
 ]
 
 [[package]]
 name = "plxs-procedures"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "plxs-assembly",
  "plxs-constraints",
@@ -3664,7 +3664,7 @@ dependencies = [
 
 [[package]]
 name = "plxs-session"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "plxs-assembly",
  "plxs-constraints",
@@ -3682,7 +3682,7 @@ dependencies = [
 
 [[package]]
 name = "plxs-verify"
-version = "0.3.15"
+version = "0.1.0"
 dependencies = [
  "flate2",
  "plx-io",

@@ -25,7 +25,7 @@ fn plate() -> Option<Geometry> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/platte_mit_loch.step");
     match plx_mesher::import_cad(&path, UnitSystem::Unitless) {
         Ok(import) => Some(import.geometry),
-        Err(error) if std::env::var_os("PREPOLIX_REQUIRE_GMSH").is_none() => {
+        Err(error) if std::env::var_os("NODALIS_REQUIRE_GMSH").is_none() => {
             eprintln!("Gmsh not available, test skipped: {error}");
             None
         }
@@ -34,7 +34,7 @@ fn plate() -> Option<Geometry> {
 }
 
 fn folder(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("prepolix-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("nodalis-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -50,7 +50,7 @@ fn write_request(dir: &Path, geometry: Geometry) {
 }
 
 fn worker(dir: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_prepolix"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nodalis"));
     command
         .arg("--mesh-worker")
         .arg(dir)

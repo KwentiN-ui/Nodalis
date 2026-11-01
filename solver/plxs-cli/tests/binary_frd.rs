@@ -1,5 +1,5 @@
 //! `plxs -o bin`: the binary `.frd` holds the same mesh and results as the text one, read
-//! with PrePoLix's own reader (`plx-io`), for solids, an expanded shell model and several
+//! with Nodalis's own reader (`plx-io`), for solids, an expanded shell model and several
 //! increments.
 
 use std::path::{Path, PathBuf};

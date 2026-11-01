@@ -26,17 +26,17 @@ window has these entries:
   [Close Analysis], [Closes the window; the analysis stays in the project.],
 )
 
-#note[PrePoLix does not ask about unsaved changes. Save regularly. Changes of the model can be
+#note[Nodalis does not ask about unsaved changes. Save regularly. Changes of the model can be
   undone (@undo).]
 
 === What each file type does
 
-/ `.plx` (PrePoLix project): all analyses of the project, each with its geometry, mesh setup,
+/ `.ndl` (Nodalis project): all analyses of the project, each with its geometry, mesh setup,
   mesh, FE model and the results it keeps (@bind-result), and the place of its block in the
   schematic. Saving writes a temporary file first and then replaces the old one, so a crash
   during saving cannot destroy the project, together with the links between the analyses.
-  A project written by a newer version of PrePoLix is refused, and so are projects saved by
-  PrePoLix 0.2.6 and older, which held one model only. Projects of the first multi-analysis
+  A project written by a newer version of Nodalis is refused, and so are projects saved by
+  Nodalis 0.2.6 and older, which held one model only. Projects of the first multi-analysis
   format (one model space for all analyses) are converted on opening: their results are dropped
   and have to be solved again, and once saved, the project no longer opens in older versions.
 / `.inp` (CalculiX input): imported with #menu("Geometry", "Import ...") (@mesh-import). *Only
@@ -45,7 +45,7 @@ window has these entries:
   All other keywords (materials, steps, ...) are skipped and listed in the output pane.
 / `.frd` (CalculiX results): the results of the analysis' own runs with CalculiX. Result files
   from elsewhere are not opened.
-/ `.plxr` (PrePoLix solver results): the results of the analysis' own runs with the built-in
+/ `.ndlr` (Nodalis solver results): the results of the analysis' own runs with the built-in
   solver, a compact binary file instead of `.frd` and `.dat` (@bind-result).
 / CAD files: imported with #menu("Geometry", "Import ...") (@geometry-import).
 
@@ -59,7 +59,7 @@ A project file dropped onto the project window or an analysis window opens in th
 window. CAD files and input files dropped onto an analysis window are imported into it; several
 CAD files dropped together are combined into one geometry.
 
-On the command line, `prepolix project.plx` opens the project. Other files, for example
-`prepolix plate.step`, start a new project with one analysis named after the first file, into
-which the files are imported. Without files, PrePoLix reopens the last saved project that was
+On the command line, `nodalis project.ndl` opens the project. Other files, for example
+`nodalis plate.step`, start a new project with one analysis named after the first file, into
+which the files are imported. Without files, Nodalis reopens the last saved project that was
 open at exit.

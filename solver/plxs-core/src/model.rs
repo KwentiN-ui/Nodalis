@@ -102,7 +102,7 @@ pub struct InitialConditions {
     pub temperatures: Vec<(NodeRef, f64)>,
     /// `TYPE=VELOCITY`: (node or set, DOF, value).
     pub velocities: Vec<(NodeRef, u8, f64)>,
-    /// `TYPE=DISPLACEMENT`, `STRESS`, `PLASTIC STRAIN`...: not written by PrePoLix.
+    /// `TYPE=DISPLACEMENT`, `STRESS`, `PLASTIC STRAIN`...: not written by Nodalis.
     pub displacements: Vec<(NodeRef, u8, f64)>,
 }
 

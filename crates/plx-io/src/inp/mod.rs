@@ -135,7 +135,7 @@ enum Block {
     },
 }
 
-/// The start of the comment PrePoLix writes before a general `*Beam section`: CalculiX
+/// The start of the comment Nodalis writes before a general `*Beam section`: CalculiX
 /// knows the profile by its area and second moments only, the results draw it from this.
 pub(crate) const PROFILE_COMMENT: &str = "** Profile: ";
 
@@ -640,7 +640,7 @@ fn read_section(
                     t: [first(2)?, first(3)?, first(4)?, first(5)?],
                 },
                 "GENERAL" => {
-                    // PrePoLix's own comment names the profile and the normal it is drawn
+                    // Nodalis's own comment names the profile and the normal it is drawn
                     // with; otherwise the values: A, I11, I12, I22, k, whose I11 is the
                     // moment of the 1-coordinate squared, see BeamProfile::data_line.
                     if let Some((profile, normal)) = comment.and_then(general_profile) {

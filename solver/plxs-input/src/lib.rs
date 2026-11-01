@@ -1,6 +1,6 @@
 //! Reader for CalculiX input files (`.inp`) into the solver's IR ([`plxs_core::Analysis`]).
 //!
-//! Scope: every keyword PrePoLix's writer emits (concept section 1), spelled as CalculiX
+//! Scope: every keyword Nodalis's writer emits (concept section 1), spelled as CalculiX
 //! documents it. Keywords, parameters and set names are case-insensitive and stored in
 //! upper case; data lines may continue on the next line after a trailing comma; `*INCLUDE`
 //! pulls in files relative to the including file; comment lines (`**`) are skipped. The
@@ -9,7 +9,7 @@
 //! [`plxs_core::Step`] is complete on its own.
 //!
 //! Errors use CalculiX's wording (`*ERROR reading *BOUNDARY: ...`, `cannot be interpreted`
-//! for unknown keywords), because PrePoLix's solver self-test reads the text.
+//! for unknown keywords), because Nodalis's solver self-test reads the text.
 //!
 //! Source: the keyword chapter of the CalculiX CrunchiX user's manual (2.23). No CalculiX
 //! source code was used.

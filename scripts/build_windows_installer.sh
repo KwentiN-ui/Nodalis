@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds the Windows installer and the portable ZIP for prepolix on Linux: cross-compiles
-# prepolix.exe for x86_64-pc-windows-gnu with MinGW, fetches the Gmsh DLL, builds the CalculiX
+# Builds the Windows installer and the portable ZIP for nodalis on Linux: cross-compiles
+# nodalis.exe for x86_64-pc-windows-gnu with MinGW, fetches the Gmsh DLL, builds the CalculiX
 # solver and packs everything with NSIS and, for the ZIP, with Python's zipfile.
 #
 #     scripts/build_windows_installer.sh
@@ -9,8 +9,8 @@
 # and what scripts/build_ccx.sh needs for CalculiX on Windows,
 # and the Rust target:   rustup target add x86_64-pc-windows-gnu
 #
-# The installer ends up in target/windows-installer/prepolix-<version>-setup.exe, the ZIP in
-# target/windows-installer/prepolix-<version>-windows-portable.zip.
+# The installer ends up in target/windows-installer/nodalis-<version>-setup.exe, the ZIP in
+# target/windows-installer/nodalis-<version>-windows-portable.zip.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -39,19 +39,19 @@ scripts/build_user_guide.sh html
 
 rm -rf "$stage"
 mkdir -p "$stage/licenses" "$stage/doc"
-cp "target/$target/release/prepolix.exe" "$stage/"
-cp "$gmsh/gmsh-4.15.dll" crates/plx-app/assets/icon/prepolix.ico installer/windows/THIRD-PARTY.txt "$stage/"
+cp "target/$target/release/nodalis.exe" "$stage/"
+cp "$gmsh/gmsh-4.15.dll" crates/plx-app/assets/icon/nodalis.ico installer/windows/THIRD-PARTY.txt "$stage/"
 cp LICENSE "$stage/LICENSE.txt"
 cp "$gmsh/GMSH-LICENSE.txt" "$gmsh/GMSH-CREDITS.txt" installer/windows/licenses/*.txt "$stage/licenses/"
 cp crates/plx-app/assets/fonts/OFL.txt "$stage/licenses/NotoSans-OFL.txt"
 cp target/user-guide/user-guide.html "$stage/doc/"
-# CalculiX with its DLLs; prepolix uses it when no other CalculiX is set.
+# CalculiX with its DLLs; nodalis uses it when no other CalculiX is set.
 cp -r "$ccx" "$stage/ccx"
 commit="$(git rev-parse HEAD 2>/dev/null || echo unbekannt)"
 dirty="$(git status --porcelain --untracked-files=no 2>/dev/null | head -1)"
 {
-    echo "PrePoLix $version"
-    echo "Quelltext: https://github.com/KwentiN-ui/prepolix"
+    echo "Nodalis $version"
+    echo "Quelltext: https://github.com/KwentiN-ui/Nodalis"
     echo "Commit:    $commit${dirty:+ (mit lokalen Änderungen)}"
 } >"$stage/SOURCE.txt"
 # Windows editors expect CRLF line ends in the text files.
@@ -59,28 +59,28 @@ for file in "$stage"/*.txt "$stage"/licenses/*.txt "$stage"/ccx/*.txt "$stage"/c
     sed -i 's/\r$//; s/$/\r/' "$file"
 done
 
-installer="$out/prepolix-$version-setup.exe"
+installer="$out/nodalis-$version-setup.exe"
 makensis -V2 -DVERSION="$version" -DSTAGE="$root/$stage" -DOUTFILE="$root/$installer" \
-    installer/windows/prepolix.nsi
+    installer/windows/nodalis.nsi
 echo "Installer: $installer ($(du -h "$installer" | cut -f1))"
 
 # The portable ZIP, like PrePoMax's: the same files in one folder, unpacked anywhere and started
-# without administrator rights or installation. portable.txt makes prepolix keep its settings
+# without administrator rights or installation. portable.txt makes nodalis keep its settings
 # in a Settings folder beside it (crates/plx-app/src/portable.rs).
-portable="$out/prepolix-$version-windows-portable.zip"
+portable="$out/nodalis-$version-windows-portable.zip"
 cat >"$stage/portable.txt" <<EOF
-PrePoLix $version, portable version
+Nodalis $version, portable version
 
-Start prepolix.exe in this folder; no installation or administrator rights are needed.
+Start nodalis.exe in this folder; no installation or administrator rights are needed.
 Settings and the material library are kept in the Settings folder next to it, CalculiX
-runs in the Temp folder. To remove PrePoLix, delete this folder.
+runs in the Temp folder. To remove Nodalis, delete this folder.
 
-While this file exists, PrePoLix stays portable. Without it, settings go to
-%APPDATA%\prepolix like with the installer.
+While this file exists, Nodalis stays portable. Without it, settings go to
+%APPDATA%\nodalis like with the installer.
 EOF
 sed -i 's/\r$//; s/$/\r/' "$stage/portable.txt"
 rm -f "$portable"
-python3 - "$stage" "$portable" "PrePoLix-$version" <<'EOF'
+python3 - "$stage" "$portable" "Nodalis-$version" <<'EOF'
 import os, sys, zipfile
 stage, archive, top = sys.argv[1:]
 with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:

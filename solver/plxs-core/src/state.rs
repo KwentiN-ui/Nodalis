@@ -1,5 +1,5 @@
 //! The state of a model between steps and increments: what a restart stores and what a
-//! state link of the PrePoLix graph hands from one node to the next. Data only; the
+//! state link of the Nodalis graph hands from one node to the next. Data only; the
 //! procedures fill it.
 
 use serde::{Deserialize, Serialize};

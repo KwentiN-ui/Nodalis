@@ -154,7 +154,7 @@ impl AnalysisKind {
 pub struct Component {
     pub name: String,
     pub values: Vec<f32>,
-    /// Computed by prepolix rather than read from the file.
+    /// Computed by nodalis rather than read from the file.
     pub derived: bool,
 }
 

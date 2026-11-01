@@ -309,7 +309,7 @@ impl Problem {
             Problem::RigidBeamNodes => {
                 "CalculiX refuses nodes of beams, trusses, shells and membranes in a rigid \
                  body (\"nodes belonging to beam elements must not be subject to a RIGID \
-                 MPC\"), because it expands these elements into solids. PrePoLix therefore \
+                 MPC\"), because it expands these elements into solids. Nodalis therefore \
                  couples such nodes of a Rigid Body constraint or a rigid displacement point \
                  with linear equations to the point. They are exact for small rotations, as \
                  in a linear analysis; with large deformations (NLGEOM) and large rotations \
@@ -326,13 +326,13 @@ impl Problem {
             Problem::HeldRigidBodyNodes => {
                 "A node of a rigid body follows its reference point; a boundary condition on \
                  it binds it a second time, which CalculiX refuses (\"dependent side of a MPC \
-                 and a SPC\"). PrePoLix leaves these nodes out of the rigid body: they keep \
+                 and a SPC\"). Nodalis leaves these nodes out of the rigid body: they keep \
                  their boundary condition, and the rigid body is not held by it."
             }
             Problem::SharedRigidBody => {
                 "A node can follow one rigid body or remote point only. Rigid body constraints \
                  and displacements on a point each tie their selection to it; where two share \
-                 nodes, PrePoLix leaves these nodes in the first rigid body and the second \
+                 nodes, Nodalis leaves these nodes in the first rigid body and the second \
                  moves without them."
             }
             Problem::NoRigidBody => {
@@ -506,7 +506,7 @@ impl Problem {
                  eigenvalue file\") or computes the wrong responses."
             }
             Problem::DesignRegionIgnored => {
-                "CalculiX defines the design variables once for the model. PrePoLix writes \
+                "CalculiX defines the design variables once for the model. Nodalis writes \
                  the design region of the first Sensitivity step; the regions of later ones \
                  are not used."
             }
@@ -626,7 +626,7 @@ impl Problem {
             Problem::MpcAndSpc => {
                 "A degree of freedom is both fixed by a boundary condition and bound as \
                  the dependent degree of freedom of an equation (MPC). CalculiX then aborts. \
-                 PrePoLix keeps the equations and rigid bodies it writes itself off the \
+                 Nodalis keeps the equations and rigid bodies it writes itself off the \
                  degrees of freedom that boundary conditions or other constraints hold (the \
                  solver output lists what it changed), so the overlap comes from a \
                  combination it does not resolve yet."
@@ -651,7 +651,7 @@ impl Problem {
                  *PHYSICAL CONSTANTS card encountered\"."
             }
             Problem::SolverError => {
-                "The solver aborted with an error message that PrePoLix does not know. \
+                "The solver aborted with an error message that Nodalis does not know. \
                  The exact text is shown in the Monitor."
             }
         }
@@ -697,7 +697,7 @@ impl Problem {
                  for the rigid body, or join the beams with a Node Tie (rigid) at a shared \
                  node instead of a rigid body. For small rotations nothing needs to change. \
                  A run that stopped with this message used an input file from an older \
-                 PrePoLix: run the analysis again."
+                 Nodalis: run the analysis again."
             }
             Problem::TieNodesNotTied => {
                 "Set the Tolerance of the contact region (or tie) a little above the largest \
@@ -747,7 +747,7 @@ impl Problem {
                  Section."
             }
             Problem::HeldOnlyByContact => {
-                "Turn Weak springs on again (Connections > Connection Settings): PrePoLix \
+                "Turn Weak springs on again (Connections > Connection Settings): Nodalis \
                  then holds these parts with very soft springs. Otherwise support them \
                  weakly yourself (a Spring with a small stiffness), let the contact \
                  surfaces touch at the start (Adjust in the contact pair) or bring the \
@@ -3114,7 +3114,7 @@ pub fn diagnose_solver_warnings(lines: &[String]) -> Vec<Finding> {
             tolerance = tolerance.max(t);
         }
     }
-    // The PrePoLix solver: "*WARNING in *TIE <name>: <n> slave node(s) are too far away
+    // The Nodalis solver: "*WARNING in *TIE <name>: <n> slave node(s) are too far away
     // from the master surface and are not tied: <ids>".
     let plxs_marker = "slave node(s) are too far away from the master surface";
     let untied: usize = (lines.iter())
@@ -3323,7 +3323,7 @@ mod tests {
     use super::diagnose_solver_warnings as warnings_of;
 
     #[test]
-    fn untied_nodes_of_the_prepolix_solver_are_found() {
+    fn untied_nodes_of_the_nodalis_solver_are_found() {
         let lines = vec![
             "*WARNING: *WARNING in *TIE GLUE: 9 slave node(s) are too far away from the master surface and are not tied: 1001, 1002".to_string(),
         ];

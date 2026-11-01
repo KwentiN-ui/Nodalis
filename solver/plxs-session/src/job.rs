@@ -1,6 +1,6 @@
-//! A whole job as the command line and PrePoLix run it: read the input, expand shells and
+//! A whole job as the command line and Nodalis run it: read the input, expand shells and
 //! beams, compute the steps on a session, write the result files. The command line prints
-//! the events in CalculiX's wording ([`format_event`]); PrePoLix consumes them directly.
+//! the events in CalculiX's wording ([`format_event`]); Nodalis consumes them directly.
 
 use std::path::{Path, PathBuf};
 
@@ -222,7 +222,7 @@ fn run_continuing(
         }
         // A frequency step that stored its modes (`*FREQUENCY, STORAGE=YES`): the `.eig`
         // file holds them in `postcard` encoding, an own format that only `plxs` reads
-        // (PrePoLix handles the file by name only, also when it keeps the results in
+        // (Nodalis handles the file by name only, also when it keeps the results in
         // memory).
         if let Some(modes) = &session.state().stored_modes {
             let path = output("eig");
@@ -290,7 +290,7 @@ fn run_continuing(
     Ok(JobOutcome::Finished)
 }
 
-/// The lines CalculiX would print for an event: PrePoLix's monitor reads them from the
+/// The lines CalculiX would print for an event: Nodalis's monitor reads them from the
 /// command line and from the built-in solver alike.
 pub fn format_event(event: &ProgressEvent) -> Vec<String> {
     match event {

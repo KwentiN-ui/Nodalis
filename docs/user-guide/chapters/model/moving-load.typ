@@ -3,7 +3,7 @@
 == Moving load <moving-load>
 
 A #ui("Moving Load") drives a group of wheels over a structure: a crane over its runway beam, a
-trolley over a crane bridge, a vehicle over a bridge deck. CalculiX has no such load, so PrePoLix
+trolley over a crane bridge, a vehicle over a bridge deck. CalculiX has no such load, so Nodalis
 writes one static step per position, each with the wheel forces at that position. No script is
 needed. Create it with #ui("Create ...") on #ui("Loads") of a static step or
 #menu("Model", "Create Load ...") and pick the type #ui("Moving Load").

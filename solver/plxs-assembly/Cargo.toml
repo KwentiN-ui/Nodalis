@@ -1,6 +1,6 @@
 [package]
 name = "plxs-assembly"
-description = "PrePoLix solver: DOF numbering, constraint elimination, parallel assembly"
+description = "Nodalis solver: DOF numbering, constraint elimination, parallel assembly"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -43,7 +43,7 @@ pub fn bolt_form(
         egui::Label::new(
             RichText::new(
                 "The faces on the two sides of the cut through the shank, or only the \
-                 cylindrical face of the shank as side A: PrePoLix then cuts the bolt across \
+                 cylindrical face of the shank as side A: Nodalis then cuts the bolt across \
                  its middle.",
             )
             .weak(),

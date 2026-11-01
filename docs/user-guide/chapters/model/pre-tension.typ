@@ -18,11 +18,11 @@ the shank together with a force, or shortens the bolt by a given length. Create 
     preloading by displacement. A shortening of 0 in a later step loosens the bolt again.],
   [Lock], [Keeps the length the bolt has at the end of the previous step (`*BOUNDARY, FIXED`):
     the bolt then works like a stiff part of the joint, and its force follows the other loads.],
-  [Direction], [The direction of the bolt axis. Unticked, PrePoLix uses the normal of the
+  [Direction], [The direction of the bolt axis. Unticked, Nodalis uses the normal of the
     selected faces; #ui("Given") takes the components #ui("X"), #ui("Y"), #ui("Z").],
 )
 
-PrePoLix cuts the mesh apart at the selected faces when it writes the input file: every
+Nodalis cuts the mesh apart at the selected faces when it writes the input file: every
 element on their side, also one that only touches the cut with an edge or a corner, gets copies
 of the nodes on the cut. `*Equation`s tie the copies to the other side the way CalculiX's
 `*PRE-TENSION SECTION` does: the gap normal to the cut is the first degree of freedom of a new
@@ -39,15 +39,15 @@ is no previous length to keep then, and the bolt carries no preload.
 face on the cut. In a tetrahedral mesh, elements that touch the cut with just an edge or a
 corner then hold both sides together and take most of the preload, which is why a thin layer of wedge elements is often
 added at the cut (#menu("Model", "Tools", "Boundary Layer")).
-PrePoLix needs no such layer: its own cut separates all of them.]
+Nodalis needs no such layer: its own cut separates all of them.]
 
 #note[A bolt split into two parts in the CAD geometry has two meshes that do not share nodes at
 the cut: connect the halves with a #ui("Tie") (@ties) between the two cut faces and put the
-pre-tension load on the faces of one of them. PrePoLix writes the nodes of the cut side as the
+pre-tension load on the faces of one of them. Nodalis writes the nodes of the cut side as the
 slave of the tie, whichever side you made the master, so the preload passes through it.]
 
 A pre-tension load can follow an #ui("Amplitude") (@amplitudes). The reaction force at the
-pre-tension node is the bolt force: PrePoLix prints it (`RF1`) and the shortening (`U1`) into the
+pre-tension node is the bolt force: Nodalis prints it (`RF1`) and the shortening (`U1`) into the
 history results under the name of the load in every step that has the load (@history-outputs).
 
 #note[A #ui("Bolt") under #ui("Connections") (@bolts) is the simpler way for most joints: pick

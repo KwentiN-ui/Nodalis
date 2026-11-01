@@ -11,7 +11,7 @@ use plx_model::{Material, MaterialLibrary, Quantity, UnitSystem};
 use crate::icons::{self, Icon};
 use crate::tree_rows::{frame, tree_row};
 
-/// Name of the library file in prepolix's data directory.
+/// Name of the library file in nodalis's data directory.
 const FILE_NAME: &str = "materials.ron";
 
 /// The library file: in the directory where the settings are kept (see

@@ -9,7 +9,7 @@ use crate::mesh::{ElementRef, NodeRef};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Step {
-    /// Name from the `** Name:` comment PrePoLix writes before the step, or `Step-<n>`.
+    /// Name from the `** Name:` comment Nodalis writes before the step, or `Step-<n>`.
     pub name: String,
     pub procedure: Procedure,
     /// `*STEP, NLGEOM`: geometrically nonlinear.
@@ -32,7 +32,7 @@ pub struct Step {
     pub outputs: Outputs,
     /// `*RESTART, WRITE` in this step.
     pub restart_write: Option<RestartWrite>,
-    /// `*CONTROLS`, not written by PrePoLix; `None` means CalculiX's defaults.
+    /// `*CONTROLS`, not written by Nodalis; `None` means CalculiX's defaults.
     pub controls: Option<Controls>,
 }
 
@@ -109,7 +109,7 @@ impl Procedure {
 /// and maps the names to its direct and iterative solvers, see [`Self::is_iterative`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EquationSolver {
-    /// CalculiX's default (PaStiX in PrePoLix's builds).
+    /// CalculiX's default (PaStiX in Nodalis's builds).
     #[default]
     Default,
     Spooles,
@@ -158,7 +158,7 @@ impl Incrementation {
 pub struct Static {
     pub solver: EquationSolver,
     pub increments: Incrementation,
-    /// `EXPLICIT`, `TIME RESET`, `TOTAL TIME AT START` are not written by PrePoLix; kept
+    /// `EXPLICIT`, `TIME RESET`, `TOTAL TIME AT START` are not written by Nodalis; kept
     /// for completeness.
     pub time_reset: bool,
     pub total_time_at_start: Option<f64>,
@@ -177,9 +177,9 @@ pub struct Frequency {
     pub solver: EquationSolver,
     /// `STORAGE=YES`: write the modes to `<job>.eig` for later modal steps.
     pub storage: bool,
-    /// `GLOBAL=NO`: modes in local systems; not written by PrePoLix.
+    /// `GLOBAL=NO`: modes in local systems; not written by Nodalis.
     pub global: bool,
-    /// `CYCMPC=INACTIVE`, not written by PrePoLix.
+    /// `CYCMPC=INACTIVE`, not written by Nodalis.
     pub cycmpc_active: bool,
     pub count: u32,
     pub lower: Option<f64>,
@@ -216,9 +216,9 @@ pub struct HeatTransfer {
     pub increments: Incrementation,
     /// `DELTMX`: maximum temperature change per increment.
     pub deltmx: Option<f64>,
-    /// `FREQUENCY=`: heat transfer modes (eigenvalues), not written by PrePoLix.
+    /// `FREQUENCY=`: heat transfer modes (eigenvalues), not written by Nodalis.
     pub frequency_count: Option<u32>,
-    /// `COMPRESSIBLE`, `SHOCK SMOOTHING`, `TURBULENCE MODEL`: fluid parameters PrePoLix does
+    /// `COMPRESSIBLE`, `SHOCK SMOOTHING`, `TURBULENCE MODEL`: fluid parameters Nodalis does
     /// not use; rejected by the reader.
     pub direct: bool,
 }
@@ -280,7 +280,7 @@ pub struct Sensitivity {
     pub nlgeom: bool,
     pub responses: Vec<DesignResponse>,
     pub filter: Option<Filter>,
-    /// `*OBJECTIVE`, written by older PrePoLix versions; names of the responses.
+    /// `*OBJECTIVE`, written by older Nodalis versions; names of the responses.
     pub objectives: Vec<String>,
 }
 
@@ -363,7 +363,7 @@ pub enum DistributedLoadKind {
         point: [f64; 3],
         axis: [f64; 3],
     },
-    /// `NEWTON`, `BX`/`BY`/`BZ` and other labels PrePoLix does not write.
+    /// `NEWTON`, `BX`/`BY`/`BZ` and other labels Nodalis does not write.
     Other { label: String, values: Vec<f64> },
 }
 
@@ -446,7 +446,7 @@ pub enum ContactChange {
         slave: String,
         master: String,
     },
-    /// `*MODEL CHANGE, TYPE=ELEMENT, ADD|REMOVE`, not written by PrePoLix.
+    /// `*MODEL CHANGE, TYPE=ELEMENT, ADD|REMOVE`, not written by Nodalis.
     Elements { add: bool, elset: String },
     /// `*CHANGE FRICTION, INTERACTION=` with the new `*FRICTION` values.
     Friction {
@@ -484,7 +484,7 @@ pub struct FieldOutput {
     pub global: bool,
     /// `SECTION FORCES`: shell results as section forces rather than stresses.
     pub section_forces: bool,
-    /// `TIME POINTS=` of `*TIME POINTS`, not written by PrePoLix.
+    /// `TIME POINTS=` of `*TIME POINTS`, not written by Nodalis.
     pub time_points: Option<String>,
 }
 
@@ -527,7 +527,7 @@ pub struct RestartWrite {
     pub overlay: bool,
 }
 
-/// `*CONTROLS`: convergence parameters. Not written by PrePoLix; kept so that an input with
+/// `*CONTROLS`: convergence parameters. Not written by Nodalis; kept so that an input with
 /// them is not rejected later.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Controls {

@@ -1,9 +1,9 @@
-//! Writers of the PrePoLix solver's result files in CalculiX's formats, so that PrePoLix
+//! Writers of the Nodalis solver's result files in CalculiX's formats, so that Nodalis
 //! reads them unchanged: `.frd` (field results with the mesh), `.dat` (history output),
 //! `.sta` (increment table) and `.cvg` (convergence table).
 //!
 //! The formats are taken from the files CalculiX writes (column layout observed on the
-//! golden files of the fixture corpus) and from PrePoLix's own readers in `plx-io`; no
+//! golden files of the fixture corpus) and from Nodalis's own readers in `plx-io`; no
 //! CalculiX code was consulted. The `.frd` is written as ASCII with 12-column fixed-width
 //! numbers or with binary number blocks ([`FrdFormat`]).
 

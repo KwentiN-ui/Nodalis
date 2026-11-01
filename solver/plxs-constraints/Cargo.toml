@@ -1,6 +1,6 @@
 [package]
 name = "plxs-constraints"
-description = "PrePoLix solver: boundary conditions, equations, rigid bodies, ties, transforms"
+description = "Nodalis solver: boundary conditions, equations, rigid bodies, ties, transforms"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

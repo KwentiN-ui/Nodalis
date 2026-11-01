@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the CalculiX solver (ccx) that the PrePoLix releases ship, with the SPOOLES, PaStiX
+# Builds the CalculiX solver (ccx) that the Nodalis releases ship, with the SPOOLES, PaStiX
 # and ARPACK solvers, for Linux or (cross-compiled with MinGW) for Windows.
 #
 #     scripts/build_ccx.sh [linux|windows]
@@ -282,7 +282,7 @@ cd "$ccx/ccx_$CCX_VERSION/src"
 # The repository says DEVELOPMENT where the tarball names its version.
 sed -i "s/Version DEVELOPMENT/Version $CCX_VERSION/" "ccx_$CCX_VERSION.c" "ccx_${CCX_VERSION}step.c"
 # ccx prints its progress (increments, iterations) with printf. Into a pipe that is block
-# buffered, so PrePoLix would see it only every 4 KB, minutes late on large models: stdout is
+# buffered, so Nodalis would see it only every 4 KB, minutes late on large models: stdout is
 # line buffered from the start of main, unbuffered on Windows, whose C library has no line
 # buffering. The anchor is the timer start, which conda-forge's mingw_time patch comments out on
 # Windows.
@@ -302,13 +302,13 @@ else
         "$($FC -print-file-name=libquadmath.a)" "$($FC -print-file-name=libgomp.a)"
         "$($CXX -print-file-name=libstdc++.a)" -lpthread -ldl -lrt)
 fi
-make -s -j"$jobs" -f "$root/installer/ccx/Makefile.prepolix" VERSION="$CCX_VERSION" \
+make -s -j"$jobs" -f "$root/installer/ccx/Makefile.nodalis" VERSION="$CCX_VERSION" \
     CC="$CC" FC="$FC" AR="$AR" PREFIX="$prefix" LDOMP="$ldomp" LINK="${link[*]}" >"$work/calculix.log" 2>&1 ||
     { tail -30 "$work/calculix.log"; exit 1; }
 
 rm -rf "$out"
 mkdir -p "$out/bin" "$out/licenses"
-cp "ccx_${CCX_VERSION}_prepolix" "$out/bin/$exe" 2>/dev/null || cp "ccx_${CCX_VERSION}_prepolix.exe" "$out/bin/$exe"
+cp "ccx_${CCX_VERSION}_nodalis" "$out/bin/$exe" 2>/dev/null || cp "ccx_${CCX_VERSION}_nodalis.exe" "$out/bin/$exe"
 "${host:+$host-}strip" "$out/bin/$exe"
 if [ "$platform" = linux ]; then
     # Only the C library may remain a dependency, otherwise ccx fails on systems without gfortran.
@@ -326,7 +326,7 @@ cp "$src/pastix/LICENSE" "$out/licenses/PaStiX-CeCILL-C.txt"
 cp "$root/installer/ccx/GCC-RUNTIME-LIBRARY-EXCEPTION.txt" "$out/licenses/"
 [ "$platform" = windows ] && cp "$root/installer/ccx/WINPTHREADS-LICENSE.txt" "$out/licenses/"
 {
-    echo "CalculiX ccx $CCX_VERSION for $platform, built by scripts/build_ccx.sh of PrePoLix"
+    echo "CalculiX ccx $CCX_VERSION for $platform, built by scripts/build_ccx.sh of Nodalis"
     echo "Solvers: SPOOLES (multithreaded), PaStiX, ARPACK"
     echo "CalculiX:  $CCX_REPO/tree/$CCX_COMMIT"
     echo "  patches: $CCX_FEEDSTOCK_REPO/tree/$CCX_FEEDSTOCK_COMMIT/recipe"
@@ -336,6 +336,6 @@ cp "$root/installer/ccx/GCC-RUNTIME-LIBRARY-EXCEPTION.txt" "$out/licenses/"
     echo "OpenBLAS:  $OPENBLAS_REPO/tree/$OPENBLAS_COMMIT"
     echo "Scotch:    $SCOTCH_URL"
     echo "PaStiX:    $PASTIX_REPO/tree/$PASTIX_COMMIT"
-    echo "  patches: installer/ccx/patches in https://github.com/KwentiN-ui/prepolix"
+    echo "  patches: installer/ccx/patches in https://github.com/KwentiN-ui/Nodalis"
 } >"$out/SOURCE.txt"
 echo "CalculiX: $out/bin/$exe ($(du -h "$out/bin/$exe" | cut -f1))"

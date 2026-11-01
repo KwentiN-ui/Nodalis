@@ -1,11 +1,11 @@
-//! The CalculiX keywords PrePoLix writes, each with the feature that needs it, so that the
+//! The CalculiX keywords Nodalis writes, each with the feature that needs it, so that the
 //! self test can say which features an older or reduced CalculiX build cannot compute.
 //!
 //! A new step type or feature that writes a new keyword adds it to [`WRITTEN_KEYWORDS`]; a
 //! test checks that every keyword in the input file writer is listed.
 
 /// Keywords the input file writer emits, spelled as CalculiX documents them, with the
-/// PrePoLix feature that writes them. Keywords of the basic static analysis come first.
+/// Nodalis feature that writes them. Keywords of the basic static analysis come first.
 pub const WRITTEN_KEYWORDS: &[(&str, &str)] = &[
     ("*HEADING", "Every analysis"),
     ("*NODE", "Every analysis"),

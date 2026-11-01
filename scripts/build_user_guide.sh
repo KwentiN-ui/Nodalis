@@ -3,7 +3,7 @@
 # first use:
 #
 #     scripts/build_user_guide.sh html   # target/user-guide/user-guide.html (shipped with the program)
-#     scripts/build_user_guide.sh pdf    # target/user-guide/prepolix-<version>-user-guide.pdf
+#     scripts/build_user_guide.sh pdf    # target/user-guide/nodalis-<version>-user-guide.pdf
 #
 # The HTML guide is one self-contained file (pictures embedded) that Help > User Guide opens in
 # the browser. HTML export needs Typst 0.14 or newer and is still marked experimental there.
@@ -40,7 +40,7 @@ case "$format" in
             docs/user-guide/main.typ "$file"
         ;;
     pdf)
-        file="$out/prepolix-$version-user-guide.pdf"
+        file="$out/nodalis-$version-user-guide.pdf"
         "$typst" compile --root . --ignore-system-fonts docs/user-guide/main.typ "$file"
         ;;
     *) echo "Format $format unbekannt (html oder pdf)" >&2; exit 1 ;;

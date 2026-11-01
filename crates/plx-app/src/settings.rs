@@ -1,5 +1,5 @@
 //! User settings, grouped like PrePoMax's settings dialog and stored by eframe in the user's
-//! data directory (Linux `~/.local/share/prepolix`, Windows `%APPDATA%\prepolix\data`).
+//! data directory (Linux `~/.local/share/nodalis`, Windows `%APPDATA%\nodalis\data`).
 
 use crate::numeric;
 pub use plx_solve::Engine;
@@ -135,10 +135,10 @@ impl Default for PostProcessing {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Solver {
-    /// The built-in PrePoLix solver or CalculiX as a process.
+    /// The built-in Nodalis solver or CalculiX as a process.
     pub engine: Engine,
     /// The CalculiX executable; a bare name is looked up on `PATH`, empty for the one shipped
-    /// with prepolix (see [`bundled_ccx`]).
+    /// with nodalis (see [`bundled_ccx`]).
     pub executable: String,
     /// Threads for the solver: the size of the one thread pool all analyses of the built-in
     /// solver share ([`plx_solve::pool`]), or `OMP_NUM_THREADS` of each CalculiX process;
@@ -204,7 +204,7 @@ impl Solver {
         use plx_io::inp::keywords::normalized;
         // The built-in solver reads everything the input file writer writes; what it cannot
         // compute yet it reports when it runs.
-        if self.engine == Engine::PrePoLix {
+        if self.engine == Engine::Nodalis {
             return Vec::new();
         }
         // An empty executable means the bundled CalculiX, see `job_solver`.
@@ -276,7 +276,7 @@ impl Solver {
     /// together they do not ask for more than the computer has.
     pub fn threads_of(&self, concurrent: usize) -> u32 {
         match (self.engine, self.threads) {
-            (Engine::PrePoLix, threads) => threads,
+            (Engine::Nodalis, threads) => threads,
             (Engine::CalculiX, AUTOMATIC_THREADS) => (cores() / concurrent.max(1) as u32).max(1),
             (Engine::CalculiX, threads) => threads,
         }
@@ -329,10 +329,10 @@ fn threads_ui(ui: &mut egui::Ui, threads: &mut u32) {
 
 /// Where the shipped CalculiX lies relative to the directory of the executable: Windows
 /// installer, Linux AppImage (usr/bin next to usr/lib), and target/ccx/<platform> for
-/// target/<profile>/prepolix.
+/// target/<profile>/nodalis.
 const BUNDLED_LOCATIONS: [&str; 3] = [
     "ccx/bin",
-    "../lib/prepolix/ccx/bin",
+    "../lib/nodalis/ccx/bin",
     if cfg!(windows) {
         "../ccx/windows/bin"
     } else {
@@ -340,7 +340,7 @@ const BUNDLED_LOCATIONS: [&str; 3] = [
     },
 ];
 
-/// The CalculiX shipped with prepolix, if there is one.
+/// The CalculiX shipped with nodalis, if there is one.
 pub fn bundled_ccx() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     find_bundled_ccx(exe.parent()?)
@@ -393,7 +393,7 @@ impl Gmsh {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Updates {
-    /// Ask GitHub for a new release when PrePoLix starts.
+    /// Ask GitHub for a new release when Nodalis starts.
     pub check_at_startup: bool,
 }
 
@@ -423,19 +423,19 @@ pub fn missing_executable(executable: &std::path::Path) -> Option<String> {
 }
 
 /// PrePoMax's default work directory: a `Temp` folder next to the program. Where that is
-/// not writable, e.g. for a binary installed to `/usr/bin`, a `prepolix` folder in the
+/// not writable, e.g. for a binary installed to `/usr/bin`, a `nodalis` folder in the
 /// system's temporary directory.
 pub fn default_work_dir() -> std::path::PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|exe| Some(exe.parent()?.join("Temp")))
         .filter(|dir| is_writable(dir))
-        .unwrap_or_else(|| std::env::temp_dir().join("prepolix"))
+        .unwrap_or_else(|| std::env::temp_dir().join("nodalis"))
 }
 
 /// Creates the directory if needed and checks that files can be written into it.
 fn is_writable(dir: &std::path::Path) -> bool {
-    let probe = dir.join(".prepolix-write-test");
+    let probe = dir.join(".nodalis-write-test");
     let writable = std::fs::create_dir_all(dir).is_ok() && std::fs::write(&probe, b"").is_ok();
     let _ = std::fs::remove_file(probe);
     writable
@@ -673,8 +673,8 @@ impl SettingsWindow {
                         ui.horizontal(|ui| {
                             for engine in Engine::ALL {
                                 let tip = match engine {
-                                    Engine::PrePoLix => "The solver built into PrePoLix: no external program, progress and results stay in the program. Steps it cannot compute yet are reported when the analysis runs.",
-                                    Engine::CalculiX => "CalculiX (ccx) as a separate program, the one shipped with PrePoLix or your own.",
+                                    Engine::Nodalis => "The solver built into Nodalis: no external program, progress and results stay in the program. Steps it cannot compute yet are reported when the analysis runs.",
+                                    Engine::CalculiX => "CalculiX (ccx) as a separate program, the one shipped with Nodalis or your own.",
                                 };
                                 ui.radio_value(&mut solver.engine, engine, engine.name())
                                     .on_hover_text(tip);
@@ -688,7 +688,7 @@ impl SettingsWindow {
                                     .hint_text(self.default_executable.as_str()),
                             )
                             .on_hover_text(
-                                "Leave empty for the CalculiX shipped with PrePoLix, or ccx on the PATH if there is none.",
+                                "Leave empty for the CalculiX shipped with Nodalis, or ccx on the PATH if there is none.",
                             );
                             ui.end_row();
                         }
@@ -729,7 +729,7 @@ impl SettingsWindow {
                 let updates = &mut self.draft.updates;
                 ui.checkbox(&mut updates.check_at_startup, "Check for updates at startup")
                     .on_hover_text(
-                        "Asks GitHub for the latest release when PrePoLix starts and shows a symbol next to the version if there is a newer one. Help > Check for Updates asks at any time.",
+                        "Asks GitHub for the latest release when Nodalis starts and shows a symbol next to the version if there is a newer one. Help > Check for Updates asks at any time.",
                     );
                 ui.add_space(4.0);
                 ui.add(egui::Label::new(self.installation.description()).wrap());
@@ -737,7 +737,7 @@ impl SettingsWindow {
         }
     }
 
-    /// Gmsh imports STEP, IGES and BREP and meshes; prepolix loads its library at run time.
+    /// Gmsh imports STEP, IGES and BREP and meshes; nodalis loads its library at run time.
     fn gmsh_ui(&mut self, ui: &mut egui::Ui) {
         let loaded = plx_mesher::loaded_library();
         egui::Grid::new("gmsh settings")
@@ -794,7 +794,7 @@ impl SettingsWindow {
                             );
                             if info.untested {
                                 let (major, minor) = plx_mesher::gmsh::TESTED_VERSION;
-                                text += &format!(" PrePoLix is tested with Gmsh {major}.{minor}.");
+                                text += &format!(" Nodalis is tested with Gmsh {major}.{minor}.");
                             }
                             text
                         })
@@ -840,8 +840,8 @@ impl SettingsWindow {
         ui.horizontal(|ui| {
             let engine = self.draft.solver.engine;
             let tip = match engine {
-                Engine::CalculiX => "Starts the executable, solves small cantilevers with the direct and the iterative equation solver, compares the results with beam theory and checks whether it knows every keyword PrePoLix writes.",
-                Engine::PrePoLix => "Solves small cantilevers with the built-in solver, direct and iterative, and compares the results with beam theory.",
+                Engine::CalculiX => "Starts the executable, solves small cantilevers with the direct and the iterative equation solver, compares the results with beam theory and checks whether it knows every keyword Nodalis writes.",
+                Engine::Nodalis => "Solves small cantilevers with the built-in solver, direct and iterative, and compares the results with beam theory.",
             };
             let button = ui
                 .add_enabled(!running, egui::Button::new("Test solver"))
@@ -1004,7 +1004,7 @@ mod tests {
         assert_eq!(chosen.shared_by(4).job_solver().threads, 3);
         // The built-in solver's analyses share one pool instead.
         let builtin = Solver {
-            engine: Engine::PrePoLix,
+            engine: Engine::Nodalis,
             ..Solver::default()
         };
         assert_eq!(builtin.threads_of(4), AUTOMATIC_THREADS);
@@ -1064,12 +1064,12 @@ mod tests {
         std::fs::create_dir_all(&exe_dir).unwrap();
         assert_eq!(find_bundled_ccx(&exe_dir), None);
         // Where the AppImage carries it.
-        let bin = root.join("usr/lib/prepolix/ccx/bin");
+        let bin = root.join("usr/lib/nodalis/ccx/bin");
         std::fs::create_dir_all(&bin).unwrap();
         let name = if cfg!(windows) { "ccx.exe" } else { "ccx" };
         std::fs::write(bin.join(name), "").unwrap();
         let found = find_bundled_ccx(&exe_dir).unwrap();
-        assert!(found.ends_with(std::path::Path::new("lib/prepolix/ccx/bin").join(name)));
+        assert!(found.ends_with(std::path::Path::new("lib/nodalis/ccx/bin").join(name)));
         assert!(!found.to_string_lossy().contains(".."));
         // The Windows installer's folder next to the program wins.
         let local = exe_dir.join("ccx").join("bin");

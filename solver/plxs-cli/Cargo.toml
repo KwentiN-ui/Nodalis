@@ -1,6 +1,6 @@
 [package]
 name = "plxs-cli"
-description = "PrePoLix solver: command line plxs, a drop-in replacement for ccx"
+description = "Nodalis solver: command line plxs, a drop-in replacement for ccx"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "plxs-contact"
-description = "PrePoLix solver: contact search and formulations"
+description = "Nodalis solver: contact search and formulations"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,5 +1,5 @@
 //! Progress events a session reports while it computes. The command line prints them in
-//! CalculiX's wording (PrePoLix's monitor reads that text), PrePoLix will consume them
+//! CalculiX's wording (Nodalis's monitor reads that text), Nodalis will consume them
 //! directly in phase 2.
 
 use std::sync::Arc;

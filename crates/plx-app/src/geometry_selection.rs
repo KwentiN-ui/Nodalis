@@ -400,7 +400,7 @@ mod tests {
             .join(file);
         match crate::model::load(&path, plx_model::UnitSystem::Unitless) {
             Ok(loaded) => loaded.geometry_view,
-            Err(error) if std::env::var_os("PREPOLIX_REQUIRE_GMSH").is_none() => {
+            Err(error) if std::env::var_os("NODALIS_REQUIRE_GMSH").is_none() => {
                 eprintln!("Gmsh not available, test skipped: {error}");
                 None
             }

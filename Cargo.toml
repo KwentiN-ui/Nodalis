@@ -4,10 +4,10 @@ members = ["crates/*", "solver/plxs-*"]
 exclude = ["vendor/egui-snarl"]
 
 [workspace.package]
-version = "0.3.15"
+version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/KwentiN-ui/prepolix"
+repository = "https://github.com/KwentiN-ui/Nodalis"
 
 [workspace.dependencies]
 plx-core = { path = "crates/plx-core" }
@@ -20,7 +20,7 @@ plx-job = { path = "crates/plx-job" }
 plx-render = { path = "crates/plx-render" }
 plx-solve = { path = "crates/plx-solve" }
 
-# The PrePoLix solver (solver/, prefix plxs-). Numerics come from one ecosystem only: faer for
+# The Nodalis solver (solver/, prefix plxs-). Numerics come from one ecosystem only: faer for
 # dense and sparse linear algebra and rayon for parallelism; no second numerics crate beside them.
 plxs-core = { path = "solver/plxs-core" }
 plxs-input = { path = "solver/plxs-input" }

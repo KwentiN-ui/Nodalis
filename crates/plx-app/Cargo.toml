@@ -1,13 +1,13 @@
 [package]
 name = "plx-app"
-description = "PrePoLix: FEM-Präprozessor und Postprozessor für CalculiX"
+description = "Nodalis: FEM-Präprozessor und Postprozessor für CalculiX"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "prepolix"
+name = "nodalis"
 path = "src/main.rs"
 
 [dependencies]

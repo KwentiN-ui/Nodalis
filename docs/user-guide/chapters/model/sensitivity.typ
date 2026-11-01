@@ -32,7 +32,7 @@ conditions, loads or defined fields of its own:
   it; CalculiX reads the modes from the `.eig` file.
 
 The model check (@model-check) reports a sensitivity step without the fitting step. CalculiX
-defines the design region once for the whole model: PrePoLix writes the region of the first
+defines the design region once for the whole model: Nodalis writes the region of the first
 sensitivity step (`*DESIGN VARIABLES, TYPE=COORDINATE`), and the check warns when a later
 sensitivity step has another one.
 

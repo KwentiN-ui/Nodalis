@@ -1,4 +1,4 @@
-// Layout of the PrePoLix user guide. Only fonts embedded in Typst are used, so the PDF
+// Layout of the Nodalis user guide. Only fonts embedded in Typst are used, so the PDF
 // looks the same on every machine (`typst compile --ignore-system-fonts`).
 //
 // The same source also compiles to the offline HTML guide shipped with the program
@@ -70,9 +70,9 @@
   show grid: it => html.elem("div", attrs: (class: "grid"), it.children.map(c => c.body).join())
   html.elem("style", html-css)
   html.elem("header", {
-    image("../../assets/icon/prepolix.svg", alt: "")
+    image("../../assets/icon/nodalis.svg", alt: "")
     html.elem("div", {
-      html.elem("h1", [PrePoLix User Guide])
+      html.elem("h1", [Nodalis User Guide])
       html.elem("p", [A pre- and post-processor for CalculiX, Version
         #version.])
     })
@@ -97,9 +97,9 @@
   // Title page.
   page(margin: 3cm)[
     #v(12%)
-    #image("../../assets/icon/prepolix.svg", width: 4.5cm)
+    #image("../../assets/icon/nodalis.svg", width: 4.5cm)
     #v(1.5em)
-    #text(size: 36pt, weight: "bold", fill: accent)[PrePoLix]
+    #text(size: 36pt, weight: "bold", fill: accent)[Nodalis]
     #v(0.2em)
     #text(size: 18pt)[User Guide]
     #v(1em)
@@ -115,7 +115,7 @@
     header: context {
       if counter(page).get().first() > 2 {
         set text(size: 9pt, fill: luma(110))
-        [PrePoLix User Guide #h(1fr) Version #version]
+        [Nodalis User Guide #h(1fr) Version #version]
       }
     },
   )
@@ -126,7 +126,7 @@
 }
 
 #let guide(version: "dev", body) = {
-  set document(title: "PrePoLix User Guide", author: "PrePoLix contributors")
+  set document(title: "Nodalis User Guide", author: "Nodalis contributors")
   set text(font: "Libertinus Serif", size: 10.5pt, lang: "en")
   set par(justify: true, leading: 0.6em)
   set heading(numbering: "1.1")

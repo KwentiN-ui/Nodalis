@@ -296,7 +296,7 @@ impl Analysis {
         if !check_model && !model.fe.steps.iter().any(|s| s.active) {
             return Err("Analysis not started: all steps are deactivated.".into());
         }
-        let heading = format!("PrePoLix: {}", model.file_name());
+        let heading = format!("Nodalis: {}", model.file_name());
         let mut fe = model.fe.clone();
         let job_name = job_name(name);
         stage_global_results(&mut fe, work_dir, &job_name)?;
@@ -304,7 +304,7 @@ impl Analysis {
         // The sets of the analyses that continue from its states go into the input file too:
         // CalculiX takes no new sets after reading a state.
         let engine = solver.engine;
-        // CalculiX checks an input without steps (`*NO ANALYSIS`); the PrePoLix solver checks
+        // CalculiX checks an input without steps (`*NO ANALYSIS`); the Nodalis solver checks
         // every step's supports, so it reads the whole input.
         let input = if check_model && engine == Engine::CalculiX {
             plx_io::inp::write_check_inp(&model.mesh, &fe, &heading)
@@ -358,7 +358,7 @@ impl Analysis {
                 "CalculiX ({}) not started: {e}. {hint}",
                 job_solver.executable.display()
             ),
-            Engine::PrePoLix => format!("Solver not started: {e}"),
+            Engine::Nodalis => format!("Solver not started: {e}"),
         })?;
         let mut output = vec![format!(
             "{name} {} in {}",
@@ -394,12 +394,12 @@ impl Analysis {
         })
     }
 
-    /// Adds a line of prepolix's own to the monitor output.
+    /// Adds a line of nodalis's own to the monitor output.
     pub fn note(&mut self, line: String) {
         self.collect([line]);
     }
 
-    /// What the PrePoLix solver found, typed, once the run has finished; `None` for
+    /// What the Nodalis solver found, typed, once the run has finished; `None` for
     /// CalculiX, whose output is read as text instead.
     pub fn diagnostics(&self) -> Option<Vec<plx_solve::Diagnostic>> {
         self.job.diagnostics()
@@ -821,7 +821,7 @@ mod tests {
             ];
             step
         });
-        let mut model = Model::new(std::path::Path::new("cubes.plx"), mesh);
+        let mut model = Model::new(std::path::Path::new("cubes.ndl"), mesh);
         model.fe = plx_model::FeModel {
             materials: vec![Material {
                 name: "S235".into(),
@@ -870,7 +870,7 @@ mod tests {
         analysis.output().to_vec()
     }
 
-    /// Check Model with the PrePoLix solver: cubes held in X only can slide and turn; the
+    /// Check Model with the Nodalis solver: cubes held in X only can slide and turn; the
     /// solver's rank test names the part and the free motions, attached to each step.
     #[test]
     fn the_built_in_model_check_names_the_free_part() {
@@ -881,10 +881,10 @@ mod tests {
                 plx_model::BoundaryKind::displacement([Some(0.0), None, None, None, None, None]);
         }
         let solver = Solver {
-            engine: Engine::PrePoLix,
+            engine: Engine::Nodalis,
             ..Default::default()
         };
-        let dir = std::env::temp_dir().join(format!("prepolix-check-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nodalis-check-{}", std::process::id()));
         let mut analysis =
             Analysis::start(&solver, &model, true, "Cubes", &dir, &Default::default()).unwrap();
         let status = loop {
@@ -929,7 +929,7 @@ mod tests {
             eprintln!("ccx missing, test skipped");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("prepolix-restart-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nodalis-restart-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let output = solve(&pulled_cubes(0.03), &dir.join("Cubes"));
         assert!(
@@ -967,7 +967,7 @@ mod tests {
             eprintln!("ccx missing, test skipped");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("prepolix-continue-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nodalis-continue-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         // The continuing analysis holds the end with a boundary condition of its own, on a
         // set the first analysis does not use itself.
@@ -1029,7 +1029,7 @@ mod tests {
             eprintln!("ccx missing, test skipped");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("prepolix-linked-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nodalis-linked-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let bc = |name: &str, nodes: Vec<u32>, kind| BoundaryCondition {
             distribution: None,

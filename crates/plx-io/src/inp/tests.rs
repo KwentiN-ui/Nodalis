@@ -131,7 +131,7 @@ fn missing_include_is_an_io_error() {
 
 #[test]
 fn finds_contact_pairs_but_not_ties() {
-    let dir = std::env::temp_dir().join("prepolix_defines_contact");
+    let dir = std::env::temp_dir().join("nodalis_defines_contact");
     std::fs::create_dir_all(&dir).unwrap();
     let write = |name: &str, text: &str| {
         let path = dir.join(name);

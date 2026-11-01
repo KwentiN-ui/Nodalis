@@ -205,7 +205,7 @@ impl BackgroundSolve {
         analysis.is_running().then(|| analysis.progress()).flatten()
     }
 
-    /// The output so far: prepolix's lines around CalculiX's.
+    /// The output so far: nodalis's lines around CalculiX's.
     pub fn output(&self) -> Vec<&str> {
         let solver = self.analysis.as_ref().map_or(&[][..], |a| a.output());
         (self.before.iter().chain(solver).chain(&self.after))
@@ -437,7 +437,7 @@ impl BackgroundSolve {
         };
         self.after
             .push(format!("Analysis {}", Analysis::status_text(status)));
-        // The PrePoLix solver tells the causes of a failed run, typed.
+        // The Nodalis solver tells the causes of a failed run, typed.
         if let Some(diagnostics) = analysis.diagnostics()
             && let Some(model) = &self.model
         {
@@ -552,7 +552,7 @@ mod tests {
     /// The same with the built-in solver, which needs no program.
     #[test]
     fn solves_with_the_built_in_solver() {
-        solves_and_keeps_the_results(plx_solve::Engine::PrePoLix);
+        solves_and_keeps_the_results(plx_solve::Engine::Nodalis);
     }
 
     fn solves_and_keeps_the_results(engine: plx_solve::Engine) {
@@ -571,10 +571,8 @@ mod tests {
             model: fe,
             ..Default::default()
         };
-        let dir = std::env::temp_dir().join(format!(
-            "prepolix-monitor-{engine:?}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("nodalis-monitor-{engine:?}-{}", std::process::id()));
         let solver = Solver {
             engine,
             executable: "ccx".into(),
@@ -582,7 +580,7 @@ mod tests {
             ..Default::default()
         };
         let ctx = egui::Context::default();
-        let project = dir.join("project.plx");
+        let project = dir.join("project.ndl");
         let work_dir = dir.join("project").join("Beam_1");
         let mut solve = BackgroundSolve::start(
             &ctx,
@@ -646,10 +644,10 @@ mod tests {
     #[test]
     fn a_stopped_solve_keeps_nothing() {
         let ctx = egui::Context::default();
-        let dir = std::env::temp_dir().join(format!("prepolix-stop-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nodalis-stop-{}", std::process::id()));
         let mut solve = BackgroundSolve::start(
             &ctx,
-            dir.join("p.plx"),
+            dir.join("p.ndl"),
             ProjectAnalysis::default(),
             Solver::default(),
             dir.clone(),

@@ -1,4 +1,4 @@
-//! Project files (`.plx`): the analyses of a project, each with its geometry, mesh, FE model
+//! Project files (`.ndl`): the analyses of a project, each with its geometry, mesh, FE model
 //! in RON, written by serde, and the results the user bound to it.
 
 use std::collections::BTreeMap;
@@ -15,7 +15,7 @@ use plx_model::{FeModel, Geometry, PROJECT_FORMAT};
 use plx_results::ResultsSettings;
 use serde::{Deserialize, Serialize};
 
-/// A prepolix project as saved in a `.plx` file: its analyses, like the systems of an Ansys
+/// A nodalis project as saved in a `.ndl` file: its analyses, like the systems of an Ansys
 /// Workbench project, and the blocks that give them data. Like PrePoMax's `.pmx` it stores
 /// what the user defined, not the CalculiX input files.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -511,7 +511,7 @@ pub struct BoundResults {
     #[serde(default)]
     pub with_errors: bool,
     pub files: Vec<BoundFile>,
-    /// The results of the built-in solver, a `.plxr` file ([`plx_results::SolverResults`]),
+    /// The results of the built-in solver, a `.ndlr` file ([`plx_results::SolverResults`]),
     /// read without a `.frd` file; CalculiX's results are among [`BoundResults::files`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solver: Option<BoundFile>,
@@ -644,10 +644,10 @@ pub enum ProjectError {
     },
     #[error("{path}: not a valid project file: {message}")]
     Format { path: PathBuf, message: String },
-    #[error("{path} comes from a newer PrePoLix version (format {format})")]
+    #[error("{path} comes from a newer Nodalis version (format {format})")]
     Newer { path: PathBuf, format: u32 },
     #[error(
-        "{path} comes from an older PrePoLix version (format {format}), which cannot be \
+        "{path} comes from an older Nodalis version (format {format}), which cannot be \
          opened: build the project anew, or import the input files of its analyses"
     )]
     Older { path: PathBuf, format: u32 },
@@ -668,7 +668,7 @@ pub fn save_project(path: &Path, project: &Project) -> Result<(), ProjectError> 
     std::fs::rename(&temporary, path).map_err(io)
 }
 
-/// The oldest format that can still be opened. While PrePoLix is being designed, a new
+/// The oldest format that can still be opened. While Nodalis is being designed, a new
 /// format is not converted: older projects are refused.
 pub const FIRST_PROJECT_FORMAT: u32 = 16;
 
@@ -729,7 +729,7 @@ pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
 }
 
 /// Reads the files of a finished analysis into [`BoundResults`]; files that do not exist are
-/// left out, the results file (`.frd` of CalculiX or `.plxr` of the built-in solver) has to
+/// left out, the results file (`.frd` of CalculiX or `.ndlr` of the built-in solver) has to
 /// be there.
 pub fn bind_results(
     analysis: &str,
@@ -775,7 +775,7 @@ pub fn bind_results(
     Ok(bound)
 }
 
-/// Writes the files of bound results into `dir`; returns the results file: `.plxr` for
+/// Writes the files of bound results into `dir`; returns the results file: `.ndlr` for
 /// results of the built-in solver, `.frd` for those of CalculiX.
 pub fn restore_results(bound: &BoundResults, dir: &Path) -> Result<PathBuf, ProjectError> {
     let format = |message: String| ProjectError::Format {
@@ -862,7 +862,7 @@ pub fn restore_file(bound: &BoundResults, name: &str, path: &Path) -> Result<boo
     Ok(true)
 }
 
-/// Whether a file holds results: `.frd` of CalculiX or `.plxr` of the built-in solver.
+/// Whether a file holds results: `.frd` of CalculiX or `.ndlr` of the built-in solver.
 fn is_results_file(path: &Path) -> bool {
     is_frd(path) || plx_results::solver::is_solver_results(path)
 }
@@ -1106,7 +1106,7 @@ mod tests {
     fn the_format_is_read_from_the_start_of_the_file() {
         // Reading it as a Header instead took minutes for a project with a large mesh.
         let project = single(None, &FeMesh::default(), &FeModel::default(), None);
-        let path = std::env::temp_dir().join(format!("plx-format-{}.plx", std::process::id()));
+        let path = std::env::temp_dir().join(format!("plx-format-{}.ndl", std::process::id()));
         save_project(&path, &project).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
@@ -1255,7 +1255,7 @@ mod tests {
         };
         let dir = std::env::temp_dir().join(format!("plx-project-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("block.plx");
+        let path = dir.join("block.ndl");
         let geometry = Geometry {
             source: "block.step".into(),
             brep: "DBRep_DrawableShape\n\"quoted\" lines\n".into(),
@@ -1378,7 +1378,7 @@ mod tests {
     fn cross_section_blocks_read_back() {
         let dir = std::env::temp_dir().join(format!("plx-cross-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("cross.plx");
+        let path = dir.join("cross.ndl");
         let set = CrossSectionSet {
             id: 4,
             name: "Cross-Sections".into(),
@@ -1415,7 +1415,7 @@ mod tests {
     fn source_blocks_read_back_and_older_projects_are_refused() {
         let dir = std::env::temp_dir().join(format!("plx-nodes-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("nodes.plx");
+        let path = dir.join("nodes.ndl");
         let set = MaterialSet {
             id: 3,
             name: "Materials".into(),
@@ -1742,7 +1742,7 @@ mod tests {
         );
         assert!(bind_results("Analysis-1", &[dir.join("missing.frd")], false).is_err());
 
-        let path = dir.join("block.plx");
+        let path = dir.join("block.ndl");
         let model = FeModel::default();
         let mut bound = bound;
         bound.settings = Some(ResultsSettings {

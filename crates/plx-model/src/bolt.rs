@@ -1,5 +1,5 @@
 //! Bolts preloaded across a cut through their shank, Ansys' bolt pretension: the user picks
-//! the two faces of the cut and the preload, PrePoLix derives the rest when the input file is
+//! the two faces of the cut and the preload, Nodalis derives the rest when the input file is
 //! written ([`FeModel::lower_bolts`]): which side the mesh is cut on, the tie between the
 //! halves of a bolt split into two bodies, the pre-tension load in every step (the preload
 //! in the first step that takes loads, locked at its length after it), and the contact

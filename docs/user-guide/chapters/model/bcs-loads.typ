@@ -37,7 +37,7 @@ temperature boundary conditions can follow an #ui("Amplitude") (@amplitudes).
 
 What a #ui("Displacement/Rotation") does depends on what is selected. Nodes of solid and 2D
 elements have displacements only. Holding all nodes of a face in `U1` to `U3` therefore also
-keeps the face from turning, whatever the rotations say. To let a face turn, PrePoLix holds a
+keeps the face from turning, whatever the rotations say. To let a face turn, Nodalis holds a
 point at its centre instead, and the face follows the point, as Ansys' remote displacement does:
 a beam end on a hinge, a shaft end turned by an angle, a bolt hole held in place while the part
 turns about it. The line below #ui("Behavior") always says which of the two the input file gets.
@@ -86,7 +86,7 @@ The two behaviors of a point match those of Ansys:
   distributing coupling (RBE3) of other programs.
 
 You define no reference point, rigid body or equation for it. When the input file is written,
-PrePoLix adds a reference node and a rotation node at the point. #ui("Rigid") writes a
+Nodalis adds a reference node and a rotation node at the point. #ui("Rigid") writes a
 `*RIGID BODY` on the selection, with nodes of beams and shells coupled by `*EQUATION`s
 (@rigid-body); #ui("Deformable") writes `*EQUATION`s between the nodes and the point. The values
 go on these two nodes, with a `*TRANSFORM` when a coordinate system is chosen. The point is
@@ -118,7 +118,7 @@ angle Theta of a cylindrical system is the one number that cannot be exposed.
 - A coordinate system of its own at each node turns everything else on those nodes too, like
   a skewed symmetry plane (@symmetry); keep other supports and point loads off them.
 - Ansys features that CalculiX cannot carry over are left out: the #ui("Beam") behavior, the
-  augmented Lagrange formulation (PrePoLix always writes exact constraints) and tabular values
+  augmented Lagrange formulation (Nodalis always writes exact constraints) and tabular values
   per component (one amplitude acts on all components).
 
 === Motion preview <motion-preview>

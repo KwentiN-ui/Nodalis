@@ -82,7 +82,7 @@ constraint out of the input file.
 
 Contacts and glued joints between parts are listed under #ui("Connections") in the tree of the FE
 model. The usual way is a contact region: you say which two regions touch and how they behave,
-and PrePoLix works out how CalculiX should model it. The manual objects of CalculiX (surface
+and Nodalis works out how CalculiX should model it. The manual objects of CalculiX (surface
 interactions, contact pairs, ties) are still there under #ui("Connections") #sym.arrow.r
 #ui("Advanced") and in #menu("Interaction", "Advanced").
 
@@ -90,10 +90,10 @@ interactions, contact pairs, ties) are still there under #ui("Connections") #sym
 
 #menu("Interaction", "Create Contact Region ...") or #ui("Create Contact Region ...") in the
 context menu of #ui("Connections") connects two regions, #ui("Side A") and #ui("Side B"). Which
-side is A does not matter: PrePoLix chooses the master side itself.
+side is A does not matter: Nodalis chooses the master side itself.
 
 #screenshot("contact-region-dialog.png", [A frictional contact region with its advanced settings.
-  Side A is red in the 3D view, side B blue; #ui("Exported as") shows what PrePoLix writes for
+  Side A is red in the 3D view, side B blue; #ui("Exported as") shows what Nodalis writes for
   CalculiX and why])
 
 #fields(
@@ -108,11 +108,11 @@ side is A does not matter: PrePoLix chooses the master side itself.
   [From definition], [Names the region by its type and parts, e.g.
     #ui("Frictional - Block to Cap"). A name that starts with the type follows it when the
     type changes, here or in the worksheet.],
-  [Exported as], [What PrePoLix writes for CalculiX, with the derived stiffness and the reasons
+  [Exported as], [What Nodalis writes for CalculiX, with the derived stiffness and the reasons
     below in grey.],
 )
 
-#ui("Advanced settings") shows what PrePoLix derived. Every setting starts at #ui("Auto"), which
+#ui("Advanced settings") shows what Nodalis derived. Every setting starts at #ui("Auto"), which
 shows the derived value in brackets; choosing something else overrides it for this region only.
 
 #fields(
@@ -160,7 +160,7 @@ millimetres or metres. Bonded regions whose slave sides share nodes are written 
 
 ==== Contact detection <contact-detection>
 
-Instead of picking every pair of sides by hand, let PrePoLix find them:
+Instead of picking every pair of sides by hand, let Nodalis find them:
 #menu("Interaction", "Detect Contacts ...") or #ui("Detect Contacts ...") in the context menu of
 #ui("Connections") creates a contact detection. #ui("OK") searches the parts for surfaces that
 touch and adds a contact region for every pair it finds, listed under the detection in the tree.
@@ -269,7 +269,7 @@ definition, or delete them.
 
 ==== Contact check <contact-check>
 
-PrePoLix checks every contact region before you solve: for each node of the slave side it
+Nodalis checks every contact region before you solve: for each node of the slave side it
 measures the distance to the master side, along the outward normal of solid faces (negative
 means the sides overlap). A node counts as touching when it lies within the tolerance of the
 region: its tie tolerance or adjustment distance, or else a quarter of the mesh size. The
@@ -346,7 +346,7 @@ export leaves it out.
 A bolt joins the two sides of a cut through a bolt shank and tightens them with a preload.
 Create it with #menu("Interaction", "Create Bolt ...") or #ui("Create Bolt ...") in the context
 menu of #ui("Connections"); it is listed under #ui("Connections") #sym.arrow.r #ui("Bolts").
-You pick the faces on the two sides of the cut and give the preload, PrePoLix works out the
+You pick the faces on the two sides of the cut and give the preload, Nodalis works out the
 rest.
 
 #screenshot("bolt-dialog.png", [A bolt between two parts. The bonded contact region the contact
@@ -359,10 +359,10 @@ rest.
     only the cylindrical face of its shank as side A, see below.],
   [Preload by], [#ui("Force") pulls the two sides together with the preload, #ui("Shortening")
     shortens the bolt by a length.],
-  [Axis], [The direction of the bolt axis. Unticked, PrePoLix uses the normal of the cut;
+  [Axis], [The direction of the bolt axis. Unticked, Nodalis uses the normal of the cut;
     #ui("Given") takes the components #ui("X"), #ui("Y"), #ui("Z").],
   [Steps], [What the bolt does in each step that takes loads, see below.],
-  [Exported as], [How PrePoLix writes the bolt for CalculiX: where it cuts the mesh, whether it
+  [Exported as], [How Nodalis writes the bolt for CalculiX: where it cuts the mesh, whether it
     ties the two halves and which contact regions the bolt replaces.],
 )
 
@@ -383,13 +383,13 @@ an action of its own instead:
 ==== Picking the shank
 
 A bolt does not need to be cut in the CAD geometry: pick the cylindrical face of the free
-shank, between head and nut, as #ui("Side A") and leave #ui("Side B") empty. PrePoLix finds
+shank, between head and nut, as #ui("Side A") and leave #ui("Side B") empty. Nodalis finds
 the axis of the shank from the face and cuts the bolt across the middle of the face. The cut
 follows the element faces of the mesh, like a staircase in a tetrahedral mesh, so the bolt
 needs no new mesh; the preload acts along the axis. #ui("Exported as") says when the shank was
 recognised. Hide the clamped parts (@view) to reach the shank in the 3D view.
 
-#screenshot("bolt-shank.png", [Only the shank of an uncut bolt picked: PrePoLix cuts it across
+#screenshot("bolt-shank.png", [Only the shank of an uncut bolt picked: Nodalis cuts it across
   its middle])
 
 The bolt must be one part of its own, at least where the shank is. Its contact with the hole
@@ -397,9 +397,9 @@ must let the shank slide: the contact detection usually finds the head, the nut 
 as one bonded region with the clamped parts. The model check then warns at the bolt that the
 region holds it at its cut; make that region frictional or frictionless.
 
-==== What PrePoLix writes
+==== What Nodalis writes
 
-When the two sides share their nodes (one mesh through the cut), PrePoLix cuts the mesh between
+When the two sides share their nodes (one mesh through the cut), Nodalis cuts the mesh between
 them. For two parts it cuts the side with the finer mesh and ties its nodes to the other side;
 the sides cannot slide against each other. The preload is the first degree of freedom of a new
 node, as with a pre-tension load (@pre-tension).
@@ -435,7 +435,7 @@ that contact pairs refer to. Move the models you need from #ui("Available") to #
     own curve) or #ui("Tied") (the surfaces stay connected with stiffness K, see below).],
   [Friction], [Coulomb friction: the tangential force is limited to #ui("Friction coefficient")
     times the contact pressure. The optional #ui("Stick slope") is the stiffness while sticking;
-    if empty, PrePoLix writes 1/100 of the normal contact stiffness (see below). Friction makes
+    if empty, Nodalis writes 1/100 of the normal contact stiffness (see below). Friction makes
     the analysis more nonlinear, so start with
     small coefficients and enough increments.],
   [Gap Conductance], [Heat transfer across the contact, constant or as a table over pressure
@@ -458,8 +458,8 @@ dialog does not accept a tied interaction without it. Tied contact works only wi
 With the methods #ui("Node to surface") and #ui("Surface to surface") CalculiX enforces a
 #ui("Hard") contact with a stiff spring (penalty contact), so the surfaces penetrate a little.
 CalculiX's own default stiffness, 50 times Young's modulus, ignores the element size and
-therefore depends on the unit system: PrePoLix writes the input file in SI units, where it would
-be about 1000 times softer than in mm. PrePoLix therefore writes the spring itself, the same in
+therefore depends on the unit system: Nodalis writes the input file in SI units, where it would
+be about 1000 times softer than in mm. Nodalis therefore writes the spring itself, the same in
 every unit system:
 
 - Normal stiffness K = 10 E / h, with E the smaller Young's modulus of the two sides and h the
@@ -469,7 +469,7 @@ every unit system:
 - An empty #ui("Stick slope") is K / 100, as the CalculiX manual recommends. For a #ui("Linear")
   behavior K is its own #ui("K"), and for #ui("Tied") the stick slope is the whole #ui("K"), so
   the tied surfaces do not slide.
-- With #ui("Mortar") a #ui("Hard") contact is truly hard: PrePoLix leaves the surface behavior
+- With #ui("Mortar") a #ui("Hard") contact is truly hard: Nodalis leaves the surface behavior
   out, which is how CalculiX's mortar contact enforces it without penetration.
 
 For a #ui("Hard") contact the input file names E and h in a comment. A #ui("Linear") or
@@ -581,7 +581,7 @@ creates ties or contact pairs for them. It is the manual counterpart of the cont
 #ui("Search") fills the table; its #ui("Geometry") column tells what touches, e.g.
 #ui("Solid-Shell edge") where the edge of a shell or membrane stands on a solid. Each row can be edited and switched off with its check box; select
 several rows to edit them together. The context menu of a row has #ui("Swap Master/Slave") and
-#ui("Merge by Master/Slave"). PrePoLix chooses the coarser mesh as master, then the stiffer
+#ui("Merge by Master/Slave"). Nodalis chooses the coarser mesh as master, then the stiffer
 material, then the larger surface; an edge of a shell is always the slave of a face. A shell
 touches with the side facing the other part: CalculiX ties its top (S2) or bottom (S1). #ui("OK") creates the checked pairs, all under
 #ui("Contact Pairs"); line ends become node ties. Surfaces that are whole CAD faces or edges are stored by geometry and
@@ -598,5 +598,5 @@ and use the context menu of one of them (@model-tree).
   the context menu acts on all of them])
 
 CalculiX ties the edge faces of membranes to nothing (the solver stops with a singular stiffness
-matrix), so PrePoLix writes the slave side of a tie on membrane edges as a node surface of the
+matrix), so Nodalis writes the slave side of a tie on membrane edges as a node surface of the
 edge's nodes; a membrane has no rotations that would need more.

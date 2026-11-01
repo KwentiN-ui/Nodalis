@@ -1,6 +1,6 @@
 [package]
 name = "plxs-procedures"
-description = "PrePoLix solver: step procedures (static, dynamic, frequency, heat, ...)"
+description = "Nodalis solver: step procedures (static, dynamic, frequency, heat, ...)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

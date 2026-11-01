@@ -1,6 +1,6 @@
 //! Where the time of a solve goes: wall-clock time per phase, summed over the steps of a
 //! session. `plxs --profile` (or `PLXS_PROFILE=1`) prints the table at the end of the job;
-//! PrePoLix can show it from [`crate::ProcedureContext::profile`] in phase 2.
+//! Nodalis can show it from [`crate::ProcedureContext::profile`] in phase 2.
 
 use std::time::{Duration, Instant};
 

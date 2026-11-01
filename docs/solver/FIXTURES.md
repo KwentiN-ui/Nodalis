@@ -1,7 +1,7 @@
-# Fixture-Korpus des PrePoLix-Solvers
+# Fixture-Korpus des Nodalis-Solvers
 
 Stand M0 (2026-10-31). Der Korpus in `solver/fixtures/` ist die Feature-Matrix des Solvers:
-jede Fixture ist eine Eingabe, die PrePoLix' eigener `.inp`-Writer schreibt (oder ein
+jede Fixture ist eine Eingabe, die Nodalis' eigener `.inp`-Writer schreibt (oder ein
 Beispiel aus `testdata/`), mit dem Ergebnis, das CalculiX dafür liefert. Ein Feature gilt als
 nachgebaut, wenn seine Fixtures mit `plxs` innerhalb der Toleranz liegen. Aus der Tabelle
 unten leitet der Koordinator die Briefs der Stufen M1 bis M3 ab.
@@ -9,7 +9,7 @@ unten leitet der Koordinator die Briefs der Stufen M1 bis M3 ab.
 ## Aufbau
 
 ```
-solver/fixtures/<bereich>/<name>.inp          Eingabe (wie PrePoLix sie schreibt)
+solver/fixtures/<bereich>/<name>.inp          Eingabe (wie Nodalis sie schreibt)
 solver/fixtures/<bereich>/<name>.toml         Bereich, Toleranzklasse, Stufe, Features, Herkunft, Referenz
 solver/fixtures/<bereich>/<name>.ref.frd.gz   .frd von CalculiX, gzip (flate2, pure Rust; das Konzept nannte zstd)
 solver/fixtures/<bereich>/<name>.ref.dat      .dat von CalculiX, wenn die Eingabe History-Ausgaben hat

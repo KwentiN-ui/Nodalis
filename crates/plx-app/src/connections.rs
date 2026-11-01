@@ -1427,7 +1427,7 @@ mod tests {
     fn gmsh_available() -> bool {
         match plx_mesher::self_test() {
             Ok(_) => true,
-            Err(error) if std::env::var_os("PREPOLIX_REQUIRE_GMSH").is_none() => {
+            Err(error) if std::env::var_os("NODALIS_REQUIRE_GMSH").is_none() => {
                 eprintln!("Gmsh not available, test skipped: {error}");
                 false
             }
@@ -1465,7 +1465,7 @@ mod tests {
         std::process::Command::new("ccx").arg("-v").output().ok()?;
         let inp = plx_io::inp::write_inp(&model.mesh, &model.fe, "Block").unwrap();
         let dir = std::env::temp_dir().join(format!(
-            "prepolix-geometry-detection-{}-{}",
+            "nodalis-geometry-detection-{}-{}",
             std::process::id(),
             model.mesh.element_count()
         ));
@@ -1494,7 +1494,7 @@ mod tests {
         if !gmsh_available() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("prepolix-block-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nodalis-block-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("block.brep");
         plx_mesher::gmsh::with_gmsh(|gmsh| {
@@ -1644,7 +1644,7 @@ mod tests {
         if !gmsh_available() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("prepolix-beam-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nodalis-beam-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("beam.brep");
         plx_mesher::gmsh::with_gmsh(|gmsh| {

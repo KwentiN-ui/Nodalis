@@ -2,14 +2,14 @@
 
 == Meshing <meshing>
 
-PrePoLix meshes each geometry part separately with Gmsh. Parts do not share nodes; connect them
+Nodalis meshes each geometry part separately with Gmsh. Parts do not share nodes; connect them
 with ties, contacts or node ties (@constraints).
 
 - #menu("Mesh", "Mesh All Parts") meshes every part.
 - #ui("Create Mesh") in the context menu of a part meshes only this part. Its old mesh is
   replaced; the other parts keep their node and element numbers.
 
-The output pane lists each part with its element count and size range. Afterwards PrePoLix
+The output pane lists each part with its element count and size range. Afterwards Nodalis
 switches to the #ui("FE Model") tab.
 
 === Cancelling the meshing <cancel-meshing>
@@ -164,7 +164,7 @@ meshing parameters and local mesh sizes, as for tetrahedra.
 #screenshot("extrude-mesh.png", [Extrude Mesh item with the top face of a plate as source,
   and the hexahedra swept from it in four layers])
 
-Before meshing, prepolix checks that the part really is an extrusion of the source: every
+Before meshing, nodalis checks that the part really is an extrusion of the source: every
 vertex at the boundary of the source has a straight edge of the same length and direction to
 its copy at the other end, and the part's volume is the source's area times the height. If not,
 meshing fails with a message naming the part; mesh it with tetrahedra or select the faces at one
@@ -180,7 +180,7 @@ tetrahedra without an error; a #ui("Tetrahedral Gmsh") item naming a part keeps 
 
 #ui("Hexahedra where possible") also finds parts that are a section turned about an axis:
 rings, flanges, hubs and segments of them. Their edges are circles about one common axis and
-profile curves in planes through it. prepolix meshes the section with quadrilaterals and turns
+profile curves in planes through it. nodalis meshes the section with quadrilaterals and turns
 that mesh about the axis in steps of about the max element size at the largest radius, at least
 16 steps for a full turn. A segment is turned from one of its end faces to the other; a closed
 ring gets a section cut through it and ends where it started. The result is hexahedra, with

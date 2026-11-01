@@ -1,6 +1,6 @@
 [package]
 name = "plxs-session"
-description = "PrePoLix solver: session API (load model, run steps, state, results, restart)"
+description = "Nodalis solver: session API (load model, run steps, state, results, restart)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

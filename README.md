@@ -1,20 +1,20 @@
 <p align="center">
-  <img src="assets/icon/prepolix.svg" alt="PrePoLix icon" width="160">
+  <img src="assets/icon/nodalis.svg" alt="Nodalis icon" width="160">
 </p>
 
-<h1 align="center">PrePoLix</h1>
+<h1 align="center">Nodalis</h1>
 
-PrePoLix is a graphical pre- and post-processor for the finite element solver
+Nodalis is a graphical pre- and post-processor for the finite element solver
 [CalculiX](http://www.calculix.de/). It is written in
 Rust and runs on **Linux and Windows**. Organise your analyses as a project of linked nodes, import a
 geometry, mesh it, set up materials, loads and steps, run CalculiX and look at the results, all
 without editing input files by hand.
 
-![PrePoLix main window with a result](docs/images/readme-hero.png)
+![Nodalis main window with a result](docs/images/readme-hero.png)
 
-> PrePoLix is a hobby project under active development. It is not affiliated with
+> Nodalis is a hobby project under active development. It is not affiliated with
 > CalculiX. Expect rough edges and please report what you find in the
-> [issue tracker](https://github.com/KwentiN-ui/prepolix/issues).
+> [issue tracker](https://github.com/KwentiN-ui/Nodalis/issues).
 
 ## Features
 
@@ -43,32 +43,32 @@ without editing input files by hand.
 - Derived field and history outputs, paths, planes, hot-spot search and result queries.
 - Screenshots to file or clipboard.
 
-Projects are saved as `.plx` files.
+Projects are saved as `.ndl` files.
 
 ## Installation
 
-PrePoLix needs two other programs: the solver CalculiX and, for geometry import and meshing, Gmsh.
+Nodalis needs two other programs: the solver CalculiX and, for geometry import and meshing, Gmsh.
 The Windows installer and the Linux AppImage bundle both. See the sections below.
 
 ### Windows
 
-Download `prepolix-<version>-setup.exe` from the
-[latest release](https://github.com/KwentiN-ui/prepolix/releases/latest) and run it. It installs
-PrePoLix with a Start menu entry, bundles Gmsh and CalculiX and can associate `.plx` project files.
+Download `nodalis-<version>-setup.exe` from the
+[latest release](https://github.com/KwentiN-ui/Nodalis/releases/latest) and run it. It installs
+Nodalis with a Start menu entry, bundles Gmsh and CalculiX and can associate `.ndl` project files.
 
 ### Linux
 
-Download `prepolix-<version>-x86_64.AppImage` from the
-[latest release](https://github.com/KwentiN-ui/prepolix/releases/latest), make it executable and
+Download `nodalis-<version>-x86_64.AppImage` from the
+[latest release](https://github.com/KwentiN-ui/Nodalis/releases/latest), make it executable and
 start it:
 
 ```sh
-chmod +x prepolix-*-x86_64.AppImage
-./prepolix-*-x86_64.AppImage
+chmod +x nodalis-*-x86_64.AppImage
+./nodalis-*-x86_64.AppImage
 ```
 
 The AppImage bundles Gmsh and runs on x86_64 distributions with glibc 2.35 or newer (Ubuntu 22.04,
-Debian 12, Fedora 36 and later). To get a menu entry and open `.plx` files by double-click, integrate
+Debian 12, Fedora 36 and later). To get a menu entry and open `.ndl` files by double-click, integrate
 it with a tool such as [Gear Lever](https://flathub.org/apps/it.mijorus.gearlever) or
 [AppImageLauncher](https://github.com/TheAssassin/AppImageLauncher). The AppImage carries update
 information, so these tools can also update it to the latest release.
@@ -79,10 +79,10 @@ Any distribution works with one command, straight from the Git repository, witho
 need a current stable Rust toolchain ([rustup](https://rustup.rs/)):
 
 ```sh
-cargo install --git https://github.com/KwentiN-ui/PrePoLix plx-app
+cargo install --git https://github.com/KwentiN-ui/Nodalis plx-app
 ```
 
-This builds the `prepolix` program and puts it in `~/.cargo/bin`. The first build takes a few
+This builds the `nodalis` program and puts it in `~/.cargo/bin`. The first build takes a few
 minutes. Building needs the ALSA development files (Debian/Ubuntu: `sudo apt install libasound2-dev pkg-config`,
 Fedora: `sudo dnf install alsa-lib-devel`). At run time Linux needs `libxkbcommon-x11` (X11) or
 `libxkbcommon` (Wayland) and a Vulkan or OpenGL driver, which most desktops already have.
@@ -93,10 +93,10 @@ To update later, run the same command again with `--force`. To build from a clon
 
 ### Gmsh for cargo install and source builds
 
-PrePoLix imports STEP, IGES and BREP geometry and meshes it with [Gmsh](https://gmsh.info/). Gmsh is
-not part of PrePoLix and is loaded as a library at run time. The Windows installer and the Linux
+Nodalis imports STEP, IGES and BREP geometry and meshes it with [Gmsh](https://gmsh.info/). Gmsh is
+not part of Nodalis and is loaded as a library at run time. The Windows installer and the Linux
 AppImage bundle it, so this section only applies if you installed with cargo or built from source.
-**Without Gmsh** PrePoLix starts and works normally, but geometry import and meshing are not available. Opening `.inp` meshes and `.frd`
+**Without Gmsh** Nodalis starts and works normally, but geometry import and meshing are not available. Opening `.inp` meshes and `.frd`
 results, model setup, running CalculiX and post-processing do not need it.
 
 On Linux, the simplest way is to take the official library (Gmsh 4.15, the tested version) from its
@@ -110,10 +110,10 @@ mv ~/.cargo/bin/gmsh/LICENSE.txt ~/.cargo/bin/gmsh/GMSH-LICENSE.txt
 ```
 
 The library also needs `libGLU` and `libXft` (Debian/Ubuntu: `sudo apt install libglu1-mesa libxft2`).
-PrePoLix looks for the library, in this order, at the path set in *Tools > Settings > Gmsh*, in the
-environment variable `PREPOLIX_GMSH`, next to the program and in its `gmsh` subfolder, and finally in
+Nodalis looks for the library, in this order, at the path set in *Tools > Settings > Gmsh*, in the
+environment variable `NODALIS_GMSH`, next to the program and in its `gmsh` subfolder, and finally in
 the system library path. If you already have Gmsh installed (for example `libgmsh` from your
-distribution), point the setting or `PREPOLIX_GMSH` to it; other Gmsh 4 versions may work but are
+distribution), point the setting or `NODALIS_GMSH` to it; other Gmsh 4 versions may work but are
 not tested. The *Test Gmsh* button in the settings loads the library and meshes a cube. From a clone,
 `python3 scripts/fetch_gmsh.py` does the same, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#gmsh).
 
@@ -129,9 +129,9 @@ CalculiX into `target/ccx`, where development builds find it.
 
 ## Documentation
 
-The **User Guide** is a PDF attached to every [release](https://github.com/KwentiN-ui/prepolix/releases/latest)
-(`prepolix-<version>-user-guide.pdf`). It starts with a first analysis step by step and then
-describes every dialog and what PrePoLix writes to the CalculiX input file. The source is in
+The **User Guide** is a PDF attached to every [release](https://github.com/KwentiN-ui/Nodalis/releases/latest)
+(`nodalis-<version>-user-guide.pdf`). It starts with a first analysis step by step and then
+describes every dialog and what Nodalis writes to the CalculiX input file. The source is in
 [docs/user-guide/](docs/user-guide/).
 
 ## Contributing and development
@@ -141,14 +141,14 @@ Building from source, project layout, tests and releases are described in
 
 ## License
 
-PrePoLix is licensed under the GPL-3.0-or-later, see [LICENSE](LICENSE).
+Nodalis is licensed under the GPL-3.0-or-later, see [LICENSE](LICENSE).
 
 Parts of the workflow and several defaults were inspired by [PrePoMax](https://prepomax.fs.um.si/)
 (GPL-3.0) by Matej Borovinšek; thanks to the PrePoMax project.
 
 Gmsh is licensed under the GPL-2.0-or-later with an exception for OpenCASCADE, Netgen and METIS,
 and OpenCASCADE under the LGPL-2.1 with exception; both are compatible with the GPL-3.0. If you
-distribute PrePoLix together with the Gmsh library, include `GMSH-LICENSE.txt` and point to the
+distribute Nodalis together with the Gmsh library, include `GMSH-LICENSE.txt` and point to the
 sources: Gmsh at <https://gitlab.onelab.info/gmsh/gmsh> (tag `gmsh_4_15_2`), OpenCASCADE at
 <https://github.com/Open-Cascade-SAS/OCCT>.
 

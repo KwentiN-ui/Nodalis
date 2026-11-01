@@ -30,7 +30,7 @@ const MODE_CLUSTER_GAP: f64 = 1e-3;
 /// Mode shapes (every field of a mode increment) get this multiple of the class tolerance.
 const MODE_SHAPE_FACTOR: f64 = 10.0;
 
-/// Values below this are round-off in every unit system PrePoLix uses (CalculiX prints
+/// Values below this are round-off in every unit system Nodalis uses (CalculiX prints
 /// e.g. reaction forces of 1e-14 where plxs computes exact zeros).
 pub const ABSOLUTE_FLOOR: f64 = 1e-7;
 

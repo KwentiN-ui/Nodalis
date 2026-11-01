@@ -1,4 +1,4 @@
-//! Elements and their types: everything PrePoLix writes (concept section 1.1).
+//! Elements and their types: everything Nodalis writes (concept section 1.1).
 
 use serde::{Deserialize, Serialize};
 
@@ -34,11 +34,11 @@ pub enum ElementFamily {
     Truss,
     Spring,
     Gap,
-    /// A user element (`*USER ELEMENT`); PrePoLix writes `U1` for general beam sections.
+    /// A user element (`*USER ELEMENT`); Nodalis writes `U1` for general beam sections.
     User,
 }
 
-/// The CalculiX element types PrePoLix writes, spelled as in the input.
+/// The CalculiX element types Nodalis writes, spelled as in the input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum ElementType {
@@ -100,7 +100,7 @@ pub enum ElementType {
 }
 
 impl ElementType {
-    /// The type for its name in the input (case-insensitive), if PrePoLix writes it.
+    /// The type for its name in the input (case-insensitive), if Nodalis writes it.
     pub fn parse(name: &str) -> Option<Self> {
         use ElementType::*;
         Some(match name.trim().to_ascii_uppercase().as_str() {

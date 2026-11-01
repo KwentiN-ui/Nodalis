@@ -637,7 +637,7 @@ fn run_speed(
 ) -> Result<SpeedPoint, String> {
     let label = format!("{} rpm", numeric::format_physical(rpm(speed)));
     let fe = with_speed(&input.fe, speed);
-    let heading = format!("PrePoLix Campbell sweep: {label}");
+    let heading = format!("Nodalis Campbell sweep: {label}");
     let text = plx_io::inp::write_inp(&input.mesh, &fe, &heading)
         .map_err(|e| format!("{label}: input file not written: {e}"))?;
     let name = job_name(index);

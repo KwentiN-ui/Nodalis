@@ -14,7 +14,7 @@ fn read(text: &str) -> Result<Analysis, Vec<Error>> {
     read_inp_str(text, None).map(|r| r.analysis)
 }
 
-/// A cube on steel with a fixed face, as PrePoLix writes it, with `steps` in place of the step.
+/// A cube on steel with a fixed face, as Nodalis writes it, with `steps` in place of the step.
 fn cube(steps: &str) -> String {
     format!(
         "*Heading\ncube\n*Node\n1, 0, 0, 0\n2, 1, 0, 0\n3, 1, 1, 0\n4, 0, 1, 0\n5, 0, 0, 1\n6, 1, 0, 1\n7, 1, 1, 1\n8, 0, 1, 1\n\
