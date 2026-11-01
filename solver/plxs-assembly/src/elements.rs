@@ -477,6 +477,7 @@ impl ElementTable {
             elastic.young,
             elastic.poisson,
             thickness,
+            element.kind == ElementType::M3D4R,
         )
         .ok_or_else(|| bad("degenerate element"))?;
         let dofs = nodes

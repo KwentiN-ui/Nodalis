@@ -24,8 +24,8 @@
 //! No CalculiX code was consulted.
 
 use plxs_assembly::{
-    ElementTable, Reduction, Spc, assemble_geometric_stiffness, assemble_mass, assemble_stiffness,
-    assemble_tangent_stiffness, load_vector,
+    ElementTable, Reduction, Spc, add_membrane_geometric_stiffness, assemble_geometric_stiffness,
+    assemble_mass, assemble_stiffness, assemble_tangent_stiffness, load_vector,
 };
 use plxs_core::results::{IncrementKind, ResultsIncrement};
 use plxs_core::state::{IntegrationPointField, NodalField, StoredModes};
@@ -511,6 +511,7 @@ impl Procedure for BuckleProcedure {
         // Initial stress stiffness of the buckling load and the eigenvalue problem.
         let mut k_sigma = SparseMatrix::zeros(ctx.pattern.clone());
         assemble_geometric_stiffness(ctx.table, ctx.model, &stresses, &mut k_sigma)?;
+        add_membrane_geometric_stiffness(ctx.table, &u, &mut k_sigma);
         let k_sigma_free = k_sigma.restrict(&reduction.free);
         let started = std::time::Instant::now();
         let mut lanczos =
