@@ -12,10 +12,13 @@
 //! `faer`'s dense kernels; the matrix layout is the textbook compressed-column format. No
 //! CalculiX code was consulted.
 
+pub mod dense;
+pub mod eigen;
 pub mod ordering;
 pub mod pattern;
 pub mod solver;
 pub mod supernodal;
 
+pub use eigen::{EigenPairs, EigenSolver, LanczosOptions, ShiftInvertLanczos};
 pub use pattern::{Pattern, SparseMatrix};
 pub use solver::{LdltSolver, LinearSolver};

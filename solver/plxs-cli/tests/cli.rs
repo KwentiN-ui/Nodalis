@@ -1,10 +1,10 @@
 //! The `plxs` command line: reads fixtures, reports in CalculiX's wording, computes
-//! `*NO ANALYSIS` and linear static steps and refuses every other procedure.
+//! `*NO ANALYSIS`, linear static and eigenvalue steps and refuses every other procedure.
 
 use std::path::PathBuf;
 use std::process::Command;
 
-use plxs_verify::{Outcome, corpus, fixtures_root, run_fixture};
+use plxs_verify::{corpus, fixtures_root, run_fixture};
 
 fn plxs() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_plxs"))
@@ -35,17 +35,18 @@ fn a_static_fixture_is_computed_and_other_procedures_are_refused() {
         report.log
     );
     assert!(report.log.contains("This is Version"), "{}", report.log);
-    let f = fixtures
-        .iter()
-        .find(|f| f.meta.area == "eigen" && f.has_reference())
+    // A procedure plxs does not compute (yet) on the same model.
+    let text = std::fs::read_to_string(f.inp()).unwrap();
+    let dynamic = text.replacen("*Static", "*Dynamic, Explicit", 1);
+    assert_ne!(dynamic, text);
+    std::fs::write(work.join("dynamik.inp"), dynamic).unwrap();
+    let output = Command::new(plxs())
+        .args(["-i", "dynamik"])
+        .current_dir(&work)
+        .output()
         .unwrap();
-    let report = run_fixture(&plxs(), f, &work);
-    assert!(
-        matches!(&report.outcome, Outcome::Error(e) if e.contains("procedure not implemented yet")),
-        "{:?}\n{}",
-        report.outcome,
-        report.log
-    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("procedure not implemented yet"), "{text}");
     let _ = std::fs::remove_dir_all(&work);
 }
 

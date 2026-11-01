@@ -29,6 +29,23 @@ pub fn write_dat_to(out: &mut impl Write, results: &Results) -> std::io::Result<
             writeln!(out, "                        S T E P {:>7}", block.step)?;
             writeln!(out)?;
         }
+        if block.quantity == DESIGN_RESPONSE_TABLE {
+            if last.map(|(s, _)| s) != Some(block.step) {
+                writeln!(out)?;
+            }
+            last = Some((block.step, block.increment));
+            write_design_response_table(out, block)?;
+            continue;
+        }
+        if let Some(table) = EigenTable::of(block) {
+            // The eigenvalue tables stand under the step heading without an increment.
+            if last.map(|(s, _)| s) != Some(block.step) {
+                writeln!(out)?;
+            }
+            last = Some((block.step, block.increment));
+            write_eigen_table(out, table, block)?;
+            continue;
+        }
         if last != Some((block.step, block.increment)) {
             writeln!(out)?;
             writeln!(
@@ -73,4 +90,200 @@ fn write_block(out: &mut impl Write, block: &HistoryBlock) -> std::io::Result<()
         writeln!(out)?;
     }
     Ok(())
+}
+
+/// The table a `*SENSITIVITY` step prints per design response (or per mode for
+/// `EIGENFREQUENCY`): [`HistoryBlock::quantity`] is this name, `set` holds the response
+/// kinds of the rows joined by commas (`MASS,STRAINENERGY`; the writer names every response
+/// by its kind), each row is `(index, [value, length of the gradient])`.
+pub const DESIGN_RESPONSE_TABLE: &str = "DESIGN RESPONSE INFORMATION";
+
+const DESIGN_RESPONSE_RULE: &str = "   ##############################################################################################################";
+
+fn write_design_response_table(out: &mut impl Write, block: &HistoryBlock) -> std::io::Result<()> {
+    let names: Vec<&str> = block.set.split(',').collect();
+    writeln!(out)?;
+    writeln!(out, "{DESIGN_RESPONSE_RULE}")?;
+    writeln!(
+        out,
+        "   D E S I G N   R E S P O N S E                    I N F O R M A T I O N"
+    )?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "   FUNCTION        FUNCTION VALUE    LENGTH GRADIENT   NAME                                                        "
+    )?;
+    writeln!(out, "{DESIGN_RESPONSE_RULE}")?;
+    writeln!(out)?;
+    for (id, values) in &block.rows {
+        let name = names.get(*id as usize).copied().unwrap_or("");
+        writeln!(
+            out,
+            "   {:<16} {:>13}{:>19}   {:<80}",
+            name,
+            fortran_time(values.first().copied().unwrap_or(0.0)),
+            fortran_time(values.get(1).copied().unwrap_or(0.0)),
+            name
+        )?;
+    }
+    Ok(())
+}
+
+/// The tables an eigenvalue step prints: [`HistoryBlock::quantity`] names them in
+/// CalculiX's spelling without the spacing, the set is empty, rows are keyed by mode (0
+/// for a total row). Written by `plxs-procedures::history`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EigenTable {
+    /// Rows `(mode, [eigenvalue, omega, frequency, imaginary part])`.
+    Eigenvalues,
+    /// Rows `(mode, [x, y, z, rx, ry, rz])`.
+    ParticipationFactors,
+    /// Rows `(mode, [..6])` and a row `(0, [..6])` with the totals.
+    EffectiveModalMass,
+    /// One row `(0, [..6])`.
+    TotalEffectiveMass,
+    /// Rows `(mode, [factor])`.
+    BucklingFactors,
+    /// A complex frequency step: rows `(mode, [omega, frequency, imaginary part])`.
+    ComplexEigenvalues,
+    /// Rows `(mode, [+1 forward or −1 backward])` and a row `(0, [axis x, y, z])`.
+    TurningDirection,
+}
+
+impl EigenTable {
+    pub const EIGENVALUES: &'static str = "EIGENVALUE OUTPUT";
+    pub const PARTICIPATION: &'static str = "PARTICIPATION FACTORS";
+    pub const EFFECTIVE_MODAL_MASS: &'static str = "EFFECTIVE MODAL MASS";
+    pub const TOTAL_EFFECTIVE_MASS: &'static str = "TOTAL EFFECTIVE MASS";
+    pub const BUCKLING: &'static str = "BUCKLING FACTOR OUTPUT";
+    pub const COMPLEX_EIGENVALUES: &'static str = "COMPLEX EIGENVALUE OUTPUT";
+    pub const TURNING_DIRECTION: &'static str = "EIGENMODE TURNING DIRECTION";
+
+    pub fn of(block: &HistoryBlock) -> Option<EigenTable> {
+        if !block.set.is_empty() {
+            return None;
+        }
+        Some(match block.quantity.as_str() {
+            Self::EIGENVALUES => EigenTable::Eigenvalues,
+            Self::PARTICIPATION => EigenTable::ParticipationFactors,
+            Self::EFFECTIVE_MODAL_MASS => EigenTable::EffectiveModalMass,
+            Self::TOTAL_EFFECTIVE_MASS => EigenTable::TotalEffectiveMass,
+            Self::BUCKLING => EigenTable::BucklingFactors,
+            Self::COMPLEX_EIGENVALUES => EigenTable::ComplexEigenvalues,
+            Self::TURNING_DIRECTION => EigenTable::TurningDirection,
+            _ => return None,
+        })
+    }
+
+    fn heading(self) -> &'static str {
+        match self {
+            EigenTable::Eigenvalues => "E I G E N V A L U E   O U T P U T",
+            EigenTable::ParticipationFactors => "P A R T I C I P A T I O N   F A C T O R S",
+            EigenTable::EffectiveModalMass => "E F F E C T I V E   M O D A L   M A S S",
+            EigenTable::TotalEffectiveMass => "T O T A L   E F F E C T I V E   M A S S",
+            EigenTable::BucklingFactors => "B U C K L I N G   F A C T O R   O U T P U T",
+            EigenTable::ComplexEigenvalues => "E I G E N V A L U E   O U T P U T",
+            EigenTable::TurningDirection => "E I G E N M O D E   T U R N I N G   D I R E C T I O N",
+        }
+    }
+}
+
+const RIGID_COLUMNS: &str = "MODE NO.   X-COMPONENT     Y-COMPONENT     Z-COMPONENT     X-ROTATION      Y-ROTATION      Z-ROTATION";
+
+fn write_eigen_table(
+    out: &mut impl Write,
+    table: EigenTable,
+    block: &HistoryBlock,
+) -> std::io::Result<()> {
+    writeln!(out)?;
+    writeln!(out, "     {}", table.heading())?;
+    writeln!(out)?;
+    match table {
+        EigenTable::Eigenvalues => {
+            writeln!(
+                out,
+                " MODE NO    EIGENVALUE                       FREQUENCY   "
+            )?;
+            writeln!(
+                out,
+                "                                     REAL PART            IMAGINARY PART"
+            )?;
+            writeln!(
+                out,
+                "                           (RAD/TIME)      (CYCLES/TIME     (RAD/TIME)"
+            )?;
+        }
+        EigenTable::BucklingFactors => {
+            writeln!(out, " MODE NO       BUCKLING")?;
+            writeln!(out, "                FACTOR")?;
+        }
+        EigenTable::ComplexEigenvalues => {
+            writeln!(
+                out,
+                " MODE NO                     FREQUENCY                   "
+            )?;
+            writeln!(
+                out,
+                "                      REAL PART         IMAGINARY PART"
+            )?;
+            writeln!(out, "             (RAD/TIME)   (CYCLES/TIME)   (RAD/TIME)")?;
+        }
+        EigenTable::TurningDirection => {
+            let axis = block
+                .rows
+                .iter()
+                .find(|r| r.0 == 0)
+                .map(|r| r.1.clone())
+                .unwrap_or_default();
+            write!(out, "    Axis reference direction:")?;
+            for v in &axis {
+                write!(out, "{:>12}", fortran_e10(*v))?;
+            }
+            writeln!(out)?;
+            writeln!(out)?;
+            writeln!(out, " MODE NO     TURNING DIRECTION (F=FORWARD,B=BACKWARD)")?;
+            writeln!(out)?;
+            for (id, values) in block.rows.iter().filter(|r| r.0 != 0) {
+                let direction = if values.first().copied().unwrap_or(1.0) >= 0.0 {
+                    'F'
+                } else {
+                    'B'
+                };
+                writeln!(out, "{id:>7}          {direction}")?;
+            }
+            return Ok(());
+        }
+        _ => writeln!(out, "{RIGID_COLUMNS}")?,
+    }
+    writeln!(out)?;
+    for (id, values) in &block.rows {
+        if *id == 0 {
+            if table == EigenTable::EffectiveModalMass {
+                write!(out, "{:<7}", "TOTAL")?;
+            } else {
+                write!(out, "{:7}", "")?;
+            }
+        } else {
+            write!(out, "{id:>7}")?;
+        }
+        for v in values {
+            write!(out, "{:>16}", fortran_time(*v))?;
+        }
+        writeln!(out)?;
+    }
+    Ok(())
+}
+
+/// `0.1000E+01`: the short layout of the axis in the turning direction table.
+fn fortran_e10(value: f64) -> String {
+    if value == 0.0 || !value.is_finite() {
+        return "0.0000E+00".to_string();
+    }
+    let text = format!("{:.3E}", value.abs());
+    let (mantissa, exponent) = text.split_once('E').unwrap();
+    let exponent: i32 = exponent.parse::<i32>().unwrap() + 1;
+    let digits: String = mantissa.chars().filter(|c| c.is_ascii_digit()).collect();
+    let sign = if value < 0.0 { "-" } else { "" };
+    let exp_sign = if exponent < 0 { "-" } else { "+" };
+    format!("{sign}0.{digits}E{exp_sign}{:02}", exponent.abs())
 }
