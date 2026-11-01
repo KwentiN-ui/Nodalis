@@ -1,7 +1,10 @@
 //! Procedures of the PrePoLix solver: what a step computes. M1: linear static analysis
 //! (`*STATIC` without `NLGEOM`). M2: heat transfer and temperature-displacement steps
-//! ([`heat`], [`thermal`]). Nonlinear, eigenvalue and dynamic procedures follow in M2/M3
-//! (concept section 4.5).
+//! ([`heat`], [`thermal`]), nonlinear static (`NLGEOM`, plastic and creeping materials,
+//! [`nonlinear`]) and `*VISCO`, `*FREQUENCY` and `*BUCKLE` ([`eigen`]), `*DYNAMIC`
+//! ([`dynamic`]), modal dynamics, steady state dynamics and complex frequency ([`modal`],
+//! [`complex`]), `*SENSITIVITY` ([`sensitivity`], T17). The remaining procedures follow in
+//! M3 (concept section 4.5).
 //!
 //! A procedure works on a [`ProcedureContext`]: the model, its element table, the assembled
 //! stiffness matrix and solver, the state it starts from, and the results it appends to.
@@ -10,10 +13,17 @@
 //!
 //! No CalculiX code was consulted.
 
+pub mod complex;
+pub mod dynamic;
+pub mod eigen;
 pub mod equations;
 pub mod fields;
 pub mod heat;
 pub mod history;
+pub mod modal;
+pub mod nonlinear;
+pub mod profile;
+pub mod sensitivity;
 pub mod static_linear;
 pub mod thermal;
 
@@ -23,7 +33,7 @@ use plxs_assembly::ElementTable;
 use plxs_core::step::Procedure as ProcedureKind;
 use plxs_core::{Error, Model, Progress, Result, Results, State, Step};
 use plxs_linalg::{LdltSolver, Pattern, SparseMatrix};
-use plxs_output::StaRow;
+use plxs_output::{CvgRow, StaRow};
 
 /// How a step ended.
 #[derive(Clone, Debug, PartialEq)]
@@ -57,11 +67,18 @@ pub struct ProcedureContext<'a> {
     pub step_number: u32,
     /// Rows of the `.sta` file written so far.
     pub sta: Vec<StaRow>,
+    /// Rows of the `.cvg` file written so far (one per Newton iteration).
+    pub cvg: Vec<CvgRow>,
+    /// CalculiX's time-average force of the previous steps (the scale of the residual
+    /// check), `None` before the first nonlinear step.
+    pub average_force: Option<f64>,
     /// The job's directory: files the input refers to (`*TEMPERATURE, FILE=`) are read
     /// from here.
     pub work_dir: std::path::PathBuf,
     /// Set by the caller to stop the run between increments.
     pub cancel: plxs_core::CancelToken,
+    /// Time per phase, summed over the steps of the session.
+    pub profile: profile::Profile,
 }
 
 /// A procedure computes a step on the context.
@@ -82,9 +99,23 @@ pub fn run_step(
 ) -> Result<StepOutcome> {
     match &step.procedure {
         ProcedureKind::NoAnalysis => Ok(StepOutcome::Converged),
-        ProcedureKind::Static(_) if !step.nlgeom => {
+        ProcedureKind::Static(_) if !step.nlgeom && !ctx.table.has_nonlinear_material() => {
             static_linear::StaticLinear.run(ctx, step, progress)
         }
+        ProcedureKind::Static(_) | ProcedureKind::Visco(_) => {
+            nonlinear::NonlinearStatic.run(ctx, step, progress)
+        }
+        ProcedureKind::Frequency(_) => eigen::FrequencyProcedure.run(ctx, step, progress),
+        ProcedureKind::Buckle(_) => eigen::BuckleProcedure.run(ctx, step, progress),
+        ProcedureKind::Dynamic(_) => dynamic::DynamicProcedure.run(ctx, step, progress),
+        ProcedureKind::ComplexFrequency(_) => {
+            complex::ComplexFrequencyProcedure.run(ctx, step, progress)
+        }
+        ProcedureKind::ModalDynamics(_) => modal::ModalDynamicsProcedure.run(ctx, step, progress),
+        ProcedureKind::SteadyStateDynamics(_) => {
+            modal::SteadyStateProcedure.run(ctx, step, progress)
+        }
+        ProcedureKind::Sensitivity(_) => sensitivity::SensitivityProcedure.run(ctx, step, progress),
         ProcedureKind::HeatTransfer(_)
         | ProcedureKind::CoupledTemperatureDisplacement(_)
         | ProcedureKind::UncoupledTemperatureDisplacement(_)

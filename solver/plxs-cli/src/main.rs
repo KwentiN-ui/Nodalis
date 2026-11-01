@@ -5,6 +5,8 @@
 //! plxs -i <job>         the same
 //! plxs -v               print the version
 //! plxs --threads <n>    number of threads (default: OMP_NUM_THREADS, else all cores)
+//! plxs -o bin <job>     write the .frd with binary number blocks (-o asc: text, default)
+//! plxs --profile <job>  print the time per phase at the end (also PLXS_PROFILE=1)
 //! ```
 //!
 //! stdout follows CalculiX's lines (`STEP n`, `increment n attempt m`, `iteration n`, `Job
@@ -47,6 +49,8 @@ fn banner() {
 fn run(args: Vec<String>) -> i32 {
     let mut job: Option<String> = None;
     let mut threads: Option<usize> = None;
+    let mut frd_format = plxs_output::FrdFormat::Ascii;
+    let mut profile = std::env::var("PLXS_PROFILE").is_ok_and(|v| !v.is_empty() && v != "0");
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -62,8 +66,23 @@ fn run(args: Vec<String>) -> i32 {
                 i += 1;
                 threads = args.get(i).and_then(|t| t.parse().ok());
             }
+            "--profile" => profile = true,
+            "-o" => {
+                i += 1;
+                frd_format = match args.get(i).map(|a| a.to_ascii_lowercase()).as_deref() {
+                    Some("bin" | "binary") => plxs_output::FrdFormat::Binary,
+                    Some("asc" | "ascii" | "frd") => plxs_output::FrdFormat::Ascii,
+                    other => {
+                        say(&format!(
+                            "*ERROR: unknown output format {}; use asc or bin",
+                            other.unwrap_or("")
+                        ));
+                        return 1;
+                    }
+                };
+            }
             "-h" | "--help" => {
-                say("usage: plxs [-i] <job> [--threads <n>] | plxs -v");
+                say("usage: plxs [-i] <job> [--threads <n>] [-o asc|bin] | plxs -v");
                 return 0;
             }
             other if !other.starts_with('-') => job = Some(other.to_string()),
@@ -75,7 +94,7 @@ fn run(args: Vec<String>) -> i32 {
         i += 1;
     }
     let Some(job) = job else {
-        say("usage: plxs [-i] <job> [--threads <n>] | plxs -v");
+        say("usage: plxs [-i] <job> [--threads <n>] [-o asc|bin] | plxs -v");
         return 1;
     };
     banner();
@@ -112,11 +131,9 @@ fn run(args: Vec<String>) -> i32 {
         .unwrap_or_else(|| job.clone());
     let options = plxs_session::JobOptions {
         threads,
-        pool: None,
-        work_dir: job_dir,
-        name: stem,
-        write_files: true,
-        cancel: plxs_core::CancelToken::new(),
+        frd_format,
+        profile,
+        ..plxs_session::JobOptions::new(job_dir, stem)
     };
     let mut progress = |event: ProgressEvent| {
         for line in plxs_session::format_event(&event) {

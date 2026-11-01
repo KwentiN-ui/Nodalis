@@ -19,6 +19,7 @@ plxs-elements.workspace = true
 
 [dev-dependencies]
 plxs-verify.workspace = true
+plx-io.workspace = true
 
 [lints]
 workspace = true

@@ -79,8 +79,8 @@ pub enum Procedure {
     Dynamic(Dynamic),
     ModalDynamics(ModalDynamics),
     SteadyStateDynamics(SteadyStateDynamics),
-    /// `*SENSITIVITY`: parsed for completeness; dropped from phase 1, such steps keep
-    /// running with CalculiX.
+    /// `*SENSITIVITY`: derivatives of design responses with respect to the design node
+    /// positions (`plxs-procedures::sensitivity`, T17).
     Sensitivity(Sensitivity),
 }
 

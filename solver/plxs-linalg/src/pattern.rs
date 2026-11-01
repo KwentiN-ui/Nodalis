@@ -179,6 +179,33 @@ impl SparseMatrix {
         }
     }
 
+    /// `self += alpha · other`; both matrices must share the pattern (the same `Arc` or an
+    /// equal one, as two matrices assembled from the same element table do).
+    pub fn add_scaled(&mut self, other: &SparseMatrix, alpha: f64) {
+        assert!(
+            Arc::ptr_eq(&self.pattern, &other.pattern) || *self.pattern == *other.pattern,
+            "add_scaled needs matrices with the same sparsity pattern"
+        );
+        for (v, o) in self.values.iter_mut().zip(&other.values) {
+            *v += alpha * o;
+        }
+    }
+
+    /// `alpha · a + beta · b` on the pattern of `a` (`b` must share it).
+    pub fn linear_combination(
+        a: &SparseMatrix,
+        alpha: f64,
+        b: &SparseMatrix,
+        beta: f64,
+    ) -> SparseMatrix {
+        let mut out = a.clone();
+        for v in out.values.iter_mut() {
+            *v *= alpha;
+        }
+        out.add_scaled(b, beta);
+        out
+    }
+
     /// The entry `(i, j)`, zero when it is not in the pattern.
     pub fn get(&self, i: u32, j: u32) -> f64 {
         let (row, col) = if i <= j { (i, j) } else { (j, i) };

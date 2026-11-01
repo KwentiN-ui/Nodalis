@@ -209,10 +209,8 @@ impl BuiltinJob {
         let options = plxs_session::JobOptions {
             threads: threads as usize,
             pool: Some(pool(threads)?),
-            work_dir: work_dir.to_owned(),
-            name: name.to_owned(),
-            write_files: true,
             cancel: cancel.clone(),
+            ..plxs_session::JobOptions::new(work_dir, name)
         };
         let input = input.to_owned();
         let lines = Arc::clone(&output);
@@ -410,7 +408,9 @@ S
     fn unsupported_procedures_fail_with_a_hint() {
         let dir = std::env::temp_dir().join(format!("plx-solve-dyn-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let input = CUBE.replace("*STATIC", "*DYNAMIC\n0.1, 1.0");
+        let input = CUBE
+            .replace("*STEP", "*STEP, NLGEOM")
+            .replace("*STATIC", "*COUPLED TEMPERATURE-DISPLACEMENT\n0.1, 1.0");
         let mut job = BuiltinJob::start(1, &dir, "Dyn", &input).unwrap();
         assert_eq!(job.wait(), JobStatus::Failed);
         let output = job.new_output();
