@@ -1,8 +1,9 @@
 //! Procedures of the PrePoLix solver: what a step computes. M1: linear static analysis
 //! (`*STATIC` without `NLGEOM`). M2: heat transfer and temperature-displacement steps
 //! ([`heat`], [`thermal`]), nonlinear static (`NLGEOM`, plastic and creeping materials,
-//! [`nonlinear`]) and `*VISCO`. Eigenvalue and dynamic procedures follow in M2/M3
-//! (concept section 4.5).
+//! [`nonlinear`]) and `*VISCO`, `*FREQUENCY` and `*BUCKLE` ([`eigen`]), `*DYNAMIC`
+//! ([`dynamic`]), `*SENSITIVITY` ([`sensitivity`], T17). The remaining procedures follow
+//! in M3 (concept section 4.5).
 //!
 //! A procedure works on a [`ProcedureContext`]: the model, its element table, the assembled
 //! stiffness matrix and solver, the state it starts from, and the results it appends to.
@@ -12,10 +13,13 @@
 //! No CalculiX code was consulted.
 
 pub mod contact;
+pub mod dynamic;
+pub mod eigen;
 pub mod fields;
 pub mod heat;
 pub mod history;
 pub mod nonlinear;
+pub mod sensitivity;
 pub mod static_linear;
 pub mod thermal;
 
@@ -90,6 +94,22 @@ pub fn run_step(
         ProcedureKind::Static(_) | ProcedureKind::Visco(_) => {
             nonlinear::NonlinearStatic.run(ctx, step, progress)
         }
+        ProcedureKind::Frequency(_)
+        | ProcedureKind::Buckle(_)
+        | ProcedureKind::Dynamic(_)
+        | ProcedureKind::Sensitivity(_)
+            if !ctx.contact.is_empty() =>
+        {
+            Err(Error::Unsupported(format!(
+                "contact in {} steps is not implemented yet (step {})",
+                step.procedure.keyword(),
+                step.name
+            )))
+        }
+        ProcedureKind::Frequency(_) => eigen::FrequencyProcedure.run(ctx, step, progress),
+        ProcedureKind::Buckle(_) => eigen::BuckleProcedure.run(ctx, step, progress),
+        ProcedureKind::Dynamic(_) => dynamic::DynamicProcedure.run(ctx, step, progress),
+        ProcedureKind::Sensitivity(_) => sensitivity::SensitivityProcedure.run(ctx, step, progress),
         ProcedureKind::HeatTransfer(_)
         | ProcedureKind::CoupledTemperatureDisplacement(_)
         | ProcedureKind::UncoupledTemperatureDisplacement(_)

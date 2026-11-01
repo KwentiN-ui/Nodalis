@@ -6,7 +6,8 @@ use faer::Side;
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::ldlt::factor::LdltRegularization;
 use faer::sparse::linalg::cholesky::{
-    CholeskySymbolicParams, SymbolicCholesky, SymmetricOrdering, factorize_symbolic_cholesky,
+    CholeskySymbolicParams, SymbolicCholesky, SymbolicCholeskyRaw, SymmetricOrdering,
+    factorize_symbolic_cholesky, supernodal::SupernodalLdltRef,
 };
 use faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
 
@@ -34,6 +35,11 @@ pub struct LdltSolver {
     symbolic: Option<SymbolicCholesky<u32>>,
     values: Vec<f64>,
     factorized: bool,
+    /// Relative threshold below which a pivot is replaced by `±threshold · scale` (its sign
+    /// kept); `0.0` means none. Indefinite matrices (`K − σM` with `σ` inside the spectrum,
+    /// the Sturm checks of the eigensolvers) can meet pivots that are exactly zero without
+    /// being singular, which LDLᵀ without pivoting cannot pass otherwise.
+    regularization: f64,
 }
 
 impl LdltSolver {
@@ -49,7 +55,15 @@ impl LdltSolver {
             symbolic: None,
             values: Vec::new(),
             factorized: false,
+            regularization: 0.0,
         }
+    }
+
+    /// Replaces pivots smaller than `relative` times the largest diagonal entry by that
+    /// value with the pivot's sign (dynamic regularization), for indefinite matrices.
+    /// `0.0` switches it off (the default: a zero pivot is then an error).
+    pub fn set_regularization(&mut self, relative: f64) {
+        self.regularization = relative;
     }
 
     fn symbolic_matrix(pattern: &Pattern) -> SymbolicSparseColMatRef<'_, u32> {
@@ -97,6 +111,16 @@ impl LinearSolver for LdltSolver {
         let scratch = symbolic.factorize_numeric_ldlt_scratch::<f64>(self.par, Default::default());
         let mut buffer = MemBuffer::try_new(scratch)
             .map_err(|_| numerical("out of memory in the factorization"))?;
+        let threshold = if self.regularization > 0.0 {
+            let largest = matrix
+                .diagonal()
+                .iter()
+                .fold(0.0_f64, |m, v| m.max(v.abs()))
+                .max(f64::MIN_POSITIVE);
+            self.regularization * largest
+        } else {
+            0.0
+        };
         symbolic
             .factorize_numeric_ldlt::<f64>(
                 &mut self.values,
@@ -104,8 +128,8 @@ impl LinearSolver for LdltSolver {
                 Side::Upper,
                 LdltRegularization {
                     dynamic_regularization_signs: None,
-                    dynamic_regularization_delta: 0.0,
-                    dynamic_regularization_epsilon: 0.0,
+                    dynamic_regularization_delta: threshold,
+                    dynamic_regularization_epsilon: threshold,
                 },
                 self.par,
                 MemStack::new(&mut buffer),
@@ -138,8 +162,31 @@ impl LinearSolver for LdltSolver {
         Ok(())
     }
 
+    /// The number of negative entries of `D`: by Sylvester's law of inertia the number of
+    /// negative eigenvalues of the factorized matrix, which is what the Sturm sequence
+    /// check of the eigensolvers counts (`K − σM` has as many negative pivots as there are
+    /// eigenvalues below `σ`).
     fn inertia(&self) -> Option<usize> {
-        None
+        let symbolic = self.symbolic.as_ref().filter(|_| self.factorized)?;
+        let negative = match symbolic.raw() {
+            SymbolicCholeskyRaw::Simplicial(simplicial) => {
+                // The first stored entry of every column of the factor is its diagonal, D_j.
+                let col_ptr = simplicial.col_ptr();
+                (0..simplicial.nrows())
+                    .filter(|&j| self.values[col_ptr[j] as usize] < 0.0)
+                    .count()
+            }
+            SymbolicCholeskyRaw::Supernodal(supernodal) => {
+                let ldlt = SupernodalLdltRef::new(supernodal, &self.values);
+                (0..supernodal.n_supernodes())
+                    .map(|s| {
+                        let block = ldlt.supernode(s).val();
+                        (0..block.ncols()).filter(|&j| block[(j, j)] < 0.0).count()
+                    })
+                    .sum()
+            }
+        };
+        Some(negative)
     }
 }
 
@@ -174,6 +221,55 @@ mod tests {
         for (x, expected) in b.iter().zip([1.0, 2.0, 3.0]) {
             assert!((x - expected).abs() < 1e-12, "{b:?}");
         }
+    }
+
+    #[test]
+    fn inertia_counts_negative_eigenvalues() {
+        // A = [[1, 2, 0], [2, -3, 1], [0, 1, 2]]: eigenvalues -3.98, 1.33, 2.65 -> one negative.
+        let pattern = Arc::new(Pattern::from_blocks(3, [&[0u32, 1][..], &[1, 2][..]]));
+        let mut a = SparseMatrix::zeros(pattern.clone());
+        a.add(0, 0, 1.0);
+        a.add(1, 1, -3.0);
+        a.add(2, 2, 2.0);
+        a.add(0, 1, 2.0);
+        a.add(1, 2, 1.0);
+        let mut solver = LdltSolver::new(1);
+        solver.analyze(&pattern).unwrap();
+        solver.factorize(&a).unwrap();
+        assert_eq!(solver.inertia(), Some(1));
+        // Shifted by -5: all eigenvalues negative.
+        let mut b = a.clone();
+        for i in 0..3 {
+            b.add(i, i, -5.0);
+        }
+        solver.factorize(&b).unwrap();
+        assert_eq!(solver.inertia(), Some(3));
+        // A larger banded matrix that faer factorizes supernodally: tridiagonal with 2 on
+        // the diagonal and -1 off it has eigenvalues 2 - 2 cos(kπ/(n+1)) > 0; shifted by -1
+        // the eigenvalues below 1 are those with k < (n+1)/3.
+        let n = 400usize;
+        let blocks: Vec<[u32; 2]> = (0..n as u32 - 1).map(|i| [i, i + 1]).collect();
+        let pattern = Arc::new(Pattern::from_blocks(n, blocks.iter().map(|b| &b[..])));
+        let mut t = SparseMatrix::zeros(pattern.clone());
+        for i in 0..n as u32 {
+            t.add(i, i, 1.0);
+            if i + 1 < n as u32 {
+                t.add(i, i + 1, -1.0);
+            }
+        }
+        let mut solver = LdltSolver::new(1);
+        // Without pivoting the natural order meets an exact zero pivot (1 - 1/1 = 0);
+        // regularization lets the factorization pass with the right signs.
+        solver.analyze(&pattern).unwrap();
+        assert!(solver.factorize(&t).is_err());
+        solver.set_regularization(1e-12);
+        solver.factorize(&t).unwrap();
+        let expected = (1..=n)
+            .filter(|&k| {
+                2.0 - 2.0 * (k as f64 * std::f64::consts::PI / (n as f64 + 1.0)).cos() < 1.0
+            })
+            .count();
+        assert_eq!(solver.inertia(), Some(expected));
     }
 
     #[test]

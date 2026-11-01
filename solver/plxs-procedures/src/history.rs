@@ -8,6 +8,24 @@ use plxs_core::{Model, Results};
 
 use plxs_assembly::ElementTable;
 
+/// Appends one of the tables an eigenvalue step prints (see `plxs_output::EigenTable`):
+/// `quantity` is the table's name, rows are keyed by mode (0 for a total row).
+pub fn write_table(
+    results: &mut Results,
+    step_number: u32,
+    quantity: &str,
+    rows: Vec<(u32, Vec<f64>)>,
+) {
+    results.history.push(HistoryBlock {
+        step: step_number,
+        increment: 0,
+        quantity: quantity.to_string(),
+        set: String::new(),
+        time: 0.0,
+        rows,
+    });
+}
+
 /// Appends the history blocks of an increment.
 #[allow(clippy::too_many_arguments)]
 pub fn write_history(
@@ -20,6 +38,34 @@ pub fn write_history(
     // The total time, which CalculiX prints in the block headers.
     time: f64,
     u: &[f64],
+    forces: &[f64],
+    stresses: &IntegrationPointField,
+    strains: &IntegrationPointField,
+    material: Option<&IntegrationPointField>,
+) {
+    write_history_with_velocities(
+        results,
+        model,
+        table,
+        step,
+        (step_number, increment, time),
+        (u, None),
+        forces,
+        stresses,
+        strains,
+        material,
+    );
+}
+
+/// [`write_history`] of a dynamic increment, which also prints the velocities (`V`).
+#[allow(clippy::too_many_arguments)]
+pub fn write_history_with_velocities(
+    results: &mut Results,
+    model: &Model,
+    table: &ElementTable,
+    step: &Step,
+    (step_number, increment, time): (u32, u32, f64),
+    (u, velocities): (&[f64], Option<&[f64]>),
     forces: &[f64],
     stresses: &IntegrationPointField,
     strains: &IntegrationPointField,
@@ -77,6 +123,7 @@ pub fn write_history(
             });
         }
     }
+    let velocities = velocities.map(|v| table.reported(model, v, &vec![0.0; v.len()]).0);
     let (u, forces) = &table.reported(model, u, forces);
     for request in &step.outputs.node_print {
         let Some(set) = request.set.as_deref() else {
@@ -112,6 +159,15 @@ pub fn write_history(
                         results
                             .history
                             .push(block("displacements (vx,vy,vz)", rows_of(u)));
+                    }
+                }
+                "V" => {
+                    if let Some(v) = &velocities
+                        && request.totals != Totals::Only
+                    {
+                        results
+                            .history
+                            .push(block("velocities (vx,vy,vz)", rows_of(v)));
                     }
                 }
                 "RF" => {

@@ -2018,6 +2018,64 @@ fn calculix_swings_the_cantilever_about_its_static_deflection() {
     );
 }
 
+/// Short dynamic runs that keep the golden files of the solver corpus small: a damped start
+/// with Rayleigh damping, automatic incrementation, and a dynamic step that lets the
+/// cantilever swing back from a static preload.
+#[test]
+fn calculix_runs_short_dynamic_steps() {
+    let damping = plx_model::RayleighDamping {
+        alpha: 50.0,
+        beta: 2e-5,
+    };
+    let (mesh, model) = dynamic_cantilever(1.5e-4, 2.5e-5, Some(damping));
+    let Some(frd) = run_ccx("dynamik-kurz", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    assert_eq!(tip_history(&frd).len(), 6);
+
+    let (mesh, mut model) = dynamic_cantilever(2e-4, 2.5e-5, None);
+    let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.increments.incrementation = Incrementation::Automatic;
+    settings.increments.max_increment = 6e-5;
+    let frd = run_ccx(
+        "dynamik-automatisch",
+        &write_inp(&mesh, &model, "").unwrap(),
+    )
+    .unwrap();
+    let history = tip_history(&frd);
+    assert!(history.len() > 3 && history.len() < 8, "{history:?}");
+    assert!(
+        (history.last().unwrap().0 - 2e-4).abs() < 1e-9,
+        "{history:?}"
+    );
+
+    // The preload of a static step, released at the start of the dynamic step. Both steps
+    // ask for ENER, which CalculiX wants in the first step when a later one is dynamic.
+    let (mesh, mut model) = dynamic_cantilever(1e-4, 2.5e-5, None);
+    let mut release = model.steps[0].clone();
+    release.name = "Release".into();
+    release.loads[0].active = false;
+    let mut preload = Step::new_static("Preload");
+    preload.boundary_conditions = release.boundary_conditions.clone();
+    preload.loads.push(tip_force());
+    preload.field_outputs = release.field_outputs.clone();
+    model.steps = vec![preload, release];
+    let frd = run_ccx("statisch-dynamisch", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let tip = frd.mesh.node_index(99).unwrap();
+    let static_u3 = (frd.increments.iter())
+        .find(|i| i.kind == plx_results::AnalysisKind::Static)
+        .map(|i| i.field("DISP").unwrap().component("U3").unwrap().values[tip])
+        .unwrap();
+    let swing = tip_history(&frd);
+    assert_eq!(swing.len(), 4, "{swing:?}");
+    assert!(
+        swing.iter().all(|s| s.1 > f64::from(static_u3)),
+        "released tip {swing:?} from {static_u3}"
+    );
+}
+
 /// The cantilever with a frequency step that stores its modes, a modal dynamics step with
 /// the tip force applied at once, and a steady state sweep of the tip force around the
 /// first bending mode; both modal steps damped as given.
@@ -2331,6 +2389,12 @@ fn a_preloaded_buckle_step_counts_its_modes_from_one() {
         unreachable!()
     };
     settings.perturbation = true;
+    // The side load splits the degenerate pair of bending modes by 2e-4 only; with the
+    // default accuracy CalculiX's Lanczos iteration stops 2e-5 away from the buckling
+    // factor, too far for the solver fixture made from this test, and the shape of a
+    // single mode of the pair carries a trace of the other, so both are requested.
+    settings.accuracy = 1e-10;
+    settings.num_factors = 2;
     let Some(frd) = run_ccx("vorspannung-beulen", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
@@ -2338,7 +2402,15 @@ fn a_preloaded_buckle_step_counts_its_modes_from_one() {
         .map(|i| (i.step, i.increment, i.kind))
         .collect();
     use plx_results::AnalysisKind::{Buckling, Static};
-    assert_eq!(ids, [(1, 1, Static), (2, 0, Buckling), (2, 1, Buckling)]);
+    assert_eq!(
+        ids,
+        [
+            (1, 1, Static),
+            (2, 0, Buckling),
+            (2, 1, Buckling),
+            (2, 2, Buckling)
+        ]
+    );
 }
 
 #[test]
@@ -6810,6 +6882,7 @@ fn sensitivity_cantilever(settings: SensitivityStep) -> (FeMesh, FeModel) {
 
 /// Runs CalculiX and reads the `.frd` and `.dat` files.
 fn run_ccx_frd_dat(name: &str, text: &str) -> Option<(FrdImport, crate::dat::DatImport)> {
+    dump_fixture(name, text);
     let dir = ccx_dir(name)?;
     let frd = run_ccx_in(&dir, name, text);
     let dat = crate::dat::read_dat(&dir.join(format!("{name}.dat"))).unwrap();
@@ -6898,6 +6971,31 @@ fn calculix_computes_the_sensitivities_of_mass_and_strain_energy() {
         .component("DFDN")
         .unwrap();
     assert!(sen.values.iter().any(|v| *v != 0.0));
+}
+
+/// With a linear filter, CalculiX smooths the sensitivities (DFDNFIL) and keeps the raw
+/// ones (DFDN); the responses and their gradient lengths do not change.
+#[test]
+fn calculix_filters_the_sensitivities() {
+    let (mesh, model) = sensitivity_cantilever(SensitivityStep {
+        filter_radius: Some(15.0),
+        ..SensitivityStep::default()
+    });
+    let Some((frd, dat)) = run_ccx_frd_dat(
+        "sensitivitaet-filter",
+        &write_inp(&mesh, &model, "").unwrap(),
+    ) else {
+        return;
+    };
+    let set = dat.sets.iter().find(|s| s.name == "STEP_2").unwrap();
+    assert!(set.field("GRADIENT_LENGTH").is_some());
+    let sensitivity = (frd.increments.iter())
+        .find(|i| i.step == 2 && i.field("SENENER").is_some())
+        .unwrap();
+    let field = sensitivity.field("SENENER").unwrap();
+    let filtered = &field.component("DFDNFIL").unwrap().values;
+    let length: f32 = filtered.iter().map(|v| v * v).sum::<f32>().sqrt();
+    assert!((length - 1.0).abs() < 1e-3, "{length}");
 }
 
 /// After a frequency step, the sensitivities of the eigenfrequencies come as one increment

@@ -9,10 +9,13 @@
 //! Sources: the sparse LDLᵀ factorization is `faer`'s (supernodal with AMD ordering); the
 //! matrix layout is the textbook compressed-column format. No CalculiX code was consulted.
 
+pub mod eigen;
 pub mod gmres;
 pub mod pattern;
 pub mod solver;
 
 pub use gmres::gmres;
+
+pub use eigen::{EigenPairs, EigenSolver, LanczosOptions, ShiftInvertLanczos};
 pub use pattern::{Pattern, SparseMatrix};
 pub use solver::{LdltSolver, LinearSolver};

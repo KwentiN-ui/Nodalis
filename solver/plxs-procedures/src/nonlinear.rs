@@ -11,7 +11,8 @@
 
 use plxs_assembly::discrete::{DiscreteElement, DiscreteKind};
 use plxs_assembly::{
-    NonlinearInput, Spc, assemble_nonlinear, load_vector, rotate_concentrated_loads,
+    NonlinearInput, Spc, add_membrane_pressures, assemble_nonlinear, load_vector,
+    membrane_pressures, rotate_concentrated_loads,
 };
 use plxs_constraints::ConstraintSet;
 use plxs_core::step::{DefaultAmplitude, Incrementation, Procedure as ProcedureKind};
@@ -306,6 +307,21 @@ impl Procedure for NonlinearStatic {
                 });
                 let (mut f_ext, warnings) =
                     load_vector(ctx.model, ctx.table, step, step_time, total, period)?;
+                // Under NLGEOM pressures on membranes follow the deformed surface (as in
+                // CalculiX, see `plxs_elements::membrane`): the reference forces leave the
+                // load vector and the assembly adds the current ones.
+                let follower = if step.nlgeom {
+                    membrane_pressures(ctx.model, ctx.table, step, step_time, total, period)?
+                } else {
+                    Vec::new()
+                };
+                if !follower.is_empty() {
+                    let mut reference = vec![0.0; f_ext.len()];
+                    add_membrane_pressures(ctx.table, &follower, None, &mut reference);
+                    for (f, r) in f_ext.iter_mut().zip(&reference) {
+                        *f -= r;
+                    }
+                }
                 rotate_concentrated_loads(
                     ctx.model,
                     constraints,
@@ -333,6 +349,7 @@ impl Procedure for NonlinearStatic {
                     time: total,
                     creep_active: visco,
                     temperature,
+                    follower: &follower,
                 };
                 // Contact: candidate master faces from the start of the increment and the
                 // matrix pattern with every spring they allow.

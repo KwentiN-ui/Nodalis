@@ -26,6 +26,10 @@ pub enum IncrementKind {
     Buckling,
     /// A complex mode: `value` is the real part of the frequency.
     ComplexFrequency,
+    /// A data set of a `*SENSITIVITY` step (the `.frd` marks it as analysis type 3 without
+    /// a mode): the surface normals (`value` 0) or the sensitivities of one design response
+    /// (`value` the eigenfrequency for `EIGENFREQUENCY`, 0 otherwise).
+    Sensitivity,
 }
 
 /// Fields written for one increment of one step.
