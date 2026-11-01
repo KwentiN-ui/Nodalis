@@ -16,6 +16,8 @@ use plx_job::{Job, JobStatus, live::LiveProgress};
 use plxs_core::{CancelToken, Error, ProgressEvent};
 use serde::{Deserialize, Serialize};
 
+pub use plxs_core::{Diagnostic, DiagnosticCode};
+
 /// The version of the built-in solver.
 pub const VERSION: &str = plxs_session::job::VERSION;
 
@@ -68,6 +70,34 @@ impl Run {
             Engine::PrePoLix => {
                 BuiltinJob::start(solver.threads, work_dir, name, input).map(Run::Builtin)
             }
+        }
+    }
+
+    /// Starts the model check of `input`: CalculiX reads an input without steps
+    /// (`*NO ANALYSIS`), the PrePoLix solver checks the whole input including its steps
+    /// (free motions per step) without computing results, see [`Run::diagnostics`].
+    pub fn check(
+        engine: Engine,
+        solver: &plx_job::Solver,
+        work_dir: &Path,
+        name: &str,
+        input: &str,
+    ) -> std::io::Result<Run> {
+        match engine {
+            Engine::CalculiX => Job::start(solver, work_dir, name, input).map(Run::Process),
+            Engine::PrePoLix => {
+                BuiltinJob::start_check(solver.threads, work_dir, name, input).map(Run::Builtin)
+            }
+        }
+    }
+
+    /// What the PrePoLix solver found, typed, once the run has finished: the findings of a
+    /// model check, or the error of a failed run with its causes. `None` for CalculiX, whose
+    /// output is text.
+    pub fn diagnostics(&self) -> Option<Vec<Diagnostic>> {
+        match self {
+            Run::Process(_) => None,
+            Run::Builtin(job) => job.diagnostics(),
         }
     }
 
@@ -155,6 +185,9 @@ pub struct BuiltinJob {
     cancel: CancelToken,
     handle: Option<JoinHandle<Finished>>,
     status: JobStatus,
+    /// A model check computes no results: it is complete without them.
+    check: bool,
+    diagnostics: Arc<Mutex<Option<Vec<Diagnostic>>>>,
 }
 
 /// How the solver thread ended.
@@ -168,6 +201,26 @@ enum Finished {
 impl BuiltinJob {
     /// Writes `<work_dir>/<name>.inp` and starts the solver on it with `threads` threads.
     pub fn start(threads: u32, work_dir: &Path, name: &str, input: &str) -> std::io::Result<Self> {
+        Self::spawn(threads, work_dir, name, input, false)
+    }
+
+    /// Writes `<work_dir>/<name>.inp` and starts the solver's model check on it.
+    pub fn start_check(
+        threads: u32,
+        work_dir: &Path,
+        name: &str,
+        input: &str,
+    ) -> std::io::Result<Self> {
+        Self::spawn(threads, work_dir, name, input, true)
+    }
+
+    fn spawn(
+        threads: u32,
+        work_dir: &Path,
+        name: &str,
+        input: &str,
+        check: bool,
+    ) -> std::io::Result<Self> {
         std::fs::create_dir_all(work_dir)?;
         for extension in OLD_FILES {
             let path = work_dir.join(format!("{name}.{extension}"));
@@ -190,6 +243,8 @@ impl BuiltinJob {
         };
         let input = input.to_owned();
         let lines = Arc::clone(&output);
+        let diagnostics = Arc::new(Mutex::new(None));
+        let found = Arc::clone(&diagnostics);
         let handle = std::thread::Builder::new()
             .name(format!("plxs {name}"))
             .spawn(move || {
@@ -199,9 +254,72 @@ impl BuiltinJob {
                         say(line);
                     }
                 };
+                let keep = |list: Vec<Diagnostic>| {
+                    *found.lock().unwrap_or_else(|e| e.into_inner()) = Some(list);
+                };
+                if check {
+                    let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        plxs_session::check_input(
+                            &input,
+                            Some(&input_path),
+                            &options,
+                            &mut progress,
+                        )
+                    }));
+                    return match checked {
+                        Ok(checked) => {
+                            for diagnostic in &checked.diagnostics {
+                                say(plxs_session::format_diagnostic(diagnostic));
+                            }
+                            say(format!(
+                                " *INFO: model check finished in {:.2} s",
+                                checked.seconds
+                            ));
+                            let errors = checked.has_errors();
+                            keep(checked.diagnostics);
+                            if errors {
+                                Finished::Error
+                            } else {
+                                Finished::Done
+                            }
+                        }
+                        Err(_) => {
+                            say("*ERROR: the model check failed".into());
+                            Finished::Error
+                        }
+                    };
+                }
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     plxs_session::run_job(&input, Some(&input_path), &options, &mut progress)
                 }));
+                // A singular matrix or a failed increment: the model check names the cause
+                // (free motions, untied nodes).
+                if let Ok(Err(error)) = &run {
+                    let mut list = vec![Diagnostic::from_error(error)];
+                    if matches!(error, Error::Numerical { .. }) && !options.cancel.is_cancelled() {
+                        say(" *INFO: looking for the cause with the model check".into());
+                        let checked =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                plxs_session::check_input(
+                                    &input,
+                                    Some(&input_path),
+                                    &options,
+                                    &mut |_| {},
+                                )
+                            }));
+                        if let Ok(checked) = checked {
+                            for diagnostic in checked
+                                .diagnostics
+                                .into_iter()
+                                .filter(|d| d.severity != plxs_core::Severity::Info)
+                            {
+                                say(plxs_session::format_diagnostic(&diagnostic));
+                                list.push(diagnostic);
+                            }
+                        }
+                    }
+                    keep(list);
+                }
                 match run {
                     Ok(Ok(plxs_session::JobOutcome::Finished)) => Finished::Done,
                     Ok(Ok(plxs_session::JobOutcome::Cancelled)) => {
@@ -243,7 +361,20 @@ impl BuiltinJob {
             cancel,
             handle: Some(handle),
             status: JobStatus::Running,
+            check,
+            diagnostics,
         })
+    }
+
+    /// What the solver found, once it has finished; see [`Run::diagnostics`].
+    pub fn diagnostics(&self) -> Option<Vec<Diagnostic>> {
+        if self.status == JobStatus::Running {
+            return None;
+        }
+        self.diagnostics
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn name(&self) -> &str {
@@ -302,7 +433,12 @@ impl BuiltinJob {
             return;
         };
         let finished = handle.join().unwrap_or(Finished::Error);
-        let results = self.results_written();
+        // A model check computes no results.
+        let results = !self.check && self.results_written();
+        if self.check && finished == Finished::Done {
+            self.status = JobStatus::Completed;
+            return;
+        }
         self.status = match (finished, results) {
             (Finished::Cancelled, _) => JobStatus::Killed,
             (Finished::Done, true) => JobStatus::Completed,

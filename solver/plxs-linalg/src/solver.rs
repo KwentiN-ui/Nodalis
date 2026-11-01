@@ -85,6 +85,48 @@ impl LdltSolver {
         }
     }
 
+    /// The pivots `D` of the last factorization, indexed like the unknowns of the matrix
+    /// (not in the elimination order). A pivot that is zero or tiny against the diagonal
+    /// entry of its unknown marks a singular direction: what is left of that unknown's
+    /// stiffness once the unknowns eliminated before it took theirs.
+    pub fn pivots(&self) -> Option<Vec<f64>> {
+        let symbolic = self.symbolic.as_ref().filter(|_| self.factorized)?;
+        let n = symbolic.nrows();
+        // D in the elimination order.
+        let mut eliminated = vec![0.0; n];
+        match symbolic.raw() {
+            SymbolicCholeskyRaw::Simplicial(simplicial) => {
+                // The first stored entry of every column of the factor is its diagonal, D_j.
+                let col_ptr = simplicial.col_ptr();
+                for (j, d) in eliminated.iter_mut().enumerate() {
+                    *d = self.values[col_ptr[j] as usize];
+                }
+            }
+            SymbolicCholeskyRaw::Supernodal(supernodal) => {
+                let ldlt = SupernodalLdltRef::new(supernodal, &self.values);
+                let begin = supernodal.supernode_begin();
+                for (s, &first) in begin.iter().enumerate().take(supernodal.n_supernodes()) {
+                    let block = ldlt.supernode(s).val();
+                    let first = first as usize;
+                    for j in 0..block.ncols() {
+                        eliminated[first + j] = block[(j, j)];
+                    }
+                }
+            }
+        }
+        Some(match symbolic.perm() {
+            Some(perm) => {
+                let (forward, _) = perm.arrays();
+                let mut pivots = vec![0.0; n];
+                for (new, &old) in forward.iter().enumerate() {
+                    pivots[old as usize] = eliminated[new];
+                }
+                pivots
+            }
+            None => eliminated,
+        })
+    }
+
     /// How many `analyze` calls were skipped because the pattern was the analyzed one.
     pub fn analyses_reused(&self) -> u32 {
         self.reused
@@ -392,6 +434,42 @@ mod tests {
             })
             .count();
         assert_eq!(solver.inertia(), Some(expected));
+    }
+
+    #[test]
+    fn pivots_show_the_singular_unknown() {
+        // A chain of three springs, held at no end: singular once; regularization lets the
+        // factorization pass and the last pivot in the elimination order is zero. Both the
+        // simplicial and the tree-parallel supernodal factorization.
+        let pattern = Arc::new(Pattern::from_blocks(3, [&[0u32, 1][..], &[1, 2][..]]));
+        let mut a = SparseMatrix::zeros(pattern.clone());
+        for (i, j) in [(0, 1), (1, 2)] {
+            a.add(i, i, 1.0);
+            a.add(j, j, 1.0);
+            a.add(i, j, -1.0);
+        }
+        for supernodal in [false, true] {
+            let mut solver = LdltSolver::new(1);
+            if supernodal {
+                solver = solver.force_supernodal();
+            }
+            solver.analyze(&pattern).unwrap();
+            solver.set_regularization(1e-14);
+            solver.factorize(&a).unwrap();
+            let pivots = solver.pivots().unwrap();
+            let diagonal = a.diagonal();
+            let zero = (0..3).filter(|&j| pivots[j] / diagonal[j] < 1e-10).count();
+            assert_eq!(zero, 1, "supernodal {supernodal}: {pivots:?}");
+            // Held at one end: no zero pivot.
+            let mut held = a.clone();
+            held.add(0, 0, 1.0);
+            solver.factorize(&held).unwrap();
+            let pivots = solver.pivots().unwrap();
+            assert!(
+                (0..3).all(|j| pivots[j] > 0.1),
+                "supernodal {supernodal}: {pivots:?}"
+            );
+        }
     }
 
     #[test]

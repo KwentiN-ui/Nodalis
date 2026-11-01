@@ -272,7 +272,7 @@ impl Problem {
             Problem::MpcAndSpc => "Degree of freedom bound twice",
             Problem::RotationIn2d => "Rotation in a 2D model",
             Problem::UnknownKeyword => "Keyword unknown to CalculiX",
-            Problem::SolverError => "CalculiX error",
+            Problem::SolverError => "Solver error",
         }
     }
 
@@ -651,7 +651,7 @@ impl Problem {
                  *PHYSICAL CONSTANTS card encountered\"."
             }
             Problem::SolverError => {
-                "CalculiX aborted with an error message that PrePoLix does not know. \
+                "The solver aborted with an error message that PrePoLix does not know. \
                  The exact text is shown in the Monitor."
             }
         }
@@ -945,7 +945,7 @@ impl Finding {
         Self::new(ModelItem::Analysis, Problem::UnknownKeyword, detail)
     }
 
-    fn new(item: ModelItem, problem: Problem, detail: impl Into<String>) -> Self {
+    pub(crate) fn new(item: ModelItem, problem: Problem, detail: impl Into<String>) -> Self {
         Self {
             item,
             problem,
@@ -2989,7 +2989,7 @@ fn free_motions(gram: &[[f64; 6]; 6], unknowns: usize) -> Vec<[f64; 6]> {
 }
 
 /// Names the free motions, e.g. "translation in X, rotation about Z".
-fn describe_motions(space: ModelSpace, free: &[[f64; 6]]) -> String {
+pub(crate) fn describe_motions(space: ModelSpace, free: &[[f64; 6]]) -> String {
     let project = |v: &[f64; 6]| -> f64 {
         free.iter()
             .map(|f| (0..6).map(|i| f[i] * v[i]).sum::<f64>().powi(2))
@@ -3114,8 +3114,26 @@ pub fn diagnose_solver_warnings(lines: &[String]) -> Vec<Finding> {
             tolerance = tolerance.max(t);
         }
     }
-    if count == 0 {
+    // The PrePoLix solver: "*WARNING in *TIE <name>: <n> slave node(s) are too far away
+    // from the master surface and are not tied: <ids>".
+    let plxs_marker = "slave node(s) are too far away from the master surface";
+    let untied: usize = (lines.iter())
+        .filter_map(|line| {
+            let at = line.find(plxs_marker)?;
+            line[..at].split_whitespace().last()?.parse::<usize>().ok()
+        })
+        .sum();
+    if count == 0 && untied == 0 {
         return Vec::new();
+    }
+    if count == 0 {
+        return vec![Finding::new(
+            ModelItem::Analysis,
+            Problem::TieNodesNotTied,
+            format!(
+                "{untied} slave nodes not tied: farther than the tolerance from the master side"
+            ),
+        )];
     }
     vec![Finding::new(
         ModelItem::Analysis,
@@ -3302,6 +3320,23 @@ impl UnionFind {
 
 #[cfg(test)]
 mod tests {
+    use super::diagnose_solver_warnings as warnings_of;
+
+    #[test]
+    fn untied_nodes_of_the_prepolix_solver_are_found() {
+        let lines = vec![
+            "*WARNING: *WARNING in *TIE GLUE: 9 slave node(s) are too far away from the master surface and are not tied: 1001, 1002".to_string(),
+        ];
+        let found = warnings_of(&lines);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].problem, Problem::TieNodesNotTied);
+        assert!(
+            found[0].detail.starts_with("9 slave nodes"),
+            "{}",
+            found[0].detail
+        );
+    }
+
     use plx_mesh::{Element, ElementShape, Part};
 
     use super::*;

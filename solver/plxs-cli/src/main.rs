@@ -5,6 +5,7 @@
 //! plxs -i <job>         the same
 //! plxs -v               print the version
 //! plxs --threads <n>    number of threads (default: OMP_NUM_THREADS, else all cores)
+//! plxs --check <job>    model check only: free motions, untied nodes, size (no results)
 //! plxs -o bin <job>     write the .frd with binary number blocks (-o asc: text, default)
 //! plxs --profile <job>  print the time per phase at the end (also PLXS_PROFILE=1)
 //! ```
@@ -49,6 +50,7 @@ fn banner() {
 fn run(args: Vec<String>) -> i32 {
     let mut job: Option<String> = None;
     let mut threads: Option<usize> = None;
+    let mut check = false;
     let mut frd_format = plxs_output::FrdFormat::Ascii;
     let mut profile = std::env::var("PLXS_PROFILE").is_ok_and(|v| !v.is_empty() && v != "0");
     let mut i = 0;
@@ -66,6 +68,7 @@ fn run(args: Vec<String>) -> i32 {
                 i += 1;
                 threads = args.get(i).and_then(|t| t.parse().ok());
             }
+            "--check" => check = true,
             "--profile" => profile = true,
             "-o" => {
                 i += 1;
@@ -82,7 +85,7 @@ fn run(args: Vec<String>) -> i32 {
                 };
             }
             "-h" | "--help" => {
-                say("usage: plxs [-i] <job> [--threads <n>] [-o asc|bin] | plxs -v");
+                say("usage: plxs [-i] <job> [--threads <n>] [-o asc|bin] [--check] | plxs -v");
                 return 0;
             }
             other if !other.starts_with('-') => job = Some(other.to_string()),
@@ -94,7 +97,7 @@ fn run(args: Vec<String>) -> i32 {
         i += 1;
     }
     let Some(job) = job else {
-        say("usage: plxs [-i] <job> [--threads <n>] [-o asc|bin] | plxs -v");
+        say("usage: plxs [-i] <job> [--threads <n>] [-o asc|bin] [--check] | plxs -v");
         return 1;
     };
     banner();
@@ -140,6 +143,14 @@ fn run(args: Vec<String>) -> i32 {
             say(&line);
         }
     };
+    if check {
+        let found = plxs_session::check_input(&input, Some(&path), &options, &mut progress);
+        for diagnostic in &found.diagnostics {
+            say(&plxs_session::format_diagnostic(diagnostic));
+        }
+        say(&format!(" model check finished in {:.2} s", found.seconds));
+        return i32::from(found.has_errors());
+    }
     match plxs_session::run_job(&input, Some(&path), &options, &mut progress) {
         Ok(plxs_session::JobOutcome::Finished) => {
             say("");

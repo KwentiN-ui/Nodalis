@@ -307,7 +307,10 @@ impl Analysis {
         let initial = stage_linked_results(&fe, work_dir, &job_name)?;
         // The sets of the analyses that continue from its states go into the input file too:
         // CalculiX takes no new sets after reading a state.
-        let input = if check_model {
+        let engine = solver.engine;
+        // CalculiX checks an input without steps (`*NO ANALYSIS`); the PrePoLix solver checks
+        // every step's supports, so it reads the whole input.
+        let input = if check_model && engine == Engine::CalculiX {
             plx_io::inp::write_check_inp(&model.mesh, &fe, &heading)
         } else {
             let dependent = &continuation.dependent_steps;
@@ -328,7 +331,6 @@ impl Analysis {
         };
         let copied = copy_result_files(&fe, work_dir);
         let job_solver = solver.job_solver();
-        let engine = solver.engine;
         let hint = "Check the executable under Tools > Settings > Solver.";
         if engine == Engine::CalculiX
             && let Some(message) = crate::settings::missing_executable(&job_solver.executable)
@@ -350,16 +352,18 @@ impl Analysis {
             Some(run) => run.chain.input.clone(),
             None => input,
         };
-        let job =
-            Run::start(engine, &job_solver, work_dir, &job_name, &run_input).map_err(|e| {
-                match engine {
-                    Engine::CalculiX => format!(
-                        "CalculiX ({}) not started: {e}. {hint}",
-                        job_solver.executable.display()
-                    ),
-                    Engine::PrePoLix => format!("Solver not started: {e}"),
-                }
-            })?;
+        let job = if check_model {
+            Run::check(engine, &job_solver, work_dir, &job_name, &run_input)
+        } else {
+            Run::start(engine, &job_solver, work_dir, &job_name, &run_input)
+        }
+        .map_err(|e| match engine {
+            Engine::CalculiX => format!(
+                "CalculiX ({}) not started: {e}. {hint}",
+                job_solver.executable.display()
+            ),
+            Engine::PrePoLix => format!("Solver not started: {e}"),
+        })?;
         let mut output = vec![format!(
             "{name} {} in {}",
             if check_model {
@@ -397,6 +401,12 @@ impl Analysis {
     /// Adds a line of prepolix's own to the monitor output.
     pub fn note(&mut self, line: String) {
         self.collect([line]);
+    }
+
+    /// What the PrePoLix solver found, typed, once the run has finished; `None` for
+    /// CalculiX, whose output is read as text instead.
+    pub fn diagnostics(&self) -> Option<Vec<plx_solve::Diagnostic>> {
+        self.job.diagnostics()
     }
 
     /// The keywords of the input file CalculiX runs on.
@@ -871,6 +881,63 @@ mod tests {
         };
         assert_eq!(status, JobStatus::Completed, "{:?}", analysis.output());
         analysis.output().to_vec()
+    }
+
+    /// Check Model with the PrePoLix solver: cubes held in X only can slide and turn; the
+    /// solver's rank test names the part and the free motions, attached to each step.
+    #[test]
+    fn the_built_in_model_check_names_the_free_part() {
+        let mut model = pulled_cubes(0.03);
+        for step in &mut model.fe.steps {
+            step.boundary_conditions.truncate(1);
+            step.boundary_conditions[0].kind =
+                plx_model::BoundaryKind::displacement([Some(0.0), None, None, None, None, None]);
+        }
+        let solver = Solver {
+            engine: Engine::PrePoLix,
+            ..Default::default()
+        };
+        let dir = std::env::temp_dir().join(format!("prepolix-check-{}", std::process::id()));
+        let mut analysis = Analysis::start(
+            &solver,
+            &model,
+            EquationSolver::Default,
+            true,
+            "Cubes",
+            &dir,
+            &Default::default(),
+        )
+        .unwrap();
+        let status = loop {
+            if let Some(status) = analysis.poll() {
+                break status;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert_eq!(status, JobStatus::Failed, "{:?}", analysis.output());
+        let diagnostics = analysis.diagnostics().expect("typed diagnostics");
+        let findings = plx_model::diagnose_solver_check(&diagnostics, &model.mesh, &model.fe);
+        let at = |item| {
+            findings
+                .iter()
+                .find(|f| f.item == item && f.problem == plx_model::Problem::RigidBodyMotion)
+        };
+        let part = at(plx_model::ModelItem::Part(0)).expect("the part is named");
+        assert!(part.detail.contains("Solid-1"), "{}", part.detail);
+        // Held in X at one end: Y, Z and the turns about Y and Z (X turns too: one line
+        // of nodes would hold it, a face holds it in X only).
+        assert!(part.detail.contains("displacement in Y"), "{}", part.detail);
+        for step in 0..3 {
+            assert!(
+                at(plx_model::ModelItem::BoundaryConditions(step)).is_some(),
+                "{findings:?}"
+            );
+        }
+        let output = analysis.output().join("\n");
+        assert!(
+            output.contains("*ERROR in model check (step 1)"),
+            "{output}"
+        );
     }
 
     #[test]
