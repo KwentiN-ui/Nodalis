@@ -208,6 +208,7 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `dynamic/dynamik` | E | M3 | none | C3D20R, \*AMPLITUDE, \*DYNAMIC |
 | `dynamic/dynamik_gedaempft` | E | M3 | none | C3D20R, \*AMPLITUDE, \*DYNAMIC, \*DAMPING |
 | `dynamic/statisch-dynamisch` | E | M3 | ccx 2.21 | C3D20R, \*AMPLITUDE, \*STATIC, \*DYNAMIC |
+| `eigen/beulen-starr` | A | M2 | ccx 2.21 | C3D20R, \*RIGID BODY, \*BUCKLE |
 | `eigen/beulen` | A | M2 | ccx 2.21 | C3D20R, \*BUCKLE |
 | `eigen/beulform` | A | M2 | ccx 2.21 | C3D20R, \*BUCKLE |
 | `eigen/deaktiviert` | A | M2 | ccx 2.21 | C3D20R, \*FREQUENCY |

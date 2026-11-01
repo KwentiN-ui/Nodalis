@@ -24,7 +24,7 @@
 //! No CalculiX code was consulted.
 
 use plxs_assembly::{
-    ElementTable, Reduction, Spc, add_membrane_geometric_stiffness, assemble_geometric_stiffness,
+    ElementTable, Spc, add_membrane_geometric_stiffness, assemble_geometric_stiffness,
     assemble_mass, assemble_stiffness, assemble_tangent_stiffness, load_vector,
 };
 use plxs_constraints::{ConstraintSet, ModelConstraints};
@@ -165,13 +165,6 @@ pub(crate) fn increment_results(
             forces[*dof as usize] += f;
         }
     }
-}
-
-/// Homogeneous single-point constraints of an eigenvalue step.
-fn homogeneous_reduction(ctx: &ProcedureContext<'_>, step: &Step) -> Result<Reduction> {
-    let mut spc = Spc::of_step(ctx.model, step, &ctx.table.dofs, 1.0, 1.0, 1.0)?;
-    spc.values.iter_mut().for_each(|v| *v = 0.0);
-    Ok(Reduction::new(ctx.table.dofs.len(), spc))
 }
 
 fn lanczos_options(accuracy: Option<f64>) -> LanczosOptions {
@@ -497,12 +490,13 @@ impl Procedure for BuckleProcedure {
         };
         let count = parameters.count.max(1) as usize;
         let (k, perturbed) = reference_stiffness(ctx, step, progress)?;
-        let reduction = homogeneous_reduction(ctx, step)?;
+        let reduction = homogeneous_constraints(ctx, step, progress)?;
         let total_dofs = ctx.table.dofs.len();
-        let k_free = k.restrict(&reduction.free);
+        let zeros = vec![0.0; total_dofs];
+        let k_free = reduction.reduce(&k);
         progress.event(ProgressEvent::Info(format!(
             "number of equations: {}; {count} buckling factors requested",
-            reduction.free.len()
+            reduction.reduced_len()
         )));
 
         // Static solution for the step's loads (fully applied).
@@ -535,14 +529,13 @@ impl Procedure for BuckleProcedure {
             },
             other => other,
         })?;
-        let mut u_free = reduction.reduce_vector(&f);
+        let mut u_free = reduction.reduce_rhs(&f);
         ctx.solver.solve(&mut u_free)?;
         progress.event(ProgressEvent::Info(format!(
             "reference solution in {:.2} s",
             started.elapsed().as_secs_f64()
         )));
-        let mut u = vec![0.0; total_dofs];
-        reduction.expand_into(&u_free, &mut u);
+        let u = reduction.expand(&u_free, &zeros);
         let mut stresses = ctx.table.layout.field(6);
         let mut strains = ctx.table.layout.field(6);
         let mut forces = vec![0.0; total_dofs];
@@ -571,7 +564,7 @@ impl Procedure for BuckleProcedure {
         let mut k_sigma = SparseMatrix::zeros(ctx.pattern.clone());
         assemble_geometric_stiffness(ctx.table, ctx.model, &stresses, &mut k_sigma)?;
         add_membrane_geometric_stiffness(ctx.table, &u, &mut k_sigma);
-        let k_sigma_free = k_sigma.restrict(&reduction.free);
+        let k_sigma_free = reduction.reduce(&k_sigma);
         let started = std::time::Instant::now();
         let mut lanczos =
             ShiftInvertLanczos::new(ctx.threads, lanczos_options(parameters.accuracy));
@@ -603,8 +596,7 @@ impl Procedure for BuckleProcedure {
                 value: *factor,
             });
             rows.push((mode, vec![*factor]));
-            let mut phi = vec![0.0; total_dofs];
-            reduction.expand_into(phi_free, &mut phi);
+            let mut phi = reduction.expand(phi_free, &zeros);
             normalize_buckling_mode(&k, &mut phi, &mut forces);
             // CalculiX derives the stresses of a buckling mode from the linear strains even
             // with a preload (the reference solution above and the modes of a perturbed

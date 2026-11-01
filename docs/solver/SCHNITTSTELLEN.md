@@ -429,6 +429,11 @@ Querschnitt) abgelesen, kein Quelltext:
   alle Steps (jeder Frequenzmode, die Beul-Referenzlösung und jeder Beulmode zählen wie ein
   statisches Inkrement); die fünfte Spalte der `100CL`-Zeile trägt dieselbe laufende Nummer.
   Wertspalte mit 10 signifikanten Stellen.
+- **`*BUCKLE` mit MPCs**: Referenzlösung, `K`, `K_σ` und Moden laufen über
+  `ModelConstraints::step_set` (homogene SPCs plus alle MPCs, `homogeneous_constraints`).
+  Fixture `eigen/beulen-starr`: Stab mit verdrehgesichertem Starrkörperende. ccx findet
+  mit der Vorgabegenauigkeit 1e-4 nur einen Mode des entarteten Paares, der Writer-Test
+  fordert daher 1e-10 und vier Faktoren.
 - **Massenmatrix** mit der Integrationsregel des Elements (reduziert für C3D20R).
 - **Beulmoden** sind auf Einheits-Formänderungsenergie normiert: `φᵀ K φ = 1` mit der
   Referenzsteifigkeit (Euklid-Norm der ccx-Moden exakt `1/√(φᵀKφ)` der unnormierten).

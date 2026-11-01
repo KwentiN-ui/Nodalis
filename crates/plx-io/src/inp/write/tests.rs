@@ -2470,6 +2470,36 @@ fn a_preloaded_buckle_step_counts_its_modes_from_one() {
     );
 }
 
+/// A buckle step with a rigid end: the tip face is held against turning by a remote
+/// displacement (a `*RIGID BODY`, a multi-point constraint the eigenvalue problem must
+/// eliminate), so the column buckles clamped-guided instead of as a cantilever.
+#[test]
+fn a_buckle_step_eliminates_a_rigid_end() {
+    let (mesh, mut model) = buckle_analysis();
+    let mut bc = remote_with([None, None, None, Some(0.0), Some(0.0), Some(0.0)], |r| {
+        r.behavior = Behavior::Rigid
+    });
+    bc.region = Region::NodeSet("TIP".into());
+    model.steps[0].boundary_conditions.push(bc);
+    let StepKind::Buckle(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    // Both pairs of the square column are exactly degenerate; with the default accuracy
+    // CalculiX's Lanczos iteration returns only one mode of the first pair (8064, 29508).
+    settings.accuracy = 1e-10;
+    settings.num_factors = 4;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Rigid body"), "{text}");
+    let Some(frd) = run_ccx("beulen-starr", &text) else {
+        return;
+    };
+    let ids: Vec<_> = (frd.increments.iter())
+        .map(|i| (i.step, i.increment, i.kind))
+        .collect();
+    use plx_results::AnalysisKind::Buckling;
+    assert_eq!(ids, (0..=4).map(|i| (1, i, Buckling)).collect::<Vec<_>>());
+}
+
 #[test]
 fn deactivated_items_are_left_out_as_comments() {
     let (mesh, mut model) = cantilever(tip_force());
