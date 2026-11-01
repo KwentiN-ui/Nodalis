@@ -683,3 +683,31 @@ plxs 6,0 s, ccx 2.21 12,4 s (4 Threads), Verschiebungen auf 6,6e-6 gleich.
   supernodale LDLᵀ auf faer's dichten Kernen soll den Rest (Faktor ~2 in der numerischen
   Faktorisierung) holen. Benchmark-Eingaben: `/mnt/project-files/prepolix/workbench/benchmark/`
   (Projektordner, nicht im Repo), Zahlen in `KONZEPT_CCX_ABLOESUNG.md` Abschnitt 7.
+
+## Stand nach T20 (2026-11-01, Thread "Solver schneller als PaStiX machen")
+
+- `plxs-linalg::supernodal`: eigene numerische Faktorisierung für supernodale Strukturen,
+  parallel über den Eliminationsbaum. faer liefert weiter die symbolische Analyse (Ordnung,
+  Supernodes, Struktur und Speicherlayout des Faktors), deshalb bleiben `solve` und die
+  Inertia-Zählung faer's. Left-looking wie faer: ein Supernode holt die Updates aller
+  Nachfahren, deren Zeilen in seine Spalten reichen, direkt aus deren fertigen Spalten (ein
+  dichtes Produkt je Nachfahre, dann Scatter); dann faer's dichte LDLᵀ des Diagonalblocks und
+  die Dreieckslösung des Blocks darunter (transponiert in einem zusammenhängenden Puffer,
+  faer's Kerne sind darauf deutlich schneller). Teilbäume laufen ab genug Arbeit parallel
+  (rayon), kleine sequentiell ohne Rekursion; große Supernodes nahe der Wurzel teilen ihre
+  Spalten in Blöcke, die ihre Updates parallel holen. Kein Speicher über den Faktor hinaus;
+  Puffer der Produkte (`Workspace`) bleiben über Refaktorisierungen erhalten.
+- Kleine Systeme, für die faer die simpliziale Struktur wählt, rechnet weiter faer.
+  `LdltSolver::force_supernodal()` erzwingt den neuen Pfad (Tests); `PLXS_FACTOR=faer`
+  schaltet für Messungen auf faer's supernodale Faktorisierung zurück.
+- Der Faktor wird in `analyze` einmal sequentiell beschrieben: Page-Faults, die mehrere
+  Threads gleichzeitig nehmen, kosten in der Cloud-VM ein Vielfaches.
+- Verworfen: eine multifrontale Variante. Sie war mit warmem Speicher 20 % schneller (6,4 s
+  gegen 8,0 s für den 173k-Block, 4 Threads), brauchte aber 1,7 GB Update-Matrizen zusätzlich
+  zum 1,9-GB-Faktor; bei großen Modellen (1 Mio. Gleichungen) ein Speicherrisiko, und in der VM
+  war die erste Faktorisierung dadurch langsamer.
+- Ergebnisse unverändert (Fixture-Korpus grün; Block-Ergebnisse bis auf die letzte Stelle der
+  `.frd` gleich). Zahlen gegen ccx/PaStiX in `KONZEPT_CCX_ABLOESUNG.md` Abschnitt 7.4.
+- Offen: faer's dichte Kerne erreichen in der VM 40-50 GFlop/s je Kern (OpenBLAS in PaStiX
+  ca. 55-60); Dreieckslösung und dichte LDLᵀ ca. 25-35. Multithreaded Vorwärts-/
+  Rückwärtseinsetzen; Separator-Verfeinerung im Ordering (Scotch füllt 11 % weniger).
