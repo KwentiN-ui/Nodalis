@@ -408,9 +408,19 @@ pub fn write_increment(
     strains: &IntegrationPointField,
     material: Option<&IntegrationPointField>,
 ) -> Result<()> {
-    let fields = build_fields_with(
+    let mut fields = build_fields_with(
         ctx.table, ctx.model, step, u, reactions, stresses, strains, material,
     );
+    if let Some(evaluation) = &ctx.contact.last {
+        let order = node_order(ctx.model);
+        fields.extend(crate::contact::contact_fields(
+            ctx.model,
+            step,
+            &ctx.contact,
+            evaluation,
+            &order,
+        ));
+    }
     ctx.results.increments.push(ResultsIncrement {
         step: ctx.step_number,
         increment,
@@ -431,7 +441,7 @@ pub fn unsupported_outputs(step: &Step) -> Vec<String> {
     // frequency steps; CalculiX ignores them in the others.
     let known = [
         "U", "V", "S", "E", "RF", "ERR", "NOE", "PEEQ", "ENER", "NT", "HFL", "RFL", "PU", "PHS",
-        "SEN",
+        "SEN", "CDIS", "CSTR", "CELS",
     ];
     let mut out = Vec::new();
     for v in requested(step) {

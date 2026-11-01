@@ -140,6 +140,8 @@ enum Failure {
 /// A converged attempt.
 struct Converged {
     iterations: u32,
+    /// The contact springs at the converged displacements.
+    contact: Option<plxs_contact::Evaluation>,
     u: Vec<f64>,
     output: plxs_assembly::NonlinearOutput,
     average_force: f64,
@@ -246,6 +248,12 @@ impl Procedure for NonlinearStatic {
         )));
         let discrete: Vec<&DiscreteElement> = ctx.table.discrete.iter().collect();
         let mut k = SparseMatrix::zeros(ctx.pattern.clone());
+        // Contact: *MODEL CHANGE / *CHANGE FRICTION of the step, then a contact state per
+        // slave point.
+        for warning in ctx.contact.begin_step(step, ctx.state) {
+            progress.event(ProgressEvent::Warning(warning));
+        }
+        let has_contact = ctx.contact.is_active();
         // Displacements at the end of the previous step (`*BOUNDARY, FIXED`).
         let previous = ctx.state.displacements.values.clone();
         let rotation = |node: u32| constraints.rotation(node).copied();
@@ -346,6 +354,13 @@ impl Procedure for NonlinearStatic {
                     temperature,
                     follower: &follower,
                 };
+                // Contact: candidate master faces from the start of the increment and the
+                // matrix pattern with every spring they allow.
+                if has_contact {
+                    let u0 = ctx.state.displacements.values.clone();
+                    let blocks = ctx.contact.prepare(&ctx.model.nodes.coordinates, &u0);
+                    k = SparseMatrix::zeros(crate::contact::pattern_with(ctx.table, &blocks));
+                }
                 let result = Self::attempt(
                     ctx,
                     progress,
@@ -419,6 +434,10 @@ impl Procedure for NonlinearStatic {
             step_force_count += 1;
             average_force = step_force_sum / f64::from(step_force_count);
             ctx.average_force = Some(average_force);
+            if let Some(evaluation) = converged.contact.clone() {
+                ctx.state.contact = evaluation.states();
+                ctx.contact.last = Some(evaluation);
+            }
             let Converged {
                 iterations,
                 u,
@@ -462,6 +481,20 @@ impl Procedure for NonlinearStatic {
                 &ctx.state.strains,
                 Some(&ctx.state.material),
             );
+            if let Some(evaluation) = &ctx.contact.last {
+                for request in &step.outputs.contact_print {
+                    let blocks = plxs_contact::output::history_blocks(
+                        &ctx.contact,
+                        evaluation,
+                        request,
+                        &ctx.model.nodes.ids,
+                        ctx.step_number,
+                        increment,
+                        total,
+                    );
+                    ctx.results.history.extend(blocks);
+                }
+            }
             ctx.profile.add(Phase::Results, started);
             ctx.sta.push(StaRow {
                 step: ctx.step_number,
@@ -576,7 +609,7 @@ impl NonlinearStatic {
         let mut residuals: Vec<f64> = Vec::new();
         let mut last_correction = f64::INFINITY;
         let mut previous_correction = f64::INFINITY;
-        let mut acting: Option<Vec<bool>> = None;
+        let mut acting: Option<Vec<u8>> = None;
         let mut iteration = 0u32;
         loop {
             let started = Instant::now();
@@ -587,10 +620,38 @@ impl NonlinearStatic {
                 ctx.state,
                 Some(k),
             );
+            let mut status: Vec<u8> = Self::add_discrete(discrete, &u, k, &mut output.f_int)
+                .into_iter()
+                .map(u8::from)
+                .collect();
+            let closed_gaps = discrete
+                .iter()
+                .zip(&status)
+                .filter(|(e, x)| **x > 0 && matches!(e.kind, DiscreteKind::Gap { .. }))
+                .count() as u32;
+            // Contact springs at the current displacements; a change of the contact status
+            // (closed, sticking, sliding) needs another iteration like a gap that changed.
+            let contact = if !ctx.contact.is_empty() {
+                let evaluation = ctx.contact.evaluate(
+                    &ctx.model.nodes.coordinates,
+                    &u,
+                    &ctx.state.contact,
+                    iteration == 0,
+                );
+                for element in &evaluation.elements {
+                    k.add_block(&element.dofs, &element.ke);
+                    for (&dof, f) in element.dofs.iter().zip(&element.fe) {
+                        output.f_int[dof as usize] += f;
+                    }
+                }
+                status.extend(evaluation.status_key());
+                Some(evaluation)
+            } else {
+                None
+            };
+            let contact_elements = closed_gaps + contact.as_ref().map_or(0, |e| e.active as u32);
             ctx.profile.add(Phase::Assembly, started);
-            let status = Self::add_discrete(discrete, &u, k, &mut output.f_int);
             let gaps_changed = acting.as_ref().is_some_and(|a| *a != status);
-            let closed_gaps = status.iter().filter(|&&x| x).count() as u32;
             acting = Some(status);
             let flux = if output.flux_count > 0 {
                 output.flux_sum / output.flux_count as f64
@@ -627,7 +688,7 @@ impl NonlinearStatic {
                     increment,
                     attempt,
                     iteration,
-                    contact_elements: closed_gaps,
+                    contact_elements,
                     residual: r_max,
                     correction: last_correction,
                     step_time,
@@ -680,6 +741,7 @@ impl NonlinearStatic {
                         u,
                         output,
                         average_force: flux,
+                        contact,
                     }));
                 }
                 // Divergence and slow-convergence checks (not across a change of the gap
@@ -738,8 +800,38 @@ impl NonlinearStatic {
             })?;
             ctx.profile.add(Phase::Factorization, started);
             let started = Instant::now();
-            let mut dv = residual;
-            ctx.solver.solve(&mut dv)?;
+            let unsymmetric: Vec<&plxs_contact::ContactElement> = contact
+                .as_ref()
+                .map(|e| {
+                    e.elements
+                        .iter()
+                        .filter(|e| !e.unsymmetric.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let dv = if unsymmetric.is_empty() {
+                let mut dv = residual;
+                ctx.solver.solve(&mut dv)?;
+                dv
+            } else {
+                // Sliding friction makes the tangent unsymmetric: GMRES on the full
+                // tangent, preconditioned by the factorized symmetric part.
+                let zero = vec![0.0; total_dofs];
+                let solver = &ctx.solver;
+                let apply = |v: &[f64], out: &mut [f64]| {
+                    k_reduced.multiply(v, out);
+                    let full = set.expand(v, &zero);
+                    let mut e = vec![0.0; total_dofs];
+                    for element in &unsymmetric {
+                        element.apply_unsymmetric(&full, &mut e);
+                    }
+                    for (o, r) in out.iter_mut().zip(set.reduce_rhs(&e)) {
+                        *o += r;
+                    }
+                };
+                let precondition = |v: &mut [f64]| solver.solve(v);
+                plxs_linalg::gmres(&apply, &precondition, &residual, 1e-10, 60, 300)?.0
+            };
             ctx.profile.add(Phase::Solve, started);
             let du = set.expand(&dv, &vec![0.0; total_dofs]);
             previous_correction = last_correction;

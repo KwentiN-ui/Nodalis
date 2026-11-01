@@ -3576,6 +3576,11 @@ dependencies = [
 [[package]]
 name = "plxs-contact"
 version = "0.3.15"
+dependencies = [
+ "plxs-core",
+ "plxs-elements",
+ "plxs-materials",
+]
 
 [[package]]
 name = "plxs-core"
@@ -3630,6 +3635,7 @@ version = "0.3.15"
 dependencies = [
  "plxs-assembly",
  "plxs-constraints",
+ "plxs-contact",
  "plxs-core",
  "plxs-elements",
  "plxs-linalg",
@@ -3643,6 +3649,7 @@ version = "0.3.15"
 dependencies = [
  "plxs-assembly",
  "plxs-constraints",
+ "plxs-contact",
  "plxs-core",
  "plxs-linalg",
  "plxs-output",
