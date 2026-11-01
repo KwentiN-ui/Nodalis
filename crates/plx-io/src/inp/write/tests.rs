@@ -2330,6 +2330,12 @@ fn a_preloaded_buckle_step_counts_its_modes_from_one() {
         unreachable!()
     };
     settings.perturbation = true;
+    // The side load splits the degenerate pair of bending modes by 2e-4 only; with the
+    // default accuracy CalculiX's Lanczos iteration stops 2e-5 away from the buckling
+    // factor, too far for the solver fixture made from this test, and the shape of a
+    // single mode of the pair carries a trace of the other, so both are requested.
+    settings.accuracy = 1e-10;
+    settings.num_factors = 2;
     let Some(frd) = run_ccx("vorspannung-beulen", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
@@ -2337,7 +2343,15 @@ fn a_preloaded_buckle_step_counts_its_modes_from_one() {
         .map(|i| (i.step, i.increment, i.kind))
         .collect();
     use plx_results::AnalysisKind::{Buckling, Static};
-    assert_eq!(ids, [(1, 1, Static), (2, 0, Buckling), (2, 1, Buckling)]);
+    assert_eq!(
+        ids,
+        [
+            (1, 1, Static),
+            (2, 0, Buckling),
+            (2, 1, Buckling),
+            (2, 2, Buckling)
+        ]
+    );
 }
 
 #[test]
@@ -6809,6 +6823,7 @@ fn sensitivity_cantilever(settings: SensitivityStep) -> (FeMesh, FeModel) {
 
 /// Runs CalculiX and reads the `.frd` and `.dat` files.
 fn run_ccx_frd_dat(name: &str, text: &str) -> Option<(FrdImport, crate::dat::DatImport)> {
+    dump_fixture(name, text);
     let dir = ccx_dir(name)?;
     let frd = run_ccx_in(&dir, name, text);
     let dat = crate::dat::read_dat(&dir.join(format!("{name}.dat"))).unwrap();
@@ -6897,6 +6912,31 @@ fn calculix_computes_the_sensitivities_of_mass_and_strain_energy() {
         .component("DFDN")
         .unwrap();
     assert!(sen.values.iter().any(|v| *v != 0.0));
+}
+
+/// With a linear filter, CalculiX smooths the sensitivities (DFDNFIL) and keeps the raw
+/// ones (DFDN); the responses and their gradient lengths do not change.
+#[test]
+fn calculix_filters_the_sensitivities() {
+    let (mesh, model) = sensitivity_cantilever(SensitivityStep {
+        filter_radius: Some(15.0),
+        ..SensitivityStep::default()
+    });
+    let Some((frd, dat)) = run_ccx_frd_dat(
+        "sensitivitaet-filter",
+        &write_inp(&mesh, &model, "").unwrap(),
+    ) else {
+        return;
+    };
+    let set = dat.sets.iter().find(|s| s.name == "STEP_2").unwrap();
+    assert!(set.field("GRADIENT_LENGTH").is_some());
+    let sensitivity = (frd.increments.iter())
+        .find(|i| i.step == 2 && i.field("SENENER").is_some())
+        .unwrap();
+    let field = sensitivity.field("SENENER").unwrap();
+    let filtered = &field.component("DFDNFIL").unwrap().values;
+    let length: f32 = filtered.iter().map(|v| v * v).sum::<f32>().sqrt();
+    assert!((length - 1.0).abs() < 1e-3, "{length}");
 }
 
 /// After a frequency step, the sensitivities of the eigenfrequencies come as one increment

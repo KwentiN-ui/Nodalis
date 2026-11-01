@@ -78,7 +78,7 @@ gebaut und getestet werden kann; `plxs-verify` nutzt `plx-io` nur zum Lesen von 
 
 Was die IR heute schon abdeckt, das aber erst später gerechnet wird: alle Elementtypen des
 Inventars (`ElementType`), alle Prozeduren (`Procedure`), Kontakt, zyklische Symmetrie,
-Submodelle, `*SENSITIVITY` (nur geparst; rechnet weiter mit ccx), `*RESTART`, `*CONTROLS`.
+Submodelle, `*RESTART`, `*CONTROLS`. `*SENSITIVITY` rechnet plxs seit T17 (Abschnitt „Stand nach T17“).
 
 ## Session-API (`plxs-session`, M1 T3)
 
@@ -220,7 +220,7 @@ pub trait Procedure {
 // ProcedureContext: Modell, DofMap, Assembler, Solver, State, Results, Thread-Pool.
 // Static (linear), Nonlinear (Newton mit automatischer Inkrementierung nach *CONTROLS-Defaults),
 // Frequency, Buckle, Dynamic (HHT-α / explizit), HeatTransfer, Coupled/Uncoupled,
-// ModalDynamics, SteadyStateDynamics, ComplexFrequency, Visco.
+// ModalDynamics, SteadyStateDynamics, ComplexFrequency, Visco, Sensitivity (T17).
 ```
 
 ### `plxs-output` (M1 T3)
@@ -332,6 +332,75 @@ Verschiebungen stimmen auf 2e-6 überein. Die Faktorisierung dominiert: AMD erze
 (Minimum-Fill für 3D-Gitter typisch 3–5× weniger) ist der Hebel für M4, nicht die
 Assemblierung. Die Messlatte des Konzepts (ccx/PaStiX 8,7 s) stammt von anderer Hardware.
 
+## Stand nach M2 T7 (Eigenwerte und Buckling)
+
+Was T7 gebaut hat (`*FREQUENCY`, `*BUCKLE`, beide auch mit `PERTURBATION`):
+
+- `plxs-linalg`: `ShiftInvertLanczos` (`eigen.rs`) implementiert `EigenSolver` auf faer:
+  Shift-Invert-Lanczos mit voller Reorthogonalisierung (DGKS), dickem Restart und **Locking**
+  konvergierter Vektoren mit frischem Startvektor (so werden exakt entartete Eigenwerte wie die
+  beiden Biegemoden eines quadratischen Stabs alle gefunden); Sturm-Check über die Trägheit
+  der LDLᵀ-Faktorisierung (`LdltSolver::inertia`, negative Pivots). `LdltSolver` kennt jetzt
+  eine dynamische Regularisierung winziger Pivots (`set_regularization`), weil faer ohne
+  Bunch-Kaufman-Pivotisierung bei indefinitem `K − σM` an exakten Nullpivots scheitert;
+  Shifts dicht an einem Eigenwert bleiben zu vermeiden. `SparseMatrix::add_scaled` und
+  `linear_combination` für `K − σM` auf gleichem Muster.
+- `plxs-elements`: `SolidElement::mass` (konsistent, mit der **Integrationsregel des
+  Elements selbst**: C3D20R mit 2×2×2, nicht voll – nur so stimmen die ccx-Eigenwerte auf
+  7 Stellen), `geometric_stiffness` (Anfangsspannungsmatrix aus IP-Spannungen),
+  `initial_displacement_stiffness` und `linearized_strains` (total-lagrangesch, Bathe 6.3.4,
+  `B_L = B_0 + B_1(u)`); neue Regeln `tet14`, `wedge18` für Massenmatrizen von C3D10/C3D15.
+- `plxs-assembly`: `assemble_mass` (Fehler ohne `*DENSITY`), `assemble_geometric_stiffness`,
+  `assemble_tangent_stiffness` (`K + K_u(u) + K_σ(σ)`).
+- `plxs-procedures`: `eigen::FrequencyProcedure` (Shift 0 bzw. `(2π·untere Grenze)²`,
+  negative Ersatzshifts bei singulärem `K`, obere Grenze als Filter, Massennormierung,
+  Partizipationsfaktoren `Γ = φᵀ M r` für sechs Starrkörperbewegungen um den globalen
+  Ursprung auf den **freien** DOFs, effektive Modalmasse `Γ²`, STORAGE → `state.stored_modes`)
+  und `eigen::BuckleProcedure` (statische Referenzlösung als Inkrement 0, `K_σ` der
+  Beullast, `(K + λK_σ)φ = 0` über den Operator `K⁻¹K_σ` im `K`-Skalarprodukt, kleinstes
+  positives λ). `fields::build_fields` und `history::write_table` sind herausgelöst, damit
+  Prozeduren ihre Felder und `.dat`-Tabellen selbst zusammensetzen.
+- `plxs-output`: Eigenwerttabellen der `.dat` (`EigenTable`, Überschriften und Spalten wie
+  ccx, TOTAL-Zeile) als `HistoryBlock`s mit leerem `set`; `.frd` mit Lastfallnummern,
+  Modalkopfzeilen (`1PGM`/`1PGK`/`1PHID`/`1PSUBC`/`1PMODE`) und Analysetext `MODAL`.
+- `plxs-cli` schreibt `<job>.eig` (postcard von `StoredModes`), wenn ein Step STORAGE=YES
+  verlangt; `plxs-verify` vergleicht Moden als Unterräume (Vorzeichen, entartete Paare,
+  Partizipationsfaktoren invariant, siehe `compare.rs`).
+- Abnahmetest `solver/plxs-cli/tests/eigen_corpus.rs`: alle `eigen/*`-Fixtures grün.
+
+### Was von CalculiX nur durch Beobachtung bekannt ist (T7)
+
+Aus ccx-2.21-Läufen (Fixtures und Orakel-Decks mit variierter Vorlast und rechteckigem
+Querschnitt) abgelesen, kein Quelltext:
+
+- **Lastfallnummern** der `.frd`: 100 + laufende Nummer des geschriebenen Inkrements über
+  alle Steps (jeder Frequenzmode, die Beul-Referenzlösung und jeder Beulmode zählen wie ein
+  statisches Inkrement); die fünfte Spalte der `100CL`-Zeile trägt dieselbe laufende Nummer.
+  Wertspalte mit 10 signifikanten Stellen.
+- **Massenmatrix** mit der Integrationsregel des Elements (reduziert für C3D20R).
+- **Beulmoden** sind auf Einheits-Formänderungsenergie normiert: `φᵀ K φ = 1` mit der
+  Referenzsteifigkeit (Euklid-Norm der ccx-Moden exakt `1/√(φᵀKφ)` der unnormierten).
+- **Perturbation**: `K_ref = K + K_u(u_pre) + K_σ(σ_pre)` (beide Terme nötig: die
+  Eigenfrequenzen von `eigenfrequenz` stimmen nur so auf 7 Stellen). Beim Beulen mit Vorlast
+  wird die Beullast statisch mit `K_ref` gelöst (Verschiebungen auf 6 Stellen gleich), die
+  Spannung der Beullast ist das **linearisierte Inkrement** `σ_b = D B_L(u_pre) u_b`
+  (mit `B_0 u_b` liegt der Beulwert bei Vorlast 0,8 % daneben, so auf 7 Stellen: fünf
+  Orakel-Fälle mit axialer, seitlicher und Zug-Vorlast). Die Spannungen und Dehnungen der
+  Referenzlösung und der Moden eines perturbierten `*FREQUENCY` sind ebenfalls
+  `D B_L(u_pre) φ`; die **Beulformen** dagegen bekommen die linearen Dehnungen `B_0 φ`
+  (mit `B_L` wären Schubspannungen um ein Viertel falsch). Ein Restterm bis 1e-3 an den
+  Lastknoten des freien Endes ist nicht identifiziert (Fixture `vorspannung-beulen` deshalb
+  Klasse B; Eigenwerte, Referenzlösung und Modenformen stimmen auf 1e-5).
+- **FORC** von Referenzlösung und Moden ist die innere Kraft `∫ B_0ᵀ σ dV` (bei Vorlast nicht
+  der Lastvektor: die Anfangsspannungsmatrix der Vorlast fehlt darin, ccx-Werte an freien
+  Knoten entsprechend ungleich null).
+- **Lanczos-Genauigkeit**: der zweite Parameter von `*BUCKLE` (Writer: 1e-4) stoppt ccx bei
+  dicht liegenden Beulwerten bis 2e-5 vom Eigenwert entfernt; die Eigenvektoren von ccx sind
+  auf etwa 1e-5 konvergiert (Modenformen bekommen in `plxs-verify` zehnfache Toleranz). Der
+  Writer-Test `vorspannung-beulen` verlangt deshalb Genauigkeit 1e-10 und beide Moden des
+  fast entarteten Paars.
+- **Partizipationsfaktoren** werden mit den Starrkörperbewegungen um den globalen Ursprung auf
+  den freien DOFs gebildet (feste DOFs tragen nicht bei).
 ## Stand nach M2 T4 (2D-Elemente, restliche Volumenelemente)
 
 - **2D-Elemente** (`plxs-elements/src/plane.rs`): CPS/CPE/CAX 3, 4, 4R, 6, 8, 8R werden wie
@@ -658,6 +727,65 @@ Abnahme: `solver/plxs-cli/tests/constraints_corpus.rs` (alle `constraints/*` plu
 `held_dependent_dofs_are_repivoted` (Equations mit gehaltenem ersten Term ergeben dasselbe
 wie die vom Writer umgestellten). Gegencheck 30³-C3D8-Block mit Rigid Body und Moment:
 plxs 6,0 s, ccx 2.21 12,4 s (4 Threads), Verschiebungen auf 6,6e-6 gleich.
+
+## Stand nach T17 (Sensitivity)
+
+`plxs-procedures::sensitivity` rechnet `*SENSITIVITY` mit `*DESIGN VARIABLES, TYPE=COORDINATE`
+und den Design Responses, die PrePoLix schreibt: `MASS`, `STRAINENERGY` (beide mit Element-Set)
+und `EIGENFREQUENCY` (nach `*FREQUENCY, STORAGE=YES`, die Moden kommen aus
+`State::stored_modes`), dazu `*FILTER, TYPE=LINEAR`. Andere Responses (`STRESS`, `DISPLACEMENT`
+usw.), andere Filtertypen und `NLGEOM` melden `Unsupported`. `IncrementKind::Sensitivity` (IR,
+angehängt) kennzeichnet die Datensätze; die `.frd` schreibt sie als Analyseart 3, die `.dat`
+die Tabelle `D E S I G N   R E S P O N S E   I N F O R M A T I O N`
+(`plxs_output::dat::DESIGN_RESPONSE_TABLE`, Set = Response-Namen mit Komma).
+
+Ableitungen: je Designknoten zentrale Differenzen der Elementgrößen der umliegenden Elemente
+(Schritt 1e-6 der Elementgröße), projiziert auf die Knotennormale. `MASS`: ρ dV.
+`STRAINENERGY`: ½ uᵀ dK_S u + λᵀ (dF − dK u) mit K λ = K_S u (λ = u ohne Teilmenge), dF aus
+Druck auf bewegten Flächen und Volumenlasten (GRAV, CENTRIF). `EIGENFREQUENCY`:
+φᵀ (dK − λ dM) φ je gespeicherter Mode.
+
+### Was von CalculiX durch Beobachtung bekannt ist (T17)
+
+Abgeleitet aus Orakel-Läufen mit ccx 2.21 (Kragbalken C3D8, C3D20, C3D10, gekrümmte Platte mit
+ungleichmäßigem Netz, Teilmengen, Teil-SPCs, Druck, Schwerkraft, Filter mit lokalisierter
+Sensitivität):
+
+- **Designknoten**: Knoten des Sets auf Außenflächen (Fläche keines zweiten Elements). Normale =
+  normierte Summe der **Einheits**normalen aller angrenzenden Außenflächen (nicht flächen­
+  gewichtet; Eckknoten und Mittenknoten gleich); Komponenten von DOFs mit SPC im Step werden
+  vor dem Normieren gestrichen, ganz gehaltene Knoten haben die Normale 0 und keine
+  Sensitivität.
+- **DFDN** = Ableitung / Knotenfläche, Knotenfläche = Σ ∫ N_a dA über die Außenflächen (bei
+  C3D8 ein Viertel jeder angrenzenden Fläche). `SENMASS` ist damit auf ebenen Flächen genau ρ.
+  Eckknoten quadratischer Elemente (deren ∫ N_a dA verschwindet oder negativ ist) bekommen den
+  Mittelwert der Mittenknoten auf den angrenzenden Außenkanten (C3D20 und C3D10 auf 1e-6).
+- **LENGTH GRADIENT** in der `.dat` = 2-Norm von DFDN über alle Knoten.
+- **DFDNFIL** = gefiltertes Feld, auf Länge 1 normiert; ohne Filter DFDN normiert. Linearer
+  Filter: jeder Designknoten j verteilt seinen Wert auf die Designknoten i im Radius r mit
+  Gewicht (1 − d/r) / Σ_i (1 − d/r), also **spaltenweise** normiert (auf 1e-7 getroffen;
+  zeilenweise Normierung liegt 2 % daneben).
+- **Datensätze**: NORM (Wert 0), dann je Response ein Satz `SENMASS`/`SENENER`, bei
+  `EIGENFREQUENCY` je Mode ein Satz `SENFREQ` mit der Frequenz als Wert; alle mit Inkrement 1.
+  Die `.dat` druckt je Mode eine eigene Tabelle, die übrigen Responses gemeinsam.
+- **Eigenfrequenzen**: ccx differenziert jede Mode der gespeicherten Basis einzeln. Bei
+  doppelten Eigenwerten (quadratischer Querschnitt) hängen die Einzelwerte und ihre Längen von
+  der Basis ab, die der Eigenlöser wählt; nur die Summe über das Cluster (Spur) ist invariant.
+  `plxs-verify` vergleicht dort die Summe von DFDN und lässt DFDNFIL und die Länge weg. Ohne
+  Entartung (Rechteckquerschnitt) stimmt alles auf 1e-4 (ccx' Finite Differenzen und
+  Eigenvektoren auf 1e-5), daher Toleranzklasse B für den Bereich.
+
+### Bekannte Abweichung: STRAINENERGY
+
+ccx' Strain-Energy-Sensitivität ist nicht die Ableitung seiner eigenen Response. In allen acht
+Orakel-Modellen gilt auf 1e-5: ccx = exakt − Q mit Q = Σ_ip w_ip dV_ip/ds (Formänderungs­
+energiedichte mal Ableitung des Integrationspunktvolumens), d. h. im expliziten Teil
+½ uᵀ dK u fehlt die Volumenänderung. Finite Differenzen mit ccx selbst (Knoten verschieben,
+neu rechnen) bestätigen den exakten Wert, nicht ccx' Ausgabe. Mit Element-Set verwendet ccx
+außerdem λ = u statt der Adjungierten K λ = K_S u (PrePoLix schreibt immer alle Elemente).
+plxs rechnet die exakte Ableitung; die Fixtures führen `SENENER` und
+`GRADIENT_LENGTH STRAINENERGY` als `deviations` (die `.dat`-Vergleiche beachten sie seit T17),
+`plxs-cli/tests/sensitivity_corpus.rs` prüft die Ableitung gegen Finite Differenzen.
 
 ## Was M1 zu liefern hat (Abnahme)
 

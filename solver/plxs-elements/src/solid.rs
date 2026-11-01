@@ -1268,3 +1268,303 @@ mod tests {
         assert!(e8 > 1.5 * exact, "C3D8 {e8} vs {exact}");
     }
 }
+
+// ---------------------------------------------------------------------------------------
+// Mass and geometric (initial stress, initial displacement) stiffness, M2 T7. Formulas from
+// Zienkiewicz & Taylor (consistent mass, chapter 16 of volume 1 / chapter 2 of volume 2)
+// and Bathe, "Finite Element Procedures", section 6.3 (total Lagrangian formulation:
+// linear strain-displacement matrix B_L = B_0 + B_1(u) and the initial stress matrix
+// ∫ Gᵀ S G dV). No CalculiX code was consulted.
+// ---------------------------------------------------------------------------------------
+
+impl SolidElement {
+    /// The integration rule of the consistent mass matrix: the element's own rule, as
+    /// CalculiX does it (the eigenfrequencies of the C3D20R fixtures agree to seven digits
+    /// with the 2×2×2 rule and differ by up to 4e-5 with the full 3×3×3 rule; inferred
+    /// from its output, no source consulted). One-point rules (C3D8R, C3D4) would leave
+    /// the mass matrix rank deficient and use the full rule of their family instead.
+    pub fn mass_rule(&self) -> IntegrationRule {
+        if self.rule.len() > 1 {
+            return self.rule.clone();
+        }
+        match self.family {
+            Family::Hex8 | Family::Hex20 => IntegrationRule::hex(2),
+            Family::Tet4 => IntegrationRule::tet4(),
+            Family::Tet10 => IntegrationRule::tet14(),
+            Family::Wedge6 => IntegrationRule::wedge2(),
+            Family::Wedge15 => IntegrationRule::wedge18(),
+        }
+    }
+
+    /// Consistent mass matrix (row-major `3n × 3n`) for the density `rho`:
+    /// `M[(a,i),(b,j)] = δ_ij ∫ ρ N_a N_b dV`.
+    pub fn mass(&self, coords: &[[f64; 3]], rho: f64, out: &mut Vec<f64>) {
+        let ndof = self.dof_count();
+        let nodes = self.node_count();
+        out.clear();
+        out.resize(ndof * ndof, 0.0);
+        let rule = self.mass_rule();
+        for (&p, &w) in rule.points.iter().zip(&rule.weights) {
+            let point = self.point(p, coords);
+            let f = rho * point.det * w;
+            for a in 0..nodes {
+                for b in a..nodes {
+                    let v = f * point.n[a] * point.n[b];
+                    for k in 0..3 {
+                        out[(3 * a + k) * ndof + 3 * b + k] += v;
+                        if a != b {
+                            out[(3 * b + k) * ndof + 3 * a + k] += v;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Initial stress (geometric) stiffness `∫ Gᵀ S G dV` (row-major `3n × 3n`) for the
+    /// stresses `[xx, yy, zz, xy, yz, zx]` at the element's integration points:
+    /// `K_σ[(a,i),(b,j)] = δ_ij ∇N_aᵀ S ∇N_b`.
+    pub fn geometric_stiffness(
+        &self,
+        coords: &[[f64; 3]],
+        stresses: &[[f64; 6]],
+        out: &mut Vec<f64>,
+    ) {
+        let ndof = self.dof_count();
+        let nodes = self.node_count();
+        out.clear();
+        out.resize(ndof * ndof, 0.0);
+        for ((&p, &w), s) in self
+            .rule
+            .points
+            .iter()
+            .zip(&self.rule.weights)
+            .zip(stresses)
+        {
+            let point = self.point(p, coords);
+            let f = point.det * w;
+            let sm = [[s[0], s[3], s[5]], [s[3], s[1], s[4]], [s[5], s[4], s[2]]];
+            // S ∇N_b for every node once.
+            let sg: Vec<[f64; 3]> = point
+                .dndx
+                .iter()
+                .map(|g| {
+                    let mut r = [0.0; 3];
+                    for (i, ri) in r.iter_mut().enumerate() {
+                        *ri = sm[i][0] * g[0] + sm[i][1] * g[1] + sm[i][2] * g[2];
+                    }
+                    r
+                })
+                .collect();
+            for a in 0..nodes {
+                let ga = point.dndx[a];
+                for b in a..nodes {
+                    let v = f * (ga[0] * sg[b][0] + ga[1] * sg[b][1] + ga[2] * sg[b][2]);
+                    for k in 0..3 {
+                        out[(3 * a + k) * ndof + 3 * b + k] += v;
+                        if a != b {
+                            out[(3 * b + k) * ndof + 3 * a + k] += v;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Engineering strain increment of the total Lagrangian formulation for a displacement
+    /// increment `du` about the displaced state `u`: `B_L(u) du` with `B_L = B_0 + B_1(u)`
+    /// (Bathe, section 6.3.4). The incompatible modes of C3D8I follow `du` as in
+    /// [`Self::strains`]. Without displacement this is [`Self::strains`].
+    pub fn linearized_strains(
+        &self,
+        coords: &[[f64; 3]],
+        d: &[[f64; 6]; 6],
+        u: &[f64],
+        du: &[f64],
+    ) -> Vec<[f64; 6]> {
+        let ndof = self.dof_count();
+        let nodes = self.node_count();
+        let mut bl = vec![0.0; 6 * ndof];
+        let incompatible = (self.formulation == Formulation::Incompatible).then(|| {
+            let (x, inv0, det0) = self.incompatible_coupling(coords, d);
+            let mut alpha = [0.0; 9];
+            for (m, a) in alpha.iter_mut().enumerate() {
+                *a = -(0..ndof).map(|j| x[m * ndof + j] * du[j]).sum::<f64>();
+            }
+            (alpha, inv0, det0)
+        });
+        let mut g = vec![0.0; 6 * 9];
+        self.rule
+            .points
+            .iter()
+            .map(|&p| {
+                let point = self.point(p, coords);
+                Self::fill_b(&point.dndx, &mut bl);
+                Self::add_b1(&point.dndx, nodes, u, &mut bl);
+                let mut e = [0.0; 6];
+                for (r, er) in e.iter_mut().enumerate() {
+                    *er = (0..ndof).map(|c| bl[r * ndof + c] * du[c]).sum();
+                }
+                if let Some((alpha, inv0, det0)) = &incompatible {
+                    Self::fill_g(p, inv0, *det0, point.det, &mut g);
+                    for (r, er) in e.iter_mut().enumerate() {
+                        *er += (0..9).map(|c| g[r * 9 + c] * alpha[c]).sum::<f64>();
+                    }
+                }
+                e
+            })
+            .collect()
+    }
+
+    /// Adds the initial displacement part `B_1(u)` of the total Lagrangian strain matrix
+    /// to `b` (row-major `6 × 3n`, which holds `B_0` on entry).
+    fn add_b1(dndx: &[[f64; 3]], nodes: usize, u: &[f64], b: &mut [f64]) {
+        let ndof = 3 * nodes;
+        // Displacement gradient l[i][j] = ∂u_i/∂x_j.
+        let mut l = [[0.0; 3]; 3];
+        for (a, g) in dndx.iter().enumerate() {
+            for (i, row) in l.iter_mut().enumerate() {
+                for (lij, gj) in row.iter_mut().zip(g) {
+                    *lij += u[3 * a + i] * gj;
+                }
+            }
+        }
+        for (a, g) in dndx.iter().enumerate() {
+            for (i, li) in l.iter().enumerate() {
+                let c = 3 * a + i;
+                b[c] += li[0] * g[0];
+                b[ndof + c] += li[1] * g[1];
+                b[2 * ndof + c] += li[2] * g[2];
+                b[3 * ndof + c] += li[0] * g[1] + li[1] * g[0];
+                b[4 * ndof + c] += li[1] * g[2] + li[2] * g[1];
+                b[5 * ndof + c] += li[0] * g[2] + li[2] * g[0];
+            }
+        }
+    }
+
+    /// The initial displacement stiffness of the total Lagrangian formulation for the
+    /// nodal displacements `u`: `∫ (B_Lᵀ D B_L − B_0ᵀ D B_0) dV` with `B_L = B_0 + B_1(u)`
+    /// (Bathe, section 6.3.4), added to `out` (row-major `3n × 3n`). Together with
+    /// [`Self::stiffness`] and [`Self::geometric_stiffness`] this is the tangent stiffness
+    /// at a deformed state, what a perturbation step needs.
+    pub fn initial_displacement_stiffness(
+        &self,
+        coords: &[[f64; 3]],
+        d: &[[f64; 6]; 6],
+        u: &[f64],
+        out: &mut [f64],
+    ) {
+        let ndof = self.dof_count();
+        let nodes = self.node_count();
+        let mut b0 = vec![0.0; 6 * ndof];
+        let mut bl = vec![0.0; 6 * ndof];
+        for (&p, &w) in self.rule.points.iter().zip(&self.rule.weights) {
+            let point = self.point(p, coords);
+            Self::fill_b(&point.dndx, &mut b0);
+            bl.copy_from_slice(&b0);
+            Self::add_b1(&point.dndx, nodes, u, &mut bl);
+            let f = point.det * w;
+            accumulate_btdb(&bl, d, ndof, f, out);
+            accumulate_btdb(&b0, d, ndof, -f, out);
+        }
+    }
+}
+
+#[cfg(test)]
+mod mass_tests {
+    use super::*;
+
+    fn unit_cube() -> Vec<[f64; 3]> {
+        Family::Hex8
+            .node_coordinates()
+            .iter()
+            .map(|p| [0.5 * (p[0] + 1.0), 0.5 * (p[1] + 1.0), 0.5 * (p[2] + 1.0)])
+            .collect()
+    }
+
+    #[test]
+    fn mass_matrix_sums_to_the_element_mass() {
+        for kind in [
+            ElementType::C3D8,
+            ElementType::C3D8R,
+            ElementType::C3D20R,
+            ElementType::C3D20,
+        ] {
+            let element = solid(kind).unwrap();
+            let coords: Vec<[f64; 3]> = element
+                .family
+                .node_coordinates()
+                .iter()
+                .map(|p| [0.5 * (p[0] + 1.0), 0.5 * (p[1] + 1.0), 0.5 * (p[2] + 1.0)])
+                .collect();
+            let mut m = Vec::new();
+            element.mass(&coords, 7.85e-9, &mut m);
+            let n = element.dof_count();
+            // Rigid translation in x: eᵀ M e = ρ V.
+            let mut total = 0.0;
+            for a in 0..n / 3 {
+                for b in 0..n / 3 {
+                    total += m[(3 * a) * n + 3 * b];
+                }
+            }
+            assert!((total - 7.85e-9).abs() < 1e-20, "{kind}: {total}");
+            for i in 0..n {
+                for j in 0..n {
+                    assert!((m[i * n + j] - m[j * n + i]).abs() < 1e-24);
+                }
+            }
+        }
+        for (kind, volume) in [
+            (ElementType::C3D4, 1.0 / 6.0),
+            (ElementType::C3D10, 1.0 / 6.0),
+            (ElementType::C3D6, 1.0),
+            (ElementType::C3D15, 1.0),
+        ] {
+            let element = solid(kind).unwrap();
+            let coords = element.family.node_coordinates().to_vec();
+            let mut m = Vec::new();
+            element.mass(&coords, 2.0, &mut m);
+            let n = element.dof_count();
+            let mut total = 0.0;
+            for a in 0..n / 3 {
+                for b in 0..n / 3 {
+                    total += m[(3 * a + 1) * n + 3 * b + 1];
+                }
+            }
+            assert!((total - 2.0 * volume).abs() < 1e-12, "{kind}: {total}");
+        }
+    }
+
+    #[test]
+    fn geometric_stiffness_of_a_uniaxially_stressed_cube() {
+        // A unit cube under σ_xx = s: K_σ = s ∫ ∂N_a/∂x ∂N_b/∂x dV ⊗ I. The rigid-body
+        // translations are in its kernel; a uniform stretch in x has the energy s/2·(Δl/l)².
+        let element = solid(ElementType::C3D8).unwrap();
+        let coords = unit_cube();
+        let s = 100.0;
+        let stresses = vec![[s, 0.0, 0.0, 0.0, 0.0, 0.0]; 8];
+        let mut k = Vec::new();
+        element.geometric_stiffness(&coords, &stresses, &mut k);
+        let n = 24;
+        let translation: Vec<f64> = (0..n).map(|i| if i % 3 == 1 { 1.0 } else { 0.0 }).collect();
+        let stretch: Vec<f64> = (0..8).flat_map(|a| [coords[a][0], 0.0, 0.0]).collect();
+        let quad = |v: &[f64]| -> f64 {
+            (0..n)
+                .map(|i| v[i] * (0..n).map(|j| k[i * n + j] * v[j]).sum::<f64>())
+                .sum()
+        };
+        assert!(quad(&translation).abs() < 1e-12);
+        assert!((quad(&stretch) - s).abs() < 1e-10, "{}", quad(&stretch));
+    }
+
+    #[test]
+    fn initial_displacement_stiffness_vanishes_without_displacement() {
+        let element = solid(ElementType::C3D20R).unwrap();
+        let coords: Vec<[f64; 3]> = element.family.node_coordinates().to_vec();
+        let d = [[1.0; 6]; 6];
+        let u = vec![0.0; 60];
+        let mut out = vec![0.0; 3600];
+        element.initial_displacement_stiffness(&coords, &d, &u, &mut out);
+        assert!(out.iter().all(|v| v.abs() < 1e-15));
+    }
+}

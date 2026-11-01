@@ -8,6 +8,24 @@ use plxs_core::{Model, Results};
 
 use plxs_assembly::ElementTable;
 
+/// Appends one of the tables an eigenvalue step prints (see `plxs_output::EigenTable`):
+/// `quantity` is the table's name, rows are keyed by mode (0 for a total row).
+pub fn write_table(
+    results: &mut Results,
+    step_number: u32,
+    quantity: &str,
+    rows: Vec<(u32, Vec<f64>)>,
+) {
+    results.history.push(HistoryBlock {
+        step: step_number,
+        increment: 0,
+        quantity: quantity.to_string(),
+        set: String::new(),
+        time: 0.0,
+        rows,
+    });
+}
+
 /// Appends the history blocks of an increment.
 #[allow(clippy::too_many_arguments)]
 pub fn write_history(
