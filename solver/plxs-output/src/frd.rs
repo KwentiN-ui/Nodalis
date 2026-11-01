@@ -223,7 +223,7 @@ fn write_block(
         IncrementKind::Dynamic => 1,
         IncrementKind::Frequency => 2,
         IncrementKind::Buckling => 4,
-        IncrementKind::ComplexFrequency => 3,
+        IncrementKind::ComplexFrequency | IncrementKind::Sensitivity => 3,
     };
     writeln!(
         out,
