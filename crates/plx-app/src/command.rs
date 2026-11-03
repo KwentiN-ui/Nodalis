@@ -222,6 +222,8 @@ pub enum Cmd {
     ScreenshotClipboard,
     ScreenshotFile,
     ExportInp,
+    /// Shows the checklist in the properties panel again.
+    Checklist,
     // Everywhere.
     Settings,
     UserGuide,
@@ -1644,6 +1646,16 @@ fn build() -> Vec<Command> {
         Node(NodeIcon::Link),
         "",
         crate::settings::SHOW_LINKED_TIP,
+    ));
+    add(command(
+        C::Checklist,
+        "Check-\nlist",
+        v,
+        t,
+        "Show",
+        Shape(Glyph::Check),
+        "",
+        "Shows the checklist in the properties panel while nothing is edited.",
     ));
     add(command(
         C::SectionView,

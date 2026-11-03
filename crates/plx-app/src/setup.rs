@@ -2189,6 +2189,14 @@ impl Editor {
         })
     }
 
+    /// The name of the item, as the title shows it.
+    pub fn name(&self) -> String {
+        let title = self.title();
+        title
+            .split_once(": ")
+            .map_or(title.clone(), |(_, name)| name.to_owned())
+    }
+
     /// The name of the step this dialog creates, if it creates one.
     pub fn new_step(&self) -> Option<String> {
         match &self.draft {

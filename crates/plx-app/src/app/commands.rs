@@ -73,12 +73,27 @@ impl AnalysisWindow {
     }
 
     /// The pill was clicked: the solver's problems, else the monitor.
+    /// The checklist of the workspace shown, for the properties panel.
+    pub fn checklist(&self) -> Vec<crate::checklist::Step> {
+        let w = &self.workbench;
+        match w.tree_view {
+            TreeView::Geometry => crate::checklist::geometry(w.geometry.as_ref(), w.model.as_ref()),
+            TreeView::FeModel => crate::checklist::fe_model(w.model.as_ref()),
+            TreeView::Results => crate::checklist::results(
+                !w.results.is_empty()
+                    || w.model.as_ref().is_some_and(|m| m.bound_results.is_some()),
+            ),
+        }
+    }
+
     pub fn pill_clicked(&mut self) {
+        // With problems the Problems tab, else the monitor of the solver.
         let workbench = &mut self.workbench;
         if workbench.solver_findings.is_empty() {
             workbench.analysis_tab = true;
+            workbench.problems_tab = false;
         } else {
-            workbench.findings_window = Some(workbench.solver_findings.clone());
+            workbench.problems_tab = true;
         }
     }
 
@@ -219,6 +234,7 @@ impl AnalysisWindow {
             | Cmd::ShellThickness
             | Cmd::BeamProfiles
             | Cmd::ShowLinked
+            | Cmd::Checklist
             | Cmd::Screenshot
             | Cmd::ScreenshotClipboard
             | Cmd::ScreenshotFile
@@ -242,6 +258,7 @@ impl AnalysisWindow {
             Cmd::ShellThickness => graphics.shell_thickness,
             Cmd::BeamProfiles => graphics.beam_profiles,
             Cmd::ShowLinked => graphics.show_linked,
+            Cmd::Checklist => w.checklist_shown,
             Cmd::SectionView => w.section.is_some() || w.section_dialog.is_some(),
             Cmd::ExplodedView => w.exploded_applied() || w.exploded_dialog.is_some(),
             Cmd::Query => w.query.is_some(),
@@ -410,6 +427,7 @@ impl AnalysisWindow {
                 let graphics = &mut w.settings.graphics;
                 graphics.beam_profiles = !graphics.beam_profiles;
             }
+            Cmd::Checklist => w.checklist_shown = !w.checklist_shown,
             Cmd::ShowLinked => {
                 let graphics = &mut w.settings.graphics;
                 graphics.show_linked = !graphics.show_linked;

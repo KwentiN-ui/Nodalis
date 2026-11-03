@@ -148,7 +148,8 @@ file and keeps its results.
 
 Nodalis checks the model continuously while you work. Items with a problem get a warning sign in
 the tree; items with an error and their containers are shown in red. Click the warning sign to see
-what is wrong and how to fix it.
+what is wrong and how to fix it. The #ui("Problems") tab below the 3D view lists all of them
+(@problems).
 
 #screenshot("model-check.png", [Model check: parts without a section])
 

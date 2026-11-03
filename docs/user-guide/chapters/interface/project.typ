@@ -151,7 +151,8 @@ the state of another analysis (@data-links).
   [Rename ... (#key("F2"))], [Gives the analysis a new name. Names are unique within a project.],
   [Duplicate (#key("Shift+D"))], [Adds a copy of the analysis, named "Copy of ...". A copy
     of a block in a frame goes into the same frame.],
-  [Delete ... (#key("X"))], [Removes the analysis from the project after asking. An open window closes.
+  [Delete (#key("X"))], [Removes the analysis from the project at once; the note at the
+    bottom of the schematic offers #ui("Undo"). An open window closes.
     Links to and from it are removed; analyses that took items from it keep their copies.],
 )
 
@@ -210,7 +211,8 @@ block with #key("Shift") held; with #key("Shift") a rectangle adds to the select
 
 #fields(
   [#key("Shift+A")], [Searches the blocks to add at the pointer (@block-search).],
-  [#key("X"), #key("Delete")], [Deletes the blocks after asking; #key("Enter") agrees.],
+  [#key("X"), #key("Delete")], [Deletes the blocks at once; #ui("Undo") in the note at the
+    bottom, or #key("Ctrl+Z"), brings them back.],
   [#key("Shift+D")], [Duplicates the blocks.],
   [#key("H")], [Shows the blocks compact, or in full if they all are compact.],
   [#key("Ctrl+J")], [Puts the blocks in a new frame.],

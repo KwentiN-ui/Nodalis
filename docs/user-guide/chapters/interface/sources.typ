@@ -7,7 +7,7 @@ analyses through links. They have no steps and are not solved, and #ui("Update P
 passes them by; the mesh export block at the end of this section takes data instead of giving
 it. Add one from #menu("Project") or by double-clicking or right-clicking the background of the schematic;
 its header has its own tint, so that it stands apart from the analyses. Its context menu has
-#ui("Edit ..."), #ui("Rename ..."), #ui("Duplicate") and #ui("Delete ..."); a double-click
+#ui("Edit ..."), #ui("Rename ..."), #ui("Duplicate") and #ui("Delete"); a double-click
 opens its editor in the project window. Deleting a source block removes its links; the
 analyses keep copies of what they took.
 

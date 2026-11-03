@@ -105,6 +105,38 @@ its symbols.
 - Without a step the combo box says #ui("No step"), and only #ui("Step") can be used.
 - The #ui("Step") row at the top of a boundary condition or load moves it to another step.
 
+=== Checklist <checklist>
+
+While nothing is edited, the properties panel shows the *checklist* of the workspace: what the
+model still needs, ticked off once it is there. Geometry asks for parts and a mesh, FE Model for
+a material, a section, a step, supports and loads, Results for a solution. A button next to an
+open step runs the command that does it. When the model check finds problems, a link below the
+list shows them in the #ui("Problems") tab.
+
+#screenshot("checklist.png", [The checklist of the FE Model workspace with a material defined])
+
+The cross in the head of the panel hides the checklist, and the 3D view takes the room;
+#ui("Checklist") on the #ui("View") tab shows it again.
+
+=== Problems <problems>
+
+The #ui("Problems") tab below the 3D view lists what the model check (@model-check) and the
+last check by the solver found, errors first; its title counts them. The tooltip of an entry
+says why it is a problem and how to fix it. A click selects the item in the tree and the 3D
+view, a double-click opens it in the properties panel. A click on the state in the app bar
+shows the tab when there are problems.
+
+#screenshot("problems.png", [The #ui("Problems") tab with the tooltip of an error])
+
+=== Deleting and undo <delete-undo>
+
+#key("Delete") or #ui("Delete") deletes the selected items of the FE Model and the selected
+blocks of the schematic without asking. A note at the bottom of the 3D view or the schematic
+names what was deleted; its #ui("Undo") brings it back, as does #key("Ctrl+Z") at any time
+(@undo). The note goes away after a few seconds.
+
+#screenshot("delete-undo.png", [The note after deleting a material])
+
 === Placing blocks <place-block>
 
 The tiles on the #ui("Sources"), #ui("Parameters"), #ui("Evaluate") and #ui("Annotate") tabs

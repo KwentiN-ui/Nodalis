@@ -41,9 +41,15 @@ fn key(ctx: &Context) -> Id {
     crate::ids::window(ctx, "properties panel")
 }
 
-/// Lays out the panel on the right of `ui`; call it before the central panel.
-pub fn panel(ui: &mut Ui) {
+/// What the panel shows while no editor is open: a title and its content.
+pub type Content<'a> = (&'a str, &'a mut dyn FnMut(&mut Ui));
+
+/// Lays out the panel on the right of `ui`; call it before the central panel. An editor
+/// draws into it later in the frame; without one, `empty` fills it under its title, and the
+/// return value tells whether its close button was clicked.
+pub fn panel(ui: &mut Ui, empty: Option<Content<'_>>) -> bool {
     let ctx = ui.ctx().clone();
+    let mut closed = false;
     egui::Panel::right("properties")
         .resizable(true)
         .default_size(WIDTH)
@@ -55,12 +61,34 @@ pub fn panel(ui: &mut Ui) {
                 .inner_margin(8),
         )
         .show(ui, |ui| {
+            if let Some((title, add)) = empty {
+                closed = head(ui, title);
+                egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .show(ui, |ui| add(ui));
+                return;
+            }
             let rect = ui.max_rect();
             ui.allocate_rect(rect, egui::Sense::hover());
             // The key first: the context is locked while its data is borrowed.
             let (pass, key) = (ctx.cumulative_pass_nr(), key(&ctx));
             ctx.data_mut(|d| d.insert_temp(key, (pass, rect)));
         });
+    closed
+}
+
+/// The head of the panel: its title, a close button and a line. Returns whether the
+/// button was clicked.
+fn head(ui: &mut Ui, title: impl Into<WidgetText>) -> bool {
+    let mut close = false;
+    ui.horizontal(|ui| {
+        ui.label(title.into().strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            close = close_button(ui).on_hover_text("Close").clicked();
+        });
+    });
+    ui.separator();
+    close
 }
 
 /// The inside of the panel, when it was laid out in this frame.
@@ -90,15 +118,9 @@ pub fn show<R>(
         .show(ctx, |ui| {
             ui.set_min_size(rect.size());
             ui.set_max_size(rect.size());
-            ui.horizontal(|ui| {
-                ui.label(title.into().strong());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if close_button(ui).on_hover_text("Close").clicked() {
-                        *open = false;
-                    }
-                });
-            });
-            ui.separator();
+            if head(ui, title) {
+                *open = false;
+            }
             // Vertical only: layouts from the right need a bounded width.
             egui::ScrollArea::vertical()
                 .auto_shrink(false)

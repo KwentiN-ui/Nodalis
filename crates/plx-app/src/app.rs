@@ -166,6 +166,15 @@ struct Workbench {
     /// Item asked to be deleted, waiting for the user's confirmation.
     /// Items to delete once the user agrees: several parts, or one item.
     confirm_delete: Option<(TreeView, Vec<TreeItem>)>,
+    /// The toast shown over the 3D view, such as "Deleted Force-1" with Undo.
+    toast: Option<crate::toast::Toast>,
+    /// The output pane shows the Problems tab.
+    problems_tab: bool,
+    /// The properties panel shows the checklist while no item is edited.
+    checklist_shown: bool,
+    /// Whether the Analysis tab was asked for in the last frame, to notice when a solve
+    /// brings it to the front.
+    analysis_tab_before: bool,
     /// Open search for contact pairs.
     contact_search: Option<ContactSearchDialog>,
     /// The table of all contact regions is open.
@@ -318,6 +327,10 @@ impl AnalysisWindow {
                 step_selection: None,
                 docked: Vec::new(),
                 confirm_delete: None,
+                toast: None,
+                problems_tab: false,
+                checklist_shown: true,
+                analysis_tab_before: false,
                 contact_search: None,
                 contact_worksheet: false,
                 mesh_tool: None,
@@ -1531,7 +1544,25 @@ impl AnalysisWindow {
             });
         self.workbench.follow_selected_step();
         if self.workbench.one_docked() {
-            crate::dock::panel(ui);
+            crate::dock::panel(ui, None);
+        } else if self.workbench.checklist_shown {
+            let steps = self.checklist();
+            let problems = self.workbench.problems().len();
+            let mut clicked = None;
+            let mut draw = |ui: &mut egui::Ui| {
+                clicked = crate::checklist::show(ui, &steps, problems);
+            };
+            if crate::dock::panel(ui, Some(("Checklist", &mut draw))) {
+                self.workbench.checklist_shown = false;
+            }
+            match clicked {
+                Some(crate::checklist::Clicked::Run(cmd)) => {
+                    self.ribbon.reveal(workspace, cmd);
+                    self.run_command(&ctx, cmd);
+                }
+                Some(crate::checklist::Clicked::Problems) => self.workbench.problems_tab = true,
+                None => {}
+            }
         }
         egui::Panel::bottom("output")
             .resizable(true)
@@ -1596,6 +1627,7 @@ impl AnalysisWindow {
         self.workbench.update_motion_preview(&ctx);
         self.workbench.update_cyclic_preview();
         self.workbench.confirm_delete_window(&ctx);
+        self.workbench.toast(&ctx);
         self.workbench.contact_search_window(&ctx);
         self.workbench.contact_worksheet_window(&ctx);
         self.workbench.mesh_tool_window(&ctx);
@@ -2053,15 +2085,33 @@ impl Workbench {
     /// The pane below the 3D view: the messages, and in the Analysis tab the output of
     /// CalculiX, so the results stay in view while it runs.
     fn output(&mut self, ui: &mut egui::Ui, pane: egui::Frame) {
-        let (clicked, selected_tab) =
-            crate::style::tabs(ui, &["Output", "Analysis"], usize::from(self.analysis_tab));
+        // The Analysis tab, brought to the front by a solve, covers the problems.
+        if self.analysis_tab && !self.analysis_tab_before {
+            self.problems_tab = false;
+        }
+        let problems = self.problems();
+        let problems_title = format!("Problems ({})", problems.len());
+        let selected = if self.problems_tab {
+            0
+        } else if self.analysis_tab {
+            1
+        } else {
+            2
+        };
+        let titles = [problems_title.as_str(), "Analysis", "Output"];
+        let (clicked, selected_tab) = crate::style::tabs(ui, &titles, selected);
         if let Some(index) = clicked {
+            self.problems_tab = index == 0;
             self.analysis_tab = index == 1;
         }
+        self.analysis_tab_before = self.analysis_tab;
         let mut event = MonitorEvent::None;
+        let mut picked = None;
         pane.inner_margin(4).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
-            if !self.analysis_tab {
+            if self.problems_tab {
+                picked = problems_list(ui, &problems);
+            } else if !self.analysis_tab {
                 crate::virtual_table::lines(
                     ui,
                     egui::ScrollArea::both()
@@ -2078,10 +2128,41 @@ impl Workbench {
             }
         });
         crate::style::open_tab(ui, selected_tab);
+        if let Some((finding, open)) = picked {
+            self.pick_problem(ui.ctx(), &finding, open);
+        }
         match event {
             MonitorEvent::OpenResults => self.open_bound_results(),
             MonitorEvent::Stop => self.stop(),
             MonitorEvent::None => {}
+        }
+    }
+
+    /// The problems of the FE model: what the model check finds and what the solver found
+    /// in the last run.
+    fn problems(&self) -> Vec<plx_model::Finding> {
+        let mut findings = (self.model.as_ref()).map_or_else(Vec::new, Model::findings);
+        findings.extend(self.solver_findings.iter().cloned());
+        // Errors first.
+        findings.sort_by_key(|f| f.severity() != plx_model::Severity::Error);
+        findings
+    }
+
+    /// A problem was clicked: its item is selected in the FE Model tree; a double-click
+    /// opens it in the properties panel.
+    fn pick_problem(&mut self, ctx: &egui::Context, finding: &plx_model::Finding, open: bool) {
+        let (item, _) = tree::tree_items(finding.item);
+        if !matches!(item, TreeItem::Model) {
+            self.set_tree_view(TreeView::FeModel);
+            self.tree.selected = Some((TreeView::FeModel, item.clone()));
+            self.tree.reveal = true;
+        }
+        if open {
+            let response = TreeResponse {
+                open: Some(item),
+                ..Default::default()
+            };
+            self.tree_response(ctx, TreeView::FeModel, response);
         }
     }
 
@@ -4008,6 +4089,9 @@ impl Workbench {
                     analysis.note(
                         "The warning symbol on the analysis in the tree explains the cause.".into(),
                     );
+                    // Errors bring the problems to the front.
+                    self.problems_tab = true;
+                    self.analysis_tab_before = self.analysis_tab;
                 }
             }
             // Warnings that point to wrong results, after any run.
@@ -4944,26 +5028,49 @@ impl Workbench {
             [name] => format!("Delete the selected part?\n{name}"),
             names => format!("Delete the selected parts?\n{}", names.join(", ")),
         };
-        egui::Modal::new(crate::ids::window(ctx, "confirm delete")).show(ctx, |ui| {
-            ui.label(question);
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                if ui.button("OK").clicked() {
+        // In the FE model Undo brings a deleted item back, so it goes at once and a toast
+        // offers Undo. Elsewhere there is no Undo, so the user is asked first.
+        let undoable = view == TreeView::FeModel;
+        let toast = undoable.then(|| {
+            let names: Vec<String> = match parts.as_slice() {
+                [] => (items.iter())
+                    .filter_map(|item| self.item_name(item))
+                    .collect(),
+                names => names.to_vec(),
+            };
+            match names.as_slice() {
+                [name] if items.len() == 1 => format!("Deleted {name}"),
+                _ => format!("Deleted {} items", items.len()),
+            }
+        });
+        if undoable {
+            answer = Some(true);
+        } else {
+            egui::Modal::new(crate::ids::window(ctx, "confirm delete")).show(ctx, |ui| {
+                ui.label(question);
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() {
+                        answer = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        answer = Some(false);
+                    }
+                });
+            });
+            // Enter confirms and Escape cancels, as with the default buttons of a message
+            // box.
+            ctx.input(|i| {
+                if i.key_pressed(egui::Key::Enter) {
                     answer = Some(true);
-                }
-                if ui.button("Cancel").clicked() {
+                } else if i.key_pressed(egui::Key::Escape) {
                     answer = Some(false);
                 }
             });
-        });
-        // Enter confirms and Escape cancels, as with the default buttons of a message box.
-        ctx.input(|i| {
-            if i.key_pressed(egui::Key::Enter) {
-                answer = Some(true);
-            } else if i.key_pressed(egui::Key::Escape) {
-                answer = Some(false);
-            }
-        });
+        }
+        if let (Some(true), Some(text)) = (answer, toast) {
+            self.toast = Some(crate::toast::Toast::new(text, true));
+        }
         match answer {
             Some(true) => {
                 self.confirm_delete = None;
@@ -4993,6 +5100,28 @@ impl Workbench {
             }
             Some(false) => self.confirm_delete = None,
             None => {}
+        }
+    }
+
+    /// The name of an item of the FE model, as its dialog shows it.
+    fn item_name(&self, item: &TreeItem) -> Option<String> {
+        let model = self.model.as_ref()?;
+        let editor = Editor::edit(item, &model.fe, &model.mesh)?;
+        Some(editor.name())
+    }
+
+    /// Shows the toast, if there is one, over the bottom of the 3D view.
+    fn toast(&mut self, ctx: &egui::Context) {
+        let Some(toast) = &mut self.toast else {
+            return;
+        };
+        match crate::toast::show(ctx, toast, self.viewport.rect) {
+            crate::toast::Event::None => {}
+            crate::toast::Event::Gone => self.toast = None,
+            crate::toast::Event::Undo => {
+                self.toast = None;
+                self.undo();
+            }
         }
     }
 
@@ -7410,6 +7539,61 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
         event = WindowEvent::Close;
     }
     event
+}
+
+/// The list of problems in the Problems tab: errors and warnings with what they are about.
+/// Returns the problem clicked, and whether it was double-clicked.
+fn problems_list(
+    ui: &mut egui::Ui,
+    problems: &[plx_model::Finding],
+) -> Option<(plx_model::Finding, bool)> {
+    if problems.is_empty() {
+        ui.weak("No problems found: the model check has nothing to report.");
+        return None;
+    }
+    let mut picked = None;
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for finding in problems {
+                let (kind, color) = match finding.severity() {
+                    plx_model::Severity::Error => ("Error", crate::style::error()),
+                    plx_model::Severity::Warning => ("Warning", crate::style::warning()),
+                };
+                let row = ui
+                    .horizontal(|ui| {
+                        ui.colored_label(color, egui::RichText::new(kind).strong());
+                        ui.label(egui::RichText::new(finding.problem.title()).strong());
+                        ui.weak(&finding.detail);
+                    })
+                    .response;
+                let row = ui
+                    .interact(row.rect, row.id.with("problem"), egui::Sense::click())
+                    .on_hover_text(format!(
+                        "{}\n\nRemedy: {}\n\nClick to select it in the tree, \
+                         double-click to open it.",
+                        finding.problem.explanation(),
+                        finding.problem.fix()
+                    ));
+                if row.hovered() {
+                    ui.painter().rect_filled(
+                        row.rect,
+                        2.0,
+                        ui.visuals()
+                            .widgets
+                            .hovered
+                            .weak_bg_fill
+                            .gamma_multiply(0.3),
+                    );
+                }
+                if row.double_clicked() {
+                    picked = Some((finding.clone(), true));
+                } else if row.clicked() {
+                    picked = Some((finding.clone(), false));
+                }
+            }
+        });
+    picked
 }
 
 /// The step an item of the FE model tree belongs to.

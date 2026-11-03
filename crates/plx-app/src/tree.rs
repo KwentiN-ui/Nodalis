@@ -491,7 +491,7 @@ fn warning_sign(ui: &mut Ui) -> Response {
 }
 
 /// Tree item of an item of the FE model and the containers it is shown in, innermost first.
-fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
+pub(crate) fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
     let step = |s: usize, group: &'static str| {
         vec![
             TreeItem::StepGroup(s, group),

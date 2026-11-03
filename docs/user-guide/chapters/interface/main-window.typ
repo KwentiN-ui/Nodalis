@@ -15,7 +15,8 @@ From top to bottom the window contains:
 / Model tree: on the left, with the items of the workspace (@model-tree).
 / 3D view: in the centre (@view).
 / Properties panel: on the right, while an item is created or edited (@properties-panel).
-/ Output pane: below the 3D view, with two tabs. #ui("Output") collects messages: what was loaded
+/ Output pane: below the 3D view, with three tabs. #ui("Problems") lists what the model check
+  finds (@problems). #ui("Output") collects messages: what was loaded
   or saved, warnings, keywords of an imported `.inp` that were skipped ("Not yet evaluated:
   ..."), unit conversions and the output of the query tool. #ui("Analysis") is the monitor of
   the solver (@monitor); it comes to the front when a run starts.
@@ -71,7 +72,9 @@ opens in the Geometry workspace, opening a result file switches to Results.
 - *Double-click* an item to open it in the properties panel (@properties-panel). A
   double-click on a container only opens or closes it; new items come from the ribbon.
 - *Right-click* an item for its context menu (see below).
-- *Del* deletes the selected item after asking "Delete the selected item?"; #key("Ctrl+Z") brings it back (@undo).
+- *Del* deletes the selected items of the FE Model at once; a note at the bottom of the 3D view
+  says what was deleted and offers #ui("Undo") for a few seconds (@delete-undo). #key("Ctrl+Z")
+  brings them back as well (@undo). Parts and mesh setup items are deleted after asking.
 - *Space* activates or deactivates the selected item while the mouse is over the tree.
 - Selecting an item highlights its region in the 3D view. Master and slave regions of contacts and
   ties get different colours.
