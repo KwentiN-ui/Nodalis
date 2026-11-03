@@ -227,6 +227,10 @@ impl PcgSolver {
 
 impl LinearSolver for PcgSolver {
     fn analyze(&mut self, pattern: &Pattern) -> Result<()> {
+        if self.pattern.as_deref() == Some(pattern) {
+            // The Newton iterations of a step keep their pattern.
+            return Ok(());
+        }
         let n = pattern.dimension();
         let (ptr, rows) = (pattern.col_ptr(), pattern.row_idx());
         // Entries per row of the whole matrix: column j of the upper triangle gives row j

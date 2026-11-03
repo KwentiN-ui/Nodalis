@@ -91,7 +91,9 @@ fn check(name: &'static str, passed: bool, message: String) -> CheckResult {
 /// Timoshenko beam theory and the reactions must balance the load.
 fn tip_force(threads: u32, dir: &Path, equations: LinearSolverChoice) -> CheckResult {
     let (name, job) = match equations {
-        LinearSolverChoice::Direct => ("Cantilever with end load", "Cantilever"),
+        LinearSolverChoice::Direct | LinearSolverChoice::Automatic => {
+            ("Cantilever with end load", "Cantilever")
+        }
         LinearSolverChoice::Iterative => ("Iterative equation solver", "Iterative"),
     };
     let mesh = beam_mesh();

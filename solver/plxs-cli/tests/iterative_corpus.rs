@@ -1,6 +1,7 @@
-//! The iterative equation solver (stage 5 of the ccx replacement): the `static` and `heat`
-//! fixtures, every step switched to `SOLVER=ITERATIVE CHOLESKY`, still match the CalculiX
-//! golden files within their class tolerance.
+//! The iterative equation solver (stage 5 of the ccx replacement, extended to nonlinear
+//! static, contact and dynamic steps): the fixtures of those areas, every step switched to
+//! `SOLVER=ITERATIVE CHOLESKY`, still match the CalculiX golden files within their class
+//! tolerance.
 
 use std::path::{Path, PathBuf};
 
@@ -8,12 +9,17 @@ use plxs_verify::report::format_reports;
 use plxs_verify::{Outcome, corpus, fixtures_root, run_corpus};
 
 /// Procedures that solve with conjugate gradients when asked to.
-const ITERATIVE: [&str; 4] = [
+const ITERATIVE: [&str; 6] = [
     "*STATIC",
+    "*VISCO",
+    "*DYNAMIC",
     "*HEAT TRANSFER",
     "*COUPLED TEMPERATURE-DISPLACEMENT",
     "*UNCOUPLED TEMPERATURE-DISPLACEMENT",
 ];
+
+/// Fixture areas whose steps have an iterative solver.
+const AREAS: [&str; 5] = ["static", "heat", "nonlinear", "contact", "dynamic"];
 
 /// The input with `SOLVER=ITERATIVE CHOLESKY` on each procedure line that names no solver.
 fn iterative(input: &str) -> String {
@@ -48,11 +54,11 @@ fn copy_area(from: &Path, to: &Path) {
 }
 
 #[test]
-fn static_and_heat_fixtures_match_calculix_with_the_iterative_solver() {
+fn fixtures_match_calculix_with_the_iterative_solver() {
     let root: PathBuf =
         std::env::temp_dir().join(format!("plxs-iterative-corpus-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    for area in ["static", "heat"] {
+    for area in AREAS {
         copy_area(
             &fixtures_root().join(area),
             &root.join("fixtures").join(area),

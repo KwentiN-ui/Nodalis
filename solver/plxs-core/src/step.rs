@@ -105,11 +105,11 @@ impl Procedure {
     }
 }
 
-/// The equation solver CalculiX is asked for (`SOLVER=`); the own solver takes it as a hint
-/// and maps the names to its direct and iterative solvers, see [`Self::is_iterative`].
+/// The equation solver CalculiX is asked for (`SOLVER=`); the own solver maps the names to
+/// its automatic choice, its direct and its iterative solver, see [`Self::mode`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EquationSolver {
-    /// CalculiX's default (PaStiX in Nodalis's builds).
+    /// No `SOLVER=`: CalculiX takes its default; the own solver chooses automatically.
     #[default]
     Default,
     Spooles,
@@ -120,15 +120,35 @@ pub enum EquationSolver {
 }
 
 impl EquationSolver {
-    /// Whether the step asks for an iterative solver; the own solver then solves linear
-    /// static and heat transfer systems with conjugate gradients
-    /// (`plxs_linalg::PcgSolver`), every other name means its direct solver.
+    /// Whether the step asks for an iterative solver.
     pub fn is_iterative(self) -> bool {
-        matches!(
-            self,
-            EquationSolver::IterativeScaling | EquationSolver::IterativeCholesky
-        )
+        self.mode() == SolverMode::Iterative
     }
+
+    /// How the own solver solves the step's systems: no `SOLVER=` chooses automatically,
+    /// the iterative names mean conjugate gradients (`plxs_linalg::PcgSolver`), every
+    /// other name the direct solver.
+    pub fn mode(self) -> SolverMode {
+        match self {
+            EquationSolver::Default => SolverMode::Automatic,
+            EquationSolver::IterativeScaling | EquationSolver::IterativeCholesky => {
+                SolverMode::Iterative
+            }
+            EquationSolver::Spooles | EquationSolver::Pastix | EquationSolver::Pardiso => {
+                SolverMode::Direct
+            }
+        }
+    }
+}
+
+/// The own solver's reading of [`EquationSolver`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SolverMode {
+    /// Direct while the factor fits into the memory, iterative beyond (and back to direct
+    /// when the iteration fails), where the procedure has an iterative solver.
+    Automatic,
+    Direct,
+    Iterative,
 }
 
 /// Time incrementation of a step: initial increment, step period, minimum and maximum

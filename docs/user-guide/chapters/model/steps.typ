@@ -44,27 +44,37 @@ results refer to the order at the time of the run.
 
 === Equation solver <equation-solver>
 
-Static and heat transfer steps have an #ui("Equation solver") field that chooses how the
-systems of equations of the step are solved:
+Static, visco, dynamic and heat transfer steps have an #ui("Equation solver") field that
+chooses how the systems of equations of the step are solved:
 
 #fields(
-  [Direct], [(default) A sparse direct factorization (LDLᵀ). It solves every system,
-    including contact and nonlinear tangents, but needs memory for the factor, which grows
-    quickly with the model: about 2 GB for a solid block of 170 000 equations.],
+  [Automatic], [(default) The solver chooses. For a system of 50 000 equations and more it
+    first estimates the memory of the direct factorization; if that exceeds 60 % of the
+    memory the computer has free, the step solves iteratively, otherwise directly. If the
+    chosen solver fails, the other one takes over once: a factorization that does not fit
+    into the memory continues iteratively, an iteration that does not converge continues
+    directly. Leave it here unless you have a reason not to.],
+  [Direct], [A sparse direct factorization (LDLᵀ). It solves every system, including
+    tangents near buckling and parts held only by contact, but needs memory for the factor,
+    which grows quickly with the model: about 2.4 GB for a solid block of 170 000 equations.],
   [Iterative], [Conjugate gradients with an incomplete Cholesky preconditioner. It needs a
     fraction of the memory (about 35 times less on that block) and is often faster on large
-    solid models, but it only solves positive definite systems: no contact, no gaps, and the
-    model must be held against every rigid body motion. If it does not converge, the
-    analysis stops with a message that names the direct solver.],
+    solid models. It solves linear and nonlinear static steps (also with plasticity, large
+    deformations, gaps and contact; sliding friction adds a few GMRES iterations around it),
+    visco, implicit and explicit dynamic and heat transfer steps. It only solves positive
+    definite systems: the model must be held against every rigid body motion, and a tangent
+    that loses its stiffness (close to buckling) stops it. Then the analysis stops with a
+    message that names the direct solver.],
 )
 
 #screenshot("equation-solver.png", [Equation solver of a static step])
 
-The built-in solver uses the iterative solver for linear static and heat transfer steps;
-frequency, buckle, dynamic and modal steps always solve directly, so their dialogs do not
-offer the choice. The input file writes `SOLVER=ITERATIVE CHOLESKY` for #ui("Iterative") and
-nothing for #ui("Direct"), so that CalculiX takes its fastest direct solver (Pardiso, PaStiX or
-SPOOLES, whichever it was built with; the CalculiX shipped with Nodalis uses PaStiX).
+Frequency, buckle, complex frequency, modal dynamics, steady state dynamics and sensitivity
+steps always solve directly, so their dialogs do not offer the choice. The monitor reports
+the automatic choice with the estimated memory, e.g. "automatic equation solver: the factor
+of 173394 equations needs 2.4 GB, 15.8 GB available; solving directly". The input file writes
+nothing for #ui("Automatic"), `SOLVER=PASTIX` for #ui("Direct") and `SOLVER=ITERATIVE
+CHOLESKY` for #ui("Iterative").
 
 The monitor shows how a solve went: for the direct solver the size of the factor and the
 times of ordering, factorization and solution; for the iterative one the size of the

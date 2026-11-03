@@ -483,7 +483,7 @@ impl<'h> HeatRun<'h> {
             if !reduction.free.is_empty() {
                 self.factorize(&reduction.free, size)?;
                 self.equations
-                    .solve(&self.solver, &mut rhs, &mut NoProgress)
+                    .solve(&mut self.solver, &mut rhs, &mut NoProgress)
                     .map_err(|e| in_increment(e, ctx.step_number, increment))?;
             }
             for (&dof, d) in reduction.free.iter().zip(&rhs) {
@@ -630,7 +630,7 @@ impl<'h> HeatRun<'h> {
             let rhs_full: Vec<f64> = f.iter().zip(&k_up).map(|(f, ku)| f - ku).collect();
             let mut rhs = reduction.reduce_vector(&rhs_full);
             self.mechanical_equations
-                .solve(&ctx.solver, &mut rhs, &mut NoProgress)
+                .solve(&mut ctx.solver, &mut rhs, &mut NoProgress)
                 .map_err(|e| in_increment(e, ctx.step_number, increment))?;
             let mut u = u_p;
             reduction.expand_into(&rhs, &mut u);
@@ -815,7 +815,7 @@ impl<'h> HeatRun<'h> {
                     other => other,
                 })?;
             self.mechanical_equations
-                .solve(&ctx.solver, &mut rhs, &mut NoProgress)
+                .solve(&mut ctx.solver, &mut rhs, &mut NoProgress)
                 .map_err(|e| in_increment(e, ctx.step_number, increment))?;
             for (&dof, d) in reduction.free.iter().zip(&rhs) {
                 u[dof as usize] += d;
