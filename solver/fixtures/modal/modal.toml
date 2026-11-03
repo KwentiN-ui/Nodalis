@@ -5,4 +5,4 @@ stage = "M3"
 features = ["*HEADING", "*NODE", "*ELEMENT", "C3D20R", "*NSET", "*ELSET", "*MATERIAL", "*DENSITY", "*ELASTIC", "*SOLID SECTION", "*AMPLITUDE", "*STEP", "*FREQUENCY", "*BOUNDARY", "*NODE FILE", "*EL FILE", "*END STEP", "*MODAL DYNAMICS", "*MODAL DAMPING", "*CLOAD", "*DLOAD", "*STEADY STATE DYNAMICS"]
 source = "plx-io writer test"
 reference = "none"
-note = "golden .frd would be 7.3M compressed (hundreds of increments); make it locally with scripts/solver_reference.sh --name modal"
+note = "a snapshot .frd would be 7.3M compressed (hundreds of increments); make it locally with scripts/solver_reference.sh --name modal"

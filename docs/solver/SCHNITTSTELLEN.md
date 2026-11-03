@@ -703,7 +703,8 @@ ccx), dazu die Übernahmetests in `plxs-input/src/tests.rs`.
   Knoten abhängig, der Tie bindet den Originalknoten (ccx 2.21: die expandierten Knoten
   folgen nur im Mittel, die Schale bleibt drehbar). Jeder Knoten eines `*RIGID BODY`
   verschiebt die erste expandierte Knotennummer um eins (ccx-Beobachtung).
-- **Dokumentierte Abweichungen** (Fixture-`deviations`, `FIXTURES.md`):
+- **Dokumentierte Abweichungen** (Fixture-`deviations`, `FIXTURES.md`; seit Stufe 7 der
+  CalculiX-Ablösung entfallen, die Referenzen sind plxs-Snapshots):
   - Balken mit Rotations-Randbedingung: ccx schreibt an den expandierten Knoten der
     gehaltenen Balkenknoten FORC, die nicht K·u sind (Summe nicht im Gleichgewicht mit den
     Lasten); plxs schreibt K·u.

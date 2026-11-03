@@ -1,12 +1,12 @@
 //! The iterative equation solver (stage 5 of the ccx replacement, extended to nonlinear
 //! static, contact, dynamic and eigenvalue steps): the fixtures of those areas, every step switched to
-//! `SOLVER=ITERATIVE CHOLESKY`, still match the CalculiX golden files within their class
+//! `SOLVER=ITERATIVE CHOLESKY`, still match their plxs snapshots within their class
 //! tolerance.
 
 use std::path::{Path, PathBuf};
 
 use plxs_verify::report::format_reports;
-use plxs_verify::{Outcome, corpus, fixtures_root, run_corpus};
+use plxs_verify::{corpus, fixtures_root, run_corpus};
 
 /// Procedures that solve with conjugate gradients when asked to.
 const ITERATIVE: [&str; 8] = [
@@ -68,7 +68,7 @@ fn copy_area(from: &Path, to: &Path) {
 }
 
 #[test]
-fn fixtures_match_calculix_with_the_iterative_solver() {
+fn fixtures_are_unchanged_with_the_iterative_solver() {
     let root: PathBuf =
         std::env::temp_dir().join(format!("plxs-iterative-corpus-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -99,7 +99,7 @@ fn fixtures_match_calculix_with_the_iterative_solver() {
     );
     for report in &reports {
         assert!(
-            report.outcome.passed() || report.outcome == Outcome::NoReference,
+            report.outcome.passed() || !report.outcome.compared(),
             "{}: {:?}\n{}",
             report.fixture,
             report.outcome,

@@ -4,4 +4,5 @@ class = "A"
 stage = "M2"
 features = ["*HEADING", "*NODE", "*ELEMENT", "C3D8", "M3D4", "*NSET", "*ELSET", "*SURFACE", "*MATERIAL", "*ELASTIC", "*SOLID SECTION", "*MEMBRANE SECTION", "*RIGID BODY", "*TIE", "*STEP", "*STATIC", "*BOUNDARY", "*CLOAD", "*DLOAD", "*NODE FILE", "*EL FILE", "*END STEP"]
 source = "plx-io writer test"
-reference = "ccx 2.21"
+reference = "none"
+known_gap = "the solid hangs on the membrane like on a hinge: its rotation is a mechanism only the tiny out-of-plane stiffness of the membranes fixes, differently in CalculiX and plxs"

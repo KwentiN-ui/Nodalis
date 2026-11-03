@@ -4,9 +4,8 @@ class = "C"
 stage = "M3"
 features = ["*HEADING", "*NODE", "*ELEMENT", "C3D8", "*NSET", "*ELSET", "*SURFACE", "*MATERIAL", "*ELASTIC", "*SOLID SECTION", "*SURFACE INTERACTION", "*SURFACE BEHAVIOR", "*CONTACT PAIR", "*CLEARANCE", "*STEP", "*STATIC", "*BOUNDARY", "*CLOAD", "*DLOAD", "*NODE FILE", "*EL FILE", "*CONTACT FILE", "*END STEP"]
 source = "hand-written variant of a plx-io contact fixture"
-reference = "ccx 2.21"
-
+reference = "plxs 0.2.0"
 note = "The *CLEARANCE is ignored for node-to-face contact (as by ccx); without load the displacements are zero and ccx's contact forces are round-off"
 
 [noise]
-FORC = 1e-6
+FORC = 0.000001

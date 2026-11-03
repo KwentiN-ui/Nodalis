@@ -4,6 +4,4 @@ class = "B"
 stage = "M3"
 features = ["*HEADING", "*NODE", "*ELEMENT", "C3D8", "*NSET", "*ELSET", "*SURFACE", "*MATERIAL", "*DENSITY", "*ELASTIC", "*SOLID SECTION", "*DESIGN VARIABLES", "*STEP", "*STATIC", "*BOUNDARY", "*CLOAD", "*DLOAD", "*NODE FILE", "*EL FILE", "*END STEP", "*SENSITIVITY", "*DESIGN RESPONSE", "*FILTER"]
 source = "plx-io writer test"
-reference = "ccx 2.21"
-note = "SENENER and the gradient length of STRAINENERGY deviate on purpose: CalculiX leaves out the change of the element volume in the explicit part of the derivative (its values equal the exact ones minus the integral of the strain energy density times the volume derivative, to 1e-5 in eight oracle models); plxs computes the exact derivative, checked against finite differences (plxs-cli tests/sensitivity_corpus.rs), see docs/solver/SCHNITTSTELLEN.md"
-deviations = ["SENENER", "GRADIENT_LENGTH STRAINENERGY"]
+reference = "plxs 0.2.0"

@@ -1,4 +1,4 @@
-//! The corpus checks itself: every fixture is complete, parses, and its golden files decode.
+//! The corpus checks itself: every fixture is complete, parses, and its snapshots decode.
 
 use std::path::PathBuf;
 
@@ -33,13 +33,13 @@ fn every_fixture_is_complete_and_within_the_size_budget() {
         assert!(!f.meta.features.is_empty(), "{}", f.id());
         if f.meta.reference == "none" {
             assert!(
-                f.meta.note.is_some(),
-                "{} has no reference and no note why",
+                f.meta.note.is_some() || f.meta.known_gap.is_some(),
+                "{} has no reference and no note or known gap why",
                 f.id()
             );
             assert!(!f.ref_frd().exists(), "{}", f.id());
         } else {
-            assert!(f.ref_frd().is_file(), "{} lacks its golden .frd", f.id());
+            assert!(f.ref_frd().is_file(), "{} lacks its snapshot .frd", f.id());
         }
         for path in [f.inp(), f.toml(), f.ref_frd(), f.ref_dat()] {
             total += std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -58,7 +58,7 @@ fn every_fixture_reads_into_the_ir() {
 }
 
 #[test]
-fn every_golden_file_decodes_and_matches_itself() {
+fn every_snapshot_decodes_and_matches_itself() {
     let mut with_dat = 0;
     for f in corpus(&fixtures_root())
         .unwrap()

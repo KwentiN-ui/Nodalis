@@ -3,8 +3,9 @@
 //! ```text
 //! plxs-fixtures import <dir> [--source <text>]   copy the .inp files of a directory into the
 //!                                                corpus, classified by their keywords
-//! plxs-fixtures reference [--ccx <exe>] [--all]  compute golden files with CalculiX for the
-//!                                                fixtures without any (or all)
+//! plxs-fixtures reference --solver <plxs> [--all] [--name <n>]
+//!                                                freeze what plxs computes as the snapshot
+//!                                                of the fixtures without one (or all)
 //! plxs-fixtures matrix                           print the feature matrix (docs/solver/FIXTURES.md)
 //! plxs-fixtures run --solver <exe> [--area <a>] [--name <n>]
 //!                                                run a solver over the corpus and compare
@@ -97,7 +98,8 @@ fn import(args: &[String]) -> Result<(), String> {
                 std::fs::read_to_string(old.inp()).ok().as_deref() == Some(text.as_str());
             meta.area = old.meta.area.clone();
             meta.note = old.meta.note.clone();
-            meta.deviations = old.meta.deviations.clone();
+            meta.known_gap = old.meta.known_gap.clone();
+            meta.undetermined = old.meta.undetermined.clone();
             meta.noise = old.meta.noise.clone();
             if unchanged {
                 meta.reference = old.meta.reference.clone();
@@ -126,7 +128,10 @@ fn import(args: &[String]) -> Result<(), String> {
 }
 
 fn reference(args: &[String]) -> Result<(), String> {
-    let ccx = option(args, "--ccx").unwrap_or("ccx");
+    let Some(solver) = option(args, "--solver") else {
+        return Err("reference needs --solver <plxs executable>".into());
+    };
+    let solver = std::fs::canonicalize(solver).map_err(|e| format!("{solver}: {e}"))?;
     let all = args.iter().any(|a| a == "--all");
     let only = option(args, "--name");
     let root = fixtures_root();
@@ -140,21 +145,33 @@ fn reference(args: &[String]) -> Result<(), String> {
         {
             continue;
         }
-        if !all && fixture.has_reference() {
+        // Only a fixture named explicitly gets a snapshot when it had none on purpose
+        // (too large, see its note).
+        let unwanted = fixture.meta.reference == "none" && fixture.meta.note.is_some();
+        if (!all && fixture.has_reference()) || (only.is_none() && unwanted) {
             continue;
         }
         let dir = work.join(&fixture.meta.name);
         let mut meta = fixture.meta.clone();
-        match plxs_verify::reference::make_reference(ccx, fixture, &dir) {
+        // A known gap is not frozen as the expected result.
+        if fixture.meta.known_gap.is_some() {
+            let _ = std::fs::remove_file(fixture.ref_frd());
+            let _ = std::fs::remove_file(fixture.ref_dat());
+            meta.reference = "none".into();
+            write_meta(&fixture.path, &meta)?;
+            continue;
+        }
+        match plxs_verify::reference::make_snapshot(&solver, fixture, &dir) {
             Ok(version) => {
                 meta.reference = version;
-                meta.note = None;
                 made += 1;
-                println!("{}: reference made", fixture.id());
+                println!("{}: snapshot made", fixture.id());
             }
             Err(e) => {
+                let _ = std::fs::remove_file(fixture.ref_frd());
+                let _ = std::fs::remove_file(fixture.ref_dat());
                 meta.reference = "none".into();
-                meta.note = Some(format!("CalculiX failed: {e}"));
+                meta.known_gap = Some(format!("plxs failed: {e}"));
                 failed.push(format!("{}: {e}", fixture.id()));
             }
         }
@@ -162,10 +179,7 @@ fn reference(args: &[String]) -> Result<(), String> {
         let _ = std::fs::remove_dir_all(&dir);
     }
     let _ = std::fs::remove_dir_all(&work);
-    println!(
-        "{made} golden files made, {} fixtures without",
-        failed.len()
-    );
+    println!("{made} snapshots made, {} fixtures failed", failed.len());
     for f in failed {
         println!("  {f}");
     }
