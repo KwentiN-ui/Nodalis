@@ -22,8 +22,18 @@ use crate::numeric;
 use crate::selection::{GeometryRegion, History, Operation, PartPicks, Picker, PickerAction};
 use crate::viewport::{BoxSelect, Preview};
 
-/// The rows of the meshing parameters in a two-column grid.
-fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters, units: UnitSystem) {
+/// Whether the parameters reach a part of faces, the only parts the quad-dominated option
+/// changes: of the parts named, or of all parts if none are; true without a geometry view.
+fn reaches_faces(view: Option<&Model>, parts: &BTreeSet<String>) -> bool {
+    view.is_none_or(|view| {
+        (view.parts.iter())
+            .any(|p| p.dimension == Some(2) && (parts.is_empty() || parts.contains(&p.name)))
+    })
+}
+
+/// The rows of the meshing parameters in a two-column grid. `faces`: whether they reach a
+/// part of faces; the quad-dominated option is greyed out otherwise.
+fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters, units: UnitSystem, faces: bool) {
     ui.label("Max. element size");
     ui.add(numeric::quantity(&mut d.max_size, units, Quantity::Length).range(0.0..=f64::MAX));
     ui.end_row();
@@ -48,8 +58,18 @@ fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters, units: UnitSystem
             ),
         );
         ui.checkbox(&mut d.optimize, "Optimize mesh (Netgen)");
-        ui.checkbox(&mut d.quad_dominated, "Quad-dominated surface mesh")
-            .on_hover_text("Mesh faces (2D models and shells) mostly with quadrilaterals.");
+        ui.add_enabled(
+            faces,
+            egui::Checkbox::new(&mut d.quad_dominated, "Quad-dominated surface mesh"),
+        )
+        .on_hover_text(
+            "Mesh faces (2D models and shells) mostly with quadrilaterals. Solids keep \
+             triangles on their faces, as tetrahedra need them.",
+        )
+        .on_disabled_hover_text(
+            "Only for faces (2D models and shells): the parts are solids, meshed with \
+             tetrahedra, which need triangles on their faces.",
+        );
         ui.checkbox(&mut d.hexahedra_where_possible, "Hexahedra where possible")
             .on_hover_text(
                 "Parts that are straight extrusions of a face or bodies of revolution get a \
@@ -63,6 +83,8 @@ fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters, units: UnitSystem
 /// Meshing Parameters item covers.
 pub struct MeshSetupWindow {
     draft: MeshingParameters,
+    /// Whether the geometry has a part of faces, for the quad-dominated option.
+    faces: bool,
     /// Unit system of the model, the unit of the sizes.
     units: UnitSystem,
 }
@@ -77,9 +99,10 @@ pub enum MeshSetupResult {
 }
 
 impl MeshSetupWindow {
-    pub fn new(setup: &MeshingParameters, units: UnitSystem) -> Self {
+    pub fn new(setup: &MeshingParameters, units: UnitSystem, view: Option<&Model>) -> Self {
         Self {
             draft: *setup,
+            faces: reaches_faces(view, &BTreeSet::new()),
             units,
         }
     }
@@ -96,12 +119,12 @@ impl MeshSetupWindow {
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                let (d, units) = (&mut self.draft, self.units);
+                let (d, units, faces) = (&mut self.draft, self.units, self.faces);
                 ui.weak("Apply to all parts without their own Meshing Parameters.");
                 egui::Grid::new("mesh size")
                     .num_columns(2)
                     .spacing([12.0, 6.0])
-                    .show(ui, |ui| parameters_ui(ui, d, units));
+                    .show(ui, |ui| parameters_ui(ui, d, units, faces));
                 if d.max_size <= 0.0 {
                     ui.colored_label(
                         crate::style::error(),
@@ -393,7 +416,7 @@ impl MeshItemEditor {
                 egui::Grid::new("mesh item form")
                     .num_columns(2)
                     .spacing([12.0, 6.0])
-                    .show(ui, |ui| self.form(ui));
+                    .show(ui, |ui| self.form(ui, view));
                 if let Some(error) = &self.error {
                     ui.colored_label(crate::style::error(), error);
                 }
@@ -528,14 +551,15 @@ impl MeshItemEditor {
         self.sync_parts();
     }
 
-    fn form(&mut self, ui: &mut egui::Ui) {
+    fn form(&mut self, ui: &mut egui::Ui, view: Option<&Model>) {
         ui.label("Name");
         ui.text_edit_singleline(&mut self.draft.name);
         ui.end_row();
         match &mut self.draft.kind {
             MeshSetupKind::MeshingParameters { parameters, .. } => {
                 parts_ui(ui, &mut self.parts);
-                parameters_ui(ui, parameters, self.units);
+                let faces = reaches_faces(view, &self.parts.names());
+                parameters_ui(ui, parameters, self.units, faces);
             }
             MeshSetupKind::LocalMeshSize { size, .. } => {
                 ui.label("Region");

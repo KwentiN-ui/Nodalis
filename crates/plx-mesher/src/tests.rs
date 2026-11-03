@@ -1978,3 +1978,22 @@ fn corners_of_flat_faces_are_rounded_and_bevelled() {
     let same = apply_cad_operation(&input, Chamfer, &[vertex(&input, 0.0, 0.0)], 0.0).unwrap();
     assert_eq!(same.brep, input.brep);
 }
+
+#[test]
+fn quad_dominated_meshing_leaves_solids_whole() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::Unitless)
+        .unwrap()
+        .geometry;
+    geometry.meshing.second_order = false;
+    geometry.meshing.max_size = 2.0;
+    let total = |mesh: &FeMesh| -> f64 { mesh.elements().iter().map(|e| volume(mesh, e)).sum() };
+    let triangles = generate_mesh(&geometry).unwrap().mesh;
+    geometry.meshing.quad_dominated = true;
+    let quads = generate_mesh(&geometry).unwrap().mesh;
+    assert!(quads.elements().iter().all(|e| e.type_name == "C3D4"));
+    let (a, b) = (total(&triangles), total(&quads));
+    assert!((a - b).abs() / a < 1e-9, "Volume {b} instead of {a}");
+}
