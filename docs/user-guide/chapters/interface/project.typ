@@ -123,6 +123,8 @@ the state of another analysis (@data-links).
 - The *minimap* in the lower right corner shows all blocks and frames in small, with the part
   in view outlined; click or drag in it to move the view there.
   #menu("Arrange", "Minimap") shows or hides it.
+- The *floating bar* at the bottom of the schematic holds #ui("Show All"), #ui("Minimap"),
+  #ui("Compact View"), #ui("Frame") and #ui("Duplicate"), the same as on the #ui("Arrange") tab.
 
 #screenshot("schematic-minimap.png", [The minimap: the frames and blocks of the project in
   small, the outline is the part in view])

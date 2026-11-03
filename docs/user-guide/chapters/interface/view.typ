@@ -35,6 +35,19 @@ delete the selected tree item, #key("Space") activate or deactivate it. In dialo
 #key("Enter") means OK and #key("Esc") Cancel; a confirmation takes both as Cancel
 (@tool-windows).
 
+=== Floating bar <floating-bar>
+
+At the bottom of the 3D view floats a bar with the view commands needed most:
+#ui("Zoom to Fit"), #ui("Standard Views"), #ui("Vertical View"), #ui("Edges Only"),
+#ui("Mesh Edges"), #ui("Section View"), #ui("Exploded View") and #ui("Screenshot"). They are
+the same as on the #ui("View") tab of the ribbon; a pressed tile shows what is on. The bar is
+left out of screenshots.
+
+#figure(
+  image("../../images/view-floating-bar.png", width: 45%),
+  caption: [The floating bar of the 3D view.],
+)
+
 === Views
 
 The projection is orthographic. Y points up in the front view.
@@ -46,11 +59,12 @@ The projection is orthographic. Y points up in the front view.
 - #menu("View", "Standard Views", "View Normal to X/Y/Z") looks along an axis onto the plane normal to it.
 - #menu("View", "Standard Views", "Isometric, X/Y/Z Up") shows the isometric view with the chosen axis
   pointing up, for models built with Z up.
-- The *coordinate triad* in the lower right corner can be clicked: a click on an axis tip (or on
+- The *coordinate triad* in the upper right corner can be clicked: a click on an axis tip (or on
   its grey negative half) looks along that axis.
 
-A 2D model always opens in the front view. Legend, info block, scale bar and min/max labels can
-be dragged to another position in the view.
+A 2D model always opens in the front view. The legend sits in the upper left corner, the info
+block left of the triad, the scale bar above the floating bar. Legend, info block, scale bar and
+min/max labels can be dragged to another position in the view.
 
 === Showing and hiding parts
 

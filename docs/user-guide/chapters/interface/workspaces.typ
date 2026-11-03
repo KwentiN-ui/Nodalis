@@ -19,6 +19,7 @@ Nodalis works in one window. Its top line, the *app bar*, switches between four 
 From left to right the app bar holds:
 
 #fields(
+  [Tree], [Only in a narrow window (@window-size): shows or hides the tree of the workspace.],
   [Workspaces], [#ui("Project"), then #ui("Geometry"), #ui("FE Model") and #ui("Results").
     The last three show the analysis picked right of them.],
   [Analysis], [The active analysis. Picking another one here, or selecting its block in the
@@ -36,7 +37,8 @@ From left to right the app bar holds:
   [State], [A short summary: in the Project workspace how many analyses there are and how
     many are out of date, in the others the state of the solution. A click shows the
     solution monitor (@solution-monitor) or the #ui("Analysis") tab (@monitor).],
-  [Search], [Finds any command by its name (@command-search).],
+  [Search], [Finds any command by its name (@command-search). In a narrow window only the
+    magnifier shows.],
   [Settings, Help], [The settings (@settings) and this guide.],
 )
 
@@ -55,7 +57,8 @@ tooltip of a tile names its shortcut and what it does.
 The group on the right edge stays the same on every tab of a workspace: #ui("Update Project"),
 #ui("Stop") and #ui("Monitor") in the Project workspace, #ui("Solve"), #ui("Stop") and
 #ui("Monitor") in Geometry and FE Model, where #ui("Check Model") joins them. A double-click on a tab folds the
-ribbon to its tab row and back; so does #ui("Fold Ribbon") in its context menu.
+ribbon to its tab row and back; so does #ui("Fold Ribbon") in its context menu. When a tab does
+not fit into the window, its groups fold into a menu tile named after them, from the right.
 
 #fields(
   [Project], [#ui("Project"): file commands, #ui("New Analysis"), and #ui("Open"),
@@ -72,6 +75,31 @@ ribbon to its tab row and back; so does #ui("Fold Ribbon") in its context menu.
     planes, history outputs, derived fields and the Campbell diagram. #ui("View").],
 )
 
+=== Small windows <window-size>
+
+Nodalis fits its layout to the size of the window:
+
+- *Narrower than 1500 points*: groups of the ribbon that do not fit fold into one menu tile
+  each, from the right; the pinned group stays.
+- *Narrower than 1200 points*: the properties panel no longer narrows the 3D view but lies
+  over its right edge, above the output pane. The checklist (@checklist) then waits until
+  #ui("Checklist") on the #ui("View") tab asks for it. The search field of the app bar
+  shrinks to its magnifier.
+- *Narrower than 900 points*: the ribbon shows its icons only, their names are in the
+  tooltips. The tree folds away; the button left of #ui("Project") in the app bar shows it
+  again. The output pane folds to its tabs.
+- *Lower than 700 points*: the ribbon folds to its tabs, and so does the output pane.
+
+A folded output pane opens with a click on one of its tabs, and it opens by itself when a
+solve or a problem brings its tab to the front; a double-click on its tabs folds it again.
+What you unfold or fold yourself stays so until the window crosses one of these sizes.
+
+#screenshot("narrow-window.png", [A window 850 points wide: icons only, the tree behind the
+  button in the app bar, the output pane folded to its tabs])
+
+#screenshot("properties-overlay.png", [In a window 1100 points wide the properties panel lies
+  over the 3D view])
+
 === Properties panel <properties-panel>
 
 Items of an analysis are created and edited in the *properties panel* on the right of the
@@ -80,7 +108,8 @@ loads, constraints, contacts, amplitudes, outputs, features, mesh setup items, h
 model properties and the properties of a part. A tile of the ribbon or a double-click on an
 item in the tree opens the panel; #ui("OK") or #ui("Cancel") at its foot, or the cross in
 its head, close it. The 3D view shrinks while the panel is open, and its left edge can be
-dragged to make it wider.
+dragged to make it wider; in a narrow window the panel lies over the view instead
+(@window-size).
 
 The panel holds one editor at a time. Opening another item replaces the one shown; changes to
 it that were not confirmed with #ui("OK") are dropped. While a region is picked, the

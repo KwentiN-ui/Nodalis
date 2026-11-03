@@ -452,7 +452,7 @@ impl ProjectApp {
 }
 
 /// The ribbon of the Project workspace asks the project about its commands.
-struct ProjectHost<'a>(&'a mut ProjectApp);
+pub(super) struct ProjectHost<'a>(pub(super) &'a mut ProjectApp);
 
 impl ribbon::Host for ProjectHost<'_> {
     fn enabled(&self, cmd: Cmd) -> bool {

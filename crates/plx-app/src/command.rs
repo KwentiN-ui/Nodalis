@@ -283,6 +283,8 @@ pub enum Glyph {
     Search,
     Analysis,
     Save,
+    /// The button of the app bar that shows the folded tree.
+    Tree,
 }
 
 pub struct Command {
@@ -356,7 +358,6 @@ pub fn registry() -> &'static [Command] {
 }
 
 /// The command `cmd` as registered.
-#[cfg(test)]
 pub fn find(cmd: Cmd) -> Option<&'static Command> {
     registry().iter().find(|c| c.cmd == cmd)
 }

@@ -259,7 +259,7 @@ impl AnalysisWindow {
             Cmd::ShellThickness => graphics.shell_thickness,
             Cmd::BeamProfiles => graphics.beam_profiles,
             Cmd::ShowLinked => graphics.show_linked,
-            Cmd::Checklist => w.checklist_shown,
+            Cmd::Checklist => w.checklist_visible,
             Cmd::SectionView => w.section.is_some() || w.section_dialog.is_some(),
             Cmd::ExplodedView => w.exploded_applied() || w.exploded_dialog.is_some(),
             Cmd::Query => w.query.is_some(),
@@ -429,7 +429,12 @@ impl AnalysisWindow {
                 let graphics = &mut w.settings.graphics;
                 graphics.beam_profiles = !graphics.beam_profiles;
             }
-            Cmd::Checklist => w.checklist_shown = !w.checklist_shown,
+            Cmd::Checklist => {
+                // A narrow window hides the checklist until it is asked for.
+                let overlay = crate::layout::current(ctx).overlay;
+                w.checklist_shown = !w.checklist_visible;
+                w.checklist_fold.set(overlay, false);
+            }
             Cmd::ShowLinked => {
                 let graphics = &mut w.settings.graphics;
                 graphics.show_linked = !graphics.show_linked;

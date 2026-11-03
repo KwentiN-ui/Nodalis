@@ -7615,17 +7615,44 @@ impl ProjectApp {
         let pane = egui::Frame::new()
             .fill(crate::style::window())
             .stroke(egui::Stroke::new(1.0, crate::style::border()));
-        egui::Panel::bottom("project output")
-            .resizable(true)
-            .default_size(170.0)
-            .size_range(70.0..=500.0)
+        // In a small window the output pane shows only its tabs until one is clicked.
+        let folded = crate::layout::output_folded(&ctx);
+        let panel = if folded {
+            egui::Panel::bottom("project output folded")
+                .resizable(false)
+                .exact_size(crate::app::OUTPUT_TABS)
+        } else {
+            egui::Panel::bottom("project output")
+                .resizable(true)
+                .default_size(170.0)
+                .size_range(70.0..=500.0)
+        };
+        panel
             .frame(egui::Frame::new().fill(crate::style::control()))
             .show(ui, |ui| {
                 let titles = ["Output", "Analyses"];
                 let selected = usize::from(self.monitor.shown);
+                let top = ui.cursor().top();
                 let (clicked, tab) = crate::style::tabs(ui, &titles, selected);
+                let row =
+                    egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
                 if let Some(index) = clicked {
                     self.monitor.shown = index == 1;
+                    if folded {
+                        crate::layout::fold_output(&ctx, false);
+                    }
+                }
+                let double = ui.input(|i| {
+                    i.pointer
+                        .button_double_clicked(egui::PointerButton::Primary)
+                        && i.pointer.interact_pos().is_some_and(|p| row.contains(p))
+                });
+                if double && !folded {
+                    crate::layout::fold_output(&ctx, true);
+                }
+                if folded {
+                    crate::style::open_tab(ui, tab);
+                    return;
                 }
                 pane.inner_margin(4).show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
@@ -7647,6 +7674,15 @@ impl ProjectApp {
         let central = egui::CentralPanel::no_frame().show(ui, |ui| self.schematic(ui));
         for action in central.inner {
             self.act(&ctx, action);
+        }
+        if let Some(cmd) = crate::ribbon::floating_bar(
+            &ctx,
+            "schematic",
+            central.response.rect,
+            crate::ribbon::SCHEMATIC_BAR,
+            &mut workspace::ProjectHost(self),
+        ) {
+            self.run_command(&ctx, cmd);
         }
         if let Some(toast) = &mut self.toast {
             match crate::toast::show(&ctx, toast, central.response.rect) {

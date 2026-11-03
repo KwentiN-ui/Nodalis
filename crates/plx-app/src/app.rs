@@ -173,9 +173,15 @@ struct Workbench {
     problems_tab: bool,
     /// The properties panel shows the checklist while no item is edited.
     checklist_shown: bool,
+    /// The checklist lying over the 3D view of a narrow window waits until it is asked for.
+    checklist_fold: crate::layout::Fold,
+    /// Whether the checklist was shown in the last frame, for its ribbon tile.
+    checklist_visible: bool,
     /// Whether the Analysis tab was asked for in the last frame, to notice when a solve
     /// brings it to the front.
     analysis_tab_before: bool,
+    /// `problems_tab` in the last frame: a folded output pane opens when it turns on.
+    problems_tab_before: bool,
     /// Open search for contact pairs.
     contact_search: Option<ContactSearchDialog>,
     /// The table of all contact regions is open.
@@ -332,7 +338,10 @@ impl AnalysisWindow {
                 toast: None,
                 problems_tab: false,
                 checklist_shown: true,
+                checklist_fold: Default::default(),
+                checklist_visible: false,
                 analysis_tab_before: false,
+                problems_tab_before: false,
                 contact_search: None,
                 contact_worksheet: false,
                 mesh_tool: None,
@@ -1178,6 +1187,9 @@ const IMPORT_FILTER: (&str, &[&str]) = (
     ],
 );
 
+/// The height of the output pane folded to its tabs.
+pub const OUTPUT_TABS: f32 = 26.0;
+
 /// File dialog filter of the CAD formats Gmsh imports.
 const GEOMETRY_FILTER: (&str, &[&str]) = (
     "Geometry (*.step, *.stp, *.iges, *.igs, *.brep)",
@@ -1244,6 +1256,35 @@ impl AnalysisWindow {
             }
         }
         self.workspace_ui(ui);
+    }
+
+    /// The properties panel: the editor that is open, or else the checklist.
+    fn properties_panel(&mut self, ui: &mut egui::Ui, workspace: crate::command::Workspace) {
+        let ctx = ui.ctx().clone();
+        let overlay = crate::layout::current(&ctx).overlay;
+        let folded = self.workbench.checklist_fold.folded(overlay);
+        self.workbench.checklist_visible = self.workbench.checklist_shown && !folded;
+        if self.workbench.one_docked() {
+            crate::dock::panel(ui, None);
+        } else if self.workbench.checklist_visible {
+            let steps = self.checklist();
+            let problems = self.workbench.problems().len();
+            let mut clicked = None;
+            let mut draw = |ui: &mut egui::Ui| {
+                clicked = crate::checklist::show(ui, &steps, problems);
+            };
+            if crate::dock::panel(ui, Some(("Checklist", &mut draw))) {
+                self.workbench.checklist_shown = false;
+            }
+            match clicked {
+                Some(crate::checklist::Clicked::Run(cmd)) => {
+                    self.ribbon.reveal(workspace, cmd);
+                    self.run_command(&ctx, cmd);
+                }
+                Some(crate::checklist::Clicked::Problems) => self.workbench.problems_tab = true,
+                None => {}
+            }
+        }
     }
 
     /// Shows the analysis inside the project window, below the project's app bar.
@@ -1362,53 +1403,53 @@ impl AnalysisWindow {
         let pane = egui::Frame::new()
             .fill(crate::style::window())
             .stroke(egui::Stroke::new(1.0, crate::style::border()));
-        egui::Panel::left("tree")
-            .resizable(true)
-            .default_size(280.0)
-            .size_range(160.0..=700.0)
-            .frame(egui::Frame::new().fill(crate::style::control()))
-            .show(ui, |ui| {
-                // The tree of the workspace; the segments of the app bar switch it.
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(6.0);
-                    ui.strong(workspace.title());
+        // Below the narrow width the tree folds away behind a button of the app bar.
+        if !crate::layout::tree_folded(&ctx) {
+            egui::Panel::left("tree")
+                .resizable(true)
+                .default_size(280.0)
+                .size_range(160.0..=700.0)
+                .frame(egui::Frame::new().fill(crate::style::control()))
+                .show(ui, |ui| {
+                    // The tree of the workspace; the segments of the app bar switch it.
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(6.0);
+                        ui.strong(workspace.title());
+                    });
+                    ui.add_space(2.0);
+                    pane.inner_margin(4).show(ui, |ui| {
+                        ui.set_min_size(ui.available_size());
+                        let view = self.workbench.tree_view;
+                        self.workbench.model_tree(ui, view);
+                    });
                 });
-                ui.add_space(2.0);
-                pane.inner_margin(4).show(ui, |ui| {
-                    ui.set_min_size(ui.available_size());
-                    let view = self.workbench.tree_view;
-                    self.workbench.model_tree(ui, view);
-                });
-            });
-        self.workbench.follow_selected_step();
-        if self.workbench.one_docked() {
-            crate::dock::panel(ui, None);
-        } else if self.workbench.checklist_shown {
-            let steps = self.checklist();
-            let problems = self.workbench.problems().len();
-            let mut clicked = None;
-            let mut draw = |ui: &mut egui::Ui| {
-                clicked = crate::checklist::show(ui, &steps, problems);
-            };
-            if crate::dock::panel(ui, Some(("Checklist", &mut draw))) {
-                self.workbench.checklist_shown = false;
-            }
-            match clicked {
-                Some(crate::checklist::Clicked::Run(cmd)) => {
-                    self.ribbon.reveal(workspace, cmd);
-                    self.run_command(&ctx, cmd);
-                }
-                Some(crate::checklist::Clicked::Problems) => self.workbench.problems_tab = true,
-                None => {}
-            }
         }
-        egui::Panel::bottom("output")
-            .resizable(true)
-            .default_size(170.0)
-            .size_range(70.0..=600.0)
-            .frame(egui::Frame::new().fill(crate::style::control()))
-            .show(ui, |ui| self.workbench.output(ui, pane));
+        self.workbench.follow_selected_step();
+        // The properties panel takes its room before the output pane; lying over the 3D view
+        // in a narrow window, it ends above the output pane.
+        let overlay = crate::layout::current(&ctx).overlay;
+        if !overlay {
+            self.properties_panel(ui, workspace);
+        }
+        // In a small window the output pane shows only its tabs until one is clicked.
+        if crate::layout::output_folded(&ctx) {
+            egui::Panel::bottom("output folded")
+                .resizable(false)
+                .exact_size(OUTPUT_TABS)
+                .frame(egui::Frame::new().fill(crate::style::control()))
+                .show(ui, |ui| self.workbench.output(ui, pane, true));
+        } else {
+            egui::Panel::bottom("output")
+                .resizable(true)
+                .default_size(170.0)
+                .size_range(70.0..=600.0)
+                .frame(egui::Frame::new().fill(crate::style::control()))
+                .show(ui, |ui| self.workbench.output(ui, pane, false));
+        }
+        if overlay {
+            self.properties_panel(ui, workspace);
+        }
         egui::CentralPanel::no_frame().show(ui, |ui| {
             self.workbench.viewport.selecting = self.workbench.picking()
                 || self.workbench.section_picks()
@@ -1457,6 +1498,20 @@ impl AnalysisWindow {
             }
         });
         let view = self.workbench.viewport.rect;
+        // The floating bar, at the bottom of what the properties panel leaves of the view;
+        // not in a screenshot.
+        if self.workbench.shown().is_some() && !self.workbench.screenshot.capturing(&ctx) {
+            let mut free = view;
+            if let Some(panel) = crate::dock::over_view(&ctx) {
+                free.max.x = free.max.x.min(panel.left());
+            }
+            let bar = crate::ribbon::VIEW_BAR;
+            let host = &mut commands::RibbonHost(self);
+            if let Some(cmd) = crate::ribbon::floating_bar(&ctx, "view", free, bar, host) {
+                self.ribbon.reveal(workspace, cmd);
+                self.run_command(&ctx, cmd);
+            }
+        }
         let workbench = &mut self.workbench;
         workbench
             .screenshot
@@ -1924,11 +1979,17 @@ impl Workbench {
 
     /// The pane below the 3D view: the messages, and in the Analysis tab the output of
     /// CalculiX, so the results stay in view while it runs.
-    fn output(&mut self, ui: &mut egui::Ui, pane: egui::Frame) {
+    fn output(&mut self, ui: &mut egui::Ui, pane: egui::Frame, folded: bool) {
+        let ctx = ui.ctx().clone();
         // The Analysis tab, brought to the front by a solve, covers the problems.
         if self.analysis_tab && !self.analysis_tab_before {
             self.problems_tab = false;
+            crate::layout::fold_output(&ctx, false);
         }
+        if self.problems_tab && !self.problems_tab_before {
+            crate::layout::fold_output(&ctx, false);
+        }
+        self.problems_tab_before = self.problems_tab;
         let problems = self.problems();
         let problems_title = format!("Problems ({})", problems.len());
         let selected = if self.problems_tab {
@@ -1939,12 +2000,29 @@ impl Workbench {
             2
         };
         let titles = [problems_title.as_str(), "Analysis", "Output"];
+        let top = ui.cursor().top();
         let (clicked, selected_tab) = crate::style::tabs(ui, &titles, selected);
+        let row = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
         if let Some(index) = clicked {
             self.problems_tab = index == 0;
             self.analysis_tab = index == 1;
+            if folded {
+                crate::layout::fold_output(&ctx, false);
+            }
         }
         self.analysis_tab_before = self.analysis_tab;
+        let double = ui.input(|i| {
+            i.pointer
+                .button_double_clicked(egui::PointerButton::Primary)
+                && i.pointer.interact_pos().is_some_and(|p| row.contains(p))
+        });
+        if double && !folded {
+            crate::layout::fold_output(&ctx, true);
+        }
+        if folded {
+            crate::style::open_tab(ui, selected_tab);
+            return;
+        }
         let mut event = MonitorEvent::None;
         let mut picked = None;
         pane.inner_margin(4).show(ui, |ui| {

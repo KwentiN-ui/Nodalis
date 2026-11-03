@@ -1,5 +1,5 @@
-//! Annotations drawn over the 3D view in PrePoMax's layout: legend top left, information block
-//! top right, scale bar bottom centre, axis triad bottom right, plus markers at the minimum and
+//! Annotations drawn over the 3D view: legend top left, axis triad top right with the
+//! information block left of it, scale bar bottom centre above the floating bar, plus markers at the minimum and
 //! maximum and a triad at the global origin. Legend, information block, scale bar and markers
 //! can be dragged within the view.
 
@@ -14,9 +14,14 @@ use crate::model::SECONDARY_HIGHLIGHT_COLOR;
 use crate::results::{Legend, format_legend_value, format_value};
 
 const MARGIN: f32 = 20.0;
+/// Length of the axes of the corner triad, and its distance from the corner.
+const TRIAD: f32 = 45.0;
+const TRIAD_INSET: f32 = 24.0;
 /// Legend band height; PrePoMax's boxes are a third wider than high.
 const BAND_HEIGHT: f32 = 18.0;
 const SCALE_BAR_WIDTH: f32 = 400.0;
+/// The room the floating bar in the bottom centre of the view takes, with its margins.
+const FLOATING_BAR: f32 = 62.0;
 const TRIAD_PICK_RADIUS: f32 = 9.0;
 const SCALE_BAR_HEIGHT: f32 = 8.0;
 const SCALE_BAR_FIELDS: usize = 5;
@@ -224,9 +229,9 @@ pub fn draw(
         );
     }
     if overlay.show_view_triad {
-        let corner = rect.right_bottom() - vec2(24.0 + 45.0, 24.0 + 45.0);
-        triad(&painter, camera, corner, 45.0, true);
-        clicked.axis = triad_buttons(ui, &painter, camera, corner, 45.0);
+        let corner = triad_center(rect);
+        triad(&painter, camera, corner, TRIAD, true);
+        clicked.axis = triad_buttons(ui, &painter, camera, corner, TRIAD);
     }
     for (marker, offset, id) in [
         (&overlay.minimum, &mut offsets.minimum, "minimum label"),
@@ -271,7 +276,20 @@ pub fn draw(
         });
     }
     if !overlay.status.is_empty() {
-        draw_status(ui, &painter, rect, &overlay.status, &mut offsets.status);
+        // Left of the corner triad, which takes the top right corner.
+        let room = if overlay.show_view_triad {
+            2.0 * (TRIAD_INSET + TRIAD) - MARGIN
+        } else {
+            0.0
+        };
+        draw_status(
+            ui,
+            &painter,
+            rect,
+            room,
+            &overlay.status,
+            &mut offsets.status,
+        );
     }
     clicked
 }
@@ -476,8 +494,20 @@ fn draw_legend(
     response
 }
 
-/// Framed text block, by default in the top right corner.
-fn draw_status(ui: &Ui, painter: &Painter, rect: Rect, lines: &[String], offset: &mut Vec2) {
+/// The centre of the corner triad, in the top right corner of the view.
+pub fn triad_center(rect: Rect) -> Pos2 {
+    rect.right_top() + vec2(-(TRIAD_INSET + TRIAD), TRIAD_INSET + TRIAD)
+}
+
+/// Framed text block, by default in the top right corner, `room` points left of it.
+fn draw_status(
+    ui: &Ui,
+    painter: &Painter,
+    rect: Rect,
+    room: f32,
+    lines: &[String],
+    offset: &mut Vec2,
+) {
     let galleys: Vec<_> = lines
         .iter()
         .map(|l| painter.layout_no_wrap(l.clone(), font(), crate::style::viewport_text()))
@@ -486,7 +516,7 @@ fn draw_status(ui: &Ui, painter: &Painter, rect: Rect, lines: &[String], offset:
     let line_height = galleys.first().map_or(0.0, |g| g.size().y) + 2.0;
     let size = vec2(width, line_height * galleys.len() as f32)
         + vec2(2.0 * STATUS_PADDING, STATUS_PADDING);
-    let default = pos2(rect.right() - MARGIN - size.x, rect.top() + MARGIN);
+    let default = pos2(rect.right() - MARGIN - room - size.x, rect.top() + MARGIN);
     let (frame, _) = drag_label(ui, rect, "status", default, size, offset, Sense::drag());
     painter.rect_stroke(
         frame,
@@ -505,7 +535,7 @@ fn draw_status(ui: &Ui, painter: &Painter, rect: Rect, lines: &[String], offset:
 }
 
 /// Bar of five alternating fields whose total length is a round number of model units, by
-/// default centred at the bottom; dragging it moves the bar together with its labels.
+/// by default centred at the bottom above the floating bar; dragging it moves the bar together with its labels.
 fn draw_scale_bar(
     ui: &Ui,
     painter: &Painter,
@@ -515,7 +545,7 @@ fn draw_scale_bar(
     offset: &mut Vec2,
 ) {
     let world_per_point = camera.pixel_size(rect.width(), rect.height()) * factor;
-    let Some((length, width)) = scale_bar_length(world_per_point) else {
+    let Some((length, width)) = scale_bar_length(world_per_point, SCALE_BAR_WIDTH) else {
         return;
     };
     let labels: Vec<_> = (0..=SCALE_BAR_FIELDS)
@@ -538,9 +568,10 @@ fn draw_scale_bar(
         left_overhang + width + right_overhang,
         label_height + 3.0 + SCALE_BAR_HEIGHT,
     );
+    // Above the floating bar in the bottom centre.
     let default = pos2(
         rect.center().x - width * 0.5 - left_overhang,
-        rect.bottom() - MARGIN - size.y,
+        rect.bottom() - FLOATING_BAR - size.y,
     );
     let (frame, _) = drag_label(ui, rect, "scale bar", default, size, offset, Sense::drag());
     let left = frame.left() + left_overhang;
@@ -570,10 +601,10 @@ fn draw_scale_bar(
     }
 }
 
-/// Round length near [`SCALE_BAR_WIDTH`] points (steps of 0.2 of a power of ten) and its width
+/// Round length near `room` points (steps of 0.2 of a power of ten) and its width
 /// in points.
-pub fn scale_bar_length(world_per_point: f32) -> Option<(f32, f32)> {
-    let nominal = SCALE_BAR_WIDTH * world_per_point;
+pub fn scale_bar_length(world_per_point: f32, room: f32) -> Option<(f32, f32)> {
+    let nominal = room * world_per_point;
     if !(nominal.is_finite() && nominal > 0.0) {
         return None;
     }
@@ -847,9 +878,9 @@ mod tests {
     #[test]
     fn scale_bar_rounds_to_fifths_of_a_decade() {
         // 400 points at 0.37 units each are 148 units: rounded to 140.
-        let (length, width) = scale_bar_length(0.37).unwrap();
+        let (length, width) = scale_bar_length(0.37, SCALE_BAR_WIDTH).unwrap();
         assert!((length - 140.0).abs() < 1e-3, "{length}");
         assert!((width - 140.0 / 0.37).abs() < 1e-2);
-        assert!(scale_bar_length(0.0).is_none());
+        assert!(scale_bar_length(0.0, SCALE_BAR_WIDTH).is_none());
     }
 }
