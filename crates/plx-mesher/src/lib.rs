@@ -1116,7 +1116,11 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
             return extrude::extrude_part_mesh(gmsh, geometry, part, volume, extrude)?
                 .map_err(GmshError::Other);
         }
-        let options = MeshOptions::of_part(geometry, part);
+        let mut options = MeshOptions::of_part(geometry, part);
+        // Recombined boundary faces would make Gmsh fill the solid with pyramids next to
+        // them, which neither the solver nor the tetrahedra read here take: solids get
+        // triangles on their faces whatever the quad-dominated option says.
+        options.quads = false;
         options.apply(gmsh)?;
         let faces: BTreeSet<i32> = gmsh.adjacencies(3, volume)?.1.into_iter().collect();
         local_sizes(gmsh, geometry, &faces)?;
@@ -1531,7 +1535,8 @@ struct MeshOptions {
     straight_midside_nodes: bool,
     netgen: bool,
     algorithms: (Algorithm2d, Algorithm3d),
-    /// Recombines triangles into quadrilaterals where Gmsh can (faces only).
+    /// Recombines triangles into quadrilaterals where Gmsh can; for faces only, never for
+    /// the boundary of a solid meshed with tetrahedra.
     quads: bool,
 }
 

@@ -3226,7 +3226,11 @@ impl Workbench {
             && let Some(geometry) = &model.geometry
         {
             let units = model.fe.properties.units;
-            self.mesh_setup = Some(MeshSetupWindow::new(&geometry.meshing, units));
+            self.mesh_setup = Some(MeshSetupWindow::new(
+                &geometry.meshing,
+                units,
+                self.geometry.as_ref(),
+            ));
         }
     }
 

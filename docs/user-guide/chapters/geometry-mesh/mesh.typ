@@ -102,12 +102,16 @@ values and meshes at once.
     straight edge between the corner nodes (only with second order).],
   [Optimize mesh (Netgen)], [Improves the element quality after meshing (default on).],
   [Quad-dominated surface mesh], [Creates mainly quadrilaterals on faces: plane elements of 2D
-    models and shells of 3D models.],
+    models and shells of 3D models. Solids are not affected: their tetrahedra need triangles on
+    the faces. The option is greyed out when the parameters reach only solids.],
   [Hexahedra where possible], [Meshes every solid that is a straight extrusion of one of its
     faces, as an Extrude Mesh item with its defaults would (@extrude-mesh), or a body of
     revolution with hexahedra (@revolve-mesh); the other solids keep tetrahedra (default
     off).],
 )
+
+#screenshot("quad-dominated-solids.png", [Quad-dominated surface mesh greyed out for a geometry of
+  solids only])
 
 === Mesh setup items
 
