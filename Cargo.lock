@@ -3444,6 +3444,7 @@ dependencies = [
  "plx-render",
  "plx-results",
  "plx-solve",
+ "plxs-core",
  "plxs-session",
  "png",
  "rfd",
@@ -3469,6 +3470,7 @@ dependencies = [
  "plx-model",
  "plx-results",
  "plxs-core",
+ "plxs-input",
  "plxs-output",
  "plxs-session",
  "ron",
@@ -3543,6 +3545,7 @@ version = "0.2.0"
 dependencies = [
  "plx-results",
  "plxs-core",
+ "plxs-input",
  "plxs-session",
  "rayon",
  "windows-sys 0.61.2",
@@ -3613,6 +3616,7 @@ dependencies = [
  "plx-io",
  "plx-mesh",
  "plxs-core",
+ "serde_json",
 ]
 
 [[package]]

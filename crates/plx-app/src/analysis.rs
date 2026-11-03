@@ -196,14 +196,52 @@ pub fn stage_global_results(
     Ok(())
 }
 
+/// The lowered analysis for the solver, with its input text for reference.
+pub fn prepare(lowered: plx_io::inp::Lowered) -> plx_solve::Prepared {
+    plx_solve::Prepared {
+        text: lowered.text(),
+        analysis: lowered.analysis,
+        warnings: lowered.warnings,
+    }
+}
+
+/// Initial temperatures taken from the results of another analysis.
+#[derive(Debug)]
+pub struct InitialTemperatures {
+    /// Where they come from, in words.
+    pub source: String,
+    /// The temperature of each node.
+    pub values: Vec<(u32, f64)>,
+}
+
+impl InitialTemperatures {
+    /// Sets them as the initial conditions of `analysis`, after those of the model. Every
+    /// node has to be one of the model's.
+    pub fn apply(&self, analysis: &mut plxs_core::Analysis) -> Result<(), String> {
+        let model = &mut analysis.model;
+        if let Some(&(node, _)) =
+            (self.values.iter()).find(|(n, _)| model.nodes.index(*n).is_none())
+        {
+            return Err(format!(
+                "Initial temperatures not set: node {node} of {} is not in the model.",
+                self.source
+            ));
+        }
+        let values = self.values.iter();
+        (model.initial.temperatures)
+            .extend(values.map(|&(node, value)| (plxs_core::mesh::NodeRef::Node(node), value)));
+        Ok(())
+    }
+}
+
 /// Prepares what the model takes from the results of other analyses: the stored eigenmodes
-/// are copied to `<name>.eig`, where CalculiX reads them; the initial temperatures are read
-/// from their results file and returned as the keyword that sets them.
+/// are copied to `<name>.eig`, where the solver reads them; the initial temperatures are
+/// read from their results file.
 pub fn stage_linked_results(
     fe: &plx_model::FeModel,
     dir: &std::path::Path,
     name: &str,
-) -> Result<Option<String>, String> {
+) -> Result<Option<InitialTemperatures>, String> {
     if let Some(modes) = &fe.properties.stored_modes {
         if !modes.is_file() {
             return Err(format!(
@@ -232,27 +270,12 @@ pub fn stage_linked_results(
                 file.display()
             )
         })?;
-    let mut keyword = format!(
-        "** Initial temperatures: step {step} of {}\n*Initial conditions, Type=Temperature\n",
-        file.display()
-    );
-    for (node, value) in results.mesh.node_ids().iter().zip(&temperatures.values) {
-        keyword.push_str(&format!("{node}, {value:e}\n"));
-    }
-    Ok(Some(keyword))
-}
-
-/// The input file with `keyword` inserted after the model definition, before the first step.
-fn before_first_step(input: &str, keyword: &str) -> String {
-    let at = (input.match_indices('\n'))
-        .map(|(i, _)| i + 1)
-        .find(|&i| {
-            input[i..]
-                .get(..5)
-                .is_some_and(|k| k.eq_ignore_ascii_case("*step"))
-        })
-        .unwrap_or(input.len());
-    format!("{}{keyword}{}", &input[..at], &input[at..])
+    Ok(Some(InitialTemperatures {
+        source: format!("step {step} of {}", file.display()),
+        values: (results.mesh.node_ids().iter().copied())
+            .zip(temperatures.values.iter().map(|&t| f64::from(t)))
+            .collect(),
+    }))
 }
 
 impl Analysis {
@@ -285,18 +308,19 @@ impl Analysis {
         // The model check reads the whole input with its steps: it checks every step's
         // supports.
         let dependent = &continuation.dependent_steps;
-        let input = plx_io::inp::write_inp_with_sets_of(&model.mesh, &fe, &heading, dependent)
-            .map_err(|e| format!("Input file not written: {e}"))?;
-        let input = match &initial {
-            Some(keyword) => before_first_step(&input, keyword),
-            None => input,
-        };
-        let overlaps = plx_io::inp::resolved_overlaps(&input);
+        let mut lowered =
+            plx_io::inp::lower_with_sets_unvalidated(&model.mesh, &fe, &heading, dependent)
+                .map_err(|e| format!("Analysis not set up: {e}"))?;
+        if let Some(initial) = &initial {
+            initial.apply(&mut lowered.analysis)?;
+        }
+        let overlaps = std::mem::take(&mut lowered.resolved_overlaps);
+        let prepared = prepare(lowered);
         let copied = copy_result_files(&fe, work_dir);
         let job = if check_model {
-            Run::check(solver.threads, work_dir, &job_name, &input)
+            Run::check_analysis(solver.threads, work_dir, &job_name, prepared)
         } else {
-            Run::start(solver.threads, work_dir, &job_name, &input)
+            Run::start_analysis(solver.threads, work_dir, &job_name, prepared)
         }
         .map_err(|e| format!("Solver not started: {e}"))?;
         let mut output = vec![format!(
@@ -309,6 +333,9 @@ impl Analysis {
             work_dir.display()
         )];
         output.extend(copied);
+        if let Some(initial) = &initial {
+            output.push(format!("Initial temperatures: {}", initial.source));
+        }
         // Constraints the input file writer had to change so that they do not bind a degree of
         // freedom twice.
         output.extend(
@@ -704,7 +731,10 @@ mod tests {
         };
         solve_as(&source, &dir.join("Source"), "Source", &continuation);
         let source_inp = std::fs::read_to_string(dir.join("Source/Source.inp")).unwrap();
-        assert!(source_inp.contains("Hold"), "{source_inp}");
+        assert!(
+            source_inp.to_ascii_uppercase().contains("HOLD"),
+            "{source_inp}"
+        );
         assert_eq!(source_inp.matches("*Step").count(), 2);
         let continuation = crate::links::Continuation {
             upstream: vec![(dir.join("Source"), "Source".into())],
@@ -801,21 +831,20 @@ mod tests {
         plx_io::solver::export_calculix(&solved, &dir.join("Thermal/Thermal.frd")).unwrap();
         let mut fe = cubes().fe;
         fe.properties.initial_temperatures = Some((dir.join("Thermal/Thermal.frd"), 1));
-        let keyword = stage_linked_results(&fe, &dir, "Start").unwrap().unwrap();
-        let lines: Vec<&str> = keyword.lines().collect();
-        assert_eq!(lines[1], "*Initial conditions, Type=Temperature");
-        assert_eq!(lines.len(), 2 + 16);
-        let value = |node: &str| -> f64 {
-            let line = lines
-                .iter()
-                .find(|l| l.starts_with(&format!("{node}, ")))
-                .unwrap();
-            line.split(", ").nth(1).unwrap().parse().unwrap()
-        };
-        assert!((value("1") - 100.0).abs() < 1e-3 && (value("16") - 20.0).abs() < 1e-3);
-        assert!((value("8") - 100.0 + 80.0 / 3.0).abs() < 1e-2, "{keyword}");
-        let input = before_first_step("*Node\n1, 0, 0, 0\n*Step\n*Static\n", &keyword);
-        assert!(input.find("*Initial").unwrap() < input.find("*Step").unwrap());
+        let initial = stage_linked_results(&fe, &dir, "Start").unwrap().unwrap();
+        assert_eq!(initial.values.len(), 16);
+        let value = |node: u32| initial.values.iter().find(|(n, _)| *n == node).unwrap().1;
+        assert!((value(1) - 100.0).abs() < 1e-3 && (value(16) - 20.0).abs() < 1e-3);
+        assert!((value(8) - 100.0 + 80.0 / 3.0).abs() < 1e-2, "{initial:?}");
+        let mut lowered = plx_io::inp::lower_unvalidated(&cubes().mesh, &fe, "Start").unwrap();
+        initial.apply(&mut lowered.analysis).unwrap();
+        let temperatures = &lowered.analysis.model.initial.temperatures;
+        assert_eq!(temperatures.len(), 16);
+        assert!(
+            lowered
+                .text()
+                .contains("*Initial conditions, Type=Temperature")
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

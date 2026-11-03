@@ -639,10 +639,11 @@ fn run_speed(
     let label = format!("{} rpm", numeric::format_physical(rpm(speed)));
     let fe = with_speed(&input.fe, speed);
     let heading = format!("Nodalis Campbell sweep: {label}");
-    let text = plx_io::inp::write_inp(&input.mesh, &fe, &heading)
-        .map_err(|e| format!("{label}: input file not written: {e}"))?;
+    let lowered = plx_io::inp::lower_unvalidated(&input.mesh, &fe, &heading)
+        .map_err(|e| format!("{label}: analysis not set up: {e}"))?;
     let name = job_name(index);
-    let mut job = Run::start(input.threads, &input.work_dir, &name, &text)
+    let prepared = crate::analysis::prepare(lowered);
+    let mut job = Run::start_analysis(input.threads, &input.work_dir, &name, prepared)
         .map_err(|e| format!("{label}: solver not started: {e}"))?;
     let status = loop {
         let status = job.poll();
