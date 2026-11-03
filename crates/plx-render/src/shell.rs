@@ -9,7 +9,8 @@ use plx_mesh::PartSkin;
 
 use crate::contour::NO_VALUE;
 use crate::fe::{
-    EDGE_COLOR, FEATURE_EDGE_OPACITY, STRAIGHT_TOLERANCE, face_triangles, smooth_vertex_normals,
+    EDGE_COLOR, FEATURE_EDGE_OPACITY, STRAIGHT_TOLERANCE, centre_scalar, face_triangles,
+    has_centre, quad8_centre, smooth_vertex_normals,
 };
 use crate::mesh::{NodeBlend, RenderMesh, Vertex};
 
@@ -105,6 +106,26 @@ pub fn thick_shell_mesh(
                     scalar: scalar(node),
                 });
                 render.origins.push(NodeBlend::at(node));
+            }
+            if has_centre(face) {
+                let normal = (render.vertices[base as usize..].iter())
+                    .map(|v| glam::Vec3::from(v.normal))
+                    .sum::<glam::Vec3>()
+                    .normalize_or_zero();
+                let nodes = face.corners.iter().chain(&face.mids);
+                render.vertices.push(Vertex {
+                    position: render_position(quad8_centre(
+                        positions[index].iter().map(|p| p[side]),
+                    )),
+                    normal: normal.to_array(),
+                    color,
+                    scalar: centre_scalar(nodes.map(|&n| scalar(n))),
+                });
+                render.origins.push(NodeBlend {
+                    a: face.mids[0] as u32,
+                    b: face.mids[2] as u32,
+                    t: 0.5,
+                });
             }
             let triangles = face_triangles(face);
             if side == 0 {
