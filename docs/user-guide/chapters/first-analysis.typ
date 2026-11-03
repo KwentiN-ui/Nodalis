@@ -31,6 +31,7 @@ end and pulled at the other. Each step links to the chapter with the details.
   #ui("MISES") in the tree to see the von Mises stress around the hole (@results).
 + *Save the project.* The save button of the app bar or #key("Ctrl+S") writes a `.ndl` file with all analyses of
   the project: geometry, mesh, model and results. The schematic of the Project workspace now shows the analysis
-  as up to date; change a load, and its solution turns out of date until you solve again.
+  as up to date; change a load, and its solution turns out of date until you solve again. Renaming or hiding
+  an item, or adding a result path, changes nothing the solver computes, so the results stay up to date.
 
 #screenshot("main-window.png", [The plate with support (green) and load (blue arrow) in the FE Model workspace])
