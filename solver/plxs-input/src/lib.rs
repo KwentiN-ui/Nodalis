@@ -27,7 +27,7 @@ use std::path::Path;
 use plxs_core::{Analysis, Error};
 
 pub use lexer::{Keyword, Line, split_fields};
-pub use render::{render, unwritable_names};
+pub use render::{render, render_with_parts, unwritable_names};
 
 /// What reading an input file produces: the analysis and what the reader noticed but did
 /// not stop for (`*WARNING` lines on the command line).

@@ -704,7 +704,10 @@ mod tests {
         };
         solve_as(&source, &dir.join("Source"), "Source", &continuation);
         let source_inp = std::fs::read_to_string(dir.join("Source/Source.inp")).unwrap();
-        assert!(source_inp.contains("Hold"), "{source_inp}");
+        assert!(
+            source_inp.to_ascii_uppercase().contains("HOLD"),
+            "{source_inp}"
+        );
         assert_eq!(source_inp.matches("*Step").count(), 2);
         let continuation = crate::links::Continuation {
             upstream: vec![(dir.join("Source"), "Source".into())],

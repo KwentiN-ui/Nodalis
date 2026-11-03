@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use plx_mesh::CadEntity;
@@ -11,7 +12,111 @@ use plx_model::{
 
 use super::*;
 use crate::frd::{FrdImport, read_frd};
+use crate::inp::legacy_write::{self, Keyword, KeywordKind, model_keywords};
 use crate::inp::{read_inp, read_inp_str};
+
+/// The text the writer wrote before the lowering, after checking that the lowering gives
+/// the analysis the solver reads of that text: every test of the text checks the lowering
+/// of its model too.
+fn write_inp(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<String, WriteError> {
+    let text = legacy_write::write_inp(mesh, model, heading);
+    check_lowering(&text, lower_unvalidated(mesh, model, heading));
+    text
+}
+
+fn write_deformed_mesh_inp(
+    mesh: &FeMesh,
+    displacements: &[[f32; 3]],
+    scale: f64,
+    heading: &str,
+) -> Result<String, WriteError> {
+    let text = legacy_write::write_deformed_mesh_inp(mesh, displacements, scale, heading);
+    let new = super::write_deformed_mesh_inp(mesh, displacements, scale, heading);
+    assert_eq!(text.is_ok(), new.is_ok());
+    text
+}
+
+/// Checks that the lowering `lowered` gives what the solver reads of the input file
+/// `text`, or fails as it does.
+fn check_lowering(text: &Result<String, WriteError>, lowered: Result<Lowered, WriteError>) {
+    let text = match text {
+        Ok(text) => text,
+        Err(error) => {
+            assert_eq!(
+                lowered.err().as_ref(),
+                Some(error),
+                "the lowering fails alike"
+            );
+            return;
+        }
+    };
+    let read = plxs_input::read_inp_str(text, None);
+    let lowered = lowered.map_err(LowerError::from).and_then(validated);
+    match (read, lowered) {
+        (Ok(read), Ok(lowered)) => {
+            let read = serde_json::to_value(&read.analysis).unwrap();
+            let lowered = serde_json::to_value(&lowered.analysis).unwrap();
+            if let Some(difference) = first_difference("", &read, &lowered) {
+                panic!("the lowering differs from the input file read: {difference}\n{text}");
+            }
+        }
+        (Err(_), Err(_)) => {}
+        (Ok(_), Err(error)) => {
+            panic!("the lowering fails ({error}) where the input file reads\n{text}")
+        }
+        (Err(errors), Ok(_)) => panic!(
+            "the input file does not read ({}) but the lowering does\n{text}",
+            errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+    }
+}
+
+/// The path of the first difference between two values and the two there; numbers differ
+/// beyond the 9 digits of the input file.
+fn first_difference(path: &str, a: &serde_json::Value, b: &serde_json::Value) -> Option<String> {
+    use serde_json::Value;
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => {
+            let (x, y) = (x.as_f64().unwrap(), y.as_f64().unwrap());
+            let close = (x - y).abs() <= 2e-8 * x.abs().max(y.abs()) + 1e-300;
+            (!close).then(|| format!("{path}: {x} vs {y}"))
+        }
+        (Value::Array(x), Value::Array(y)) => {
+            if x.len() != y.len() {
+                return Some(format!(
+                    "{path}: {} vs {} entries: {} vs {}",
+                    x.len(),
+                    y.len(),
+                    short(a),
+                    short(b)
+                ));
+            }
+            (x.iter().zip(y).enumerate())
+                .find_map(|(i, (x, y))| first_difference(&format!("{path}[{i}]"), x, y))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            let keys: BTreeSet<&String> = x.keys().chain(y.keys()).collect();
+            keys.into_iter().find_map(|k| match (x.get(k), y.get(k)) {
+                (Some(x), Some(y)) => first_difference(&format!("{path}.{k}"), x, y),
+                _ => Some(format!("{path}.{k}: only on one side")),
+            })
+        }
+        _ => (a != b).then(|| format!("{path}: {} vs {}", short(a), short(b))),
+    }
+}
+
+fn short(value: &serde_json::Value) -> String {
+    let text = value.to_string();
+    if text.len() > 400 {
+        format!("{}...", &text[..400])
+    } else {
+        text
+    }
+}
 
 fn testdata(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -3,6 +3,8 @@
 //! The reader currently takes the mesh: nodes, elements, node and element sets, and surfaces.
 //! Every other keyword is skipped and reported in [`InpImport::skipped_keywords`].
 
+#[cfg(test)]
+mod legacy_write;
 mod lines;
 mod write;
 
@@ -17,8 +19,8 @@ use plx_model::{
 };
 
 pub use write::{
-    Keyword, KeywordKind, SHORTENED_NAME, WriteError, model_keywords, resolved_overlaps,
-    write_deformed_mesh_inp, write_inp, write_inp_with_sets_of, write_keywords,
+    LowerError, Lowered, SHORTENED_NAME, WriteError, lower, lower_with_sets_of, resolved_overlaps,
+    write_deformed_mesh_inp, write_inp, write_inp_with_sets_of,
 };
 
 use lines::{Keyword as KeywordLine, SourceLine, fields, is_keyword, parse_f64};

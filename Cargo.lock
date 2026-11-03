@@ -3469,10 +3469,12 @@ dependencies = [
  "plx-model",
  "plx-results",
  "plxs-core",
+ "plxs-input",
  "plxs-output",
  "plxs-session",
  "ron",
  "serde",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 

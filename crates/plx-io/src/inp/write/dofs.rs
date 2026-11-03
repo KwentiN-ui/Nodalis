@@ -160,7 +160,7 @@ impl Dofs {
 }
 
 /// The start of the comment lines that list the changes.
-const PREFIX: &str = "** Overlapping constraints resolved: ";
+pub(super) const PREFIX: &str = "** Overlapping constraints resolved: ";
 
 /// What was changed for an item, in words.
 fn describe(changes: &Changes) -> String {

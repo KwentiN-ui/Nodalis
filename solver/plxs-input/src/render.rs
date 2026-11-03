@@ -11,7 +11,7 @@
 //! The keywords are spelled as the CalculiX manual (2.23) documents them, so that the file
 //! also runs in CalculiX for the features both have.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use plxs_core::constraints::{RigidBodyNodes, TransformKind};
@@ -29,6 +29,13 @@ use plxs_core::{Analysis, Model, Step};
 
 /// The text of an input file that reads back as `analysis`.
 pub fn render(analysis: &Analysis) -> String {
+    render_with_parts(analysis, &[])
+}
+
+/// [`render`] with the elements of the element sets `parts` in element blocks of those
+/// names (`*ELEMENT, ELSET=`), as far as the order of the elements allows: a mesh reader
+/// makes parts of them. The names are written as given, in any case.
+pub fn render_with_parts(analysis: &Analysis, parts: &[String]) -> String {
     let mut out = Out::default();
     let model = &analysis.model;
     heading(&mut out, model);
@@ -40,7 +47,7 @@ pub fn render(analysis: &Analysis) -> String {
         out.keyword(&header);
         out.list(submodel.node_sets.iter().map(String::as_str));
     }
-    mesh(&mut out, model);
+    mesh(&mut out, model, parts);
     materials(&mut out, model);
     sections(&mut out, model);
     constraints(&mut out, model);
@@ -131,7 +138,7 @@ fn heading(out: &mut Out, model: &Model) {
     }
 }
 
-fn mesh(out: &mut Out, model: &Model) {
+fn mesh(out: &mut Out, model: &Model, parts: &[String]) {
     if !model.nodes.is_empty() {
         out.keyword("*Node");
         for (id, [x, y, z]) in model.nodes.iter() {
@@ -144,27 +151,70 @@ fn mesh(out: &mut Out, model: &Model) {
             );
         }
     }
+    // An element block takes the name of the part whose members go on with its elements;
+    // what such blocks leave of a set follows as `*ELSET`.
+    let sets = &model.sets.element_sets;
+    let part_name = |set: &str| parts.iter().find(|p| plxs_core::normalized_name(p) == set);
+    let mut covered: BTreeMap<&str, usize> = sets.keys().map(|k| (k.as_str(), 0)).collect();
     let mut user_element = false;
-    let mut current = None;
-    for element in &model.elements {
-        if current != Some(element.kind) {
-            if element.kind == ElementType::U1 && !std::mem::replace(&mut user_element, true) {
-                out.keyword("*User element, Type=U1, Nodes=2, Integration points=2, Maxdof=6");
+    let elements = &model.elements;
+    let mut i = 0;
+    while i < elements.len() {
+        let kind = elements[i].kind;
+        let run = |ids: &[u32]| {
+            (ids.iter().zip(&elements[i..]))
+                .take_while(|(id, e)| **id == e.id && e.kind == kind)
+                .count()
+        };
+        let mut best: Option<(&str, usize)> = None;
+        for (name, ids) in sets.iter().filter(|(name, _)| part_name(name).is_some()) {
+            let n = run(&ids[covered[name.as_str()]..]);
+            if n > 0 && best.is_none_or(|(_, m)| n > m) {
+                best = Some((name, n));
             }
-            out.keyword(&format!("*Element, Type={}", element.kind));
-            current = Some(element.kind);
         }
-        let mut entries = vec![element.id.to_string()];
-        entries.extend(element.nodes.iter().map(u32::to_string));
-        out.entries(&entries, 16);
+        let (set, count) = match best {
+            Some((set, n)) => (Some(set), n),
+            None => {
+                // Up to the next element a set goes on with.
+                let heads: BTreeSet<u32> = (sets.iter())
+                    .filter(|(name, _)| part_name(name).is_some())
+                    .filter_map(|(name, ids)| ids.get(covered[name.as_str()]).copied())
+                    .collect();
+                let n = (elements[i..].iter().enumerate())
+                    .take_while(|(k, e)| e.kind == kind && (*k == 0 || !heads.contains(&e.id)))
+                    .count();
+                (None, n)
+            }
+        };
+        if kind == ElementType::U1 && !std::mem::replace(&mut user_element, true) {
+            out.keyword("*User element, Type=U1, Nodes=2, Integration points=2, Maxdof=6");
+        }
+        match set {
+            Some(set) => {
+                let written = part_name(set).map_or(set, String::as_str);
+                out.keyword(&format!("*Element, Type={kind}, Elset={written}"));
+                *covered.get_mut(set).unwrap() += count;
+            }
+            None => out.keyword(&format!("*Element, Type={kind}")),
+        }
+        for element in &elements[i..i + count] {
+            let mut entries = vec![element.id.to_string()];
+            entries.extend(element.nodes.iter().map(u32::to_string));
+            out.entries(&entries, 16);
+        }
+        i += count;
     }
     for (name, ids) in &model.sets.node_sets {
         out.keyword(&format!("*Nset, Nset={name}"));
         out.ids(ids);
     }
-    for (name, ids) in &model.sets.element_sets {
-        out.keyword(&format!("*Elset, Elset={name}"));
-        out.ids(ids);
+    for (name, ids) in sets {
+        let rest = &ids[covered[name.as_str()]..];
+        if ids.is_empty() || !rest.is_empty() {
+            out.keyword(&format!("*Elset, Elset={name}"));
+            out.ids(rest);
+        }
     }
     for (name, surface) in &model.sets.surfaces {
         match surface {
