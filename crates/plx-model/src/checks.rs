@@ -36,6 +36,8 @@ pub enum Problem {
     /// a membrane section on quadratic elements, or whose values CalculiX rejects.
     InvalidSection,
     NoSection,
+    /// Two sections whose regions share elements.
+    OverlappingSections,
     NoElastic,
     NoDensity,
     /// A boundary condition, load or history output on a reference point that no active
@@ -209,6 +211,7 @@ impl Problem {
             Problem::MissingReference => "Missing reference",
             Problem::InvalidSection => "Section does not fit its elements",
             Problem::NoSection => "Elements without material",
+            Problem::OverlappingSections => "Part in more than one section",
             Problem::NoElastic => "Material without elasticity",
             Problem::NoDensity => "Material without density",
             Problem::NoConductivity => "Material without conductivity",
@@ -291,6 +294,12 @@ impl Problem {
             Problem::NoSection => {
                 "CalculiX needs a material for every element. Elements that no section \
                  covers abort the run with \"no material was assigned to element\"."
+            }
+            Problem::OverlappingSections => {
+                "An element may belong to one section only. When the regions of two sections \
+                 share elements (for example the same part in two sections), the element \
+                 would get two materials and two section definitions, and only one of them \
+                 can apply."
             }
             Problem::NoElastic => {
                 "A section uses this material, but it has no Young's modulus and no \
@@ -661,6 +670,10 @@ impl Problem {
             Problem::NoSection => {
                 "Under Sections create a section for the part or extend an existing one \
                  to it."
+            }
+            Problem::OverlappingSections => {
+                "Remove the part from all but one section, or split the part with element \
+                 sets so that every element is in exactly one section."
             }
             Problem::NoElastic => {
                 "Edit the material and enter Young's modulus and Poisson's ratio, or \
@@ -1840,6 +1853,31 @@ impl FeModel {
     }
 
     fn check_sections(&self, mesh: &FeMesh, findings: &mut Vec<Finding>) {
+        // Every element may be in one section only; the later section is flagged.
+        let mut owner: std::collections::HashMap<ElementId, usize> = Default::default();
+        let mut clashes: Vec<(usize, usize, usize)> = Vec::new();
+        for (j, section) in self.sections.iter().enumerate() {
+            let mut with: std::collections::BTreeMap<usize, usize> = Default::default();
+            for e in section.region.elements(mesh) {
+                match owner.get(&e) {
+                    Some(&i) => *with.entry(i).or_default() += 1,
+                    None => {
+                        owner.insert(e, j);
+                    }
+                }
+            }
+            clashes.extend(with.into_iter().map(|(i, n)| (j, i, n)));
+        }
+        for (j, i, n) in clashes {
+            findings.push(Finding::new(
+                ModelItem::Section(j),
+                Problem::OverlappingSections,
+                format!(
+                    "{} shares {n} elements with {}",
+                    self.sections[j].name, self.sections[i].name
+                ),
+            ));
+        }
         let whole: HashSet<&str> = (self.sections.iter())
             .filter_map(|s| match &s.region {
                 crate::Region::Parts(names) => Some(names.iter().map(String::as_str)),
@@ -3963,6 +4001,25 @@ mod tests {
             problems(&check(&model, &mesh)),
             [(ModelItem::Material(0), Problem::NoDensity)]
         );
+    }
+
+    #[test]
+    fn a_part_in_two_sections_is_an_error() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        let mut second = model.sections[0].clone();
+        second.name = "Section-2".into();
+        model.sections.push(second);
+        let found = check(&model, &mesh);
+        assert_eq!(
+            problems(&found),
+            [(ModelItem::Section(1), Problem::OverlappingSections)]
+        );
+        assert_eq!(found[0].severity(), Severity::Error);
+        // Disjoint parts are fine.
+        model.sections[0].region = Region::Parts(vec!["PART-1".into()]);
+        model.sections[1].region = Region::Parts(vec!["PART-2".into()]);
+        assert_eq!(problems(&check(&model, &mesh)), []);
     }
 
     #[test]
