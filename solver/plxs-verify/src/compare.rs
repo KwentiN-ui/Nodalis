@@ -160,8 +160,8 @@ pub fn compare_frd(reference: &FrdImport, candidate: &FrdImport, class: Class) -
 }
 
 /// [`compare_frd`] leaving out the field components named in `undetermined`
-/// (`"DISP U1"`) and the values of whole fields named there (`"FORC"`, a fixture's
-/// documented deviations; such a field may also be missing in the candidate).
+/// (`"DISP U1"`) and the values of whole fields named there (`"FORC"`; such a field may
+/// also be missing in the candidate).
 pub fn compare_frd_except(
     reference: &FrdImport,
     candidate: &FrdImport,
@@ -1159,8 +1159,7 @@ pub fn compare_dat(
 }
 
 /// [`compare_dat`] leaving out the history components named in `undetermined` as
-/// `"<FIELD> <COMPONENT>"` (`"GRADIENT_LENGTH STRAINENERGY"`, a fixture's documented
-/// deviations).
+/// `"<FIELD> <COMPONENT>"` (`"GRADIENT_LENGTH STRAINENERGY"`).
 pub fn compare_dat_except(
     reference: &DatImport,
     candidate: &DatImport,

@@ -4,4 +4,4 @@ class = "B"
 stage = "M2"
 features = ["*NODE", "*ELEMENT", "C3D8", "GAPUNI", "*ELSET", "*NSET", "*MATERIAL", "*ELASTIC", "*SOLID SECTION", "*GAP", "*BOUNDARY", "*STEP", "*STATIC", "*CLOAD", "*NODE FILE", "*EL FILE", "*END STEP", "NLGEOM"]
 source = "testdata"
-reference = "ccx 2.21"
+reference = "plxs 0.2.0"

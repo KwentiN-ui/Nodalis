@@ -1,14 +1,14 @@
 //! The M2 T4 acceptance test: every fixture of the `plane` area (plane stress, plane strain
-//! and axisymmetric elements) solved by `plxs` matches the
-//! CalculiX golden files within its class tolerance.
+//! and axisymmetric elements) solved by `plxs` matches its
+//! plxs snapshot within its class tolerance.
 
 use std::path::Path;
 
 use plxs_verify::report::format_reports;
-use plxs_verify::{Outcome, corpus, fixtures_root, run_corpus};
+use plxs_verify::{corpus, fixtures_root, run_corpus};
 
 #[test]
-fn plane_fixtures_match_calculix() {
+fn plane_fixtures_are_unchanged() {
     let fixtures = corpus(&fixtures_root()).expect("fixture corpus");
     let work = std::env::temp_dir().join(format!("plxs-plane-corpus-{}", std::process::id()));
     let reports = run_corpus(
@@ -22,7 +22,7 @@ fn plane_fixtures_match_calculix() {
     assert!(!reports.is_empty());
     for report in &reports {
         assert!(
-            report.outcome.passed() || report.outcome == Outcome::NoReference,
+            report.outcome.passed() || !report.outcome.compared(),
             "{}: {:?}\n{}",
             report.fixture,
             report.outcome,

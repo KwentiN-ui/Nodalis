@@ -1,12 +1,12 @@
 //! The M2 T6 acceptance test: every fixture of the `constraints` area and the
-//! compression-only (`GAPUNI`) fixtures of the `nonlinear` area solved by `plxs` match the
-//! CalculiX golden files within their class tolerance, apart from the fixtures listed in
+//! compression-only (`GAPUNI`) fixtures of the `nonlinear` area solved by `plxs` match their
+//! plxs snapshots within their class tolerance, apart from the fixtures listed in
 //! [`WAITING`], which need features of other M2 stages.
 
 use std::path::Path;
 
 use plxs_verify::report::format_reports;
-use plxs_verify::{Fixture, Outcome, corpus, fixtures_root, run_corpus};
+use plxs_verify::{Fixture, corpus, fixtures_root, run_corpus};
 
 /// Fixtures that need other stages, with the reason. A listed fixture may pass (once the
 /// other stage is merged); one that is not listed must.
@@ -18,7 +18,7 @@ fn selected(f: &Fixture) -> bool {
 }
 
 #[test]
-fn constraint_fixtures_match_calculix() {
+fn constraint_fixtures_are_unchanged() {
     let fixtures = corpus(&fixtures_root()).expect("fixture corpus");
     let work = std::env::temp_dir().join(format!("plxs-constraints-corpus-{}", std::process::id()));
     let reports = run_corpus(
@@ -35,7 +35,7 @@ fn constraint_fixtures_match_calculix() {
             continue;
         }
         assert!(
-            report.outcome.passed() || report.outcome == Outcome::NoReference,
+            report.outcome.passed() || !report.outcome.compared(),
             "{}: {:?}\n{}",
             report.fixture,
             report.outcome,

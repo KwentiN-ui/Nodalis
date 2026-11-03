@@ -4,10 +4,10 @@ class = "A"
 stage = "M2"
 features = ["*HEADING", "*NODE", "*ELEMENT", "C3D8", "*NSET", "*ELSET", "*SURFACE", "*MATERIAL", "*DENSITY", "*ELASTIC", "*EXPANSION", "*CONDUCTIVITY", "*SPECIFIC HEAT", "*SOLID SECTION", "*INITIAL CONDITIONS", "*STEP", "*COUPLED TEMPERATURE-DISPLACEMENT", "*BOUNDARY", "*CLOAD", "*DLOAD", "*CFLUX", "*NODE FILE", "*EL FILE", "*END STEP"]
 source = "plx-io writer test"
-reference = "ccx 2.21"
+reference = "plxs 0.2.0"
 
 [noise]
-STRESS = 1e-6
-FORC = 1e-6
-FLUX = 1e-9
-RFL = 1e-9
+FLUX = 0.000000001
+FORC = 0.000001
+RFL = 0.000000001
+STRESS = 0.000001

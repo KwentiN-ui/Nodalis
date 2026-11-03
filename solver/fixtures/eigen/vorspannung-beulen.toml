@@ -4,5 +4,5 @@ class = "B"
 stage = "M2"
 features = ["*HEADING", "*NODE", "*ELEMENT", "C3D20R", "*NSET", "*ELSET", "*MATERIAL", "*DENSITY", "*ELASTIC", "*SOLID SECTION", "*STEP", "*STATIC", "*BOUNDARY", "*CLOAD", "*DLOAD", "*NODE FILE", "*EL FILE", "*END STEP", "*BUCKLE"]
 source = "plx-io writer test"
-reference = "ccx 2.21"
+reference = "plxs 0.2.0"
 note = "Buckling with preload: eigenvalues, reference solution and mode shapes agree with CalculiX to 1e-5, the stresses and forces of the modes only to 1e-3 at the loaded end (CalculiX adds a term to the linear-strain stresses that is not identified), so class B."

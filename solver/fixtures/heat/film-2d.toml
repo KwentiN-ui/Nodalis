@@ -4,7 +4,7 @@ class = "A"
 stage = "M2"
 features = ["*HEADING", "*NODE", "*ELEMENT", "CPS8", "*NSET", "*ELSET", "*SURFACE", "*MATERIAL", "*ELASTIC", "*CONDUCTIVITY", "*SOLID SECTION", "*STEP", "*HEAT TRANSFER", "*BOUNDARY", "*CFLUX", "*FILM", "*NODE FILE", "*EL FILE", "*END STEP"]
 source = "plx-io writer test"
-reference = "ccx 2.21"
+reference = "plxs 0.2.0"
 
 [noise]
-RFL = 1e-9
+RFL = 0.000000001

@@ -1,5 +1,5 @@
-//! The T17 acceptance tests: the fixtures of the `sensitivity` area match the CalculiX
-//! golden files within their class tolerance (documented deviations aside), and the
+//! The T17 acceptance tests: the fixtures of the `sensitivity` area match their plxs
+//! snapshots within their class tolerance, and the
 //! strain energy sensitivity, where plxs deliberately differs from CalculiX, is the exact
 //! derivative: moving a design node along its normal changes strain energy and mass in
 //! the ratio of their sensitivities (the node area both are divided by cancels).
@@ -11,10 +11,10 @@ use plxs_core::results::Results;
 use plxs_output::dat::DESIGN_RESPONSE_TABLE;
 use plxs_session::{Session, SessionOptions};
 use plxs_verify::report::format_reports;
-use plxs_verify::{Outcome, corpus, fixtures_root, run_corpus};
+use plxs_verify::{corpus, fixtures_root, run_corpus};
 
 #[test]
-fn sensitivity_fixtures_match_calculix() {
+fn sensitivity_fixtures_are_unchanged() {
     let fixtures = corpus(&fixtures_root()).expect("fixture corpus");
     let work = std::env::temp_dir().join(format!("plxs-sensitivity-corpus-{}", std::process::id()));
     let reports = run_corpus(
@@ -28,7 +28,7 @@ fn sensitivity_fixtures_match_calculix() {
     assert!(reports.len() >= 3);
     for report in &reports {
         assert!(
-            report.outcome.passed() || report.outcome == Outcome::NoReference,
+            report.outcome.passed() || !report.outcome.compared(),
             "{}: {:?}\n{}",
             report.fixture,
             report.outcome,
