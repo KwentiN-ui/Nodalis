@@ -5,8 +5,7 @@
 A #ui("Symmetry") boundary condition cuts a symmetric model in half: select the faces that lie in
 the cut plane and Nodalis holds them as the mirror image would. You do not have to work out
 which components of a #ui("Displacement/Rotation") boundary condition to fix. Create it with
-#ui("Create ...") on #ui("BCs") of a step or #menu("Model", "Create Boundary Condition ...") and
-choose the type #ui("Symmetry").
+#ui("Boundary Condition") on the #ui("Steps") tab and choose the type #ui("Symmetry").
 
 #screenshot("symmetry-dialog.png", [Symmetry boundary condition on the front face of a block])
 

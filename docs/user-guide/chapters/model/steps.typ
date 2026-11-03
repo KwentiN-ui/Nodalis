@@ -3,7 +3,7 @@
 == Steps <steps>
 
 A step is one analysis of CalculiX with its own boundary conditions, loads and outputs. Create it
-with #menu("Model", "Create Step ...") or #ui("Create ...") on #ui("Steps"). A new step copies the
+with #ui("Step") on the #ui("Steps") tab of the ribbon. A new step copies the
 boundary conditions and loads of the last step, as far as its type accepts them. The type of a
 step cannot be changed after it was created.
 
@@ -165,8 +165,8 @@ A static step over a creep time in which materials with a creep law creep (`*VIS
 
 Field outputs control what the solver writes to the results as `*NODE FILE`,
 `*EL FILE` and `*CONTACT FILE`. A new step gets a node and an element field output whose
-variables depend on the step type. Create more with #ui("Create ...") on #ui("Field Outputs") of a
-step or with #menu("Model", "Create Field Output ..."). Edit one with a double-click. Hovering over
+variables depend on the step type. Create more with #ui("Field Output") on the #ui("Steps") tab; it
+goes into the active step (@active-step). Edit one with a double-click. Hovering over
 a variable shows what it is.
 
 #fields(
@@ -197,8 +197,8 @@ tab derive new fields from opened results instead (@derived-fields).]
 === History outputs
 
 History outputs write values of a region to the `.dat` file in every increment (`*NODE PRINT`,
-`*EL PRINT`, `*CONTACT PRINT`). Create them with #ui("Create ...") on #ui("History Outputs") of a
-step. Hovering over a variable shows what it is.
+`*EL PRINT`, `*CONTACT PRINT`). Create them with #ui("History Output") on the #ui("Steps") tab, in the
+active step. Hovering over a variable shows what it is.
 
 #fields(
   [Type], [#ui("Node Output") (region of nodes), #ui("Element Output") (parts, element set or

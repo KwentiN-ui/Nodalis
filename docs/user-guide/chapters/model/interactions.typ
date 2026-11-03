@@ -3,8 +3,7 @@
 == Constraints <constraints>
 
 Parts meshed separately share no nodes. Constraints connect them or attach springs to the model.
-Create them with #menu("Interaction", "Create Constraint ...") or with #ui("Create ...") on
-#ui("Constraints").
+Create them with #ui("Constraint") on the #ui("Connections") tab of the ribbon.
 
 #screenshot("constraint.png", [Spring dialog: springs from a surface to ground])
 

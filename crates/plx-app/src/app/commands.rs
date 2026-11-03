@@ -136,7 +136,7 @@ impl AnalysisWindow {
         let has_setup = setup.is_some();
         let has_geometry = w.model.as_ref().is_some_and(|m| m.geometry.is_some());
         let has_mesh = setup.is_some_and(|m| m.mesh.element_count() > 0);
-        let last_step = setup.and_then(|m| m.fe.steps.last());
+        let last_step = (w.active_step()).and_then(|i| setup?.fe.steps.get(i));
         let parts = self.selected_parts();
         let shown = w.shown().is_some();
         let results_open = w.shown_results_view().is_some();
@@ -184,6 +184,7 @@ impl AnalysisWindow {
             | Cmd::SurfaceInteraction
             | Cmd::ContactPair
             | Cmd::Tie
+            | Cmd::NodeTie
             | Cmd::ContactWorksheet
             | Cmd::ConnectionSettings
             | Cmd::Step
@@ -258,9 +259,7 @@ impl AnalysisWindow {
         let parts = self.selected_parts();
         let view = self.workbench.tree_view;
         let w = &mut self.workbench;
-        let last_step = (w.setup_model())
-            .and_then(|m| m.fe.steps.len().checked_sub(1))
-            .unwrap_or(0);
+        let last_step = w.active_step().unwrap_or(0);
         match cmd {
             Cmd::Import | Cmd::ImportMesh => self.import(ctx),
             Cmd::DefaultMeshParameters => w.open_mesh_setup(),
@@ -367,6 +366,7 @@ impl AnalysisWindow {
             Cmd::SurfaceInteraction => w.create(NewItem::SurfaceInteraction),
             Cmd::ContactPair => w.create(NewItem::ContactPair),
             Cmd::Tie => w.create(NewItem::Tie),
+            Cmd::NodeTie => w.create(NewItem::NodeTie),
             Cmd::ContactWorksheet => w.contact_worksheet = true,
             Cmd::ConnectionSettings => {
                 if let Some(model) = w.setup_model() {
@@ -446,8 +446,10 @@ impl crate::ribbon::Host for RibbonHost<'_> {
     }
 
     fn custom(&mut self, ui: &mut egui::Ui, cmd: Cmd) {
-        if cmd == Cmd::ResultsDisplay {
-            self.0.workbench.results_tool_bar(ui);
+        match cmd {
+            Cmd::ResultsDisplay => self.0.workbench.results_tool_bar(ui),
+            Cmd::ActiveStep => self.0.workbench.active_step_combo(ui),
+            _ => {}
         }
     }
 }

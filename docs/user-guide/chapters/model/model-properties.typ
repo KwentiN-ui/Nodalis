@@ -4,8 +4,9 @@
 
 The FE Model workspace holds everything CalculiX needs besides the mesh: materials, sections,
 constraints, contacts, amplitudes, initial conditions and steps with their boundary conditions,
-loads and outputs. Most items are created from the #ui("Model") and #ui("Interaction") menus or
-with #ui("Create ...") in the context menu of their container in the tree.
+loads and outputs. Items are created with the tiles of the ribbon tabs #ui("Mesh"), #ui("Material"),
+#ui("Features"), #ui("Connections") and #ui("Steps"), or with the command search
+(@command-search); the tree no longer creates items.
 
 #screenshot("fe-model-tree.png", [FE Model tree])
 

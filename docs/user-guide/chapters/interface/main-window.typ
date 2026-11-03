@@ -14,6 +14,7 @@ From top to bottom the window contains:
   #menu("Help", "User Guide") opens this guide in the web browser (@offline-guide).
 / Model tree: on the left, with the items of the workspace (@model-tree).
 / 3D view: in the centre (@view).
+/ Properties panel: on the right, while an item is created or edited (@properties-panel).
 / Output pane: below the 3D view, with two tabs. #ui("Output") collects messages: what was loaded
   or saved, warnings, keywords of an imported `.inp` that were skipped ("Not yet evaluated:
   ..."), unit conversions and the output of the query tool. #ui("Analysis") is the monitor of
@@ -67,8 +68,8 @@ opens in the Geometry workspace, opening a result file switches to Results.
 
 === Working with tree items
 
-- *Double-click* an item to open its dialog. Double-clicking a container (for example
-  #ui("Materials")) creates a new item in it.
+- *Double-click* an item to open it in the properties panel (@properties-panel). A
+  double-click on a container only opens or closes it; new items come from the ribbon.
 - *Right-click* an item for its context menu (see below).
 - *Del* deletes the selected item after asking "Delete the selected item?"; #key("Ctrl+Z") brings it back (@undo).
 - *Space* activates or deactivates the selected item while the mouse is over the tree.
@@ -82,11 +83,11 @@ opens in the Geometry workspace, opening a result file switches to Results.
 
 === Context menus
 
-/ Containers: #ui("Create ..."), #ui("Expand All"), #ui("Collapse All"). Some containers have
-  more entries: #ui("Material Library ...") on #ui("Materials"), #ui("Default Mesh Parameters
-  ...") and #ui("Mesh All Parts") on #ui("Mesh Setup"), #ui("Create Tie ...") and
-  #ui("Create Node Tie ...") on #ui("Contact Pairs"), #ui("Search Contact Pairs ...") on #ui("Constraints") and
-  #ui("Contact Pairs"). A container that cannot
+/ Containers: #ui("Expand All"), #ui("Collapse All"). Some containers have more entries:
+  #ui("Material Library ...") on #ui("Materials"), #ui("Default Mesh Parameters ...") and
+  #ui("Mesh All Parts") on #ui("Mesh Setup"), #ui("Search Contact Pairs ...") on
+  #ui("Constraints") and #ui("Contact Pairs"). Containers create no items: that is the job
+  of the ribbon (@ribbon). A container that cannot
   take items explains why in a tooltip, for example "A frequency step has no loads."
 / Items: #ui("Edit ..."), #ui("Activate")/#ui("Deactivate"), #ui("Swap Master/Slave") (ties,
   spring connections and contact pairs), #ui("Delete"). Items that come from another analysis

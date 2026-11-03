@@ -156,6 +156,13 @@ struct Workbench {
     frame_cache: std::collections::HashMap<usize, Vec<RenderMesh>>,
     /// Open dialog creating or editing an item of the FE model.
     editor: Option<Editor>,
+    /// The step new boundary conditions, loads, outputs and defined fields go into, by name;
+    /// `None` or a name no longer there means the last step.
+    active_step: Option<String>,
+    /// The selection the active step last followed, so that it follows only a new one.
+    step_selection: Option<TreeItem>,
+    /// The open editors of the properties panel, the newest last; only one stays open.
+    docked: Vec<crate::dock::Docked>,
     /// Item asked to be deleted, waiting for the user's confirmation.
     /// Items to delete once the user agrees: several parts, or one item.
     confirm_delete: Option<(TreeView, Vec<TreeItem>)>,
@@ -307,6 +314,9 @@ impl AnalysisWindow {
                 frame_changed: false,
                 frame_cache: Default::default(),
                 editor: None,
+                active_step: None,
+                step_selection: None,
+                docked: Vec::new(),
                 confirm_delete: None,
                 contact_search: None,
                 contact_worksheet: false,
@@ -1519,6 +1529,10 @@ impl AnalysisWindow {
                     self.workbench.model_tree(ui, view);
                 });
             });
+        self.workbench.follow_selected_step();
+        if self.workbench.one_docked() {
+            crate::dock::panel(ui);
+        }
         egui::Panel::bottom("output")
             .resizable(true)
             .default_size(170.0)
@@ -2103,6 +2117,7 @@ impl Workbench {
         if view == TreeView::FeModel {
             self.update_acting();
         }
+        self.tree.active_step = self.active_step();
         let shown = match view {
             TreeView::Results => self.results.get_mut(self.current_result),
             TreeView::Geometry => self.geometry.as_mut(),
@@ -2757,6 +2772,133 @@ impl Workbench {
         self.model.as_ref()
     }
 
+    /// The index of the active step: the one picked in the ribbon or last selected in the
+    /// tree, else the last step.
+    pub(crate) fn active_step(&self) -> Option<usize> {
+        let steps = &self.setup_model()?.fe.steps;
+        (self.active_step.as_ref())
+            .and_then(|name| steps.iter().position(|s| &s.name == name))
+            .or_else(|| steps.len().checked_sub(1))
+    }
+
+    /// Makes step `index` the active one.
+    pub(crate) fn set_active_step(&mut self, index: usize) {
+        let name = (self.setup_model())
+            .and_then(|m| m.fe.steps.get(index))
+            .map(|s| s.name.clone());
+        if name.is_some() {
+            self.active_step = name;
+        }
+    }
+
+    /// The combo box of the active step on the Steps tab of the ribbon.
+    pub(crate) fn active_step_combo(&mut self, ui: &mut egui::Ui) {
+        let active = self.active_step();
+        let steps: Vec<String> = (self.setup_model())
+            .map(|m| m.fe.steps.iter().map(|s| s.name.clone()).collect())
+            .unwrap_or_default();
+        let text = active
+            .and_then(|i| steps.get(i))
+            .map_or("No step", String::as_str)
+            .to_owned();
+        let mut picked = None;
+        let mut new_step = false;
+        ui.vertical(|ui| {
+            ui.add_space(6.0);
+            ui.weak("New items go into");
+            ui.add_enabled_ui(self.setup_model().is_some(), |ui| {
+                egui::ComboBox::from_id_salt("active step")
+                    .selected_text(text)
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        for (i, name) in steps.iter().enumerate() {
+                            if ui.selectable_label(active == Some(i), name).clicked() {
+                                picked = Some(i);
+                            }
+                        }
+                        ui.separator();
+                        new_step = ui.selectable_label(false, "New Step ...").clicked();
+                    })
+                    .response
+                    .on_hover_text(
+                        "The active step: new boundary conditions, loads, outputs and \
+                         defined fields go into it, and the 3D view shows its symbols.",
+                    );
+            });
+        });
+        if let Some(i) = picked {
+            self.set_active_step(i);
+            // The symbols follow the active step, not a selection in another one.
+            if (self.tree.selected.as_ref())
+                .is_some_and(|(_, item)| step_of(item).is_some_and(|s| s != i))
+            {
+                self.tree.selected = None;
+            }
+        }
+        if new_step {
+            self.create(NewItem::Step);
+        }
+    }
+
+    /// The editors of the properties panel that are open.
+    fn docked_open(&self) -> Vec<crate::dock::Docked> {
+        use crate::dock::Docked;
+        let mut open = Vec::new();
+        for (is_open, docked) in [
+            (self.dialog.is_some(), Docked::Properties),
+            (self.editor.is_some(), Docked::Item),
+            (self.mesh_item_editor.is_some(), Docked::MeshItem),
+            (self.feature_dialog.is_some(), Docked::Feature),
+            (self.field_output_dialog.is_some(), Docked::FieldOutput),
+            (self.history_dialog.is_some(), Docked::HistoryOutput),
+            (self.hot_spot_dialog.is_some(), Docked::HotSpot),
+            (self.model_dialog.is_some(), Docked::ModelProperties),
+        ] {
+            if is_open {
+                open.push(docked);
+            }
+        }
+        open
+    }
+
+    /// Keeps one editor open in the properties panel, the one opened last; returns whether
+    /// one is open.
+    fn one_docked(&mut self) -> bool {
+        use crate::dock::Docked;
+        let open = self.docked_open();
+        for closed in crate::dock::one_open(&mut self.docked, &open) {
+            match closed {
+                Docked::Properties => self.dialog = None,
+                Docked::Item => {
+                    self.editor = None;
+                    self.highlighted = None;
+                }
+                Docked::MeshItem => self.mesh_item_editor = None,
+                Docked::Feature => self.feature_dialog = None,
+                Docked::FieldOutput => self.field_output_dialog = None,
+                Docked::HistoryOutput => self.history_dialog = None,
+                Docked::HotSpot => self.hot_spot_dialog = None,
+                Docked::ModelProperties => self.model_dialog = None,
+            }
+        }
+        !self.docked.is_empty()
+    }
+
+    /// A newly selected step, or item of a step, in the tree makes that step active.
+    fn follow_selected_step(&mut self) {
+        let selected = match &self.tree.selected {
+            Some((TreeView::FeModel, item)) => Some(item.clone()),
+            _ => None,
+        };
+        if selected == self.step_selection {
+            return;
+        }
+        if let Some(step) = selected.as_ref().and_then(step_of) {
+            self.set_active_step(step);
+        }
+        self.step_selection = selected;
+    }
+
     /// What the 3D view shows: the current results on the Results tab, else the FE model.
     fn shown(&self) -> Option<&Model> {
         match self.tree_view {
@@ -3369,17 +3511,10 @@ impl Workbench {
         let Some(model) = self.setup_model() else {
             return;
         };
-        let last_step = model.fe.steps.len().checked_sub(1);
-        let takes_loads = model
-            .fe
-            .steps
-            .last()
-            .is_some_and(|s| s.kind.supports_loads());
-        let takes_defined_fields = model
-            .fe
-            .steps
-            .last()
-            .is_some_and(|s| s.kind.supports_defined_fields());
+        let last_step = self.active_step();
+        let step = last_step.and_then(|i| model.fe.steps.get(i));
+        let takes_loads = step.is_some_and(|s| s.kind.supports_loads());
+        let takes_defined_fields = step.is_some_and(|s| s.kind.supports_defined_fields());
         let mut kind = None;
         for (item, label, enabled) in [
             (NewItem::Material, "Create Material …", true),
@@ -5298,6 +5433,10 @@ impl Workbench {
             EditorResult::Ok => {
                 if let Some(editor) = self.editor.take() {
                     let created = editor.new_interaction_item(&model.fe);
+                    // A new step becomes the active one.
+                    if let Some(step) = editor.new_step() {
+                        self.active_step = Some(step);
+                    }
                     let detection = editor.detection(&model.fe);
                     let sets = model.fe.mesh_sets.clone();
                     if let Some((kind, name)) = editor.replaced_set() {
@@ -5542,19 +5681,9 @@ impl Workbench {
             }
         }
         items.extend(self.editor.as_ref().and_then(Editor::constraint_item));
-        let step_of = |item: &TreeItem| match *item {
-            TreeItem::Step(s)
-            | TreeItem::StepGroup(s, _)
-            | TreeItem::BoundaryCondition(s, _)
-            | TreeItem::Load(s, _)
-            | TreeItem::FieldOutput(s, _)
-            | TreeItem::HistoryOutput(s, _)
-            | TreeItem::DefinedField(s, _) => Some(s),
-            _ => None,
-        };
         let index = (edited.as_ref().map(|(s, ..)| *s))
             .or_else(|| selected.and_then(step_of))
-            .or_else(|| model.fe.steps.len().checked_sub(1));
+            .or_else(|| self.active_step());
         let Some((index, step)) = index.and_then(|i| Some((i, model.fe.steps.get(i)?))) else {
             return items;
         };
@@ -6222,39 +6351,39 @@ impl Workbench {
             TreeView::Geometry => self.geometry.as_ref(),
             TreeView::FeModel => self.model.as_ref(),
         };
-        egui::Window::new(properties::title(shown, &item))
+        let title = properties::title(shown, &item);
+        let builder = egui::Window::new(title.clone())
             .id(crate::ids::window(ctx, "properties window"))
-            .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
-            .show(ctx, |ui| {
-                let (name, error) = &mut self.part_name;
-                let name = part.map(|_| name);
-                // Element types are chosen for the FE model, not for results.
-                let types = (part.is_some() && self.tree_view == TreeView::FeModel)
-                    .then_some(())
-                    .zip(shown)
-                    .map(|((), model)| properties::ElementTypes {
-                        types: &mut self.part_types,
-                        space: model.fe.properties.space,
-                    });
-                properties::show(ui, shown, &item, name, types);
-                if let Some(error) = error.as_ref().filter(|_| part.is_some()) {
-                    ui.add_space(4.0);
-                    ui.colored_label(crate::style::error(), error);
-                }
-                ui.add_space(8.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if part.is_some() {
-                        close = ui.button("Cancel").clicked();
-                        accept = ui.button("OK").clicked();
-                    } else {
-                        close = ui.button("Close").clicked();
-                    }
+            .default_pos(ctx.content_rect().center());
+        crate::dock::show(ctx, builder, title, &mut open, |ui| {
+            let (name, error) = &mut self.part_name;
+            let name = part.map(|_| name);
+            // Element types are chosen for the FE model, not for results.
+            let types = (part.is_some() && self.tree_view == TreeView::FeModel)
+                .then_some(())
+                .zip(shown)
+                .map(|((), model)| properties::ElementTypes {
+                    types: &mut self.part_types,
+                    space: model.fe.properties.space,
                 });
+            properties::show(ui, shown, &item, name, types);
+            if let Some(error) = error.as_ref().filter(|_| part.is_some()) {
+                ui.add_space(4.0);
+                ui.colored_label(crate::style::error(), error);
+            }
+            ui.add_space(8.0);
+            crate::dock::footer(ui, |ui| {
+                if part.is_some() {
+                    close = ui.button("Cancel").clicked();
+                    accept = ui.button("OK").clicked();
+                } else {
+                    close = ui.button("Close").clicked();
+                }
             });
+        });
         accept |= part.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Enter));
         if let (true, Some(index)) = (accept, part) {
             let name = self.part_name.0.clone();
@@ -7281,6 +7410,20 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
         event = WindowEvent::Close;
     }
     event
+}
+
+/// The step an item of the FE model tree belongs to.
+fn step_of(item: &TreeItem) -> Option<usize> {
+    match *item {
+        TreeItem::Step(s)
+        | TreeItem::StepGroup(s, _)
+        | TreeItem::BoundaryCondition(s, _)
+        | TreeItem::Load(s, _)
+        | TreeItem::FieldOutput(s, _)
+        | TreeItem::HistoryOutput(s, _)
+        | TreeItem::DefinedField(s, _) => Some(s),
+        _ => None,
+    }
 }
 
 /// Prefixes an output message with the local time, `HH:MM:SS`.

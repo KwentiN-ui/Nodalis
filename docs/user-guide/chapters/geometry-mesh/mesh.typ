@@ -81,8 +81,8 @@ where the problem is. The marking disappears with the next meshing.
 == Mesh setup <mesh-setup>
 
 The mesh is controlled by the #ui("Mesh Setup") items in the Geometry workspace. Create them
-with #menu("Mesh", "Create Mesh Setup Item ...") or #ui("Create ...") on the #ui("Mesh Setup")
-container.
+with #ui("Local Mesh Size"), #ui("Extrude Mesh") or #ui("Tetra. Gmsh") on the #ui("Geometry")
+tab of the ribbon.
 
 === Default mesh parameters
 

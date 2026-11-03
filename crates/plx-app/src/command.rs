@@ -173,6 +173,7 @@ pub enum Cmd {
     SurfaceInteraction,
     ContactPair,
     Tie,
+    NodeTie,
     ContactWorksheet,
     ConnectionSettings,
     Step,
@@ -184,6 +185,8 @@ pub enum Cmd {
     Distribution,
     FieldOutput,
     HistoryOutput,
+    /// The combo box of the step new items go into.
+    ActiveStep,
     // Results workspace.
     /// The controls of the shown results: deformation, contours, increment, animation.
     ResultsDisplay,
@@ -1201,6 +1204,16 @@ fn build() -> Vec<Command> {
         "Surfaces glued to each other.",
     ));
     add(command(
+        C::NodeTie,
+        "Node\nTie",
+        f,
+        t,
+        "Advanced",
+        Tree(TreeIcon::ContactPair),
+        "",
+        "Nodes tied to the nearest nodes of other parts.",
+    ));
+    add(command(
         C::ContactWorksheet,
         "Contact\nWorksheet",
         f,
@@ -1221,6 +1234,19 @@ fn build() -> Vec<Command> {
         "Settings of all contacts.",
     ));
     let t = "Steps";
+    add(tile(
+        command(
+            C::ActiveStep,
+            "",
+            f,
+            t,
+            "Active Step",
+            TileIcon::None,
+            "",
+            "",
+        ),
+        Tile::Custom,
+    ));
     add(command(
         C::Step,
         "Step",

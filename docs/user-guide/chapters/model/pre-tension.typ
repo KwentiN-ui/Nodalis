@@ -3,8 +3,7 @@
 == Bolt pre-tension <pre-tension>
 
 A #ui("Pre-tension (bolt preload)") load tightens a bolt: it pulls the two sides of a cut through
-the shank together with a force, or shortens the bolt by a given length. Create it with #ui("Create ...") on #ui("Loads") of a step or
-#menu("Model", "Create Load ...").
+the shank together with a force, or shortens the bolt by a given length. Create it with #ui("Load") on the #ui("Steps") tab.
 
 #screenshot("pre-tension-load.png", [Pre-tension load on the cut through a bolt shank])
 

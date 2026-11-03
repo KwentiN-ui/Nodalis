@@ -18,6 +18,7 @@ mod contact_search;
 mod contacts;
 mod cross_section;
 mod distribution_dialog;
+mod dock;
 mod exploded;
 mod expose;
 mod features;

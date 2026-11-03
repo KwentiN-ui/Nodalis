@@ -72,6 +72,39 @@ ribbon to its tab row and back; so does #ui("Fold Ribbon") in its context menu.
     planes, history outputs, derived fields and the Campbell diagram. #ui("View").],
 )
 
+=== Properties panel <properties-panel>
+
+Items of an analysis are created and edited in the *properties panel* on the right of the
+Geometry, FE Model and Results workspaces: materials, sections, steps, boundary conditions,
+loads, constraints, contacts, amplitudes, outputs, features, mesh setup items, hot spots, the
+model properties and the properties of a part. A tile of the ribbon or a double-click on an
+item in the tree opens the panel; #ui("OK") or #ui("Cancel") at its foot, or the cross in
+its head, close it. The 3D view shrinks while the panel is open, and its left edge can be
+dragged to make it wider.
+
+The panel holds one editor at a time. Opening another item replaces the one shown; changes to
+it that were not confirmed with #ui("OK") are dropped. While a region is picked, the
+#ui("Selection") window stands left of the panel, over the 3D view.
+
+#screenshot("properties-panel.png", [A new boundary condition in the properties panel; it
+  goes into #ui("Step-1"), the active step])
+
+=== Active step <active-step>
+
+Boundary conditions, loads, field and history outputs and defined fields belong to a step. The
+*active step* decides which: the combo box #ui("Active Step") at the left of the
+#ui("Steps") tab shows it, and the tiles of that tab create their items in it. In the tree
+the active step is marked #ui("(active)") when there are several steps, and the 3D view shows
+its symbols.
+
+#screenshot("active-step.png", [The #ui("Steps") tab with the active step])
+
+- Picking a step in the combo box makes it active; #ui("New Step ...") at its end creates one.
+- Selecting a step, or an item of a step, in the tree makes that step active.
+- A new step becomes active once it is created.
+- Without a step the combo box says #ui("No step"), and only #ui("Step") can be used.
+- The #ui("Step") row at the top of a boundary condition or load moves it to another step.
+
 === Placing blocks <place-block>
 
 The tiles on the #ui("Sources"), #ui("Parameters"), #ui("Evaluate") and #ui("Annotate") tabs

@@ -29,7 +29,8 @@ transformations.
 
 == Derived field outputs <derived-fields>
 
-#ui("Create ...") on #ui("Field Outputs") computes new fields from the results.
+#ui("Derived Field") on the #ui("Evaluate") tab of the Results workspace computes new fields
+from the results.
 
 #screenshot("field-output.png", [Create Field Output])
 
@@ -77,7 +78,7 @@ like displacements.
 
 #ui("History Outputs") in the Results workspace lists the history outputs from the `.dat` file
 (for example the eigenfrequencies of a frequency step) and the ones you create with
-#ui("Create ..."):
+#ui("History Output") on the #ui("Evaluate") tab:
 
 / From Field Output: values of a field at selected nodes, one row per increment.
 / From History Output by Equation: a formula of other history outputs.
@@ -110,7 +111,7 @@ it was made from; with results kept with the project (@bind-result) it is saved 
 
 == Paths <paths>
 
-#ui("Create ...") on #ui("Paths") shows the displayed component along a straight line.
+#ui("Path") on the #ui("Evaluate") tab shows the displayed component along a straight line.
 
 #screenshot("path.png", [Stress along a path through the hole])
 
@@ -160,7 +161,7 @@ Changes show at once; #ui("Cancel") restores the plot.
 
 == Plane results
 
-#ui("Create ...") on #ui("Plane Results") evaluates the displayed component on a plane defined
+#ui("Plane Result") on the #ui("Evaluate") tab evaluates the displayed component on a plane defined
 under #ui("Features"): minimum and maximum with their position, the area-weighted mean, and the
 cut area. With its check box ticked, the 3D view shows only the cut, and the legend uses the
 values on it. #ui("Save as CSV...") and #ui("Save as JSON...") save the cut points with their
