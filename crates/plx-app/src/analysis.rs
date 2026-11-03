@@ -18,10 +18,10 @@ pub struct Analysis {
     job: Run,
     /// Name of the analysis, also of its input and results files.
     name: String,
-    /// Fingerprint of the model the run solves, see [`plx_model::fingerprint::solve_input`];
+    /// Fingerprint of the model the run solves, see [`crate::solve_fingerprint`];
     /// kept with its results to tell when they are out of date.
     pub input: u64,
-    /// The fingerprint of each step's results, see [`plx_model::fingerprint::step_inputs`].
+    /// The fingerprint of each step's results, see [`crate::solve_fingerprint`].
     pub steps: Vec<u64>,
     output: Vec<String>,
     /// Lines dropped from the front of `output` to keep it at [`MAX_OUTPUT_LINES`].
@@ -343,6 +343,8 @@ impl Analysis {
         if !check_model && !model.fe.steps.iter().any(|s| s.active) {
             return Err("Analysis not started: all steps are deactivated.".into());
         }
+        // What the run solves, before anything of the run (linked results) is added.
+        let prints = crate::solve_fingerprint::fingerprints(&model.mesh, &model.fe);
         let heading = format!("Nodalis: {}", model.file_name());
         let mut fe = model.fe.clone();
         let job_name = job_name(name);
@@ -395,8 +397,8 @@ impl Analysis {
             filter: String::new(),
             job,
             name: name.to_owned(),
-            input: plx_model::fingerprint::solve_input(&model.mesh, &model.fe),
-            steps: plx_model::fingerprint::step_inputs(&model.mesh, &model.fe),
+            input: prints.input,
+            steps: prints.steps,
             started: Instant::now(),
             finished: None,
             status: JobStatus::Running,

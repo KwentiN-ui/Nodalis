@@ -9660,3 +9660,66 @@ fn a_lowering_error_names_its_item() {
     let error = lower_unvalidated(&mesh, &model, "").unwrap_err();
     assert_eq!(error.item, Some(ModelItem::Section(0)));
 }
+
+/// The fingerprints of the solution come from the analysis: names, hidden items, a
+/// deactivated load and items for the results only change nothing; a changed load changes
+/// the steps from its own on.
+#[test]
+fn fingerprints_count_what_the_solver_computes_with() {
+    use crate::fingerprint::fingerprints;
+    let prints = |model: &FeModel, mesh: &FeMesh| {
+        fingerprints(&lower_unvalidated(mesh, model, "").unwrap(), model)
+    };
+    let (mesh, mut model) = cantilever(tip_force());
+    let mut second = model.steps[0].clone();
+    second.name = "Step-2".into();
+    model.steps.push(second);
+    let before = prints(&model, &mesh);
+    assert_eq!(before.steps.len(), 2);
+    assert_ne!(before.steps[0], before.steps[1]);
+    assert_eq!(before.input, before.steps[1]);
+
+    let mut renamed = model.clone();
+    renamed.steps[0].name = "Preload".into();
+    renamed.steps[0].boundary_conditions[0].name = "Clamp".into();
+    renamed.steps[1].loads[0].name = "Pull".into();
+    renamed.steps[1].loads[0].visible = false;
+    renamed.sections[0].name = "Steel section".into();
+    renamed.materials[0].name = "S355".into();
+    renamed.sections[0].material = "S355".into();
+    let mut off = tip_force();
+    off.name = "Not yet".into();
+    off.active = false;
+    off.kind = LoadKind::force([5.0, 0.0, 0.0]);
+    renamed.steps[0].loads.push(off);
+    renamed
+        .result_paths
+        .push(plx_model::ResultPath::new("Path-1"));
+    assert_eq!(prints(&renamed, &mesh), before);
+
+    let mut changed = model.clone();
+    changed.steps[1].loads[0].kind = LoadKind::force([0.0, 0.0, -200.0]);
+    let after = prints(&changed, &mesh);
+    assert_eq!(after.steps[0], before.steps[0]);
+    assert_ne!(after.steps[1], before.steps[1]);
+    assert_ne!(after.input, before.input);
+    // So does the material, for every step.
+    let mut stiffer = model.clone();
+    stiffer.materials[0].elastic.as_mut().unwrap().young *= 2.0;
+    let stiff = prints(&stiffer, &mesh);
+    assert!(stiff.steps[0] != before.steps[0] && stiff.steps[1] != before.steps[1]);
+    // A deactivated step keeps the fingerprint of the steps before it, and the later ones
+    // their own.
+    let mut skipped = model.clone();
+    skipped.steps.insert(1, {
+        let mut step = model.steps[0].clone();
+        step.name = "Off".into();
+        step.active = false;
+        step
+    });
+    let skip = prints(&skipped, &mesh);
+    assert_eq!(
+        skip.steps,
+        [before.steps[0], before.steps[0], before.steps[1]]
+    );
+}

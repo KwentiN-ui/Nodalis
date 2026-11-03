@@ -142,7 +142,7 @@ pub fn analysis_status(
         _ if running => CellState::Running,
         None => CellState::Missing,
         Some(results) => {
-            let solved = results.input == Some(fingerprint::solve_input(mesh, fe));
+            let solved = results.input == Some(crate::solve_fingerprint::solve_input(mesh, fe));
             // Results taken from analyses whose own results are out of date are too.
             if !solved || mesh_state != CellState::UpToDate || !upstream.stale_results.is_empty() {
                 CellState::OutOfDate
@@ -261,7 +261,7 @@ mod tests {
         let mesh = block();
         let mut fe = FeModel::default();
         fe.steps.push(Step::new_static("Step-1"));
-        let solved = results(fingerprint::solve_input(&mesh, &fe));
+        let solved = results(crate::solve_fingerprint::solve_input(&mesh, &fe));
         let status = analysis_status(
             None,
             &mesh,
@@ -275,7 +275,7 @@ mod tests {
         assert_eq!(status.mesh, CellState::UpToDate);
         assert_eq!(status.solution, CellState::UpToDate);
         assert!(!status.needs_solve());
-        // A result path changes nothing that CalculiX solves.
+        // A result path changes nothing that the solver computes.
         fe.result_paths.push(plx_model::ResultPath::new("Path-1"));
         let status = analysis_status(
             None,
@@ -287,7 +287,19 @@ mod tests {
             false,
         );
         assert_eq!(status.solution, CellState::UpToDate);
+        // Nor does a name: the solver computes the same.
         fe.steps[0].name = "Loading".into();
+        let status = analysis_status(
+            None,
+            &mesh,
+            &fe,
+            &BTreeMap::new(),
+            Some(&solved),
+            &Upstream::default(),
+            false,
+        );
+        assert_eq!(status.solution, CellState::UpToDate);
+        fe.steps[0].active = false;
         let status = analysis_status(
             None,
             &mesh,
@@ -322,7 +334,7 @@ mod tests {
             part.clone(),
             fingerprint::mesh_input(&geometry, space, &part),
         )]);
-        let solved = results(fingerprint::solve_input(&mesh, &fe));
+        let solved = results(crate::solve_fingerprint::solve_input(&mesh, &fe));
         let status = analysis_status(
             Some(&geometry),
             &mesh,
@@ -355,7 +367,7 @@ mod tests {
         let mesh = block();
         let mut fe = FeModel::default();
         fe.steps.push(Step::new_static("Step-1"));
-        let solved = results(fingerprint::solve_input(&mesh, &fe));
+        let solved = results(crate::solve_fingerprint::solve_input(&mesh, &fe));
         let inputs = BTreeMap::new();
         let status = analysis_status(
             None,
@@ -387,7 +399,7 @@ mod tests {
         let mesh = block();
         let mut fe = FeModel::default();
         fe.steps.push(Step::new_static("Step-1"));
-        let solved = results(fingerprint::solve_input(&mesh, &fe));
+        let solved = results(crate::solve_fingerprint::solve_input(&mesh, &fe));
         let upstream = Upstream {
             stale_results: vec!["Global".into()],
             ..Default::default()

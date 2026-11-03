@@ -1586,8 +1586,8 @@ impl Node {
         match data.fe.steps.iter().position(|s| s.name == step) {
             // Results solved before they kept the fingerprints of their steps count whole.
             Some(index) if !bound.steps.is_empty() => {
-                let input = plx_model::fingerprint::steps_input(data.mesh, data.fe, index + 1);
-                bound.steps.get(index) != Some(&input)
+                let inputs = crate::solve_fingerprint::step_inputs(data.mesh, data.fe);
+                bound.steps.get(index) != inputs.get(index)
             }
             _ => self.results_out_of_date(),
         }
@@ -12429,8 +12429,8 @@ mod tests {
         model.steps.push(plx_model::Step::new_static("Step-1"));
         let mesh = plx_mesh::FeMesh::default();
         let results = plx_io::project::BoundResults {
-            input: Some(plx_model::fingerprint::solve_input(&mesh, &model)),
-            steps: plx_model::fingerprint::step_inputs(&mesh, &model),
+            input: Some(crate::solve_fingerprint::solve_input(&mesh, &model)),
+            steps: crate::solve_fingerprint::step_inputs(&mesh, &model),
             ..Default::default()
         };
         model.steps.push(plx_model::Step::new_static("Step-2"));
@@ -12458,9 +12458,15 @@ mod tests {
         assert!(node.out_of_date_for(&link("Step-2", "Global results")));
         // Eigenmodes are written anew by every frequency step.
         assert!(node.out_of_date_for(&link("Step-1", "Eigenmodes")));
-        // So does a changed first step.
+        // A renamed first step keeps them: the solver computes the same.
         if let Some(data) = node.as_analysis_mut().and_then(|a| a.data.as_mut()) {
             data.model.steps[0].name = "Load".into();
+        }
+        node.refresh_closed();
+        assert!(!node.out_of_date_for(&link("Load", "Global results")));
+        // A changed first step does not.
+        if let Some(data) = node.as_analysis_mut().and_then(|a| a.data.as_mut()) {
+            data.model.steps[0].active = false;
         }
         node.refresh_closed();
         assert!(node.out_of_date_for(&link("Load", "Global results")));
