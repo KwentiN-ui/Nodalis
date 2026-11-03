@@ -44,6 +44,8 @@ use crate::tree::{self, TreeItem, TreeResponse, TreeState, TreeView};
 use crate::viewport::{Axis, BoxSelect, Click, ViewCommand, Viewport};
 use plx_render::RenderMesh;
 
+mod commands;
+
 enum LoadEvent {
     Started(PathBuf),
     Finished(PathBuf, Result<Box<LoadedModel>, String>),
@@ -77,6 +79,8 @@ pub enum Request {
     Unlink(Vec<String>),
     /// Open the Campbell block of this analysis, made and linked first if it has none.
     Campbell,
+    /// Close the analysis shown in the project window: its data goes back to the project.
+    Close,
 }
 
 struct Workbench {
@@ -258,6 +262,10 @@ pub struct AnalysisWindow {
     import_when_loaded: Vec<PathBuf>,
     /// The workspace to switch to once the analysis is loaded.
     show_when_loaded: Option<Show>,
+    /// The tab of each workspace and whether the ribbon is folded.
+    ribbon: crate::ribbon::RibbonState,
+    /// The command search, in a window of its own; the project window has its own.
+    search: Option<crate::node_picker::NodePicker>,
 }
 
 impl AnalysisWindow {
@@ -345,6 +353,8 @@ impl AnalysisWindow {
             loading: None,
             import_when_loaded: Vec::new(),
             show_when_loaded: None,
+            ribbon: Default::default(),
+            search: None,
         }
     }
 
@@ -794,8 +804,10 @@ impl AnalysisWindow {
         }
     }
 
-    fn menu_bar(&mut self, ui: &mut egui::Ui) {
-        egui::MenuBar::new().ui(ui, |ui| {
+    /// The menus of the analysis in the app bar. In the project window, Close Analysis gives
+    /// the analysis back to the project instead of closing a window.
+    pub fn menus(&mut self, ui: &mut egui::Ui, embedded: bool) {
+        {
             ui.menu_button("File", |ui| {
                 let import = egui::Button::new("Import …");
                 if ui.add_enabled(self.loading.is_none(), import).clicked() {
@@ -866,116 +878,124 @@ impl AnalysisWindow {
                     }
                 }
                 ui.separator();
-                let tip = "Closes the window; the analysis stays in the project.";
+                let tip = "Closes the analysis; it stays in the project.";
                 if ui.button("Close Analysis").on_hover_text(tip).clicked() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    if embedded {
+                        self.workbench.requests.push(Request::Close);
+                    } else {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
                 }
             });
             ui.menu_button("Edit", |ui| self.workbench.edit_menu(ui));
-            ui.menu_button("View", |ui| {
-                if ui.button("Zoom to Fit").clicked() {
-                    self.workbench.view_command = Some(ViewCommand::Fit);
-                }
-                for (view, label) in STANDARD_VIEWS {
-                    if ui.button(label).clicked() {
-                        self.workbench.view_command = Some(ViewCommand::View(view));
+            // The menus of PrePoMax, until the ribbon has taken them over.
+            ui.menu_button("More", |ui| {
+                ui.menu_button("View", |ui| {
+                    if ui.button("Zoom to Fit").clicked() {
+                        self.workbench.view_command = Some(ViewCommand::Fit);
                     }
-                }
-                if ui.button("Vertical View").clicked() {
-                    self.workbench.view_command = Some(ViewCommand::Vertical);
-                }
-                ui.menu_button("View Normal to Axis", |ui| {
-                    for axis in Axis::ALL {
-                        if ui.button(axis.label()).clicked() {
-                            self.workbench.view_command = Some(ViewCommand::AxisView(axis));
+                    for (view, label) in STANDARD_VIEWS {
+                        if ui.button(label).clicked() {
+                            self.workbench.view_command = Some(ViewCommand::View(view));
                         }
                     }
-                });
-                ui.menu_button("Isometric, Axis Up", |ui| {
-                    for axis in Axis::ALL {
-                        if ui.button(axis.label()).clicked() {
-                            self.workbench.view_command = Some(ViewCommand::IsometricAxis(axis));
+                    if ui.button("Vertical View").clicked() {
+                        self.workbench.view_command = Some(ViewCommand::Vertical);
+                    }
+                    ui.menu_button("View Normal to Axis", |ui| {
+                        for axis in Axis::ALL {
+                            if ui.button(axis.label()).clicked() {
+                                self.workbench.view_command = Some(ViewCommand::AxisView(axis));
+                            }
                         }
+                    });
+                    ui.menu_button("Isometric, Axis Up", |ui| {
+                        for axis in Axis::ALL {
+                            if ui.button(axis.label()).clicked() {
+                                self.workbench.view_command =
+                                    Some(ViewCommand::IsometricAxis(axis));
+                            }
+                        }
+                    });
+                    ui.separator();
+                    ui.checkbox(
+                        &mut self.workbench.viewport.options.mesh_edges,
+                        "Mesh Edges",
+                    );
+                    ui.checkbox(
+                        &mut self.workbench.settings.graphics.shell_thickness,
+                        "Shell Thickness",
+                    )
+                    .on_hover_text(settings::SHELL_THICKNESS_TIP);
+                    ui.checkbox(
+                        &mut self.workbench.settings.graphics.beam_profiles,
+                        "Beam Profiles",
+                    )
+                    .on_hover_text(settings::BEAM_PROFILES_TIP);
+                    ui.checkbox(
+                        &mut self.workbench.settings.graphics.show_linked,
+                        settings::SHOW_LINKED_LABEL,
+                    )
+                    .on_hover_text(settings::SHOW_LINKED_TIP);
+                    ui.separator();
+                    let has_model = self.workbench.shown().is_some();
+                    if ui
+                        .add_enabled(has_model, egui::Button::new("Section View …"))
+                        .clicked()
+                    {
+                        self.workbench.open_section_dialog();
+                    }
+                    let active = self.workbench.section.is_some();
+                    if ui
+                        .add_enabled(active, egui::Button::new("Section View Off"))
+                        .clicked()
+                    {
+                        self.workbench.section = None;
+                        self.workbench.section_dialog = None;
+                    }
+                    ui.separator();
+                    if ui
+                        .add_enabled(has_model, egui::Button::new("Exploded View …"))
+                        .clicked()
+                    {
+                        self.workbench.open_exploded_dialog();
+                    }
+                    let exploded = self.workbench.exploded_applied();
+                    if ui
+                        .add_enabled(exploded, egui::Button::new("Exploded View Off"))
+                        .clicked()
+                    {
+                        self.workbench.toggle_exploded();
                     }
                 });
-                ui.separator();
-                ui.checkbox(
-                    &mut self.workbench.viewport.options.mesh_edges,
-                    "Mesh Edges",
-                );
-                ui.checkbox(
-                    &mut self.workbench.settings.graphics.shell_thickness,
-                    "Shell Thickness",
-                )
-                .on_hover_text(settings::SHELL_THICKNESS_TIP);
-                ui.checkbox(
-                    &mut self.workbench.settings.graphics.beam_profiles,
-                    "Beam Profiles",
-                )
-                .on_hover_text(settings::BEAM_PROFILES_TIP);
-                ui.checkbox(
-                    &mut self.workbench.settings.graphics.show_linked,
-                    settings::SHOW_LINKED_LABEL,
-                )
-                .on_hover_text(settings::SHOW_LINKED_TIP);
-                ui.separator();
-                let has_model = self.workbench.shown().is_some();
-                if ui
-                    .add_enabled(has_model, egui::Button::new("Section View …"))
-                    .clicked()
-                {
-                    self.workbench.open_section_dialog();
-                }
-                let active = self.workbench.section.is_some();
-                if ui
-                    .add_enabled(active, egui::Button::new("Section View Off"))
-                    .clicked()
-                {
-                    self.workbench.section = None;
-                    self.workbench.section_dialog = None;
-                }
-                ui.separator();
-                if ui
-                    .add_enabled(has_model, egui::Button::new("Exploded View …"))
-                    .clicked()
-                {
-                    self.workbench.open_exploded_dialog();
-                }
-                let exploded = self.workbench.exploded_applied();
-                if ui
-                    .add_enabled(exploded, egui::Button::new("Exploded View Off"))
-                    .clicked()
-                {
-                    self.workbench.toggle_exploded();
-                }
-            });
-            ui.menu_button("Geometry", |ui| {
-                let import = egui::Button::new("Import …");
-                if ui.add_enabled(self.loading.is_none(), import).clicked() {
-                    self.import(ui.ctx());
-                }
-            });
-            ui.menu_button("Mesh", |ui| self.workbench.mesh_menu(ui));
-            ui.menu_button("Model", |ui| self.workbench.model_menu(ui));
-            ui.menu_button("Interaction", |ui| self.workbench.interaction_menu(ui));
-            ui.menu_button("Analysis", |ui| self.workbench.analysis_menu(ui));
-            ui.menu_button("Results", |ui| self.workbench.results_menu(ui));
-            ui.menu_button("Tools", |ui| {
-                if ui.button("Query …").clicked() {
-                    self.workbench.open_query();
-                }
-                let annotated = self.workbench.has_annotations();
-                if ui
-                    .add_enabled(annotated, egui::Button::new("Remove Annotations"))
-                    .clicked()
-                {
-                    self.workbench.annotations(AnnotationCommand::DeleteAll);
-                }
-                ui.separator();
-                if ui.button("Settings …").clicked() {
-                    self.workbench.settings_window =
-                        Some(SettingsWindow::new(&self.workbench.settings));
-                }
+                ui.menu_button("Geometry", |ui| {
+                    let import = egui::Button::new("Import …");
+                    if ui.add_enabled(self.loading.is_none(), import).clicked() {
+                        self.import(ui.ctx());
+                    }
+                });
+                ui.menu_button("Mesh", |ui| self.workbench.mesh_menu(ui));
+                ui.menu_button("Model", |ui| self.workbench.model_menu(ui));
+                ui.menu_button("Interaction", |ui| self.workbench.interaction_menu(ui));
+                ui.menu_button("Analysis", |ui| self.workbench.analysis_menu(ui));
+                ui.menu_button("Results", |ui| self.workbench.results_menu(ui));
+                ui.menu_button("Tools", |ui| {
+                    if ui.button("Query …").clicked() {
+                        self.workbench.open_query();
+                    }
+                    let annotated = self.workbench.has_annotations();
+                    if ui
+                        .add_enabled(annotated, egui::Button::new("Remove Annotations"))
+                        .clicked()
+                    {
+                        self.workbench.annotations(AnnotationCommand::DeleteAll);
+                    }
+                    ui.separator();
+                    if ui.button("Settings …").clicked() {
+                        self.workbench.settings_window =
+                            Some(SettingsWindow::new(&self.workbench.settings));
+                    }
+                });
             });
             ui.menu_button("Help", |ui| {
                 let tip = "Opens the user guide in the web browser";
@@ -984,161 +1004,6 @@ impl AnalysisWindow {
                     self.workbench.output.push(line);
                 }
             });
-            // Version number, greyed out at the far right of the menu bar.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
-                        .color(ui.visuals().weak_text_color()),
-                );
-            });
-        });
-    }
-
-    /// PrePoMax's main tool bar: file commands, then views and display options.
-    fn tool_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 1.0;
-            let can_open = self.loading.is_none();
-            let import = "Import Geometry (STEP, IGES, BREP) or mesh (INP)";
-            if icons::button(ui, Icon::Import, import, can_open, false).clicked() {
-                self.import(ui.ctx());
-            }
-            if icons::button(ui, Icon::Save, "Save Project (Ctrl+S)", true, false).clicked() {
-                self.workbench.requests.push(Request::Save(false));
-            }
-            ui.separator();
-            if icons::button(ui, Icon::Fit, "Zoom to Fit", true, false).clicked() {
-                self.workbench.view_command = Some(ViewCommand::Fit);
-            }
-            for (view, label) in STANDARD_VIEWS {
-                if icons::button(ui, Icon::View(view), label, true, false).clicked() {
-                    self.workbench.view_command = Some(ViewCommand::View(view));
-                }
-            }
-            if icons::button(ui, Icon::Vertical, "Vertical View", true, false).clicked() {
-                self.workbench.view_command = Some(ViewCommand::Vertical);
-            }
-            let camera = icons::button(ui, Icon::Screenshot, "Screenshot", true, false);
-            egui::Popup::menu(&camera).show(|ui| {
-                if ui.button("Copy to Clipboard").clicked() {
-                    self.workbench
-                        .screenshot
-                        .request(screenshot::Target::Clipboard);
-                }
-                if ui.button("Save As …").clicked() {
-                    self.workbench.screenshot.request(screenshot::Target::File);
-                }
-            });
-            ui.separator();
-            let options = &mut self.workbench.viewport.options;
-            let mesh = options.mesh_edges;
-            if icons::button(ui, Icon::FeatureEdges, "Edges Only", true, !mesh).clicked() {
-                options.mesh_edges = false;
-            }
-            if icons::button(ui, Icon::MeshEdges, "Mesh Edges", true, mesh).clicked() {
-                options.mesh_edges = true;
-            }
-            ui.separator();
-            let shown = self.workbench.shown().is_some();
-            let sectioned =
-                self.workbench.section.is_some() || self.workbench.section_dialog.is_some();
-            if icons::button(ui, Icon::SectionView, "Section View", shown, sectioned).clicked() {
-                self.workbench.open_section_dialog();
-            }
-            // PrePoMax: a left click turns the exploded view on and off, a right click opens
-            // its dialog.
-            let exploded =
-                self.workbench.exploded_applied() || self.workbench.exploded_dialog.is_some();
-            let tooltip = "Exploded View on/off (right click: settings)";
-            let button = icons::button(ui, Icon::ExplodedView, tooltip, shown, exploded);
-            if button.clicked() {
-                self.workbench.toggle_exploded();
-            }
-            if button.secondary_clicked() {
-                self.workbench.open_exploded_dialog();
-            }
-            ui.separator();
-            // PrePoMax: Query, then Remove annotations.
-            let querying = self.workbench.query.is_some();
-            if icons::button(ui, Icon::Query, "Query", shown, querying).clicked() {
-                if querying {
-                    self.workbench.close_query();
-                } else {
-                    self.workbench.open_query();
-                }
-            }
-            let annotated = self.workbench.has_annotations();
-            let tooltip = "Remove Annotations";
-            if icons::button(ui, Icon::RemoveAnnotations, tooltip, annotated, false).clicked() {
-                self.workbench.annotations(AnnotationCommand::DeleteAll);
-            }
-            ui.separator();
-            self.solve_tools(ui);
-        });
-    }
-
-    /// Solve, Stop and Monitor with the state of the solution, which replace PrePoMax's
-    /// analysis in the tree.
-    fn solve_tools(&mut self, ui: &mut egui::Ui) {
-        let workbench = &mut self.workbench;
-        let running = workbench.running();
-        let meshing = workbench.meshing.is_some();
-        let can_solve = workbench.model.is_some() && !running && !meshing && self.loading.is_none();
-        if icons::button(ui, Icon::Solve, SOLVE_TIP, can_solve, false).clicked() {
-            workbench.solve();
-        }
-        let (tip, can_stop) = if meshing && !running {
-            ("Cancel the meshing", true)
-        } else {
-            ("Stop the analysis", running)
-        };
-        if icons::button(ui, Icon::Stop, tip, can_stop, false).clicked() {
-            if running {
-                workbench.stop();
-            } else {
-                workbench.cancel_meshing();
-            }
-        }
-        let tip = "Monitor: the output of CalculiX in the Analysis tab below the 3D view";
-        let shown = workbench.analysis_tab;
-        if icons::button(ui, Icon::Monitor, tip, true, shown).clicked() {
-            workbench.analysis_tab = !shown;
-        }
-        ui.add_space(4.0);
-        let Some(status) = workbench.cached_status() else {
-            return;
-        };
-        let (state, text) = if meshing {
-            (crate::status::CellState::Running, "Meshing …".to_string())
-        } else {
-            let state = status.solution;
-            let text = match state {
-                crate::status::CellState::Missing => "Not solved".into(),
-                crate::status::CellState::UpToDate => "Solution up to date".into(),
-                crate::status::CellState::OutOfDate => "Solution out of date".into(),
-                crate::status::CellState::Running => "Solving …".into(),
-                crate::status::CellState::Failed => "Solved with errors".into(),
-                crate::status::CellState::NotUsed => String::new(),
-            };
-            (state, text)
-        };
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(18.0, 22.0), egui::Sense::hover());
-        crate::status::paint(ui.painter(), crate::status::symbol_rect(rect).min, state);
-        let label = ui.label(text);
-        if !status.stale_parts.is_empty() {
-            label.on_hover_text(format!(
-                "The mesh of {} is out of date.",
-                status.stale_parts.join(", ")
-            ));
-        }
-        // Problems CalculiX reported, explained in a window.
-        if !workbench.solver_findings.is_empty() {
-            let warning = ui
-                .add(egui::Button::new("Problems").small())
-                .on_hover_text("What CalculiX reported in the last run");
-            if warning.clicked() {
-                workbench.findings_window = Some(workbench.solver_findings.clone());
-            }
         }
     }
 
@@ -1460,8 +1325,89 @@ const STANDARD_VIEWS: [(StandardView, &str); 7] = [
 ];
 
 impl AnalysisWindow {
-    /// Shows the window's content in `ui`, the whole of its viewport.
+    /// Shows the analysis in a window of its own: its app bar without the Project segment,
+    /// its ribbon and its workspace.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        let bar = crate::ribbon::Bar {
+            project: false,
+            workspace: self.workspace(),
+            analyses: Vec::new(),
+            active: None,
+            active_name: self.workbench.analysis_name.clone(),
+            title: self.workbench.analysis_name.clone(),
+            pill: self.pill(),
+            can_undo: self.can_undo(),
+            can_redo: self.can_redo(),
+        };
+        let events = egui::Panel::top("app bar")
+            .exact_size(crate::ribbon::APP_BAR)
+            .show(ui, |ui| {
+                crate::ribbon::app_bar(ui, &bar, &mut |ui| self.menus(ui, false))
+            })
+            .inner;
+        let ctx = ui.ctx().clone();
+        for event in events {
+            use crate::ribbon::BarEvent;
+            match event {
+                BarEvent::Workspace(workspace) => self.set_workspace(workspace),
+                BarEvent::Analysis(_) => {}
+                BarEvent::Save => self.workbench.requests.push(Request::Save(false)),
+                BarEvent::Undo => self.undo(),
+                BarEvent::Redo => self.redo(),
+                BarEvent::Search(at) => {
+                    self.search = Some(
+                        crate::node_picker::NodePicker::new(at, at)
+                            .with_limit(crate::command::SEARCH_ROWS, crate::command::SEARCH_HINT),
+                    );
+                }
+                BarEvent::Settings => self.open_settings(),
+                BarEvent::Help => self.open_user_guide(),
+                BarEvent::Pill => self.pill_clicked(),
+            }
+        }
+        let workspace = self.workspace();
+        if let Some(search) = &mut self.search {
+            let entries = crate::command::search_order(false, workspace);
+            let list: Vec<crate::node_picker::Entry> = (entries.iter())
+                .map(|e| crate::node_picker::Entry { ..e.entry })
+                .collect();
+            match search.show(&ctx, &list) {
+                crate::node_picker::Outcome::Open => {}
+                crate::node_picker::Outcome::Closed => self.search = None,
+                crate::node_picker::Outcome::Picked(i) => {
+                    self.search = None;
+                    let entry = &entries[i];
+                    self.run_found(&ctx, entry.workspace, entry.cmd);
+                }
+            }
+        }
+        self.workspace_ui(ui);
+    }
+
+    /// Shows the analysis inside the project window, below the project's app bar.
+    pub fn ui_embedded(&mut self, ui: &mut egui::Ui) {
+        self.workspace_ui(ui);
+    }
+
+    /// Runs a command the command search found: in its workspace, on its ribbon tab.
+    pub fn run_found(
+        &mut self,
+        ctx: &egui::Context,
+        workspace: crate::command::Workspace,
+        cmd: crate::command::Cmd,
+    ) {
+        if workspace.view().is_some()
+            && workspace != self.workspace()
+            && !matches!(cmd, crate::command::Cmd::View(_))
+        {
+            self.set_workspace(workspace);
+        }
+        self.ribbon.reveal(self.workspace(), cmd);
+        self.run_command(ctx, cmd);
+    }
+
+    /// The ribbon and the workspace: tree, 3D view, output, status bar and dialogs.
+    fn workspace_ui(&mut self, ui: &mut egui::Ui) {
         self.handle_load_events();
         let ctx = ui.ctx().clone();
         if self.loading.is_none() && self.workbench.model.is_some() {
@@ -1530,14 +1476,19 @@ impl AnalysisWindow {
             self.import_paths(dropped, &ctx);
         }
 
-        egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
-        egui::Panel::top("tools").show(ui, |ui| {
-            self.tool_bar(ui);
-            // Like PrePoMax, the results row stays in place and is greyed out outside the
-            // Results tab, so the 3D view does not jump when switching tabs.
-            ui.separator();
-            self.workbench.results_tool_bar(ui);
-        });
+        let workspace = self.workspace();
+        let mut ribbon = std::mem::take(&mut self.ribbon);
+        let clicked = egui::Panel::top("ribbon")
+            .frame(egui::Frame::new().fill(crate::style::control()))
+            .show(ui, |ui| {
+                crate::ribbon::show(ui, &mut ribbon, workspace, &mut commands::RibbonHost(self))
+            })
+            .inner;
+        self.ribbon = ribbon;
+        if let Some(cmd) = clicked {
+            self.run_command(&ctx, cmd);
+        }
+
         self.workbench.animate(&ctx);
         self.workbench.play_sound(&ctx);
         let cancel = egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
@@ -1555,14 +1506,18 @@ impl AnalysisWindow {
             .size_range(160.0..=700.0)
             .frame(egui::Frame::new().fill(crate::style::control()))
             .show(ui, |ui| {
-                let selected_tab = self.workbench.tree_tabs(ui);
+                // The tree of the workspace; the segments of the app bar switch it.
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(6.0);
+                    ui.strong(workspace.title());
+                });
+                ui.add_space(2.0);
                 pane.inner_margin(4).show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
                     let view = self.workbench.tree_view;
                     self.workbench.model_tree(ui, view);
                 });
-                // The selected tab opens into the pane like a Windows tab control.
-                crate::style::open_tab(ui, selected_tab);
             });
         egui::Panel::bottom("output")
             .resizable(true)
@@ -2081,20 +2036,6 @@ impl Workbench {
         }
     }
 
-    /// Tab strip above the tree, like PrePoMax's Windows tab control.
-    /// Returns the rect of the selected tab.
-    fn tree_tabs(&mut self, ui: &mut egui::Ui) -> Option<egui::Rect> {
-        let views = [TreeView::Geometry, TreeView::FeModel, TreeView::Results];
-        let titles = views.map(TreeView::title);
-        let selected = views.iter().position(|&v| v == self.tree_view).unwrap_or(0);
-        let (clicked, selected_rect) = crate::style::tabs(ui, &titles, selected);
-        if let Some(index) = clicked {
-            self.pinned_view = None;
-            self.set_tree_view(views[index]);
-        }
-        selected_rect
-    }
-
     /// The pane below the 3D view: the messages, and in the Analysis tab the output of
     /// CalculiX, so the results stay in view while it runs.
     fn output(&mut self, ui: &mut egui::Ui, pane: egui::Frame) {
@@ -2138,9 +2079,9 @@ impl Workbench {
         };
         if let Some(text) = empty {
             let hint = if view == TreeView::Geometry {
-                "Geometry > Import or drag a STEP, IGES or BREP file into the window."
+                "Import Geometry in the ribbon, or drag a STEP, IGES or BREP file into the window."
             } else {
-                "Geometry > Import or drag a STEP or .inp file into the window."
+                "Import Geometry in the ribbon, or drag a STEP or .inp file into the window."
             };
             ui.weak(format!("{text}.\n{hint}"));
             ui.separator();
@@ -3557,12 +3498,8 @@ impl Workbench {
                 "Drops the results the analysis keeps; saving the project leaves them out.",
             )
             .clicked()
-            && let Some(model) = &mut self.model
-            && model.bound_results.take().is_some()
         {
-            model.bound_results_file = None;
-            self.output
-                .push("Results removed; saving the project leaves them out.".into());
+            self.remove_results();
         }
         ui.separator();
         if ui.button("Solver Settings …").clicked() {
@@ -3585,6 +3522,17 @@ impl Workbench {
             .clicked()
         {
             self.requests.push(Request::Campbell);
+        }
+    }
+
+    /// Drops the results the analysis keeps; saving the project leaves them out.
+    fn remove_results(&mut self) {
+        if let Some(model) = &mut self.model
+            && model.bound_results.take().is_some()
+        {
+            model.bound_results_file = None;
+            self.output
+                .push("Results removed; saving the project leaves them out.".into());
         }
     }
 
@@ -3844,7 +3792,7 @@ impl Workbench {
         };
         if model.mesh.element_count() == 0 {
             self.output
-                .push("The model has no mesh yet: Mesh > Mesh All Parts".into());
+                .push("The model has no mesh yet: Geometry > Mesh All Parts".into());
             return;
         }
         let findings = model.findings();

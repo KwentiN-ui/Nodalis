@@ -58,12 +58,19 @@ pub enum NodeIcon {
 
 /// Paints `icon` into the 14 x 14 square at `min` in `color`.
 pub fn paint(painter: &Painter, min: Pos2, icon: NodeIcon, color: Color32) {
+    paint_scaled(painter, min, icon, color, 1.0);
+}
+
+/// Paints `icon` into the square of 14 times `scale` at `min` in `color`, for the larger
+/// tiles of the ribbon.
+pub fn paint_scaled(painter: &Painter, min: Pos2, icon: NodeIcon, color: Color32, scale: f32) {
     if let NodeIcon::StepType(glyph) = icon {
         tree_icons::paint(painter, min, TreeIcon::StepType(glyph));
         return;
     }
-    let stroke = Stroke::new(1.2, color);
-    let p = |x: f32, y: f32| pos2(min.x + x, min.y + y);
+    let s = scale;
+    let stroke = Stroke::new(1.2 * s.sqrt(), color);
+    let p = |x: f32, y: f32| pos2(min.x + x * s, min.y + y * s);
     let line = |points: &[Pos2]| {
         painter.add(Shape::line(points.to_vec(), stroke));
     };
@@ -71,10 +78,10 @@ pub fn paint(painter: &Painter, min: Pos2, icon: NodeIcon, color: Color32) {
         painter.add(Shape::closed_line(points.to_vec(), stroke));
     };
     let circle = |center: Pos2, radius: f32| {
-        painter.circle_stroke(center, radius, stroke);
+        painter.circle_stroke(center, radius * s, stroke);
     };
     let dot = |center: Pos2, radius: f32| {
-        painter.circle_filled(center, radius, color);
+        painter.circle_filled(center, radius * s, color);
     };
     match icon {
         NodeIcon::StepType(_) => {}
@@ -240,7 +247,7 @@ pub fn paint(painter: &Painter, min: Pos2, icon: NodeIcon, color: Color32) {
                 .map(|i| {
                     let angle = std::f32::consts::TAU * i as f32 / 16.0;
                     let radius = if i % 2 == 0 { 6.0 } else { 4.3 };
-                    p(7.0, 7.0) + radius * vec2(angle.cos(), angle.sin())
+                    p(7.0, 7.0) + radius * s * vec2(angle.cos(), angle.sin())
                 })
                 .collect();
             closed(&gear);
@@ -250,7 +257,7 @@ pub fn paint(painter: &Painter, min: Pos2, icon: NodeIcon, color: Color32) {
             line(&[p(1.5, 12.5), p(12.5, 12.5)]);
             for (x, height) in [(3.0, 5.0), (6.5, 9.0), (10.0, 7.0)] {
                 painter.rect_filled(
-                    egui::Rect::from_min_size(p(x, 12.5 - height), vec2(2.5, height)),
+                    egui::Rect::from_min_size(p(x, 12.5 - height), vec2(2.5, height) * s),
                     0.5,
                     color,
                 );

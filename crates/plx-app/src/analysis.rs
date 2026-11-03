@@ -270,7 +270,7 @@ impl Analysis {
     ) -> Result<Self, String> {
         if model.fe.steps.is_empty() && !check_model {
             return Err(
-                "Analysis not started: the model has no step (Model > Create Step …).".into(),
+                "Analysis not started: the model has no step (FE Model > Steps > Step).".into(),
             );
         }
         if !check_model && !model.fe.steps.iter().any(|s| s.active) {

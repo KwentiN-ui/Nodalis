@@ -121,6 +121,27 @@ pub fn dialog_button(ui: &mut Ui, icon: Icon, tooltip: &str, enabled: bool) -> R
     response
 }
 
+/// Paints `icon` into the square `area` of any size, scaled from its 16 x 16 grid: the
+/// large icons of the ribbon's tiles.
+pub fn paint_in(painter: &egui::Painter, icon: Icon, area: Rect, enabled: bool) {
+    let mut shapes = Vec::new();
+    paint(
+        &mut shapes,
+        icon,
+        Rect::from_min_size(Pos2::ZERO, Vec2::splat(ICON)),
+    );
+    let scale = area.width().min(area.height()) / ICON;
+    let transform = egui::emath::TSTransform::new(area.min.to_vec2(), scale);
+    for shape in &mut shapes {
+        shape.transform(transform);
+        map_colors(shape, &crate::style::adapt);
+        if !enabled {
+            map_colors(shape, &grey);
+        }
+    }
+    painter.extend(shapes);
+}
+
 /// The colour of a disabled icon: grey and half transparent.
 fn grey(c: Color32) -> Color32 {
     let l = ((c.r() as u32 + c.g() as u32 + c.b() as u32) / 3) as u8;

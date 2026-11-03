@@ -613,6 +613,12 @@ impl SnarlWidget {
     }
 }
 
+/// PrePoLix: selects these nodes in the UI of the `SnarlWidget` with this ID from the next
+/// frame on. Only works if [`SnarlWidget::id`] was used.
+pub fn set_selected_nodes(id: Id, ctx: &Context, nodes: &[NodeId]) {
+    SelectedNodes(nodes.iter().copied().collect()).save(ctx, id);
+}
+
 /// Returns nodes selected in the UI for the `SnarlWidget` with same ID.
 ///
 /// Only works if [`SnarlWidget::id`] was used.

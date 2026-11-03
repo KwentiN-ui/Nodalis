@@ -22,16 +22,6 @@ pub enum TreeView {
     Results,
 }
 
-impl TreeView {
-    pub fn title(self) -> &'static str {
-        match self {
-            TreeView::Geometry => "Geometry",
-            TreeView::FeModel => "FE Model",
-            TreeView::Results => "Results",
-        }
-    }
-}
-
 /// A node of a tree; placeholders and group nodes are identified by their name.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TreeItem {
