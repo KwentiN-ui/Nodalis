@@ -2,7 +2,7 @@
 
 == Transformations <transformations>
 
-The transformation button on the results toolbar shows the results of a symmetric or periodic
+The transformation button among the result controls of the ribbon shows the results of a symmetric or periodic
 model as the full structure. Transformations only change the display.
 
 #figure(
@@ -75,7 +75,7 @@ like displacements.
 
 == History outputs and tables <history-outputs>
 
-#ui("History Outputs") on the #ui("Results") tab lists the history outputs from the `.dat` file
+#ui("History Outputs") in the Results workspace lists the history outputs from the `.dat` file
 (for example the eigenfrequencies of a frequency step) and the ones you create with
 #ui("Create ..."):
 
@@ -271,7 +271,7 @@ table or a plot.
 
 == Query <query>
 
-#menu("Tools", "Query ...") or the #ui("Query") button of the toolbar (the pipette) reads values from the model by clicking: #ui("Vertex/Node"),
+#menu("Tools", "Query ...") or the #ui("Query") tile of the ribbon (the pipette) reads values from the model by clicking: #ui("Vertex/Node"),
 #ui("Facet/Element"), #ui("Edge") (length), #ui("Surface") (area), #ui("Part"), #ui("Assembly"), #ui("Bounding box size"), #ui("Distance")
 (two nodes), #ui("Angle") (three nodes) and #ui("Circle") (centre and radius through three
 nodes). The values appear in the output pane and as labels in the 3D view. On results, node
@@ -281,7 +281,7 @@ component.
 The labels stay in the view when the query window is closed and can be dragged
 aside. A right click on a label offers #ui("Delete") for this label and #ui("Delete All
 Annotations"); #ui("Remove Annotations") in the query window, in the #ui("Tools") menu and on the
-toolbar deletes all of them. Each model keeps its own labels: the geometry, the FE model and every
+ribbon deletes all of them. Each model keeps its own labels: the geometry, the FE model and every
 result file. Meshing again removes those of the FE model, since they refer to node and element
 ids.
 

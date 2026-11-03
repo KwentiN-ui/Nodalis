@@ -13,7 +13,7 @@ Create it with #menu("Model", "Create Section ...") and choose #ui("Membrane"). 
 be linear: mesh the part with #ui("Second order") off (@mesh-setup). Linear shells of the region
 (`S3`, `S4`, `S4R`) are written as the membranes `M3D3`, `M3D4` and `M3D4R`, so the part keeps
 its element type. A membrane type can also be chosen for the part itself: double-click it on
-the #ui("FE Model") tab and pick it in the #ui("Element type") box (@element-type).
+the FE Model workspace and pick it in the #ui("Element type") box (@element-type).
 
 #screenshot("membrane-element-type.png", [Choosing a membrane element type for a part])
 

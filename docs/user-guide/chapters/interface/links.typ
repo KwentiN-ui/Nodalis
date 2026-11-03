@@ -72,7 +72,7 @@ the setup (open #ui("Setup") with the arrow in front of it: #ui("Materials"), #u
 one contact pair, one step). A linked category also passes on items added to it later.
 
 A linked #ui("Geometry") takes the shapes only: the parts are read-only, but the mesh setup on
-the #ui("Geometry") tab (#ui("Default Mesh Parameters ..."), the #ui("Mesh Setup") items) stays
+the Geometry workspace (#ui("Default Mesh Parameters ..."), the #ui("Mesh Setup") items) stays
 the target's own, and the target meshes the geometry itself. Several analyses can so mesh the
 same geometry, from another analysis or from a file block (@file-block), each its own way. A
 target without geometry starts from the mesh setup of the source. A linked #ui("Mesh") takes the

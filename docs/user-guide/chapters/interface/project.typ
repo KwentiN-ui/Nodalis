@@ -1,12 +1,13 @@
 #import "../../template.typ": *
 
-= The User Interface
-
 == Projects and analyses <project-window>
 
-A Nodalis project (`.ndl`) holds several analyses, like a project of Ansys Workbench. Nodalis
-starts with the *project window*. It shows each analysis as a block in the project schematic;
-each analysis opens in a window of its own (@main-window). Several analysis windows can be open at the same time, next to the project window.
+A Nodalis project (`.ndl`) holds several analyses, like a project of Ansys Workbench. The
+Project workspace (@workspaces), also called the *project window* in this guide, shows each
+analysis as a block in the project schematic. A double-click on a block opens the analysis in
+the Geometry, FE Model or Results workspace of the same window (@main-window); with
+#ui("Open in New Window") it opens in a window of its own. A new project starts with one empty
+analysis.
 
 #screenshot("project-window.png", [Project window with three analyses: #ui("Cantilever
   continued") continues #ui("Cantilever") after its last step (green wire), #ui("Axial-load")
@@ -105,11 +106,13 @@ the state of another analysis (@data-links).
 
 === Working with the schematic
 
-- *Double-click* a block to open its analysis in its own window. If the window is open
-  already, it comes to the front, also when it is minimized. Wayland does not let a program
-  bring its own window to the front; there the taskbar marks the window instead. While the analysis is solved in the background, it opens
-  once the solve is done. The header of an open analysis says #ui("(open)").
-  Double-clicking a row opens the window in the matching workspace: #ui("Geometry") and
+- *Click* an analysis block to make it the active analysis of the app bar (@app-bar).
+- *Double-click* a block to open its analysis in the main window. If it is open in a window
+  of its own, that window comes to the front, also when it is minimized. Wayland does not let
+  a program bring its own window to the front; there the taskbar marks the window instead.
+  While the analysis is solved in the background, it opens once the solve is done. The header
+  of an open analysis says #ui("(open)").
+  Double-clicking a row opens the analysis in the matching workspace: #ui("Geometry") and
   #ui("Mesh") in the Geometry workspace, #ui("Setup") and its categories in the FE Model
   workspace, the rows of the steps likewise with the step selected in the tree, and #ui("Results") in the Results workspace.
 - *Drag* a block by its header to move it. Drag the background to select the blocks in a
@@ -216,9 +219,11 @@ block with #key("Shift") held; with #key("Shift") a rectangle adds to the select
   [#key("Home")], [Fits all blocks and frames into the view.],
 )
 
-=== Menus and toolbar of the project window
+=== Menus and ribbon of the project window
 
 #screenshot("project-menu-f5.png", [Project menu; #key("F5") starts Update Project])
+
+Most of these commands are also on the ribbon of the Project workspace (@ribbon).
 
 #fields(
   [File > New Project], [Closes the project and starts a new, empty one. Add analyses with #ui("New Analysis").],
@@ -249,12 +254,12 @@ block with #key("Shift") held; with #key("Shift") a rectangle adds to the select
     for a new version.],
 )
 
-The toolbar holds #ui("New Project"), #ui("Open"), #ui("Save"), #ui("Update Project"), the
-button that stops the update and kills the running analyses, and #ui("Solution Monitor").
+#ui("Update Project"), #ui("Stop") (stops the update and kills the running analyses) and
+#ui("Monitor") stay on the right edge of the ribbon on every tab of the Project workspace.
 
-Closing the project window closes Nodalis with all analysis windows. Closing an analysis
-window (or #menu("File", "Close Analysis") in it) keeps the analysis in the project, with all
-changes; save the project to write them to the file. An analysis window that is meshing or
+Closing the main window closes Nodalis with all analysis windows. #menu("File", "Close
+Analysis") in an analysis, or closing its own window, keeps the analysis in the project, with
+all changes; save the project to write them to the file. An analysis window that is meshing or
 solving cannot be closed.
 
 === Update Project <update-project>
@@ -305,7 +310,7 @@ with #ui("<block> updated").
 The project window has its own monitor, like the monitor of an analysis window (@monitor) but
 for all analyses of the project. It is the #ui("Analyses") tab of the output pane below the
 schematic and comes to the front when an update or #ui("Solve") on a block starts;
-#menu("Project", "Solution Monitor") or the monitor button in the toolbar switches between it
+#menu("Project", "Solution Monitor") or #ui("Monitor") on the ribbon switches between it
 and the #ui("Output") tab.
 
 #screenshot("solution-monitor.png", [Solution monitor after Update Project solved three

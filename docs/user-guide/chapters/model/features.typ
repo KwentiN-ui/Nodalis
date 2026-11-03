@@ -5,7 +5,7 @@
 Under #ui("Features") in the tree you define reference points, coordinate systems and planes.
 They are helpers for other functions (section views, plane results, paths, result
 transformations) and are not written to the input file. The results have their own copy of the
-features, which can be edited on the #ui("Results") tab.
+features, which can be edited in the Results workspace.
 
 Points can be typed in or picked with #ui("..."). In the geometry mode #ui("Points"), the default
 of the selection window, a click on a face or edge takes the corner point of the geometry nearest

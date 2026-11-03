@@ -16,7 +16,7 @@
   [#key("Ctrl") + middle button drag], [Zoom],
   [Double-click (left)], [Zoom to fit],
   [Left click on a part], [Select the part in the tree; #key("Ctrl") toggles, #key("Shift")
-    adds. On the #ui("FE Model") tab the tree marks what acts on the part (@acting).
+    adds. In the FE Model workspace the tree marks what acts on the part (@acting).
     A click into empty space clears the selection.],
   [Left drag], [Box selection, only while a dialog is picking (@selection)],
   [Right click], [Context menu: the menu of the part under the cursor followed by the view
@@ -39,7 +39,7 @@ delete the selected tree item, #key("Space") activate or deactivate it. In dialo
 The projection is orthographic. Y points up in the front view.
 
 - #ui("Front"), #ui("Back"), #ui("Left"), #ui("Right"), #ui("Top"), #ui("Bottom") and
-  #ui("Isometric") are on the toolbar and in the #ui("View") menu.
+  #ui("Isometric") are in #ui("Standard Views") on the #ui("View") tab of the ribbon and in the #ui("View") menu.
 - #ui("Vertical View") rolls the view about the viewing direction so that the global axis
   closest to screen-up points exactly up.
 - #menu("View", "View Normal to Axis", "X/Y/Z") looks along an axis onto the plane normal to it.
@@ -67,13 +67,13 @@ of the tree at once, in the geometry, FE model and results trees alike.
 
 === Screenshots <screenshot>
 
-The #ui("Screenshot") button on the toolbar captures the 3D view including legend and labels:
+The #ui("Screenshot") tile on the #ui("View") tab of the ribbon captures the 3D view including legend and labels:
 #ui("Copy to Clipboard") or #ui("Save As ...") (PNG).
 
 === Section view <section-view>
 
-#menu("View", "Section View ...") or the toolbar button cuts the model with a plane. Volume
-elements show their cut faces with mesh edges and, on the #ui("Results") tab, with the result
+#menu("View", "Section View ...") or #ui("Section View") on the ribbon cuts the model with a plane. Volume
+elements show their cut faces with mesh edges and, in the Results workspace, with the result
 colours.
 
 #screenshot("section-view.png", [Section view of a result])
@@ -99,7 +99,7 @@ as well.
 === Exploded view <exploded-view>
 
 #menu("View", "Exploded View ...") pulls the parts of an assembly apart for display. The mesh
-itself is not changed; parts that share nodes move together. A left click on the toolbar button
+itself is not changed; parts that share nodes move together. A left click on the ribbon tile
 switches the exploded view on and off, a right click opens the settings.
 
 #screenshot("exploded-view.png", [Exploded view dialog])

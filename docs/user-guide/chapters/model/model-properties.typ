@@ -2,7 +2,7 @@
 
 = The FE Model
 
-The #ui("FE Model") tab holds everything CalculiX needs besides the mesh: materials, sections,
+The FE Model workspace holds everything CalculiX needs besides the mesh: materials, sections,
 constraints, contacts, amplitudes, initial conditions and steps with their boundary conditions,
 loads and outputs. Most items are created from the #ui("Model") and #ui("Interaction") menus or
 with #ui("Create ...") in the context menu of their container in the tree.

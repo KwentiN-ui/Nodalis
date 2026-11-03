@@ -192,7 +192,7 @@ takes increments, a frequency or buckle step one row per mode. A history output 
 effect in the following steps until a step defines history outputs of the same type (node, element or contact) of its own.
 
 When results are opened, the `.dat` file is read too, and the history outputs appear on the
-#ui("Results") tab (@history-outputs).
+Results workspace (@history-outputs).
 
 ==== Forces and moments of a point <history-point>
 
