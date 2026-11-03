@@ -992,6 +992,10 @@ pub struct FrequencyStep {
     /// highest one the sectors allow.
     #[serde(default)]
     pub nodal_diameters: Option<[u32; 2]>,
+    /// How the shifted systems of the eigenvalue iteration are solved. Iterative needs no
+    /// lower frequency bound (the shift must stay below the spectrum).
+    #[serde(default)]
+    pub solver: LinearSolverChoice,
 }
 
 /// Settings of a `*DYNAMIC` step, with PrePoMax's defaults; like PrePoMax's `DynamicStep` it
@@ -1269,6 +1273,7 @@ impl Default for FrequencyStep {
             storage: false,
             perturbation: false,
             nodal_diameters: None,
+            solver: LinearSolverChoice::Automatic,
         }
     }
 }
@@ -1308,6 +1313,9 @@ pub struct BuckleStep {
     /// Adds the stiffness of the deformed state of the previous step, e.g. of a preload that
     /// is not scaled by the buckling factor (`*STEP, PERTURBATION`).
     pub perturbation: bool,
+    /// How the reference solution and the systems of the eigenvalue iteration are solved.
+    #[serde(default)]
+    pub solver: LinearSolverChoice,
 }
 
 impl Default for BuckleStep {
@@ -1316,6 +1324,7 @@ impl Default for BuckleStep {
             num_factors: 1,
             accuracy: 1e-4,
             perturbation: false,
+            solver: LinearSolverChoice::Automatic,
         }
     }
 }

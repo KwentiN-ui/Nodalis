@@ -30,12 +30,13 @@ use plxs_assembly::{
 use plxs_constraints::{ConstraintSet, ModelConstraints};
 use plxs_core::results::{IncrementKind, ResultsIncrement};
 use plxs_core::state::{IntegrationPointField, NodalField, StoredModes};
-use plxs_core::step::Procedure as ProcedureKind;
+use plxs_core::step::{EquationSolver, Procedure as ProcedureKind, SolverMode};
 use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Step};
-use plxs_linalg::{LanczosOptions, LinearSolver, ShiftInvertLanczos, SparseMatrix};
+use plxs_linalg::{LanczosOptions, ShiftInvertLanczos, SparseMatrix};
 use plxs_output::{EigenTable, StaRow};
 use rayon::prelude::*;
 
+use crate::equations::{Equations, in_increment};
 use crate::fields::build_fields;
 use crate::history::write_table;
 use crate::{Procedure, ProcedureContext, StepOutcome};
@@ -225,12 +226,14 @@ pub(crate) fn restrict_to_free(
 /// The lowest `count` eigenpairs of `K φ = λ M φ` (above the lower frequency bound when
 /// given) by shift-invert Lanczos; a singular stiffness (free structure) moves the shift
 /// below the spectrum.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn lanczos_modes(
     ctx: &ProcedureContext<'_>,
     k_free: &SparseMatrix,
     m_free: &SparseMatrix,
     count: usize,
     lower: Option<f64>,
+    solver: EquationSolver,
     progress: &mut dyn Progress,
 ) -> Result<plxs_linalg::EigenPairs> {
     let lower_shift = lower
@@ -238,56 +241,119 @@ pub(crate) fn lanczos_modes(
         .map(|f| (2.0 * std::f64::consts::PI * f).powi(2));
     let mut lanczos = ShiftInvertLanczos::new(ctx.threads, lanczos_options(None));
     let started = std::time::Instant::now();
-    let mut pairs = None;
     let mut shifts = vec![lower_shift.unwrap_or(0.0)];
     if lower_shift.is_none() {
         let scale = k_free.diagonal().iter().sum::<f64>()
             / m_free.diagonal().iter().sum::<f64>().max(f64::MIN_POSITIVE);
         shifts.extend([-1e-6 * scale, -1e-4 * scale, -1e-2 * scale]);
     }
-    let mut last_error = None;
-    for shift in shifts {
-        match lanczos.frequencies(k_free, m_free, count, shift) {
-            Ok(p) => {
-                pairs = Some(p);
-                break;
+    // A shift above zero (a lower frequency bound) makes K − σM indefinite, which the
+    // iterative inner solver cannot take.
+    let definite = lower_shift.is_none();
+    let pairs = with_eigen_solver(
+        &mut lanczos,
+        solver,
+        k_free,
+        definite,
+        progress,
+        |lanczos, progress| {
+            let mut last_error = None;
+            for &shift in &shifts {
+                match lanczos.frequencies(k_free, m_free, count, shift) {
+                    Ok(p) => return Ok(p),
+                    // A singular stiffness (free structure): the factorization says so, the
+                    // iteration breaks down or does not converge.
+                    Err(Error::Numerical { message, .. })
+                        if (message.contains("singular") || lanczos.is_iterative())
+                            && lower_shift.is_none() =>
+                    {
+                        progress.event(ProgressEvent::Info(format!(
+                            "shift {shift:e}: {message}; trying a negative shift"
+                        )));
+                        last_error = Some(message);
+                    }
+                    Err(e) => return Err(e),
+                }
             }
-            Err(Error::Numerical { message, .. })
-                if message.contains("singular") && lower_shift.is_none() =>
-            {
-                progress.event(ProgressEvent::Info(format!(
-                    "shift {shift:e}: {message}; trying a negative shift"
-                )));
-                last_error = Some(message);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    let Some(pairs) = pairs else {
-        return Err(Error::Numerical {
-            step: ctx.step_number,
-            increment: 1,
-            message: last_error.unwrap_or_else(|| "no eigenvalues found".into()),
-        });
-    };
+            Err(Error::Numerical {
+                step: ctx.step_number,
+                increment: 1,
+                message: last_error.unwrap_or_else(|| "no eigenvalues found".into()),
+            })
+        },
+    )?;
+    let iterative = lanczos.is_iterative();
     progress.event(ProgressEvent::Info(format!(
         "{} eigenvalues in {:.2} s ({} Lanczos steps, residual {:.1e}{})",
         pairs.values.len(),
         started.elapsed().as_secs_f64(),
         pairs.steps,
         pairs.residual,
-        if pairs.sturm_confirmed {
+        if iterative {
+            ", iterative inner solver, confirmed by restarts"
+        } else if pairs.sturm_confirmed {
             ", Sturm check passed"
         } else {
             ", Sturm check NOT confirmed"
         }
     )));
-    if !pairs.sturm_confirmed {
+    if !pairs.sturm_confirmed && !iterative {
         progress.event(ProgressEvent::Warning(
             "the Sturm sequence check could not confirm that no eigenvalue was missed".into(),
         ));
     }
     Ok(pairs)
+}
+
+/// Runs `solve` on `lanczos` with the inner solver the step's equation solver asks for:
+/// the factorization, or conjugate gradients (only when the shifted matrices are positive
+/// definite, `definite`). The automatic choice takes the iterative one when the factor of
+/// `k` would not fit into the memory and falls back once to the other on a numerical
+/// failure.
+fn with_eigen_solver<T>(
+    lanczos: &mut ShiftInvertLanczos,
+    solver: EquationSolver,
+    k: &SparseMatrix,
+    definite: bool,
+    progress: &mut dyn Progress,
+    mut solve: impl FnMut(&mut ShiftInvertLanczos, &mut dyn Progress) -> Result<T>,
+) -> Result<T> {
+    let iterative = match solver.mode() {
+        SolverMode::Direct => false,
+        SolverMode::Iterative if !definite => {
+            progress.event(ProgressEvent::Warning(
+                "the iterative equation solver needs the shift at or below the spectrum \
+                 (no lower frequency bound); solving directly"
+                    .into(),
+            ));
+            false
+        }
+        SolverMode::Iterative => true,
+        SolverMode::Automatic => {
+            definite
+                && k.dimension() >= crate::equations::AUTOMATIC_FROM
+                && crate::equations::factor_exceeds_memory(lanczos.direct_mut(), k, None, progress)?
+        }
+    };
+    lanczos.set_iterative(iterative);
+    match solve(lanczos, progress) {
+        Err(error @ Error::Numerical { .. })
+            if solver.mode() == SolverMode::Automatic
+                && (iterative || (definite && plxs_linalg::is_out_of_memory(&error))) =>
+        {
+            let message = match &error {
+                Error::Numerical { message, .. } => message.clone(),
+                _ => unreachable!(),
+            };
+            progress.event(ProgressEvent::Warning(format!(
+                "{message}; solving {} instead",
+                if iterative { "directly" } else { "iteratively" }
+            )));
+            lanczos.set_iterative(!iterative);
+            solve(lanczos, progress)
+        }
+        other => other,
+    }
 }
 
 /// The six unit rigid body motions on the full DOF vector: translations along the axes
@@ -337,7 +403,15 @@ impl Procedure for FrequencyProcedure {
             "number of equations: {}; {count} eigenvalues requested",
             reduction.reduced_len()
         )));
-        let pairs = lanczos_modes(ctx, &k_free, &m_free, count, parameters.lower, progress)?;
+        let pairs = lanczos_modes(
+            ctx,
+            &k_free,
+            &m_free,
+            count,
+            parameters.lower,
+            parameters.solver,
+            progress,
+        )?;
 
         // Keep the modes within the requested range.
         let upper = parameters.upper.filter(|f| *f > 0.0);
@@ -520,17 +594,30 @@ impl Procedure for BuckleProcedure {
             total_time: ctx.state.total_time + 1.0,
         });
         let started = std::time::Instant::now();
-        ctx.solver.analyze(k_free.pattern())?;
-        ctx.solver.factorize(&k_free).map_err(|e| match e {
-            Error::Numerical { message, .. } => Error::Numerical {
-                step: ctx.step_number,
-                increment: 1,
-                message: format!("{message}; the model is probably not sufficiently constrained"),
-            },
-            other => other,
-        })?;
+        let mut equations = Equations::new(parameters.solver);
+        let coordinates = || {
+            (reduction.free.iter())
+                .map(|&dof| ctx.model.nodes.coordinates[dof as usize / 3])
+                .collect()
+        };
+        equations
+            .prepare(&mut ctx.solver, &k_free, coordinates, true, progress)
+            .map_err(|e| match e {
+                Error::Numerical { message, .. } => Error::Numerical {
+                    step: ctx.step_number,
+                    increment: 1,
+                    message: if equations.hints_constraints() {
+                        format!("{message}; the model is probably not sufficiently constrained")
+                    } else {
+                        message
+                    },
+                },
+                other => other,
+            })?;
         let mut u_free = reduction.reduce_rhs(&f);
-        ctx.solver.solve(&mut u_free)?;
+        equations
+            .solve(&mut ctx.solver, &mut u_free, progress)
+            .map_err(|e| in_increment(e, ctx.step_number, 1))?;
         progress.event(ProgressEvent::Info(format!(
             "reference solution in {:.2} s",
             started.elapsed().as_secs_f64()
@@ -568,20 +655,30 @@ impl Procedure for BuckleProcedure {
         let started = std::time::Instant::now();
         let mut lanczos =
             ShiftInvertLanczos::new(ctx.threads, lanczos_options(parameters.accuracy));
-        let pairs = lanczos.buckling(&k_free, &k_sigma_free, count)?;
+        let pairs = with_eigen_solver(
+            &mut lanczos,
+            parameters.solver,
+            &k_free,
+            true,
+            progress,
+            |lanczos, _| lanczos.buckling(&k_free, &k_sigma_free, count),
+        )?;
+        let iterative = lanczos.is_iterative();
         progress.event(ProgressEvent::Info(format!(
             "{} buckling factors in {:.2} s ({} Lanczos steps, residual {:.1e}{})",
             pairs.values.len(),
             started.elapsed().as_secs_f64(),
             pairs.steps,
             pairs.residual,
-            if pairs.sturm_confirmed {
+            if iterative {
+                ", iterative inner solver, confirmed by restarts"
+            } else if pairs.sturm_confirmed {
                 ", Sturm check passed"
             } else {
                 ", Sturm check NOT confirmed"
             }
         )));
-        if !pairs.sturm_confirmed {
+        if !pairs.sturm_confirmed && !iterative {
             progress.event(ProgressEvent::Warning(
                 "the Sturm sequence check could not confirm that no buckling factor was missed"
                     .into(),

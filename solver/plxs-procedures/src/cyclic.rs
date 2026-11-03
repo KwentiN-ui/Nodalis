@@ -145,7 +145,15 @@ pub(crate) fn cyclic_frequency(
             "nodal diameter {diameter}: number of equations: {}; {count} eigenvalues requested",
             set.reduced_len()
         )));
-        let pairs = lanczos_modes(ctx, &k_free, &m_free, count, parameters.lower, progress)?;
+        let pairs = lanczos_modes(
+            ctx,
+            &k_free,
+            &m_free,
+            count,
+            parameters.lower,
+            parameters.solver,
+            progress,
+        )?;
 
         let rigid_free: Vec<Vec<f64>> = rigid
             .iter()

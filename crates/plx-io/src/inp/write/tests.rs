@@ -154,9 +154,15 @@ fn solver_accepts_the_options_of_field_outputs() {
 #[test]
 fn the_chosen_solver_is_written_with_the_procedure() {
     let (mesh, mut model) = cantilever(tip_force());
-    // Direct leaves the choice to the solver: its fastest direct one.
+    // Automatic (the default) leaves the choice to the solver.
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("*Step\n*Static\n"), "{text}");
+    let StepKind::Static(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.solver = LinearSolverChoice::Direct;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Static, Solver=PaStiX\n"), "{text}");
     let StepKind::Static(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
@@ -167,6 +173,22 @@ fn the_chosen_solver_is_written_with_the_procedure() {
         text.contains("*Static, Solver=Iterative Cholesky, Direct\n1, 1\n"),
         "{text}"
     );
+    // Frequency and buckle steps name it as well.
+    model.steps[0].kind = StepKind::Frequency(plx_model::FrequencyStep {
+        solver: LinearSolverChoice::Iterative,
+        ..Default::default()
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Frequency, Solver=Iterative Cholesky\n10\n"),
+        "{text}"
+    );
+    model.steps[0].kind = StepKind::Buckle(plx_model::BuckleStep {
+        solver: LinearSolverChoice::Direct,
+        ..Default::default()
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Buckle, Solver=PaStiX\n1, "), "{text}");
 }
 
 #[test]

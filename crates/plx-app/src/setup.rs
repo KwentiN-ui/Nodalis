@@ -5419,8 +5419,8 @@ fn validate_heat_transfer_step(settings: &HeatTransferStep) -> Result<(), String
 }
 
 /// "Equation solver: Automatic | Direct | Iterative" of the steps whose systems the
-/// iterative solver can solve: static (also nonlinear and with contact), visco, dynamic and
-/// heat transfer.
+/// iterative solver can solve: static (also nonlinear and with contact), visco, dynamic,
+/// heat transfer, frequency and buckle.
 fn solver_row(ui: &mut Ui, solver: &mut LinearSolverChoice) {
     ui.label("Equation solver");
     ui.horizontal(|ui| {
@@ -5494,6 +5494,7 @@ fn frequency_form(
     if let Some(sectors) = cyclic_sectors {
         nodal_diameter_rows(ui, &mut settings.nodal_diameters, sectors);
     }
+    solver_row(ui, &mut settings.solver);
     ui.label("");
     ui.weak("Loads have no effect in a frequency step; only the boundary conditions count.");
     ui.end_row();
@@ -5572,6 +5573,7 @@ fn buckle_form(ui: &mut Ui, settings: &mut BuckleStep) {
     ui.label("Accuracy");
     ui.add(numeric::drag_value(&mut settings.accuracy).speed(0.0));
     ui.end_row();
+    solver_row(ui, &mut settings.solver);
     ui.label("");
     ui.weak("The critical load is the buckling factor times the loads of this step.");
     ui.end_row();

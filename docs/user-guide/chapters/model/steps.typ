@@ -44,8 +44,9 @@ results refer to the order at the time of the run.
 
 === Equation solver <equation-solver>
 
-Static, visco, dynamic and heat transfer steps have an #ui("Equation solver") field that
-chooses how the systems of equations of the step are solved:
+Static, visco, dynamic, heat transfer, frequency and buckle steps have an
+#ui("Equation solver") field that chooses how the systems of equations of the step are
+solved:
 
 #fields(
   [Automatic], [(default) The solver chooses. For a system of 50 000 equations and more it
@@ -61,7 +62,8 @@ chooses how the systems of equations of the step are solved:
     fraction of the memory (about 35 times less on that block) and is often faster on large
     solid models. It solves linear and nonlinear static steps (also with plasticity, large
     deformations, gaps and contact; sliding friction adds a few GMRES iterations around it),
-    visco, implicit and explicit dynamic and heat transfer steps. It only solves positive
+    visco, implicit and explicit dynamic and heat transfer steps, and the eigenvalue
+    iteration of frequency and buckle steps (see below). It only solves positive
     definite systems: the model must be held against every rigid body motion, and a tangent
     that loses its stiffness (close to buckling) stops it. Then the analysis stops with a
     message that names the direct solver.],
@@ -69,8 +71,16 @@ chooses how the systems of equations of the step are solved:
 
 #screenshot("equation-solver.png", [Equation solver of a static step])
 
-Frequency, buckle, complex frequency, modal dynamics, steady state dynamics and sensitivity
-steps always solve directly, so their dialogs do not offer the choice. The monitor reports
+In frequency and buckle steps the eigenvalue iteration (shift-invert Lanczos) solves one
+system per iteration step. With #ui("Iterative") these are solved by conjugate gradients,
+which takes longer than with a factorization but fits large models into the memory. A
+frequency step needs no #ui("Lower frequency") bound for it; with one it solves directly.
+Without a factorization there is no Sturm sequence check that no eigenvalue was missed;
+instead the iteration restarts with a fresh start vector until no new eigenvalue turns up
+among the wanted ones, which also finds the second copies of double eigenvalues (symmetric
+parts). Complex frequency, modal dynamics and steady state dynamics steps work on the modes of
+a frequency step, so the choice there applies to them as well; sensitivity steps always solve
+directly and do not offer it. The monitor reports
 the automatic choice with the estimated memory, e.g. "automatic equation solver: the factor
 of 173394 equations needs 2.4 GB, 15.8 GB available; solving directly". The input file writes
 nothing for #ui("Automatic"), `SOLVER=PASTIX` for #ui("Direct") and `SOLVER=ITERATIVE
@@ -102,6 +112,8 @@ Computes eigenfrequencies and mode shapes (`*FREQUENCY`). A frequency step takes
   [Store matrices and eigenmodes], [Writes the `.eig` file (`STORAGE=YES`).],
   [Nodal diameter range], [Only in cyclic symmetric models (@cyclic-symmetry): the nodal
     diameters to compute.],
+  [Equation solver], [How the systems of the eigenvalue iteration are solved
+    (@equation-solver).],
 )
 
 Materials need a density in a frequency step.
@@ -116,6 +128,8 @@ load: the critical load is the buckling factor times these loads.
     preload.],
   [Number of buckling factors], [Default 1.],
   [Accuracy], [Convergence tolerance of the eigenvalue solver (default 1e-4).],
+  [Equation solver], [How the reference solution and the systems of the eigenvalue
+    iteration are solved (@equation-solver).],
 )
 
 === Heat Transfer, Coupled and Uncoupled Temperature-Displacement

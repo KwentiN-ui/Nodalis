@@ -3269,6 +3269,9 @@ fn frequency_step(settings: &FrequencyStep, cyclic: bool) -> (String, String) {
     }
     header.push('\n');
     let mut procedure = String::from("*Frequency");
+    if let Some(solver) = settings.solver.keyword() {
+        let _ = write!(procedure, ", Solver={solver}");
+    }
     if settings.storage {
         procedure.push_str(", Storage=Yes");
     }
@@ -3323,6 +3326,9 @@ fn buckle_step(settings: &BuckleStep) -> (String, String) {
     }
     header.push('\n');
     let mut procedure = String::from("*Buckle");
+    if let Some(solver) = settings.solver.keyword() {
+        let _ = write!(procedure, ", Solver={solver}");
+    }
     let _ = writeln!(
         procedure,
         "\n{}, {}",

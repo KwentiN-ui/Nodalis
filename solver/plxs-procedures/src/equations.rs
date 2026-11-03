@@ -218,31 +218,13 @@ impl Equations {
         coordinates: &mut Option<impl FnOnce() -> Vec<[f64; 3]>>,
         progress: &mut dyn Progress,
     ) -> Result<bool> {
-        let n = k.dimension();
-        if n < self.automatic_from {
+        if k.dimension() < self.automatic_from {
             return Ok(false);
         }
-        let started = std::time::Instant::now();
         if let Some(coordinates) = coordinates.take() {
             direct.set_coordinates(Some(coordinates()));
         }
-        let factor = direct.estimate_factor_bytes(k.pattern())?;
-        let need = factor.saturating_add(factor / 4);
-        let (available, known) = match self.available.or_else(plxs_linalg::available_memory) {
-            Some(bytes) => (bytes, true),
-            None => (ASSUMED_MEMORY, false),
-        };
-        let iterative = need as f64 > MEMORY_SHARE * available as f64;
-        progress.event(ProgressEvent::Info(format!(
-            "automatic equation solver: the factor of {n} equations needs {:.1} GB, {:.1} GB \
-             {}; solving {} (estimated in {:.2} s)",
-            need as f64 / 1e9,
-            available as f64 / 1e9,
-            if known { "available" } else { "assumed" },
-            if iterative { "iteratively" } else { "directly" },
-            started.elapsed().as_secs_f64()
-        )));
-        Ok(iterative)
+        factor_exceeds_memory(direct, k, self.available, progress)
     }
 
     fn prepare_iterative(&mut self, k: &SparseMatrix, progress: &mut dyn Progress) -> Result<()> {
@@ -308,6 +290,37 @@ fn with_message(error: Error, f: impl FnOnce(&str) -> String) -> Error {
         },
         other => other,
     }
+}
+
+/// The automatic choice for a system of `k`'s pattern: whether its factor (estimated by
+/// the symbolic analysis on `direct`, which keeps it) with a quarter more for the work
+/// space exceeds [`MEMORY_SHARE`] of the available memory (`available`, else the
+/// platform's). Tells the monitor what it found.
+pub fn factor_exceeds_memory(
+    direct: &mut LdltSolver,
+    k: &SparseMatrix,
+    available: Option<u64>,
+    progress: &mut dyn Progress,
+) -> Result<bool> {
+    let n = k.dimension();
+    let started = std::time::Instant::now();
+    let factor = direct.estimate_factor_bytes(k.pattern())?;
+    let need = factor.saturating_add(factor / 4);
+    let (available, known) = match available.or_else(plxs_linalg::available_memory) {
+        Some(bytes) => (bytes, true),
+        None => (ASSUMED_MEMORY, false),
+    };
+    let iterative = need as f64 > MEMORY_SHARE * available as f64;
+    progress.event(ProgressEvent::Info(format!(
+        "automatic equation solver: the factor of {n} equations needs {:.1} GB, {:.1} GB {}; \
+         solving {} (estimated in {:.2} s)",
+        need as f64 / 1e9,
+        available as f64 / 1e9,
+        if known { "available" } else { "assumed" },
+        if iterative { "iteratively" } else { "directly" },
+        started.elapsed().as_secs_f64()
+    )));
+    Ok(iterative)
 }
 
 /// Passes the warnings of a solver on, and its other messages only when `all`: for
