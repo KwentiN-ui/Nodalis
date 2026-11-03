@@ -167,6 +167,9 @@ pub enum Problem {
     RotationIn2d,
     /// Any other `*ERROR` of the solver output.
     SolverError,
+    /// An item the analysis cannot be set up with: the lowering of the model into the
+    /// solver's input stopped at it (an empty region, a missing amplitude).
+    NotLowered,
 }
 
 impl Problem {
@@ -272,6 +275,7 @@ impl Problem {
             Problem::MpcAndSpc => "Degree of freedom bound twice",
             Problem::RotationIn2d => "Rotation in a 2D model",
             Problem::SolverError => "Solver error",
+            Problem::NotLowered => "Analysis not set up",
         }
     }
 
@@ -652,6 +656,10 @@ impl Problem {
                 "The solver aborted with an error message that Nodalis does not know. \
                  The exact text is shown in the Monitor."
             }
+            Problem::NotLowered => {
+                "The analysis cannot be set up with this item: the solver's input cannot \
+                 be built from it as it is."
+            }
         }
     }
 
@@ -924,6 +932,7 @@ impl Problem {
                 "Read the message in the Monitor; \"Check Model\" in the context menu of \
                  the analysis often helps."
             }
+            Problem::NotLowered => "Correct the item as the message says.",
         }
     }
 }
@@ -938,7 +947,7 @@ pub struct Finding {
 }
 
 impl Finding {
-    pub(crate) fn new(item: ModelItem, problem: Problem, detail: impl Into<String>) -> Self {
+    pub fn new(item: ModelItem, problem: Problem, detail: impl Into<String>) -> Self {
         Self {
             item,
             problem,

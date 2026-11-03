@@ -9608,3 +9608,55 @@ fn solver_stretches_the_bar_plastically_with_nlgeom() {
         "{u2} vs {lateral}"
     );
 }
+
+/// The lowering keeps a table from the items of the analysis back to the model's, so the
+/// solver's diagnostics point at the tree: steps skip the deactivated ones, sections and
+/// materials keep their index.
+#[test]
+fn the_analysis_knows_the_items_it_came_from() {
+    use plx_model::ModelItem;
+    let (mesh, mut model) = cantilever(tip_force());
+    let mut second = model.steps[0].clone();
+    second.name = "Step-2".into();
+    second.active = false;
+    let mut third = second.clone();
+    third.name = "Step-3".into();
+    third.active = true;
+    model.steps.extend([second, third]);
+    let lowered = lower_unvalidated(&mesh, &model, "").unwrap();
+    let origins = &lowered.origins;
+    assert_eq!(lowered.analysis.steps.len(), 2);
+    assert_eq!(origins.get(&ir::ItemRef::Step(0)), Some(ModelItem::Step(0)));
+    assert_eq!(origins.get(&ir::ItemRef::Step(1)), Some(ModelItem::Step(2)));
+    assert_eq!(
+        origins.get(&ir::ItemRef::Section(0)),
+        Some(ModelItem::Section(0))
+    );
+    assert_eq!(
+        origins.get(&ir::ItemRef::Material("STEEL".into())),
+        Some(ModelItem::Material(0))
+    );
+}
+
+/// An error of the lowering names the item of the tree it stopped at, also when another
+/// step has an item of the same name.
+#[test]
+fn a_lowering_error_names_its_item() {
+    use plx_model::ModelItem;
+    let (mesh, mut model) = cantilever(tip_force());
+    let mut second = model.steps[0].clone();
+    second.name = "Step-2".into();
+    second.loads[0].amplitude = Some("Gone".into());
+    model.steps.push(second);
+    let error = lower_unvalidated(&mesh, &model, "").unwrap_err();
+    assert!(
+        matches!(error.error, WriteError::UnknownAmplitude { .. }),
+        "{error:?}"
+    );
+    assert_eq!(error.item, Some(ModelItem::Load(1, 0)));
+    // A missing material names the section that refers to it.
+    let (mesh, mut model) = cantilever(tip_force());
+    model.sections[0].material = "Unobtainium".into();
+    let error = lower_unvalidated(&mesh, &model, "").unwrap_err();
+    assert_eq!(error.item, Some(ModelItem::Section(0)));
+}

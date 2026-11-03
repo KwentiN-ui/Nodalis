@@ -154,7 +154,9 @@ pub fn check_analysis(
             ),
         );
         diagnostic.nodes = ids(missed);
-        check.diagnostics.push(diagnostic);
+        check
+            .diagnostics
+            .push(diagnostic.concerning(plxs_core::ItemRef::Tie(tie.clone())));
     }
 
     // One rank test per distinct set of held DOFs; the stiffness is the same for all.

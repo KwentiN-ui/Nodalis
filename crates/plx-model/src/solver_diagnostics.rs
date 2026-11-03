@@ -3,20 +3,46 @@
 //! nodes to the analysis and their parts. The solver found them exactly; the geometric
 //! estimates of [`crate::checks`] are only a quick hint while editing.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use plx_mesh::FeMesh;
-use plxs_core::{Diagnostic, DiagnosticCode, Severity as SolverSeverity};
+use plxs_core::{Diagnostic, DiagnosticCode, ItemRef, Severity as SolverSeverity};
 
 use crate::checks::{Finding, Problem, describe_motions};
 use crate::{FeModel, ModelItem, ModelSpace};
 
+/// The item of the model each item of a lowered analysis came from, filled by the lowering
+/// (`plx_io::inp::lower`): a diagnostic of the solver that names an [`ItemRef`] points at
+/// the item in the tree through it, without its message being read.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Origins(BTreeMap<ItemRef, ModelItem>);
+
+impl Origins {
+    pub fn insert(&mut self, item: ItemRef, origin: ModelItem) {
+        self.0.insert(item, origin);
+    }
+
+    /// The item of the model `item` came from.
+    pub fn get(&self, item: &ItemRef) -> Option<ModelItem> {
+        self.0.get(item).copied()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&ItemRef, &ModelItem)> {
+        self.0.iter()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// The findings of the solver's diagnostics. Information (sizes, free modes of a frequency
-/// step) gives none.
+/// step) gives none. `origins` leads the items the solver names back to the model's.
 pub fn diagnose_solver_check(
     diagnostics: &[Diagnostic],
     mesh: &FeMesh,
     fe: &FeModel,
+    origins: &Origins,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     let parts_of = parts_of_nodes(mesh);
@@ -52,9 +78,16 @@ pub fn diagnose_solver_check(
         }
         match &diagnostic.code {
             DiagnosticCode::RigidBodyMotion | DiagnosticCode::Mechanism => {
-                let step = (diagnostic.step)
-                    .and_then(|s| active.get(s as usize - 1))
-                    .copied();
+                // The step of the model the solver's step came from; without the table
+                // (another input file) the active steps in order.
+                let step = (diagnostic.step).and_then(|s| {
+                    let index = (s as usize).checked_sub(1)?;
+                    match origins.get(&ItemRef::Step(index)) {
+                        Some(ModelItem::Step(step)) => Some(step),
+                        _ if origins.is_empty() => active.get(index).copied(),
+                        _ => None,
+                    }
+                });
                 let problem = if has_contact && diagnostic.severity == SolverSeverity::Warning {
                     Problem::HeldOnlyByContact
                 } else if diagnostic.code == DiagnosticCode::Mechanism {
@@ -97,6 +130,9 @@ pub fn diagnose_solver_check(
                     Problem::TieNodesNotTied,
                     detail.clone(),
                 ));
+                if let Some(item) = (diagnostic.item.as_ref()).and_then(|i| origins.get(i)) {
+                    findings.push(Finding::new(item, Problem::TieNodesNotTied, detail.clone()));
+                }
                 for part in parts {
                     findings.push(Finding::new(
                         ModelItem::Part(part),
@@ -111,6 +147,22 @@ pub fn diagnose_solver_check(
                     Problem::SolverError,
                     diagnostic.message.clone(),
                 ));
+                // The item the solver names: an element by its part, the rest by the
+                // table of the lowering.
+                let item = match &diagnostic.item {
+                    Some(ItemRef::Element(id)) => (mesh.parts.iter())
+                        .position(|p| p.elements.contains(id))
+                        .map(ModelItem::Part),
+                    Some(item) => origins.get(item),
+                    None => None,
+                };
+                if let Some(item) = item.filter(|&i| i != ModelItem::Analysis) {
+                    findings.push(Finding::new(
+                        item,
+                        Problem::SolverError,
+                        diagnostic.message.clone(),
+                    ));
+                }
             }
             DiagnosticCode::NearlySingular | DiagnosticCode::FactorSize { .. } => {}
         }
@@ -201,6 +253,43 @@ mod tests {
         assert_eq!(
             describe_motions(ModelSpace::ThreeD, &free),
             "rotation about Z free"
+        );
+    }
+
+    /// The items the solver names lead to the model's through the lowering's table: an
+    /// untied tie to the contact region it stands for, a step to the model's step of that
+    /// analysis step, which skips deactivated ones.
+    #[test]
+    fn the_solver_items_lead_back_to_the_tree() {
+        let mut fe = FeModel::default();
+        for name in ["Step-1", "Off", "Step-3"] {
+            let mut step = crate::Step::new_static(name);
+            step.active = name != "Off";
+            fe.steps.push(step);
+        }
+        let mut origins = Origins::default();
+        origins.insert(ItemRef::Tie("GLUE".into()), ModelItem::ContactRegion(4));
+        origins.insert(ItemRef::Step(0), ModelItem::Step(0));
+        origins.insert(ItemRef::Step(1), ModelItem::Step(2));
+        let untied = Diagnostic::new(
+            DiagnosticCode::TieNodesNotTied { tie: "GLUE".into() },
+            SolverSeverity::Warning,
+            "not tied",
+        )
+        .concerning(ItemRef::Tie("GLUE".into()));
+        let mut free = Diagnostic::new(
+            DiagnosticCode::RigidBodyMotion,
+            SolverSeverity::Error,
+            "free",
+        );
+        free.step = Some(2);
+        free.motions = vec![[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
+        let findings = diagnose_solver_check(&[untied, free], &FeMesh::default(), &fe, &origins);
+        let items: Vec<ModelItem> = findings.iter().map(|f| f.item).collect();
+        assert!(items.contains(&ModelItem::ContactRegion(4)), "{items:?}");
+        assert!(
+            items.contains(&ModelItem::BoundaryConditions(2)),
+            "{items:?}"
         );
     }
 }

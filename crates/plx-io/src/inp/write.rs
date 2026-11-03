@@ -15,11 +15,11 @@ use plx_model::{
     ComplexFrequencyStep, Constraint, ContactMethod, ContactPair, ContactScale, DefinedFieldKind,
     DynamicStep, FeModel, FieldOutput, Formulation, FrequencyStep, GapConductance,
     HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialConditionKind,
-    InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep, ModelSpace, MovingFrame,
-    NodeTie, OutputDimension, OutputKind, Quantity, Region, RemoteBehavior, RemoteDof, Sampler,
-    Section, SectionKind, SectorDisplay, SensitivityStep, StaticStep, SteadyStateDynamicsStep,
-    Step, StepKind, SurfaceBehavior, SurfaceInteraction, Tie, Totals, UnitSystem, ViscoStep,
-    line_tangent, symmetry_dofs, symmetry_plane,
+    InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep, ModelItem, ModelSpace,
+    MovingFrame, NodeTie, Origins, OutputDimension, OutputKind, Quantity, Region, RemoteBehavior,
+    RemoteDof, Sampler, Section, SectionKind, SectorDisplay, SensitivityStep, StaticStep,
+    SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, Tie, Totals,
+    UnitSystem, ViscoStep, line_tangent, symmetry_dofs, symmetry_plane,
 };
 use plxs_core as ir;
 use plxs_core::mesh::{ElementRef, NodeRef};
@@ -88,12 +88,61 @@ pub enum WriteError {
     Unsupported { item: String, reason: String },
 }
 
+impl WriteError {
+    /// The name of the item the error is about.
+    pub fn item_name(&self) -> &str {
+        use WriteError as E;
+        match self {
+            E::EmptyRegion { item, .. }
+            | E::UnknownMaterial { item, .. }
+            | E::UnknownInteraction { item, .. }
+            | E::UnknownAmplitude { item, .. }
+            | E::InvalidAmplitude { item, .. }
+            | E::UnknownDistribution { item, .. }
+            | E::InvalidDistribution { item, .. }
+            | E::UnknownSurface { item, .. }
+            | E::UnknownContactPair { item, .. }
+            | E::InvalidSection { item, .. }
+            | E::InvalidCyclicSymmetry { item, .. }
+            | E::InvalidResultFile { item, .. }
+            | E::UnknownReferencePoint { item, .. }
+            | E::UnknownRemotePoint { item, .. }
+            | E::InvalidLoad { item, .. }
+            | E::InvalidBoundary { item, .. }
+            | E::NoGlobalResults { item }
+            | E::NoSymmetryPlane { item, .. }
+            | E::Unsupported { item, .. } => item,
+        }
+    }
+}
+
+/// An error of the model with the item of the tree it is about, so that the GUI can point
+/// at it. `item` is `None` when the error is about something the lowering derived (a tie of
+/// a contact region's detection) that has no item of its own.
+#[derive(Debug, thiserror::Error, PartialEq)]
+#[error("{error}")]
+pub struct ModelError {
+    pub item: Option<ModelItem>,
+    pub error: WriteError,
+}
+
+impl ModelError {
+    /// The error with the item it names, looked up in `model` (in the step that was being
+    /// lowered first).
+    fn new(model: &FeModel, error: WriteError, step: Option<usize>) -> Self {
+        Self {
+            item: model.item_named(error.item_name(), step),
+            error,
+        }
+    }
+}
+
 /// Why a model cannot be lowered: the model itself (an empty region, a missing material),
 /// or the analysis made of it, which the solver's validation refuses.
 #[derive(Debug, thiserror::Error)]
 pub enum LowerError {
     #[error(transparent)]
-    Model(#[from] WriteError),
+    Model(#[from] ModelError),
     #[error("{}", .0.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))]
     Solver(Vec<ir::Error>),
 }
@@ -115,6 +164,9 @@ pub struct Lowered {
     /// input file names it with (see [`super::PROFILE_COMMENT`]): the solver knows the
     /// section by its values only, the results draw it from the comment.
     pub profile_comments: Vec<(String, String)>,
+    /// The item of the model each section, tie, rigid body, contact pair, material,
+    /// amplitude and step of the analysis came from, for the solver's diagnostics.
+    pub origins: Origins,
 }
 
 impl Lowered {
@@ -170,7 +222,7 @@ pub fn lower_unvalidated(
     mesh: &FeMesh,
     model: &FeModel,
     heading: &str,
-) -> Result<Lowered, WriteError> {
+) -> Result<Lowered, ModelError> {
     Ok(lower_model(mesh, model, heading)?.assemble(|_| true))
 }
 
@@ -180,7 +232,7 @@ pub fn lower_with_sets_unvalidated(
     model: &FeModel,
     heading: &str,
     extra: &[(usize, Vec<Step>)],
-) -> Result<Lowered, WriteError> {
+) -> Result<Lowered, ModelError> {
     if extra.iter().all(|(_, steps)| steps.is_empty()) {
         return lower_unvalidated(mesh, model, heading);
     }
@@ -203,7 +255,9 @@ pub fn lower_with_sets_unvalidated(
 
 /// Writes the mesh and the analysis as the text of an input file.
 pub fn write_inp(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<String, WriteError> {
-    Ok(lower_unvalidated(mesh, model, heading)?.text())
+    Ok(lower_unvalidated(mesh, model, heading)
+        .map_err(|e| e.error)?
+        .text())
 }
 
 /// Writes the input file of `model` with the sets of `extra` steps too, which are not
@@ -219,7 +273,9 @@ pub fn write_inp_with_sets_of(
     heading: &str,
     extra: &[(usize, Vec<Step>)],
 ) -> Result<String, WriteError> {
-    Ok(lower_with_sets_unvalidated(mesh, model, heading, extra)?.text())
+    Ok(lower_with_sets_unvalidated(mesh, model, heading, extra)
+        .map_err(|e| e.error)?
+        .text())
 }
 
 /// An input file with only the mesh, its nodes moved by `scale` times `displacements` (one per
@@ -265,6 +321,8 @@ struct Built {
     shortened_names: Vec<(String, String)>,
     part_sets: Vec<String>,
     profile_comments: Vec<(String, String)>,
+    /// The origins of everything but the steps, which [`Built::assemble`] adds.
+    origins: Origins,
 }
 
 impl Built {
@@ -277,10 +335,16 @@ impl Built {
             let _ = assembler.apply(&model, card);
         }
         let mut steps = Vec::new();
+        let mut origins = self.origins;
+        // The steps written are those of the model, in order; the others are of the
+        // analyses that continue from it.
+        let mut model_step = 0;
         for (index, blocks) in self.steps.into_iter().enumerate() {
             if !written(index) {
                 continue;
             }
+            let origin = model_step;
+            model_step += 1;
             for block in blocks {
                 let mut step = block.step;
                 if !block.named {
@@ -290,7 +354,11 @@ impl Built {
                 for card in block.boundaries.into_iter().chain(block.cards) {
                     let _ = assembler.apply(&model, card);
                 }
+                let first = steps.len();
                 steps.extend(assembler.end(&model));
+                for step in first..steps.len() {
+                    origins.insert(ir::ItemRef::Step(step), ModelItem::Step(origin));
+                }
             }
         }
         Lowered {
@@ -300,6 +368,7 @@ impl Built {
             shortened_names: self.shortened_names,
             part_sets: self.part_sets,
             profile_comments: self.profile_comments,
+            origins,
         }
     }
 }
@@ -327,8 +396,22 @@ fn step_title(name: &str) -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
-/// The analysis lowered from mesh and model, without the assembly of its steps.
-fn lower_model(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Built, WriteError> {
+/// The analysis lowered from mesh and model, without the assembly of its steps; an error
+/// names the item it is about.
+fn lower_model(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Built, ModelError> {
+    let mut step = None;
+    lower_model_named(mesh, model, heading, &mut step)
+        .map_err(|error| ModelError::new(model, error, step))
+}
+
+/// [`lower_model`], keeping the index of the step being lowered in `lowering`.
+fn lower_model_named(
+    mesh: &FeMesh,
+    model: &FeModel,
+    heading: &str,
+    lowering: &mut Option<usize>,
+) -> Result<Built, WriteError> {
+    let original = model;
     // The faces of 2D elements are their edges; a mesh whose surface elements are still
     // typed as shells is lowered as the model space types them. Parts get the element
     // types the user chose for them, and linear shells of membrane sections become
@@ -351,20 +434,52 @@ fn lower_model(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Built, W
     };
     // Bolts become pre-tension loads and ties, and switch off the contact regions on
     // their cuts.
-    let bolted;
+    let (bolted, bolt_items);
     let model = if model.bolts.is_empty() {
+        bolt_items = None;
         model
     } else {
-        bolted = model.lower_bolts(mesh).0;
+        let (copy, items) = model.lower_bolts(mesh);
+        (bolted, bolt_items) = (copy, Some(items));
         &bolted
     };
     // Contact regions become the ties and contact pairs they stand for.
-    let lowered;
+    let (lowered, contact_items);
     let model = if model.contact_regions.is_empty() {
+        contact_items = None;
         model
     } else {
-        lowered = model.lower_contacts(mesh).0;
+        let (copy, items) = model.lower_contacts(mesh);
+        (lowered, contact_items) = (copy, Some(items));
         &lowered
+    };
+    // The item of the original model an item of the lowered one stands for: a tie or
+    // contact pair of a contact region the region, one of a bolt the bolt, an item the
+    // lowering added itself (a weak spring) none.
+    let origin = |item: ModelItem| -> Option<ModelItem> {
+        if let Some(items) = &contact_items {
+            if let Some(region) = items.region_of(item) {
+                return Some(ModelItem::ContactRegion(region));
+            }
+            match item {
+                ModelItem::Tie(i) if i >= items.first_tie => return None,
+                ModelItem::ContactPair(i) if i >= items.first_pair => return None,
+                ModelItem::ContactRegion(_) => return None,
+                _ => {}
+            }
+        }
+        if let Some(items) = &bolt_items {
+            if let Some(bolt) = items.bolt_of(item) {
+                return Some(ModelItem::Bolt(bolt));
+            }
+            if matches!(item, ModelItem::Tie(i) if i >= items.first_tie) {
+                return None;
+            }
+        }
+        match item {
+            ModelItem::Constraint(i) if i >= original.constraints.len() => None,
+            item => Some(item),
+        }
     };
     // Parts held only by contact get weak springs to ground.
     let springs = model.weak_springs(mesh);
@@ -419,9 +534,9 @@ fn lower_model(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Built, W
     // degrees of freedom (see [`dofs`]): rigid bodies and remote points, pre-tension cuts,
     // node ties, last springs and contact regions.
     let mut materials = materials(model);
-    let (mut sections, profile_comments) = sections(&mut sets, model)?;
+    let (mut sections, profile_comments, section_owners) = sections(&mut sets, model)?;
     let mut generated = constraints::Generated::default();
-    let mut constraints = constraints(&mut sets, model, &mut generated)?;
+    let (mut constraints, mut constraint_owners) = constraints(&mut sets, model, &mut generated)?;
     let pre_tension_equations = pre_tension_sections(&mut sets, model, &cuts, &mut generated);
     let node_tie_equations = node_ties(&mut sets, model, &lines)?;
     constraints::springs(&mut sets, model, &mut generated)?;
@@ -464,9 +579,11 @@ fn lower_model(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Built, W
                 pair_surfaces: &pair_surfaces,
                 model,
             };
+            *lowering = Some(s);
             lower_step(&mut sets, step, &context)
         })
         .collect::<Result<Vec<_>, _>>()?;
+    *lowering = None;
 
     // The model in the order of the input file, which the solver reads it in: submodel,
     // nodes, elements, sets, surfaces, coordinate systems, materials, sections,
@@ -525,12 +642,26 @@ fn lower_model(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Built, W
     ir_model.constraints.transforms = transforms(&sets.transforms);
     ir_model.materials = materials;
     ir_model.sections = sections;
+    let mut origins = Origins::default();
+    for (i, &section) in section_owners.iter().enumerate() {
+        if let Some(item) = origin(ModelItem::Section(section)) {
+            origins.insert(ir::ItemRef::Section(i), item);
+        }
+    }
     let constraint_list = &mut ir_model.constraints;
     constraint_list.equations.extend(pre_tension_equations);
-    for item in constraints {
+    // The equations generated after them have no item of their own.
+    constraint_owners.resize(constraints.len(), None);
+    for (item, owner) in constraints.into_iter().zip(constraint_owners) {
         match item {
             ConstraintItem::Equation(equation) => constraint_list.equations.push(equation),
-            ConstraintItem::RigidBody(body) => constraint_list.rigid_bodies.push(body),
+            ConstraintItem::RigidBody(body) => {
+                if let Some(item) = owner.and_then(origin) {
+                    let index = constraint_list.rigid_bodies.len();
+                    origins.insert(ir::ItemRef::RigidBody(index), item);
+                }
+                constraint_list.rigid_bodies.push(body);
+            }
             ConstraintItem::Tie(tie, cyclic) => {
                 constraint_list.ties.push(tie);
                 if cyclic.is_some() {
@@ -538,6 +669,25 @@ fn lower_model(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Built, W
                 }
             }
         }
+    }
+    for (i, tie) in model.ties.iter().enumerate().filter(|(_, t)| t.active) {
+        if let Some(item) = origin(ModelItem::Tie(i)) {
+            origins.insert(ir::ItemRef::Tie(ir_name(&name(&tie.name))), item);
+        }
+    }
+    let active_pairs = (model.contact_pairs.iter().enumerate()).filter(|(_, p)| p.active);
+    for (index, (i, _)) in active_pairs.enumerate().take(contact_pairs.len()) {
+        if let Some(item) = origin(ModelItem::ContactPair(i)) {
+            origins.insert(ir::ItemRef::ContactPair(index), item);
+        }
+    }
+    for (i, material) in original.materials.iter().enumerate() {
+        let item = ir::ItemRef::Material(ir_name(&name(&material.name)));
+        origins.insert(item, ModelItem::Material(i));
+    }
+    for (i, amplitude) in original.amplitudes.iter().enumerate() {
+        let item = ir::ItemRef::Amplitude(ir_name(&name(&amplitude.name)));
+        origins.insert(item, ModelItem::Amplitude(i));
     }
     ir_model.contact = ir::contact::Contact {
         interactions,
@@ -560,6 +710,7 @@ fn lower_model(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Built, W
         shortened_names: sets.shortened.clone(),
         part_sets: mesh.parts.iter().map(|p| p.name.clone()).collect(),
         profile_comments,
+        origins,
     })
 }
 
@@ -1389,7 +1540,8 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<SectionsAndProfiles, Wri
     use ir::section::{Section as IrSection, SectionKind as Kind};
     let mut out = Vec::new();
     let mut comments = Vec::new();
-    for section in &model.sections {
+    let mut owners = Vec::new();
+    for (index, section) in model.sections.iter().enumerate() {
         if !model.materials.iter().any(|m| m.name == section.material) {
             return Err(WriteError::UnknownMaterial {
                 item: section.name.clone(),
@@ -1466,13 +1618,14 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<SectionsAndProfiles, Wri
                 }
             }
         }
+        owners.resize(out.len(), index);
     }
-    Ok((out, comments))
+    Ok((out, comments, owners))
 }
 
-/// The sections, and the profile comments of the general beam sections (see
-/// [`Lowered::profile_comments`]).
-type SectionsAndProfiles = (Vec<ir::section::Section>, Vec<(String, String)>);
+/// The sections, the profile comments of the general beam sections (see
+/// [`Lowered::profile_comments`]) and the section of the model each section came from.
+type SectionsAndProfiles = (Vec<ir::section::Section>, Vec<(String, String)>, Vec<usize>);
 
 /// The comment before the `*Beam section` of a general profile: the profile, in RON, and
 /// the normal it is drawn with, which [`read_inp`](super::read_inp) takes back.
@@ -1644,13 +1797,18 @@ fn constraints(
     sets: &mut Sets,
     model: &FeModel,
     generated: &mut constraints::Generated,
-) -> Result<Vec<ConstraintItem>, WriteError> {
+) -> Result<(Vec<ConstraintItem>, Vec<Option<ModelItem>>), WriteError> {
     let mut items = Vec::new();
+    // The item each of `items` came from, where the solver can name it (a rigid body).
+    let mut owners: Vec<Option<ModelItem>> = Vec::new();
     let mut next_node = (sets.mesh.node_ids().iter().copied())
         .chain(generated.nodes.iter().map(|(id, _)| *id))
         .max()
         .map_or(1, |n| n + 1);
-    for constraint in model.constraints.iter().filter(|c| c.active()) {
+    for (index, constraint) in model.constraints.iter().enumerate() {
+        if !constraint.active() {
+            continue;
+        }
         match constraint {
             Constraint::Spring(_) | Constraint::CompressionOnly(_) => {}
             // Moved to the model's node ties when the project was read.
@@ -1675,6 +1833,7 @@ fn constraints(
                         set: None,
                     },
                 );
+                owners.resize(items.len(), None);
                 rigid_body(
                     &mut items,
                     sets,
@@ -1684,6 +1843,7 @@ fn constraints(
                     None,
                     [reference, rotation],
                 )?;
+                owners.resize(items.len(), Some(ModelItem::Constraint(index)));
             }
             Constraint::Tie(t) => items.push(tie(sets, t)?),
         }
@@ -1742,6 +1902,7 @@ fn constraints(
                     } else {
                         Region::Nodes(point.nodes.clone())
                     };
+                    owners.resize(items.len(), None);
                     rigid_body(
                         &mut items,
                         sets,
@@ -1751,6 +1912,7 @@ fn constraints(
                         point.axes,
                         [reference, rotation],
                     )?;
+                    owners.resize(items.len(), Some(ModelItem::BoundaryCondition(s, i)));
                 }
                 RemoteBehavior::Deformable => {
                     let space = model.properties.space;
@@ -1771,7 +1933,8 @@ fn constraints(
     for t in model.ties.iter().filter(|t| t.active) {
         items.push(tie(sets, t)?);
     }
-    Ok(items)
+    owners.resize(items.len(), None);
+    Ok((items, owners))
 }
 
 /// A tie of a slave surface glued to its master, with its cyclic symmetry model if it is

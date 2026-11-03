@@ -207,4 +207,5 @@ fn untied_slave_nodes_are_named() {
     assert_eq!(untied.len(), 1, "{:#?}", check.diagnostics);
     assert_eq!(untied[0].nodes.len(), 9);
     assert!(untied[0].nodes.iter().all(|&n| n > 1000));
+    assert_eq!(untied[0].item, Some(plxs_core::ItemRef::Tie("GLUE".into())));
 }
