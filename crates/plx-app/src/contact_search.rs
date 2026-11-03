@@ -1,4 +1,4 @@
-//! PrePoMax's "Search Contact Pairs": finds the surfaces of different parts that touch and
+//! The "Search Contact Pairs": finds the surfaces of different parts that touch and
 //! turns them into ties or contact pairs. The pairs found are listed in a table; the ones
 //! selected there are shown in the 3D view, master in the primary and slave in the secondary
 //! highlight colour, and can be edited together, swapped or merged before OK creates them.
@@ -35,7 +35,7 @@ impl PairType {
     }
 }
 
-/// The methods PrePoMax offers in the search, and mortar.
+/// The methods offered in the search.
 const METHODS: [ContactMethod; 3] = [
     ContactMethod::NodeToSurface,
     ContactMethod::SurfaceToSurface,
@@ -63,7 +63,7 @@ struct Row {
 }
 
 impl Row {
-    /// What touches, as in PrePoMax's table: solids, shells, their edges, the edges of a 2D
+    /// What touches, as in the table: solids, shells, their edges, the edges of a 2D
     /// model, or line ends.
     fn geometry(&self) -> String {
         if self.joint.is_some() {
@@ -135,7 +135,7 @@ pub enum SearchResult {
 impl ContactSearchDialog {
     pub fn new(fe: &FeModel) -> Self {
         Self {
-            // PrePoMax's 0.01 mm.
+            // 0.01 mm.
             distance: UnitSystem::MmTonSC.stored(0.01, Quantity::Length),
             angle: 35.0,
             group_by: GroupBy::Parts,
@@ -335,7 +335,7 @@ impl ContactSearchDialog {
         result
     }
 
-    /// The four groups above the table, as in PrePoMax.
+    /// The four groups above the table.
     fn parameters(&mut self, ui: &mut Ui, model: &Model) {
         ui.horizontal_top(|ui| {
             group(ui, "Search Parameters", |ui| {
@@ -469,7 +469,7 @@ impl ContactSearchDialog {
     }
 
     fn rows_grid(&mut self, ui: &mut Ui, units: UnitSystem) {
-        // Selected rows are filled across all columns, as in PrePoMax's table.
+        // Selected rows are filled across all columns, as in the table.
         let selected: Vec<bool> = self.rows.iter().map(|r| r.selected).collect();
         let fill = ui.visuals().selection.bg_fill;
         let text_color = ui.visuals().selection.stroke.color;
@@ -618,7 +618,7 @@ impl ContactSearchDialog {
         }
     }
 
-    /// PrePoMax's "Merge by Master/Slave": the selected pairs become one.
+    /// The "Merge by Master/Slave": the selected pairs become one.
     fn merge(&mut self) {
         let selected: Vec<usize> = (self.rows.iter().enumerate())
             .filter(|(_, r)| r.selected && r.joint.is_none())
@@ -649,7 +649,7 @@ impl ContactSearchDialog {
         }
     }
 
-    /// The properties of the selected rows, edited together like PrePoMax's property grid.
+    /// The properties of the selected rows, edited together in the property grid.
     fn properties(&mut self, ui: &mut Ui, model: &Model) {
         let selected: Vec<usize> = (self.rows.iter().enumerate())
             .filter(|(_, r)| r.selected)

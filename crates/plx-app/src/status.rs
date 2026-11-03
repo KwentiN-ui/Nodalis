@@ -34,7 +34,7 @@ impl CellState {
             CellState::UpToDate => "up to date",
             CellState::OutOfDate => "out of date: Solve makes it again",
             CellState::Running => "running",
-            CellState::Failed => "CalculiX reported errors",
+            CellState::Failed => "The solver reported errors",
             CellState::NotUsed => "not used: the mesh comes from an input file",
         }
     }
@@ -171,7 +171,7 @@ pub fn analysis_status(
 }
 
 /// Paints the symbol of a state into a 16 × 16 square at `min`, as Ansys Workbench marks its
-/// cells, with PrePoMax's icons where it has one: OK, an arrow for out of date, a question mark
+/// cells, with the icons where it has one: OK, an arrow for out of date, a question mark
 /// for missing.
 pub fn paint(painter: &Painter, min: egui::Pos2, state: CellState) {
     let p = |x: f32, y: f32| pos2(min.x + x, min.y + y);

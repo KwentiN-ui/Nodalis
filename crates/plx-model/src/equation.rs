@@ -1,4 +1,4 @@
-//! Equations of derived outputs and distributions in PrePoMax's syntax, which is NCalc's:
+//! Equations of derived outputs and distributions in NCalc's syntax:
 //! `=STRESS.MISES / 235`, with the arithmetic and comparison operators, `? :`, and functions
 //! such as `Sqrt`, `Max` or `If`. Results are referred to as `FIELD.COMPONENT`; a name
 //! containing characters an identifier cannot hold, like `Limit-1.RATIO`, is written in
@@ -66,7 +66,7 @@ enum Function {
 }
 
 impl Function {
-    /// NCalc's functions plus PrePoMax's `Ln`, with their number of arguments.
+    /// NCalc's functions plus `Ln`, with their number of arguments.
     const ALL: [(&'static str, Function, std::ops::RangeInclusive<usize>); 22] = [
         ("Abs", Function::Abs, 1..=1),
         ("Acos", Function::Acos, 1..=1),
@@ -102,7 +102,7 @@ fn flag(value: bool) -> f64 {
 }
 
 impl Equation {
-    /// Parses an equation; the leading `=` PrePoMax requires is optional.
+    /// Parses an equation; a leading `=` is optional.
     pub fn parse(text: &str) -> Result<Self, String> {
         let text = text.trim();
         let text = text.strip_prefix('=').unwrap_or(text);

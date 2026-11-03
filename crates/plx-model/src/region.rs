@@ -25,7 +25,7 @@ pub enum Region {
     /// A surface of the input file.
     Surface(String),
     /// Faces, edges and vertices of the CAD geometry the mesh was generated from, picked
-    /// as in PrePoMax. They are found on the mesh again after remeshing.
+    /// on the geometry. They are found on the mesh again after remeshing.
     Geometry(Vec<CadEntity>),
     /// A reference point by name, for boundary conditions and loads on a rigid body: the
     /// body's reference node, which exists only in the input file, so the region has no

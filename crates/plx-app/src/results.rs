@@ -11,7 +11,7 @@ use plx_results::history_output::{self, HistoryOutput, HistorySet};
 use plx_results::transformation::{self, Transformation};
 use plx_results::{AnalysisKind, Component, Field, Increment};
 
-/// How the deformed shape is scaled, as in PrePoMax's results toolbar.
+/// How the deformed shape is scaled, as in the results toolbar.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Deformation {
     Undeformed,
@@ -110,7 +110,7 @@ pub struct ResultsView {
     /// The sets of the `.dat` file followed by the data of the derived history outputs that
     /// could be computed, by name.
     pub history: Vec<HistorySet>,
-    /// Mirrored and patterned copies drawn besides the results, as PrePoMax's
+    /// Mirrored and patterned copies drawn besides the results, the
     /// transformations; the legend and the extremes include them.
     pub transformations: Vec<Transformation>,
     /// Coordinate systems of the results' features, for transformed field outputs.
@@ -125,10 +125,10 @@ pub struct ResultsView {
     pub plane_result: Option<usize>,
     /// Arrows over the contours and their options.
     pub vector_display: plx_results::display::VectorDisplay,
-    /// Unit system of the values, PrePoMax's results unit system: that of the FE model the
+    /// Unit system of the values: that of the FE model the
     /// results belong to; the legend shows units after it.
     pub units: UnitSystem,
-    /// Characteristic model size for the automatic scale (PrePoMax: cube root of the bounding
+    /// Characteristic model size for the automatic scale (cube root of the bounding
     /// box volume, square root of the area for flat models).
     model_size: f64,
     /// [`max_deformation`] of each increment, once asked for: the toolbar wants it every frame
@@ -179,7 +179,7 @@ impl Legend {
     }
 
     /// Range the values are normalized over for colouring: the bands', widened by one band
-    /// for each out-of-range colour, as PrePoMax's lookup table.
+    /// for each out-of-range colour.
     pub fn color_range(&self) -> (f32, f32) {
         let band = (self.max - self.min) / self.levels().max(1) as f32;
         let below = if self.below.is_some() { band } else { 0.0 };
@@ -247,7 +247,7 @@ impl ResultsView {
         view
     }
 
-    /// PrePoMax's automatic scale, except for contact outside eigenmode steps: exaggerated,
+    /// The automatic scale, except for contact outside eigenmode steps: exaggerated,
     /// the touching parts appear to penetrate each other, which confuses new users. Mode
     /// shapes are scaled arbitrarily, so they always get the automatic scale.
     pub fn default_deformation(&self) -> Deformation {
@@ -266,7 +266,7 @@ impl ResultsView {
         }
     }
 
-    /// PrePoMax opens the last increment of the last step, or the first mode of a frequency or
+    /// Nodalis opens the last increment of the last step, or the first mode of a frequency or
     /// buckle step; the reference state of a buckle step (increment 0) is skipped.
     fn default_increment(&self) -> usize {
         let Some(last) = self.increments.last() else {
@@ -610,7 +610,7 @@ impl ResultsView {
         self.recompute_history(mesh)
     }
 
-    /// Entry of the increment list, "step, increment" as in PrePoMax's results toolbar.
+    /// Entry of the increment list, "step, increment" as in the results toolbar.
     pub fn increment_label(increment: &Increment) -> String {
         match increment.nodal_diameter {
             Some(nd) => format!("{}, {} (ND {nd})", increment.step, increment.increment),
@@ -618,7 +618,7 @@ impl ResultsView {
         }
     }
 
-    /// PrePoMax's information block in the top right corner of the 3D view.
+    /// The information block in the top right corner of the 3D view.
     pub fn status_lines(&self, file_name: &str) -> Vec<String> {
         let mut lines = vec![format!(
             "Name: {file_name}   Date: {}   Time: {}",
@@ -745,7 +745,7 @@ impl ResultsView {
     }
 
     /// Factor on the shown values: the deformation factor, without its sign for magnitudes and
-    /// equivalent values, which stay positive while a mode shape swings (as in PrePoMax).
+    /// equivalent values, which stay positive while a mode shape swings.
     /// Values other than the displacements of a whirling complex mode follow its real part.
     pub fn value_amplitude(&self) -> f32 {
         let amplitude = match self.whirl() {
@@ -778,7 +778,7 @@ impl ResultsView {
     }
 
     /// Displacements of a whirling complex mode at the phase of the shown frame:
-    /// `u_k = MAG_k cos(phase + PHA_k)` per node, PrePoMax's complex animation.
+    /// `u_k = MAG_k cos(phase + PHA_k)` per node.
     fn whirl_displacements(phase: f32, field: &Field) -> Vec<[f32; 3]> {
         let nodes = field.component("MAG1").map_or(0, |c| c.values.len());
         (0..nodes)
@@ -1159,7 +1159,7 @@ impl ResultsView {
         } else {
             "Automatic"
         };
-        // PrePoMax writes names with blanks instead of underscores and dashes.
+        // Names are shown with blanks instead of underscores and dashes.
         let name = |n: &str| n.replace(['_', '-'], " ");
         let derived = self.field_outputs.iter().find(|o| o.name == field.name);
         let unit = match derived.map(|o| &o.kind) {
@@ -1256,7 +1256,7 @@ fn field_measure(field: &str, component: &str) -> Option<Measure> {
     }
 }
 
-/// The unit of a field of CalculiX's results in `units`, as PrePoMax shows it in the legend;
+/// The unit of a field of CalculiX's results in `units`, as the legend shows it;
 /// `None` for fields without a unit, such as strains, and for unknown fields.
 pub fn field_unit(field: &str, component: &str, units: UnitSystem) -> Option<String> {
     let unit = |quantity| Some(units.unit(quantity).to_string()).filter(|u| !u.is_empty());
@@ -1337,7 +1337,7 @@ pub fn convert_history(sets: &mut [HistorySet], units: UnitSystem) {
     }
 }
 
-/// PrePoMax's measure of the largest displacement: the root of the summed squares of the
+/// The measure of the largest displacement: the root of the summed squares of the
 /// largest absolute value of every `DISP` component, including `ALL`.
 fn max_deformation(increment: &Increment) -> Option<f32> {
     // A complex mode reaches its magnitudes over a turn, not in its real part alone.
@@ -1392,7 +1392,7 @@ pub(crate) fn round_significant(value: f64, digits: i32) -> f64 {
     (value * magnitude).round() / magnitude
 }
 
-/// Number with four significant digits, like PrePoMax's default "G4" format.
+/// Number with four significant digits, the "G4" format.
 pub fn format_value(value: f32) -> String {
     let abs = value.abs();
     if value == 0.0 {
@@ -1482,7 +1482,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_scale_follows_prepomax() {
+    fn automatic_scale_follows_model_size() {
         // Cube of size 10, largest displacement 0.1 in z: ALL and U3 both reach 0.1.
         let view = ResultsView::new(
             vec![increment(

@@ -4,7 +4,7 @@
 //!
 //! The mesh only knows the shape of a line element, two or three nodes; which CalculiX type
 //! it becomes (B31, B32, B32R, T3D2) follows from its section when the input file is written.
-//! PrePoMax has no beams, so these follow CalculiX's own keywords.
+//! Beam and truss sections follow CalculiX's own keywords.
 
 use glam::DVec3;
 use plx_mesh::{Element, ElementFamily, ElementShape};
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{BeamProfile, Region};
 
-/// Assigns a material to the elements of a region, PrePoMax's solid section, or a beam or
+/// Assigns a material to the elements of a region, a solid section, or a beam or
 /// truss section of CalculiX.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Section {
@@ -27,7 +27,7 @@ pub struct Section {
     pub kind: SectionKind,
 }
 
-/// PrePoMax's default thickness of 2D sections, one millimetre in SI units, as values are
+/// The default thickness of 2D sections, one millimetre in SI units, as values are
 /// stored.
 pub fn unit_thickness() -> f64 {
     1e-3
@@ -42,7 +42,7 @@ pub enum SectionKind {
     Truss { area: f64 },
     /// Line elements with bending stiffness (`B31`, `B32`, `B32R`).
     Beam(BeamSection),
-    /// Surface elements of a 3D model as shells (`*SHELL SECTION`), PrePoMax's shell
+    /// Surface elements of a 3D model as shells (`*SHELL SECTION`), a shell
     /// section: the thickness and the offset of the reference surface from the mid-surface
     /// as a fraction of the thickness.
     Shell { thickness: f64, offset: f64 },
@@ -70,7 +70,7 @@ impl SectionKind {
         },
     ];
 
-    /// Name of the kind, also the prefix of new sections' names, like PrePoMax's
+    /// Name of the kind, also the prefix of new sections' names, as in
     /// `Solid_Section-1`.
     pub fn prefix(&self) -> &'static str {
         match self {
@@ -171,8 +171,8 @@ impl SectionKind {
                 if matches!(element.shape, ElementShape::Tri6 | ElementShape::Quad8) =>
             {
                 Some(format!(
-                    "Element {} is quadratic; CalculiX computes quadratic membranes \
-                     wrongly, mesh the part with linear elements",
+                    "Element {} is quadratic; quadratic membranes are not \
+                     supported, mesh the part with linear elements",
                     element.id
                 ))
             }
@@ -190,7 +190,7 @@ impl SectionKind {
                     && element.shape != ElementShape::Line2 =>
             {
                 Some(format!(
-                    "Element {} has 3 nodes; {} profiles are general sections of CalculiX's \
+                    "Element {} has 3 nodes; {} profiles are general sections of the \
                      user element U1, which needs lines with 2 nodes",
                     element.id,
                     profile.map_or("", BeamProfile::label)

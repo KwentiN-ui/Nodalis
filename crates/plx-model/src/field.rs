@@ -1,4 +1,4 @@
-//! Field outputs of a step, PrePoMax's nodal, element and contact field outputs: the
+//! Field outputs of a step, the nodal, element and contact field outputs: the
 //! variables CalculiX writes into the `.frd` file (`*NODE FILE`, `*EL FILE`,
 //! `*CONTACT FILE`). The model keeps what the user picked; the keywords are made when the
 //! input file is written.
@@ -12,7 +12,7 @@ pub struct FieldOutput {
     #[serde(default = "crate::active")]
     pub active: bool,
     pub kind: OutputKind,
-    /// CalculiX's variable names, such as `U` or `S`, in PrePoMax's order.
+    /// CalculiX's variable names, such as `U` or `S`, in a fixed order.
     pub variables: Vec<String>,
     /// Writes the results of every iteration of the last increment, for finding out why a
     /// solution diverges (`LAST ITERATIONS`).
@@ -40,7 +40,7 @@ pub enum OutputKind {
     Contact,
 }
 
-/// CalculiX's `OUTPUT` parameter of `*EL FILE`, PrePoMax's "Output (2D/3D)".
+/// CalculiX's `OUTPUT` parameter of `*EL FILE`, the "Output (2D/3D)".
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputDimension {
     /// Left to CalculiX, which writes shells and beams as the solids it expands them to.
@@ -67,8 +67,7 @@ impl OutputDimension {
 impl OutputKind {
     pub const ALL: [OutputKind; 3] = [Self::Node, Self::Element, Self::Contact];
 
-    /// Variables the kind can write, in PrePoMax's order (`NodalFieldVariable`,
-    /// `ElementFieldVariable`, `ContactFieldVariable`).
+    /// Variables the kind can write, in a fixed order.
     pub fn choices(self) -> &'static [&'static str] {
         match self {
             Self::Node => &["RF", "U", "PU", "V", "NT", "PNT", "RFL", "SEN"],
@@ -79,7 +78,7 @@ impl OutputKind {
         }
     }
 
-    /// The tree's and the dialog's name of the kind, as in PrePoMax.
+    /// The tree's and the dialog's name of the kind.
     pub fn label(self) -> &'static str {
         match self {
             Self::Node => "Node Output",
@@ -88,7 +87,7 @@ impl OutputKind {
         }
     }
 
-    /// Prefix of default names, PrePoMax's `NF_Output`, `EF_Output` and `CF_Output`.
+    /// Prefix of default names, the `NF_Output`, `EF_Output` and `CF_Output`.
     pub fn prefix(self) -> &'static str {
         match self {
             Self::Node => "NF_Output",
@@ -97,7 +96,7 @@ impl OutputKind {
         }
     }
 
-    /// The variables PrePoMax picks for a new field output of the kind.
+    /// The variables picked for a new field output of the kind.
     pub fn default_variables(self) -> &'static [&'static str] {
         match self {
             Self::Node => &["U"],
@@ -107,7 +106,7 @@ impl OutputKind {
     }
 }
 
-/// PrePoMax's description of a field or history output variable, shown when hovering over its
+/// The description of a field or history output variable, shown when hovering over its
 /// check box; the history-only variables are described as in the CalculiX manual.
 pub fn output_variable_description(variable: &str) -> &'static str {
     match variable {
@@ -145,7 +144,7 @@ pub fn output_variable_description(variable: &str) -> &'static str {
 }
 
 impl FieldOutput {
-    /// A field output of the kind with the given variables and PrePoMax's default options.
+    /// A field output of the kind with the given variables and the default options.
     pub fn new(name: impl Into<String>, kind: OutputKind, variables: &[&str]) -> Self {
         Self {
             name: name.into(),
@@ -159,7 +158,7 @@ impl FieldOutput {
         }
     }
 
-    /// Sorts the variables into PrePoMax's order and drops those the kind cannot write.
+    /// Sorts the variables into their fixed order and drops those the kind cannot write.
     pub fn normalize_variables(&mut self) {
         let choices = self.kind.choices();
         self.variables.retain(|v| choices.contains(&v.as_str()));
@@ -168,7 +167,7 @@ impl FieldOutput {
         self.variables.dedup();
     }
 
-    /// Why CalculiX would reject the variables, as PrePoMax checks them.
+    /// Why CalculiX would reject the variables.
     pub fn check_variables(&self) -> Result<(), String> {
         if self.variables.is_empty() {
             return Err("Please select at least one variable.".into());
@@ -182,7 +181,7 @@ impl FieldOutput {
         Ok(())
     }
 
-    /// Field outputs PrePoMax adds to a new static step. `NOE` is added when writing.
+    /// Field outputs added to a new static step. `NOE` is added when writing.
     pub fn defaults() -> Vec<Self> {
         vec![
             Self::new("NF-Output-1", OutputKind::Node, &["RF", "U"]),
@@ -190,7 +189,7 @@ impl FieldOutput {
         ]
     }
 
-    /// Field outputs PrePoMax adds to a new frequency step: no reaction forces, as the
+    /// Field outputs added to a new frequency step: no reaction forces, as the
     /// mode shapes are scaled arbitrarily.
     pub fn frequency_defaults() -> Vec<Self> {
         let mut outputs = Self::defaults();
@@ -198,7 +197,7 @@ impl FieldOutput {
         outputs
     }
 
-    /// Field outputs PrePoMax adds to a new complex frequency step: the displacements with
+    /// Field outputs added to a new complex frequency step: the displacements with
     /// their magnitudes and phases (`PU`), so the whirling of a mode can be shown.
     pub fn complex_frequency_defaults() -> Vec<Self> {
         let mut outputs = Self::defaults();
@@ -214,7 +213,7 @@ impl FieldOutput {
         outputs
     }
 
-    /// Field outputs PrePoMax adds to a new heat transfer step: temperatures, reaction heat
+    /// Field outputs added to a new heat transfer step: temperatures, reaction heat
     /// flows and heat fluxes.
     pub fn heat_transfer_defaults() -> Vec<Self> {
         let mut outputs = Self::defaults();
@@ -223,7 +222,7 @@ impl FieldOutput {
         outputs
     }
 
-    /// Field outputs PrePoMax adds to a new dynamic step: velocities and energies too.
+    /// Field outputs added to a new dynamic step: velocities and energies too.
     pub fn dynamic_defaults() -> Vec<Self> {
         let mut outputs = Self::defaults();
         outputs[0].variables = ["RF", "U", "V"].map(String::from).to_vec();
@@ -237,7 +236,7 @@ impl FieldOutput {
         vec![Self::new("NF-Output-1", OutputKind::Node, &["SEN"])]
     }
 
-    /// Field outputs PrePoMax adds to a new coupled temperature-displacement step.
+    /// Field outputs added to a new coupled temperature-displacement step.
     pub fn coupled_defaults() -> Vec<Self> {
         let mut outputs = Self::defaults();
         outputs[0].variables = ["RF", "U", "NT", "RFL"].map(String::from).to_vec();
@@ -251,7 +250,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn projects_without_the_options_load_with_prepomax_defaults() {
+    fn projects_without_the_options_load_with_the_defaults() {
         let saved = r#"(name: "NF-Output-1", kind: Node, variables: ["RF", "U"])"#;
         let output: FieldOutput = ron::from_str(saved).unwrap();
         assert_eq!(
@@ -293,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn variables_keep_prepomax_order() {
+    fn variables_keep_their_order() {
         let mut output = FieldOutput::new("x", OutputKind::Node, &["V", "U", "S", "U"]);
         output.normalize_variables();
         assert_eq!(output.variables, ["U", "V"]);

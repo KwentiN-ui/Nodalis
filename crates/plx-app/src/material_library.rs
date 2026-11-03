@@ -1,4 +1,4 @@
-//! PrePoMax's Material Library Editor: copies materials between the user's material library
+//! The Material Library Editor: copies materials between the user's material library
 //! and the FE model, and keeps the library in the user's data directory.
 
 use std::path::PathBuf;
@@ -20,7 +20,7 @@ pub fn library_file() -> Option<PathBuf> {
     crate::portable::data_dir().map(|dir| dir.join(FILE_NAME))
 }
 
-/// Which list was used last; the move buttons and the preview follow it, as in PrePoMax.
+/// Which list was used last; the move buttons and the preview follow it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Side {
     Library,
@@ -89,7 +89,7 @@ impl MaterialLibraryEditor {
             error: None,
             confirm_close: false,
         };
-        // PrePoMax selects the first model material and the first library material.
+        // Nodalis selects the first model material and the first library material.
         let first = editor.library.first_material().unwrap_or_default();
         editor.select_library(first);
         if !editor.materials.is_empty() {
@@ -366,7 +366,7 @@ impl MaterialLibraryEditor {
         result
     }
 
-    /// PrePoMax's collapsed "Libraries" box: here the one library file of the user.
+    /// The collapsed "Libraries" box: the one library file of the user.
     fn libraries_section(&mut self, ui: &mut Ui) {
         egui::CollapsingHeader::new("Libraries")
             .default_open(false)
@@ -553,7 +553,7 @@ impl MaterialLibraryEditor {
         }
     }
 
-    /// PrePoMax's "Preview Material Properties": the material models of the selected
+    /// The "Preview Material Properties": the material models of the selected
     /// material and their values, read only.
     fn preview_window(&mut self, ctx: &egui::Context, at: egui::Pos2) {
         let mut open = true;
@@ -730,7 +730,7 @@ fn material_models(
     models
 }
 
-/// Number as PrePoMax shows it in property grids: very small or large values in E notation.
+/// Number as property grids show it: very small or large values in E notation.
 fn format_value(value: f64) -> String {
     if value != 0.0 && !(1e-3..1e7).contains(&value.abs()) {
         format!("{value:.2E}")
@@ -739,7 +739,7 @@ fn format_value(value: f64) -> String {
     }
 }
 
-/// Categories are blue in PrePoMax's library tree.
+/// Categories are blue in the library tree.
 fn category_label(name: &str, selected: bool) -> RichText {
     let text = RichText::new(name);
     if selected {
@@ -795,7 +795,7 @@ fn library_tree(
     }
 }
 
-/// Group box with a title, like the WinForms group boxes of PrePoMax's dialog.
+/// Group box with a title.
 fn group(ui: &mut Ui, title: &str, size: egui::Vec2, body: impl FnOnce(&mut Ui)) {
     ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
         ui.set_width(size.x);

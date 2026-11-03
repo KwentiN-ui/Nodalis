@@ -565,7 +565,7 @@ fn a_force_on_points_is_shared_by_the_nodes() {
         text.contains("*Cload, op=New\nINTERNAL_SELECTION-1_FORCE-1, 3, -25\n"),
         "{text}"
     );
-    // At each node, like PrePoMax's concentrated force, every node takes the whole force.
+    // At each node, like a concentrated force, every node takes the whole force.
     let mut each = tip_force();
     each.region = Region::Nodes(vec![96, 97, 98, 99]);
     each.kind = LoadKind::Force {
@@ -1569,8 +1569,8 @@ fn tet_cut_faces(mesh: &FeMesh) -> Vec<(ElementId, u8)> {
 }
 
 /// CalculiX's own `*PRE-TENSION SECTION` leaves the tetrahedra that touch the cut with only
-/// an edge or a corner on both sides, and most of the preload goes through them (PrePoMax
-/// users add a thin layer of wedge elements for this). The cut through the mesh carries all
+/// an edge or a corner on both sides, and most of the preload goes through them (a thin
+/// layer of wedge elements is the usual workaround). The cut through the mesh carries all
 /// of it, also across a cut whose normal is not along an axis of the bar.
 #[test]
 fn solver_preloads_a_tetrahedral_bar_across_the_cut() {
@@ -3448,7 +3448,7 @@ fn solver_carries_the_load_across_a_tie() {
 
 #[test]
 fn solver_carries_the_load_across_a_contact() {
-    // PrePoMax's default hard contact and a linear spring.
+    // The default hard contact and a linear spring.
     let linear = SurfaceBehavior::Linear {
         k: 1e7,
         sigma_inf: 2.86,
@@ -6451,7 +6451,7 @@ fn submodels_read_the_cut_displacements_of_the_global_results() {
          INTERNAL_SELECTION-1_SUBMODEL-1, 3, 3\n"
     ));
 
-    // A general model has no global results, as in PrePoMax.
+    // A general model has no global results.
     model.properties.kind = plx_model::ModelKind::General;
     assert!(matches!(
         write_inp(&mesh, &model, ""),

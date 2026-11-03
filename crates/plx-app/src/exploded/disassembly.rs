@@ -1,4 +1,4 @@
-//! PrePoMax's disassembly direction method, in three stages.
+//! The disassembly direction method, in three stages.
 //!
 //! 1. Contact graph: groups of connected parts are the nodes, detected interfaces the edges.
 //!    Two surface patches touch when the bounding boxes of their faces, enlarged by half the
@@ -33,7 +33,7 @@ const MIN_CLEARANCE_FACTOR: f64 = 0.01;
 const DIRECTION_GROUP_DIGITS: i32 = 2;
 const MIN_FASTENER_AXIAL_INTERFACES: usize = 2;
 const MAX_FASTENER_VOLUME_FACTOR: f64 = 0.2;
-/// Relative tolerances of the surface recognition, PrePoMax's `FaceTypeRecognition`.
+/// Relative tolerances of the surface recognition.
 const PLANE_REL_TOL: f64 = 1e-3;
 const NORMAL_RANK_REL_TOL: f64 = 0.02;
 const FIT_REL_TOL: f64 = 5e-3;
@@ -673,8 +673,7 @@ fn agrees(candidate: &Candidate, direction: DVec3) -> bool {
     }
 }
 
-/// Recognizes planes, surfaces with an axis and spheres from the corner nodes of a patch,
-/// after PrePoMax's `FaceTypeRecognition`.
+/// Recognizes planes, surfaces with an axis and spheres from the corner nodes of a patch.
 fn classify(coords: &[[f64; 3]], face: &Face) -> Shape {
     let mut index: HashMap<usize, usize> = HashMap::new();
     let mut points: Vec<DVec3> = Vec::new();

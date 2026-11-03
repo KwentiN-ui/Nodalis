@@ -1,4 +1,4 @@
-//! Contact and tie definitions: PrePoMax's surface interactions, contact pairs and tie
+//! Contact and tie definitions: the surface interactions, contact pairs and tie
 //! constraints. Master and slave are regions the user picked; their surfaces are written to
 //! the input file only when it is exported.
 
@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{CompressionOnly, NodeTie, Region, RigidBody, Spring};
 
-/// PrePoMax's default colour of contact and constraint surfaces, yellow.
+/// The default colour of contact and constraint surfaces, yellow.
 pub const DEFAULT_SURFACE_COLOR: [u8; 3] = [255, 255, 0];
 
 /// Mechanical and thermal behaviour of touching surfaces (`*SURFACE INTERACTION`), referred to
@@ -52,7 +52,7 @@ pub enum InteractionProperty {
 }
 
 impl InteractionProperty {
-    /// PrePoMax's names of the interaction models, which are also the default models.
+    /// The names of the interaction models, which are also the default models.
     pub fn all() -> [InteractionProperty; 3] {
         [
             InteractionProperty::SurfaceBehavior(SurfaceBehavior::default()),
@@ -70,7 +70,7 @@ impl InteractionProperty {
     }
 }
 
-/// Pressure-overclosure relation of the contact (`*SURFACE BEHAVIOR`), with PrePoMax's default
+/// Pressure-overclosure relation of the contact (`*SURFACE BEHAVIOR`), with the default
 /// values for mm, N and MPa.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum SurfaceBehavior {
@@ -94,9 +94,9 @@ pub enum SurfaceBehavior {
 }
 
 impl SurfaceBehavior {
-    /// Kinds of the relation with PrePoMax's default values, as offered in the dialog.
+    /// Kinds of the relation with the default values, as offered in the dialog.
     pub fn kinds() -> [SurfaceBehavior; 5] {
-        // PrePoMax's values for mm, t, s, stored in SI units. E = 200 GPa: K = 50 E,
+        // The values for mm, t, s, stored in SI units. E = 200 GPa: K = 50 E,
         // sigma_inf = E / 70000.
         use crate::{Quantity, UnitSystem::MmTonSC};
         let k = MmTonSC.stored(1e7, Quantity::ForcePerVolume);
@@ -179,7 +179,7 @@ impl ContactMethod {
         ContactMethod::Massless,
     ];
 
-    /// PrePoMax's name, which is also the value of `TYPE=`.
+    /// The name, which is also the value of `TYPE=`.
     pub fn name(self) -> &'static str {
         match self {
             ContactMethod::NodeToSurface => "Node to surface",
@@ -263,7 +263,7 @@ pub struct ContactPair {
     pub slave_color: [u8; 3],
 }
 
-/// PrePoMax's name of a swapped pair: `<slave>_to_<master>` for `<master>_to_<slave>`, other
+/// The name of a swapped pair: `<slave>_to_<master>` for `<master>_to_<slave>`, other
 /// names as they are.
 pub fn swapped_name(name: &str) -> String {
     match name.split("_to_").collect::<Vec<_>>()[..] {
@@ -273,7 +273,7 @@ pub fn swapped_name(name: &str) -> String {
 }
 
 impl ContactPair {
-    /// Swaps master and slave, like PrePoMax also in a name `<master>_to_<slave>`.
+    /// Swaps master and slave, also in a name `<master>_to_<slave>`.
     pub fn swap_master_slave(&mut self) {
         std::mem::swap(&mut self.master, &mut self.slave);
         self.name = swapped_name(&self.name);
@@ -297,7 +297,7 @@ impl ContactPair {
     }
 }
 
-/// A constraint between parts of the model or to ground, PrePoMax's Constraints.
+/// A constraint between parts of the model or to ground.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Constraint {
     Spring(Spring),
@@ -372,7 +372,7 @@ impl Constraint {
         }
     }
 
-    /// Swaps master and slave of a tie or spring connection, like PrePoMax also in a name
+    /// Swaps master and slave of a tie or spring connection, also in a name
     /// `<master>_to_<slave>`; returns false for constraints without the two.
     pub fn swap_master_slave(&mut self) -> bool {
         let (name, master, slave) = match self {
@@ -479,7 +479,7 @@ impl Default for CyclicSymmetry {
 const SECTOR_ANGLE_TOLERANCE: f64 = 2e-3;
 
 impl CyclicSymmetry {
-    /// The highest nodal diameter `sectors` sectors can carry, PrePoMax's limit.
+    /// The highest nodal diameter `sectors` sectors can carry.
     pub fn highest_nodal_diameter(sectors: u32) -> u32 {
         sectors / 2
     }

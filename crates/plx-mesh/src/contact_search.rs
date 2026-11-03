@@ -1,9 +1,9 @@
-//! PrePoMax's "Search Contact Pairs": finds surfaces of different parts that lie on each other
+//! The "Search Contact Pairs": finds surfaces of different parts that lie on each other
 //! and decides which side is master and which slave, following `CaeMesh.ContactSearch` and
 //! `ContactGraph`.
 //!
 //! Surfaces are the smooth patches of the part skins, which stand for the CAD faces the way
-//! PrePoMax's geometry surfaces do: of solids their outer side, of shells and membranes the
+//! geometry surfaces do: of solids their outer side, of shells and membranes the
 //! top and the bottom side, and the free edges of shells in chains between corners. In 2D
 //! models the surfaces are chains of outline edges of the plane elements, split at corners,
 //! the way CalculiX takes the edges as faces. Two surfaces are in contact where triangles of
@@ -24,7 +24,7 @@ use crate::skin::PartSkin;
 /// (the region of the part's skin, or the chain of edges).
 pub type SurfaceId = (usize, SurfaceKind, usize);
 
-/// What a contact surface is, PrePoMax's geometry types of the search.
+/// What a contact surface is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SurfaceKind {
     /// The outer side of solid elements.
@@ -38,7 +38,7 @@ pub enum SurfaceKind {
 }
 
 impl SurfaceKind {
-    /// PrePoMax's name in the search's table.
+    /// The name in the search's table.
     pub fn label(self) -> &'static str {
         match self {
             SurfaceKind::Solid => "Solid",
@@ -48,7 +48,7 @@ impl SurfaceKind {
     }
 }
 
-/// Which surfaces are searched, PrePoMax's geometry filter.
+/// Which surfaces are searched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GeometryFilter {
     pub solid: bool,
@@ -78,7 +78,7 @@ impl GeometryFilter {
     }
 }
 
-/// How the pairs of touching surfaces become contact pairs, PrePoMax's "Group by".
+/// How the pairs of touching surfaces become contact pairs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum GroupBy {
     /// One contact pair per pair of touching surfaces.
@@ -113,7 +113,7 @@ pub struct MasterSlaveItem {
 }
 
 impl MasterSlaveItem {
-    /// PrePoMax's name of the pair, `<master>_to_<slave>`, shortened to 35 characters.
+    /// The name of the pair, `<master>_to_<slave>`, shortened to 35 characters.
     pub fn name(&self) -> String {
         let join = |a: &str, b: &str| format!("{a}_to_{b}");
         let mut name = join(&self.master_name, &self.slave_name);
@@ -135,7 +135,7 @@ impl MasterSlaveItem {
         std::mem::swap(&mut self.master, &mut self.slave);
     }
 
-    /// What touches, as in PrePoMax's table, e.g. "Shell edge-Solid": the kind of the
+    /// What touches, as in the table, e.g. "Shell edge-Solid": the kind of the
     /// master's and of the slave's first surface.
     pub fn geometry(&self) -> String {
         let kind = |side: &BTreeSet<SurfaceId>| side.first().map_or("", |id| id.1.label());
@@ -251,7 +251,7 @@ pub fn find_contact_pairs(
                 BTreeMap::new();
             for &(a, b) in &touching {
                 // Sides by part order; the contact graph decides which is master. Edges of
-                // shells touching a part make a pair of their own, as in PrePoMax.
+                // shells touching a part make a pair of their own.
                 let (master, slave) = if a.0 < b.0 { (a, b) } else { (b, a) };
                 let edge = |id: SurfaceId| id.1 == SurfaceKind::ShellEdge;
                 let key = (master.0, edge(master), slave.0, edge(slave));
@@ -557,8 +557,7 @@ fn surface_areas(surfaces: &[Surface]) -> HashMap<SurfaceId, f64> {
         .collect()
 }
 
-/// Whether two surfaces face each other somewhere within the distance and angle,
-/// PrePoMax's `CheckSurfaceToSurfaceDistance`.
+/// Whether two surfaces face each other somewhere within the distance and angle.
 fn surfaces_touch(a: &Surface, b: &Surface, distance: f64, angle: f64) -> bool {
     if a.internal || b.internal || a.id.0 == b.id.0 || !a.bounds.intersects(&b.bounds) {
         return false;
@@ -584,12 +583,12 @@ fn surfaces_touch(a: &Surface, b: &Surface, distance: f64, angle: f64) -> bool {
     false
 }
 
-/// The triangles of a face: one, or two of a quadrilateral as PrePoMax splits it.
+/// The triangles of a face: one, or two of a quadrilateral.
 fn triangles(points: &[[f64; 3]]) -> impl Iterator<Item = [[f64; 3]; 3]> + '_ {
     (1..points.len() - 1).map(move |k| [points[0], points[k], points[k + 1]])
 }
 
-/// PrePoMax's `CheckTriangleToTriangleDistance` for solid surfaces, which may penetrate each
+/// Whether two triangles of solid surfaces touch; solid surfaces which may penetrate each
 /// other: the triangles face each other within the angle, are closer than the distance, lie
 /// one above the other, and still are after shrinking them, so that touching only at a corner
 /// or an edge does not count.
@@ -849,7 +848,7 @@ impl Priority {
 }
 
 impl Context<'_> {
-    /// PrePoMax's `GetNameFromItemIds`: the part name if all surfaces are of one part, else
+    /// Name of merged items: the part name if all surfaces are of one part, else
     /// the next free "Merged-n".
     fn name(&self, ids: &BTreeSet<SurfaceId>, taken: &[String]) -> String {
         let parts: BTreeSet<usize> = ids.iter().map(|id| id.0).collect();
@@ -914,7 +913,7 @@ impl GraphNode {
     }
 }
 
-/// An undirected graph as PrePoMax's `Graph<T>`: nodes in order, and per node its neighbours
+/// An undirected graph: nodes in order, and per node its neighbours
 /// in the order the edges were added, an edge added twice listed twice.
 #[derive(Clone, Debug, Default)]
 struct Graph {
@@ -970,7 +969,7 @@ impl Graph {
     }
 }
 
-/// PrePoMax's `ContactGraph`: sides of contact pairs as nodes, the pairs as edges.
+/// Sides of contact pairs as nodes, the pairs as edges.
 struct ContactGraph<'a> {
     context: &'a Context<'a>,
     nodes: HashMap<usize, GraphNode>,
@@ -1071,7 +1070,7 @@ impl<'a> ContactGraph<'a> {
         ordered
     }
 
-    /// PrePoMax's `GetGroupedMasterSlaveItems`: a two-colourable part becomes one pair with
+    /// Groups the pairs by master and slave: a two-colourable part becomes one pair with
     /// the better master side as master; otherwise each node is the slave of its better
     /// neighbours, slaves with the same masters in one pair.
     fn grouped_master_slave_items(&self) -> Vec<MasterSlaveItem> {
@@ -1604,7 +1603,7 @@ mod tests {
     }
 
     #[test]
-    fn long_names_are_shortened_like_prepomax() {
+    fn long_names_are_shortened() {
         let item = MasterSlaveItem {
             master_name: "A_VERY_LONG_PART_NAME_INDEED_REALLY".into(),
             slave_name: "B".into(),

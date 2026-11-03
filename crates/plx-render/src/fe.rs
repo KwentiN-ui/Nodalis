@@ -6,7 +6,7 @@ use crate::contour::NO_VALUE;
 use crate::mesh::{NodeBlend, RenderMesh, Vertex};
 
 pub(crate) const EDGE_COLOR: [f32; 3] = [0.0, 0.0, 0.0];
-/// Opacities of PrePoMax's edge actors; line vertices carry them in [`Vertex::scalar`], the
+/// Opacities of the edge actors; line vertices carry them in [`Vertex::scalar`], the
 /// shader draws mesh edges with [`MESH_EDGE_OPACITY`] (`viewport.wgsl` repeats it).
 pub const FEATURE_EDGE_OPACITY: f32 = 0.7;
 pub const MESH_EDGE_OPACITY: f32 = 0.4;
@@ -14,7 +14,7 @@ pub const WIREFRAME_OPACITY: f32 = 0.5;
 /// How far the mid node of a straight edge may lie off its centre, relative to its length.
 pub(crate) const STRAIGHT_TOLERANCE: f64 = 1e-3;
 
-/// PrePoMax's default part colours (System.Drawing names), cycled by part index.
+/// The default part colours (System.Drawing names), cycled by part index.
 const PART_COLORS_SRGB: [[u8; 3]; 10] = [
     [245, 245, 220], // Beige
     [143, 188, 143], // DarkSeaGreen
@@ -197,7 +197,7 @@ impl SharedVertices {
     }
 }
 
-/// Feature edges of a part as translucent black lines, PrePoMax's wireframe of the undeformed
+/// Feature edges of a part as translucent black lines, the wireframe of the undeformed
 /// shape behind deformed results.
 pub fn wireframe_edges(coords: &[[f64; 3]], skin: &PartSkin, origin: DVec3) -> Vec<Vertex> {
     let vertex = |node: usize| Vertex {

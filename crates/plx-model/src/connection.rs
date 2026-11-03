@@ -1123,7 +1123,7 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
             (false, _) if formulation == ContactMethod::Mortar => SurfaceBehavior::Hard,
             (false, Some(k)) => SurfaceBehavior::Linear {
                 k,
-                // PrePoMax's tension at large clearances, E / 70000.
+                // The tension at large clearances, E / 70000.
                 sigma_inf: young.unwrap_or(0.0) / 70_000.0,
                 c0: None,
             },

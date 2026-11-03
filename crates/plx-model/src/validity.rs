@@ -1,4 +1,4 @@
-//! Items whose references are gone, like PrePoMax's invalid features: a section whose material
+//! Items whose references are gone: a section whose material
 //! was deleted, or a load on a node set the mesh no longer has. Validity is derived from the
 //! model each time, so an item becomes valid again as soon as its reference is back.
 

@@ -279,7 +279,7 @@ impl Problem {
         }
     }
 
-    /// What goes wrong and why CalculiX cannot cope with it.
+    /// What goes wrong and why the solver cannot cope with it.
     pub fn explanation(self) -> &'static str {
         match self {
             Problem::MissingReference => {
@@ -291,13 +291,13 @@ impl Problem {
                 "The type of the section and the elements of its region do not go together: \
                  beams and trusses need line elements, solid sections solid or plane \
                  elements, shell and membrane sections surface elements of a 3D model. \
-                 Membranes must be linear, since CalculiX computes quadratic membranes \
-                 (M3D6, M3D8) wrongly. Dimensions such as a thickness of 0 are rejected too. \
+                 Membranes must be linear: quadratic membranes \
+                 (M3D6, M3D8) are not supported. Dimensions such as a thickness of 0 are rejected too. \
                  The input file cannot be written like this."
             }
             Problem::NoSection => {
-                "CalculiX needs a material for every element. Elements that no section \
-                 covers abort the run with \"no material was assigned to element\"."
+                "The solver needs a material for every element. Elements that no section \
+                 covers abort the run."
             }
             Problem::OverlappingSections => {
                 "An element may belong to one section only. When the regions of two sections \
@@ -307,18 +307,17 @@ impl Problem {
             }
             Problem::NoElastic => {
                 "A section uses this material, but it has no Young's modulus and no \
-                 Poisson's ratio. Without them there is no stiffness; CalculiX aborts \
-                 with \"no elastic constants were assigned\"."
+                 Poisson's ratio. Without them there is no stiffness and the \
+                 run aborts."
             }
             Problem::NoDensity => {
                 "A Frequency step, a Dynamic step, a transient heat transfer as well as \
                  gravity and centrifugal loads need the mass of the model. Without a \
-                 density CalculiX aborts with \"no density was assigned\"."
+                 density the run aborts."
             }
             Problem::RigidBeamNodes => {
-                "CalculiX refuses nodes of beams, trusses, shells and membranes in a rigid \
-                 body (\"nodes belonging to beam elements must not be subject to a RIGID \
-                 MPC\"), because it expands these elements into solids. Nodalis therefore \
+                "Nodes of beams, trusses, shells and membranes cannot be part of a rigid \
+                 body, because the solver expands these elements into solids. Nodalis therefore \
                  couples such nodes of a Rigid Body constraint or a rigid displacement point \
                  with linear equations to the point. They are exact for small rotations, as \
                  in a linear analysis; with large deformations (NLGEOM) and large rotations \
@@ -326,16 +325,14 @@ impl Problem {
                  the rotations of beam and shell nodes are not coupled."
             }
             Problem::TieNodesNotTied => {
-                "CalculiX ties a slave node of a bonded contact region or tie only if the \
+                "The solver ties a slave node of a bonded contact region or tie only if the \
                  master side is closer than the position tolerance. These nodes are further \
                  away: they stay unconnected, the parts can open there and the stresses next \
-                 to them are wrong. CalculiX lists the nodes in the file \
-                 <job>_WarnNodeMissTiedContact.nam of the working directory."
+                 to them are wrong. The solver output lists the nodes."
             }
             Problem::HeldRigidBodyNodes => {
                 "A node of a rigid body follows its reference point; a boundary condition on \
-                 it binds it a second time, which CalculiX refuses (\"dependent side of a MPC \
-                 and a SPC\"). Nodalis leaves these nodes out of the rigid body: they keep \
+                 it binds it a second time, which the solver refuses. Nodalis leaves these nodes out of the rigid body: they keep \
                  their boundary condition, and the rigid body is not held by it."
             }
             Problem::SharedRigidBody => {
@@ -350,42 +347,39 @@ impl Problem {
                  point there is no node to apply it to; the input file would be incomplete."
             }
             Problem::InvalidCreep => {
-                "CalculiX reads Norton's creep law only after an isotropic elasticity and \
+                "The solver reads Norton's creep law only after an isotropic elasticity and \
                  refuses a constant A or an exponent n that is not positive."
             }
             Problem::InvalidPlastic => {
                 "The hardening curve of a plastic material lists the yield stress over the \
                  plastic strain. Every row needs a stress above 0, the first row of each \
                  temperature starts at plastic strain 0 and the strain grows from row to \
-                 row; plasticity also needs the elastic constants. Otherwise CalculiX stops \
-                 with \"*PLASTIC: the plastic strain must be increasing\" or gives a wrong \
-                 stiffness."
+                 row; plasticity also needs the elastic constants. Otherwise the run stops \
+                 or gives a wrong stiffness."
             }
             Problem::NoConductivity => {
-                "A heat transfer needs the thermal conductivity of every material. \
-                 CalculiX only warns (\"no conductivity constants were assigned\") and \
-                 then crashes while solving."
+                "A heat transfer needs the thermal conductivity of every material; \
+                 without it the run fails."
             }
             Problem::NoSpecificHeat => {
-                "A transient heat transfer needs the specific heat. CalculiX aborts \
-                 with \"no specific heat was assigned\"."
+                "A transient heat transfer needs the specific heat; without it the \
+                 run aborts."
             }
             Problem::NoInitialTemperature => {
                 "A transient heat transfer starts from an initial temperature, and a \
                  prescribed temperature (Defined Field) expands the model relative to it. \
-                 Without it CalculiX aborts with \"please define initial conditions for \
-                 the temperature\" or \"no thermal *INITIAL CONDITIONS are given\"."
+                 Without it the run aborts."
             }
             Problem::InvalidElastic => {
                 "Young's modulus must be greater than 0 and Poisson's ratio must lie \
                  between -1 and 0.5 (0.5 would be an incompressible material, which a \
-                 linear elastic model cannot represent). CalculiX rejects the material \
+                 linear elastic model cannot represent). The solver rejects the material \
                  when reading the input."
             }
             Problem::DistortedElements => {
                 "These elements are inverted or so badly distorted that their Jacobian \
-                 determinant is not positive at an integration point. CalculiX aborts \
-                 with \"nonpositive jacobian determinant in element\". Typical causes \
+                 determinant is not positive at an integration point, and the run \
+                 aborts. Typical causes \
                  are quadratic tetrahedra whose midside nodes were moved onto a strongly \
                  curved face, very thin regions, or 2D elements whose nodes are numbered \
                  clockwise."
@@ -393,7 +387,7 @@ impl Problem {
             Problem::SpinAboutPins => {
                 "These beams are held by pins, nodes with all displacements and no rotation \
                  given, which leave them free to turn about the line through the pins. \
-                 Nothing loads this rotation, and CalculiX solves such models in linear and \
+                 Nothing loads this rotation, and the solver solves such models in linear and \
                  nonlinear steps alike; the results are valid. Only a moment about that line \
                  would turn the beams without limit."
             }
@@ -403,28 +397,28 @@ impl Problem {
                  tied contact connects them to supported parts. A Compression Only \
                  support holds only perpendicular to its surface: on a flat face the \
                  part can still slide and turn in the plane. The stiffness matrix is \
-                 then singular. Depending on the matrix solver CalculiX aborts with \"zero \
-                 pivot\" or returns huge, useless displacements without an error."
+                 then singular. Depending on the matrix solver the run aborts \
+                 or returns huge, useless displacements without an error."
             }
             Problem::Mechanism => {
                 "Trusses (Truss Section) carry axial force only. A node at which all \
                  trusses lie on one line or in one plane is not held across it: a truss \
                  of several elements buckles at every inner node without resistance, and \
                  a plane truss can move perpendicular to its plane. The stiffness matrix \
-                 is singular; CalculiX does not report this but returns huge, useless \
+                 is singular; the solver does not report this but returns huge, useless \
                  displacements."
             }
             Problem::HeldOnlyByContact => {
                 "These parts are held only by contact pairs without tied surface \
                  behavior. At the start of the \
                  analysis a contact carries load only once it is closed; until then the \
-                 parts can drift away freely. This often leads to \"zero pivot\", to \
-                 \"too many cutbacks\" or to very long analyses."
+                 parts can drift away freely. This often leads to a singular system, to \
+                 too many cutbacks or to very long analyses."
             }
             Problem::ConflictingBoundaries => {
                 "In this step the same nodes are prescribed by several boundary \
                  conditions with different values, e.g. a face fixed and an adjacent \
-                 edge with a displacement. CalculiX does not report this but uses the \
+                 edge with a displacement. The solver does not report this but uses the \
                  value written last; the result then depends on the order in the tree."
             }
             Problem::LoadOnFixedNodes => {
@@ -434,10 +428,10 @@ impl Problem {
             Problem::RotationsIgnored => {
                 "Only beam and shell nodes have rotations (UR1 to UR3). Solid and 2D \
                  elements have displacements only; prescribed rotations are ignored or \
-                 abort the run in 2D models (\"mpc of type is unknown\")."
+                 abort the run in 2D models."
             }
             Problem::PartialBeamRotations => {
-                "CalculiX expands beams into solid elements. A beam node with a given \
+                "The solver expands beams into solid elements. A beam node with a given \
                  rotation becomes a rigid knot of its cross section, and the knot is held \
                  in all three rotations even if only one of them is given: a pin that \
                  should only stop the twist acts as a clamp, and its reaction forces are \
@@ -469,14 +463,13 @@ impl Problem {
             }
             Problem::SkewedSymmetryShared => {
                 "A symmetry plane that is not a coordinate plane is written with a local \
-                 coordinate system for its nodes (*TRANSFORM). CalculiX then reads every \
+                 coordinate system for its nodes (*TRANSFORM). The solver then reads every \
                  boundary condition and point load at these nodes in that local system \
                  (x along the plane normal), and a node can have only one such system."
             }
             Problem::IncrementExceedsStep => {
-                "The initial increment is larger than the time period of the step. \
-                 CalculiX rejects the step with \"initial increment size exceeds step \
-                 size\"."
+                "The initial increment is larger than the time period of the step, \
+                 which the solver rejects."
             }
             Problem::WheelOffSurface => {
                 "At some positions of the moving load a wheel is partly or fully off the \
@@ -495,27 +488,26 @@ impl Problem {
             Problem::UnusedAmplitude => {
                 "No boundary condition, load or defined field refers to this amplitude, so it \
                  has no effect. Loads and boundary conditions without an amplitude follow \
-                 CalculiX's default ramp or step."
+                 the default ramp or step."
             }
             Problem::NoExpansion => {
                 "A defined temperature (Defined Field) deforms the model only through the \
                  thermal expansion of the materials. Without an expansion coefficient \
-                 CalculiX runs, but the temperature has no effect."
+                 the analysis runs, but the temperature has no effect."
             }
             Problem::NoStoredModes => {
                 "Modal Dynamics, Steady State Dynamics and Complex Frequency steps work on \
-                 the eigenmodes a previous Frequency step with Storage wrote to the .eig \
-                 file. Without it CalculiX stops with \"error opening the eigenvalue file\" \
-                 or \"the eigenvalue file does not exist\"."
+                 the eigenmodes a previous Frequency step with Storage keeps. Without \
+                 them the run stops."
             }
             Problem::NoSensitivityBase => {
                 "A Sensitivity step differentiates the solution of the step right before it: \
                  strain energy needs a Static step, eigenfrequencies a Frequency step that \
-                 stores its eigenmodes, mass either. Otherwise CalculiX stops (\"cannot open \
-                 eigenvalue file\") or computes the wrong responses."
+                 stores its eigenmodes, mass either. Otherwise the run stops \
+                 or computes the wrong responses."
             }
             Problem::DesignRegionIgnored => {
-                "CalculiX defines the design variables once for the model. Nodalis writes \
+                "The solver defines the design variables once for the model. Nodalis writes \
                  the design region of the first Sensitivity step; the regions of later ones \
                  are not used."
             }
@@ -524,16 +516,16 @@ impl Problem {
                  period. Without such a material it computes the same as a Static step."
             }
             Problem::GeneralBeamStep => {
-                "I, T, channel, angle and general profiles are not beam sections of CalculiX \
-                 itself: they are written as general sections of its user element U1, a \
+                "I, T, channel, angle and general profiles are not native beam sections: \
+                 they are written as general sections of the user element U1, a \
                  linear beam. It computes Static steps without large deformations (Nlgeom), \
-                 Frequency steps (CalculiX 2.23, not 2.21) and the modal and steady state \
-                 dynamics built on them; other steps stop CalculiX with an error."
+                 Frequency steps and the modal and steady state \
+                 dynamics built on them; other steps stop the run with an error."
             }
             Problem::InvalidCyclicSymmetry => {
                 "A cyclic symmetry tie models a whole part by one sector of a 3D mesh. The \
                  number of sectors N is 360 degrees over the angle between the two cut faces \
-                 about the axis, which must be a whole number: CalculiX solves only sectors \
+                 about the axis, which must be a whole number: the solver solves only sectors \
                  that close the full circle. A model of N sectors carries the nodal diameters \
                  0 to N/2 only."
             }
@@ -549,8 +541,8 @@ impl Problem {
             }
             Problem::BoltFacesUsedTwice => {
                 "The bolt joins the two sides of its cut itself. A tie or contact pair on the \
-                 same faces binds the nodes a second time: CalculiX then loops forever while \
-                 resolving the constraints, or the contact does not converge."
+                 same faces binds the nodes a second time: the constraints then conflict, \
+                 or the contact does not converge."
             }
             Problem::BoltHeldAtCut => {
                 "A bonded or rough contact region touches the cut of the \
@@ -559,7 +551,7 @@ impl Problem {
             }
             Problem::LockWithoutPreload => {
                 "Lock keeps the length the bolt had at the end of the previous step. In the \
-                 first step the pre-tension acts in there is none, and CalculiX holds the bolt \
+                 first step the pre-tension acts in there is none, and the solver holds the bolt \
                  at its unstretched length: the bolt carries no preload."
             }
             Problem::VelocityIgnored => {
@@ -572,19 +564,19 @@ impl Problem {
                  complex eigenfrequencies are those of the Frequency step."
             }
             Problem::ContactIgnored => {
-                "CalculiX takes contact into account in a Frequency step only as a \
+                "The solver takes contact into account in a Frequency step only as a \
                  perturbation of the static step before it. Without Perturbation the contact \
                  pairs, tied ones included, are left out without a message: parts held only \
                  by them float and give eigenfrequencies near zero or on weak springs."
             }
             Problem::ContactFormulationsDiffer => {
-                "CalculiX takes one formulation (node to surface, surface to surface, mortar \
+                "The solver takes one formulation (node to surface, surface to surface, mortar \
                  or massless) for all contact pairs of a model. A contact pair defined by hand \
                  has another one than the contact regions, which use the formulation of the \
                  Connections."
             }
             Problem::MortarNotSupported => {
-                "CalculiX takes mortar contact in static steps only. In frequency, \
+                "The solver takes mortar contact in static steps only. In frequency, \
                  buckling, dynamic and thermal steps the run aborts or the contact is left \
                  out."
             }
@@ -601,40 +593,39 @@ impl Problem {
                  them together: gaps open or the sides press into each other."
             }
             Problem::ContactOutputIgnored => {
-                "CalculiX prints contact values (*CONTACT PRINT) of contact pairs only: a \
+                "The solver prints contact values (*CONTACT PRINT) of contact pairs only: a \
                  bonded region written as a tie and a region of no separation have no \
                  contact elements, and a deactivated region is not written. The history \
                  output is left out."
             }
             Problem::ContactChangeIgnored => {
-                "CalculiX switches contact pairs off and on within the steps, but not ties \
+                "The solver switches contact pairs off and on within the steps, but not ties \
                  and constraint equations: a bonded region written as a tie and a region of \
                  no separation hold in every step. A region deactivated as a whole is not \
                  written at all, so no step can switch it on."
             }
             Problem::InvalidTiedContact => {
-                "CalculiX offers the Tied surface behavior only for Surface to surface \
+                "The solver offers the Tied surface behavior only for Surface to surface \
                  contact pairs, and it needs a Friction model in the same surface \
                  interaction: the stick slope of the friction is the stiffness of the tie \
                  along the surfaces (the friction coefficient is irrelevant). Without \
-                 friction the run aborts with \"a stick slope using the *FRICTION card is \
-                 mandatory\"; with Node to surface it aborts too, and Mortar fails."
+                 friction the run aborts; with Node to surface it aborts too, and Mortar fails."
             }
             Problem::ContactWithCoriolis => {
-                "CalculiX computes the Coriolis coupling of a Complex Frequency step without \
+                "The solver computes the Coriolis coupling of a Complex Frequency step without \
                  the contact springs of the Frequency step. With parts joined by contact \
                  pairs whirl pairs do not split, and modes go missing from the results."
             }
             Problem::NoConvergence => {
-                "The Newton iteration did not converge; CalculiX kept reducing the \
-                 increment and gave up (\"too many cutbacks\" or \"increment size \
-                 smaller than minimum\"). The cause is usually contacts, poorly supported \
+                "The Newton iteration did not converge; the solver kept reducing the \
+                 increment and gave up (too many cutbacks or an increment smaller than \
+                 the minimum). The cause is usually contacts, poorly supported \
                  parts or too large loads in a nonlinear analysis. An even smaller \
                  minimum increment rarely helps."
             }
             Problem::MpcAndSpc => {
                 "A degree of freedom is both fixed by a boundary condition and bound as \
-                 the dependent degree of freedom of an equation (MPC). CalculiX then aborts. \
+                 the dependent degree of freedom of an equation (MPC). The run then aborts. \
                  Nodalis keeps the equations and rigid bodies it writes itself off the \
                  degrees of freedom that boundary conditions or other constraints hold (the \
                  solver output lists what it changed), so the overlap comes from a \
@@ -642,9 +633,8 @@ impl Problem {
             }
             Problem::RotationIn2d => {
                 "Rotations (degrees of freedom 4 to 6) were fixed in a 2D model. \
-                 CalculiX expands 2D elements internally into solid elements and cannot \
-                 prescribe rotations for them; the run aborts with \"mpc of type is \
-                 unknown\" or a floating point error."
+                 The solver expands 2D elements internally into solid elements and cannot \
+                 prescribe rotations for them; the run aborts."
             }
             Problem::NoPhysicalConstants => {
                 "Radiation (*RADIATE) depends on the fourth power of the absolute \
@@ -778,7 +768,7 @@ impl Problem {
             Problem::PartialBeamRotations => {
                 "Give all three rotations UR1 to UR3 of the node (a clamp) or none of them \
                  (a pin). A pin at each end of a beam may leave it free to spin about the \
-                 line through both; CalculiX copes with that."
+                 line through both; the solver copes with that."
             }
             Problem::NoSymmetryPlane => {
                 "Select the planar faces of the cut (or the edge of shells), or enter the \
@@ -3226,7 +3216,7 @@ pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
                     ModelItem::Part(p),
                     problem,
                     format!(
-                        "According to CalculiX: element(s) {}",
+                        "According to the solver: element(s) {}",
                         list(in_part.iter().take(5))
                     ),
                 ));

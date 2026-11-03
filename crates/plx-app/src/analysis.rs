@@ -1,5 +1,5 @@
 //! Running the analysis: writes the input file, starts the solver (see [`plx_solve::Run`])
-//! and shows PrePoMax's monitor window with the solver output, progress and the button to
+//! and shows the monitor window with the solver output, progress and the button to
 //! open the results.
 
 use std::path::PathBuf;
@@ -324,7 +324,7 @@ pub fn stage_linked_results(
 
 impl Analysis {
     /// Writes the input file of the analysis `name` into `work_dir` and starts the solver on
-    /// it. With `check_model` the solver only checks the model (PrePoMax's "Check Model").
+    /// it. With `check_model` the solver only checks the model (Check Model).
     /// `continuation` tells which analyses continue from its state, whose sets its input
     /// file holds too.
     pub fn start(
@@ -499,7 +499,7 @@ impl Analysis {
         }
     }
 
-    /// PrePoMax's monitor, in the Analysis tab below the 3D view: status, progress and
+    /// The monitor, in the Analysis tab below the 3D view: status, progress and
     /// filter in one row over the output of the run.
     pub fn monitor(&mut self, ui: &mut egui::Ui) -> MonitorEvent {
         let mut event = MonitorEvent::None;

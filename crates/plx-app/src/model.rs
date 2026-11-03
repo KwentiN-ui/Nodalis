@@ -37,11 +37,11 @@ pub fn is_project_file(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case(PROJECT_EXTENSION))
 }
 
-/// Colour of selected faces and nodes, PrePoMax's highlight red.
+/// Colour of selected faces and nodes.
 pub const HIGHLIGHT_COLOR: [f32; 3] = [1.0, 0.0, 0.0];
 
 /// Colour of the second region of an item, such as the slave surface of a contact pair:
-/// PrePoMax's secondary highlight colour, violet.
+/// The secondary highlight colour, violet.
 pub const SECONDARY_HIGHLIGHT_COLOR: [f32; 3] = [238.0 / 255.0, 130.0 / 255.0, 238.0 / 255.0];
 
 /// Summary of one part, computed once on load so the GUI never iterates large meshes.
@@ -54,7 +54,7 @@ pub struct PartInfo {
     /// Bounding box relative to [`Model::origin`].
     pub bounds: Option<(Vec3, Vec3)>,
     pub visible: bool,
-    /// Whether the part takes part in the colour scale of results (PrePoMax: colour
+    /// Whether the part takes part in the colour scale of results (colour
     /// contours on); a part without them is plain grey and leaves the legend range alone.
     pub contours: bool,
     /// Dimension of the CAD shape of a geometry part: 3 solid, 2 face, 1 edge.
@@ -74,7 +74,7 @@ pub struct Model {
     pub load_time: Duration,
     /// Results read from an `.frd` file, with what the user currently looks at. A model
     /// with results is a results file: it lives in the Results workspace and has no FE model
-    /// to set up, as in PrePoMax.
+    /// to set up.
     pub results: Option<ResultsView>,
     /// The analysis set up on this mesh.
     pub fe: FeModel,
@@ -283,7 +283,7 @@ struct CadDisplay {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Highlight {
     pub parts: HashSet<usize>,
-    /// Parts drawn with a red outline only, as PrePoMax shows a selected part.
+    /// Parts drawn with a red outline only, as a selected part is shown.
     pub outlines: HashSet<usize>,
     /// Element faces as (element, CalculiX face number).
     pub faces: HashSet<(ElementId, u8)>,
@@ -587,7 +587,7 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
         view.time = time;
         view
     });
-    // History outputs CalculiX printed next to the results, as PrePoMax reads them, or
+    // History outputs CalculiX printed next to the results, or
     // those of the built-in solver.
     if let Some(view) = &mut model.results {
         let dat = ["dat", "DAT"]
@@ -1977,8 +1977,8 @@ impl Model {
         Ok(())
     }
 
-    /// Gives the elements of the part that have the shape of `type_name` this type, as
-    /// PrePoMax's part properties do; the choice is kept for the part when it is meshed anew.
+    /// Gives the elements of the part that have the shape of `type_name` this type,
+    /// as the part properties do; the choice is kept for the part when it is meshed anew.
     pub fn set_element_type(&mut self, index: usize, type_name: &str) -> Result<(), String> {
         let part = self.parts.get(index).ok_or("The part no longer exists.")?;
         let part = part.name.clone();

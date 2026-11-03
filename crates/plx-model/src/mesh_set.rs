@@ -1,5 +1,5 @@
-//! Node sets, element sets and surfaces the user defines in the FE Model tree, as in
-//! PrePoMax. They keep the selection they were made from, so that they are found on a new
+//! Node sets, element sets and surfaces the user defines in the FE Model tree.
+//! They keep the selection they were made from, so that they are found on a new
 //! mesh again; the members are written into the mesh's sets, which the input file lists.
 
 use plx_mesh::{FeMesh, SurfaceDefinition};
@@ -25,7 +25,7 @@ impl SetKind {
         }
     }
 
-    /// PrePoMax's default name prefix.
+    /// The default name prefix.
     pub fn prefix(self) -> &'static str {
         match self {
             SetKind::Nodes => "Node_Set",

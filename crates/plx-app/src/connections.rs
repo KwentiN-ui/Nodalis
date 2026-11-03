@@ -506,7 +506,7 @@ fn stiffness_row(
 ) {
     ui.label(label);
     ui.horizontal(|ui| {
-        let auto_text = auto.map_or("CalculiX".into(), |k| {
+        let auto_text = auto.map_or("solver".into(), |k| {
             with_unit(k, units, Quantity::ForcePerVolume)
         });
         let kind = match value {
@@ -619,7 +619,7 @@ fn advanced_rows(ui: &mut Ui, model: &Model, region: &mut ContactRegion, resolve
         let auto = resolved
             .tolerance()
             .or(resolved.mesh_size.map(|h| 0.25 * h));
-        let auto_text = auto.map_or("CalculiX".into(), |t| with_unit(t, units, Quantity::Length));
+        let auto_text = auto.map_or("solver".into(), |t| with_unit(t, units, Quantity::Length));
         ui.checkbox(&mut set, "")
             .on_hover_text(format!("Untick for Auto ({auto_text})"));
         if set {
@@ -767,7 +767,7 @@ pub fn connections_form(ui: &mut Ui, fe: &FeModel, defaults: &mut ContactDefault
     ui.add(
         egui::Label::new(
             RichText::new(format!(
-                "{description}\n\nCalculiX takes one formulation for all contacts of a model. \
+                "{description}\n\nThe solver takes one formulation for all contacts of a model. \
              Bonded regions written as ties are not affected."
             ))
             .weak(),

@@ -1,6 +1,6 @@
 struct Globals {
     view_proj: mat4x4<f32>,
-    // Directions towards PrePoMax's three camera lights, in world space.
+    // Directions towards the three camera lights, in world space.
     lights: array<vec4<f32>, 3>,
     // Direction towards the viewer (orthographic, so the same everywhere).
     view_dir: vec4<f32>,
@@ -70,10 +70,10 @@ fn clipped(world: vec3<f32>) -> bool {
         && dot(globals.clip.xyz, world) - globals.clip.w < -globals.clip_options.y;
 }
 
-// Colour without a result value: light grey, like PrePoMax's NaN colour.
+// Colour without a result value: light grey.
 const NO_VALUE_COLOR: vec3<f32> = vec3<f32>(0.75, 0.75, 0.75);
 
-// PrePoMax's actor properties and light intensity.
+// Material properties and light intensity.
 const AMBIENT: f32 = 0.6;
 const DIFFUSE: f32 = 0.6;
 const SPECULAR: f32 = 0.6;

@@ -1,4 +1,4 @@
-//! Diagram of curves over a common x axis, PrePoMax's diagram view of a table selection: a
+//! Diagram of curves over a common x axis: a
 //! curve per y column, a legend, grid lines at round numbers and the value of the nearest
 //! point under the mouse.
 
@@ -356,7 +356,7 @@ pub struct WindowResponse {
     pub plot: Rect,
 }
 
-/// The diagram in its own window, PrePoMax's diagram view; `shown` is whether it is also an
+/// The diagram in its own window; `shown` is whether it is also an
 /// annotation in the 3D view.
 pub fn window(ctx: &egui::Context, data: &XyData, shown: bool) -> WindowResponse {
     let mut open = true;

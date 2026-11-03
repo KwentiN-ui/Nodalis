@@ -1,4 +1,4 @@
-//! PrePoMax's mesh tools: Transform of mesh parts (translate, rotate, mirror, scale) from
+//! The mesh tools: Transform of mesh parts (translate, rotate, mirror, scale) from
 //! the part's context menu, and Merge Coincident Nodes and Renumber All of the Mesh menu.
 
 use egui::Ui;
@@ -84,7 +84,7 @@ pub struct MeshToolDialog {
 
 impl MeshToolDialog {
     pub fn new(tool: MeshTool, model: &Model) -> Self {
-        // A tolerance of a thousandth of the mesh size, as PrePoMax proposes.
+        // A tolerance of a thousandth of the mesh size.
         let size = model.mesh.bounds().map_or(1.0, |(min, max)| {
             (0..3)
                 .map(|k| max[k] - min[k])

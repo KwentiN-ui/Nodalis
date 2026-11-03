@@ -2,7 +2,7 @@
 //!
 //! An `.frd` file carries its own mesh (nodes and elements, shells and beams already expanded
 //! to solids by CalculiX) followed by one block per result field and increment. Component names
-//! follow PrePoMax: `D1` becomes `U1`, `SXX` becomes `S11` and so on.
+//! follow the common names: `D1` becomes `U1`, `SXX` becomes `S11` and so on.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;

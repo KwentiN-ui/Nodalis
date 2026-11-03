@@ -1,8 +1,8 @@
 //! Lowering of a [`FeModel`] with its mesh into the solver's input, a
-//! [`plxs_core::Analysis`], following the layout of PrePoMax's `CalculixFileWriter`.
+//! [`plxs_core::Analysis`], in the layout of a CalculiX input file.
 //!
 //! Regions the user picked in the GUI become node sets, element sets and surfaces named
-//! like PrePoMax's internal selections (`Internal_Selection-1_Fixed-1`), so the user never
+//! as internal selections (`Internal_Selection-1_Fixed-1`), so the user never
 //! defines sets by hand. The steps are assembled with CalculiX's carry-over between them
 //! resolved ([`plxs_input::steps`]), as the solver reads an input file. An input file is
 //! the analysis rendered as text ([`plxs_input::render`]), for the export only.
@@ -279,7 +279,7 @@ pub fn write_inp_with_sets_of(
 }
 
 /// An input file with only the mesh, its nodes moved by `scale` times `displacements` (one per
-/// node, in the order of [`FeMesh::coords`]), as PrePoMax's "Export deformed mesh": the
+/// node, in the order of [`FeMesh::coords`]), for "Export deformed mesh": the
 /// deformed shape, e.g. a buckling mode as imperfection, can be imported into another model.
 pub fn write_deformed_mesh_inp(
     mesh: &FeMesh,
@@ -1096,7 +1096,7 @@ impl<'a> Sets<'a> {
             .expect("unbounded range")
     }
 
-    /// Next free name `<prefix>-<n>_<postfix>`, like PrePoMax's `GetNextNumberedKey`.
+    /// Next free name `<prefix>-<n>_<postfix>`.
     fn free_name(&mut self, prefix: &str, postfix: &str) -> String {
         let (name, full) = (1..)
             .map(|n| {
@@ -1111,7 +1111,7 @@ impl<'a> Sets<'a> {
         name
     }
 
-    /// An element surface as PrePoMax builds it: one element set per face number and a node
+    /// An element surface: one element set per face number and a node
     /// set with all face nodes for boundary conditions.
     fn add_face_surface(&mut self, name: &str, faces: &[(ElementId, u8)]) {
         let mut by_face: BTreeMap<u8, BTreeSet<ElementId>> = BTreeMap::new();
@@ -1192,7 +1192,7 @@ impl<'a> Sets<'a> {
     }
 
     /// Surface of a contact or tie side: a surface of the input file, or one built from
-    /// picked faces and named like PrePoMax's `Internal_Selection-1_Tie-1_Master`.
+    /// picked faces and named like `Internal_Selection-1_Tie-1_Master`.
     fn surface(&mut self, item: &str, side: &str, region: &Region) -> Result<String, WriteError> {
         match region {
             Region::Surface(surface) if self.mesh.surfaces.contains_key(surface) => {
@@ -1348,7 +1348,7 @@ fn add_material(materials: &mut Vec<ir::material::Material>, material: ir::mater
     );
 }
 
-/// PrePoMax's dummy plastic material that makes CalculiX solve gaps nonlinearly.
+/// The dummy plastic material that makes CalculiX solve gaps nonlinearly.
 fn gap_material(name: &str) -> ir::material::Material {
     use ir::material as m;
     m::Material {
@@ -1375,7 +1375,7 @@ fn gap_material(name: &str) -> ir::material::Material {
     }
 }
 
-/// The physical constants, as PrePoMax's `CalPhysicalConstants` sets them.
+/// The physical constants.
 fn physical_constants(model: &FeModel) -> ir::PhysicalConstants {
     ir::PhysicalConstants {
         absolute_zero: model.properties.absolute_zero,
@@ -1384,7 +1384,7 @@ fn physical_constants(model: &FeModel) -> ir::PhysicalConstants {
     }
 }
 
-/// The amplitudes, as PrePoMax's `CalAmplitude` writes them.
+/// The amplitudes.
 fn amplitudes(model: &FeModel) -> Result<Vec<ir::amplitude::Amplitude>, WriteError> {
     let mut amplitudes = Vec::new();
     for amplitude in &model.amplitudes {
@@ -1479,8 +1479,7 @@ fn face_center(mesh: &FeMesh, element: ElementId, face: u8) -> Option<[f64; 3]> 
     Some(center)
 }
 
-/// Initial temperatures and velocities as PrePoMax's `CalInitialTemperature`,
-/// `CalInitialTranslationalVelocity` and `CalInitialAngularVelocity` write them: one entry
+/// Initial temperatures and velocities: one entry
 /// per set or node and non-zero component, 2D models without the third.
 fn initial_conditions(
     sets: &mut Sets,
@@ -1552,7 +1551,7 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<SectionsAndProfiles, Wri
         match &section.kind {
             SectionKind::Solid => {
                 let set = sets.element_set(&section.name, &section.region)?;
-                // Plane stress and plane strain sections have a thickness, as in PrePoMax.
+                // Plane stress and plane strain sections have a thickness.
                 let thickness =
                     (model.properties.space.has_thickness()).then_some(section.thickness);
                 out.push(IrSection {
@@ -1791,7 +1790,7 @@ fn beam_groups(
     Ok(named)
 }
 
-/// Rigid bodies, remote points and ties, PrePoMax's `CalTie` for the ties: slave surface
+/// Rigid bodies, remote points and ties; ties take the slave surface
 /// first. Springs and supports become elements, see [`constraints::springs`].
 fn constraints(
     sets: &mut Sets,
@@ -1820,7 +1819,7 @@ fn constraints(
                         point: body.reference_point.clone(),
                     });
                 };
-                // Both nodes sit on the reference point, as PrePoMax places them.
+                // Both nodes sit on the reference point.
                 let (reference, rotation) = (next_node, next_node + 1);
                 next_node += 2;
                 generated.nodes.push((reference, point.position));
@@ -1992,7 +1991,7 @@ fn tie(sets: &mut Sets, tie: &Tie) -> Result<ConstraintItem, WriteError> {
                     item: tie.name.clone(),
                     reason,
                 })?;
-            // As PrePoMax's CalCyclicSymmetry: the axis by a point and a second point on it.
+            // The axis by a point and a second point on it.
             let [x, y, z] = cyclic.axis_point;
             let [dx, dy, dz] = cyclic.axis_direction;
             Some(ir::constraints::CyclicSymmetryModel {
@@ -2241,7 +2240,7 @@ impl InteractionDefaults {
     }
 }
 
-/// A surface interaction, like PrePoMax's `CalSurfaceInteraction`, with the defaults filled
+/// A surface interaction, with the defaults filled
 /// in.
 fn interaction(
     interaction: &SurfaceInteraction,
@@ -2317,7 +2316,7 @@ fn interaction(
 /// Master and slave surface of each active contact pair, by the pair's name.
 type PairSurfaces = BTreeMap<String, (String, String)>;
 
-/// Contact pairs as PrePoMax's `CalContactPair` writes them: slave surface first; with
+/// Contact pairs: slave surface first; with
 /// their clearances.
 fn contact_pairs(
     sets: &mut Sets,
@@ -2402,7 +2401,7 @@ fn stored_perturbation(before: &[Step]) -> bool {
         .unwrap_or(false)
 }
 
-/// A step as the solver takes it, as PrePoMax structures it: the procedure, then the
+/// A step as the solver takes it: the procedure, then the
 /// boundary conditions, loads, defined fields, history and field outputs. A deactivated
 /// step, or item, is left out, and so are its sets.
 ///
@@ -2955,12 +2954,12 @@ fn step_block<'f>(
             items,
         });
     }
-    // Boundary conditions that constraints need, PrePoMax's additional boundary conditions.
+    // Boundary conditions that constraints need.
     if step.kind.is_mechanical() {
         boundaries.extend(extra_boundary.cloned());
     }
     let mut loads: Vec<(Option<usize>, Vec<Card>)> = Vec::new();
-    // Like PrePoMax, a step resets the loads it takes; one that takes no loads gets none,
+    // A step resets the loads it takes; one that takes no loads gets none,
     // not even the reset. Distributed fluxes, films and radiation are reset only when the
     // model has them.
     let kind = &step.kind;
@@ -3224,7 +3223,7 @@ fn step_block<'f>(
                     items,
                 }]
             }
-            // As PrePoMax's CalGravityLoad: the size of the acceleration and its direction.
+            // Gravity: the size of the acceleration and its direction.
             LoadKind::Gravity(acceleration) => {
                 let set = sets.element_set(&load.name, &load.region)?;
                 let Some((size, direction)) = unit_vector(acceleration) else {
@@ -3242,7 +3241,7 @@ fn step_block<'f>(
                     items: vec![dload(element_set_ref(&set), kind, &amplitude)],
                 }]
             }
-            // As PrePoMax's CalCentrifLoad: the square of the rotational speed, a point on
+            // Centrifugal load: the square of the rotational speed, a point on
             // the axis and the axis direction.
             LoadKind::Centrifugal { point, axis, speed } => {
                 let set = sets.element_set(&load.name, &load.region)?;
@@ -3337,7 +3336,7 @@ fn contact_changes(
     changes
 }
 
-/// The defined temperatures of a step as PrePoMax's `CalDefinedTemperature` gives them: on
+/// The defined temperatures of a step: on
 /// the node set with the value, or from the result file of a previous analysis and the step
 /// to read. CalculiX 2.21 takes the file name with its extension and looks for it next to
 /// the input file; `BStep` is the only step parameter it knows.
@@ -3405,7 +3404,7 @@ fn defined_fields(
 }
 
 /// Equivalent nodal forces of a total force spread evenly over element faces, the way
-/// PrePoMax turns a surface traction into concentrated loads. Each face takes its share by
+/// a surface traction is turned into concentrated loads. Each face takes its share by
 /// area; within a face the share follows the shape functions: equal parts on linear faces,
 /// only midside nodes on quadratic triangles, and -1/12 per corner and 1/3 per midside
 /// node on quadratic quadrilaterals.
@@ -3509,8 +3508,8 @@ fn polygon_area(corners: &[[f64; 3]]) -> f64 {
     0.5 * (sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]).sqrt()
 }
 
-/// Which kinds of heat loads the model has in any step: PrePoMax resets distributed fluxes,
-/// films and radiation only then.
+/// Which kinds of heat loads the model has in any step: distributed fluxes,
+/// films and radiation are reset only then.
 #[derive(Clone, Copy, Debug, Default)]
 struct FluxKinds {
     distributed: bool,
@@ -3638,8 +3637,7 @@ enum HeatKind {
     Uncoupled,
 }
 
-/// A heat transfer or coupled step, as PrePoMax's `CalHeatTransferStep` and
-/// `CalCoupledTempDispStep` set them up.
+/// A heat transfer or coupled step.
 fn heat_transfer_step(settings: &HeatTransferStep, kind: HeatKind) -> ir::Step {
     let increments = &settings.increments;
     let heat = ir::step::HeatTransfer {
@@ -3664,7 +3662,7 @@ fn heat_transfer_step(settings: &HeatTransferStep, kind: HeatKind) -> ir::Step {
     incremented_step(increments, procedure, nlgeom)
 }
 
-/// A dynamic step, as PrePoMax's `CalDynamicStep` and `CalDamping` set it up: the Rayleigh
+/// A dynamic step: the Rayleigh
 /// damping belongs to the step. Its loads act at once, as in CalculiX.
 fn dynamic_step(settings: &DynamicStep) -> ir::Step {
     let increments = &settings.increments;
@@ -3686,7 +3684,7 @@ fn dynamic_step(settings: &DynamicStep) -> ir::Step {
     step
 }
 
-/// A modal dynamics step, as PrePoMax's `CalModalDynamicsStep` sets it up, with the modal
+/// A modal dynamics step, with the modal
 /// damping. Its loads act at once, as in CalculiX.
 fn modal_dynamics_step(settings: &ModalDynamicsStep) -> ir::Step {
     let period = if settings.steady_state {
@@ -3708,7 +3706,7 @@ fn modal_dynamics_step(settings: &ModalDynamicsStep) -> ir::Step {
     step
 }
 
-/// A steady state dynamics step, as PrePoMax's `CalSteadyStateDynamicsStep` sets it up.
+/// A steady state dynamics step.
 fn steady_state_dynamics_step(settings: &SteadyStateDynamicsStep) -> ir::Step {
     new_step(ir::step::Procedure::SteadyStateDynamics(
         ir::step::SteadyStateDynamics {
@@ -3724,7 +3722,7 @@ fn steady_state_dynamics_step(settings: &SteadyStateDynamicsStep) -> ir::Step {
     ))
 }
 
-/// The modal damping as PrePoMax's `CalModalDamping` gives it: a constant ratio covers
+/// The modal damping: a constant ratio covers
 /// modes 1 to 1000000.
 fn modal_damping(damping: Option<&ModalDamping>) -> Option<ir::step::ModalDamping> {
     Some(match damping? {
@@ -3777,7 +3775,7 @@ fn incremented_step(
     step
 }
 
-/// A frequency step, as PrePoMax sets it up: the lower bound is 0 when only an upper bound
+/// A frequency step: the lower bound is 0 when only an upper bound
 /// is given. In a cyclic symmetric model CalculiX finds every mode twice, as a cosine and a
 /// sine part, so it is asked for twice the number of eigenfrequencies per nodal diameter,
 /// in the range of nodal diameters if one is set.
@@ -3804,7 +3802,7 @@ fn frequency_step(settings: &FrequencyStep, cyclic: bool) -> ir::Step {
     step
 }
 
-/// A complex frequency step, as PrePoMax's `CalComplexFrequency` sets it up.
+/// A complex frequency step.
 /// `perturbation` is the flag of the frequency step that stored the modes: CalculiX
 /// requires the same on both steps.
 fn complex_frequency_step(settings: &ComplexFrequencyStep, perturbation: bool) -> ir::Step {
@@ -3819,7 +3817,7 @@ fn complex_frequency_step(settings: &ComplexFrequencyStep, perturbation: bool) -
     step
 }
 
-/// A buckle step, as PrePoMax's `CalBuckleStep` sets it up.
+/// A buckle step.
 fn buckle_step(settings: &BuckleStep) -> ir::Step {
     let mut step = new_step(ir::step::Procedure::Buckle(ir::step::Buckle {
         solver: equation_solver(settings.solver),
@@ -3837,8 +3835,7 @@ fn variables<'a>(variables: impl IntoIterator<Item = &'a str>) -> Vec<String> {
         .collect()
 }
 
-/// The field output request of a field output, as PrePoMax's `CalNodeFile`, `CalElFile`
-/// and `CalContactFile` write them; none without variables. Node outputs take the form
+/// The field output request of a field output; none without variables. Node outputs take the form
 /// `dimension` of the step's element outputs.
 fn field_output(output: &FieldOutput, dimension: OutputDimension) -> Option<Card> {
     if !output.active || output.variables.is_empty() {
@@ -3846,7 +3843,7 @@ fn field_output(output: &FieldOutput, dimension: OutputDimension) -> Option<Card
     }
     let mut names = variables(output.variables.iter().map(String::as_str));
     if output.kind == OutputKind::Element {
-        // PrePoMax adds nodal extrapolation of stresses unless error estimators are
+        // Nodalis adds nodal extrapolation of stresses unless error estimators are
         // requested.
         let has = |v: &str| output.variables.iter().any(|x| x == v);
         if has("S") && !has("ERR") && !has("HER") && !has("ZZS") {
@@ -3905,8 +3902,7 @@ fn node_print(set: &str, names: &[&str], totals_of: Totals) -> ir::step::History
     }
 }
 
-/// The history output requests of a history output, as PrePoMax's `CalNodePrint`,
-/// `CalElPrint` and `CalContactPrint` write them; none without variables.
+/// The history output requests of a history output; none without variables.
 fn history_output(
     sets: &mut Sets,
     output: &HistoryOutput,

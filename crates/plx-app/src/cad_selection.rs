@@ -1,5 +1,5 @@
-//! Selections on a mesh generated from CAD geometry by its faces, edges and vertices, as
-//! PrePoMax's geometry based selection does. They are stored as CAD entities and found on
+//! Selections on a mesh generated from CAD geometry by its faces, edges and vertices.
+//! They are stored as CAD entities and found on
 //! the mesh again after remeshing, see [`plx_model::Region::Geometry`].
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};

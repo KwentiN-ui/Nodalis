@@ -1,7 +1,7 @@
-//! PrePoMax's result transformations: mirrored and patterned copies of the results, e.g. to
+//! The result transformations: mirrored and patterned copies of the results, e.g. to
 //! show the full model of a half model. They only change what is drawn, not the results.
 //!
-//! The copies are chained as in PrePoMax: every transformation copies everything drawn so far,
+//! The copies are chained: every transformation copies everything drawn so far,
 //! including the copies of the transformations before it. Directional values are rotated or
 //! mirrored with the copy, so that a mirrored displacement component changes its sign.
 
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Field, FieldRank};
 
-/// Plane of a symmetry, named by the axis normal to it as in PrePoMax.
+/// Plane of a symmetry, named by the axis normal to it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SymmetryPlane {
     X,
@@ -60,7 +60,7 @@ pub struct Transformation {
 }
 
 impl Transformation {
-    /// PrePoMax's defaults: planes through the origin, a pattern along x and one about y,
+    /// The defaults: planes through the origin, a pattern along x and one about y,
     /// the axis of CalculiX's axisymmetric models.
     pub fn symmetry(plane: SymmetryPlane) -> Self {
         Self {
@@ -135,7 +135,7 @@ impl Transformation {
         }
     }
 
-    /// PrePoMax's checks when the transformations are applied.
+    /// The checks when the transformations are applied.
     pub fn check(&self) -> Result<(), String> {
         let error = |text: &str| Err(format!("{}: {text}", self.name));
         match self.kind {
@@ -164,8 +164,8 @@ impl Transformation {
     }
 }
 
-/// Every item drawn: the original (identity) first, then the copies, chained like PrePoMax's
-/// transformed actors.
+/// Every item drawn: the original (identity) first, then the copies, chained.
+///
 pub fn instances(transformations: &[Transformation]) -> Vec<DAffine3> {
     let mut instances = vec![DAffine3::IDENTITY];
     for transformation in transformations {
@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn copies_are_chained_like_prepomax() {
+    fn copies_are_chained() {
         // A quarter mirrored at x and then at y gives four items; a circular pattern of
         // three after it twelve.
         let mut list = vec![

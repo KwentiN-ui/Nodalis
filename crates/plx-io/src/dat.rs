@@ -1,6 +1,6 @@
 //! Reader for the history output CalculiX prints into the `.dat` file (`*NODE PRINT`,
-//! `*EL PRINT`, `*CONTACT PRINT` and the eigenvalue output of frequency steps), after
-//! PrePoMax's `DatFileReader`.
+//! `*EL PRINT`, `*CONTACT PRINT` and the eigenvalue output of frequency steps), from
+//! CalculiX's `.dat` file.
 //!
 //! Every block of the file names a quantity, a set and a time:
 //!
@@ -10,11 +10,11 @@
 //!         41 -1.422638E-02  3.592771E-05 -1.902165E-01
 //! ```
 //!
-//! The blocks become history sets named after the set, with PrePoMax's field and component
+//! The blocks become history sets named after the set, with the field and component
 //! names (`DISPLACEMENTS`, `U1`), one entry per node, element or integration point and one
 //! row per increment, or per mode of a frequency step. Sets nodalis writes for picked
 //! regions (`INTERNAL_SELECTION-1_NH_OUTPUT-1`) are shown under the name of the history
-//! output (`NH_OUTPUT-1`), as in PrePoMax.
+//! output (`NH_OUTPUT-1`).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -85,7 +85,7 @@ struct Kind {
 const STRESS: &[&str] = &["S11", "S22", "S33", "S12", "S13", "S23"];
 const STRAIN: &[&str] = &["E11", "E22", "E33", "E12", "E13", "E23"];
 
-/// The blocks CalculiX writes, with PrePoMax's names (`HOFieldNames`, `HOComponentNames`).
+/// The blocks CalculiX writes, with their field and component names.
 const KINDS: &[Kind] = &[
     kind(
         "displacements",
@@ -241,7 +241,7 @@ type Components = Vec<(String, Vec<EntryData>)>;
 struct EntryData {
     name: String,
     /// Sum and count of the values by row; contact elements print a line per integration
-    /// point of a face, which PrePoMax averages.
+    /// point of a face, which are averaged.
     values: HashMap<usize, (f64, u32)>,
 }
 
@@ -491,7 +491,7 @@ pub fn parse_dat(text: &str) -> DatImport {
             }
             continue;
         }
-        // A buckle step lists its buckling factors by mode, as PrePoMax's buckling history.
+        // A buckle step lists its buckling factors by mode.
         if trimmed == "B U C K L I N G   F A C T O R   O U T P U T" {
             let table = table_after(&lines, &mut i);
             let set = format!("STEP_{step}");
@@ -751,7 +751,7 @@ fn rotation_kind(kind: &'static Kind) -> &'static Kind {
         .unwrap_or(kind)
 }
 
-/// The name PrePoMax shows for a set: without the prefix of the sets written for picked
+/// The name shown for a set: without the prefix of the sets written for picked
 /// regions.
 fn repair_set_name(name: &str) -> String {
     let upper = name.to_ascii_uppercase();
@@ -866,7 +866,7 @@ fn parse_number(text: &str) -> f64 {
     f64::NAN
 }
 
-/// Adds von Mises, Tresca and the principal stresses to stress fields, as PrePoMax does.
+/// Adds von Mises, Tresca and the principal stresses to stress fields.
 fn add_stress_components(set: &mut HistorySet) {
     for field in set.fields.iter_mut().filter(|f| f.name == "STRESSES") {
         let Some(base) = STRESS
@@ -923,7 +923,7 @@ fn add_stress_components(set: &mut HistorySet) {
                 });
             }
         }
-        // PrePoMax lists the equivalent stresses first and the principal stresses last.
+        // Nodalis lists the equivalent stresses first and the principal stresses last.
         let principal = derived.split_off(2);
         let raw = std::mem::take(&mut field.components);
         field.components = derived.into_iter().chain(raw).chain(principal).collect();

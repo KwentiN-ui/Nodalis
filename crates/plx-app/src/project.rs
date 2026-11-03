@@ -1,6 +1,6 @@
 //! The project window, Ansys Workbench's project schematic: the analyses of the project as
 //! blocks of a node graph, each with the state of its cells. An analysis opens in a window of
-//! its own, the [`AnalysisWindow`], which looks like PrePoMax's main window.
+//! its own, the [`AnalysisWindow`], which looks like the classic main window.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -4985,7 +4985,7 @@ impl ProjectApp {
         rows
     }
 
-    /// PrePoMax's monitor for the whole project, in the Analyses tab below the schematic:
+    /// The monitor for the whole project, in the Analyses tab below the schematic:
     /// the analyses being solved with their state on the left, the output of the one
     /// picked on the right.
     fn monitor_panel(&mut self, ui: &mut egui::Ui) {
@@ -8047,7 +8047,7 @@ fn block_rows(
         output: false,
         tip: "Drop the results of a step of another analysis here: this analysis then \
                   continues from the state after that step. It takes the model and the steps \
-                  up to it, and CalculiX solves only its own steps."
+                  up to it, and the solver solves only its own steps."
             .into(),
         linked_from: continues,
         collection: false,
@@ -11454,7 +11454,7 @@ fn schematic_style() -> SnarlStyle {
 
 /// Tooltip of Add Materials.
 const ANALYSIS_TIP: &str = "Adds an analysis: a model of its own with geometry, mesh, setup \
-     and steps, solved with CalculiX. Double-click its block to open it in Geometry, FE Model and Results.";
+     and steps, solved with the built-in solver. Double-click its block to open it in Geometry, FE Model and Results.";
 
 const PARAMETERS_TIP: &str = "Adds a block of named numbers: drag the pin of one to a \
                               parameter of another block, such as a length of a mesh block, \
@@ -11482,7 +11482,7 @@ const UPDATE_TIP: &str = "Update Project (F5): solves every analysis that is not
      one after the other, and keeps the new results.";
 
 const MONITOR_TIP: &str = "Solution Monitor: the analyses being solved, with the output of \
-     CalculiX, in the Analyses tab below the schematic";
+     the solver, in the Analyses tab below the schematic";
 
 /// The project window's solution monitor: which analysis' output it shows, and the text
 /// the output is filtered by.

@@ -1,6 +1,6 @@
 //! Campbell diagram of a rotor: the complex eigenfrequencies over the rotational speed.
 //!
-//! PrePoMax has no such tool; CalculiX computes the whirling modes for one speed per run.
+//! A single Complex Frequency step computes the whirling modes for one speed only.
 //! The sweep runs the analysis once per speed, scaling the centrifugal loads of the model,
 //! reads the complex frequencies and the turning direction of every mode from the `.dat`
 //! file and plots them over the speed, with the engine order lines (1x, 2x, ...) whose
