@@ -4,7 +4,7 @@
 
 The mesh tools change an existing mesh without meshing again: they move or mirror parts, join
 parts, merge nodes that lie on top of each other and renumber the mesh. They work on the
-#ui("FE Model") tab, on meshed geometry as well as on imported meshes.
+FE Model workspace, on meshed geometry as well as on imported meshes.
 
 === Transform parts
 

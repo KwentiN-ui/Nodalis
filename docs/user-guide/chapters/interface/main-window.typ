@@ -1,73 +1,69 @@
 #import "../../template.typ": *
 
-== Analysis window <main-window>
+== Analysis workspaces <main-window>
 
-Each analysis of the project opens in a window of its own. Its
-title shows the name of the analysis and of the project. The layout is fixed.
-Only the separators between the panes can be moved.
+The Geometry, FE Model and Results workspaces show the active analysis (@workspaces). Their
+layout is fixed; only the separators between the panes can be moved.
 
-#screenshot("analysis-window.png", [Analysis window with a solved model on the FE Model tab])
+#screenshot("analysis-window.png", [An analysis in the FE Model workspace])
 
 From top to bottom the window contains:
 
-/ Menu bar: #ui("File"), #ui("Edit"), #ui("View"), #ui("Geometry"), #ui("Mesh"),
-  #ui("Model"), #ui("Interaction"), #ui("Analysis"), #ui("Results"), #ui("Tools"),
-  #ui("Help"). #ui("Edit") holds Undo and Redo (@undo). #menu("Help", "User Guide") opens
-  this guide in the web browser (@offline-guide).
-/ Toolbar: two rows. The first row holds the file, view and display buttons, the second row the
-  result controls (@results-toolbar). The result row is always there but greyed out outside the
-  #ui("Results") tab, so the 3D view does not jump when you switch tabs.
-/ Model tree: on the left, with the three tabs #ui("Geometry"), #ui("FE Model") and
-  #ui("Results") (@model-tree).
+/ App bar and ribbon: the workspaces, the active analysis, the menus and the commands of the
+  workspace (@app-bar, @ribbon). #ui("Edit") holds Undo and Redo (@undo).
+  #menu("Help", "User Guide") opens this guide in the web browser (@offline-guide).
+/ Model tree: on the left, with the items of the workspace (@model-tree).
 / 3D view: in the centre (@view).
 / Output pane: below the 3D view, with two tabs. #ui("Output") collects messages: what was loaded
   or saved, warnings, keywords of an imported `.inp` that were skipped ("Not yet evaluated:
   ..."), unit conversions and the output of the query tool. #ui("Analysis") is the monitor of
-  CalculiX (@monitor); it comes to the front when a run starts.
+  the solver (@monitor); it comes to the front when a run starts.
 / Status bar: on the left what is loaded ("bracket.ndl: 12345 nodes, 6789 elements, 3 parts") or
   what is running ("Meshing ..."), on the right the unit system and the model space of the
   analysis.
 
-=== Toolbar, first row
+=== Commands of the ribbon
+
+The commands that used to be the toolbar of the analysis window are on these tabs of the
+ribbon:
 
 #fields(
-  [Save], [Saves the project, as #menu("File", "Save Project") (@files).],
-  [Import Geometry], [Imports STEP, IGES or BREP files and adds them to the geometry
-    (@geometry-import), or the mesh of input files (`.inp`) as mesh parts (@mesh-import).],
-  [Zoom to Fit], [Fits the visible parts into the view.],
-  [Front, Back, Top, Bottom, Left, Right, Isometric], [Standard views (@view).],
-  [Vertical View], [Rolls the view so that the axis closest to screen-up points straight up.],
-  [Screenshot], [Copies the 3D view to the clipboard or saves it as PNG (@screenshot).],
-  [Edges Only / Mesh Edges], [Show only the feature edges of the model, or all element edges.
-    Exactly one of the two is active.],
-  [Section View], [Opens the section view dialog. The button stays pressed while a section is
-    active (@section-view).],
-  [Exploded View], [A left click switches the exploded view on and off, a right click opens its
-    settings (@exploded-view).],
-  [Query], [Opens and closes the query window (@query). The button stays pressed while it is
-    open.],
-  [Remove Annotations], [Deletes all query labels of the model shown.],
-  [Solve, Stop, Monitor], [Solve the analysis, stop meshing or CalculiX, and show the
-    #ui("Analysis") tab of the output pane (@monitor). Next to them, the state of the solution: #ui("Not solved"),
-    #ui("Solution up to date"), #ui("Solution out of date") and so on. #ui("Problems") appears
-    when CalculiX reported problems in the last run and lists them.],
+  [Import Geometry], [#ui("Geometry") tab of the Geometry workspace. Imports STEP, IGES or
+    BREP files and adds them to the geometry (@geometry-import). #ui("Import Mesh (.inp)")
+    on the #ui("Mesh") tab of the FE Model workspace adds the mesh of input files as mesh
+    parts (@mesh-import).],
+  [Zoom to Fit, Standard Views, Vertical View], [#ui("View") tab, group #ui("Camera"). The
+    #ui("Standard Views") menu holds front, back, top, bottom, left, right, isometric and the
+    views normal to an axis (@view). #ui("Vertical View") rolls the view so that the axis
+    closest to screen-up points straight up.],
+  [Edges Only, Mesh Edges], [#ui("View") tab, group #ui("Show"). Show only the feature edges
+    of the model, or all element edges. Exactly one of the two is active.],
+  [Section View, Exploded View], [#ui("View") tab, group #ui("Cut"). They stay pressed while
+    a section or an exploded view is active (@section-view, @exploded-view); #ui("Section
+    Off") and #ui("Exploded Off") end them.],
+  [Screenshot], [#ui("View") tab: copies the 3D view to the clipboard or saves it as PNG
+    (@screenshot).],
+  [Query, Remove Annotations], [#ui("View") tab in Geometry and FE Model, #ui("Evaluate") tab
+    in Results. #ui("Query") opens and closes the query window (@query) and stays pressed while
+    it is open; #ui("Remove Annotations") deletes all query labels of the model shown.],
+  [Solve, Stop, Monitor], [On the right edge of the ribbon in Geometry and FE Model. Solve the
+    analysis, stop meshing or the solver, and show the #ui("Analysis") tab of the output pane
+    (@monitor). The state of the solution (#ui("Not solved"), #ui("Solution up to date"),
+    #ui("Solution out of date") and so on) is shown in the app bar; with problems in the last
+    run it names their number, and a click lists them.],
 )
-
-Buttons that cannot be used at the moment are greyed out, for example #ui("Stop") while
-nothing runs.
 
 == Model tree <model-tree>
 
-The tree on the left has three tabs:
+The tree on the left shows the items of the workspace:
 
 / Geometry: imported CAD parts and the mesh setup (@geometry).
 / FE Model: mesh parts, materials, sections, constraints, contacts and steps.
 / Results: the opened result files with their fields, history outputs, paths, planes and hot
   spots (@results).
 
-#ui("Geometry") and #ui("FE Model") share one camera, #ui("Results") has its own. A model that
-has no mesh yet opens on the #ui("Geometry") tab, opening a result file switches to
-#ui("Results").
+Geometry and FE Model share one camera, Results has its own. A model that has no mesh yet
+opens in the Geometry workspace, opening a result file switches to Results.
 
 === Working with tree items
 
@@ -97,7 +93,7 @@ has no mesh yet opens on the #ui("Geometry") tab, opening a result file switches
   through a link are shown in blue with the name of that analysis; their commands are greyed
   out, and a double-click offers to open that analysis or to unlink the item (@data-links).
 / Parts: #ui("Properties ..."), #ui("Hide")/#ui("Show"), #ui("Delete"); on the
-  #ui("Geometry") tab also #ui("Create Mesh").
+  Geometry workspace also #ui("Create Mesh").
 
 === Deactivating items
 
@@ -128,8 +124,8 @@ parts selected the tree marks what acts on any of them.
 === Properties dialogs
 
 A double-click on a part opens its properties: name, number of elements and nodes, element types,
-colour and visibility. On the #ui("FE Model") tab the element types can be changed
-(@element-type). On the #ui("Results") tab, a double-click on #ui("Model") shows file,
+colour and visibility. In the FE Model workspace the element types can be changed
+(@element-type). In the Results workspace, a double-click on #ui("Model") shows file,
 load time, node and element counts, element types, the dimensions of the model and its sets and
 surfaces. A double-click on a result component shows its maximum and minimum with the node where
 they occur.

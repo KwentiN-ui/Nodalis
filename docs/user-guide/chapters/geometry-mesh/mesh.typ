@@ -10,16 +10,16 @@ with ties, contacts or node ties (@constraints).
   replaced; the other parts keep their node and element numbers.
 
 The output pane lists each part with its element count and size range. Afterwards Nodalis
-switches to the #ui("FE Model") tab.
+switches to the FE Model workspace.
 
 === Cancelling the meshing <cancel-meshing>
 
 Gmsh runs in a separate process, so a meshing that takes too long, for example because the
 element size is too small, can be cancelled at any time. While it runs, the status bar shows
 #ui("Meshing ...") with a #ui("Cancel") button; #menu("Mesh", "Cancel Meshing") and the
-#ui("Stop") button of the toolbar do the same. The mesher stops at once and the parts keep
+#ui("Stop") tile of the ribbon do the same. The mesher stops at once and the parts keep
 the mesh they had before. During #ui("Update Project") the #ui("Stop") buttons of the
-Solution Monitor and the project toolbar cancel a meshing in the same way.
+Solution Monitor and #ui("Stop") in the Project workspace cancel a meshing in the same way.
 
 #screenshot("meshing-cancel.png", [The status bar while meshing, with the Cancel button])
 
@@ -47,7 +47,7 @@ section on shells is reported as an invalid section.
 
 === Changing the element type <element-type>
 
-A part on the #ui("FE Model") tab can be given another element type with the
+A part in the FE Model workspace can be given another element type with the
 same nodes: double-click the part and choose it in the #ui("Element type") box, then #ui("OK").
 A part with several element types has one box per type.
 
@@ -75,12 +75,12 @@ new elements the same type, and in a 2D model a new model space keeps the reduce
 === Meshing errors
 
 If Gmsh fails, the output pane shows "Meshing failed: ..." with the message of Gmsh. The faces,
-edges and points the message names are marked red on the #ui("Geometry") tab, so you can see
+edges and points the message names are marked red in the Geometry workspace, so you can see
 where the problem is. The marking disappears with the next meshing.
 
 == Mesh setup <mesh-setup>
 
-The mesh is controlled by the #ui("Mesh Setup") items on the #ui("Geometry") tab. Create them
+The mesh is controlled by the #ui("Mesh Setup") items in the Geometry workspace. Create them
 with #menu("Mesh", "Create Mesh Setup Item ...") or #ui("Create ...") on the #ui("Mesh Setup")
 container.
 

@@ -272,7 +272,7 @@ impl ConstraintDraft {
         show_dropped_note(ui);
         hint(
             ui,
-            "Ties are not constraints: create them with Interaction > Create Tie, they are \
+            "Ties are not constraints: create them with FE Model > Connections > Tie, they are \
              listed under Contact Pairs.",
         );
         name_row(ui, &mut self.constraint);

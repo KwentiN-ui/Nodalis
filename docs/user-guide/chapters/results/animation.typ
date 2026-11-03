@@ -2,7 +2,7 @@
 
 == Animation <animation>
 
-The animation button on the results toolbar opens the animation window.
+The animation button among the result controls of the ribbon opens the animation window.
 
 #screenshot("animation.png", [Animation window])
 
@@ -22,7 +22,7 @@ The buttons step through the frames or play them; the slider selects a frame. Cl
 shows the increment that was shown at the start, or the one you selected meanwhile.
 
 The window can stay open while you change the increment: the #ui("Step, Increment") list and the
-First, Previous, Next and Last Increment buttons of the results toolbar keep working. The
+First, Previous, Next and Last Increment buttons of the result controls keep working. The
 animation continues with the new increment (or the increments of its step) and keeps its
 settings, so you can page through modes or steps without reopening the window.
 

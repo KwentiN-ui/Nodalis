@@ -4,7 +4,7 @@
 
 == Importing geometry <geometry-import>
 
-#menu("Geometry", "Import ...") or the toolbar button #ui("Import Geometry") reads STEP
+#menu("Geometry", "Import ...") or the ribbon tile #ui("Import Geometry") reads STEP
 (`.step`, `.stp`), IGES (`.iges`, `.igs`) and BREP (`.brep`) files. Several files can be
 selected at once. Gmsh with OpenCASCADE reads the files, so Gmsh must be available
 (@settings).
@@ -32,7 +32,7 @@ selected at once. Gmsh with OpenCASCADE reads the files, so Gmsh must be availab
 The same dialog also takes input files (`.inp`). Their mesh is added to the model as *mesh
 parts*, for example a mesh written by #menu("File", "Export Deformed Mesh (.inp) ...")
 (@export-deformed) to use a buckling mode as imperfection. Select the files in the file dialog
-(the filter #ui("Input file") shows only those) and the parts appear on the #ui("FE Model") tab.
+(the filter #ui("Input file") shows only those) and the parts appear in the FE Model workspace.
 
 - A model is never replaced. If it already has parts, the imported nodes and elements are
   numbered after the highest numbers it has, so nothing that refers to the existing parts changes.
@@ -61,7 +61,7 @@ created from it.
 
 It is common to split faces in the CAD program, for example a ring on a shaft where a bearing
 sits, so that a boundary condition can be applied to exactly that area. Nodalis keeps such
-faces: the mesh follows their borders, and on the #ui("FE Model") tab their outline is drawn
+faces: the mesh follows their borders, and in the FE Model workspace their outline is drawn
 like any other edge although the surface does not bend there. Pick them with the geometry based
 selection (@selection) like any other face.
 

@@ -310,6 +310,16 @@ impl MeshItemEditor {
         }
     }
 
+    /// A new item of the kind at `index` of the dialog's list: meshing parameters of parts,
+    /// local mesh size, tetrahedral Gmsh or extrude mesh.
+    pub fn create_kind(geometry: &Geometry, units: UnitSystem, index: usize) -> Self {
+        let mut editor = Self::create(geometry, units);
+        let kind = new_kind(index, geometry);
+        editor.draft.name = next_name(kind.type_name(), editor.others.iter().map(String::as_str));
+        editor.draft.kind = kind;
+        editor
+    }
+
     pub fn edit(geometry: &Geometry, index: usize, units: UnitSystem) -> Option<Self> {
         let draft = geometry.mesh_items.get(index)?.clone();
         let others = (geometry.mesh_items.iter().enumerate())

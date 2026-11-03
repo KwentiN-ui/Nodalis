@@ -19,7 +19,7 @@ use plx_model::{
 use crate::app::{AnalysisWindow, Request, Show};
 use crate::cad_editor::{CadEditorResult, CadOperationEditor};
 use crate::campbell::CampbellWindow;
-use crate::icons::{self, Icon};
+use crate::command::BlockTile;
 use crate::links;
 use crate::material_set::{Collection, MaterialSetEditor, MaterialSetResult};
 use crate::measure::{MeasureEditor, MeasureEditorResult};
@@ -41,6 +41,7 @@ mod frames;
 mod history;
 mod minimap;
 mod numbers;
+mod workspace;
 
 /// Storage key of the project file open at exit, reopened at the next start.
 const LAST_PROJECT_KEY: &str = "last_project";
@@ -231,6 +232,9 @@ struct AnalysisBlock {
     /// The analysis' data while its window is closed; an open window holds it.
     data: Option<ProjectAnalysis>,
     window: Option<Box<AnalysisWindow>>,
+    /// Whether its window is a window of its own; otherwise the project window shows it in
+    /// the workspaces Geometry, FE Model and Results.
+    own_window: bool,
     /// Where the window opens the first time: over the project window.
     window_position: Option<egui::Pos2>,
     /// The state of its cells, as last found.
@@ -600,6 +604,7 @@ impl Node {
         let block = AnalysisBlock {
             data: Some(data),
             window: None,
+            own_window: false,
             window_position: None,
             status: None,
             space,
@@ -1734,8 +1739,10 @@ enum Action {
 
     /// Make the mesh of a mesh block anew.
     Generate(u64),
-    /// Open the analysis' window, in the workspace of a cell if given.
+    /// Open the analysis in the project window, in the workspace of a cell if given.
     Open(u64, Option<Show>),
+    /// Open the analysis in a window of its own.
+    OpenInWindow(u64),
     Solve(u64),
     /// Update the block and what it takes data from: its out-of-date symbol was clicked.
     Update(u64),
@@ -1915,6 +1922,17 @@ pub struct ProjectApp {
     /// The title last given to the window: setting it asks egui for another frame, so it
     /// is set only when it changes, else the app would draw without pause.
     shown_title: String,
+    /// Whether the window shows the Project workspace; otherwise the active analysis in
+    /// the workspace its window shows.
+    in_project: bool,
+    /// The analysis the workspaces Geometry, FE Model and Results act on.
+    active: Option<u64>,
+    /// The tab of each workspace and whether the ribbon is folded.
+    ribbon: crate::ribbon::RibbonState,
+    /// The command search (Ctrl+K).
+    search: Option<NodePicker>,
+    /// The kind of block hanging at the pointer until a click places it.
+    placing: Option<BlockTile>,
 }
 
 impl ProjectApp {
@@ -2001,6 +2019,11 @@ impl ProjectApp {
             files_checked: None,
             synced_freshness: Vec::new(),
             warned: BTreeSet::new(),
+            in_project: true,
+            active: None,
+            ribbon: Default::default(),
+            search: None,
+            placing: None,
         };
         if app.settings.updates.check_at_startup && app.updater.installation().checks_at_startup() {
             app.updater.check(&cc.egui_ctx, false);
@@ -2023,6 +2046,8 @@ impl ProjectApp {
         } else if let Some(path) = cc.storage.and_then(stored_last_project) {
             // Without files on the command line, the project open at the last exit opens.
             app.open(&cc.egui_ctx, path);
+        } else {
+            app.add_first_analysis();
         }
         Ok(app)
     }
@@ -4144,6 +4169,42 @@ impl ProjectApp {
             Some(Kind::Math | Kind::Switch) => return,
             None => return,
         }
+        self.open_analysis(ctx, id, view, false);
+    }
+
+    /// Opens the analysis: in the project window, which then shows it in the workspace of
+    /// its window, or with `own` in a window of its own. An analysis already open in a
+    /// window of its own is brought to the front.
+    fn open_analysis(&mut self, ctx: &egui::Context, id: u64, view: Option<Show>, own: bool) {
+        if !own {
+            self.active = Some(id);
+        }
+        let shown_here = !self.in_project && self.active == Some(id);
+        if let Some(analysis) = self.node(id).and_then(Node::as_analysis_mut)
+            && let Some(window) = &mut analysis.window
+            && !analysis.own_window
+        {
+            if let Some(view) = view {
+                window.show_workspace(view);
+            }
+            if own {
+                // Moved out into a window of its own.
+                analysis.own_window = true;
+                if shown_here {
+                    self.in_project = true;
+                }
+            } else {
+                self.in_project = false;
+            }
+            return;
+        }
+        // Open in a window of its own: shown here, it would be shown twice.
+        if (self.nodes.iter().find(|n| n.id == id))
+            .and_then(Node::as_analysis)
+            .is_some_and(|a| a.window.is_some())
+        {
+            self.in_project = true;
+        }
         let path = self.model_path();
         let folder = crate::analysis::job_name(&self.project_name());
         let (render_state, settings) = (self.render_state.clone(), self.settings.clone());
@@ -4194,6 +4255,10 @@ impl ProjectApp {
         }
         analysis.window = Some(Box::new(window));
         analysis.window_position = at;
+        analysis.own_window = own;
+        if !own {
+            self.in_project = false;
+        }
     }
 
     /// The path the analyses' models take: the project file, or a name for an unsaved one.
@@ -4223,6 +4288,7 @@ impl ProjectApp {
         }
         analysis.data = window.data();
         analysis.window = None;
+        analysis.own_window = false;
         analysis.seen = None;
         node.refresh_closed();
         self.sync_due = true;
@@ -4252,7 +4318,22 @@ impl ProjectApp {
         self.path = None;
         self.forget_solves();
         self.history.clear();
+        self.in_project = true;
+        self.active = None;
+        self.add_first_analysis();
         self.output.push("New project".into());
+    }
+
+    /// A new project starts with an analysis, with the model space and units of the
+    /// settings, so that Geometry, FE Model and Results can be used right away.
+    fn add_first_analysis(&mut self) {
+        let properties = ModelProperties {
+            kind: plx_model::ModelKind::General,
+            global_results: None,
+            ..self.settings.new_model.clone()
+        };
+        let id = self.add_analysis("Analysis-1", egui::pos2(40.0, 40.0), properties);
+        self.active = Some(id);
     }
 
     fn open_dialog(&mut self, ctx: &egui::Context) {
@@ -5108,7 +5189,7 @@ impl ProjectApp {
     }
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
-        egui::MenuBar::new().ui(ui, |ui| {
+        {
             ui.menu_button("File", |ui| {
                 if ui.button("New Project").clicked() {
                     self.new_project();
@@ -5229,49 +5310,9 @@ impl ProjectApp {
                     updater.check(ui.ctx(), true);
                 }
             });
-            // Version number, greyed out at the far right of the menu bar, with the symbol of
-            // a newer release left of it.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
-                        .color(ui.visuals().weak_text_color()),
-                );
-                self.updater.indicator(ui);
-            });
-        });
-    }
-
-    fn tool_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 1.0;
-            if icons::button(ui, Icon::New, "New Project", true, false).clicked() {
-                self.new_project();
-            }
-            let can_open = self.opening.is_none();
-            if icons::button(ui, Icon::Open, "Open Project (Ctrl+O)", can_open, false).clicked() {
-                self.open_dialog(ui.ctx());
-            }
-            if icons::button(ui, Icon::Save, "Save Project (Ctrl+S)", true, false).clicked() {
-                self.save(false);
-            }
-            ui.separator();
-            let updating = self.busy();
-            let update = icons::button(ui, Icon::Solve, UPDATE_TIP, !updating, false).clicked();
-            let text = egui::Button::new("Update Project").frame(false);
-            let text = ui.add_enabled(!updating, text).on_hover_text(UPDATE_TIP);
-            if update || text.clicked() {
-                self.update_all();
-            }
-            ui.add_space(4.0);
-            if icons::button(ui, Icon::Stop, "Stop Update Project", updating, false).clicked() {
-                self.stop_update();
-            }
-            ui.add_space(4.0);
-            let shown = self.monitor.shown;
-            if icons::button(ui, Icon::Monitor, MONITOR_TIP, true, shown).clicked() {
-                self.toggle_monitor();
-            }
-        });
+            // The symbol of a newer release.
+            self.updater.indicator(ui);
+        }
     }
 
     /// A place for a new block: right of the last one.
@@ -5459,9 +5500,30 @@ impl ProjectApp {
         self.block_sizes = std::mem::take(&mut viewer.sizes);
         self.block_sizes.extend(viewer.drawn.drain());
         self.frame_label = viewer.frame_label.take();
-        self.selected = (egui_snarl::ui::get_selected_nodes(snarl_id, ui.ctx()).into_iter())
+        let selected: Vec<u64> = (egui_snarl::ui::get_selected_nodes(snarl_id, ui.ctx()))
+            .into_iter()
             .filter_map(|g| self.graph.get_node(g).copied())
             .collect();
+        // A click on a block selects it alone, as in Blender; Shift adds to the selection.
+        let mut selected = selected;
+        let layer = egui::LayerId::new(ui.layer_id().order, snarl_id);
+        if let Some(id) = self.clicked_block(ui, layer, viewer.to_global) {
+            if let Some(node) = self.graph_node(id) {
+                egui_snarl::ui::set_selected_nodes(snarl_id, ui.ctx(), &[node]);
+            }
+            selected = vec![id];
+        }
+        // An analysis selected alone becomes the one Geometry, FE Model and Results show.
+        if selected != self.selected
+            && let [id] = selected[..]
+            && self
+                .nodes
+                .iter()
+                .any(|n| n.id == id && n.kind() == Kind::Analysis)
+        {
+            self.active = Some(id);
+        }
+        self.selected = selected;
         let clip = viewer.to_global.inverse() * ui.clip_rect();
         draw_feedback(ui.ctx(), &viewer.feedback, &viewer.rects, clip);
         self.pin_rects = ui.ctx().data_mut(|d| {
@@ -5473,7 +5535,8 @@ impl ProjectApp {
         // Blender.
         // The response lies on the zoomed and panned layer of the schematic, so its pointer
         // position is in the schematic; the picker needs the one on the screen.
-        if (response.double_clicked() || response.secondary_clicked())
+        if self.placing.is_none()
+            && (response.double_clicked() || response.secondary_clicked())
             && let Some(screen) = ui.ctx().input(|i| i.pointer.interact_pos())
         {
             let graph = viewer.to_global.inverse() * screen;
@@ -5493,14 +5556,15 @@ impl ProjectApp {
                 }
             }
         }
+        self.place_block(ui, viewer.to_global.inverse(), &mut viewer.actions);
         if self.nodes.is_empty() {
             ui.put(
                 egui::Rect::from_center_size(ui.max_rect().center(), egui::vec2(420.0, 60.0)),
                 egui::Label::new(
                     egui::RichText::new(
-                        "Double-click or right-click here, or use the Project menu, to add an analysis,\n\
-                         materials or a mesh. Double-click an analysis to open it in its\n\
-                         own window.",
+                        "Place an analysis, materials or a mesh with the tiles of the ribbon,\n\
+                         or double-click here to search the blocks. Double-click an analysis\n\
+                         to open it in Geometry, FE Model and Results.",
                     )
                     .weak(),
                 )
@@ -5509,6 +5573,44 @@ impl ProjectApp {
             );
         }
         viewer.actions
+    }
+
+    /// The block a plain click went to in this frame, if any.
+    fn clicked_block(
+        &self,
+        ui: &egui::Ui,
+        layer: egui::LayerId,
+        to_global: egui::emath::TSTransform,
+    ) -> Option<u64> {
+        let ctx = ui.ctx();
+        let (clicked, modifiers, pos) = ctx.input(|i| {
+            (
+                i.pointer.primary_clicked(),
+                i.modifiers,
+                i.pointer.interact_pos(),
+            )
+        });
+        let pos = pos?;
+        if !clicked || modifiers.shift || modifiers.command || self.placing.is_some() {
+            return None;
+        }
+        // Not through a window or menu over the schematic.
+        let over = ctx.layer_id_at(pos);
+        if !ui.max_rect().contains(pos) || (over != Some(layer) && over != Some(ui.layer_id())) {
+            return None;
+        }
+        let at = to_global.inverse() * pos;
+        (self.graph.nodes_pos_ids())
+            .filter(|(_, min, id)| {
+                let size = self
+                    .block_sizes
+                    .get(id)
+                    .copied()
+                    .unwrap_or(egui::vec2(220.0, 60.0));
+                egui::Rect::from_min_size(*min, size).contains(at)
+            })
+            .map(|(_, _, id)| *id)
+            .last()
     }
 
     /// Finds the pin a wire is dragged from, by where the drag started, and for each pin of the
@@ -6812,6 +6914,7 @@ impl ProjectApp {
         Some(match action {
             Action::New(_)
             | Action::Open(..)
+            | Action::OpenInWindow(_)
             | Action::Solve(_)
             | Action::Update(_)
             | Action::Rename(_)
@@ -7002,6 +7105,7 @@ impl ProjectApp {
                 self.sync_due = true;
             }
             Action::Open(id, view) => self.open_window(ctx, id, view),
+            Action::OpenInWindow(id) => self.open_analysis(ctx, id, None, true),
             Action::Solve(id) => self.solve_chain(id),
             Action::Update(id) => self.update_block(id),
             Action::Rename(id) => {
@@ -7363,6 +7467,7 @@ impl ProjectApp {
     /// Shows the open analyses' windows and acts on what they ask.
     fn analysis_windows(&mut self, ctx: &egui::Context) {
         let project = self.project_name();
+        let embedded = self.embedded().filter(|_| !self.in_project);
         let mut requests = Vec::new();
         let mut closing = Vec::new();
         let mut settings = None;
@@ -7379,25 +7484,33 @@ impl ProjectApp {
             if let Some(solve) = self.solves.iter().rev().find(|s| s.id == id) {
                 window.show_run(solve);
             }
-            let mut builder = egui::ViewportBuilder::default()
-                .with_title(format!("{name} - {project} - Nodalis"))
-                .with_app_id("nodalis")
-                .with_inner_size([1400.0, 900.0])
-                .with_min_inner_size([640.0, 400.0])
-                .with_icon(crate::window_icon());
-            if let Some(position) = analysis.window_position {
-                builder = builder.with_position(position);
-            }
-            ctx.show_viewport_immediate(analysis_viewport(id), builder, |ui, _| {
-                window.ui(ui);
-                if ui.input(|i| i.viewport().close_requested()) {
-                    if window.busy().is_some() {
-                        ui.ctx()
-                            .send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                    }
-                    closing.push(id);
+            if !analysis.own_window {
+                // Shown in the project window, or parked there while another one is shown:
+                // it goes on with what it does in the background.
+                if embedded != Some(id) {
+                    window.tick(ctx);
                 }
-            });
+            } else {
+                let mut builder = egui::ViewportBuilder::default()
+                    .with_title(format!("{name} - {project} - Nodalis"))
+                    .with_app_id("nodalis")
+                    .with_inner_size([1400.0, 900.0])
+                    .with_min_inner_size([640.0, 400.0])
+                    .with_icon(crate::window_icon());
+                if let Some(position) = analysis.window_position {
+                    builder = builder.with_position(position);
+                }
+                ctx.show_viewport_immediate(analysis_viewport(id), builder, |ui, _| {
+                    window.ui(ui);
+                    if ui.input(|i| i.viewport().close_requested()) {
+                        if window.busy().is_some() {
+                            ui.ctx()
+                                .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                        }
+                        closing.push(id);
+                    }
+                });
+            }
             requests.extend(window.take_requests().into_iter().map(|r| (id, r)));
             if window.settings() != &self.settings {
                 settings = Some(window.settings().clone());
@@ -7450,6 +7563,11 @@ impl ProjectApp {
                     }
                 }
                 Request::Campbell => self.open_campbell_of(ctx, id),
+                Request::Close => {
+                    if self.close_window(id) && self.active == Some(id) {
+                        self.in_project = true;
+                    }
+                }
                 // Unlinking what a state link took makes the analysis independent.
                 Request::Unlink(path) => {
                     self.exclude(None, Some(&(id, path.clone())));
@@ -7528,12 +7646,15 @@ impl eframe::App for ProjectApp {
         let ctx = ui.ctx().clone();
         crate::style::sync(&ctx);
         self.poll_opening();
+        self.check_active();
+        let project = self.in_project;
         let title = format!("{} - Nodalis", self.project_name());
         if title != self.shown_title {
             self.shown_title = title.clone();
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F5)) {
+        // In the analysis workspaces F5 solves the analysis shown, Ctrl+Z undoes its changes.
+        if project && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F5)) {
             self.solve_shortcut();
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
@@ -7547,7 +7668,7 @@ impl eframe::App for ProjectApp {
             self.save(false);
         }
         let typing = ctx.memory(|m| m.focused().is_some());
-        if !typing {
+        if !typing && project {
             if ctx.input_mut(|i| i.consume_key(shift_command, egui::Key::Z))
                 || ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y))
             {
@@ -7556,7 +7677,10 @@ impl eframe::App for ProjectApp {
                 self.undo(&ctx);
             }
         }
-        if !typing && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Home)) {
+        if !typing
+            && project
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Home))
+        {
             self.show_all = true;
         }
         let dropped: Vec<PathBuf> = ctx.input(|i| {
@@ -7568,8 +7692,45 @@ impl eframe::App for ProjectApp {
         if let Some(path) = dropped.into_iter().next() {
             self.open(&ctx, path);
         }
-        egui::Panel::top("project menu").show(ui, |ui| self.menu_bar(ui));
-        egui::Panel::top("project tools").show(ui, |ui| self.tool_bar(ui));
+        self.app_bar(ui);
+        // The analysis shown here, in Geometry, FE Model or Results.
+        if let Some(id) = self.embedded().filter(|_| !self.in_project) {
+            self.embedded_ui(ui, id);
+        } else {
+            self.project_ui(ui);
+        }
+        self.rename_window(&ctx);
+        self.confirm_delete_window(&ctx);
+        self.material_set_window(&ctx);
+        self.mesh_block_window(&ctx);
+        self.cad_editor_window(&ctx);
+        self.parameter_set_window(&ctx);
+        self.measure_window(&ctx);
+        self.study_window(&ctx);
+        self.campbell_windows(&ctx);
+        self.new_analysis_window(&ctx);
+        self.settings_window(&ctx);
+        self.updater.show(&ctx, &mut self.output);
+        self.sync_links(&ctx);
+        if self.update_after_sync && !self.sync_due {
+            self.update_after_sync = false;
+            self.update_project();
+        }
+        self.poll_solves(&ctx);
+        self.run_update(&ctx);
+        self.run_study();
+        self.run_exports();
+        self.analysis_windows(&ctx);
+        self.join_dropped(&ctx);
+        self.record_change(&ctx);
+    }
+}
+
+impl ProjectApp {
+    /// The Project workspace: its ribbon, the schematic and the solution monitor.
+    fn project_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        self.project_ribbon(ui);
         egui::Panel::bottom("project status").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if let Some((path, _)) = &self.opening {
@@ -7620,30 +7781,6 @@ impl eframe::App for ProjectApp {
         for action in actions {
             self.act(&ctx, action);
         }
-        self.rename_window(&ctx);
-        self.confirm_delete_window(&ctx);
-        self.material_set_window(&ctx);
-        self.mesh_block_window(&ctx);
-        self.cad_editor_window(&ctx);
-        self.parameter_set_window(&ctx);
-        self.measure_window(&ctx);
-        self.study_window(&ctx);
-        self.campbell_windows(&ctx);
-        self.new_analysis_window(&ctx);
-        self.settings_window(&ctx);
-        self.updater.show(&ctx, &mut self.output);
-        self.sync_links(&ctx);
-        if self.update_after_sync && !self.sync_due {
-            self.update_after_sync = false;
-            self.update_project();
-        }
-        self.poll_solves(&ctx);
-        self.run_update(&ctx);
-        self.run_study();
-        self.run_exports();
-        self.analysis_windows(&ctx);
-        self.join_dropped(&ctx);
-        self.record_change(&ctx);
     }
 }
 
@@ -10322,7 +10459,10 @@ impl SnarlViewer<u64> for Viewer {
             });
         }
         let tip = match kind {
-            Kind::Analysis => "Double-click opens the analysis in its own window.",
+            Kind::Analysis => {
+                "Double-click opens the analysis in Geometry, FE Model or Results; its menu \
+                 opens it in a window of its own."
+            }
             Kind::Materials => "Double-click edits the materials.",
             Kind::CrossSections => "Double-click edits the cross-sections.",
             Kind::Mesh => "Double-click edits the size and division of the mesh.",
@@ -11215,6 +11355,7 @@ fn node_menu(
         return;
     }
     entry(ui, "Open", "", Action::Open(id, None));
+    entry(ui, "Open in New Window", "", Action::OpenInWindow(id));
     entry(ui, "Solve", "", Action::Solve(id));
     ui.separator();
     let split = steps.len() > 1;
@@ -11313,7 +11454,7 @@ fn schematic_style() -> SnarlStyle {
 
 /// Tooltip of Add Materials.
 const ANALYSIS_TIP: &str = "Adds an analysis: a model of its own with geometry, mesh, setup \
-     and steps, solved with CalculiX. Double-click its block to open it in its own window.";
+     and steps, solved with CalculiX. Double-click its block to open it in Geometry, FE Model and Results.";
 
 const PARAMETERS_TIP: &str = "Adds a block of named numbers: drag the pin of one to a \
                               parameter of another block, such as a length of a mesh block, \

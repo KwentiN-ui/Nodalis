@@ -12,6 +12,7 @@
 #include "chapters/introduction.typ"
 #include "chapters/first-analysis.typ"
 
+#include "chapters/interface/workspaces.typ"
 #include "chapters/interface/project.typ"
 #include "chapters/interface/links.typ"
 #include "chapters/interface/sources.typ"
