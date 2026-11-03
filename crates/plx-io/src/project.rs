@@ -507,7 +507,7 @@ pub struct BoundResults {
     /// only later steps change.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<u64>,
-    /// CalculiX reported errors but wrote results.
+    /// The solver reported errors but wrote results.
     #[serde(default)]
     pub with_errors: bool,
     pub files: Vec<BoundFile>,

@@ -21,7 +21,7 @@ pub enum CellState {
     /// Made from inputs that changed since: Solve makes it again.
     OutOfDate,
     Running,
-    /// CalculiX reported errors; results may still be there.
+    /// The solver reported errors; results may still be there.
     Failed,
     /// Not part of this analysis, such as the geometry of a mesh read from an input file.
     NotUsed,
@@ -95,7 +95,7 @@ impl Upstream {
     }
 }
 
-/// The state of each cell of an analysis with this data; `running` while CalculiX solves it.
+/// The state of each cell of an analysis with this data; `running` while the solver solves it.
 /// `upstream` is what it takes from other blocks that is not ready.
 pub fn analysis_status(
     geometry: Option<&Geometry>,

@@ -239,7 +239,7 @@ const INCH: f64 = 0.0254;
 /// degree Celsius. An analysis' own unit system only says in which units its dialogs and
 /// views show the values, and in which units files without units are read, so analyses of
 /// different unit systems can take values and results from each other as they are.
-/// CalculiX gets the values in these units, too.
+/// The solver gets the values in these units, too.
 pub const STORED: UnitSystem = UnitSystem::MKgSC;
 
 impl UnitSystem {

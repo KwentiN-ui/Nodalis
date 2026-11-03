@@ -9,7 +9,7 @@
 //! The sweep is adaptive: after a coarse grid over the speed range it keeps adding speeds
 //! where the curves bend most, until it is stopped or reaches its number of runs. The modes
 //! are followed from speed to speed by their course, not by their rank, so a spurious root
-//! CalculiX finds at one speed does not shift every curve above it.
+//! the solver finds at one speed does not shift every curve above it.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -43,7 +43,7 @@ const WIDTH_WEIGHT: f64 = 0.01;
 const MIN_TRACK: usize = 3;
 
 /// Speeds in a row a curve may be missing at, as when a spurious root takes its place among
-/// the modes CalculiX computes, before it counts as ended.
+/// the modes the solver computes, before it counts as ended.
 const MAX_MISSED: usize = 2;
 
 /// A crossing of a mode with an engine order line.
@@ -284,7 +284,7 @@ pub fn track(points: &[SpeedPoint]) -> Tracks {
             // spectrum, so curves near zero still find their continuation.
             let tolerance = (0.2 * expected.abs()).max(0.05 * scale);
             for (m, mode) in modes.iter().enumerate() {
-                // CalculiX gives the size of a frequency: a curve heading below zero
+                // The solver gives the size of a frequency: a curve heading below zero
                 // comes back up mirrored.
                 let distance = (mode.frequency.abs() - expected.abs()).abs();
                 if distance <= tolerance {
@@ -398,7 +398,7 @@ fn bends(tracks: &Tracks) -> Vec<(f64, f64)> {
 /// weighted with the width of the gap. The resolution is relative to the range, so a marked
 /// range is sampled finer. Gaps next to a failed or running speed and
 /// gaps narrower than twice the resolution are left alone, so the sweep does not chase
-/// a speed CalculiX cannot solve. `None` when no gap is left to split.
+/// a speed the solver cannot solve. `None` when no gap is left to split.
 pub fn next_speed(
     points: &[SpeedPoint],
     failed: &[f64],
@@ -492,7 +492,7 @@ pub fn diagram(tracks: &Tracks, orders: &[f64], max_speed: f64) -> Diagram {
 }
 
 /// The sweep as a table for a spreadsheet, its cells separated by `separator`: the speed,
-/// the frequency and whirl of each curve, the other roots CalculiX found at that speed and
+/// the frequency and whirl of each curve, the other roots the solver found at that speed and
 /// the frequency of each engine order line.
 pub fn table_text(points: &[SpeedPoint], orders: &[f64], separator: char) -> String {
     let tracks = track(points);
@@ -1547,7 +1547,7 @@ mod tests {
                     (1000.0 + 0.05 * s, Whirl::Forward),
                     (2000.0, Whirl::Backward),
                 ];
-                // CalculiX finds a root near zero at two speeds, which pushes the top mode
+                // The solver finds a root near zero at two speeds, which pushes the top mode
                 // out of the requested number of modes.
                 if i == 9 || i == 14 {
                     modes.insert(0, (-3.0, Whirl::Unknown));

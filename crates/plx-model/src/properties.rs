@@ -213,7 +213,7 @@ impl ModelSpace {
 impl ModelSpace {
     /// Makes a mesh generated from the geometry fit the model space: gives its elements the
     /// model's types and, in 2D models, numbers them counter-clockwise seen from +z, as
-    /// CalculiX needs. Fails if the mesh does not fit: 2D models take faces in the x-y
+    /// the solver needs. Fails if the mesh does not fit: 2D models take faces in the x-y
     /// plane only, axisymmetric ones on the side x >= 0 of the axis; 3D models take solids,
     /// shells and lines.
     pub fn prepare_generated_mesh(self, mesh: &mut FeMesh) -> Result<(), String> {

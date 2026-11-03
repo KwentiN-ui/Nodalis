@@ -381,7 +381,7 @@ mod tests {
 
     /// The plate with a hole (100 x 40 x 10) fixed at x = 0 and pulled by a pressure on its
     /// end at x = 100, both picked on the geometry: meshed coarse, then the part remeshed
-    /// fine. The regions find the end faces on both meshes, and CalculiX gives about the
+    /// fine. The regions find the end faces on both meshes, and the solver gives about the
     /// same elongation.
     #[test]
     fn selections_on_the_geometry_survive_remeshing() {
@@ -554,7 +554,7 @@ mod tests {
     /// A cantilever of two CAD lines along x, 0..60 and 60..100, meshed as beams: fixed at
     /// x = 0, the lines tied at x = 60 and pulled down at x = 100, all picked on the lines
     /// in the geometry mode. Meshed coarse, then both lines remeshed fine: the picks are CAD
-    /// vertices and edges, which find their nodes on both meshes, and CalculiX gives the
+    /// vertices and edges, which find their nodes on both meshes, and the solver gives the
     /// beam theory's tip deflection both times.
     #[test]
     fn selections_on_lines_survive_remeshing() {

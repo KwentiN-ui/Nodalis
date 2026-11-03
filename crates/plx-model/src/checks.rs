@@ -1,11 +1,11 @@
-//! Checks of the model before CalculiX runs, for the mistakes that most often make a run abort
+//! Checks of the model before the solver runs, for the mistakes that most often make a run abort
 //! or give useless results: parts that are not held, elements without a material, materials
 //! without the constants a step needs, distorted elements, contradicting boundary conditions.
 //! Each finding names the tree item it belongs to and explains the problem and its fix.
 //!
 //! The checks are derived from the model like [`crate::validity`]; the expensive part that
 //! only depends on the mesh (connectivity and element distortion) is computed once in
-//! [`MeshCheck`]. CalculiX's own error messages after a failed run are mapped to the same
+//! [`MeshCheck`]. The solver's own error messages after a failed run are mapped to the same
 //! explanations by [`diagnose_solver_output`].
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -19,10 +19,10 @@ use crate::{
     ModelItem, ModelSpace, SectionKind, StepKind,
 };
 
-/// Whether CalculiX aborts or the results are likely wrong.
+/// Whether the solver aborts or the results are likely wrong.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
-    /// CalculiX aborts, or the results are meaningless.
+    /// The solver aborts, or the results are meaningless.
     Error,
     /// The run may work, but the model probably does not do what was intended.
     Warning,
@@ -33,7 +33,7 @@ pub enum Severity {
 pub enum Problem {
     MissingReference,
     /// A section whose type does not fit its elements, such as a beam section on solids or
-    /// a membrane section on quadratic elements, or whose values CalculiX rejects.
+    /// a membrane section on quadratic elements, or whose values the solver rejects.
     InvalidSection,
     NoSection,
     /// Two sections whose regions share elements.
@@ -44,7 +44,7 @@ pub enum Problem {
     /// rigid body is driven by: the point has no node in the input file.
     NoRigidBody,
     /// Nodes in two rigid bodies, of rigid body constraints or displacements on a point:
-    /// CalculiX keeps them in the first and only warns.
+    /// the solver keeps them in the first and only warns.
     SharedRigidBody,
     /// Nodes of a rigid body constraint that a boundary condition holds directly: CalculiX
     /// refuses them ("dependent side of a MPC and a SPC"), so the input file leaves them
@@ -58,7 +58,7 @@ pub enum Problem {
     /// equations, which hold for small rotations only. Warned of in steps with large
     /// deformations, and found in the output of a CalculiX run of another input file.
     RigidBeamNodes,
-    /// A plastic hardening curve CalculiX rejects: no elasticity, a row without a yield
+    /// A plastic hardening curve the solver rejects: no elasticity, a row without a yield
     /// stress, or plastic strains that do not start at 0 and grow.
     InvalidPlastic,
     /// A creep law with nonpositive constants, or without elasticity.
@@ -72,7 +72,7 @@ pub enum Problem {
     /// Truss nodes that no bar or support holds in some direction.
     Mechanism,
     /// A pre-tension load locked in the first step it acts in: there is no length of a
-    /// previous step to keep, so CalculiX holds the bolt at its unstretched length.
+    /// previous step to keep, so the solver holds the bolt at its unstretched length.
     LockWithoutPreload,
     /// A bolt whose cut cannot be made: no faces of solid elements, or a side missing.
     InvalidBolt,
@@ -90,7 +90,7 @@ pub enum Problem {
     ConflictingBoundaries,
     LoadOnFixedNodes,
     RotationsIgnored,
-    /// Beam nodes with some but not all of their rotations given: CalculiX holds them all.
+    /// Beam nodes with some but not all of their rotations given: the solver holds them all.
     PartialBeamRotations,
     /// A submodel boundary condition in a model without a global results file.
     NoGlobalResults,
@@ -119,30 +119,30 @@ pub enum Problem {
     /// A sensitivity step without the static or frequency step before it whose solution
     /// its design responses need.
     NoSensitivityBase,
-    /// A later sensitivity step with another design region: CalculiX reads one, the first.
+    /// A later sensitivity step with another design region: the solver reads one, the first.
     DesignRegionIgnored,
     /// A Visco step in a model whose materials have no creep law: it is a static step.
     NoCreep,
     /// A step CalculiX's general beam (user element U1) cannot take: large deformations,
     /// buckling, direct dynamics, heat transfer.
     GeneralBeamStep,
-    /// A cyclic symmetry tie CalculiX rejects, or nodal diameters beyond what its sectors
+    /// A cyclic symmetry tie the solver rejects, or nodal diameters beyond what its sectors
     /// carry.
     InvalidCyclicSymmetry,
     /// An initial velocity in a model without a Dynamic step.
     VelocityIgnored,
     /// A Coriolis complex frequency step without a centrifugal load before it.
     NoRotation,
-    /// Contact pairs in a frequency step without perturbation: CalculiX ignores them.
+    /// Contact pairs in a frequency step without perturbation: the solver ignores them.
     ContactIgnored,
     /// Contact pairs in a complex frequency step: the Coriolis coupling goes wrong.
     ContactWithCoriolis,
-    /// A contact pair with tied surface behavior that CalculiX rejects: without friction in
+    /// A contact pair with tied surface behavior that the solver rejects: without friction in
     /// its surface interaction or with another method than surface to surface.
     InvalidTiedContact,
-    /// Contact pairs of different formulations: CalculiX takes one for all of them.
+    /// Contact pairs of different formulations: the solver takes one for all of them.
     ContactFormulationsDiffer,
-    /// Mortar contact in a step that is not static: CalculiX takes mortar in static steps
+    /// Mortar contact in a step that is not static: the solver takes mortar in static steps
     /// only.
     MortarNotSupported,
     /// A contact region whose sides do not touch in the mesh: a bonded one ties nothing,
@@ -151,7 +151,7 @@ pub enum Problem {
     /// A region of no separation in a step with large deformations: its equations hold for
     /// small displacements only.
     NoSeparationLargeDeformation,
-    /// A step switches a contact region off or on that CalculiX cannot switch: a tie, the
+    /// A step switches a contact region off or on that the solver cannot switch: a tie, the
     /// equations of no separation, or a region deactivated as a whole.
     ContactChangeIgnored,
     /// A history output prints the contact values of a region that has none: a tie, the
@@ -1043,7 +1043,7 @@ impl MeshCheck {
 }
 
 impl FeModel {
-    /// Cyclic symmetry ties CalculiX rejects, such as cut faces that do not divide the
+    /// Cyclic symmetry ties the solver rejects, such as cut faces that do not divide the
     /// full circle, and nodal diameters the sectors cannot carry.
     fn check_cyclic_symmetry(&self, mesh: &FeMesh, findings: &mut Vec<Finding>) {
         for (i, tie) in self.ties.iter().enumerate().filter(|(_, t)| t.active) {
@@ -1130,7 +1130,7 @@ impl FeModel {
     }
 
     /// Weak springs to ground for the parts that only contacts hold in a static step, so
-    /// that CalculiX does not stall on the free motions before the contacts close: with
+    /// that the solver does not stall on the free motions before the contacts close: with
     /// frictionless contact, an initial gap or Nlgeom it otherwise gives up with "too many
     /// cutbacks", and node to surface contact drifts sideways by arbitrary amounts. Each
     /// part gets a stiffness of [`WEAK_SPRING_FACTOR`](crate::WEAK_SPRING_FACTOR) E L per
@@ -1201,7 +1201,7 @@ impl FeModel {
     }
 
     /// Contact regions whose sides do not touch, contact pairs whose formulation differs
-    /// from that of the others, and the mortar formulation where CalculiX does not take it.
+    /// from that of the others, and the mortar formulation where the solver does not take it.
     fn check_contact_regions(&self, mesh: &FeMesh, lowered: &FeModel, findings: &mut Vec<Finding>) {
         for (i, check) in self.check_contacts(mesh).into_iter().enumerate() {
             let region = &self.contact_regions[i];
@@ -1421,7 +1421,7 @@ impl FeModel {
                 let previous = (self.steps[..s].iter()).rev().find(|p| p.active);
                 let fits = match previous.map(|p| &p.kind) {
                     Some(StepKind::Static(_)) => !settings.eigenfrequency,
-                    // CalculiX reads the eigenmodes from the .eig file.
+                    // The solver reads the eigenmodes a previous frequency step stored.
                     Some(StepKind::Frequency(f)) => {
                         !settings.strain_energy && (f.storage || !settings.eigenfrequency)
                     }
@@ -1459,7 +1459,7 @@ impl FeModel {
                     format!("{} is transient", step.name),
                 ));
             }
-            // CalculiX refuses a *Temperature without an initial temperature.
+            // The solver refuses a *Temperature without an initial temperature.
             let defined =
                 step.kind.supports_defined_fields() && step.defined_fields.iter().any(|f| f.active);
             if defined && !initial_temperature {
@@ -1491,7 +1491,7 @@ impl FeModel {
         findings
     }
 
-    /// Contact pairs with tied surface behavior CalculiX rejects.
+    /// Contact pairs with tied surface behavior the solver rejects.
     /// Nodes in more than one rigid body: of rigid body constraints, and of remote
     /// displacements, one per selection as in the input file.
     fn check_shared_rigid_bodies(&self, mesh: &FeMesh, findings: &mut Vec<Finding>) {
@@ -1839,7 +1839,7 @@ impl FeModel {
 
     /// Parts with elements no section covers.
     /// The beam sections on elements whose cross-section is a general profile, which
-    /// CalculiX knows only as the user element U1.
+    /// the solver knows only as the user element U1.
     fn general_beam_sections(&self, mesh: &FeMesh) -> Vec<&str> {
         (self.sections.iter())
             .filter(|s| {
@@ -2671,7 +2671,7 @@ impl FeModel {
     /// end nodes along its axis only, so a node is held when its bars, supports and springs
     /// span all three directions; tied nodes are written as one node and count together.
     /// Inner nodes of a bar meshed with several elements and the nodes of a plane truss
-    /// fail this, and CalculiX solves the singular system without a word.
+    /// fail this, and the solver solves the singular system without a word.
     fn check_trusses(
         &self,
         s: usize,
@@ -3111,60 +3111,29 @@ fn eigen(matrix: &[[f64; 6]; 6], n: usize) -> ([f64; 6], [[f64; 6]; 6]) {
     (values, vectors)
 }
 
-/// Warnings CalculiX gives in its output after any run that point to wrong results: slave
-/// nodes of ties it did not tie because the master side is too far away ("no tied MPC
-/// generated for node ... too far away; distance: ... tolerance: ...").
+/// Warnings the solver gives in its output after any run that point to wrong results: slave
+/// nodes of ties it did not tie because the master side is too far away ("*WARNING in *TIE
+/// <name>: <n> slave node(s) are too far away from the master surface and are not tied: <ids>").
 pub fn diagnose_solver_warnings(lines: &[String]) -> Vec<Finding> {
-    let text = lines.join(" ").to_ascii_lowercase();
-    let marker = "too far away; distance:";
-    let (mut count, mut distance, mut tolerance) = (0usize, 0.0f64, 0.0f64);
-    for (at, _) in text.match_indices(marker) {
-        let mut words = text[at + marker.len()..].split_whitespace();
-        let Some(d) = words.next().and_then(|w| w.parse::<f64>().ok()) else {
-            continue;
-        };
-        count += 1;
-        distance = distance.max(d);
-        if words.next() == Some("tolerance:")
-            && let Some(t) = words.next().and_then(|w| w.parse::<f64>().ok())
-        {
-            tolerance = tolerance.max(t);
-        }
-    }
-    // The Nodalis solver: "*WARNING in *TIE <name>: <n> slave node(s) are too far away
-    // from the master surface and are not tied: <ids>".
-    let plxs_marker = "slave node(s) are too far away from the master surface";
+    let marker = "slave node(s) are too far away from the master surface";
     let untied: usize = (lines.iter())
         .filter_map(|line| {
-            let at = line.find(plxs_marker)?;
+            let at = line.find(marker)?;
             line[..at].split_whitespace().last()?.parse::<usize>().ok()
         })
         .sum();
-    if count == 0 && untied == 0 {
+    if untied == 0 {
         return Vec::new();
-    }
-    if count == 0 {
-        return vec![Finding::new(
-            ModelItem::Analysis,
-            Problem::TieNodesNotTied,
-            format!(
-                "{untied} slave nodes not tied: farther than the tolerance from the master side"
-            ),
-        )];
     }
     vec![Finding::new(
         ModelItem::Analysis,
         Problem::TieNodesNotTied,
-        format!(
-            "{count} slave nodes not tied: up to {distance:.4e} from the master side, \
-             tolerance {tolerance:.4e} (lengths in the units of the input file)"
-        ),
+        format!("{untied} slave nodes not tied: farther than the tolerance from the master side"),
     )]
 }
 
 /// Problems the solver reports in its output after a failed run, mapped to the explanations of
-/// the checks. Distorted elements and elements without material are also attached to their
-/// parts.
+/// the checks. Elements without a section are also attached to their parts.
 pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
     let text = lines.join(" ").to_ascii_lowercase();
     let text: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -3174,47 +3143,32 @@ pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
             findings.push(Finding::new(ModelItem::Analysis, problem, detail));
         }
     };
-    let elements_after = |marker: &str| -> Vec<ElementId> {
-        let mut ids: Vec<ElementId> = (text.match_indices(marker))
-            .filter_map(|(at, _)| {
-                let rest = &text[at + marker.len()..];
-                rest.split_whitespace().next()?.parse().ok()
-            })
-            .collect();
-        ids.sort_unstable();
-        ids.dedup();
-        ids
-    };
+    // "element <id> has no section": the id is the word before the marker.
+    let mut no_section: Vec<ElementId> = (text.match_indices(" has no section"))
+        .filter_map(|(at, _)| text[..at].split_whitespace().last()?.parse().ok())
+        .collect();
+    no_section.sort_unstable();
+    no_section.dedup();
     let mut part_findings = Vec::new();
-    for (problem, marker) in [
-        (
-            Problem::DistortedElements,
-            "nonpositive jacobian determinant in element",
-        ),
-        (Problem::NoSection, "no material was assigned to element"),
-    ] {
-        let ids = elements_after(marker);
-        if ids.is_empty() {
-            continue;
-        }
+    if !no_section.is_empty() {
         add(
             &mut findings,
-            problem,
+            Problem::NoSection,
             format!(
                 "{} element(s), e.g. {}",
-                ids.len(),
-                list(ids.iter().take(5))
+                no_section.len(),
+                list(no_section.iter().take(5))
             ),
         );
         for (p, part) in mesh.parts.iter().enumerate() {
-            let in_part: Vec<ElementId> = (ids.iter())
+            let in_part: Vec<ElementId> = (no_section.iter())
                 .filter(|id| part.elements.contains(id))
                 .copied()
                 .collect();
             if !in_part.is_empty() {
                 part_findings.push(Finding::new(
                     ModelItem::Part(p),
-                    problem,
+                    Problem::NoSection,
                     format!(
                         "According to the solver: element(s) {}",
                         list(in_part.iter().take(5))
@@ -3223,55 +3177,38 @@ pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
             }
         }
     }
-    let known: [(Problem, &[&str]); 14] = [
-        (Problem::NoElastic, &["no elastic constants"]),
+    let known: [(Problem, &[&str]); 7] = [
         (
-            Problem::InvalidPlastic,
-            &["reading *plastic", "plastic strain must be"],
+            Problem::NoElastic,
+            &["young's modulus and poisson's ratio needed"],
         ),
-        (Problem::NoDensity, &["no density was assigned"]),
-        (Problem::NoConductivity, &["no conductivity constants"]),
-        (Problem::NoSpecificHeat, &["no specific heat was assigned"]),
+        (Problem::NoDensity, &["has no density", "has no *density"]),
+        (Problem::NoConductivity, &["has no *conductivity"]),
         (
-            Problem::NoInitialTemperature,
-            &["define initial conditions for the temperature"],
-        ),
-        (
-            Problem::InvalidElastic,
-            &["poisson coefficient should be less than 0.5"],
+            Problem::NoSpecificHeat,
+            &["has no *specific heat", "needs *density and *specific heat"],
         ),
         (
             Problem::RigidBodyMotion,
-            &["zero pivot", "matrix is singular", "singular matrix"],
+            &["matrix is singular", "free motion(s)"],
         ),
         (
             Problem::NoConvergence,
             &[
-                "too many cutbacks",
-                "increment size smaller than minimum",
-                "increment size is smaller than minimum",
-                "too far apart",
+                "cutbacks in one increment",
+                "fell below the minimum",
+                "would fall below the minimum",
+                "exceeds the maximum number of increments",
             ],
-        ),
-        (
-            Problem::IncrementExceedsStep,
-            &["initial increment size exceeds step size"],
         ),
         (
             Problem::NoPhysicalConstants,
-            &[
-                "*radiate card was selected",
-                "no *physical constants card",
-                "radiation needs *physical constants",
-            ],
+            &["radiation needs *physical constants"],
         ),
-        (Problem::MpcAndSpc, &["dependent side of a mpc and a spc"]),
-        (Problem::RotationIn2d, &["usermpc: mpc of type"]),
-        (Problem::RigidBeamNodes, &["must not be subject to a rigid"]),
     ];
     for (problem, markers) in known {
         if let Some(marker) = markers.iter().find(|m| text.contains(*m)) {
-            // The line as CalculiX wrote it, if the marker does not span two lines.
+            // The line as the solver wrote it, if the marker does not span two lines.
             let line = (lines.iter().map(|l| l.trim()))
                 .find(|l| l.to_ascii_lowercase().contains(marker))
                 .unwrap_or(marker);
@@ -4100,35 +4037,6 @@ mod tests {
     }
 
     #[test]
-    fn untied_slave_nodes_are_found_in_the_solver_output() {
-        let lines: Vec<String> = [
-            " *WARNING in gentiedmpc: no tied MPC",
-            "          generated for node       126382",
-            "          opposite master face found but",
-            "          too far away; distance:    1.6141397112631843E-003",
-            "          tolerance:    9.5492346099999999E-004",
-            " *WARNING in gentiedmpc: no tied MPC",
-            "          generated for node       126385",
-            "          opposite master face found but",
-            "          too far away; distance:    1.7738618684124165E-003",
-            "          tolerance:    9.5492346099999999E-004",
-        ]
-        .map(String::from)
-        .into();
-        let found = diagnose_solver_warnings(&lines);
-        assert_eq!(
-            problems(&found),
-            [(ModelItem::Analysis, Problem::TieNodesNotTied)]
-        );
-        assert_eq!(
-            found[0].detail,
-            "2 slave nodes not tied: up to 1.7739e-3 from the master side, tolerance \
-             9.5492e-4 (lengths in the units of the input file)"
-        );
-        assert!(diagnose_solver_warnings(&["Job finished".into()]).is_empty());
-    }
-
-    #[test]
     fn a_rigid_body_on_held_nodes_is_warned_of() {
         let mesh = cubes(1, false);
         let mut model = model(&mesh);
@@ -4654,7 +4562,7 @@ mod tests {
         );
     }
 
-    /// CalculiX holds all rotations of a beam node as soon as one is given, so a beam node
+    /// The solver holds all rotations of a beam node as soon as one is given, so a beam node
     /// with some rotations left free is not what it seems.
     #[test]
     fn beam_nodes_take_all_rotations_or_none() {
@@ -4691,7 +4599,7 @@ mod tests {
         });
         // A clamp and a pin.
         assert_eq!(check(&model, &mesh), []);
-        // The pin also stops the twist: CalculiX makes a clamp of it.
+        // The pin also stops the twist: the solver makes a clamp of it.
         model.steps[0].boundary_conditions[1].kind =
             BoundaryKind::displacement([Some(0.0), Some(0.0), Some(0.0), Some(0.0), None, None]);
         assert_eq!(
@@ -4901,10 +4809,9 @@ mod tests {
     fn solver_errors_are_explained() {
         let mesh = cubes(2, true);
         let lines: Vec<String> = [
-            " *ERROR in e_c3d: nonpositive jacobian",
-            "        determinant in element           2",
-            "",
-            " *ERROR: too many cutbacks",
+            "*ERROR reading *ELEMENT: element 2 has no section",
+            "*ERROR: the residual force grew; more than 5 cutbacks in one increment \
+             (step 1, increment 3)",
         ]
         .map(String::from)
         .to_vec();
@@ -4912,9 +4819,9 @@ mod tests {
         assert_eq!(
             problems(&findings),
             [
-                (ModelItem::Analysis, Problem::DistortedElements),
+                (ModelItem::Analysis, Problem::NoSection),
                 (ModelItem::Analysis, Problem::NoConvergence),
-                (ModelItem::Part(1), Problem::DistortedElements),
+                (ModelItem::Part(1), Problem::NoSection),
             ]
         );
         let unknown = [" *ERROR in something: new message"].map(String::from);
@@ -4922,12 +4829,9 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].problem, Problem::SolverError);
         assert_eq!(findings[0].detail, "*ERROR in something: new message");
-        let radiate = [
-            " *ERROR reading *RADIATE: *RADIATE card was selected",
-            "        but no *PHYSICAL CONSTANTS card encountered",
-            "        or incomplete (Stefan Boltzmann constant",
-        ]
-        .map(String::from);
+        let radiate =
+            ["*ERROR: radiation needs *PHYSICAL CONSTANTS with ABSOLUTE ZERO and STEFAN BOLTZMANN"]
+                .map(String::from);
         let findings = diagnose_solver_output(&radiate, &mesh);
         assert_eq!(
             problems(&findings),
@@ -4935,22 +4839,24 @@ mod tests {
         );
         assert_eq!(
             findings[0].detail,
-            "The solver reports \"*ERROR reading *RADIATE: *RADIATE card was selected\""
+            "The solver reports \"*ERROR: radiation needs *PHYSICAL CONSTANTS with ABSOLUTE \
+             ZERO and STEFAN BOLTZMANN\""
         );
-        let rigid = [
-            " *ERROR in gen3dmpc: nodes belonging to",
-            "        beam elements must not be",
-            "        subject to a RIGID                MPC.",
+        let heat =
+            ["*ERROR reading *HEAT TRANSFER: material STEEL of element 1 has no *CONDUCTIVITY"]
+                .map(String::from);
+        assert_eq!(
+            problems(&diagnose_solver_output(&heat, &mesh)),
+            [(ModelItem::Analysis, Problem::NoConductivity)]
+        );
+        let singular = [
+            "*ERROR: 4 node(s) of part 1: 6 free motion(s), the stiffness matrix is singular \
+             (step 1, increment 1)",
         ]
         .map(String::from);
         assert_eq!(
-            problems(&diagnose_solver_output(&rigid, &mesh)),
-            [(ModelItem::Analysis, Problem::RigidBeamNodes)]
-        );
-        let unknown = [" *ERROR in something: new message".to_string()];
-        assert_eq!(
-            diagnose_solver_output(&unknown, &mesh)[0].problem,
-            Problem::SolverError
+            problems(&diagnose_solver_output(&singular, &mesh)),
+            [(ModelItem::Analysis, Problem::RigidBodyMotion)]
         );
     }
 }

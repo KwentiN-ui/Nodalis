@@ -1,5 +1,5 @@
 //! Field outputs of a step, the nodal, element and contact field outputs: the
-//! variables CalculiX writes into the `.frd` file (`*NODE FILE`, `*EL FILE`,
+//! variables the solver writes into the `.frd` file (`*NODE FILE`, `*EL FILE`,
 //! `*CONTACT FILE`). The model keeps what the user picked; the keywords are made when the
 //! input file is written.
 
@@ -167,7 +167,7 @@ impl FieldOutput {
         self.variables.dedup();
     }
 
-    /// Why CalculiX would reject the variables.
+    /// Why the solver would reject the variables.
     pub fn check_variables(&self) -> Result<(), String> {
         if self.variables.is_empty() {
             return Err("Please select at least one variable.".into());
@@ -206,7 +206,7 @@ impl FieldOutput {
     }
 
     /// Field outputs of a new visco step: those of a static step and the equivalent creep
-    /// strain, which CalculiX writes as `PEEQ`.
+    /// strain, which the solver writes as `PEEQ`.
     pub fn visco_defaults() -> Vec<Self> {
         let mut outputs = Self::defaults();
         outputs[1].variables.push("PEEQ".into());

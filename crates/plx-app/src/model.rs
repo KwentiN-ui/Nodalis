@@ -381,7 +381,7 @@ fn companion_input(results: &Path) -> Option<PathBuf> {
 
 /// Groups the elements of results into the parts of the input file they were computed from,
 /// with the part names as the input writes them, and drops the springs and gaps the
-/// constraints were written as: CalculiX makes each gap section a material of its own, which
+/// constraints were written as: the solver makes each gap section a material of its own, which
 /// would show as a part per gap. Returns whether the input defines contact.
 fn adopt_input_parts(
     mesh: &mut FeMesh,
@@ -412,7 +412,7 @@ fn adopt_input_parts(
     }
 }
 
-/// Adds the user elements U1 of general beam sections, which CalculiX leaves out of the
+/// Adds the user elements U1 of general beam sections, which the solver leaves out of the
 /// results, from the input it ran: their nodes are there, so they are drawn as lines. Their
 /// stresses and strains are section forces, not stresses, so the nodes that belong to them
 /// only show none.
@@ -578,7 +578,7 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     model.included_files = included_files;
     model.results = increments.map(|(increments, date, time)| {
         let mut view = ResultsView::new(increments, model.mesh.bounds());
-        // CalculiX writes contact into the results only on request; the input it ran tells.
+        // The solver writes contact into the results only on request; the input it ran tells.
         if let Some(contact) = contact {
             view.contact |= contact;
             view.follow_default_deformation();
@@ -1576,7 +1576,7 @@ impl Model {
 
     /// The beam and truss sections whose elements can be drawn as their profile swept along
     /// the line, see [`Model::thick_lines`]. Results hold beams as lines only where the
-    /// input asked for `OUTPUT=2D`, as it does with shells; else CalculiX expanded them.
+    /// input asked for `OUTPUT=2D`, as it does with shells; else the solver expanded them.
     /// A beam section comes with the profile of its cross-section.
     pub fn line_sections(
         &self,
@@ -1643,7 +1643,7 @@ impl Model {
                     plx_model::SectionKind::Beam(beam) => profile.as_ref().map(|profile| {
                         let element = &self.mesh.elements()[index];
                         let tangent = plx_model::line_tangent(&self.mesh, element);
-                        // CalculiX refuses a normal along the beam; the model checks say so.
+                        // The solver refuses a normal along the beam; the model checks say so.
                         let normal = (beam.orientation.normal_for(tangent))
                             .or_else(|| BeamOrientation::Automatic.normal_for(tangent))
                             .unwrap_or([0.0, 0.0, 1.0]);
@@ -3484,7 +3484,7 @@ S
         assert_eq!(parts(&without_input.mesh), parts(&alone));
     }
 
-    /// CalculiX makes a material of each `*Gap` section; the gaps are not parts of the results.
+    /// The solver makes a material of each `*Gap` section; the gaps are not parts of the results.
     #[test]
     fn results_leave_out_the_gaps_of_their_input() {
         let dir = std::env::temp_dir().join(format!("nodalis-gaps-{}", std::process::id()));

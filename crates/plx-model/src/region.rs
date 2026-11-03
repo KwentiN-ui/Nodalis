@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// Where a section, boundary condition or load applies.
 ///
-/// Selections made in the GUI are stored as they were picked; the sets CalculiX needs are
+/// Selections made in the GUI are stored as they were picked; the sets the solver needs are
 /// derived from them when writing the input file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Region {

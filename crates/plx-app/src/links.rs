@@ -999,7 +999,7 @@ fn set_global_step(fe: &mut FeModel, step: &str, global: u32) -> bool {
     changed
 }
 
-/// The number CalculiX gives a step of the global model in its results: the active steps
+/// The number the solver gives a step of the global model in its results: the active steps
 /// counted from 1.
 pub fn global_step_number(fe: &FeModel, step: &str) -> Option<u32> {
     let index = (fe.steps.iter().filter(|s| s.active)).position(|s| s.name == step)?;

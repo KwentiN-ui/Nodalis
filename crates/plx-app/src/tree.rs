@@ -564,7 +564,7 @@ fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
             containers.remove(0);
             (TreeItem::StepGroup(s, "BCs"), containers)
         }
-        // The analysis has no item; what CalculiX reported shows on the model.
+        // The analysis has no item; what the solver reported shows on the model.
         ModelItem::Analysis => (TreeItem::Model, vec![]),
         ModelItem::InitialCondition(i) => (
             TreeItem::InitialCondition(i),
@@ -937,7 +937,7 @@ struct Tree<'a> {
     /// Inside an item being expanded or collapsed: the state all branches take.
     forced_open: Option<bool>,
     /// Problems found by the model checks, by item: shown with a warning sign, and red when
-    /// CalculiX would abort.
+    /// the solver would abort.
     findings: HashMap<TreeItem, Vec<Finding>>,
     /// Containers holding items with errors, shown red so that they are found when collapsed.
     holds_invalid: HashSet<TreeItem>,
@@ -1794,7 +1794,7 @@ impl Tree<'_> {
 }
 
 /// `mesh_items` names the items of the geometry's mesh setup, for the Geometry tree;
-/// `solver_findings` are the problems CalculiX reported in the last run.
+/// `solver_findings` are the problems the solver reported in the last run.
 pub fn show(
     ui: &mut Ui,
     view: TreeView,

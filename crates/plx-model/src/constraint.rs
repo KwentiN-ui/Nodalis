@@ -2,7 +2,7 @@
 //! are in [`crate::contact`].
 //!
 //! Like everything in the model they store what the user defined. The spring and gap elements,
-//! extra nodes and equations CalculiX needs for them are generated when the input file is
+//! extra nodes and equations the solver needs for them are generated when the input file is
 //! written.
 
 use serde::{Deserialize, Serialize};

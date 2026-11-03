@@ -467,7 +467,7 @@ pub fn interaction_dialog(
             }
         }
     });
-    // CalculiX aborts on a tied contact without friction, so choosing Tied brings it along.
+    // The solver aborts on a tied contact without friction, so choosing Tied brings it along.
     if !was_tied && interaction.add_friction_if_tied() {
         view.focus = Some(TIED_FRICTION);
         view.available = None;
@@ -651,7 +651,7 @@ impl Rows<'_> {
         });
     }
 
-    /// A value CalculiX may leave out; the checkbox writes it.
+    /// A value the solver may leave out; the checkbox writes it.
     fn optional(
         &mut self,
         ui: &mut Ui,

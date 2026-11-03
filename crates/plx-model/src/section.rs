@@ -112,7 +112,7 @@ impl SectionKind {
                 None
             }
             (SectionKind::Truss { .. }, ElementShape::Line2 | ElementShape::Line3) => Some("T3D2"),
-            // CalculiX has the general profiles for its user element U1 only.
+            // The solver has the general profiles for its user element U1 only.
             (SectionKind::Beam(_), ElementShape::Line2)
                 if profile.is_some_and(|p| !p.is_native()) =>
             {
@@ -212,7 +212,7 @@ impl SectionKind {
 }
 
 /// The membrane a linear shell is written as under a membrane section: `S3` becomes `M3D3`,
-/// `S4` `M3D4` and `S4R` `M3D4R`. Quadratic shells have none; CalculiX gets quadratic
+/// `S4` `M3D4` and `S4R` `M3D4R`. Quadratic shells have none; the solver gets quadratic
 /// membranes wrong.
 pub fn membrane_type(shell_type: &str) -> Option<&'static str> {
     match shell_type.to_ascii_uppercase().as_str() {
@@ -256,7 +256,7 @@ impl Default for BeamSection {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum BeamOrientation {
     /// The global z-axis, or the x-axis for beams along z, chosen per element when the
-    /// input file is written; CalculiX projects it onto the plane normal to the beam.
+    /// input file is written; the solver projects it onto the plane normal to the beam.
     #[default]
     Automatic,
     /// A direction given by the user; must not be parallel to any beam of the section.
@@ -416,7 +416,7 @@ mod tests {
                 .rejects(&element("C3D8", ElementShape::Hex8), None)
                 .is_some()
         );
-        // CalculiX gets quadratic membranes wrong.
+        // The solver gets quadratic membranes wrong.
         assert!(
             membrane
                 .rejects(&element("M3D8", ElementShape::Quad8), None)

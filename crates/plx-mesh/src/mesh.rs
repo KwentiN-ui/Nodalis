@@ -91,7 +91,7 @@ pub enum MeshError {
 
 /// Finite element mesh with nodes, elements, sets and parts.
 ///
-/// Set, surface and part names are stored upper case, because CalculiX treats them case-insensitively.
+/// Set, surface and part names are stored upper case, because the solver treats them case-insensitively.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(try_from = "MeshFile", into = "MeshFile")]
 pub struct FeMesh {
@@ -462,7 +462,7 @@ impl FeMesh {
         added
     }
 
-    /// Whether a part, set or surface already has this name; CalculiX ignores case.
+    /// Whether a part, set or surface already has this name; the solver ignores case.
     pub fn name_in_use(&self, name: &str) -> bool {
         let same = |n: &String| n.eq_ignore_ascii_case(name);
         self.parts.iter().any(|p| same(&p.name))

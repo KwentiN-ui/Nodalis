@@ -57,7 +57,7 @@ pub enum WriteError {
     InvalidSection { item: String, reason: String },
     #[error("{item}: {reason}")]
     InvalidCyclicSymmetry { item: String, reason: String },
-    /// A defined field reads a result file whose name CalculiX cannot take.
+    /// A defined field reads a result file whose name the solver cannot take.
     #[error("{item}: the result file {file} has no valid name")]
     InvalidResultFile { item: String, file: String },
     /// A boundary condition or load on a reference point no active rigid body is driven by,
@@ -262,7 +262,7 @@ pub fn write_inp(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<String
 
 /// Writes the input file of `model` with the sets of `extra` steps too, which are not
 /// written themselves: the steps of analyses that continue from the state after a step of
-/// this one. CalculiX takes no new sets after reading a state, so the run that writes it has
+/// this one. The solver takes no new sets after reading a state, so the run that writes it has
 /// to define them. Each entry holds the index of the step of `model` the steps follow; they
 /// take the place in the order of the sets they have in the input file of the analysis that
 /// continues, so that the sets are named as there. When the extra steps cannot be written,
@@ -725,7 +725,7 @@ enum ConstraintItem {
 }
 
 /// The boundary conditions of a first step that works on the eigenmodes of another
-/// analysis, taken out of the step: CalculiX allows no new boundary conditions in a modal
+/// analysis, taken out of the step: the solver allows no new boundary conditions in a modal
 /// dynamics or steady state dynamics step, so they go into the model definition, where the
 /// run that stored the eigenmodes had them before its frequency step.
 fn boundaries_before_stored_modes(
@@ -1348,7 +1348,7 @@ fn add_material(materials: &mut Vec<ir::material::Material>, material: ir::mater
     );
 }
 
-/// The dummy plastic material that makes CalculiX solve gaps nonlinearly.
+/// The dummy plastic material that makes the solver solve gaps nonlinearly.
 fn gap_material(name: &str) -> ir::material::Material {
     use ir::material as m;
     m::Material {
@@ -1851,7 +1851,7 @@ fn constraints(
     // of the region; the point exists only in the analysis. Its reference node takes the
     // translations, its rotation node the rotations as displacements, both in the directions
     // of the displacement's coordinate system. Nodes that boundary conditions hold directly
-    // stay out of the coupling: CalculiX refuses them there.
+    // stay out of the coupling: the solver refuses them there.
     let mut excluded = None;
     for (s, step) in model.steps.iter().enumerate().filter(|(_, s)| s.active) {
         for (i, bc) in step.boundary_conditions.iter().enumerate() {
@@ -2024,7 +2024,7 @@ fn tie(sets: &mut Sets, tie: &Tie) -> Result<ConstraintItem, WriteError> {
 }
 
 /// Nodes on the slave side of an active cyclic symmetry and not on its master side (the
-/// axis). CalculiX computes them from the master side and stops when a boundary condition
+/// axis). The solver computes them from the master side and stops when a boundary condition
 /// prescribes them too ("dependent side of a MPC and a SPC"), so boundary conditions leave
 /// them out; they follow the prescribed master nodes anyway.
 fn cyclic_slave_nodes(mesh: &FeMesh, model: &FeModel) -> BTreeSet<NodeId> {
@@ -2381,7 +2381,7 @@ struct StepContext<'a> {
     amplitudes: &'a [Amplitude],
     pair_surfaces: &'a PairSurfaces,
     /// `*STEP, PERTURBATION` of the frequency step whose stored modes a complex frequency
-    /// step uses; CalculiX stops when the two differ.
+    /// step uses; the solver stops when the two differ.
     stored_perturbation: bool,
     /// The model, for the coordinate systems of moving loads.
     model: &'a FeModel,
@@ -2518,7 +2518,7 @@ fn rigid_body(
     if !others.is_empty() {
         items.push(rigid(sets.node_set(item, &Region::Nodes(others))?));
     }
-    // Nodes of beams and shells, which CalculiX refuses in a rigid body.
+    // Nodes of beams and shells, which the solver refuses in a rigid body.
     for row in plx_model::rigid_rows(sets.mesh, &expanded, position) {
         items.push(ConstraintItem::Equation(equation(&remote_terms(
             &row, axes, nodes,
@@ -2735,7 +2735,7 @@ fn step_block<'f>(
         cyclic_slaves,
         model,
     } = context;
-    // Nodes of 2D models move in the x-y plane only; CalculiX fails on rotations there.
+    // Nodes of 2D models move in the x-y plane only; the solver fails on rotations there.
     let dofs = if space.is_2d() { 2 } else { 6 };
     let mut ir_step = match &step.kind {
         StepKind::Static(settings) => static_step(settings),
@@ -2755,7 +2755,7 @@ fn step_block<'f>(
     };
     ir_step.contact_changes = contact_changes(step, model, pair_surfaces);
     // A modal step keeps the supports of the frequency step that stored the modes;
-    // CalculiX refuses new ones ("in a modal dynamic step new SPCs are not allowed"), and
+    // The solver refuses new ones ("in a modal dynamic step new SPCs are not allowed"), and
     // the reset would make the same supports new. Giving them again is accepted.
     let mut boundaries = if step.kind.uses_stored_modes() || step.kind.keeps_previous_boundaries() {
         Vec::new()
@@ -2795,7 +2795,7 @@ fn step_block<'f>(
             });
             continue;
         }
-        // Truss nodes have no rotations either; CalculiX fails when they are fixed.
+        // Truss nodes have no rotations either; the solver fails when they are fixed.
         let dofs = if dofs == 6 && lines.all_truss(&bc.region.nodes(sets.mesh)) {
             3
         } else {
@@ -3275,7 +3275,7 @@ fn step_block<'f>(
             rest.push(Card::NodePrint(node_print(set, &["RF", "U"], Totals::No)));
         }
     }
-    // CalculiX writes all results of the step in one form: the node outputs follow the
+    // The solver writes all results of the step in one form: the node outputs follow the
     // element outputs.
     let dimension = (step.field_outputs.iter())
         .filter(|o| o.active && o.kind == OutputKind::Element)
@@ -3613,7 +3613,7 @@ fn sensitivity_step(
 }
 
 /// The design variables of the model: the design region of the first active sensitivity
-/// step. CalculiX reads them before the steps.
+/// step. The solver reads them before the steps.
 fn design_variables(
     sets: &mut Sets,
     model: &FeModel,
@@ -3776,7 +3776,7 @@ fn incremented_step(
 }
 
 /// A frequency step: the lower bound is 0 when only an upper bound
-/// is given. In a cyclic symmetric model CalculiX finds every mode twice, as a cosine and a
+/// is given. In a cyclic symmetric model the solver finds every mode twice, as a cosine and a
 /// sine part, so it is asked for twice the number of eigenfrequencies per nodal diameter,
 /// in the range of nodal diameters if one is set.
 fn frequency_step(settings: &FrequencyStep, cyclic: bool) -> ir::Step {
@@ -3979,7 +3979,7 @@ fn point_nodes(
 /// of its rotation node. The rotation node's set is named `Internal_Rotation-n_<output>`,
 /// by which the history reader shows its values under the output's name.
 ///
-/// CalculiX has reaction forces at the point of a rigid body only: the point of equations,
+/// The solver has reaction forces at the point of a rigid body only: the point of equations,
 /// a deformable or coupled remote displacement, prints zeros, so its `RF` is left out. A
 /// coupled point does not turn.
 fn point_output(
@@ -4027,7 +4027,7 @@ fn number(value: f64) -> String {
 }
 
 /// Item names as CalculiX accepts them: no spaces, commas or other special characters.
-/// Longest set or surface name CalculiX reads.
+/// Longest set or surface name the solver reads.
 const NAME_LIMIT: usize = 80;
 
 /// Longest name of a set made for a region: an element surface appends the face (`_S6`) to
@@ -4038,7 +4038,7 @@ const SET_NAME_LIMIT: usize = NAME_LIMIT - 3;
 /// the `.dat` file puts back.
 pub const SHORTENED_NAME: &str = "** Shortened name: ";
 
-/// `head` and `postfix` as one name, which CalculiX reads: a name too long keeps its start
+/// `head` and `postfix` as one name, which the solver reads: a name too long keeps its start
 /// and ends in a hash of the whole name, so that names alike in their start differ.
 fn fitted_name(head: &str, postfix: &str) -> String {
     let full = format!("{head}{postfix}");

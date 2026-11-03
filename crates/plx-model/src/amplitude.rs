@@ -54,7 +54,7 @@ impl Amplitude {
         value + self.shift_amplitude
     }
 
-    /// Why CalculiX would reject the points, if it would: it needs at least one point and
+    /// Why the solver would reject the points, if it would: it needs at least one point and
     /// times that do not decrease.
     pub fn points_problem(&self) -> Option<String> {
         if self.points.is_empty() {

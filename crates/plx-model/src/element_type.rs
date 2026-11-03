@@ -61,7 +61,7 @@ impl FeModel {
     }
 
     /// Chooses the element type of the elements of its shape in the part; false for a name
-    /// CalculiX has no shape for.
+    /// the solver has no shape for.
     pub fn set_element_type(&mut self, part: &str, type_name: &str) -> bool {
         let type_name = type_name.trim().to_ascii_uppercase();
         let Some(shape) = ElementShape::from_type_name(&type_name) else {

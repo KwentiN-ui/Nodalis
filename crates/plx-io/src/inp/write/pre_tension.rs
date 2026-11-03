@@ -1,5 +1,5 @@
 //! Bolt pre-tension written as a cut through the mesh with `*Equation`s, instead of CalculiX's
-//! `*PRE-TENSION SECTION`. CalculiX separates only the elements that have a face in the
+//! `*PRE-TENSION SECTION`. The solver separates only the elements that have a face in the
 //! section; a tetrahedron that touches the cut with just an edge or a corner keeps both sides
 //! together, and most of the preload goes into it (a thin layer of wedge
 //! elements at the cut is the usual workaround). Here every element on the side of the selected faces gets

@@ -5500,7 +5500,7 @@ fn frequency_form(
 }
 
 /// The nodal diameters a cyclic symmetric model is solved for, the minimum and
-/// maximum cyclic symmetry mode; unchecked, CalculiX solves all of them.
+/// maximum cyclic symmetry mode; unchecked, the solver solves all of them.
 fn nodal_diameter_rows(ui: &mut Ui, range: &mut Option<[u32; 2]>, sectors: u32) {
     let highest = CyclicSymmetry::highest_nodal_diameter(sectors);
     let mut set = range.is_some();
@@ -5526,7 +5526,7 @@ fn nodal_diameter_rows(ui: &mut Ui, range: &mut Option<[u32; 2]>, sectors: u32) 
 
 /// Settings of a complex frequency step: the number of modes; the Coriolis
 /// option is CalculiX's, with a hint at what the step builds on. The perturbation flag is the
-/// one of the Frequency step, since CalculiX requires the same on both steps.
+/// one of the Frequency step, since the solver requires the same on both steps.
 fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep) {
     ui.label("");
     ui.checkbox(

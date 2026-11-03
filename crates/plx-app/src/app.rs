@@ -194,7 +194,7 @@ struct Workbench {
     /// What was defined on the results before the analysis ran again, for its new results
     /// at this path.
     carried_settings: Option<(PathBuf, plx_results::ResultsSettings)>,
-    /// Problems CalculiX reported when the last analysis failed, shown in the tree.
+    /// Problems the solver reported when the last analysis failed, shown in the tree.
     solver_findings: Vec<plx_model::Finding>,
     /// The findings of a tree item whose warning sign was clicked, explained in a window.
     findings_window: Option<Vec<plx_model::Finding>>,
@@ -542,7 +542,7 @@ impl AnalysisWindow {
     }
 
     /// The project's solve is done: the analysis takes the mesh it made and the results it
-    /// kept, which open on the Results tab, and what CalculiX reported.
+    /// kept, which open on the Results tab, and what the solver reported.
     pub fn take_solved(&mut self, solved: crate::solution_monitor::Solved) {
         let workbench = &mut self.workbench;
         workbench.solver_findings = solved.findings;
@@ -2473,7 +2473,7 @@ impl Workbench {
     }
 
     /// Explains the findings of the tree item whose warning sign was clicked: what is wrong,
-    /// why CalculiX cannot cope with it and how to fix it.
+    /// why the solver cannot cope with it and how to fix it.
     fn findings_window(&mut self, ctx: &egui::Context) {
         let Some(findings) = &self.findings_window else {
             return;
@@ -3009,7 +3009,7 @@ impl Workbench {
             return;
         }
         if let Some(model) = self.setup_model() {
-            // CalculiX writes the values of all contacts with one contact field output, so
+            // The solver writes the values of all contacts with one contact field output, so
             // a step that has one opens it.
             let existing = match kind {
                 NewItem::ContactFieldOutput(step) => (model.fe.steps.get(step))
@@ -3780,7 +3780,7 @@ impl Workbench {
             || (self.analysis.as_ref()).is_some_and(Analysis::is_running)
     }
 
-    /// Check Model: CalculiX checks the input file of the analysis without solving it.
+    /// Check Model: the solver checks the input file of the analysis without solving it.
     fn check_model(&mut self) {
         if self.running() {
             return;
@@ -3953,7 +3953,7 @@ impl Workbench {
                 Ok(()) => self.output.push(format!("{} written", path.display())),
                 Err(error) => self.output.push(format!("{}: {error}", path.display())),
             }
-            // CalculiX reads the result files of defined fields from next to the input file.
+            // The solver reads the result files of defined fields from next to the input file.
             if let Some(dir) = path.parent() {
                 let notes = crate::analysis::copy_result_files(&fe, dir);
                 self.output.extend(notes);

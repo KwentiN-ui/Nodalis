@@ -760,7 +760,7 @@ impl ResultsView {
 
     /// The whirl of a complex mode during a scale factor animation: the phase angle of the
     /// shown frame, one turn over the frames, and the `PDISP` field with the magnitudes and
-    /// phases of the displacements CalculiX writes for `PU` output.
+    /// phases of the displacements the solver writes for `PU` output.
     pub fn whirl(&self) -> Option<(f32, &Field)> {
         let animation = self.animation.as_ref()?;
         if animation.kind != AnimationKind::ScaleFactor || self.superposition.is_some() {

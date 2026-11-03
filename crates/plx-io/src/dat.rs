@@ -1,4 +1,4 @@
-//! Reader for the history output CalculiX prints into the `.dat` file (`*NODE PRINT`,
+//! Reader for the history output the solver prints into the `.dat` file (`*NODE PRINT`,
 //! `*EL PRINT`, `*CONTACT PRINT` and the eigenvalue output of frequency steps), from
 //! CalculiX's `.dat` file.
 //!
@@ -29,7 +29,7 @@ pub struct DatImport {
     pub warnings: Vec<String>,
 }
 
-/// Name of the set of values CalculiX prints for all contact elements.
+/// Name of the set of values the solver prints for all contact elements.
 pub const ALL_CONTACT_ELEMENTS: &str = "ALL_CONTACT_ELEMENTS";
 
 pub fn read_dat(path: &Path) -> std::io::Result<DatImport> {
@@ -85,7 +85,7 @@ struct Kind {
 const STRESS: &[&str] = &["S11", "S22", "S33", "S12", "S13", "S23"];
 const STRAIN: &[&str] = &["E11", "E22", "E33", "E12", "E13", "E23"];
 
-/// The blocks CalculiX writes, with their field and component names.
+/// The blocks the solver writes, with their field and component names.
 const KINDS: &[Kind] = &[
     kind(
         "displacements",

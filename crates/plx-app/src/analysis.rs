@@ -179,7 +179,7 @@ impl RunView {
     }
 }
 
-/// The analysis name as the name of its files: CalculiX takes no spaces in them, and the
+/// The analysis name as the name of its files: the solver takes no spaces in them, and the
 /// file system no path separators.
 pub fn job_name(name: &str) -> String {
     let name: String = (name.trim().chars())
@@ -199,7 +199,7 @@ pub fn job_name(name: &str) -> String {
 }
 
 /// Copies the results file of a submodel's global model next to the input file `<name>.inp`
-/// in `dir`, as `<name>-global.frd`, and lets `fe` refer to the copy: CalculiX reads it from
+/// in `dir`, as `<name>-global.frd`, and lets `fe` refer to the copy: the solver reads it from
 /// the directory of the input file and cannot take paths with spaces. Does nothing unless a
 /// submodel boundary condition needs the file.
 pub fn stage_global_results(

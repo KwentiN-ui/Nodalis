@@ -1571,7 +1571,7 @@ impl Node {
     }
 
     /// Whether the results of `step` that the analysis keeps were made from data that
-    /// changed since. CalculiX solves the steps one after the other, so they depend only on
+    /// changed since. The solver solves the steps one after the other, so they depend only on
     /// the model and the steps up to `step`: steps added or changed after it leave them up to
     /// date, while the analysis itself is out of date.
     fn step_results_out_of_date(&self, step: &str) -> bool {
@@ -6554,7 +6554,7 @@ impl ProjectApp {
                     return None;
                 }
                 if usage == links::ResultsUse::Modes {
-                    // CalculiX writes them into the run's own folder, where the next run of
+                    // The solver writes them into the run's own folder, where the next run of
                     // the source overwrites them. The target takes a copy in a folder named
                     // after the solved model, so that new modes make it out of date.
                     let project = crate::analysis::job_name(&self.project_name());

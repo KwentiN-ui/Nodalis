@@ -98,7 +98,7 @@ pub enum Target {
     /// Pressure and forces act on element faces.
     Faces,
     /// Contacts and ties in 3D models: element faces, or the edges of shells, which
-    /// CalculiX takes as faces too.
+    /// the solver takes as faces too.
     Surfaces,
     /// In 2D models they act on the outline: the edges of the 2D elements, stored as faces.
     Edges,

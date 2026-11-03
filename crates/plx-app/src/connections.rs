@@ -1,5 +1,5 @@
 //! The forms of contact regions and of the connections they share: the user picks two sides
-//! and a type, and everything CalculiX needs besides is derived ("Auto"), shown and can be
+//! and a type, and everything the solver needs besides is derived ("Auto"), shown and can be
 //! overridden one setting at a time. Side A shows in the primary, side B in the secondary
 //! highlight colour.
 
@@ -922,7 +922,7 @@ pub fn check_summary(check: &ContactCheck, units: UnitSystem) -> String {
     text
 }
 
-/// What CalculiX found in a contact region, from the contact results (`CONTACT`) of the
+/// What the solver found in a contact region, from the contact results (`CONTACT`) of the
 /// last increment that has them, at the slave nodes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SolvedContact {
@@ -1482,7 +1482,7 @@ mod tests {
     /// The detection on the geometry finds them bonded before anything is meshed: one
     /// region of the block's bottom and the plate's top, whole CAD faces, although the block
     /// covers only part of the plate. Meshed, and meshed again finer, the region finds its
-    /// faces on each mesh, and CalculiX holds the pressed block on the fixed plate.
+    /// faces on each mesh, and the solver holds the pressed block on the fixed plate.
     #[test]
     fn contacts_detected_on_the_geometry_hold_on_every_mesh() {
         if !gmsh_available() {
@@ -1631,7 +1631,7 @@ mod tests {
 
     /// A beam 40 x 5 lying on a block 10 x 10 in a plane stress model, two faces that only
     /// touch along y = 0: the detection on the geometry ties the block's top edge to the
-    /// beam's bottom edge, whole CAD edges, before anything is meshed, and CalculiX holds
+    /// beam's bottom edge, whole CAD edges, before anything is meshed, and the solver holds
     /// the pressed beam on the fixed block.
     #[test]
     fn edges_detected_on_the_geometry_of_a_2d_model_hold() {

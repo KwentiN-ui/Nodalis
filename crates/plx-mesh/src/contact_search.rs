@@ -6,13 +6,13 @@
 //! geometry surfaces do: of solids their outer side, of shells and membranes the
 //! top and the bottom side, and the free edges of shells in chains between corners. In 2D
 //! models the surfaces are chains of outline edges of the plane elements, split at corners,
-//! the way CalculiX takes the edges as faces. Two surfaces are in contact where triangles of
+//! the way the solver takes the edges as faces. Two surfaces are in contact where triangles of
 //! both face each other within the search distance and angle; an edge is searched as a strip
 //! across it, perpendicular to its shell, or along z in 2D. The pairs found are grouped (by parts,
 //! by the contact graph or not at all). Master is the side with the coarser mesh, then the
 //! stiffer material, then the larger area, the usual rule for CalculiX contact; a surface
 //! touching several better masters is the slave of all of them at once, so that it is a
-//! slave only once, which CalculiX requires of ties.
+//! slave only once, which the solver requires of ties.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 

@@ -2,7 +2,7 @@
 //!
 //! The model describes an analysis on top of a mesh. Regions
 //! are what the user picked in the GUI (parts, nodes, element faces) or named sets of the
-//! input file; node and element sets that CalculiX needs for them are derived when the input
+//! input file; node and element sets that the solver needs for them are derived when the input
 //! file is written, so the user never has to define sets by hand.
 
 mod amplitude;
@@ -570,7 +570,7 @@ impl Default for Creep {
 }
 
 impl Creep {
-    /// Why CalculiX would reject the constants.
+    /// Why the solver would reject the constants.
     pub fn problem(&self) -> Option<&'static str> {
         if self.a <= 0.0 {
             Some("The creep constant A must be positive.")
@@ -609,7 +609,7 @@ impl Hardening {
 }
 
 /// One point of the hardening curve: the yield stress at a plastic strain, valid at a
-/// temperature. CalculiX interpolates between the points and keeps the last stress beyond
+/// temperature. The solver interpolates between the points and keeps the last stress beyond
 /// them; rows at different temperatures are interpolated in temperature.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PlasticPoint {
@@ -622,7 +622,7 @@ pub struct PlasticPoint {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Plastic {
     pub hardening: Hardening,
-    /// Rows in the order CalculiX wants them: by temperature, then by plastic strain,
+    /// Rows in the order the solver wants them: by temperature, then by plastic strain,
     /// the first row of every temperature at plastic strain 0.
     pub points: Vec<PlasticPoint>,
 }
@@ -643,7 +643,7 @@ impl Default for Plastic {
 
 impl Plastic {
     /// The first row of each temperature must start at plastic strain 0 and the plastic
-    /// strain must grow within a temperature; otherwise CalculiX stops with an error or
+    /// strain must grow within a temperature; otherwise the solver stops with an error or
     /// interpolates nonsense. Returns the number of the first offending row.
     pub fn invalid_row(&self) -> Option<usize> {
         if self.points.is_empty() {
@@ -807,7 +807,7 @@ impl StepKind {
 
     /// Whether the step takes defined fields. A thermal step solves for the temperatures
     /// instead of taking them, and a step that superposes stored eigenmodes
-    /// only takes the loads CalculiX allows there (forces, pressures, base motion).
+    /// only takes the loads the solver allows there (forces, pressures, base motion).
     pub fn supports_defined_fields(&self) -> bool {
         !self.is_thermal() && !self.uses_stored_modes() && !self.keeps_previous_boundaries()
     }
@@ -902,7 +902,7 @@ impl LinearSolverChoice {
     }
 
     /// The value of `SOLVER=` in the input file. Automatic leaves the choice to the solver
-    /// (CalculiX takes its default); Direct names PaStiX, which the Nodalis solver reads as
+    /// (the solver takes its default); Direct names PaStiX, which the Nodalis solver reads as
     /// its direct solver; Iterative asks for conjugate gradients with an incomplete
     /// Cholesky preconditioner, which CalculiX and the Nodalis solver both have.
     pub fn keyword(self) -> Option<&'static str> {
@@ -1277,11 +1277,11 @@ impl Default for FrequencyStep {
     }
 }
 
-/// Settings of a `*COMPLEX FREQUENCY` step, with the default values. CalculiX solves it on
+/// Settings of a `*COMPLEX FREQUENCY` step, with the default values. The solver solves it on
 /// the eigenmodes of the last frequency step with [`FrequencyStep::storage`]; the Coriolis
 /// forces come from the centrifugal load of the static step before that frequency step.
 ///
-/// The step has no perturbation flag of its own: CalculiX stops unless `*STEP, PERTURBATION`
+/// The step has no perturbation flag of its own: the solver stops unless `*STEP, PERTURBATION`
 /// of this step matches the one of the frequency step that stored the modes, so the writer
 /// takes [`FrequencyStep::perturbation`] of that step.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1356,11 +1356,11 @@ impl Default for ViscoStep {
 
 /// Settings of a `*SENSITIVITY` step: the design region whose surface nodes may move
 /// (`*DESIGN VARIABLES, TYPE=COORDINATE`) and the design responses whose derivatives with
-/// respect to these node positions CalculiX computes.
+/// respect to these node positions the solver computes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SensitivityStep {
-    /// Nodes that may move, usually picked faces. CalculiX keeps only surface nodes.
+    /// Nodes that may move, usually picked faces. The solver keeps only surface nodes.
     pub design_region: Region,
     /// Mass of the model (`MASS`).
     pub mass: bool,
@@ -1402,7 +1402,7 @@ impl SensitivityStep {
         responses
     }
 
-    /// Why CalculiX would reject the settings.
+    /// Why the solver would reject the settings.
     pub fn problem(&self) -> Option<String> {
         if self.responses().is_empty() {
             Some("Select at least one design response.".into())
@@ -1680,7 +1680,7 @@ pub enum LoadKind {
         by_displacement: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         lock: bool,
-        /// Direction of the preload; `None` lets CalculiX take the surface normal.
+        /// Direction of the preload; `None` lets the solver take the surface normal.
         direction: Option<[f64; 3]>,
     },
     /// Heat flow into every node of the region (`*CFLUX`).
@@ -1699,7 +1699,7 @@ pub enum LoadKind {
     Gravity([f64; 3]),
     /// Rotation of the elements of the region about an axis through `point` along `axis`
     /// at `speed` radians per time (`*DLOAD`, `CENTRIF`).
-    /// CalculiX takes the square of the speed; the model keeps the speed the user entered.
+    /// The solver takes the square of the speed; the model keeps the speed the user entered.
     Centrifugal {
         point: [f64; 3],
         axis: [f64; 3],
@@ -1844,7 +1844,7 @@ pub enum DefinedFieldKind {
     /// One temperature on the nodes of the region.
     Temperature(f64),
     /// The temperatures of a step of a result file, as a heat transfer analysis on the
-    /// same mesh wrote it (`*TEMPERATURE, FILE=`); the step counts from 1. CalculiX reads
+    /// same mesh wrote it (`*TEMPERATURE, FILE=`); the step counts from 1. The solver reads
     /// the file from the working directory of the analysis, so the file is copied there
     /// when the analysis starts.
     TemperatureFromFile { file: PathBuf, step: u32 },
@@ -1864,7 +1864,7 @@ impl DefinedFieldKind {
 
 impl FeModel {
     /// The result files the active defined fields of the active steps read, each once;
-    /// CalculiX needs them next to the input file.
+    /// The solver needs them next to the input file.
     pub fn result_files(&self) -> Vec<&Path> {
         let mut files: Vec<&Path> = (self.steps.iter().filter(|s| s.active))
             .filter(|s| s.kind.supports_defined_fields())

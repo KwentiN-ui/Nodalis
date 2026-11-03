@@ -1,5 +1,5 @@
 //! History outputs of a step, the nodal, element and contact history outputs: values
-//! CalculiX prints into the `.dat` file at every increment (`*NODE PRINT`, `*EL PRINT`,
+//! the solver prints into the `.dat` file at every increment (`*NODE PRINT`, `*EL PRINT`,
 //! `*CONTACT PRINT`). The model keeps what the user picked; the sets and keywords are made
 //! when the input file is written.
 

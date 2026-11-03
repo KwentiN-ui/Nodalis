@@ -29,7 +29,7 @@ pub(super) struct Generated {
     /// Holds the ground nodes of the gap elements in every step: the node set and the
     /// number of translations held.
     pub boundary: Option<(String, usize)>,
-    /// The dummy plastic material that makes CalculiX solve gaps nonlinearly, by
+    /// The dummy plastic material that makes the solver solve gaps nonlinearly, by
     /// its name.
     pub material: Option<String>,
 }
@@ -377,7 +377,7 @@ impl Writer {
         };
         let name = super::name(&support.name);
         // Gaps of the same direction and properties, such as those of a flat face, share an
-        // element set and a `*Gap` section: CalculiX makes a material of each section.
+        // element set and a `*Gap` section: the solver makes a material of each section.
         type Line = (String, [f64; 3], Option<(f64, f64)>);
         let mut sections: Vec<(Line, Vec<ElementId>)> = Vec::new();
         let mut by_line: BTreeMap<String, usize> = BTreeMap::new();

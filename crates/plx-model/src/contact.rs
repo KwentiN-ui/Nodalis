@@ -33,7 +33,7 @@ impl SurfaceInteraction {
         (self.properties.iter()).any(|p| matches!(p, InteractionProperty::Friction(_)))
     }
 
-    /// Adds the friction CalculiX requires with a tied surface behavior: its stick slope is
+    /// Adds the friction the solver requires with a tied surface behavior: its stick slope is
     /// the stiffness of the tie along the surfaces. Returns whether it was added.
     pub fn add_friction_if_tied(&mut self) -> bool {
         let add = self.is_tied() && !self.has_friction();
@@ -78,7 +78,7 @@ pub enum SurfaceBehavior {
     #[default]
     Hard,
     /// Linear spring: slope `k`, tension `sigma_inf` at large clearances and the clearance
-    /// `c0` up to which the spring acts (`None` lets CalculiX choose it).
+    /// `c0` up to which the spring acts (`None` lets the solver choose it).
     Linear {
         k: f64,
         sigma_inf: f64,
@@ -134,7 +134,7 @@ impl SurfaceBehavior {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Friction {
     pub coefficient: f64,
-    /// Shear stress over tangential displacement while sticking; `None` lets CalculiX choose.
+    /// Shear stress over tangential displacement while sticking; `None` lets the solver choose.
     pub stick_slope: Option<f64>,
 }
 
@@ -161,7 +161,7 @@ impl Default for GapConductance {
     }
 }
 
-/// How CalculiX treats a contact pair (`TYPE=`). All pairs of a model must use the same.
+/// How the solver treats a contact pair (`TYPE=`). All pairs of a model must use the same.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContactMethod {
     NodeToSurface,
@@ -427,7 +427,7 @@ pub struct Tie {
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,
-    /// Distance within which slave nodes are tied; `None` lets CalculiX choose.
+    /// Distance within which slave nodes are tied; `None` lets the solver choose.
     pub position_tolerance: Option<f64>,
     /// Moves the tied slave nodes onto the master surface.
     pub adjust: bool,
@@ -484,7 +484,7 @@ impl CyclicSymmetry {
         sectors / 2
     }
 
-    /// Why CalculiX would reject the settings, whatever the sides.
+    /// Why the solver would reject the settings, whatever the sides.
     pub fn problem(&self) -> Option<String> {
         if self.axis_direction.iter().all(|v| *v == 0.0) {
             Some("The axis direction must not be the zero vector.".into())
@@ -542,7 +542,7 @@ impl CyclicSymmetry {
         if whole < 2.0 || (360.0 / whole - degrees).abs() > SECTOR_ANGLE_TOLERANCE * degrees {
             return Err(format!(
                 "The cut faces are {} degrees apart, which does not divide 360 degrees \
-                 (360 / {} = {}). CalculiX needs sectors that close the full circle; check \
+                 (360 / {} = {}). The solver needs sectors that close the full circle; check \
                  the cut faces and the axis.",
                 round_to(degrees, 4),
                 round_to(degrees, 4),

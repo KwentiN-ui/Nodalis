@@ -1238,7 +1238,7 @@ fn shell_part_mesh(
 }
 
 /// Meshes an edge outside the faces with 2- or 3-node lines, typed as beams (`B31`, `B32`);
-/// the section decides what CalculiX makes of them. The mesh holds the one part, numbered
+/// the section decides what the solver makes of them. The mesh holds the one part, numbered
 /// from 1.
 fn line_part_mesh(
     gmsh: &Gmsh,
@@ -1281,7 +1281,7 @@ fn line_part_mesh(
     };
     let (_, nodes) = gmsh.elements(gmsh_type, edge)?;
     for element in nodes.chunks_exact(shape.node_count()) {
-        // Gmsh lists the end nodes first and the midside node last; CalculiX wants the
+        // Gmsh lists the end nodes first and the midside node last; the solver wants the
         // midside node in the middle.
         let order: &[usize] = if shape == ElementShape::Line3 {
             &[0, 2, 1]
@@ -1819,7 +1819,7 @@ fn label_name(label: &str) -> Option<String> {
     calculix_name(last)
 }
 
-/// A name CalculiX accepts: letters, digits, `-` and `_`, upper case, at most 60 characters.
+/// A name the solver accepts: letters, digits, `-` and `_`, upper case, at most 60 characters.
 /// German umlauts are written out, as "Ä" as "AE".
 fn calculix_name(label: &str) -> Option<String> {
     let name: String = label
