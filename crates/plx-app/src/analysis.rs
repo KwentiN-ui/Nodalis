@@ -31,6 +31,50 @@ pub struct Analysis {
     started: Instant,
     finished: Option<f32>,
     status: JobStatus,
+    /// The item of the model each item of the solver's analysis came from, which leads the
+    /// solver's diagnostics back to the tree.
+    origins: plx_model::Origins,
+}
+
+/// Why an analysis did not start, with the item of the model it is about when the lowering
+/// named one.
+#[derive(Debug)]
+pub struct StartError {
+    pub message: String,
+    pub item: Option<plx_model::ModelItem>,
+}
+
+impl StartError {
+    /// The error as a finding on its item, for the tree.
+    pub fn finding(&self) -> Option<plx_model::Finding> {
+        let item = self.item?;
+        Some(plx_model::Finding::new(
+            item,
+            plx_model::Problem::NotLowered,
+            self.message.clone(),
+        ))
+    }
+}
+
+impl From<String> for StartError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            item: None,
+        }
+    }
+}
+
+impl From<&str> for StartError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+
+impl std::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 pub enum MonitorEvent {
@@ -290,7 +334,7 @@ impl Analysis {
         name: &str,
         work_dir: &std::path::Path,
         continuation: &crate::links::Continuation,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, StartError> {
         if model.fe.steps.is_empty() && !check_model {
             return Err(
                 "Analysis not started: the model has no step (FE Model > Steps > Step).".into(),
@@ -310,11 +354,15 @@ impl Analysis {
         let dependent = &continuation.dependent_steps;
         let mut lowered =
             plx_io::inp::lower_with_sets_unvalidated(&model.mesh, &fe, &heading, dependent)
-                .map_err(|e| format!("Analysis not set up: {e}"))?;
+                .map_err(|e| StartError {
+                    message: format!("Analysis not set up: {e}"),
+                    item: e.item,
+                })?;
         if let Some(initial) = &initial {
             initial.apply(&mut lowered.analysis)?;
         }
         let overlaps = std::mem::take(&mut lowered.resolved_overlaps);
+        let origins = std::mem::take(&mut lowered.origins);
         let prepared = prepare(lowered);
         let copied = copy_result_files(&fe, work_dir);
         let job = if check_model {
@@ -352,7 +400,13 @@ impl Analysis {
             started: Instant::now(),
             finished: None,
             status: JobStatus::Running,
+            origins,
         })
+    }
+
+    /// The item of the model each item of the solver's analysis came from.
+    pub fn origins(&self) -> &plx_model::Origins {
+        &self.origins
     }
 
     /// Adds a line of nodalis's own to the monitor output.
@@ -689,7 +743,12 @@ mod tests {
         };
         assert_eq!(status, JobStatus::Failed, "{:?}", analysis.output());
         let diagnostics = analysis.diagnostics().expect("typed diagnostics");
-        let findings = plx_model::diagnose_solver_check(&diagnostics, &model.mesh, &model.fe);
+        let findings = plx_model::diagnose_solver_check(
+            &diagnostics,
+            &model.mesh,
+            &model.fe,
+            analysis.origins(),
+        );
         let at = |item| {
             findings
                 .iter()
@@ -711,6 +770,71 @@ mod tests {
             output.contains("*ERROR in model check (step 1)"),
             "{output}"
         );
+    }
+
+    /// The solver names the element it found without a section; the finding points at its
+    /// part, which the section leaves out.
+    #[test]
+    fn the_model_check_points_at_the_part_without_a_section() {
+        let mut model = pulled_cubes(0.03);
+        model.mesh.parts[0].elements = vec![1, 2];
+        model.mesh.parts.push(plx_mesh::Part {
+            name: "Solid-2".into(),
+            elements: vec![3],
+        });
+        let solver = Solver::default();
+        let dir = std::env::temp_dir().join(format!("nodalis-unsectioned-{}", std::process::id()));
+        let mut analysis =
+            Analysis::start(&solver, &model, true, "Cubes", &dir, &Default::default()).unwrap();
+        let status = loop {
+            if let Some(status) = analysis.poll() {
+                break status;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(status, JobStatus::Failed, "{:?}", analysis.output());
+        let diagnostics = analysis.diagnostics().expect("typed diagnostics");
+        let findings = plx_model::diagnose_solver_check(
+            &diagnostics,
+            &model.mesh,
+            &model.fe,
+            analysis.origins(),
+        );
+        let part = (findings.iter())
+            .find(|f| f.item == plx_model::ModelItem::Part(1))
+            .unwrap_or_else(|| panic!("{findings:?}"));
+        assert!(
+            part.detail.contains("element 3 has no section"),
+            "{}",
+            part.detail
+        );
+    }
+
+    /// A model the analysis cannot be set up with names the item, for the tree.
+    #[test]
+    fn a_model_that_cannot_be_set_up_names_the_item() {
+        let mut model = pulled_cubes(0.03);
+        model.fe.steps[1].boundary_conditions[1].region = plx_model::Region::Nodes(Vec::new());
+        let dir = std::env::temp_dir().join(format!("nodalis-not-set-up-{}", std::process::id()));
+        let error = Analysis::start(
+            &Solver::default(),
+            &model,
+            false,
+            "Cubes",
+            &dir,
+            &Default::default(),
+        )
+        .err()
+        .expect("the empty region stops the lowering");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            error.item,
+            Some(plx_model::ModelItem::BoundaryCondition(1, 1)),
+            "{error}"
+        );
+        let finding = error.finding().unwrap();
+        assert_eq!(finding.problem, plx_model::Problem::NotLowered);
     }
 
     #[test]

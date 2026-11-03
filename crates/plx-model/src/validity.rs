@@ -46,6 +46,114 @@ pub struct Invalid {
 }
 
 impl FeModel {
+    /// The item named `name`, for an error of the lowering that names the item it was
+    /// lowering: the items of `step` first (boundary conditions and loads of different steps
+    /// may share names), then those of the model, then those of any step.
+    pub fn item_named(&self, name: &str, step: Option<usize>) -> Option<ModelItem> {
+        let in_step = |s: usize| -> Option<ModelItem> {
+            let step = self.steps.get(s)?;
+            let position = |names: &mut dyn Iterator<Item = &String>| {
+                Iterator::position(&mut &mut *names, |n| n == name)
+            };
+            if let Some(i) = position(&mut step.boundary_conditions.iter().map(|b| &b.name)) {
+                return Some(ModelItem::BoundaryCondition(s, i));
+            }
+            if let Some(i) = position(&mut step.loads.iter().map(|l| &l.name)) {
+                return Some(ModelItem::Load(s, i));
+            }
+            if let Some(i) = position(&mut step.history_outputs.iter().map(|o| &o.name)) {
+                return Some(ModelItem::HistoryOutput(s, i));
+            }
+            if let Some(i) = position(&mut step.defined_fields.iter().map(|f| &f.name)) {
+                return Some(ModelItem::DefinedField(s, i));
+            }
+            None
+        };
+        if let Some(item) = step.and_then(in_step) {
+            return Some(item);
+        }
+        let find = |names: &mut dyn Iterator<Item = &str>, item: fn(usize) -> ModelItem| {
+            Iterator::position(&mut &mut *names, |n| n == name).map(item)
+        };
+        find(
+            &mut self.sections.iter().map(|x| x.name.as_str()),
+            ModelItem::Section,
+        )
+        .or_else(|| {
+            find(
+                &mut self.materials.iter().map(|x| x.name.as_str()),
+                ModelItem::Material,
+            )
+        })
+        .or_else(|| {
+            find(
+                &mut self.constraints.iter().map(|x| x.name()),
+                ModelItem::Constraint,
+            )
+        })
+        .or_else(|| {
+            find(
+                &mut self.ties.iter().map(|x| x.name.as_str()),
+                ModelItem::Tie,
+            )
+        })
+        .or_else(|| {
+            find(
+                &mut self.node_ties.iter().map(|x| x.name.as_str()),
+                ModelItem::NodeTie,
+            )
+        })
+        .or_else(|| {
+            find(
+                &mut self.contact_pairs.iter().map(|x| x.name.as_str()),
+                ModelItem::ContactPair,
+            )
+        })
+        .or_else(|| {
+            find(
+                &mut self.contact_regions.iter().map(|x| x.name.as_str()),
+                ModelItem::ContactRegion,
+            )
+        })
+        .or_else(|| {
+            find(
+                &mut self.bolts.iter().map(|x| x.name.as_str()),
+                ModelItem::Bolt,
+            )
+        })
+        .or_else(|| {
+            find(
+                &mut self.amplitudes.iter().map(|x| x.name.as_str()),
+                ModelItem::Amplitude,
+            )
+        })
+        .or_else(|| {
+            find(
+                &mut self.distributions.iter().map(|x| x.name.as_str()),
+                ModelItem::Distribution,
+            )
+        })
+        .or_else(|| {
+            find(
+                &mut self.initial_conditions.iter().map(|x| x.name.as_str()),
+                ModelItem::InitialCondition,
+            )
+        })
+        .or_else(|| {
+            find(
+                &mut self.cross_sections.iter().map(|x| x.name.as_str()),
+                ModelItem::CrossSection,
+            )
+        })
+        .or_else(|| (0..self.steps.len()).find_map(in_step))
+        .or_else(|| {
+            find(
+                &mut self.steps.iter().map(|x| x.name.as_str()),
+                ModelItem::Step,
+            )
+        })
+    }
+
     /// Items that refer to materials, parts, sets or mesh entities that do not exist.
     pub fn invalid_items(&self, mesh: &FeMesh) -> Vec<Invalid> {
         let mut invalid = Vec::new();

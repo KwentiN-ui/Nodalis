@@ -6,6 +6,7 @@
 use std::collections::{BTreeSet, HashSet};
 
 use crate::contact::ContactKind;
+use crate::diagnostic::ItemRef;
 use crate::element::ElementFamily;
 use crate::error::Error;
 use crate::mesh::{ElementRef, NodeRef, Surface};
@@ -22,6 +23,7 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
 
     // Element nodes.
     for element in &model.elements {
+        let before = errors.len();
         if element.nodes.len() != element.kind.node_count() {
             errors.push(Error::input(
                 "*ELEMENT",
@@ -43,6 +45,7 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
                 ));
             }
         }
+        concerning(&mut errors, before, ItemRef::Element(element.id));
     }
 
     // Sets and surfaces. CalculiX tolerates set members that are not defined (it allocates
@@ -99,7 +102,14 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
     // Sections: materials and element sets, then the assignment.
     let material_names: HashSet<&str> = model.materials.iter().map(|m| m.name.as_str()).collect();
     let mut assignment: Vec<Option<u32>> = vec![None; model.elements.len()];
+    let mut before_section = errors.len();
     for (index, section) in model.sections.iter().enumerate() {
+        concerning(
+            &mut errors,
+            before_section,
+            ItemRef::Section(index.wrapping_sub(1)),
+        );
+        before_section = errors.len();
         let keyword = match &section.kind {
             SectionKind::Solid { .. } => "*SOLID SECTION",
             SectionKind::Shell { .. } => "*SHELL SECTION",
@@ -147,15 +157,18 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
             }
         }
     }
+    if let Some(last) = model.sections.len().checked_sub(1) {
+        concerning(&mut errors, before_section, ItemRef::Section(last));
+    }
     // A mesh without steps (a pure mesh file) needs no sections.
     let needs_sections = !analysis.steps.is_empty();
     for (element, section) in model.elements.iter_mut().zip(assignment) {
         element.section = section;
         if section.is_none() && needs_sections {
-            errors.push(Error::input(
-                "*ELEMENT",
-                format!("element {} has no section", element.id),
-            ));
+            errors.push(
+                Error::input("*ELEMENT", format!("element {} has no section", element.id))
+                    .concerning(ItemRef::Element(element.id)),
+            );
         }
     }
 
@@ -187,7 +200,8 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
             }
         }
     }
-    for body in &model.constraints.rigid_bodies {
+    for (index, body) in model.constraints.rigid_bodies.iter().enumerate() {
+        let before = errors.len();
         match &body.nodes {
             crate::constraints::RigidBodyNodes::NodeSet(name) => {
                 if !model.sets.node_sets.contains_key(name) {
@@ -205,11 +219,15 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
                 errors.push(Error::undefined("*RIGID BODY", "node", node.to_string()));
             }
         }
+        concerning(&mut errors, before, ItemRef::RigidBody(index));
     }
     for tie in &model.constraints.ties {
         for surface in [&tie.slave, &tie.master] {
             if !model.sets.surfaces.contains_key(surface) {
-                errors.push(Error::undefined("*TIE", "surface", surface));
+                errors.push(
+                    Error::undefined("*TIE", "surface", surface)
+                        .concerning(ItemRef::Tie(tie.name.clone())),
+                );
             }
         }
     }
@@ -239,7 +257,8 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
     let interaction_names: HashSet<&str> = (model.contact.interactions.iter())
         .map(|i| i.name.as_str())
         .collect();
-    for pair in &model.contact.pairs {
+    for (index, pair) in model.contact.pairs.iter().enumerate() {
+        let before = errors.len();
         if !interaction_names.contains(pair.interaction.as_str()) {
             errors.push(Error::undefined(
                 "*CONTACT PAIR",
@@ -269,6 +288,7 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
                 ),
             ));
         }
+        concerning(&mut errors, before, ItemRef::ContactPair(index));
     }
     for clearance in &model.contact.clearances {
         for surface in [&clearance.slave, &clearance.master] {
@@ -328,6 +348,7 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
             .any(|s| matches!(&s.procedure, Procedure::Frequency(f) if f.storage))
     };
     for (index, step) in analysis.steps.iter().enumerate() {
+        let before = errors.len();
         let name = &step.name;
         for boundary in &step.boundaries {
             if !node_known(model, &boundary.region) {
@@ -503,12 +524,23 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
             }
             _ => {}
         }
+        concerning(&mut errors, before, ItemRef::Step(index));
     }
 
     if errors.is_empty() {
         Ok(warnings)
     } else {
         Err(errors)
+    }
+}
+
+/// Names `item` as what the errors from `from` on are about.
+fn concerning(errors: &mut [Error], from: usize, item: ItemRef) {
+    for error in errors.iter_mut().skip(from) {
+        if error.item().is_none() {
+            let plain = std::mem::replace(error, Error::Unsupported(String::new()));
+            *error = plain.concerning(item.clone());
+        }
     }
 }
 
@@ -597,5 +629,45 @@ mod tests {
                 "*ERROR in *BOUNDARY: amplitude A1 has not been defined",
             ]
         );
+    }
+
+    #[test]
+    fn errors_name_the_item_they_are_about() {
+        let mut analysis = small_analysis();
+        analysis.model.sections[0].kind = SectionKind::Solid {
+            material: "RUBBER".into(),
+            thickness: None,
+        };
+        analysis.steps[0].boundaries.push(crate::step::Boundary {
+            region: NodeRef::Set("NOWHERE".into()),
+            first_dof: 1,
+            last_dof: 3,
+            value: None,
+            amplitude: None,
+            fixed: false,
+            submodel_step: None,
+            load_case: None,
+        });
+        let errors = validate(&mut analysis).unwrap_err();
+        let items: Vec<_> = errors.iter().map(Error::item).collect();
+        assert_eq!(items, [Some(&ItemRef::Section(0)), Some(&ItemRef::Step(0))]);
+        // The message stays as it was, and the diagnostic carries the item.
+        assert!(
+            errors[0]
+                .to_string()
+                .starts_with("*ERROR in *SOLID SECTION")
+        );
+        let diagnostic = crate::Diagnostic::from_error(&errors[1]);
+        assert_eq!(diagnostic.item, Some(ItemRef::Step(0)));
+        assert_eq!(diagnostic.code, crate::DiagnosticCode::Input);
+    }
+
+    #[test]
+    fn an_element_without_section_is_named() {
+        let mut analysis = small_analysis();
+        analysis.model.sections.clear();
+        let errors = validate(&mut analysis).unwrap_err();
+        let id = analysis.model.elements[0].id;
+        assert_eq!(errors[0].item(), Some(&ItemRef::Element(id)));
     }
 }

@@ -400,7 +400,10 @@ impl BackgroundSolve {
         );
         let mut analysis = match started {
             Ok(analysis) => analysis,
-            Err(error) => return self.fail(error),
+            Err(error) => {
+                self.findings = error.finding().into_iter().collect();
+                return self.fail(error.message);
+            }
         };
         // Problems the checks found go first, so that an abort is explained even before
         // the solver says anything.
@@ -428,7 +431,12 @@ impl BackgroundSolve {
         if let Some(diagnostics) = analysis.diagnostics()
             && let Some(model) = &self.model
         {
-            let findings = plx_model::diagnose_solver_check(&diagnostics, &model.mesh, &model.fe);
+            let findings = plx_model::diagnose_solver_check(
+                &diagnostics,
+                &model.mesh,
+                &model.fe,
+                analysis.origins(),
+            );
             let mut shown = std::collections::HashSet::new();
             for finding in &findings {
                 if shown.insert((finding.problem, finding.detail.clone())) {

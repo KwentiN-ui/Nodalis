@@ -3830,7 +3830,11 @@ impl Workbench {
                 // The run's output shows below the 3D view, which stays free for results.
                 self.analysis_tab = true;
             }
-            Err(error) => self.output.push(error),
+            Err(error) => {
+                // A model the analysis cannot be set up with points at the item.
+                self.solver_findings = error.finding().into_iter().collect();
+                self.output.push(error.message);
+            }
         }
     }
 
@@ -3850,8 +3854,12 @@ impl Workbench {
             if let Some(diagnostics) = analysis.diagnostics()
                 && let Some(model) = self.model.as_ref()
             {
-                self.solver_findings =
-                    plx_model::diagnose_solver_check(&diagnostics, &model.mesh, &model.fe);
+                self.solver_findings = plx_model::diagnose_solver_check(
+                    &diagnostics,
+                    &model.mesh,
+                    &model.fe,
+                    analysis.origins(),
+                );
                 note_solver_findings(analysis, &self.solver_findings);
             } else if matches!(
                 status,
