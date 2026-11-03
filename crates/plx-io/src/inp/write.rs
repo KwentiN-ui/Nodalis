@@ -111,6 +111,10 @@ pub struct Lowered {
     pub shortened_names: Vec<(String, String)>,
     /// The names of the parts of the mesh, which are element sets.
     pub part_sets: Vec<String>,
+    /// The profile of each general beam section, by its element set, as the comment the
+    /// input file names it with (see [`super::PROFILE_COMMENT`]): the solver knows the
+    /// section by its values only, the results draw it from the comment.
+    pub profile_comments: Vec<(String, String)>,
 }
 
 impl Lowered {
@@ -124,10 +128,17 @@ impl Lowered {
         for overlap in &self.resolved_overlaps {
             out.push_str(&format!("{}{overlap}\n", dofs::PREFIX));
         }
-        out.push_str(&plxs_input::render_with_parts(
-            &self.analysis,
-            &self.part_sets,
-        ));
+        let text = plxs_input::render_with_parts(&self.analysis, &self.part_sets);
+        for line in text.split_inclusive('\n') {
+            if let Some(rest) = line.strip_prefix("*Beam section, Elset=") {
+                let set = rest.split(',').next().unwrap_or_default();
+                for (_, comment) in (self.profile_comments.iter()).filter(|(s, _)| s == set) {
+                    out.push_str(comment);
+                    out.push('\n');
+                }
+            }
+            out.push_str(line);
+        }
         out
     }
 }
@@ -153,8 +164,9 @@ fn validated(mut lowered: Lowered) -> Result<Lowered, LowerError> {
     Ok(lowered)
 }
 
-/// The analysis before the solver's validation.
-pub(crate) fn lower_unvalidated(
+/// The analysis before the solver's validation, for a run that validates it itself and
+/// reports what it finds as its diagnostics.
+pub fn lower_unvalidated(
     mesh: &FeMesh,
     model: &FeModel,
     heading: &str,
@@ -162,7 +174,8 @@ pub(crate) fn lower_unvalidated(
     Ok(lower_model(mesh, model, heading)?.assemble(|_| true))
 }
 
-fn lower_with_sets_unvalidated(
+/// [`lower_with_sets_of`] before the solver's validation, see [`lower_unvalidated`].
+pub fn lower_with_sets_unvalidated(
     mesh: &FeMesh,
     model: &FeModel,
     heading: &str,
@@ -251,6 +264,7 @@ struct Built {
     resolved_overlaps: Vec<String>,
     shortened_names: Vec<(String, String)>,
     part_sets: Vec<String>,
+    profile_comments: Vec<(String, String)>,
 }
 
 impl Built {
@@ -285,6 +299,7 @@ impl Built {
             resolved_overlaps: self.resolved_overlaps,
             shortened_names: self.shortened_names,
             part_sets: self.part_sets,
+            profile_comments: self.profile_comments,
         }
     }
 }
@@ -404,7 +419,7 @@ fn lower_model(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Built, W
     // degrees of freedom (see [`dofs`]): rigid bodies and remote points, pre-tension cuts,
     // node ties, last springs and contact regions.
     let mut materials = materials(model);
-    let mut sections = sections(&mut sets, model)?;
+    let (mut sections, profile_comments) = sections(&mut sets, model)?;
     let mut generated = constraints::Generated::default();
     let mut constraints = constraints(&mut sets, model, &mut generated)?;
     let pre_tension_equations = pre_tension_sections(&mut sets, model, &cuts, &mut generated);
@@ -544,6 +559,7 @@ fn lower_model(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Built, W
         resolved_overlaps,
         shortened_names: sets.shortened.clone(),
         part_sets: mesh.parts.iter().map(|p| p.name.clone()).collect(),
+        profile_comments,
     })
 }
 
@@ -1369,9 +1385,10 @@ fn initial_conditions(
     Ok(out)
 }
 
-fn sections(sets: &mut Sets, model: &FeModel) -> Result<Vec<ir::section::Section>, WriteError> {
+fn sections(sets: &mut Sets, model: &FeModel) -> Result<SectionsAndProfiles, WriteError> {
     use ir::section::{Section as IrSection, SectionKind as Kind};
     let mut out = Vec::new();
+    let mut comments = Vec::new();
     for section in &model.sections {
         if !model.materials.iter().any(|m| m.name == section.material) {
             return Err(WriteError::UnknownMaterial {
@@ -1432,7 +1449,10 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<Vec<ir::section::Section
                 let ir_profile = beam_profile(&profile);
                 // One section per normal: the solver takes one normal per section, and an
                 // automatic orientation may differ between the beams of the region.
-                for (normal, _, set) in beam_groups(sets, section, &profile)? {
+                for (normal, drawn, set) in beam_groups(sets, section, &profile)? {
+                    if !profile.is_native() {
+                        comments.push((ir_name(&set), profile_comment(&profile, drawn)));
+                    }
                     out.push(IrSection {
                         elset: ir_name(&set),
                         kind: Kind::Beam {
@@ -1447,7 +1467,19 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<Vec<ir::section::Section
             }
         }
     }
-    Ok(out)
+    Ok((out, comments))
+}
+
+/// The sections, and the profile comments of the general beam sections (see
+/// [`Lowered::profile_comments`]).
+type SectionsAndProfiles = (Vec<ir::section::Section>, Vec<(String, String)>);
+
+/// The comment before the `*Beam section` of a general profile: the profile, in RON, and
+/// the normal it is drawn with, which [`read_inp`](super::read_inp) takes back.
+fn profile_comment(profile: &BeamProfile, normal: [f64; 3]) -> String {
+    let ron = ron::to_string(profile).unwrap_or_default();
+    let normal = normal.map(number).join(", ");
+    format!("{}{ron}; Normal: {normal}", super::PROFILE_COMMENT)
 }
 
 /// The profile of a beam section as the solver takes it: a general profile by its values

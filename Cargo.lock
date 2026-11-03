@@ -3444,6 +3444,7 @@ dependencies = [
  "plx-render",
  "plx-results",
  "plx-solve",
+ "plxs-core",
  "plxs-session",
  "png",
  "rfd",
@@ -3474,7 +3475,6 @@ dependencies = [
  "plxs-session",
  "ron",
  "serde",
- "serde_json",
  "thiserror 2.0.21",
 ]
 
@@ -3545,6 +3545,7 @@ version = "0.1.1"
 dependencies = [
  "plx-results",
  "plxs-core",
+ "plxs-input",
  "plxs-session",
  "rayon",
  "windows-sys 0.61.2",

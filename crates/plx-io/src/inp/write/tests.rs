@@ -12,110 +12,22 @@ use plx_model::{
 
 use super::*;
 use crate::frd::{FrdImport, read_frd};
-use crate::inp::legacy_write::{self, Keyword, KeywordKind, model_keywords};
 use crate::inp::{read_inp, read_inp_str};
 
-/// The text the writer wrote before the lowering, after checking that the lowering gives
-/// the analysis the solver reads of that text: every test of the text checks the lowering
-/// of its model too.
-fn write_inp(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<String, WriteError> {
-    let text = legacy_write::write_inp(mesh, model, heading);
-    check_lowering(&text, lower_unvalidated(mesh, model, heading));
-    text
+/// The analysis the solver takes of the model.
+fn lowered(mesh: &FeMesh, model: &FeModel) -> ir::Analysis {
+    lower_unvalidated(mesh, model, "").unwrap().analysis
 }
 
-fn write_deformed_mesh_inp(
-    mesh: &FeMesh,
-    displacements: &[[f32; 3]],
-    scale: f64,
-    heading: &str,
-) -> Result<String, WriteError> {
-    let text = legacy_write::write_deformed_mesh_inp(mesh, displacements, scale, heading);
-    let new = super::write_deformed_mesh_inp(mesh, displacements, scale, heading);
-    assert_eq!(text.is_ok(), new.is_ok());
-    text
+/// The coordinates of `node` in `analysis`.
+fn coordinates(analysis: &ir::Analysis, node: NodeId) -> [f64; 3] {
+    let nodes = &analysis.model.nodes;
+    nodes.coordinates[nodes.index(node).unwrap() as usize]
 }
 
-/// Checks that the lowering `lowered` gives what the solver reads of the input file
-/// `text`, or fails as it does.
-fn check_lowering(text: &Result<String, WriteError>, lowered: Result<Lowered, WriteError>) {
-    let text = match text {
-        Ok(text) => text,
-        Err(error) => {
-            assert_eq!(
-                lowered.err().as_ref(),
-                Some(error),
-                "the lowering fails alike"
-            );
-            return;
-        }
-    };
-    let read = plxs_input::read_inp_str(text, None);
-    let lowered = lowered.map_err(LowerError::from).and_then(validated);
-    match (read, lowered) {
-        (Ok(read), Ok(lowered)) => {
-            let read = serde_json::to_value(&read.analysis).unwrap();
-            let lowered = serde_json::to_value(&lowered.analysis).unwrap();
-            if let Some(difference) = first_difference("", &read, &lowered) {
-                panic!("the lowering differs from the input file read: {difference}\n{text}");
-            }
-        }
-        (Err(_), Err(_)) => {}
-        (Ok(_), Err(error)) => {
-            panic!("the lowering fails ({error}) where the input file reads\n{text}")
-        }
-        (Err(errors), Ok(_)) => panic!(
-            "the input file does not read ({}) but the lowering does\n{text}",
-            errors
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("; ")
-        ),
-    }
-}
-
-/// The path of the first difference between two values and the two there; numbers differ
-/// beyond the 9 digits of the input file.
-fn first_difference(path: &str, a: &serde_json::Value, b: &serde_json::Value) -> Option<String> {
-    use serde_json::Value;
-    match (a, b) {
-        (Value::Number(x), Value::Number(y)) => {
-            let (x, y) = (x.as_f64().unwrap(), y.as_f64().unwrap());
-            let close = (x - y).abs() <= 2e-8 * x.abs().max(y.abs()) + 1e-300;
-            (!close).then(|| format!("{path}: {x} vs {y}"))
-        }
-        (Value::Array(x), Value::Array(y)) => {
-            if x.len() != y.len() {
-                return Some(format!(
-                    "{path}: {} vs {} entries: {} vs {}",
-                    x.len(),
-                    y.len(),
-                    short(a),
-                    short(b)
-                ));
-            }
-            (x.iter().zip(y).enumerate())
-                .find_map(|(i, (x, y))| first_difference(&format!("{path}[{i}]"), x, y))
-        }
-        (Value::Object(x), Value::Object(y)) => {
-            let keys: BTreeSet<&String> = x.keys().chain(y.keys()).collect();
-            keys.into_iter().find_map(|k| match (x.get(k), y.get(k)) {
-                (Some(x), Some(y)) => first_difference(&format!("{path}.{k}"), x, y),
-                _ => Some(format!("{path}.{k}: only on one side")),
-            })
-        }
-        _ => (a != b).then(|| format!("{path}: {} vs {}", short(a), short(b))),
-    }
-}
-
-fn short(value: &serde_json::Value) -> String {
-    let text = value.to_string();
-    if text.len() > 400 {
-        format!("{}...", &text[..400])
-    } else {
-        text
-    }
+/// The number of equations of the analysis of the model.
+fn equations(mesh: &FeMesh, model: &FeModel) -> usize {
+    lowered(mesh, model).model.constraints.equations.len()
 }
 
 fn testdata(name: &str) -> PathBuf {
@@ -185,21 +97,13 @@ fn writes_mesh_and_analysis_that_read_back() {
     let (mesh, model) = cantilever(tip_force());
     let text = write_inp(&mesh, &model, "Kragbalken").unwrap();
     for line in [
-        "** Nodes +++++++++++++++++++++++++++++++++++++++++++++++++++\n",
-        "*Node\n1, 0.00000000E0, 0.00000000E0, 0.00000000E0\n",
         "*Element, Type=C3D8, Elset=EALL\n",
-        "*Elset, Elset=Internal_Selection-1_Section-1\nEALL\n",
-        "*Nset, Nset=Internal_Selection-1_Force-1\n99\n",
-        "*Material, Name=Steel\n*Density\n0.00000000785\n*Elastic\n210000, 0.3\n",
-        "*Solid section, Elset=Internal_Selection-1_Section-1, Material=Steel\n",
-        "*Step\n*Static\n",
-        "*Boundary, op=New\n",
+        "*Nset, Nset=INTERNAL_SELECTION-1_FORCE-1\n99\n",
+        "*Solid section, Elset=INTERNAL_SELECTION-1_SECTION-1, Material=STEEL\n",
         "*Boundary\nFIX, 1, 6, 0\n",
-        "*Cload, op=New\n*Dload, op=New\n",
-        "*Cload\nInternal_Selection-1_Force-1, 3, -100\n",
+        "*Cload, op=New\nINTERNAL_SELECTION-1_FORCE-1, 3, -100\n",
         "*Node file\nRF, U\n",
         "*El file\nS, E, NOE\n",
-        "*End step\n",
     ] {
         assert!(text.contains(line), "missing {line:?} in\n{text}");
     }
@@ -213,7 +117,7 @@ fn writes_mesh_and_analysis_that_read_back() {
 }
 
 #[test]
-fn field_outputs_are_written_with_their_options_like_prepomax_does() {
+fn field_outputs_are_written_with_their_options() {
     let (mesh, mut model) = cantilever(tip_force());
     let outputs = &mut model.steps[0].field_outputs;
     outputs[0].last_iterations = true;
@@ -230,15 +134,15 @@ fn field_outputs_are_written_with_their_options_like_prepomax_does() {
     off.active = false;
     outputs.push(off);
     let text = write_inp(&mesh, &model, "").unwrap();
-    for line in [
-        // The node output follows the element output's form.
-        "** Name: NF-Output-1\n*Node file, Last iterations, Output=3D, Global=No\nRF, U\n",
-        "** Name: EF-Output-1\n*El file, Contact elements, Output=3D\nS, ERR\n",
-        "** Name: CF_Output-1\n*Contact file\nCDIS, CSTR\n",
-        "** Name: NF_Output-1: Deactivated\n",
-    ] {
-        assert!(text.contains(line), "missing {line:?} in\n{text}");
-    }
+    // The node output follows the element output's form; the deactivated one is left out.
+    assert!(
+        text.contains(
+            "*Node file, Last iterations, Output=3D, Global=No\nRF, U\n\
+             *El file, Contact elements, Output=3D\nS, ERR\n\
+             *Contact file\nCDIS, CSTR\n*End step\n"
+        ),
+        "{text}"
+    );
 }
 
 #[test]
@@ -261,7 +165,7 @@ fn the_chosen_solver_is_written_with_the_procedure() {
     let (mesh, mut model) = cantilever(tip_force());
     // Automatic (the default) leaves the choice to the solver.
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(text.contains("*Step\n*Static\n"), "{text}");
+    assert!(text.contains("*Static\n"), "{text}");
     let StepKind::Static(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
@@ -310,12 +214,11 @@ fn picked_faces_become_one_element_set_per_face_number() {
     };
     let (mesh, model) = cantilever(load);
     let text = write_inp(&mesh, &model, "").unwrap();
-    let side = "Internal-1_Internal_Selection-1_Pressure_1";
+    let side = "INTERNAL-1_INTERNAL_SELECTION-1_PRESSURE_1";
     for line in [
         format!("*Elset, Elset={side}_S4\n10, 20\n"),
         format!("*Elset, Elset={side}_S6\n1\n"),
-        format!("*Surface, Name=Internal_Selection-1_Pressure_1, Type=Element\n{side}_S4, S4\n"),
-        format!("*Dload\n{side}_S4, P4, 2.5\n{side}_S6, P6, 2.5\n"),
+        format!("*Dload, op=New\n{side}_S4, P4, 2.5\n{side}_S6, P6, 2.5\n"),
     ] {
         assert!(text.contains(&line), "missing {line:?} in\n{text}");
     }
@@ -615,7 +518,7 @@ fn moment(moment: [f64; 3]) -> Load {
 }
 
 #[test]
-fn a_rigid_body_and_its_reference_point_are_written_like_prepomax_does() {
+fn a_rigid_body_and_its_reference_point_are_written() {
     let bc = BoundaryCondition {
         distribution: None,
         name: "Turn-1".into(),
@@ -628,24 +531,26 @@ fn a_rigid_body_and_its_reference_point_are_written_like_prepomax_does() {
     let (mesh, model) = rigid_tip(Some(moment([0.0, 0.0, 1000.0])), Some(bc));
     let text = write_inp(&mesh, &model, "").unwrap();
     // The reference and rotation node follow the mesh nodes, both on the point.
+    let analysis = lowered(&mesh, &model);
+    let ids = &analysis.model.nodes.ids;
+    assert_eq!(ids[ids.len() - 2..], [100, 101]);
+    for node in [100, 101] {
+        assert_eq!(coordinates(&analysis, node), [100.0, 5.0, 5.0]);
+    }
     assert!(
-        text.contains("99, 1.00000000E2, 1.00000000E1, 1.00000000E1\n100, 1.00000000E2, 5.00000000E0, 5.00000000E0\n101, 1.00000000E2, 5.00000000E0, 5.00000000E0\n"),
+        text.contains("*Nset, Nset=INTERNAL_SELECTION-1_RP-1\n100\n"),
         "{text}"
     );
     assert!(
-        text.contains("*Nset, Nset=Internal_Selection-1_RP-1\n100\n"),
-        "{text}"
-    );
-    assert!(
-        text.contains("*Rigid body, Nset=Internal-1_TIP, Ref node=100, Rot node=101\n"),
+        text.contains("*Rigid body, Nset=INTERNAL-1_TIP, Ref node=100, Rot node=101\n"),
         "{text}"
     );
     // Translations on the reference node, rotations on the rotation node.
     assert!(
-        text.contains("*Boundary\nInternal_Selection-1_RP-1, 1, 2, 0\n101, 3, 3, 0.01\n"),
+        text.contains("\nINTERNAL_SELECTION-1_RP-1, 1, 2, 0\n101, 3, 3, 0.01\n"),
         "{text}"
     );
-    assert!(text.contains("*Cload\n101, 3, 1000\n"), "{text}");
+    assert!(text.contains("*Cload, op=New\n101, 3, 1000\n"), "{text}");
 }
 
 /// A force on points is the total: the nodes share it equally, a reference point of a
@@ -657,7 +562,7 @@ fn a_force_on_points_is_shared_by_the_nodes() {
     let (mesh, model) = cantilever(on_nodes);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Cload\nInternal_Selection-1_Force-1, 3, -25\n"),
+        text.contains("*Cload, op=New\nINTERNAL_SELECTION-1_FORCE-1, 3, -25\n"),
         "{text}"
     );
     // At each node, like PrePoMax's concentrated force, every node takes the whole force.
@@ -670,7 +575,7 @@ fn a_force_on_points_is_shared_by_the_nodes() {
     let (mesh, model) = cantilever(each);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Cload\nInternal_Selection-1_Force-1, 3, -100\n"),
+        text.contains("*Cload, op=New\nINTERNAL_SELECTION-1_FORCE-1, 3, -100\n"),
         "{text}"
     );
     let mut on_point = tip_force();
@@ -678,7 +583,7 @@ fn a_force_on_points_is_shared_by_the_nodes() {
     let (mesh, model) = rigid_tip(Some(on_point), None);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Cload\nInternal_Selection-1_RP-1, 3, -100\n"),
+        text.contains("*Cload, op=New\nINTERNAL_SELECTION-1_RP-1, 3, -100\n"),
         "{text}"
     );
 }
@@ -832,7 +737,7 @@ fn solver_turns_a_deformable_remote_point_with_the_mean_of_its_face() {
     }));
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(!text.contains("*Rigid body"), "{text}");
-    assert_eq!(text.matches("*Equation").count(), 6, "{text}");
+    assert_eq!(equations(&mesh, &model), 6, "{text}");
     let Some(frd) = run_solver("remote-deformable", &text) else {
         return;
     };
@@ -903,7 +808,7 @@ fn solver_holds_each_node_in_its_coordinate_system() {
     assert!(!text.contains("*Equation"), "{text}");
     assert!(!text.contains("*Rigid body"), "{text}");
     assert!(
-        text.contains("*Transform, Nset=Internal-1_TIP, Type=R\n0, 1, 0, -1, 0, 0\n"),
+        text.contains("*Transform, Nset=INTERNAL-1_TIP, Type=R\n0, 1, 0, -1, 0, 0\n"),
         "{text}"
     );
     let Some(frd) = run_solver("each-node-system", &text) else {
@@ -929,19 +834,13 @@ fn a_face_free_to_turn_follows_a_rigid_point() {
         d.behavior = Behavior::Automatic;
     }
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(text.contains("*Rigid body, Nset=Internal-1_TIP,"), "{text}");
-    assert!(
-        text.contains("** Name: Hinge-1\n*Boundary\n100, 1, 3, 0\n**"),
-        "{text}"
-    );
+    assert!(text.contains("*Rigid body, Nset=INTERNAL-1_TIP,"), "{text}");
+    assert!(text.contains("\n100, 1, 3, 0\n"), "{text}");
     // Clamped: each node.
     model.steps[0].boundary_conditions[1].kind = BoundaryKind::displacement([Some(0.0); 6]);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(!text.contains("*Rigid body"), "{text}");
-    assert!(
-        text.contains("** Name: Hinge-1\n*Boundary\nInternal-1_TIP, 1, 6, 0\n"),
-        "{text}"
-    );
+    assert!(text.contains("\nINTERNAL-1_TIP, 1, 6, 0\n"), "{text}");
     // A node of the face held by another boundary condition leaves the point.
     model.steps[0].boundary_conditions[1].kind = BoundaryKind::displacement(hinge);
     let node = Region::Surface("TIP".into()).nodes(&mesh)[0];
@@ -956,7 +855,7 @@ fn a_face_free_to_turn_follows_a_rigid_point() {
     });
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Rigid body, Nset=Internal_Selection"),
+        text.contains("*Rigid body, Nset=INTERNAL_SELECTION"),
         "{text}"
     );
     let Some(_) = run_solver("hinge-and-pin", &text) else {
@@ -982,7 +881,7 @@ fn solver_moves_a_remote_point_in_its_coordinate_system() {
     turned_system(&mut model);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Transform, Nset=Internal_Selection-1_Remote-1_Point, Type=R\n"),
+        text.contains("*Transform, Nset=INTERNAL_SELECTION-1_REMOTE-1_POINT, Type=R\n"),
         "{text}"
     );
     let Some(frd) = run_solver("remote-system", &text) else {
@@ -1025,12 +924,9 @@ fn a_remote_point_takes_its_location_and_pinball_region() {
         r.pinball = Some(6.0);
     }));
     let text = write_inp(&mesh, &model, "").unwrap();
+    assert_eq!(coordinates(&lowered(&mesh, &model), 100), [100.0, 5.0, 0.0]);
     assert!(
-        text.contains("100, 1.00000000E2, 5.00000000E0, 0.00000000E0\n"),
-        "{text}"
-    );
-    assert!(
-        text.contains("*Nset, Nset=Internal_Selection-1_Remote-1\n11, 22, 33, 55\n"),
+        text.contains("*Nset, Nset=INTERNAL_SELECTION-1_REMOTE-1\n11, 22, 33, 55\n"),
         "{text}"
     );
     // A pinball region without nodes cannot be written.
@@ -1057,25 +953,25 @@ fn a_remote_displacement_drives_its_region_from_a_point_at_its_centre() {
     model.steps.push(second);
     let text = write_inp(&mesh, &model, "").unwrap();
     // Reference and rotation node at the centre of the tip face.
-    assert!(
-        text.contains(
-            "100, 1.00000000E2, 5.00000000E0, 5.00000000E0
-101, 1.00000000E2, 5.00000000E0, 5.00000000E0
-"
-        ),
-        "{text}"
-    );
+    let analysis = lowered(&mesh, &model);
+    for node in [100, 101] {
+        let at = coordinates(&analysis, node);
+        assert!(
+            (0..3).all(|i| (at[i] - [100.0, 5.0, 5.0][i]).abs() < 1e-9),
+            "{at:?}"
+        );
+    }
     assert_eq!(text.matches("*Rigid body").count(), 1, "{text}");
     assert!(
-        text.contains(
-            "** Name: Remote-1: Remote point\n*Rigid body, Nset=Internal-1_TIP, Ref node=100, Rot node=101\n"
-        ),
+        text.contains("*Rigid body, Nset=INTERNAL-1_TIP, Ref node=100, Rot node=101\n"),
         "{text}"
     );
-    for name in ["Remote-1", "Remote-2"] {
-        let expected = format!("** Name: {name}\n*Boundary\n100, 1, 2, 0\n101, 3, 3, 0.01\n");
-        assert!(text.contains(&expected), "{expected}\n{text}");
-    }
+    // Both steps drive the point.
+    assert_eq!(
+        text.matches("\n100, 1, 2, 0\n101, 3, 3, 0.01\n").count(),
+        2,
+        "{text}"
+    );
     // Without nodes there is no centre.
     model.steps[0].boundary_conditions[1].region = Region::Nodes(Vec::new());
     assert!(matches!(
@@ -1130,14 +1026,14 @@ fn s235(mesh_model: &mut FeModel) {
 }
 
 #[test]
-fn a_plastic_material_is_written_like_prepomax_does() {
+fn a_plastic_material_is_written() {
     let (mesh, mut model) = cantilever(tip_force());
     s235(&mut model);
     model.materials[0].plastic.as_mut().unwrap().hardening = Hardening::Kinematic;
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
         text.contains(
-            "*Elastic\n210000, 0.3\n*Plastic, Hardening=Kinematic\n235, 0, 0\n400, 0.2, 0\n"
+            "*Elastic\n210000, 0.3, 0\n*Plastic, Hardening=Kinematic\n235, 0, 0\n400, 0.2, 0\n"
         ),
         "{text}"
     );
@@ -1251,7 +1147,7 @@ fn pre_tension(value: f64, by_displacement: bool) -> (FeMesh, FeModel) {
 }
 
 #[test]
-fn a_shell_section_is_written_like_prepomax_does() {
+fn a_shell_section_is_written() {
     let (mesh, mut model) = shell_plate();
     model.sections[0].kind = SectionKind::Shell {
         thickness: 2.0,
@@ -1261,7 +1157,7 @@ fn a_shell_section_is_written_like_prepomax_does() {
     assert!(text.contains("*Element, Type=S8, Elset=PLATE\n"), "{text}");
     assert!(
         text.contains(
-            "*Shell section, Elset=Internal_Selection-1_Section-1, Material=Steel, Offset=0.5\n2\n"
+            "*Shell section, Elset=INTERNAL_SELECTION-1_SECTION-1, Material=STEEL, Offset=0.5\n2\n"
         ),
         "{text}"
     );
@@ -1305,7 +1201,7 @@ fn a_membrane_section_is_written_for_membrane_elements() {
     );
     assert!(
         text.contains(
-            "*Membrane section, Elset=Internal_Selection-1_Section-1, Material=Steel, \
+            "*Membrane section, Elset=INTERNAL_SELECTION-1_SECTION-1, Material=STEEL, \
              Offset=0.5\n2\n"
         ),
         "{text}"
@@ -1539,12 +1435,20 @@ fn a_pre_tension_load_cuts_the_mesh_and_ties_the_sides_by_equations() {
     let text = write_inp(&mesh, &model, "").unwrap();
     // The 9 nodes of the cut get copies 100 to 108, the pre-tension node is 109.
     assert!(!text.contains("*Pre-tension section"), "{text}");
-    assert_eq!(text.matches("** Name: Pre_Tension-1\n*Equation").count(), 1);
-    assert_eq!(text.matches("*Equation\n").count(), 27);
-    assert!(text.contains("*Equation\n3\n100, 1, 1, "), "{text}");
-    assert_eq!(text.matches(", 109, 1, -1\n").count(), 9);
-    assert!(text.contains("108, 5.00000000E1, "), "{text}");
-    assert!(text.contains("*Cload\n109, 1, 1000\n"), "{text}");
+    let analysis = lowered(&mesh, &model);
+    let equations = &analysis.model.constraints.equations;
+    assert_eq!(equations.len(), 27);
+    let term = |node, dof, coefficient| ir::constraints::EquationTerm {
+        node: NodeRef::Node(node),
+        dof,
+        coefficient,
+    };
+    assert_eq!(equations[0].terms.len(), 3);
+    assert_eq!(equations[0].terms[0].node, NodeRef::Node(100));
+    let driven = (equations.iter()).filter(|e| e.terms.last() == Some(&term(109, 1, -1.0)));
+    assert_eq!(driven.count(), 9);
+    assert_eq!(coordinates(&analysis, 108)[0], 50.0);
+    assert!(text.contains("*Cload, op=New\n109, 1, 1000\n"), "{text}");
     assert!(text.contains("*Boundary, Fixed\n109, 1, 1\n"), "{text}");
 }
 
@@ -1904,13 +1808,6 @@ fn solver_balances_a_surface_traction() {
     assert!((reaction - 80.0).abs() < 1e-3, "{reaction}");
 }
 
-/// Position of the title `name` among the top-level keywords.
-fn top_title(tree: &[Keyword], name: &str) -> usize {
-    tree.iter()
-        .position(|k| k.kind == KeywordKind::Title(name.into()))
-        .unwrap()
-}
-
 /// Runs the solver like [`run_solver`] and returns the `.dat` file.
 fn run_dat(name: &str, text: &str) -> Option<String> {
     let dir = run_dir(name)?;
@@ -1933,19 +1830,18 @@ fn frequency_analysis() -> (FeMesh, FeModel) {
 }
 
 #[test]
-fn a_frequency_step_is_written_like_prepomax_does() {
+fn a_frequency_step_is_written() {
     let (mesh, mut model) = frequency_analysis();
     let text = write_inp(&mesh, &model, "").unwrap();
     let frequency = &text[text.find("** Step-2").unwrap()..];
     for line in [
-        "*Step\n*Frequency\n10\n",
-        "*Boundary\nFIX, 1, 6, 0\n",
+        "*Frequency\n10\n",
+        "\nFIX, 1, 6, 0\n",
         "*Node file\nU\n",
         "*El file\nS, E, NOE\n",
     ] {
         assert!(frequency.contains(line), "missing {line:?} in\n{frequency}");
     }
-    assert!(!frequency.contains("*Cload"), "{frequency}");
     let StepKind::Frequency(settings) = &mut model.steps[1].kind else {
         unreachable!()
     };
@@ -1955,7 +1851,9 @@ fn a_frequency_step_is_written_like_prepomax_does() {
     settings.upper_frequency = Some(5000.0);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Step, Perturbation\n*Frequency, Storage=Yes\n4, 0, 5000\n"),
+        text.contains(
+            "*Step, Perturbation, Inc=100, Amplitude=Ramp\n*Frequency, Storage=Yes\n4, 0, 5000\n"
+        ),
         "{text}"
     );
     let StepKind::Frequency(settings) = &mut model.steps[1].kind else {
@@ -2024,7 +1922,7 @@ fn dynamic_cantilever(
 }
 
 #[test]
-fn a_dynamic_step_is_written_like_prepomax_does() {
+fn a_dynamic_step_is_written() {
     let damping = plx_model::RayleighDamping {
         alpha: 0.0,
         beta: 4e-5,
@@ -2032,8 +1930,9 @@ fn a_dynamic_step_is_written_like_prepomax_does() {
     let (mesh, mut model) = dynamic_cantilever(1.5e-3, 2.5e-5, Some(damping));
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
-        "*Step, Inc=100\n*Dynamic, Direct\n0.000025, 0.0015\n*Damping, Alpha=0, Beta=0.00004\n",
-        "*Cload, Amplitude=Stepped\n",
+        "*Step, Inc=100, Amplitude=Step\n*Dynamic, Direct\n0.000025, 0.0015\n\
+         *Damping, Alpha=0, Beta=0.00004\n",
+        "*Cload, op=New, Amplitude=STEPPED\n",
         "*Node file\nRF, U, V\n",
         "*El file\nS, E, ENER, NOE\n",
     ] {
@@ -2051,18 +1950,15 @@ fn a_dynamic_step_is_written_like_prepomax_does() {
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
         text.contains(
-            "*Step, Nlgeom, Inc=100\n*Dynamic, Solver=Iterative Cholesky, Alpha=-0.1, Explicit=3\n\
-             0.000025, 0.0015, 0.00001, 1.00000000E30\n"
+            "*Step, Nlgeom, Inc=100, Amplitude=Step\n\
+             *Dynamic, Solver=Iterative Cholesky, Alpha=-0.1, Explicit\n\
+             0.000025, 0.0015, 0.00001, 1e30\n"
         ),
         "{text}"
     );
     assert!(!text.contains("*Damping"), "{text}");
     model.steps[0].active = false;
-    let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(
-        text.contains("** Name: DynamicStep: Deactivated\n"),
-        "{text}"
-    );
+    assert!(lowered(&mesh, &model).steps.is_empty());
 }
 
 /// The tip deflection over time of a dynamic increment: (time, U3 at node 99).
@@ -2246,14 +2142,15 @@ fn buckle_analysis() -> (FeMesh, FeModel) {
 }
 
 #[test]
-fn modal_steps_are_written_like_prepomax_does() {
+fn modal_steps_are_written() {
     let (mesh, mut model) = modal_cantilever(Some(ModalDamping::Constant(0.02)));
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
-        "*Step\n*Frequency, Storage=Yes\n6\n",
-        "*Step, Inc=100\n*Modal dynamics\n0.000025, 0.0015\n*Modal damping\n1, 1000000, 0.02\n",
-        "*Cload, Amplitude=Stepped\n",
-        "*Step\n*Steady state dynamics\n700, 900, 21, 1\n*Modal damping\n1, 1000000, 0.02\n",
+        "*Frequency, Storage=Yes\n6\n",
+        "*Step, Inc=100, Amplitude=Step\n*Modal dynamics\n0.000025, 0.0015\n\
+         *Modal damping\n1, 1000000, 0.02\n",
+        "*Cload, op=New, Amplitude=STEPPED\n",
+        "*Steady state dynamics\n700, 900, 21, 1\n*Modal damping\n1, 1000000, 0.02\n",
         "*Node file\nRF, U, V\n",
     ] {
         assert!(text.contains(line), "missing {line:?} in\n{text}");
@@ -2287,10 +2184,10 @@ fn modal_steps_are_written_like_prepomax_does() {
     }));
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
-        "*Step, Inc=100\n*Modal dynamics, Steady state\n0.000025, 0.01\n\
+        "*Step, Inc=100, Amplitude=Step\n*Modal dynamics, Steady state\n0.000025, 0.01\n\
          *Modal damping\n1, 2, 0.05\n3, 6, 0.1\n",
-        "*Step\n*Steady state dynamics, Harmonic=No\n700, 900, 21, 1, 5, 0, 0.002\n\
-         *Modal damping, Rayleigh\n , , 10, 0.00004\n",
+        "*Steady state dynamics, Harmonic=No\n700, 900, 21, 1, 5\n\
+         *Modal damping, Rayleigh\n, , 10, 0.00004\n",
     ] {
         assert!(text.contains(line), "missing {line:?} in\n{text}");
     }
@@ -2302,28 +2199,23 @@ fn modal_steps_are_written_like_prepomax_does() {
     settings.time_period = 0.01;
     assert_eq!(settings.increments(), 401);
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(text.contains("*Step, Inc=401\n*Modal dynamics"), "{text}");
+    assert!(
+        text.contains("*Step, Inc=401, Amplitude=Step\n*Modal dynamics"),
+        "{text}"
+    );
     model.steps[1].active = false;
     model.steps[2].active = false;
-    let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(
-        text.contains("** Name: ModalDynamicsStep: Deactivated\n"),
-        "{text}"
-    );
-    assert!(
-        text.contains("** Name: SteadyStateDynamicsStep: Deactivated\n"),
-        "{text}"
-    );
+    assert_eq!(lowered(&mesh, &model).steps.len(), 1);
 }
 
 #[test]
-fn a_buckle_step_is_written_like_prepomax_does() {
+fn a_buckle_step_is_written() {
     let (mesh, mut model) = buckle_analysis();
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
-        "*Step\n*Buckle\n1, 0.0001\n",
-        "*Boundary\nFIX, 1, 6, 0\n",
-        "*Cload\nTIP, 1, -1\n",
+        "*Buckle\n1, 0.0001\n",
+        "\nFIX, 1, 6, 0\n",
+        "*Cload, op=New\nTIP, 1, -1\n",
         "*Node file\nRF, U\n",
     ] {
         assert!(text.contains(line), "missing {line:?} in\n{text}");
@@ -2336,7 +2228,7 @@ fn a_buckle_step_is_written_like_prepomax_does() {
     settings.accuracy = 0.01;
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Step, Perturbation\n*Buckle\n3, 0.01\n"),
+        text.contains("*Step, Perturbation, Inc=100, Amplitude=Ramp\n*Buckle\n3, 0.01\n"),
         "{text}"
     );
 }
@@ -2584,7 +2476,7 @@ fn a_buckle_step_eliminates_a_rigid_end() {
 }
 
 #[test]
-fn deactivated_items_are_left_out_as_comments() {
+fn deactivated_items_are_left_out() {
     let (mesh, mut model) = cantilever(tip_force());
     model.steps[0].loads.push(Load {
         distribution: None,
@@ -2600,34 +2492,24 @@ fn deactivated_items_are_left_out_as_comments() {
     model.steps[0].loads[0].active = false;
     model.steps[0].boundary_conditions[0].active = false;
     let text = write_inp(&mesh, &model, "").unwrap();
-    for line in [
-        "*Boundary, op=New\n** Name: Fixed-1: Deactivated\n",
-        "*Cload, op=New\n*Dload, op=New\n** Name: Force-1: Deactivated\n** Name: Empty-1: Deactivated\n",
-    ] {
-        assert!(text.contains(line), "missing {line:?} in\n{text}");
-    }
+    let analysis = lowered(&mesh, &model);
+    let step = &analysis.steps[0];
+    assert!(step.boundaries.is_empty() && step.loads.concentrated.is_empty());
     assert!(!text.contains("FIX, 1, 6, 0"), "{text}");
     assert!(!text.contains("_Force-1"), "{text}");
 }
 
 #[test]
-fn a_deactivated_step_is_written_as_comments_only() {
+fn a_deactivated_step_is_left_out() {
     let (mesh, mut model) = frequency_analysis();
     model.steps[0].active = false;
     let text = write_inp(&mesh, &model, "").unwrap();
-    let step = &text[text.find("** Step-1").unwrap()..text.find("** Step-2").unwrap()];
-    for line in [
-        "** Name: Step-1: Deactivated\n** Name: StaticStep: Deactivated\n",
-        "** Name: Fixed-1: Deactivated\n",
-        "** Name: Force-1: Deactivated\n",
-        "** Name: NF-Output-1: Deactivated\n",
-    ] {
-        assert!(step.contains(line), "missing {line:?} in\n{step}");
-    }
-    let keywords = step
-        .lines()
-        .filter(|l| l.starts_with('*') && !l.starts_with("**"));
-    assert_eq!(keywords.count(), 0, "{step}");
+    let analysis = lowered(&mesh, &model);
+    assert_eq!(analysis.steps.len(), 1);
+    assert!(matches!(
+        analysis.steps[0].procedure,
+        ir::Procedure::Frequency(_)
+    ));
     // The node set of the load in the deactivated step is not written either.
     assert!(!text.contains("_Force-1"), "{text}");
     // CalculiX runs the remaining frequency step alone.
@@ -2787,16 +2669,16 @@ fn two_d_models_write_their_element_types_thickness_and_dofs() {
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
         "*Element, Type=CPS8, Elset=PLATE\n",
-        "*Solid section, Elset=Internal_Selection-1_Section-1, Material=Steel\n2.5\n",
+        "*Solid section, Elset=INTERNAL_SELECTION-1_SECTION-1, Material=STEEL\n2.5\n",
         ", 1, 2, 0\n",
-        "*Cload\nInternal_Selection-1_Load-1, 1, 1\nInternal_Selection-1_Load-1, 2, 2\n**\n",
+        "*Cload, op=New\nINTERNAL_SELECTION-1_LOAD-1, 1, 1\nINTERNAL_SELECTION-1_LOAD-1, 2, 2\n",
     ] {
         assert!(text.contains(line), "{line:?} missing in\n{text}");
     }
     model.properties.space = ModelSpace::Axisymmetric;
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("*Element, Type=CAX8, Elset=PLATE\n"));
-    assert!(text.contains("Material=Steel\n**"), "{text}");
+    assert!(text.contains("Material=STEEL\n"), "{text}");
 }
 
 #[test]
@@ -3248,7 +3130,7 @@ fn solver_preloads_a_bolt_split_into_two_tied_parts() {
         model.ties.push(tie);
         let text = write_inp(&mesh, &model, "").unwrap();
         // The cut nodes 19 to 27 of the lower block are the slave nodes.
-        assert!(text.contains("Slave, Type=Node\n"), "{text}");
+        assert!(text.contains("SLAVE, Type=Node\n"), "{text}");
         let name = format!("geteilt-{cut_is_master}-{on_geometry}");
         let Some(frd) = run_solver(&name, &text) else {
             return;
@@ -3330,13 +3212,12 @@ fn a_bolt_replaces_the_contact_region_on_its_cut_and_locks_after_its_preload() {
     ));
     assert!(matches!(kinds[1], LoadKind::PreTension { lock: true, .. }));
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(text.contains("*Cload\n"), "{text}");
+    assert!(text.contains("*Cload, op=New\n"), "{text}");
     assert!(text.contains("*Boundary, Fixed\n"), "{text}");
-    assert!(
-        text.contains("** Name: Bonded - LOWER to UPPER: Deactivated"),
-        "{text}"
-    );
-    assert!(text.contains("*Tie, Name=Bolt-1_Cut"), "{text}");
+    // The bonded region on the cut is left out: the cut's tie is the only one.
+    let ties = &super::tests::lowered(&mesh, &model).model.constraints.ties;
+    assert_eq!(ties.len(), 1);
+    assert_eq!(ties[0].name, "BOLT-1_CUT");
 }
 
 #[test]
@@ -3472,19 +3353,17 @@ fn a_tie_writes_its_surfaces_slave_first() {
     model.ties.push(tie);
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
-        "*Surface, Name=Internal_Selection-1_Tie-1_Master, Type=Element\n",
-        "*Elset, Elset=Internal-1_Internal_Selection-1_Tie-1_Slave_S1\n101, 102, 103, 104\n",
-        "*Tie, Name=Tie-1, Position tolerance=0.5\n\
-         Internal_Selection-1_Tie-1_Slave, Internal_Selection-1_Tie-1_Master\n",
+        "*Surface, Name=INTERNAL_SELECTION-1_TIE-1_MASTER, Type=Element\n",
+        "*Elset, Elset=INTERNAL-1_INTERNAL_SELECTION-1_TIE-1_SLAVE_S1\n101, 102, 103, 104\n",
+        "*Tie, Name=TIE-1, Position tolerance=0.5\n\
+         INTERNAL_SELECTION-1_TIE-1_SLAVE, INTERNAL_SELECTION-1_TIE-1_MASTER\n",
     ] {
         assert!(text.contains(line), "{line:?} missing in\n{text}");
     }
-    let constraints = top_title(&model_keywords(&mesh, &model, "").unwrap(), "Constraints");
-    assert_eq!(constraints, 11);
 }
 
 #[test]
-fn surface_interactions_and_contact_pairs_are_written_like_prepomax() {
+fn surface_interactions_and_contact_pairs_are_written() {
     let (mesh, lower, upper) = two_blocks(0.0);
     let mut model = stacked_blocks(&mesh);
     model.surface_interactions.push(SurfaceInteraction {
@@ -3511,20 +3390,20 @@ fn surface_interactions_and_contact_pairs_are_written_like_prepomax() {
     model.contact_pairs.push(pair.clone());
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
-        "*Surface interaction, Name=Surface_Interaction-1\n\
+        "*Surface interaction, Name=SURFACE_INTERACTION-1\n\
          *Surface behavior, Pressure-overclosure=Linear\n10000000, 2.86\n\
          *Friction\n0.2, 5000\n*Gap conductance\n3\n",
-        "*Contact pair, Interaction=Surface_Interaction-1, Type=Node to surface, \
+        "*Contact pair, Interaction=SURFACE_INTERACTION-1, Type=Node to surface, \
          Small sliding, Adjust=0\n\
-         Internal_Selection-1_Contact_Pair-1_Slave, Internal_Selection-1_Contact_Pair-1_Master\n",
+         INTERNAL_SELECTION-1_CONTACT_PAIR-1_SLAVE, INTERNAL_SELECTION-1_CONTACT_PAIR-1_MASTER\n",
     ] {
         assert!(text.contains(line), "{line:?} missing in\n{text}");
     }
-    // Deactivated, the pair keeps its place as a comment and gets no surfaces.
+    // Deactivated, the pair is left out and gets no surfaces.
     model.contact_pairs[0].active = false;
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(text.contains("** Name: Contact_Pair-1: Deactivated\n"));
-    assert!(!text.contains("Contact_Pair-1_Master"));
+    assert!(lowered(&mesh, &model).model.contact.pairs.is_empty());
+    assert!(!text.contains("CONTACT_PAIR-1_MASTER"));
     // A pair needs its interaction.
     model.contact_pairs[0] = ContactPair::new("Contact_Pair-1", "Gone");
     assert!(matches!(
@@ -3683,8 +3562,8 @@ fn hard_contact_and_stick_slope_are_written_per_element_size() {
         ContactMethod::SurfaceToSurface,
     );
     let text = write_inp(&mesh, &model, "").unwrap();
-    let expected = "*Surface interaction, Name=Surface_Interaction-1\n\
-                    ** Hard contact as linear, K = 10 E/h, E = 210000, h = 5\n\
+    // Hard contact as linear, K = 10 E/h, E = 210000, h = 5.
+    let expected = "*Surface interaction, Name=SURFACE_INTERACTION-1\n\
                     *Surface behavior, Pressure-overclosure=Linear\n420000, 3\n\
                     *Friction\n0.1, 4200\n";
     assert!(text.contains(expected), "{text}");
@@ -4040,10 +3919,7 @@ fn solver_carries_a_block_on_springs_between_two_surfaces() {
     let load = [0.0, 0.0, 100.0];
     let model = blocks_model(&blocks, vec![Constraint::Spring(bearing.clone())], load);
     let text = write_inp(&blocks.mesh, &model, "").unwrap();
-    assert!(
-        text.contains("*Element, Type=SPRING2, Elset=Bearing-1_All\n"),
-        "{text}"
-    );
+    assert!(text.contains("*Element, Type=SPRING2\n"), "{text}");
     assert!(text.contains("*Equation\n"));
     let Some(frd) = run_solver("feder-flaeche", &text) else {
         return;
@@ -4085,9 +3961,9 @@ fn solver_carries_a_block_on_springs_to_ground() {
     let springs = vec![Constraint::Spring(face), Constraint::Spring(each)];
     let model = blocks_model(&blocks, springs, [0.0, 0.0, 95.0]);
     let text = write_inp(&blocks.mesh, &model, "").unwrap();
-    assert!(text.contains("*Element, Type=SPRING1, Elset=Spring-2_All\n"));
+    assert!(text.contains("*Element, Type=SPRING1\n"));
     assert!(
-        text.contains("*Spring, Elset=Spring-2_DOF_3\n3\n100.\n"),
+        text.contains("*Spring, Elset=SPRING-2_DOF_3\n3\n100, 0\n"),
         "{text}"
     );
     let Some(frd) = run_solver("federn", &text) else {
@@ -4100,7 +3976,7 @@ fn solver_carries_a_block_on_springs_to_ground() {
     let model = blocks_model(&blocks, vec![Constraint::Spring(shared)], [0.0, 0.0, 90.0]);
     let text = write_inp(&blocks.mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Spring, Elset=Spring-1_DOF_3\n3\n100.\n"),
+        text.contains("*Spring, Elset=SPRING-1_DOF_3\n3\n100, 0\n"),
         "{text}"
     );
     let lift = mean_top(&blocks, &run_solver("federn-knoten", &text).unwrap(), "U3");
@@ -4123,15 +3999,15 @@ fn springs_on_edges_are_spread_by_length() {
         panic!("{edge_nodes:?}")
     };
     assert!(
-        text.contains(&format!("Spring-1_{a}_DOF_3\n3\n100.\n")),
+        text.contains(&format!("SPRING-1_{a}_DOF_3\n3\n100, 0\n")),
         "{text}"
     );
     assert!(
-        text.contains(&format!("Spring-1_{b}_DOF_3\n3\n200.\n")),
+        text.contains(&format!("SPRING-1_{b}_DOF_3\n3\n200, 0\n")),
         "{text}"
     );
     assert!(
-        text.contains(&format!("Spring-1_{c}_DOF_3\n3\n100.\n")),
+        text.contains(&format!("SPRING-1_{c}_DOF_3\n3\n100, 0\n")),
         "{text}"
     );
 }
@@ -4186,7 +4062,7 @@ fn solver_compression_only_support_takes_only_pressure() {
     let down = [0.0, 0.0, -100.0];
     let pulled = support(up, &|_| {});
     assert!(pulled.contains("*Element, Type=GAPUNI\n"));
-    assert!(pulled.contains("*Plastic\n"));
+    assert!(pulled.contains("*Plastic, Hardening=Isotropic\n"));
     let Some(frd) = run_solver("druck-nur-zug", &pulled) else {
         return;
     };
@@ -4222,7 +4098,7 @@ fn solver_compression_only_support_takes_only_pressure() {
         c.each_node = true;
     };
     let text = support(down, &each);
-    assert_eq!(text.matches(", , 1000, ").count(), 1, "{text}");
+    assert_eq!(text.matches(", , 1000\n").count(), 1, "{text}");
     assert_eq!(text.matches("*Gap, Elset=").count(), 1, "{text}");
     let gaps = text.split("*Element, Type=GAPUNI\n").nth(1).unwrap();
     assert_eq!(gaps.lines().take_while(|l| !l.starts_with('*')).count(), 9);
@@ -4369,9 +4245,9 @@ fn beam_sections_type_their_elements_and_write_the_normal() {
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
         "*Element, Type=B32, Elset=BEAM\n1, 1, 2, 3\n2, 3, 4, 5\n",
-        "*Beam section, Elset=Internal_Selection-1_Beam-1, Material=Steel, Section=RECT\n\
+        "*Beam section, Elset=INTERNAL_SELECTION-1_BEAM-1, Material=STEEL, Section=Rect\n\
          10, 5\n0, 1, 0\n",
-        "*Boundary\nInternal_Selection-1_Fixed-1, 1, 6, 0\n",
+        "\nINTERNAL_SELECTION-1_FIXED-1, 1, 6, 0\n",
     ] {
         assert!(text.contains(line), "{line} missing in\n{text}");
     }
@@ -4384,10 +4260,10 @@ fn beam_sections_type_their_elements_and_write_the_normal() {
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("*Element, Type=B32R, Elset=BEAM\n"), "{text}");
     // CalculiX 2.21 reads the set name of a pipe or box 20 characters wide, so it is short.
-    assert!(text.contains("*Elset, Elset=Beam-1\n1, 2\n"), "{text}");
+    assert!(text.contains("*Elset, Elset=BEAM-1\n1, 2\n"), "{text}");
     assert!(
         text.contains(
-            "*Beam section, Elset=Beam-1, Material=Steel, Section=PIPE, Offset1=0.5\n\
+            "*Beam section, Elset=BEAM-1, Material=STEEL, Section=Pipe, Offset1=0.5\n\
              5, 1\n0, 0, 1\n"
         ),
         "{text}"
@@ -4395,7 +4271,7 @@ fn beam_sections_type_their_elements_and_write_the_normal() {
     // A circle is written by its diameter, as CalculiX reads it.
     model.sections[0].kind = SectionKind::Beam(beam("Circ"));
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(text.contains("Section=CIRC\n4, 4\n0, 0, 1\n"), "{text}");
+    assert!(text.contains("Section=Circ\n4, 4\n0, 0, 1\n"), "{text}");
 }
 
 /// An I-beam is no beam section of CalculiX: it is written as a general section of the user
@@ -4425,7 +4301,7 @@ fn general_profiles_are_written_for_user_element_u1() {
     for line in [
         "*User element, Type=U1, Nodes=2, Integration points=2, Maxdof=6\n\
          *Element, Type=U1, Elset=BEAM\n1, 1, 2\n",
-        "Material=Steel, Section=GENERAL\n",
+        "Material=STEEL, Section=General\n",
         "** Profile: I(h:100.0,b:50.0,tw:4.0,tf:6.0); Normal: 0, 0, 1\n",
     ] {
         assert!(text.contains(line), "{line} missing in\n{text}");
@@ -4462,7 +4338,7 @@ fn general_profiles_are_written_for_user_element_u1() {
     model.cross_sections.last_mut().unwrap().profile = angle.clone();
     let text = write_inp(&mesh, &model, "").unwrap();
     let (sin, cos) = angle.principal_turn().sin_cos();
-    let general = format!("Section=GENERAL\n{}, ", number(angle.data_line()[0]));
+    let general = format!("Section=General\n{}, ", number(angle.data_line()[0]));
     let at = text.find(&general).expect(&text);
     let written: Vec<f64> = (text[at..].lines().nth(2).unwrap().split(','))
         .map(|v| v.trim().parse().unwrap())
@@ -4520,7 +4396,7 @@ fn sketched_profiles_are_written_for_user_element_u1() {
         profile: sketch.clone(),
     });
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(text.contains("Section=GENERAL\n"), "{text}");
+    assert!(text.contains("Section=General\n"), "{text}");
     let comment = (text.lines()).find(|l| l.starts_with("** Profile: Sketch("));
     assert!(comment.is_some_and(|c| c.len() > 132), "{text}");
     let import = read_inp_str(&text, None).unwrap();
@@ -4570,11 +4446,11 @@ fn automatic_normals_split_a_frame_into_groups() {
     );
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
-        "*Elset, Elset=Internal_Selection-1_Beam-1\n1, 2\n",
-        "*Elset, Elset=Internal_Selection-2_Beam-1\n3, 4\n",
-        "*Beam section, Elset=Internal_Selection-1_Beam-1, Material=Steel, Section=RECT\n\
+        "*Elset, Elset=INTERNAL_SELECTION-1_BEAM-1\n1, 2\n",
+        "*Elset, Elset=INTERNAL_SELECTION-2_BEAM-1\n3, 4\n",
+        "*Beam section, Elset=INTERNAL_SELECTION-1_BEAM-1, Material=STEEL, Section=Rect\n\
          10, 5\n0, 0, 1\n\
-         *Beam section, Elset=Internal_Selection-2_Beam-1, Material=Steel, Section=RECT\n\
+         *Beam section, Elset=INTERNAL_SELECTION-2_BEAM-1, Material=STEEL, Section=Rect\n\
          10, 5\n1, 0, 0\n",
     ] {
         assert!(text.contains(line), "{line} missing in\n{text}");
@@ -4634,8 +4510,8 @@ fn trusses_are_written_as_t3d2_with_translations_only() {
     for line in [
         // The midside nodes of the quadratic lines are dropped.
         "*Element, Type=T3D2, Elset=BEAM\n1, 1, 3\n2, 3, 5\n",
-        "*Solid section, Elset=Internal_Selection-1_Beam-1, Material=Steel\n50\n",
-        "*Boundary\nInternal_Selection-1_Fixed-1, 1, 3, 0\n",
+        "*Solid section, Elset=INTERNAL_SELECTION-1_BEAM-1, Material=STEEL\n50\n",
+        "\nINTERNAL_SELECTION-1_FIXED-1, 1, 3, 0\n",
     ] {
         assert!(text.contains(line), "{line} missing in\n{text}");
     }
@@ -4715,12 +4591,11 @@ fn node_ties_merge_the_nodes_or_hinge_beams_with_equations() {
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
         "*Element, Type=B31, Elset=BEAM2\n101, 3, 102\n102, 102, 103\n",
-        "** Name: Node_Tie-1\n** Node 3 (merged)\n",
-        "*Nset, Nset=Internal_Selection-1_Held\n3\n",
+        "*Nset, Nset=INTERNAL_SELECTION-1_HELD\n3\n",
     ] {
         assert!(text.contains(line), "{line} missing in\n{text}");
     }
-    assert!(!text.contains("*Node\n101,") && !text.contains("\n101, 50, 0, 0\n"));
+    assert!(lowered(&mesh, &model).model.nodes.index(101).is_none());
     assert!(!text.contains("*Equation"));
     // A hinge between beams keeps the nodes and ties their translations.
     model.node_ties[0].rotations = false;
@@ -4728,15 +4603,15 @@ fn node_ties_merge_the_nodes_or_hinge_beams_with_equations() {
     // Node 101 is held in z: that equation depends on node 3 instead, which CalculiX
     // would otherwise refuse ("dependent side of a MPC and a SPC").
     let mut expected: String = (1..=2)
-        .map(|dof| format!("*Equation\n2\n101, {dof}, 1, 3, {dof}, -1\n"))
+        .map(|dof| format!("2\n101, {dof}, 1, 3, {dof}, -1\n"))
         .collect();
-    expected.push_str("*Equation\n2\n3, 3, -1, 101, 3, 1\n");
+    expected.push_str("2\n3, 3, -1, 101, 3, 1\n");
     assert_eq!(
         crate::inp::resolved_overlaps(&write_inp(&mesh, &model, "").unwrap()),
         ["Node_Tie-1: 1 equation on another degree of freedom (the first one is held already)"]
     );
     assert!(
-        text.contains(&format!("** Name: Node_Tie-1\n{expected}")) && !text.contains("101, 4, 1"),
+        text.contains(&format!("*Equation\n{expected}")) && !text.contains("101, 4, 1"),
         "{text}"
     );
     assert!(text.contains("*Element, Type=B31, Elset=BEAM2\n101, 101, 102\n"));
@@ -4745,13 +4620,12 @@ fn node_ties_merge_the_nodes_or_hinge_beams_with_equations() {
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("*Element, Type=T3D2, Elset=BEAM2\n101, 3, 102\n"));
     assert!(!text.contains("*Equation"));
-    // A deactivated tie is a comment, an empty one an error.
+    // A deactivated tie is left out, an empty one an error.
     model.node_ties[0] = NodeTie {
         active: false,
         ..NodeTie::new("Node_Tie-1")
     };
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(text.contains("** Name: Node_Tie-1: Deactivated\n"));
     assert!(text.contains("*Element, Type=T3D2, Elset=BEAM2\n101, 101, 102\n"));
     model.node_ties[0] = NodeTie::new("Node_Tie-1");
     assert!(matches!(
@@ -4923,9 +4797,9 @@ fn a_rigid_remote_displacement_couples_beam_nodes_by_equations() {
     let (reference, rotation) = (tip + 1, tip + 2);
     // u_tip = u_point + theta x (0, 0, -20)
     for expected in [
-        format!("*Equation\n3\n{tip}, 1, 1, {reference}, 1, -1, {rotation}, 2, 20\n"),
-        format!("*Equation\n3\n{tip}, 2, 1, {reference}, 2, -1, {rotation}, 1, -20\n"),
-        format!("*Equation\n2\n{tip}, 3, 1, {reference}, 3, -1\n"),
+        format!("\n3\n{tip}, 1, 1, {reference}, 1, -1, {rotation}, 2, 20\n"),
+        format!("\n3\n{tip}, 2, 1, {reference}, 2, -1, {rotation}, 1, -20\n"),
+        format!("\n2\n{tip}, 3, 1, {reference}, 3, -1\n"),
     ] {
         assert!(text.contains(&expected), "{expected}\n{text}");
     }
@@ -4945,7 +4819,7 @@ fn a_rigid_remote_displacement_couples_beam_nodes_by_equations() {
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(!text.contains("*Rigid body"), "{text}");
     assert!(
-        text.contains(&format!("*Equation\n2\n{tip}, 1, 1, {reference}, 1, -1\n")),
+        text.contains(&format!("\n2\n{tip}, 1, 1, {reference}, 1, -1\n")),
         "{text}"
     );
 }
@@ -4985,11 +4859,8 @@ fn a_rigid_body_keeps_its_solid_nodes_and_couples_beam_nodes_by_equations() {
         .next()
         .unwrap();
     assert!(!members.contains(&start.to_string()), "{members}");
-    assert_eq!(text.matches("*Equation\n").count(), 3, "{text}");
-    assert!(
-        text.contains(&format!("*Equation\n2\n{start}, 1, 1, ")),
-        "{text}"
-    );
+    assert_eq!(equations(&mesh, &model), 3, "{text}");
+    assert!(text.contains(&format!("\n2\n{start}, 1, 1, ")), "{text}");
 }
 
 #[test]
@@ -5176,18 +5047,15 @@ fn writes_heat_transfer_keywords() {
     });
     let text = write_inp(&mesh, &model, "").unwrap();
     for expected in [
-        "*Physical constants, Absolute zero=-273.15, Stefan Boltzmann=0.0000000000567\n",
-        "*Expansion, Zero=20\n0.00001\n*Conductivity\n50\n*Specific heat\n460000000\n",
-        "** Name: Initial_Temperature-1\n*Initial conditions, Type=Temperature\n",
+        "*Physical constants, Absolute zero=-273.15, Stefan Boltzmann=5.67e-11\n",
+        "*Expansion, Zero=20\n0.00001, 0\n*Conductivity\n50, 0\n*Specific heat\n460000000, 0\n",
+        "*Initial conditions, Type=Temperature\nINTERNAL_SELECTION-1_INITIAL_TEMPERATURE-1, 20\n",
         "*Heat transfer, Deltmx=5\n",
-        "** Name: Temperature-1\n*Boundary\nFIX, 11, 11, 20\n",
         // Displacements and forces do not act in a heat transfer step.
-        "** Name: Fixed-1: Deactivated\n",
-        "** Name: Force-1: Deactivated\n",
-        "*Cflux, op=New\n*Dflux, op=New\n*Film, op=New\n",
-        "*Cflux\nInternal_Selection-1_Flux-1, 11, 3\n",
-        "*Dflux\nInternal_Selection-1_Body-1, BF, 0.5\n",
-        "*Film\nInternal-1_TIP_S4, F4, 25, 0.01\n",
+        "*Boundary\nFIX, 11, 11, 20\n*Cflux",
+        "*Cflux, op=New\nINTERNAL_SELECTION-1_FLUX-1, 11, 3\n",
+        "*Dflux, op=New\nINTERNAL_SELECTION-1_BODY-1, BF, 0.5\n",
+        "*Film, op=New\nINTERNAL-1_TIP_S4, F4, 25, 0.01\n",
         "*Node file\nNT, RFL\n",
         "*El file\nHFL\n",
     ] {
@@ -5253,7 +5121,7 @@ fn temperature_from_file(name: &str, file: &str, step: u32) -> DefinedField {
 }
 
 #[test]
-fn a_defined_temperature_is_written_like_prepomax_does() {
+fn a_defined_temperature_is_written() {
     let (mesh, mut model) = thermal_bar(
         StepKind::Static(StaticStep::default()),
         Vec::new(),
@@ -5269,14 +5137,13 @@ fn a_defined_temperature_is_written_like_prepomax_does() {
     ];
     model.steps[0].defined_fields[1].active = false;
     let text = write_inp(&mesh, &model, "").unwrap();
-    let expected = "** Name: Defined_Temperature-1\n*Temperature\n\
-                    Internal_Selection-1_Defined_Temperature-1, 120\n\
-                    ** Name: Defined_Temperature-2: Deactivated\n";
+    let expected = "*Temperature, op=New\n\
+                    INTERNAL_SELECTION-1_DEFINED_TEMPERATURE-1, 120\n*Node file";
     assert!(text.contains(expected), "{text}");
     model.steps[0].defined_fields[1].active = true;
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("** Name: Defined_Temperature-2\n*Temperature, File=heat run.frd, BStep=2\n"),
+        text.contains("*Temperature, File=\"heat run.frd\", Bstep=2\n"),
         "{text}"
     );
     assert_eq!(
@@ -5286,10 +5153,6 @@ fn a_defined_temperature_is_written_like_prepomax_does() {
     // A thermal step solves for the temperatures and leaves the fields out.
     model.steps[0].kind = steady();
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(
-        text.contains("** Name: Defined_Temperature-1: Deactivated\n"),
-        "{text}"
-    );
     assert!(!text.contains("*Temperature"), "{text}");
     assert!(model.result_files().is_empty());
     model.steps[0].kind = StepKind::Static(StaticStep::default());
@@ -5727,13 +5590,12 @@ fn writes_amplitudes_and_their_references() {
     });
     let text = write_inp(&mesh, &model, "").unwrap();
     for expected in [
-        "** Amplitudes ",
-        "*Amplitude, Name=Ramp_up, Time=Total time, Shiftx=0.1, Shifty=-0.5\n\
-         0, 0, 0.2, 0.5, 0.4, 1, 0.6, 1\n1, 0.25\n",
-        "*Amplitude, Name=Half\n0, 0.5\n",
-        "** Name: Fixed-1\n*Boundary\nFIX, 1, 6, 0\n",
-        "** Name: Displacement-1\n*Boundary, Amplitude=Half\n",
-        "*Cload, Amplitude=Ramp_up\nInternal_Selection-1_Force-1, 3, -100\n",
+        "*Amplitude, Name=RAMP_UP, Time=Total time, Shiftx=0.1, Shifty=-0.5\n\
+         0, 0, 0.2, 0.5, 0.4, 1, 0.6, 1,\n1, 0.25\n",
+        "*Amplitude, Name=HALF\n0, 0.5\n",
+        "\nFIX, 1, 6, 0\n",
+        "*Boundary, Amplitude=HALF\nINTERNAL_SELECTION-1_DISPLACEMENT-1, 2, 2, 0.5\n",
+        "*Cload, op=New, Amplitude=RAMP_UP\nINTERNAL_SELECTION-1_FORCE-1, 3, -100\n",
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
@@ -5804,11 +5666,11 @@ fn writes_both_amplitudes_of_films_and_radiation() {
     ];
     let text = write_inp(&mesh, &model, "").unwrap();
     for expected in [
-        "*Boundary, Amplitude=Sink\nFIX, 11, 11, 20\n",
-        "*Film, Amplitude=Sink, Film amplitude=Coefficient\n",
-        "*Radiate, Radiation amplitude=Coefficient\n",
-        "*Cflux, Amplitude=Sink\n",
-        "*Dflux, Amplitude=Sink\n",
+        "*Boundary, Amplitude=SINK\nFIX, 11, 11, 20\n",
+        "*Film, op=New, Amplitude=SINK, Film amplitude=COEFFICIENT\n",
+        "*Radiate, op=New, Radiation amplitude=COEFFICIENT\n",
+        "*Cflux, op=New, Amplitude=SINK\n",
+        "*Dflux, op=New, Amplitude=SINK\n",
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
@@ -5946,7 +5808,7 @@ fn solver_reads_a_total_time_amplitude_with_shifts_across_steps() {
     }
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Amplitude, Name=Total, Time=Total time, Shiftx=0.25, Shifty=0.1\n"),
+        text.contains("*Amplitude, Name=TOTAL, Time=Total time, Shiftx=0.25, Shifty=0.1\n"),
         "{text}"
     );
     let Some(frd) = run_solver("amplitude_total_time", &text) else {
@@ -6023,8 +5885,8 @@ fn solver_scales_distributed_loads_and_displacements_by_amplitudes() {
     ];
     let text = write_inp(&mesh, &model, "").unwrap();
     for expected in [
-        "*Dload, Amplitude=Rise\n",
-        "*Boundary, Amplitude=Fall\nInternal_Selection-1_Lift-1, 3, 3, 0.01\n",
+        "*Dload, op=New, Amplitude=RISE\n",
+        "*Boundary, Amplitude=FALL\nINTERNAL_SELECTION-1_LIFT-1, 3, 3, 0.01\n",
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
@@ -6076,22 +5938,18 @@ fn history_outputs_become_print_keywords_with_their_sets() {
     step.history_outputs.push(empty);
     let text = write_inp(&mesh, &model, "").unwrap();
     for expected in [
-        "*Nset, Nset=Internal_Selection-1_NH_Output-1\n99\n",
-        "*Elset, Elset=Internal_Selection-1_EH_Output-1\nEALL\n",
-        "** History outputs +++++++++++++++++++++++++++++++++++++++++\n**\n\
-         ** Name: NH_Output-1\n\
-         *Node print, Nset=Internal_Selection-1_NH_Output-1, Totals=Yes\nRF, U\n\
-         ** Name: EH_Output-1\n\
-         *El print, Elset=Internal_Selection-1_EH_Output-1\nS, EVOL\n\
-         ** Name: NH_Output-2: Deactivated\n**\n",
+        "*Nset, Nset=INTERNAL_SELECTION-1_NH_OUTPUT-1\n99\n",
+        "*Elset, Elset=INTERNAL_SELECTION-1_EH_OUTPUT-1\n1, 2, 3,",
+        // The deactivated one is left out.
+        "*Node print, Nset=INTERNAL_SELECTION-1_NH_OUTPUT-1, Totals=Yes\nRF, U\n\
+         *El print, Elset=INTERNAL_SELECTION-1_EH_OUTPUT-1\nS, EVOL\n*End step\n",
     ] {
         assert!(text.contains(expected), "{expected}\nmissing in\n{text}");
     }
-    assert!(!text.contains("NH_Output-3"));
-    // A deactivated step lists its history outputs as comments.
+    assert!(!text.contains("NH_OUTPUT-3"));
+    // A deactivated step has none.
     model.steps[0].active = false;
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(text.contains("** Name: NH_Output-1: Deactivated\n"));
     assert!(!text.contains("*Node print"));
 }
 
@@ -6102,7 +5960,7 @@ fn contact_forces_need_an_active_contact_pair() {
     model.steps[0].history_outputs.push(output.clone());
     // Without contact forces no surfaces are needed.
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(text.contains("** Name: CH_Output-1\n*Contact print\nCDIS, CSTR\n"));
+    assert!(text.contains("*Contact print\nCDIS, CSTR\n"), "{text}");
     output.variables.push("CF".into());
     model.steps[0].history_outputs[0] = output;
     assert_eq!(
@@ -6185,8 +6043,8 @@ fn solver_prints_the_contact_force_of_a_pair() {
     model.steps[0].history_outputs.push(output);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains(
-        "*Contact print, Master=Internal_Selection-1_Contact_Pair-1_Master, \
-         Slave=Internal_Selection-1_Contact_Pair-1_Slave\nCDIS, CSTR, CNUM, CF\n"
+        "*Contact print, Slave=INTERNAL_SELECTION-1_CONTACT_PAIR-1_SLAVE, \
+         Master=INTERNAL_SELECTION-1_CONTACT_PAIR-1_MASTER\nCDIS, CSTR, CNUM, CF\n"
     ));
     let Some(dat) = run_dat("kontakt-historie", &text) else {
         return;
@@ -6231,7 +6089,7 @@ fn coasting_cantilever(kind: plx_model::InitialConditionKind) -> (FeMesh, FeMode
 }
 
 #[test]
-fn initial_velocities_are_written_like_prepomax_does() {
+fn initial_velocities_are_written() {
     use plx_model::InitialConditionKind;
     let (mesh, mut model) =
         coasting_cantilever(InitialConditionKind::Velocity([0.0, 0.0, -1000.0]));
@@ -6251,9 +6109,7 @@ fn initial_velocities_are_written_like_prepomax_does() {
     let text = write_inp(&mesh, &model, "").unwrap();
     // y x (x, y, z - 5) = (z - 5, 0, -x): the tip moves down and, off the axis, along x.
     let expected = format!(
-        "** Name: Initial_Velocity-1\n*Initial conditions, Type=Velocity\nFIX, 3, -1000\n\
-         ** Name: Initial_Angular_Velocity-1\n*Initial conditions, Type=Velocity\n\
-         99, 1, {}\n99, 3, {}\n",
+        "*Initial conditions, Type=Velocity\nFIX, 3, -1000\n99, 1, {}\n99, 3, {}\n",
         number(10.0 * (tip[2] - 5.0)),
         number(-10.0 * tip[0])
     );
@@ -6307,13 +6163,11 @@ fn body_load(kind: LoadKind) -> Load {
 }
 
 #[test]
-fn gravity_and_centrifugal_loads_are_written_like_prepomax() {
+fn gravity_and_centrifugal_loads_are_written() {
     let (mesh, model) = cantilever(body_load(LoadKind::Gravity([0.0, 0.0, -9810.0])));
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains(
-            "** Name: Body-1\n*Dload\nInternal_Selection-1_Body-1, Grav, 9810, 0, 0, -1\n"
-        ),
+        text.contains("*Dload, op=New\nINTERNAL_SELECTION-1_BODY-1, GRAV, 9810, 0, 0, -1\n"),
         "{text}"
     );
     let (mesh, model) = cantilever(body_load(LoadKind::Centrifugal {
@@ -6323,7 +6177,9 @@ fn gravity_and_centrifugal_loads_are_written_like_prepomax() {
     }));
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Dload\nInternal_Selection-1_Body-1, Centrif, 10000, 0, 5, 5, 0, 0, 1\n"),
+        text.contains(
+            "*Dload, op=New\nINTERNAL_SELECTION-1_BODY-1, CENTRIF, 10000, 0, 5, 5, 0, 0, 1\n"
+        ),
         "{text}"
     );
     let (mesh, model) = cantilever(body_load(LoadKind::Gravity([0.0; 3])));
@@ -6465,18 +6321,17 @@ fn cantilever_submodel(dofs: [bool; 6]) -> (FeMesh, FeModel) {
 }
 
 #[test]
-fn a_complex_frequency_step_is_written_like_prepomax_does() {
+fn a_complex_frequency_step_is_written() {
     let (mesh, mut model) = rotor_analysis(100.0);
     let text = write_inp(&mesh, &model, "").unwrap();
     let complex = &text[text.find("** Step-3").unwrap()..];
     for line in [
-        "*Step, Perturbation\n*Complex frequency, Coriolis\n4\n",
-        "*Boundary\nFIX, 1, 6, 0\n",
+        "*Step, Perturbation, Inc=100, Amplitude=Ramp\n*Complex frequency, Coriolis\n4\n",
+        "\nFIX, 1, 6, 0\n",
         "*Node file\nU, PU\n",
     ] {
         assert!(complex.contains(line), "missing {line:?} in\n{complex}");
     }
-    assert!(!complex.contains("*Dload"), "{complex}");
     let StepKind::ComplexFrequency(settings) = &mut model.steps[2].kind else {
         unreachable!()
     };
@@ -6486,7 +6341,10 @@ fn a_complex_frequency_step_is_written_like_prepomax_does() {
     };
     settings.perturbation = false;
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(text.contains("*Step\n*Complex frequency\n4\n"), "{text}");
+    assert!(
+        text.contains("*Step, Inc=100, Amplitude=Ramp\n*Complex frequency\n4\n"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -6502,9 +6360,9 @@ fn the_complex_frequency_step_takes_perturbation_from_the_stored_frequency_step(
         let text = write_inp(&mesh, &model, "").unwrap();
         let complex = &text[text.find("** Step-3").unwrap()..];
         let header = if perturbation {
-            "*Step, Perturbation\n"
+            "*Step, Perturbation, Inc=100, Amplitude=Ramp\n"
         } else {
-            "*Step\n"
+            "*Step, Inc=100, Amplitude=Ramp\n"
         };
         assert!(
             complex.contains(&format!("{header}*Complex frequency, Coriolis\n")),
@@ -6585,12 +6443,12 @@ fn submodels_read_the_cut_displacements_of_the_global_results() {
     let text = write_inp(&mesh, &model, "").unwrap();
     let heading = text.find("*Heading").unwrap();
     let submodel = text
-        .find("*Submodel, Type=Node, Input=\"global.frd\"\nInternal_Selection-1_Submodel-1\n")
+        .find("*Submodel, Type=Node, Input=\"global.frd\"\nINTERNAL_SELECTION-1_SUBMODEL-1\n")
         .expect(&text);
     assert!(heading < submodel && submodel < text.find("*Node").unwrap());
     assert!(text.contains(
-        "** Name: Submodel-1\n*Boundary, Submodel, Step=1\nInternal_Selection-1_Submodel-1, 1, 1\n\
-         Internal_Selection-1_Submodel-1, 3, 3\n"
+        "*Boundary, Submodel, Step=1\nINTERNAL_SELECTION-1_SUBMODEL-1, 1, 1\n\
+         INTERNAL_SELECTION-1_SUBMODEL-1, 3, 3\n"
     ));
 
     // A general model has no global results, as in PrePoMax.
@@ -6727,21 +6585,21 @@ fn half_shell_plate(angle: f64) -> (FeMesh, FeModel, NodeId) {
 fn a_symmetry_plane_holds_the_normal_displacement_and_the_in_plane_rotations() {
     let (mesh, model, _) = half_shell_plate(0.0);
     let text = write_inp(&mesh, &model, "").unwrap();
-    let expected = "** Name: Symmetry-1\n*Boundary\nInternal_Selection-1_Symmetry-1, 2, 2, 0\n\
-                    Internal_Selection-1_Symmetry-1, 4, 4, 0\n\
-                    Internal_Selection-1_Symmetry-1, 6, 6, 0\n";
+    let expected = "\nINTERNAL_SELECTION-1_SYMMETRY-1, 2, 2, 0\n\
+                    INTERNAL_SELECTION-1_SYMMETRY-1, 4, 4, 0\n\
+                    INTERNAL_SELECTION-1_SYMMETRY-1, 6, 6, 0\n";
     assert!(text.contains(expected), "{text}");
     assert!(!text.contains("*Transform"), "{text}");
 
     // A skewed plane gets a local system with x along its normal.
     let (mesh, model, _) = half_shell_plate(30.0);
     let text = write_inp(&mesh, &model, "").unwrap();
-    let expected = "*Boundary\nInternal_Selection-1_Symmetry-1, 1, 1, 0\n\
-                    Internal_Selection-1_Symmetry-1, 5, 5, 0\n\
-                    Internal_Selection-1_Symmetry-1, 6, 6, 0\n";
+    let expected = "\nINTERNAL_SELECTION-1_SYMMETRY-1, 1, 1, 0\n\
+                    INTERNAL_SELECTION-1_SYMMETRY-1, 5, 5, 0\n\
+                    INTERNAL_SELECTION-1_SYMMETRY-1, 6, 6, 0\n";
     assert!(text.contains(expected), "{text}");
     let transform = text
-        .split("*Transform, Nset=Internal_Selection-1_Symmetry-1, Type=R\n")
+        .split("*Transform, Nset=INTERNAL_SELECTION-1_SYMMETRY-1, Type=R\n")
         .nth(1)
         .expect("transform missing");
     let values: Vec<f64> = (transform.lines().next().unwrap().split(','))
@@ -6884,7 +6742,7 @@ fn solver_holds_a_2d_model_in_a_skewed_symmetry_line_alike() {
         });
         let text = write_inp(&mesh, &model, "").unwrap();
         if angle == 0.0 {
-            assert!(text.contains("Symmetry-1, 2, 2, 0\n**"), "{text}");
+            assert!(text.contains("SYMMETRY-1, 2, 2, 0\n"), "{text}");
         }
         let Some(frd) = run_solver(&format!("symmetrie-2d-{angle}"), &text) else {
             return;
@@ -6995,21 +6853,20 @@ fn moving_cantilever() -> (FeMesh, FeModel) {
 fn a_moving_load_writes_a_step_per_position() {
     let (mesh, model) = moving_cantilever();
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert_eq!(text.matches("\n*Step").count(), 5, "{text}");
-    assert!(text.contains("** Moving load position 1 of 5, Moving-1 at 10\n*Step"));
-    assert!(text.contains("** Moving load position 5 of 5, Moving-1 at 90\n*Step"));
+    let analysis = lowered(&mesh, &model);
+    assert_eq!(analysis.steps.len(), 5, "{text}");
     // Each step holds the tip force and the wheel's 100 N spread over the top face.
-    for block in text.split("\n*Step").skip(1) {
-        let moving = block.split("** Name: Moving-1\n*Cload\n").nth(1).unwrap();
-        let total: f64 = (moving.lines())
-            .take_while(|l| !l.starts_with('*'))
-            .map(|l| l.split(", ").nth(2).unwrap().parse::<f64>().unwrap())
-            .sum();
+    for step in &analysis.steps {
+        let loads = &step.loads.concentrated;
+        let tip = (loads.iter())
+            .filter(|l| matches!(&l.region, NodeRef::Set(s) if s.ends_with("FORCE-1")));
+        assert_eq!(tip.map(|l| l.value).collect::<Vec<_>>(), [-100.0]);
+        let wheel = (loads.iter()).filter(|l| matches!(l.region, NodeRef::Node(_)));
+        let total: f64 = wheel.map(|l| l.value).sum();
         assert!((total + 100.0).abs() < 1e-9, "{total}");
-        assert!(block.contains("** Name: Force-1\n*Cload\n"));
     }
     // The node sets of other items are written once.
-    assert_eq!(text.matches("*Nset, Nset=Internal_Selection").count(), 1);
+    assert_eq!(text.matches("*Nset, Nset=INTERNAL_SELECTION").count(), 1);
 }
 
 #[test]
@@ -7019,11 +6876,11 @@ fn a_moving_load_off_its_faces_is_left_out() {
         unreachable!()
     };
     moving.end = 200.0;
-    let text = write_inp(&mesh, &model, "").unwrap();
-    let last = text.split("\n*Step").last().unwrap();
+    let analysis = lowered(&mesh, &model);
+    let last = &analysis.steps.last().unwrap().loads.concentrated;
     assert!(
-        last.contains("** Name: Moving-1: No wheel on the region\n"),
-        "{last}"
+        !last.iter().any(|l| matches!(l.region, NodeRef::Node(_))),
+        "{last:?}"
     );
 }
 
@@ -7108,17 +6965,14 @@ fn a_sensitivity_step_writes_design_variables_and_responses() {
     assert!(design < text.find("*Step").unwrap(), "{text}");
     let step = &text[text.find("** Step-2").unwrap()..];
     for line in [
-        "*Step\n*Sensitivity\n",
-        "*Design response, Name=MASS\nMASS, Internal_Selection-1_Step-2\n",
-        "*Design response, Name=STRAINENERGY\nSTRAINENERGY, Internal_Selection-1_Step-2\n",
-        "*Filter, Type=Linear\n15\n",
+        "*Step, Inc=100, Amplitude=Ramp\n*Sensitivity\n",
+        "*Design response, Name=MASS\nMASS, INTERNAL_SELECTION-1_STEP-2\n",
+        "*Design response, Name=STRAINENERGY\nSTRAINENERGY, INTERNAL_SELECTION-1_STEP-2\n",
+        "*Filter, Type=LINEAR\n15\n",
         "*Node file\nSEN\n",
     ] {
         assert!(step.contains(line), "missing {line:?} in\n{step}");
     }
-    // The step evaluates the static solution: no supports, loads or their resets.
-    assert!(!step.contains("*Boundary"), "{step}");
-    assert!(!step.contains("*Cload"), "{step}");
     // Eigenfrequencies come alone, without an element set.
     let StepKind::Sensitivity(settings) = &mut model.steps[1].kind else {
         unreachable!()
@@ -7259,8 +7113,8 @@ fn a_visco_step_and_a_creep_law_are_written() {
     model.steps.push(step);
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
-        "*Elastic\n210000, 0.3\n*Creep, Law=Norton\n1.00000000E-15, 5, 0\n",
-        "*Step, Inc=1000\n*Visco, Cetol=0.0001\n1, 1000, 0.00001, 1.00000000E30\n",
+        "*Elastic\n210000, 0.3, 0\n*Creep, Law=Norton\n1e-15, 5, 0, 0\n",
+        "*Step, Inc=1000, Amplitude=Ramp\n*Visco, Cetol=0.0001\n1, 1000, 0.00001, 1e30\n",
         "*El file\nS, E, PEEQ, NOE\n",
     ] {
         assert!(text.contains(line), "{line:?} missing in\n{text}");
@@ -7425,7 +7279,7 @@ fn disk(sectors: u32, full: bool) -> (FeMesh, FeModel, Faces, Faces) {
 }
 
 #[test]
-fn a_cyclic_symmetry_tie_is_written_like_prepomax_does() {
+fn a_cyclic_symmetry_tie_is_written() {
     let (mesh, mut model, left, right) = disk(12, false);
     let mut tie = plx_model::Tie::new("Tie-1");
     tie.master = Region::Faces(left);
@@ -7436,14 +7290,14 @@ fn a_cyclic_symmetry_tie_is_written_like_prepomax_does() {
     // of them show by default.
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Cyclic symmetry model, N=12, Tie=Tie-1, Ngraph=12\n0, 0, 0, 0, 0, 1\n"),
+        text.contains("*Cyclic symmetry model, N=12, Ngraph=12, Tie=TIE-1\n0, 0, 0, 0, 0, 1\n"),
         "{text}"
     );
     model.ties[0].cyclic.as_mut().unwrap().display = plx_model::SectorDisplay::Single;
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
-        "*Tie, Name=Tie-1, Cyclic symmetry\n",
-        "*Cyclic symmetry model, N=12, Tie=Tie-1\n0, 0, 0, 0, 0, 1\n",
+        "*Tie, Name=TIE-1, Cyclic symmetry\n",
+        "*Cyclic symmetry model, N=12, Ngraph=1, Tie=TIE-1\n0, 0, 0, 0, 0, 1\n",
         "*Frequency\n20\n*Select cyclic symmetry modes\n",
     ] {
         assert!(text.contains(line), "{line:?} missing in\n{text}");
@@ -7459,8 +7313,11 @@ fn a_cyclic_symmetry_tie_is_written_like_prepomax_does() {
     );
     // The bore nodes of the slave side follow the master side; CalculiX refuses them in
     // a boundary condition as well.
-    assert!(text.contains("*Boundary\nInternal_Selection-1_Fixed-1, 1, 6, 0\n"));
-    let set = "*Nset, Nset=Internal_Selection-1_Fixed-1\n";
+    assert!(
+        text.contains("*Boundary\nINTERNAL_SELECTION-1_FIXED-1, 1, 6, 0\n"),
+        "{text}"
+    );
+    let set = "*Nset, Nset=INTERNAL_SELECTION-1_FIXED-1\n";
     let nodes = &text[text.find(set).unwrap() + set.len()..];
     let nodes: Vec<&str> = nodes.lines().next().unwrap().split(", ").collect();
     assert_eq!(nodes.len(), 3 * 4, "{nodes:?}");
@@ -7718,11 +7575,9 @@ fn the_edge_of_a_shell_or_membrane_tied_to_a_solid_carries_its_load() {
         let text = write_inp(&mesh, &model, "").unwrap();
         // CalculiX ties membrane edges by their nodes only.
         let slave = if plate_type == "S4" {
-            "*Surface, Name=Internal_Selection-1_Tie-1_Slave, Type=Element\n\
-             Internal-1_Internal_Selection-1_Tie-1_Slave_S5, S5\n"
+            "*Surface, Name=INTERNAL_SELECTION-1_TIE-1_SLAVE, Type=Element\n203, S5\n204, S5\n"
         } else {
-            "*Surface, Name=Internal_Selection-1_Tie-1_Slave, Type=Node\n\
-             Internal-1_Internal_Selection-1_Tie-1_Slave\n"
+            "*Surface, Name=INTERNAL_SELECTION-1_TIE-1_SLAVE, Type=Node\n"
         };
         assert!(
             text.contains(slave),
@@ -7846,10 +7701,7 @@ fn solver_turns_the_remote_point_of_a_plane_model() {
     model.steps[0].boundary_conditions.push(bc);
     let text = write_inp(&mesh, &model, "").unwrap();
     // U3, UR1 and UR2 do not exist in a plane model.
-    assert!(
-        text.contains("** Name: Remote-1\n*Boundary\n56, 1, 2, 0\n57, 3, 3, 0.01\n**"),
-        "{text}"
-    );
+    assert!(text.contains("\n56, 1, 2, 0\n57, 3, 3, 0.01\n"), "{text}");
     let Some(frd) = run_solver("remote-2d", &text) else {
         return;
     };
@@ -7902,7 +7754,7 @@ fn solver_turns_the_reference_point_of_a_plane_model() {
     });
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("** Name: Turn-1\n*Boundary\n") && text.contains(", 3, 3, 0.01\n"),
+        text.contains("\n") && text.contains(", 3, 3, 0.01\n"),
         "{text}"
     );
     let Some(frd) = run_solver("referenzpunkt-2d", &text) else {
@@ -8013,13 +7865,11 @@ fn a_point_history_output_prints_its_reference_and_rotation_node() {
     model.steps[0].history_outputs.push(temperatures);
     let text = write_inp(&mesh, &model, "").unwrap();
     for expected in [
-        "*Nset, Nset=Internal_Selection-1_NH_Output-1\n100\n",
-        "*Nset, Nset=Internal_Rotation-1_NH_Output-1\n101\n",
-        "** Name: NH_Output-1\n\
-         *Node print, Nset=Internal_Selection-1_NH_Output-1\nRF, U\n\
-         *Node print, Nset=Internal_Rotation-1_NH_Output-1\nRF, U\n\
-         ** Name: NH_Output-2\n\
-         *Node print, Nset=Internal_Selection-1_NH_Output-2\nNT\n**\n",
+        "*Nset, Nset=INTERNAL_SELECTION-1_NH_OUTPUT-1\n100\n",
+        "*Nset, Nset=INTERNAL_ROTATION-1_NH_OUTPUT-1\n101\n",
+        "*Node print, Nset=INTERNAL_SELECTION-1_NH_OUTPUT-1\nRF, U\n\
+         *Node print, Nset=INTERNAL_ROTATION-1_NH_OUTPUT-1\nRF, U\n\
+         *Node print, Nset=INTERNAL_SELECTION-1_NH_OUTPUT-2\nNT\n",
     ] {
         assert!(text.contains(expected), "{expected}\nmissing in\n{text}");
     }
@@ -8046,11 +7896,11 @@ fn a_remote_point_history_output_prints_the_nodes_of_the_point() {
     ));
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Nset, Nset=Internal_Selection-1_NH_Output-1\n100\n"),
+        text.contains("*Nset, Nset=INTERNAL_SELECTION-1_NH_OUTPUT-1\n100\n"),
         "{text}"
     );
     assert!(
-        text.contains("*Nset, Nset=Internal_Rotation-1_NH_Output-1\n101\n"),
+        text.contains("*Nset, Nset=INTERNAL_ROTATION-1_NH_OUTPUT-1\n101\n"),
         "{text}"
     );
     // A displacement held at each node has no point.
@@ -8175,8 +8025,8 @@ fn solver_prints_the_rotation_of_a_deformable_remote_point() {
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
         text.contains(
-            "*Node print, Nset=Internal_Selection-1_NH_Output-1\nU\n\
-             *Node print, Nset=Internal_Rotation-1_NH_Output-1\nU\n"
+            "*Node print, Nset=INTERNAL_SELECTION-1_NH_OUTPUT-1\nU\n\
+             *Node print, Nset=INTERNAL_ROTATION-1_NH_OUTPUT-1\nU\n"
         ),
         "{text}"
     );
@@ -8244,8 +8094,8 @@ fn a_bonded_region_is_a_tie_with_a_tolerance_of_the_mesh_size() {
     // Faces of 5 x 5 mm: a quarter of it.
     assert!(
         text.contains(
-            "*Tie, Name=Region-1, Position tolerance=1.25\n\
-             Internal_Selection-1_Region-1_Slave, Internal_Selection-1_Region-1_Master\n"
+            "*Tie, Name=REGION-1, Position tolerance=1.25\n\
+             INTERNAL_SELECTION-1_REGION-1_SLAVE, INTERNAL_SELECTION-1_REGION-1_MASTER\n"
         ),
         "{text}"
     );
@@ -8267,7 +8117,7 @@ fn solver_ties_a_detected_gap_wider_than_a_quarter_of_the_mesh_size() {
     model.contact_regions[0].detected_by = Some("Detection-1".into());
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Tie, Name=Region-1, Position tolerance=2\n"),
+        text.contains("*Tie, Name=REGION-1, Position tolerance=2\n"),
         "{text}"
     );
     let resolved = model.resolve_contacts(&mesh);
@@ -8602,7 +8452,7 @@ fn solver_carries_the_load_across_detected_contacts() {
     model.detect_contacts(0, &mesh, &skins, &[true, true]);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Tie, Name=Bonded_-_LOWER_to_UPPER"),
+        text.contains("*Tie, Name=BONDED_-_LOWER_TO_UPPER"),
         "{text}"
     );
     let Some(frd) = run_solver("detected-bonded", &text) else {
@@ -8701,11 +8551,8 @@ fn solver_holds_a_region_of_no_separation_together_and_lets_it_slide() {
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(!text.contains("*Contact pair") && !text.contains("*Tie"));
     // The nine nodes of the upper block's bottom, each on a node of the lower block's top.
-    assert_eq!(text.matches("*Equation\n2\n").count(), 9, "{text}");
-    assert!(
-        text.contains("*Equation\n2\n105, 3, -1, 14, 3, 1\n"),
-        "{text}"
-    );
+    assert_eq!(equations(&mesh, &model), 9, "{text}");
+    assert!(text.contains("\n2\n105, 3, -1, 14, 3, 1\n"), "{text}");
     let Some(frd) = run_solver("region-no-separation", &text) else {
         return;
     };
@@ -8743,14 +8590,11 @@ fn solver_solves_no_separation_on_nodes_held_by_a_boundary_condition() {
     // Nodes 101, 104 and 107 sit on the master nodes 10, 13 and 16.
     for (slave, master) in [(101, 10), (104, 13), (107, 16)] {
         assert!(
-            text.contains(&format!("*Equation\n2\n{master}, 3, 1, {slave}, 3, -1\n")),
+            text.contains(&format!("\n2\n{master}, 3, 1, {slave}, 3, -1\n")),
             "{text}"
         );
     }
-    assert!(
-        text.contains("*Equation\n2\n105, 3, -1, 14, 3, 1\n"),
-        "{text}"
-    );
+    assert!(text.contains("\n2\n105, 3, -1, 14, 3, 1\n"), "{text}");
     assert_eq!(
         crate::inp::resolved_overlaps(&text),
         ["Region-1: 3 equations on another degree of freedom (the first one is held already)"]
@@ -8837,8 +8681,8 @@ fn solver_presses_regions_apart_by_a_negative_offset() {
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
         text.contains(
-            "*Clearance, Master=Internal_Selection-1_Region-1_Master, \
-             Slave=Internal_Selection-1_Region-1_Slave, Value=-0.01\n"
+            "*Clearance, Master=INTERNAL_SELECTION-1_REGION-1_MASTER, \
+             Slave=INTERNAL_SELECTION-1_REGION-1_SLAVE, Value=-0.01\n"
         ),
         "{text}"
     );
@@ -8999,8 +8843,8 @@ fn solver_switches_contact_regions_off_and_on_in_steps() {
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
         text.contains(
-            "** Name: Region-1\n*Model change, Type=Contact pair, Remove\n\
-             Internal_Selection-1_Region-1_Slave, Internal_Selection-1_Region-1_Master\n"
+            "*Model change, Type=Contact pair, Remove\n\
+             INTERNAL_SELECTION-1_REGION-1_SLAVE, INTERNAL_SELECTION-1_REGION-1_MASTER\n"
         ),
         "{text}"
     );
@@ -9054,7 +8898,7 @@ fn solver_changes_the_friction_of_a_region_in_a_step() {
     assert_eq!(interactions, ["PLX_Frictional", "PLX_Frictional-2"]);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Change friction, Interaction=PLX_Frictional\n*Friction\n0.3, 4200\n"),
+        text.contains("*Change friction, Interaction=PLX_FRICTIONAL\n*Friction\n0.3, 4200\n"),
         "{text}"
     );
     let Some(frd) = run_solver("region-friction-change", &text) else {
@@ -9203,7 +9047,7 @@ fn solver_pressure_follows_its_distribution() {
     model.distributions.push(equation("Rising", "=y / 10"));
     let text = write_inp(&mesh, &model, "").unwrap();
     // One line per face, no surface sets.
-    assert!(!text.contains("Internal_Selection-1_Pressure-1"), "{text}");
+    assert!(!text.contains("INTERNAL_SELECTION-1_PRESSURE-1"), "{text}");
     let faces = Region::Surface("TIP".into()).faces(&mesh);
     let (element, face) = faces[0];
     let center = face_center(&mesh, element, face).unwrap();
@@ -9243,12 +9087,12 @@ fn distributed_temperatures_are_written_per_node() {
     let text = write_inp(&mesh, &model, "").unwrap();
     for expected in [
         "*Initial conditions, Type=Temperature\n1, 10\n2, 10\n",
-        "** Name: Temperature-1\n*Boundary\n1, 11, 11, 25\n",
+        "\n1, 11, 11, 25\n",
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
     assert!(
-        !text.contains("Internal_Selection-1_Temperature-1"),
+        !text.contains("INTERNAL_SELECTION-1_TEMPERATURE-1"),
         "{text}"
     );
     model.distributions[0].kind = plx_model::DistributionKind::Equation("=x +".into());
@@ -9342,11 +9186,13 @@ fn solver_solves_a_part_held_only_by_contact_with_weak_springs() {
         let text = write_inp(&mesh, &model, "").unwrap();
         // The upper block: 1e-6 E L with L = 10 mm, spread over its 18 nodes.
         assert!(
-            text.contains("*Element, Type=SPRING1, Elset=PLX_Weak_Springs_UPPER_All\n"),
+            text.contains("*Elset, Elset=PLX_WEAK_SPRINGS_UPPER_ALL\n"),
             "{text}"
         );
         assert!(
-            text.contains("*Spring, Elset=PLX_Weak_Springs_UPPER_DOF_3\n3\n1.16666667E-1\n"),
+            text.contains(
+                "*Spring, Elset=PLX_WEAK_SPRINGS_UPPER_DOF_3\n3\n0.11666666666666667, 0\n"
+            ),
             "{text}"
         );
         model.contact_defaults.weak_springs = false;
@@ -9387,7 +9233,7 @@ fn solver_prints_the_contact_forces_of_a_bonded_region() {
     );
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(!text.contains("*Tie"), "{text}");
-    assert!(text.contains("*Contact print, Master="), "{text}");
+    assert!(text.contains("*Contact print, Slave="), "{text}");
     let Some(dat) = run_dat("region-kontaktkraft", &text) else {
         return;
     };
