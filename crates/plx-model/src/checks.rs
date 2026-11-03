@@ -790,7 +790,7 @@ impl Problem {
                  plane."
             }
             Problem::NoGlobalResults => {
-                "Open Model > Model Properties, set the model type to Submodel and pick the results \
+                "Open Model Properties (Material tab of the FE Model ribbon), set the model type to Submodel and pick the results \
                  file (.frd) of the global model."
             }
             Problem::IncrementExceedsStep => {
@@ -865,7 +865,7 @@ impl Problem {
             }
             Problem::ContactIgnored => {
                 "Tick Perturbation in the Frequency step (after a static step), or join \
-                 bonded parts with a Tie constraint instead of a tied contact pair (Interaction > Create Tie)."
+                 bonded parts with a Tie constraint instead of a tied contact pair (Connections > Tie)."
             }
             Problem::ContactFormulationsDiffer => {
                 "Set the contact pair to the formulation of the contact regions, or choose \
@@ -897,11 +897,11 @@ impl Problem {
             }
             Problem::InvalidTiedContact => {
                 "Edit the surface interaction and add Friction, and set the method of the \
-                 contact pairs to Surface to surface. To bond parts, a Tie (Interaction > \
-                 Create Tie) works with every method."
+                 contact pairs to Surface to surface. To bond parts, a Tie (Connections > \
+                 Tie) works with every method."
             }
             Problem::ContactWithCoriolis => {
-                "Join bonded parts with a Tie constraint (Interaction > Create Tie) instead \
+                "Join bonded parts with a Tie constraint (Connections > Tie) instead \
                  of a contact pair with tied surface behavior."
             }
             Problem::NoConvergence => {
@@ -917,7 +917,7 @@ impl Problem {
             }
             Problem::RotationIn2d => "In 2D models prescribe only U1 and U2.",
             Problem::NoPhysicalConstants => {
-                "Open Model > Model Properties and enter Absolute zero and Stefan-Boltzmann \
+                "Open Model Properties (Material tab of the FE Model ribbon) and enter Absolute zero and Stefan-Boltzmann \
                  under Physical Constants; Defaults fills them in for the unit system."
             }
             Problem::SolverError => {

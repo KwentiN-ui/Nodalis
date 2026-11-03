@@ -17,7 +17,7 @@ pub enum ExplodedResult {
     Open,
     /// Apply the edited exploded view.
     Ok,
-    /// Restore the exploded view from before the dialog.
+    /// Restore the exploded view from before the dialog, when another model is shown.
     Cancel,
     /// Show the model assembled.
     Disable,
@@ -75,21 +75,15 @@ impl ExplodedDialog {
             .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0))
             .show(ctx, |ui| {
                 change = self.form(ui);
-                ui.separator();
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Cancel").clicked() {
-                        result = ExplodedResult::Cancel;
-                    }
-                    if ui.button("Turn Off").clicked() {
-                        result = ExplodedResult::Disable;
-                    }
-                    if ui.button("OK").clicked() {
-                        result = ExplodedResult::Ok;
-                    }
-                });
+                // A tool window: the view follows the parameters; Close keeps it.
+                match crate::dialog::tool_footer(ui, Some(true)) {
+                    crate::dialog::Tool::Off => result = ExplodedResult::Disable,
+                    crate::dialog::Tool::Close => result = ExplodedResult::Ok,
+                    crate::dialog::Tool::None => {}
+                }
             });
         if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            result = ExplodedResult::Cancel;
+            result = ExplodedResult::Ok;
         }
         (result, change)
     }

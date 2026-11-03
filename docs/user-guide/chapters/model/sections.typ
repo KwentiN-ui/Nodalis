@@ -5,7 +5,7 @@
 A section assigns a material to elements. Every element needs a section, otherwise the model check
 reports "Elements without material". Likewise an element may be in only one section: if the same
 part (or overlapping element sets) appears in two sections, the model check reports
-"Part in more than one section" on the later section. Create sections with #menu("Model", "Create Section ...").
+"Part in more than one section" on the later section. Create sections with #menu("Material", "Section").
 
 #screenshot("section.png", [Section dialog])
 

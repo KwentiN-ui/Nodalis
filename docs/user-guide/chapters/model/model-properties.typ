@@ -12,7 +12,7 @@ loads and outputs. Items are created with the tiles of the ribbon tabs #ui("Mesh
 
 == Model properties <model-properties>
 
-#menu("Model", "Model Properties ...") (or a double-click on #ui("Model") in the tree) shows
+#menu("Material", "Model Properties") (or a double-click on #ui("Model") in the tree) shows
 the basic properties of the model. The same dialog opens when an analysis is created
 (@new-analysis); the model space and the unit system are chosen there and fixed from then on.
 The dialog of an existing analysis shows them, but only the model type and the physical

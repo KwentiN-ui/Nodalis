@@ -2,7 +2,7 @@
 
 == Settings <settings>
 
-#menu("Tools", "Settings ...") opens the settings window. The pages are listed on the left.
+#menu("Edit", "Settings ...") opens the settings window. The pages are listed on the left.
 #ui("Defaults") resets all pages, #ui("Apply") applies without closing. Settings are stored per
 user (`~/.local/share/nodalis` on Linux, `%APPDATA%\nodalis\data` on Windows), by the
 portable Windows version in the folder `Settings` next to `nodalis.exe` (@portable).

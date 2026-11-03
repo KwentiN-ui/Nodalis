@@ -5,7 +5,7 @@
 Besides analyses, the project schematic holds *source blocks*: blocks that only give data to
 analyses through links. They have no steps and are not solved, and #ui("Update Project")
 passes them by; the mesh export block at the end of this section takes data instead of giving
-it. Add one from #menu("Project") or by double-clicking or right-clicking the background of the schematic;
+it. Add one with its tile on the #ui("Sources"), #ui("Parameters") or #ui("Evaluate") tab or by double-clicking or right-clicking the background of the schematic;
 its header has its own tint, so that it stands apart from the analyses. Its context menu has
 #ui("Edit ..."), #ui("Rename ..."), #ui("Duplicate") and #ui("Delete"); a double-click
 opens its editor in the project window. Deleting a source block removes its links; the
@@ -51,7 +51,7 @@ the block's editor.
 === Cross-Sections <cross-sections-block>
 
 A cross-sections block holds beam cross-sections (@cross-sections) in the project file, like a
-materials block holds materials. Add it with #menu("Project", "Add Cross-Sections"). Its rows
+materials block holds materials. Add it with #menu("Sources", "Cross-Sections"). Its rows
 are #ui("Cross-Sections") and one row per cross-section, linked to the #ui("Setup") of an
 analysis, or to its #ui("Cross-Sections") row, in the same way; the beam sections of the
 analysis then pick the linked cross-sections. Its editor has #ui("Shown in"), #ui("New ..."),
@@ -71,8 +71,8 @@ change of kind, expose the new dimensions again.
 === Box and Rectangle meshes <mesh-block>
 
 A mesh block makes a structured mesh from a few numbers, without geometry and without Gmsh:
-#menu("Project", "Add Mesh", "Box") meshes a box with hexahedra for 3D analyses,
-#menu("Project", "Add Mesh", "Rectangle") a rectangle in the X-Y plane with quadrilaterals for
+#menu("Sources", "Box Mesh") meshes a box with hexahedra for 3D analyses,
+#menu("Sources", "Rectangle Mesh") a rectangle in the X-Y plane with quadrilaterals for
 2D analyses. Link its #ui("Mesh") row to the #ui("Mesh") row of analyses of the same model
 space; several analyses can share one mesh block.
 
@@ -133,7 +133,7 @@ and their solutions are out of date.
 === Refine Mesh <refine-mesh>
 
 A Refine Mesh block makes the mesh linked to it again, finer or coarser by a factor, and gives
-the new mesh on. Add it with #menu("Project", "Add Mesh", "Refine Mesh"), drag the
+the new mesh on. Add it with #menu("Sources", "Refine Mesh"), drag the
 #ui("Mesh") of a mesh block or of an analysis with imported geometry to the pin on the left of
 its #ui("Mesh") row, and drag the pin on the right of that row to the #ui("Mesh") row of the
 analyses that are to use the refined mesh. The mesh it refines stays as it is.
@@ -169,7 +169,7 @@ file has no parameters or geometry to mesh it again with, and the link is refuse
 
 A file block reads a file from outside the project and gives what it holds to analyses: the
 results of a CalculiX run (`.frd`), the mesh of a CalculiX input file (`.inp`) or geometry
-(STEP, IGES, BREP, STL). Add it with #menu("Project", "Add File ...") or from the picker; a
+(STEP, IGES, BREP, STL). Add it with #menu("Sources", "File") or from the picker; a
 dialog asks for the file at once. Its rows depend on the file:
 
 - results: #ui("Results") with a row per step of the file, whose pins link like the steps of
@@ -214,7 +214,7 @@ frequency step cannot be linked, as the `.frd` file does not hold them.]
 A CAD Operation block changes geometry before it is meshed: it rounds (#ui("Fillet")) or bevels
 (#ui("Chamfer")) picked edges of solids or corners of flat faces, or moves picked planar faces (#ui("Push/Pull")), of the geometry
 linked to it and gives the changed geometry on.
-Add it with #menu("Project", "Add CAD Operation") or from the picker, drag the
+Add it with #menu("Sources", "CAD Operation") or from the picker, drag the
 #ui("Geometry") of a file block, of an analysis with imported geometry or of another CAD
 Operation block to the pin on the left of its #ui("Geometry") row, and drag the pin on the
 right of that row to the #ui("Geometry") row of the analyses that are to use the changed
@@ -305,7 +305,7 @@ that:
 
 A Parameters block holds named numbers that other blocks take through *value links*, so that
 one number drives several places: the length of two meshes, or a size that is changed in one
-spot. Add it with #menu("Project", "Add Parameters", "Parameters"); it starts with one length.
+spot. Add it with #menu("Parameters", "Parameters"); it starts with one length.
 
 #screenshot("value-links.png", [The length of a Parameters block gives the edge length Lx of a
   box: the row of the box is read-only, in violet, and follows the parameter])
@@ -340,7 +340,7 @@ A double-click on the block opens its editor:
 A Math block computes a number from others, like the Math node of Blender: a height that is
 twice a width, a thickness that never drops below a minimum. A Switch block picks one of
 several numbers by an index, for variants such as three sheet thicknesses. Add them with
-#menu("Project", "Add Parameters", "Math") and #menu("Project", "Add Parameters", "Switch"), or
+#menu("Parameters", "Math") and #menu("Parameters", "Switch"), or
 search them with #key("Shift+A").
 
 #screenshot("schematic-math-switch.png", [A parameter study varies the width and the variant:
@@ -417,7 +417,7 @@ A Measure block computes one key figure from the results of a step: the largest 
 stress, the displacement of a node or of any point of the model, a total force or an
 eigenfrequency. It is the number a
 parameter study reads, and a quick way to see the figure that matters without opening the results.
-Add it with #menu("Project", "Add Measure"); it starts with the largest von Mises stress.
+Add it with #menu("Evaluate", "Measure"); it starts with the largest von Mises stress.
 
 #screenshot("measure-blocks.png", [Two Measure blocks: the lowest temperature of the thermal
   step Heat and the largest von Mises stress of the step Load that uses those temperatures])
@@ -495,7 +495,7 @@ CalculiX writes as lines are left out; those written as solids (the default) cou
 
 A mesh export block is the opposite of a source: it takes a mesh and writes it to a file, as
 a CalculiX input file (`.inp`) with the nodes, the elements, and the node sets and surfaces
-of the mesh. Add it with #menu("Project", "Add Mesh Export") or from the picker under
+of the mesh. Add it with #menu("Evaluate", "Mesh Export") or from the picker under
 #ui("Export"), and drag the #ui("Mesh") row of a mesh block or an analysis to its #ui("Mesh")
 row. Several export blocks may take the same mesh.
 

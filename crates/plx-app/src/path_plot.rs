@@ -349,7 +349,7 @@ pub fn draw(ui: &Ui, rect: Rect, camera: &Camera, boxes: &mut [PlotBox]) -> Vec<
             events.push(PlotEvent::Edit(plot.index));
         }
         response.context_menu(|ui| {
-            if ui.button("Edit...").clicked() {
+            if ui.button("Edit …").clicked() {
                 events.push(PlotEvent::Edit(plot.index));
                 ui.close();
             }

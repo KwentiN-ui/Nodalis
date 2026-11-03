@@ -881,7 +881,7 @@ pub fn part_menu(
     if ui.button("Properties …").clicked() {
         response.open = Some(TreeItem::Part(index));
     }
-    if view == TreeView::FeModel && ui.button("Transform ...").clicked() {
+    if view == TreeView::FeModel && ui.button("Transform …").clicked() {
         response.transform_part = Some(index);
     }
     if view == TreeView::FeModel

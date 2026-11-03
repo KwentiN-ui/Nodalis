@@ -9,7 +9,7 @@ flat membrane can take a load across its plane only once it is pretensioned or d
 needs a geometrically nonlinear step (#ui("Nlgeom")). For a plate under a lateral load the
 shell section (@shell-section) stays the right choice.
 
-Create it with #menu("Model", "Create Section ...") and choose #ui("Membrane"). The mesh must
+Create it with #menu("Material", "Section") and choose #ui("Membrane"). The mesh must
 be linear: mesh the part with #ui("Second order") off (@mesh-setup). Linear shells of the region
 (`S3`, `S4`, `S4R`) are written as the membranes `M3D3`, `M3D4` and `M3D4R`, so the part keeps
 its element type. A membrane type can also be chosen for the part itself: double-click it on

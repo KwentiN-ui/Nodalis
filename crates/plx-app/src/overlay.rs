@@ -264,7 +264,7 @@ pub fn draw(
         let response = draw_legend(ui, &painter, rect, legend, &mut offsets.legend);
         clicked.edit_legend = response.double_clicked();
         response.context_menu(|ui| {
-            if ui.button("Color Scale...").clicked() {
+            if ui.button("Color Scale …").clicked() {
                 clicked.edit_legend = true;
                 ui.close();
             }

@@ -25,11 +25,11 @@ From left to right the app bar holds:
     schematic, makes it active; the Geometry, FE Model and Results workspaces then show it.
     The analysis shown before stays open in the background with everything it holds, so going
     back to it is immediate.],
-  [Menus], [The menus of the workspace: those of the project window in the Project workspace,
-    those of the analysis in the other three. In this version the menus still hold all
-    commands; the analysis menus #ui("View"), #ui("Geometry"), #ui("Mesh"), #ui("Model"),
-    #ui("Interaction"), #ui("Analysis"), #ui("Results") and #ui("Tools") are gathered under
-    #ui("More"). The menu paths in this guide name them without #ui("More").],
+  [Menus], [#ui("File"): saving, in the Project workspace also new project, open and exit,
+    in an analysis the exports and #ui("Close Analysis"). #ui("Edit"): undo, redo and the settings. #ui("Help"): this guide
+    and, in the Project workspace, the check for updates. All other commands are on the
+    ribbon (@ribbon) and in the command search; a path such as #menu("Steps", "Load") in this
+    guide names the tab of the ribbon and the tile.],
   [Save, Undo, Redo], [Save the project (#key("Ctrl+S")), undo and redo (@undo). In the
     Project workspace undo and redo act on the schematic, otherwise on the analysis.],
   [Title], [The name of the project or the analysis.],
@@ -136,6 +136,27 @@ names what was deleted; its #ui("Undo") brings it back, as does #key("Ctrl+Z") a
 (@undo). The note goes away after a few seconds.
 
 #screenshot("delete-undo.png", [The note after deleting a material])
+
+=== Tool windows, work windows and confirmations <tool-windows>
+
+Besides the properties panel, Nodalis has three kinds of windows, each with the same foot:
+
+/ Tool windows: #ui("Section View"), #ui("Exploded View"), #ui("Color Scale"),
+  #ui("Query"), #ui("Transformations"), #ui("Animation") and the sound of the mode shapes.
+  What they set shows at once; there is no OK. #ui("Close") at the bottom right keeps it.
+  Where something stays shown after closing, #ui("Off") at the bottom left turns it off.
+  The tile of a tool window on the ribbon is pressed while it is open.
+/ Work windows: the contact worksheet, the search for contact pairs, the material library,
+  the history output table, plots, the Campbell diagram, the parameter study and the model
+  check. They can be resized and have #ui("Close") at the bottom right. Where the window makes
+  something, the button names it, for example #ui("Create 12 Pairs"), with #ui("Cancel")
+  next to it.
+/ Confirmations: only for what Undo cannot take back, such as deleting parts of the geometry,
+  removing the results of an analysis or dropping the changes to the material library. The
+  question is the title, below it what follows; the button that does it is red.
+  #key("Enter") and #key("Esc") cancel, so only a click does it.
+
+#screenshot("confirm-delete-part.png", [Deleting a part of the geometry asks first])
 
 === Placing blocks <place-block>
 

@@ -239,6 +239,7 @@ impl AnalysisWindow {
             | Cmd::ScreenshotClipboard
             | Cmd::ScreenshotFile
             | Cmd::Settings
+            | Cmd::SolverSettings
             | Cmd::UserGuide
             | Cmd::SaveProject
             | Cmd::SaveProjectAs
@@ -262,6 +263,7 @@ impl AnalysisWindow {
             Cmd::SectionView => w.section.is_some() || w.section_dialog.is_some(),
             Cmd::ExplodedView => w.exploded_applied() || w.exploded_dialog.is_some(),
             Cmd::Query => w.query.is_some(),
+            Cmd::ColorScale => w.color_scale_dialog.is_some(),
             Cmd::Monitor => w.analysis_tab,
             Cmd::ContactWorksheet => w.contact_worksheet,
             _ => false,
@@ -400,7 +402,7 @@ impl AnalysisWindow {
             Cmd::FieldOutput => w.create(NewItem::FieldOutput(last_step)),
             Cmd::HistoryOutput => w.create(NewItem::HistoryOutput(last_step)),
             Cmd::OpenResults => w.open_bound_results(),
-            Cmd::RemoveResults => w.remove_results(),
+            Cmd::RemoveResults => w.confirm_remove_results = true,
             Cmd::ColorScale => w.open_color_scale(),
             Cmd::ExportVtu => w.open_vtk_export(plx_io::vtk::VtkFormat::Xml),
             Cmd::ExportVtk => w.open_vtk_export(plx_io::vtk::VtkFormat::Legacy),
@@ -442,6 +444,12 @@ impl AnalysisWindow {
             Cmd::ScreenshotClipboard => w.screenshot.request(screenshot::Target::Clipboard),
             Cmd::ScreenshotFile => w.screenshot.request(screenshot::Target::File),
             Cmd::Settings => self.open_settings(),
+            Cmd::SolverSettings => {
+                let workbench = &mut self.workbench;
+                let page = crate::settings::Page::Solver;
+                workbench.settings_window =
+                    Some(SettingsWindow::with_page(&workbench.settings, page));
+            }
             Cmd::UserGuide => self.open_user_guide(),
             Cmd::SaveProject => w.requests.push(Request::Save(false)),
             Cmd::SaveProjectAs => w.requests.push(Request::Save(true)),

@@ -226,6 +226,8 @@ pub enum Cmd {
     Checklist,
     // Everywhere.
     Settings,
+    /// The Solver page of the settings.
+    SolverSettings,
     UserGuide,
     CheckForUpdates,
 }
@@ -1761,6 +1763,19 @@ fn build() -> Vec<Command> {
             TileIcon::None,
             "",
             "The settings of Nodalis.",
+        ),
+        Tile::Hidden,
+    ));
+    add(tile(
+        command(
+            C::SolverSettings,
+            "Solver Settings",
+            ALL,
+            "",
+            "Edit",
+            TileIcon::None,
+            "",
+            "The settings of the solver: threads, work folder and parallel runs.",
         ),
         Tile::Hidden,
     ));

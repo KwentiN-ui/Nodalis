@@ -7,7 +7,7 @@ most. For every node of a design region the solver computes how much a design re
 the strain energy or an eigenfrequency, changes when the node moves a little along the surface
 normal. The step does not change the model: it is a guide for the next design change, for
 example whether a larger fillet or a thicker rib raises the stiffness more. Create it with
-#menu("Model", "Create Step ...") and choose the type in the dialog.
+#menu("Steps", "Step") and choose the type in the dialog.
 
 #screenshot("sensitivity-step.png", [Sensitivity step])
 

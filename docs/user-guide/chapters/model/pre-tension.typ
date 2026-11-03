@@ -37,7 +37,7 @@ is no previous length to keep then, and the bolt carries no preload.
 #note[CalculiX's `*PRE-TENSION SECTION` separates only the elements with a
 face on the cut. In a tetrahedral mesh, elements that touch the cut with just an edge or a
 corner then hold both sides together and take most of the preload, which is why a thin layer of wedge elements is often
-added at the cut (#menu("Model", "Tools", "Boundary Layer")).
+added at the cut (in PrePoMax #menu("Model", "Tools", "Boundary Layer")).
 Nodalis needs no such layer: its own cut separates all of them.]
 
 #note[A bolt split into two parts in the CAD geometry has two meshes that do not share nodes at

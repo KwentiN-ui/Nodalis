@@ -18,6 +18,7 @@ mod constraint_dialog;
 mod contact_search;
 mod contacts;
 mod cross_section;
+mod dialog;
 mod distribution_dialog;
 mod dock;
 mod exploded;

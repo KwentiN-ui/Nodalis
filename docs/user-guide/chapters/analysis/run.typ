@@ -5,7 +5,7 @@
 == Solving an analysis
 
 Each analysis of the project is solved in its window. The solver uses the settings under
-#menu("Tools", "Settings ...", "Solver") (@settings) and runs in the folder
+#menu("Edit", "Settings ...", "Solver") (@settings) and runs in the folder
 `<work directory>/<project name>/<analysis name>`, so the analyses of a project never overwrite
 each other's files.
 
@@ -22,12 +22,13 @@ each other's files.
     solving it.],
   [Stop], [Stops meshing for a solve, or the running solver.],
   [Monitor], [Shows the #ui("Analysis") tab of the output pane (@monitor).],
-  [Open Results], [Opens the results the analysis keeps in the Results workspace.],
-  [Remove Results], [Drops the results the analysis keeps (@bind-result).],
+  [Open Results], [On the #ui("Results") tab: opens the results the analysis keeps.],
+  [Remove], [On the #ui("Results") tab: drops the results the analysis keeps, after asking
+    (@bind-result).],
 )
 
-#ui("Solve"), #ui("Stop") and #ui("Monitor") are on the right edge of the ribbon on every tab, the state of the
-solution is in the app bar, and all commands are in the #ui("Analysis") menu. Which cells are out of date is decided
+#ui("Solve"), #ui("Stop") and #ui("Monitor") are on the right edge of the ribbon on every tab; the state of the
+solution is in the app bar. Which cells are out of date is decided
 as in the project schematic (@project-window): changing a load makes only the solution out of
 date, changing the meshing settings of a part makes its mesh out of date, and result paths or
 planes change nothing that the solver needs.
@@ -109,7 +110,7 @@ submodel or the temperatures a step takes from a heat transfer analysis, Nodalis
 Results of the Nodalis solver kept by an earlier version of Nodalis in another format are not
 read: solve the analysis again.
 
-#menu("File", "Export CalculiX Results (.frd) ...") writes the current results as CalculiX's
+#menu("File", "Export", "CalculiX Results (.frd) ...") writes the current results as CalculiX's
 files, the `.frd` file and, if the run has history output, the `.dat` file next to it, for
 CalculiX GraphiX, PrePoMax or other programs that read them.
 
@@ -136,8 +137,8 @@ output pane lists what was dropped.
 #screenshot("rerun-keeps-view.png", [The results of a new run, shown from the front without mesh
   edges like the results before])
 
-#menu("Analysis", "Remove Results") drops the kept results; save the project to remove them
-from the file.
+#menu("Results", "Remove") drops the kept results after asking, since Undo cannot bring them
+back; save the project to remove them from the file.
 
 To send only the meshes and the model definitions, use
 #menu("File", "Save Project Without Results ..."). It saves a copy without the kept results under
@@ -180,7 +181,7 @@ references do stop it, because the input file cannot be written.
 
 === Check by the Nodalis solver <solver-model-check>
 
-With the Nodalis solver (#ui("Solver") under #menu("Tools", "Settings ...") > #ui("Solver"),
+With the Nodalis solver (#ui("Solver") under #menu("Edit", "Settings ...") > #ui("Solver"),
 @settings), #ui("Check Model") in the context menu of the analysis lets the solver check the
 model itself instead of estimating from the geometry. It reads the whole model with its steps
 and factorizes the stiffness matrix once for every set of supports (a check takes about as long
@@ -240,7 +241,7 @@ raise the #ui("Tolerance") of the region above it (@contact-regions) or close th
 
 == Exporting the input file <export-inp>
 
-#menu("File", "Export CalculiX Input File ...") writes the same input file as a run, for example
+#menu("File", "Export", "CalculiX Input File ...") writes the same input file as a run, for example
 to run it with CalculiX or with the command line solver `plxs` on another computer. Deactivated items appear as comments.
 
 == Submodels <submodel>
@@ -289,7 +290,7 @@ file of the submodel's own analysis.]
 
 == Exporting a deformed mesh <export-deformed>
 
-#menu("File", "Export Deformed Mesh (.inp) ...") writes the mesh of the displayed result with its
+#menu("File", "Export", "Deformed Mesh (.inp) ...") writes the mesh of the displayed result with its
 nodes moved by the displacements times the current deformation scale factor. A typical use is an
 imperfection for a buckling analysis: show the buckling mode, set #ui("Deformation") to #ui("User
 defined") with the imperfection amplitude as factor, export, and import the file into the model with

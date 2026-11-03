@@ -10,7 +10,7 @@ layout is fixed; only the separators between the panes can be moved.
 From top to bottom the window contains:
 
 / App bar and ribbon: the workspaces, the active analysis, the menus and the commands of the
-  workspace (@app-bar, @ribbon). #ui("Edit") holds Undo and Redo (@undo).
+  workspace (@app-bar, @ribbon). #ui("Edit") holds Undo, Redo (@undo) and the settings.
   #menu("Help", "User Guide") opens this guide in the web browser (@offline-guide).
 / Model tree: on the left, with the items of the workspace (@model-tree).
 / 3D view: in the centre (@view).

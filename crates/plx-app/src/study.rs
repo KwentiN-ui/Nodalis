@@ -227,7 +227,7 @@ impl StudyEditor {
     pub fn show(&mut self, ctx: &egui::Context, view: &StudyView) -> Vec<StudyEdit> {
         let mut edits = Vec::new();
         let mut open = true;
-        egui::Window::new(format!("Parameter Study - {}", self.name))
+        egui::Window::new(format!("Parameter Study: {}", self.name))
             .id(crate::ids::window(ctx, ("study", self.id)))
             .open(&mut open)
             .collapsible(false)
@@ -320,7 +320,7 @@ impl StudyEditor {
     fn table_tools(&mut self, ui: &mut egui::Ui, view: &StudyView) {
         let idle = !view.busy && !view.inputs.is_empty();
         if ui
-            .add_enabled(idle, egui::Button::new("Fill ..."))
+            .add_enabled(idle, egui::Button::new("Fill …"))
             .on_hover_text("Adds points from a list or a range of values per input.")
             .clicked()
         {
@@ -328,7 +328,7 @@ impl StudyEditor {
             self.raise = 3;
         }
         if ui
-            .add_enabled(idle, egui::Button::new("Import ..."))
+            .add_enabled(idle, egui::Button::new("Import …"))
             .on_hover_text("Adds points from a table pasted or read from a CSV file.")
             .clicked()
         {
@@ -348,8 +348,8 @@ impl StudyEditor {
             self.message = Some("Table copied.".into());
         }
         for (label, format) in [
-            ("Export CSV ...", table_export::Format::Csv),
-            ("Export JSON ...", table_export::Format::Json),
+            ("Export CSV …", table_export::Format::Csv),
+            ("Export JSON …", table_export::Format::Json),
         ] {
             if ui.add_enabled(some, egui::Button::new(label)).clicked() {
                 self.export(view, format);
@@ -385,7 +385,7 @@ impl StudyEditor {
         }
         let mut open = true;
         let mut done = false;
-        egui::Window::new(format!("Fill - {}", self.name))
+        egui::Window::new(format!("Fill: {}", self.name))
             .id(id)
             .open(&mut open)
             .collapsible(false)
@@ -474,23 +474,20 @@ impl StudyEditor {
                         ui.colored_label(crate::style::error(), why);
                     }
                 }
-                ui.horizontal(|ui| {
-                    let ready = new > 0 && !view.busy;
-                    if ui
-                        .add_enabled(ready, egui::Button::new("Add Points"))
-                        .clicked()
-                        && let Ok(rows) = rows
-                    {
-                        edits.push(StudyEdit::AddRows {
-                            rows,
-                            replace: fill.replace,
-                        });
+                let ready = new > 0 && !view.busy;
+                match crate::dialog::work_footer(ui, Some(("Add Points", ready))) {
+                    crate::dialog::Work::Verb => {
+                        if let Ok(rows) = rows {
+                            edits.push(StudyEdit::AddRows {
+                                rows,
+                                replace: fill.replace,
+                            });
+                        }
                         done = true;
                     }
-                    if ui.button("Cancel").clicked() {
-                        done = true;
-                    }
-                });
+                    crate::dialog::Work::Close => done = true,
+                    crate::dialog::Work::None => {}
+                }
             });
         if !open || done {
             self.fill = None;
@@ -510,7 +507,7 @@ impl StudyEditor {
         }
         let mut open = true;
         let mut done = false;
-        egui::Window::new(format!("Import - {}", self.name))
+        egui::Window::new(format!("Import: {}", self.name))
             .id(id)
             .open(&mut open)
             .collapsible(false)
@@ -524,7 +521,7 @@ impl StudyEditor {
                      row of names takes the columns named after inputs; without one, the \
                      columns are the inputs in order. Values are in the units shown.",
                 );
-                if ui.button("Open File ...").clicked()
+                if ui.button("Open File …").clicked()
                     && let Some(path) = rfd::FileDialog::new()
                         .set_title("Import Parameter Study")
                         .add_filter("CSV file", &["csv", "txt", "tsv"])
@@ -559,23 +556,20 @@ impl StudyEditor {
                         ui.colored_label(crate::style::error(), why);
                     }
                 }
-                ui.horizontal(|ui| {
-                    let ready = new > 0 && !view.busy;
-                    if ui
-                        .add_enabled(ready, egui::Button::new("Add Points"))
-                        .clicked()
-                        && let Ok(rows) = rows
-                    {
-                        edits.push(StudyEdit::AddRows {
-                            rows,
-                            replace: import.replace,
-                        });
+                let ready = new > 0 && !view.busy;
+                match crate::dialog::work_footer(ui, Some(("Add Points", ready))) {
+                    crate::dialog::Work::Verb => {
+                        if let Ok(rows) = rows {
+                            edits.push(StudyEdit::AddRows {
+                                rows,
+                                replace: import.replace,
+                            });
+                        }
                         done = true;
                     }
-                    if ui.button("Cancel").clicked() {
-                        done = true;
-                    }
-                });
+                    crate::dialog::Work::Close => done = true,
+                    crate::dialog::Work::None => {}
+                }
             });
         if !open || done {
             self.import = None;

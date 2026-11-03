@@ -72,7 +72,7 @@ pub fn distribution_rows(
                     format!("{source}, {} points", points.len())
                 };
                 ui.label(name);
-                if ui.button("Import ...").clicked()
+                if ui.button("Import …").clicked()
                     && let Some(path) = rfd::FileDialog::new()
                         .set_title("Points of the distribution")
                         .add_filter("Text files (*.txt, *.csv, *.dat)", &["txt", "csv", "dat"])

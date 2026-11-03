@@ -10,7 +10,7 @@ The sweep lives in a #ui("Campbell") block of the project schematic (@project-wi
 takes the analysis to sweep and keeps the diagram. The analysis needs an active
 #ui("Centrifugal") load, whose axis and point tell how the rotor turns, and a
 #ui("Complex Frequency") step (@complex-frequency); the speed of the load does not matter, 0
-included, as the sweep sets it. #menu("Analysis", "Campbell diagram ...") in the window of such
+included, as the sweep sets it. #menu("Solve", "Campbell Diagram") in the window of such
 an analysis opens its Campbell block, and makes one next to the analysis and links it first if
 there is none. A block can also be added from the block picker or the context menu of the
 schematic (category #ui("Campbell")); then drag the #ui("Setup") pin of the analysis to the
@@ -47,7 +47,7 @@ closed while the sweep runs: the block goes on and shows its progress.
     run close to the speed axis. It can be changed at any time, also during the sweep.],
 )
 
-#ui("Start sweep") sets the centrifugal loads of the model to every speed, runs the solver in
+#ui("Start Sweep") sets the centrifugal loads of the model to every speed, runs the solver in
 a folder named after the block in that of the project in the work directory (@settings) and takes the complex frequencies of the
 last Complex Frequency step and the whirl direction of every mode from its results. As many speeds run at the same time as #ui("Parallel analyses") of
 the solver settings allows. The files of a speed are deleted once its frequencies are read; those
@@ -61,7 +61,7 @@ speeds spread over the rest of the range. The diagram grows with every speed. Th
 or when no gap is wider than a five-hundredth of the range. #ui("Pause") lets the running speeds
 finish and starts no new ones; #ui("Continue") goes on from there. #ui("Continue") also goes on
 with a finished or stopped sweep: another #ui("Maximum runs") runs that refine between its speeds,
-as long as the model has not changed since; after a change, #ui("Start sweep") begins anew.
+as long as the model has not changed since; after a change, #ui("Start Sweep") begins anew.
 
 To look closer at part of the diagram, hold #key("Shift") and drag across it: the marked speed
 range is shaded and named #ui("Refine range"), and new speeds go only there, down to a
@@ -94,7 +94,7 @@ click on its legend entry])
 
 Where a mode crosses an order line, the rotor is
 excited at one of its eigenfrequencies: these crossings are listed under #ui("Critical speeds")
-with the order, the mode, its whirl, the speed in rpm and the frequency. #ui("Copy table")
+with the order, the mode, its whirl, the speed in rpm and the frequency. #ui("Copy Table")
 copies the frequencies of all modes at all speeds as tab-separated text. #ui("Export CSV ...")
 saves the same table as a CSV file, with a Save As dialog: one row per speed with the speed in
 rad/s and rpm, the frequency in Hz and the whirl (F, B or empty) of every curve, the other roots

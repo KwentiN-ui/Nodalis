@@ -41,7 +41,7 @@ use crate::sound::{self, ModeSound};
 use crate::symbols;
 use crate::transformation_dialog::{TransformationAction, TransformationDialog};
 use crate::tree::{self, TreeItem, TreeResponse, TreeState, TreeView};
-use crate::viewport::{Axis, BoxSelect, Click, ViewCommand, Viewport};
+use crate::viewport::{BoxSelect, Click, ViewCommand, Viewport};
 use plx_render::RenderMesh;
 
 mod commands;
@@ -163,9 +163,10 @@ struct Workbench {
     step_selection: Option<TreeItem>,
     /// The open editors of the properties panel, the newest last; only one stays open.
     docked: Vec<crate::dock::Docked>,
-    /// Item asked to be deleted, waiting for the user's confirmation.
     /// Items to delete once the user agrees: several parts, or one item.
     confirm_delete: Option<(TreeView, Vec<TreeItem>)>,
+    /// Remove Results waits for the user's confirmation.
+    confirm_remove_results: bool,
     /// The toast shown over the 3D view, such as "Deleted Force-1" with Undo.
     toast: Option<crate::toast::Toast>,
     /// The output pane shows the Problems tab.
@@ -327,6 +328,7 @@ impl AnalysisWindow {
                 step_selection: None,
                 docked: Vec::new(),
                 confirm_delete: None,
+                confirm_remove_results: false,
                 toast: None,
                 problems_tab: false,
                 checklist_shown: true,
@@ -827,207 +829,58 @@ impl AnalysisWindow {
         }
     }
 
-    /// The menus of the analysis in the app bar. In the project window, Close Analysis gives
-    /// the analysis back to the project instead of closing a window.
+    /// The menus of the analysis in the app bar: File, Edit and Help; the ribbon holds the
+    /// rest. In the project window, Close Analysis gives the analysis back to the project
+    /// instead of closing a window.
     pub fn menus(&mut self, ui: &mut egui::Ui, embedded: bool) {
-        {
-            ui.menu_button("File", |ui| {
-                let import = egui::Button::new("Import …");
-                if ui.add_enabled(self.loading.is_none(), import).clicked() {
-                    self.import(ui.ctx());
+        ui.menu_button("File", |ui| {
+            let save = egui::Button::new("Save Project").shortcut_text("Ctrl+S");
+            if ui.add(save).clicked() {
+                self.workbench.requests.push(Request::Save(false));
+            }
+            let save_as = egui::Button::new("Save Project As …").shortcut_text("Ctrl+Shift+S");
+            if ui.add(save_as).clicked() {
+                self.workbench.requests.push(Request::Save(true));
+            }
+            let without = egui::Button::new("Save Project Without Results …");
+            if ui
+                .add(without)
+                .on_hover_text(
+                    "Saves a copy of the project with only the meshes and the model \
+                     definitions, without the results its analyses keep. The open \
+                     project keeps them.",
+                )
+                .clicked()
+            {
+                self.workbench.requests.push(Request::SaveWithoutResults);
+            }
+            ui.separator();
+            ui.menu_button("Export", |ui| self.workbench.export_menu(ui));
+            ui.separator();
+            let tip = "Closes the analysis; it stays in the project.";
+            if ui.button("Close Analysis").on_hover_text(tip).clicked() {
+                if embedded {
+                    self.workbench.requests.push(Request::Close);
+                } else {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
-                let setup = self.workbench.setup_model().is_some();
-                let save = egui::Button::new("Save Project").shortcut_text("Ctrl+S");
-                if ui.add(save).clicked() {
-                    self.workbench.requests.push(Request::Save(false));
-                }
-                let save_as = egui::Button::new("Save Project As …").shortcut_text("Ctrl+Shift+S");
-                if ui.add(save_as).clicked() {
-                    self.workbench.requests.push(Request::Save(true));
-                }
-                let without = egui::Button::new("Save Project Without Results …");
-                if ui
-                    .add(without)
-                    .on_hover_text(
-                        "Saves a copy of the project with only the meshes and the model \
-                         definitions, without the results its analyses keep. The open \
-                         project keeps them.",
-                    )
-                    .clicked()
-                {
-                    self.workbench.requests.push(Request::SaveWithoutResults);
-                }
-                ui.separator();
-                let export = egui::Button::new("Export CalculiX Input File …");
-                if ui.add_enabled(setup, export).clicked() {
-                    self.workbench.export_inp();
-                }
-                let deformed = self.workbench.shown_results_view().is_some();
-                let export = egui::Button::new("Export Deformed Mesh (.inp) …");
-                let tip = "Writes the mesh of the current results, deformed by the current \
-                           deformation scale factor, as an input file with only the mesh.";
-                if ui
-                    .add_enabled(deformed, export)
-                    .on_hover_text(tip)
-                    .clicked()
-                {
-                    self.workbench.export_deformed_mesh();
-                }
-                let export = egui::Button::new("Export CalculiX Results (.frd) …");
-                let tip = "Writes the current results as CalculiX's result files: the .frd \
-                           file and, with history output, the .dat file beside it, for \
-                           CalculiX GraphiX, PrePoMax and other programs that read them.";
-                if ui
-                    .add_enabled(deformed, export)
-                    .on_hover_text(tip)
-                    .on_disabled_hover_text("No results are open.")
-                    .clicked()
-                {
-                    self.workbench.export_calculix_results();
-                }
-                let tip = "Writes the current results for ParaView and other VTK programs, \
-                           one increment or a time series of several.";
-                for (label, format) in [
-                    ("Export VTU …", plx_io::vtk::VtkFormat::Xml),
-                    ("Export VTK …", plx_io::vtk::VtkFormat::Legacy),
-                ] {
-                    if ui
-                        .add_enabled(deformed, egui::Button::new(label))
-                        .on_hover_text(tip)
-                        .on_disabled_hover_text("No results are open.")
-                        .clicked()
-                    {
-                        self.workbench.open_vtk_export(format);
-                    }
-                }
-                ui.separator();
-                let tip = "Closes the analysis; it stays in the project.";
-                if ui.button("Close Analysis").on_hover_text(tip).clicked() {
-                    if embedded {
-                        self.workbench.requests.push(Request::Close);
-                    } else {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                }
-            });
-            ui.menu_button("Edit", |ui| self.workbench.edit_menu(ui));
-            // The menus of PrePoMax, until the ribbon has taken them over.
-            ui.menu_button("More", |ui| {
-                ui.menu_button("View", |ui| {
-                    if ui.button("Zoom to Fit").clicked() {
-                        self.workbench.view_command = Some(ViewCommand::Fit);
-                    }
-                    for (view, label) in STANDARD_VIEWS {
-                        if ui.button(label).clicked() {
-                            self.workbench.view_command = Some(ViewCommand::View(view));
-                        }
-                    }
-                    if ui.button("Vertical View").clicked() {
-                        self.workbench.view_command = Some(ViewCommand::Vertical);
-                    }
-                    ui.menu_button("View Normal to Axis", |ui| {
-                        for axis in Axis::ALL {
-                            if ui.button(axis.label()).clicked() {
-                                self.workbench.view_command = Some(ViewCommand::AxisView(axis));
-                            }
-                        }
-                    });
-                    ui.menu_button("Isometric, Axis Up", |ui| {
-                        for axis in Axis::ALL {
-                            if ui.button(axis.label()).clicked() {
-                                self.workbench.view_command =
-                                    Some(ViewCommand::IsometricAxis(axis));
-                            }
-                        }
-                    });
-                    ui.separator();
-                    ui.checkbox(
-                        &mut self.workbench.viewport.options.mesh_edges,
-                        "Mesh Edges",
-                    );
-                    ui.checkbox(
-                        &mut self.workbench.settings.graphics.shell_thickness,
-                        "Shell Thickness",
-                    )
-                    .on_hover_text(settings::SHELL_THICKNESS_TIP);
-                    ui.checkbox(
-                        &mut self.workbench.settings.graphics.beam_profiles,
-                        "Beam Profiles",
-                    )
-                    .on_hover_text(settings::BEAM_PROFILES_TIP);
-                    ui.checkbox(
-                        &mut self.workbench.settings.graphics.show_linked,
-                        settings::SHOW_LINKED_LABEL,
-                    )
-                    .on_hover_text(settings::SHOW_LINKED_TIP);
-                    ui.separator();
-                    let has_model = self.workbench.shown().is_some();
-                    if ui
-                        .add_enabled(has_model, egui::Button::new("Section View …"))
-                        .clicked()
-                    {
-                        self.workbench.open_section_dialog();
-                    }
-                    let active = self.workbench.section.is_some();
-                    if ui
-                        .add_enabled(active, egui::Button::new("Section View Off"))
-                        .clicked()
-                    {
-                        self.workbench.section = None;
-                        self.workbench.section_dialog = None;
-                    }
-                    ui.separator();
-                    if ui
-                        .add_enabled(has_model, egui::Button::new("Exploded View …"))
-                        .clicked()
-                    {
-                        self.workbench.open_exploded_dialog();
-                    }
-                    let exploded = self.workbench.exploded_applied();
-                    if ui
-                        .add_enabled(exploded, egui::Button::new("Exploded View Off"))
-                        .clicked()
-                    {
-                        self.workbench.toggle_exploded();
-                    }
-                });
-                ui.menu_button("Geometry", |ui| {
-                    let import = egui::Button::new("Import …");
-                    if ui.add_enabled(self.loading.is_none(), import).clicked() {
-                        self.import(ui.ctx());
-                    }
-                });
-                ui.menu_button("Mesh", |ui| self.workbench.mesh_menu(ui));
-                ui.menu_button("Model", |ui| self.workbench.model_menu(ui));
-                ui.menu_button("Interaction", |ui| self.workbench.interaction_menu(ui));
-                ui.menu_button("Analysis", |ui| self.workbench.analysis_menu(ui));
-                ui.menu_button("Results", |ui| self.workbench.results_menu(ui));
-                ui.menu_button("Tools", |ui| {
-                    if ui.button("Query …").clicked() {
-                        self.workbench.open_query();
-                    }
-                    let annotated = self.workbench.has_annotations();
-                    if ui
-                        .add_enabled(annotated, egui::Button::new("Remove Annotations"))
-                        .clicked()
-                    {
-                        self.workbench.annotations(AnnotationCommand::DeleteAll);
-                    }
-                    ui.separator();
-                    if ui.button("Settings …").clicked() {
-                        self.workbench.settings_window =
-                            Some(SettingsWindow::new(&self.workbench.settings));
-                    }
-                });
-            });
-            ui.menu_button("Help", |ui| {
-                let tip = "Opens the user guide in the web browser";
-                if ui.button("User Guide").on_hover_text(tip).clicked() {
-                    let line = crate::help::open_user_guide();
-                    self.workbench.output.push(line);
-                }
-            });
-        }
+            }
+        });
+        ui.menu_button("Edit", |ui| {
+            self.workbench.edit_menu(ui);
+            ui.separator();
+            if ui.button("Settings …").clicked() {
+                self.workbench.settings_window =
+                    Some(SettingsWindow::new(&self.workbench.settings));
+            }
+        });
+        ui.menu_button("Help", |ui| {
+            let tip = "Opens the user guide in the web browser";
+            if ui.button("User Guide").on_hover_text(tip).clicked() {
+                let line = crate::help::open_user_guide();
+                self.workbench.output.push(line);
+            }
+        });
     }
 
     /// The status bar; returns whether the meshing was cancelled there.
@@ -1142,10 +995,6 @@ pub fn is_results_file(path: &std::path::Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("frd"))
         || plx_results::solver::is_solver_results(path)
 }
-
-/// Tooltip of Solve, in the tool bar and the Analysis menu.
-const SOLVE_TIP: &str = "Solve (F5): meshes the parts whose mesh is out of date, runs CalculiX \
-     if the results are missing or out of date, and keeps the new results.";
 
 /// Moves the parts of a model between two scales of an exploded view: through the levels of a
 /// sequential disassembly one after the other, else in one animation.
@@ -1336,16 +1185,6 @@ const GEOMETRY_FILTER: (&str, &[&str]) = (
         "step", "STEP", "stp", "STP", "iges", "IGES", "igs", "IGS", "brep", "BREP",
     ],
 );
-
-const STANDARD_VIEWS: [(StandardView, &str); 7] = [
-    (StandardView::Front, "Front View"),
-    (StandardView::Back, "Back View"),
-    (StandardView::Top, "Top View"),
-    (StandardView::Bottom, "Bottom View"),
-    (StandardView::Left, "Left View"),
-    (StandardView::Right, "Right View"),
-    (StandardView::Isometric, "Isometric View"),
-];
 
 impl AnalysisWindow {
     /// Shows the analysis in a window of its own: its app bar without the Project segment,
@@ -1627,6 +1466,7 @@ impl AnalysisWindow {
         self.workbench.update_motion_preview(&ctx);
         self.workbench.update_cyclic_preview();
         self.workbench.confirm_delete_window(&ctx);
+        self.workbench.confirm_remove_results(&ctx);
         self.workbench.toast(&ctx);
         self.workbench.contact_search_window(&ctx);
         self.workbench.contact_worksheet_window(&ctx);
@@ -2613,10 +2453,7 @@ impl Workbench {
                             );
                         }
                     });
-                ui.separator();
-                ui.vertical_centered(|ui| {
-                    close = ui.button("Close").clicked();
-                });
+                close = crate::dialog::work_footer(ui, None) == crate::dialog::Work::Close;
             });
         if !open || close {
             self.findings_window = None;
@@ -2898,7 +2735,7 @@ impl Workbench {
                             }
                         }
                         ui.separator();
-                        new_step = ui.selectable_label(false, "New Step ...").clicked();
+                        new_step = ui.selectable_label(false, "New Step …").clicked();
                     })
                     .response
                     .on_hover_text(
@@ -3061,26 +2898,6 @@ impl Workbench {
             }
         }
         self.results_changed = true;
-    }
-
-    /// PrePoMax's Results menu.
-    fn results_menu(&mut self, ui: &mut egui::Ui) {
-        let any = !self.results.is_empty();
-        let shown = self.tree_view == TreeView::Results
-            && (self.results.get(self.current_result)).is_some_and(|m| m.results.is_some());
-        if ui
-            .add_enabled(shown, egui::Button::new("Color Scale …"))
-            .clicked()
-        {
-            self.open_color_scale();
-        }
-        ui.separator();
-        if ui
-            .add_enabled(any, egui::Button::new("Create Hot Spot …"))
-            .clicked()
-        {
-            self.create(NewItem::ResultHotSpot);
-        }
     }
 
     /// The results row of the tool bar: the controls of the shown result.
@@ -3246,44 +3063,6 @@ impl Workbench {
                 None => Editor::create(kind, &model.fe),
             };
             self.set_tree_view(TreeView::FeModel);
-        }
-    }
-
-    /// PrePoMax's Mesh menu: the mesh setup and mesh generation for the geometry.
-    fn mesh_menu(&mut self, ui: &mut egui::Ui) {
-        let has_geometry = self.model.as_ref().is_some_and(|m| m.geometry.is_some());
-        let has_mesh = (self.model.as_ref()).is_some_and(|m| m.mesh.element_count() > 0);
-        if !has_geometry && !has_mesh {
-            ui.label("Import a geometry first");
-            return;
-        }
-        if has_geometry {
-            if ui.button("Create Mesh Setup Item …").clicked() {
-                self.create(NewItem::MeshSetupItem);
-            }
-            if ui.button("Default Mesh Parameters …").clicked() {
-                self.open_mesh_setup();
-            }
-            ui.separator();
-            let mesh = egui::Button::new("Mesh All Parts");
-            if ui.add_enabled(self.meshing.is_none(), mesh).clicked() {
-                self.generate_mesh(ui.ctx(), None);
-            }
-            let cancel = egui::Button::new("Cancel Meshing");
-            if ui.add_enabled(self.meshing.is_some(), cancel).clicked() {
-                self.cancel_meshing();
-            }
-        }
-        if has_mesh {
-            if has_geometry {
-                ui.separator();
-            }
-            if ui.button("Merge coincident nodes ...").clicked() {
-                self.open_mesh_tool(MeshTool::MergeNodes);
-            }
-            if ui.button("Renumber nodes and elements ...").clicked() {
-                self.open_mesh_tool(MeshTool::Renumber);
-            }
         }
     }
 
@@ -3531,119 +3310,6 @@ impl Workbench {
         }
     }
 
-    /// PrePoMax's Model menu: create items of the FE model.
-    /// PrePoMax's Interaction menu: constraints, contacts and the search for contact pairs.
-    fn interaction_menu(&mut self, ui: &mut egui::Ui) {
-        if self.setup_model().is_none() {
-            ui.label("Open an .inp file first");
-            return;
-        }
-        let mut kind = None;
-        if ui.button("Detect Contacts …").clicked() {
-            kind = Some(NewItem::ContactDetection);
-        }
-        if ui.button("Create Contact Region …").clicked() {
-            kind = Some(NewItem::ContactRegion);
-        }
-        if ui.button("Create Bolt …").clicked() {
-            kind = Some(NewItem::Bolt);
-        }
-        if ui.button("Contact Worksheet …").clicked() {
-            self.contact_worksheet = true;
-        }
-        if ui.button("Connection Settings …").clicked()
-            && let Some(model) = self.setup_model()
-        {
-            self.editor = Editor::edit(&TreeItem::Group("Contacts"), &model.fe, &model.mesh);
-        }
-        ui.separator();
-        if ui.button("Create Constraint …").clicked() {
-            kind = Some(NewItem::Constraint);
-        }
-        ui.menu_button("Advanced", |ui| {
-            for (item, label) in [
-                (NewItem::SurfaceInteraction, "Create Surface Interaction …"),
-                (NewItem::ContactPair, "Create Contact Pair …"),
-                (NewItem::Tie, "Create Tie …"),
-            ] {
-                if ui.button(label).clicked() {
-                    kind = Some(item);
-                }
-            }
-            ui.separator();
-            if ui.button("Search Contact Pairs …").clicked() {
-                self.open_contact_search();
-            }
-        });
-        if let Some(kind) = kind {
-            self.create(kind);
-        }
-    }
-
-    fn model_menu(&mut self, ui: &mut egui::Ui) {
-        if self.setup_model().is_none() {
-            ui.label("Create or open a model first");
-            return;
-        }
-        if ui.button("Model Properties …").clicked() {
-            self.edit_model_properties();
-        }
-        ui.separator();
-        let Some(model) = self.setup_model() else {
-            return;
-        };
-        let last_step = self.active_step();
-        let step = last_step.and_then(|i| model.fe.steps.get(i));
-        let takes_loads = step.is_some_and(|s| s.kind.supports_loads());
-        let takes_defined_fields = step.is_some_and(|s| s.kind.supports_defined_fields());
-        let mut kind = None;
-        for (item, label, enabled) in [
-            (NewItem::Material, "Create Material …", true),
-            (NewItem::CrossSection, "Create Cross-Section …", true),
-            (NewItem::Section, "Create Section …", true),
-            (
-                NewItem::InitialCondition,
-                "Create Initial Condition …",
-                true,
-            ),
-            (NewItem::Amplitude, "Create Amplitude …", true),
-            (NewItem::Distribution, "Create Distribution …", true),
-            (NewItem::Step, "Create Step …", true),
-            (
-                NewItem::BoundaryCondition(last_step.unwrap_or(0)),
-                "Create Boundary Condition …",
-                last_step.is_some(),
-            ),
-            (
-                NewItem::Load(last_step.unwrap_or(0)),
-                "Create Load …",
-                takes_loads,
-            ),
-            (
-                NewItem::FieldOutput(last_step.unwrap_or(0)),
-                "Create Field Output …",
-                last_step.is_some(),
-            ),
-            (
-                NewItem::HistoryOutput(last_step.unwrap_or(0)),
-                "Create History Output …",
-                last_step.is_some(),
-            ),
-            (
-                NewItem::DefinedField(last_step.unwrap_or(0)),
-                "Create Defined Field …",
-                takes_defined_fields,
-            ),
-        ] {
-            if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-                kind = Some(item);
-            }
-        }
-        if let Some(kind) = kind {
-            self.create(kind);
-        }
-    }
-
     /// PrePoMax's Material Library Editor, from the context menu of Materials.
     fn open_material_library(&mut self) {
         if let Some(model) = self.setup_model() {
@@ -3675,73 +3341,26 @@ impl Workbench {
         }
     }
 
-    fn analysis_menu(&mut self, ui: &mut egui::Ui) {
-        let running = self.running();
-        let can_start = self.setup_model().is_some() && !running && self.meshing.is_none();
-        let solve = egui::Button::new("Solve").shortcut_text("F5");
-        if ui
-            .add_enabled(can_start, solve)
-            .on_hover_text(SOLVE_TIP)
-            .clicked()
-        {
-            self.solve();
+    /// Asks before Remove Results, which Undo cannot take back.
+    fn confirm_remove_results(&mut self, ctx: &egui::Context) {
+        if !self.confirm_remove_results {
+            return;
         }
-        if ui
-            .add_enabled(can_start, egui::Button::new("Solve Again"))
-            .on_hover_text("Runs CalculiX even if the results are up to date.")
-            .clicked()
-        {
-            self.requests.push(Request::SolveChain(true));
-        }
-        if ui
-            .add_enabled(can_start, egui::Button::new("Check Model"))
-            .clicked()
-        {
-            self.check_model();
-        }
-        if ui.add_enabled(running, egui::Button::new("Stop")).clicked() {
-            self.stop();
-        }
-        if ui.button("Monitor").clicked() {
-            self.analysis_tab = true;
-        }
-        let kept = (self.model.as_ref()).is_some_and(|m| m.bound_results.is_some());
-        if ui
-            .add_enabled(!running && kept, egui::Button::new("Open Results"))
-            .clicked()
-        {
-            self.open_bound_results();
-        }
-        if ui
-            .add_enabled(!running && kept, egui::Button::new("Remove Results"))
-            .on_hover_text(
-                "Drops the results the analysis keeps; saving the project leaves them out.",
-            )
-            .clicked()
-        {
-            self.remove_results();
-        }
-        ui.separator();
-        if ui.button("Solver Settings …").clicked() {
-            let window = SettingsWindow::with_page(&self.settings, settings::Page::Solver);
-            self.settings_window = Some(window);
-        }
-        ui.separator();
-        let rotor = self
-            .setup_model()
-            .is_some_and(|m| crate::campbell::applies(&m.fe));
-        if ui
-            .add_enabled(rotor, egui::Button::new("Campbell diagram ..."))
-            .on_hover_text(
-                "Opens the Campbell block of the analysis in the project, which sweeps it over \
-                 the speed and keeps the diagram; makes the block first if there is none.",
-            )
-            .on_disabled_hover_text(
-                "Needs an active Centrifugal load and a Complex Frequency step.",
-            )
-            .clicked()
-        {
-            self.requests.push(Request::Campbell);
+        let question = "Remove the results of the analysis?";
+        let consequence = "Saving the project leaves them out; solve again to get them back.";
+        match crate::dialog::confirm(
+            ctx,
+            "confirm remove results",
+            question,
+            consequence,
+            "Remove",
+        ) {
+            Some(true) => {
+                self.confirm_remove_results = false;
+                self.remove_results();
+            }
+            Some(false) => self.confirm_remove_results = false,
+            None => {}
         }
     }
 
@@ -5007,12 +4626,12 @@ impl Workbench {
         }
     }
 
-    /// PrePoMax's question before deleting, for the context menu and the Delete key alike.
+    /// Deleting, for the context menu and the Delete key alike: in the FE model at once with
+    /// a toast offering Undo, elsewhere after a confirmation, since Undo does not reach there.
     fn confirm_delete_window(&mut self, ctx: &egui::Context) {
         let Some((view, items)) = self.confirm_delete.clone() else {
             return;
         };
-        let mut answer = None;
         // Like PrePoMax, the parts are named in the question.
         let parts: Vec<String> = (items.iter())
             .filter_map(|item| match item {
@@ -5023,10 +4642,14 @@ impl Workbench {
             })
             .collect();
         let question = match parts.as_slice() {
-            [] if items.len() > 1 => format!("Delete the {} selected items?", items.len()),
-            [] => "Delete the selected item?".into(),
-            [name] => format!("Delete the selected part?\n{name}"),
-            names => format!("Delete the selected parts?\n{}", names.join(", ")),
+            [] if items.len() > 1 => format!("Delete {} items?", items.len()),
+            [] => "Delete the item?".into(),
+            [name] => format!("Delete {name}?"),
+            names => format!("Delete {} parts?", names.len()),
+        };
+        let consequence = match parts.as_slice() {
+            [] | [_] => "Undo cannot bring it back here.".to_owned(),
+            names => format!("{}. Undo cannot bring them back here.", names.join(", ")),
         };
         // In the FE model Undo brings a deleted item back, so it goes at once and a toast
         // offers Undo. Elsewhere there is no Undo, so the user is asked first.
@@ -5043,31 +4666,11 @@ impl Workbench {
                 _ => format!("Deleted {} items", items.len()),
             }
         });
-        if undoable {
-            answer = Some(true);
+        let answer = if undoable {
+            Some(true)
         } else {
-            egui::Modal::new(crate::ids::window(ctx, "confirm delete")).show(ctx, |ui| {
-                ui.label(question);
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if ui.button("OK").clicked() {
-                        answer = Some(true);
-                    }
-                    if ui.button("Cancel").clicked() {
-                        answer = Some(false);
-                    }
-                });
-            });
-            // Enter confirms and Escape cancels, as with the default buttons of a message
-            // box.
-            ctx.input(|i| {
-                if i.key_pressed(egui::Key::Enter) {
-                    answer = Some(true);
-                } else if i.key_pressed(egui::Key::Escape) {
-                    answer = Some(false);
-                }
-            });
-        }
+            crate::dialog::confirm(ctx, "confirm delete", &question, &consequence, "Delete")
+        };
         if let (Some(true), Some(text)) = (answer, toast) {
             self.toast = Some(crate::toast::Toast::new(text, true));
         }
@@ -5456,6 +5059,54 @@ impl Workbench {
     }
 
     /// PrePoMax's Edit menu.
+    /// The exports of the File menu.
+    fn export_menu(&mut self, ui: &mut egui::Ui) {
+        let setup = self.setup_model().is_some();
+        let export = egui::Button::new("CalculiX Input File …");
+        if ui.add_enabled(setup, export).clicked() {
+            self.export_inp();
+        }
+        let deformed = self.shown_results_view().is_some();
+        let export = egui::Button::new("Deformed Mesh (.inp) …");
+        let tip = "Writes the mesh of the current results, deformed by the current \
+                   deformation scale factor, as an input file with only the mesh.";
+        if ui
+            .add_enabled(deformed, export)
+            .on_hover_text(tip)
+            .on_disabled_hover_text("No results are open.")
+            .clicked()
+        {
+            self.export_deformed_mesh();
+        }
+        let export = egui::Button::new("CalculiX Results (.frd) …");
+        let tip = "Writes the current results as CalculiX's result files: the .frd \
+                   file and, with history output, the .dat file beside it, for \
+                   CalculiX GraphiX, PrePoMax and other programs that read them.";
+        if ui
+            .add_enabled(deformed, export)
+            .on_hover_text(tip)
+            .on_disabled_hover_text("No results are open.")
+            .clicked()
+        {
+            self.export_calculix_results();
+        }
+        let tip = "Writes the current results for ParaView and other VTK programs, \
+                   one increment or a time series of several.";
+        for (label, format) in [
+            ("VTU …", plx_io::vtk::VtkFormat::Xml),
+            ("VTK …", plx_io::vtk::VtkFormat::Legacy),
+        ] {
+            if ui
+                .add_enabled(deformed, egui::Button::new(label))
+                .on_hover_text(tip)
+                .on_disabled_hover_text("No results are open.")
+                .clicked()
+            {
+                self.open_vtk_export(format);
+            }
+        }
+    }
+
     fn edit_menu(&mut self, ui: &mut egui::Ui) {
         let blocked = self.undo_blocked();
         let history = self.model.as_ref().map(|m| &m.history);
@@ -6027,7 +5678,6 @@ impl Workbench {
                 return;
             }
             SectionResult::Ok => self.section = Some(dialog.draft),
-            SectionResult::Cancel => self.section = dialog.before,
             SectionResult::Disable => self.section = None,
         }
         self.viewport.preview = Default::default();
@@ -7360,7 +7010,7 @@ fn start_animation_export(
         && let Err(err) = animation_export::ffmpeg_version(&ffmpeg)
     {
         output.push(format!(
-            "{err}. Exporting {} needs FFmpeg: install it or set its path under Tools > \
+            "{err}. Exporting {} needs FFmpeg: install it or set its path under Edit > \
              Settings > Post-processing; GIF works without it.",
             format.extension().to_uppercase()
         ));
@@ -7530,6 +7180,9 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
                     }
                 }
             });
+            if crate::dialog::tool_footer(ui, None) == crate::dialog::Tool::Close {
+                event = WindowEvent::Close;
+            }
         });
     if let Some(kind) = restart {
         view.start_animation(kind);

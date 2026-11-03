@@ -32,18 +32,19 @@ of a long structure from all sides without it leaving the screen.
 Keyboard shortcuts of the main window: #key("Ctrl+N") new, #key("Ctrl+O") open,
 #key("Ctrl+S") save, #key("Ctrl+Shift+S") save as, #key("F5") run analysis, #key("Del")
 delete the selected tree item, #key("Space") activate or deactivate it. In dialogs
-#key("Enter") means OK and #key("Esc") Cancel.
+#key("Enter") means OK and #key("Esc") Cancel; a confirmation takes both as Cancel
+(@tool-windows).
 
 === Views
 
 The projection is orthographic. Y points up in the front view.
 
 - #ui("Front"), #ui("Back"), #ui("Left"), #ui("Right"), #ui("Top"), #ui("Bottom") and
-  #ui("Isometric") are in #ui("Standard Views") on the #ui("View") tab of the ribbon and in the #ui("View") menu.
+  #ui("Isometric") are in #ui("Standard Views") on the #ui("View") tab of the ribbon.
 - #ui("Vertical View") rolls the view about the viewing direction so that the global axis
   closest to screen-up points exactly up.
-- #menu("View", "View Normal to Axis", "X/Y/Z") looks along an axis onto the plane normal to it.
-- #menu("View", "Isometric, Axis Up", "X/Y/Z") shows the isometric view with the chosen axis
+- #menu("View", "Standard Views", "View Normal to X/Y/Z") looks along an axis onto the plane normal to it.
+- #menu("View", "Standard Views", "Isometric, X/Y/Z Up") shows the isometric view with the chosen axis
   pointing up, for models built with Z up.
 - The *coordinate triad* in the lower right corner can be clicked: a click on an axis tip (or on
   its grey negative half) looks along that axis.
@@ -72,7 +73,7 @@ The #ui("Screenshot") tile on the #ui("View") tab of the ribbon captures the 3D 
 
 === Section view <section-view>
 
-#menu("View", "Section View ...") or #ui("Section View") on the ribbon cuts the model with a plane. Volume
+#menu("View", "Section View") or #ui("Section View") on the ribbon cuts the model with a plane. Volume
 elements show their cut faces with mesh edges and, in the Results workspace, with the result
 colours.
 
@@ -92,13 +93,13 @@ colours.
 )
 
 In the 3D view the plane has a manipulator: drag the arrow to move the plane, drag the arcs to
-tilt it. Changes are shown at once. #ui("OK") keeps the section, #ui("Deactivate") removes it,
-#ui("Cancel") restores the previous state. #menu("View", "Section View Off") removes the section
-as well.
+tilt it. Changes are shown at once, as in every tool window (@tool-windows): #ui("Close")
+keeps the section, #ui("Off") removes it and closes the window. #menu("View", "Section Off")
+removes the section as well.
 
 === Exploded view <exploded-view>
 
-#menu("View", "Exploded View ...") pulls the parts of an assembly apart for display. The mesh
+#menu("View", "Exploded View") pulls the parts of an assembly apart for display. The mesh
 itself is not changed; parts that share nodes move together. A left click on the ribbon tile
 switches the exploded view on and off, a right click opens the settings.
 
@@ -117,3 +118,6 @@ switches the exploded view on and off, a right click opens the settings.
   [Scale factor], [0 = assembled, 1 = fully exploded (default 0.5). Also set with the
     #ui("Assembled - Exploded") slider.],
 )
+
+The parts follow the parameters at once. #ui("Close") keeps the exploded view, #ui("Off")
+shows the model assembled and closes the window.

@@ -827,7 +827,7 @@ pub fn window(
                 }
                 ui.add_space(8.0);
                 if ui
-                    .add_enabled(audible, egui::Button::new("Save as WAV..."))
+                    .add_enabled(audible, egui::Button::new("Save as WAV …"))
                     .clicked()
                 {
                     actions.export = true;
@@ -839,8 +839,11 @@ pub fn window(
             if let Some(message) = &sound.message {
                 ui.colored_label(ui.visuals().error_fg_color, message);
             }
+            if crate::dialog::tool_footer(ui, None) == crate::dialog::Tool::Close {
+                actions.close = true;
+            }
         });
-    actions.close = !open;
+    actions.close |= !open;
     actions
 }
 

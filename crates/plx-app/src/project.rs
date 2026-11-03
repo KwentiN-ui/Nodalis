@@ -5238,62 +5238,6 @@ impl ProjectApp {
                     self.redo(&ctx);
                 }
                 ui.separator();
-                // On the blocks selected with Shift+click or a Shift+drag rectangle.
-                let selected = self.selected.clone();
-                let any = !selected.is_empty();
-                let items = [
-                    (
-                        "Duplicate",
-                        "Shift+D",
-                        Action::DuplicateAll(selected.clone()),
-                    ),
-                    ("Delete", "X", Action::DeleteAll(selected.clone())),
-                    ("Compact View", "H", Action::Compact(selected.clone())),
-                    ("Frame Blocks", "Ctrl+J", Action::Frame(selected.clone())),
-                    ("Remove from Frame", "Alt+P", Action::Unframe(selected)),
-                ];
-                for (text, key, action) in items {
-                    let button = egui::Button::new(text).shortcut_text(key);
-                    if ui
-                        .add_enabled(any, button)
-                        .on_disabled_hover_text(
-                            "Select blocks with Shift+click or a Shift+drag rectangle; the keys \
-                             also work on the block under the mouse pointer.",
-                        )
-                        .clicked()
-                    {
-                        self.act(&ctx, action);
-                    }
-                }
-            });
-            ui.menu_button("Project", |ui| {
-                if let Some(action) = add_block_menu(ui, self.free_position()) {
-                    let ctx = ui.ctx().clone();
-                    self.act(&ctx, action);
-                }
-                ui.separator();
-                let show_all = egui::Button::new("Show All Blocks").shortcut_text("Home");
-                if ui.add(show_all).clicked() {
-                    self.show_all = true;
-                }
-                ui.checkbox(&mut self.show_minimap, "Show Minimap")
-                    .on_hover_text(
-                        "All blocks in small in the lower right corner of the schematic",
-                    );
-                ui.separator();
-                let update = egui::Button::new("Update Project").shortcut_text("F5");
-                if ui.add(update).on_hover_text(UPDATE_TIP).clicked() && !self.busy() {
-                    self.update_all();
-                }
-                if ui
-                    .button("Solution Monitor")
-                    .on_hover_text(MONITOR_TIP)
-                    .clicked()
-                {
-                    self.toggle_monitor();
-                }
-            });
-            ui.menu_button("Tools", |ui| {
                 if ui.button("Settings …").clicked() {
                     self.settings_window = Some(SettingsWindow::new(&self.settings));
                 }
@@ -9620,27 +9564,6 @@ impl BlockKind {
         }
     }
 
-    /// The text of its menu item.
-    fn menu_label(&self) -> &'static str {
-        match self {
-            Self::Analysis => "New Analysis …",
-            Self::Materials => "Add Materials",
-            Self::CrossSections => "Add Cross-Sections",
-            Self::Mesh(primitive) => primitive.label(),
-            Self::RefineMesh => "Refine Mesh",
-            Self::CadOperation => "Add CAD Operation",
-            Self::Parameters => "Parameters",
-            Self::Math => "Math",
-            Self::Switch => "Switch",
-            Self::Measure => "Add Measure",
-            Self::Study => "Add Parameter Study",
-            Self::MeshExport => "Add Mesh Export",
-            Self::Campbell => "Add Campbell",
-            Self::File => "Add File …",
-            Self::Note => "Add Note",
-        }
-    }
-
     /// Adds its block at the position.
     fn action(&self, pos: egui::Pos2) -> Action {
         match self {
@@ -9661,39 +9584,6 @@ impl BlockKind {
             Self::Note => Action::AddNote(pos),
         }
     }
-}
-
-/// Menu items adding a block at the position: one per kind, the kinds of a group with more
-/// than one in a submenu.
-fn add_block_menu(ui: &mut egui::Ui, pos: egui::Pos2) -> Option<Action> {
-    let kinds = block_kinds();
-    let mut chosen = None;
-    let mut done: Vec<&str> = Vec::new();
-    for kind in &kinds {
-        let category = kind.entry().category;
-        if done.contains(&category) {
-            continue;
-        }
-        done.push(category);
-        let group: Vec<&BlockKind> = (kinds.iter())
-            .filter(|k| k.entry().category == category)
-            .collect();
-        let mut item = |ui: &mut egui::Ui, kind: &BlockKind, text: &str| {
-            if ui.button(text).on_hover_text(kind.entry().tip).clicked() {
-                chosen = Some(kind.action(pos));
-            }
-        };
-        if let [kind] = group[..] {
-            item(ui, kind, kind.menu_label());
-        } else {
-            ui.menu_button(format!("Add {category}"), |ui| {
-                for kind in group {
-                    item(ui, kind, kind.menu_label());
-                }
-            });
-        }
-    }
-    chosen
 }
 
 fn mesh_tip(primitive: &MeshPrimitive) -> &'static str {
@@ -11407,16 +11297,10 @@ const CROSS_SECTIONS_TIP: &str = "Adds a block of beam cross-sections kept in th
      analyses link them one by one or all at once, and their dimensions can be exposed as \
      parameters, so that a parameter study varies the profile of every analysis that links it.";
 
-/// Tooltip of Update Project.
+/// Tooltip of Undo.
 const UNDO_TIP: &str = "Undoes the last change of the project: blocks added, deleted, renamed or \
                         moved, links, and what the blocks hold. Changes inside an analysis are \
                         undone in its window.";
-const UPDATE_TIP: &str = "Update Project (F5): solves every analysis that is not up to date, \
-     one after the other, and keeps the new results.";
-
-const MONITOR_TIP: &str = "Solution Monitor: the analyses being solved, with the output of \
-     CalculiX, in the Analyses tab below the schematic";
-
 /// The project window's solution monitor: which analysis' output it shows, and the text
 /// the output is filtered by.
 #[derive(Default)]
