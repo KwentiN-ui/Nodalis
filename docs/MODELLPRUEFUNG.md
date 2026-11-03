@@ -11,6 +11,7 @@ fehlgeschlagenen Lauf aus der Ausgabe von CalculiX erkennt. Nachgestellt mit Cal
 | Stabwerk an nur einem Knoten gelagert | keine | stiller Unsinn | Starrkörper-Prüfung; Stabknoten haben keine Rotationen, auch wenn das Netz die Linien als B32 führt |
 | Teil nur über Kontakt gehalten | `zero pivot`, `too many cutbacks` | oft Abbruch | Warnung |
 | Elemente ohne Section | `no material was assigned to element N` | Abbruch | Elemente je Part gegen Sections |
+| Element in mehreren Sections (gleiches Part o. ä.) | keine Prüfung durch ccx, zwei Section-Definitionen je Element | Fehler im Check | Elemente je Section, die schon eine frühere Section belegt |
 | Material ohne Elastizität | `no elastic constants were assigned` | Abbruch | Materialien, die eine Section nutzt |
 | Frequency, Dynamic, Modal Dynamics oder Steady State Dynamics Step ohne Dichte | `no density was assigned` | Abbruch | wie oben |
 | Modal Dynamics oder Steady State Dynamics ohne vorherigen Frequency Step mit Storage=Yes | `*MODAL DYNAMIC`/`*STEADY STATE DYNAMICS`: `no eigenvalue file` bzw. Lesen von `.eig` schlägt fehl | Abbruch | Fehler: Modal-Steps brauchen einen aktiven Frequency Step mit gespeicherten Eigenformen davor |
