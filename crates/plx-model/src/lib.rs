@@ -874,33 +874,42 @@ pub enum Incrementation {
 /// How a step solves its systems of equations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LinearSolverChoice {
-    /// A sparse direct factorization (LDLᵀ): any system, memory for the factor.
+    /// The solver chooses: direct while the factor fits into the memory, iterative beyond
+    /// where the step allows it, and the other one when the first fails.
     #[default]
+    Automatic,
+    /// A sparse direct factorization (LDLᵀ): any system, memory for the factor.
     Direct,
     /// Conjugate gradients with an incomplete Cholesky preconditioner: symmetric positive
-    /// definite systems only (linear static and heat transfer), far less memory.
+    /// definite systems only (static, also nonlinear and with contact, dynamic and heat
+    /// transfer steps), far less memory.
     Iterative,
 }
 
 impl LinearSolverChoice {
-    pub const ALL: [LinearSolverChoice; 2] =
-        [LinearSolverChoice::Direct, LinearSolverChoice::Iterative];
+    pub const ALL: [LinearSolverChoice; 3] = [
+        LinearSolverChoice::Automatic,
+        LinearSolverChoice::Direct,
+        LinearSolverChoice::Iterative,
+    ];
 
     /// The name shown in the interface.
     pub fn name(self) -> &'static str {
         match self {
+            LinearSolverChoice::Automatic => "Automatic",
             LinearSolverChoice::Direct => "Direct",
             LinearSolverChoice::Iterative => "Iterative",
         }
     }
 
-    /// The value of `SOLVER=` in the input file. Direct leaves the choice to the solver,
-    /// which is its fastest direct one (CalculiX: Pardiso, PaStiX or SPOOLES, whichever it
-    /// was built with); Iterative asks for conjugate gradients with an incomplete Cholesky
-    /// preconditioner, which CalculiX and the Nodalis solver both have.
+    /// The value of `SOLVER=` in the input file. Automatic leaves the choice to the solver
+    /// (CalculiX takes its default); Direct names PaStiX, which the Nodalis solver reads as
+    /// its direct solver; Iterative asks for conjugate gradients with an incomplete
+    /// Cholesky preconditioner, which CalculiX and the Nodalis solver both have.
     pub fn keyword(self) -> Option<&'static str> {
         match self {
-            LinearSolverChoice::Direct => None,
+            LinearSolverChoice::Automatic => None,
+            LinearSolverChoice::Direct => Some("PaStiX"),
             LinearSolverChoice::Iterative => Some("Iterative Cholesky"),
         }
     }
@@ -933,7 +942,7 @@ impl Default for StaticStep {
             time_period: 1.0,
             min_increment: 1e-5,
             max_increment: 1e30,
-            solver: LinearSolverChoice::Direct,
+            solver: LinearSolverChoice::Automatic,
         }
     }
 }
@@ -983,6 +992,10 @@ pub struct FrequencyStep {
     /// highest one the sectors allow.
     #[serde(default)]
     pub nodal_diameters: Option<[u32; 2]>,
+    /// How the shifted systems of the eigenvalue iteration are solved. Iterative needs no
+    /// lower frequency bound (the shift must stay below the spectrum).
+    #[serde(default)]
+    pub solver: LinearSolverChoice,
 }
 
 /// Settings of a `*DYNAMIC` step, with PrePoMax's defaults; like PrePoMax's `DynamicStep` it
@@ -1260,6 +1273,7 @@ impl Default for FrequencyStep {
             storage: false,
             perturbation: false,
             nodal_diameters: None,
+            solver: LinearSolverChoice::Automatic,
         }
     }
 }
@@ -1299,6 +1313,9 @@ pub struct BuckleStep {
     /// Adds the stiffness of the deformed state of the previous step, e.g. of a preload that
     /// is not scaled by the buckling factor (`*STEP, PERTURBATION`).
     pub perturbation: bool,
+    /// How the reference solution and the systems of the eigenvalue iteration are solved.
+    #[serde(default)]
+    pub solver: LinearSolverChoice,
 }
 
 impl Default for BuckleStep {
@@ -1307,6 +1324,7 @@ impl Default for BuckleStep {
             num_factors: 1,
             accuracy: 1e-4,
             perturbation: false,
+            solver: LinearSolverChoice::Automatic,
         }
     }
 }

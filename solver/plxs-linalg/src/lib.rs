@@ -16,6 +16,7 @@
 pub mod dense;
 pub mod eigen;
 pub mod gmres;
+pub mod memory;
 pub mod ordering;
 pub mod pattern;
 pub mod pcg;
@@ -23,8 +24,9 @@ pub mod solver;
 pub mod supernodal;
 
 pub use gmres::gmres;
+pub use memory::available_memory;
 
 pub use eigen::{EigenPairs, EigenSolver, LanczosOptions, ShiftInvertLanczos};
 pub use pattern::{Pattern, SparseMatrix};
 pub use pcg::{PcgSolver, PcgStats};
-pub use solver::{LdltSolver, LinearSolver};
+pub use solver::{LdltSolver, LinearSolver, OUT_OF_MEMORY, is_out_of_memory};

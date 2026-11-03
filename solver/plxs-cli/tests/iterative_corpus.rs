@@ -1,6 +1,7 @@
-//! The iterative equation solver (stage 5 of the ccx replacement): the `static` and `heat`
-//! fixtures, every step switched to `SOLVER=ITERATIVE CHOLESKY`, still match the CalculiX
-//! golden files within their class tolerance.
+//! The iterative equation solver (stage 5 of the ccx replacement, extended to nonlinear
+//! static, contact, dynamic and eigenvalue steps): the fixtures of those areas, every step switched to
+//! `SOLVER=ITERATIVE CHOLESKY`, still match the CalculiX golden files within their class
+//! tolerance.
 
 use std::path::{Path, PathBuf};
 
@@ -8,11 +9,27 @@ use plxs_verify::report::format_reports;
 use plxs_verify::{Outcome, corpus, fixtures_root, run_corpus};
 
 /// Procedures that solve with conjugate gradients when asked to.
-const ITERATIVE: [&str; 4] = [
+const ITERATIVE: [&str; 8] = [
     "*STATIC",
+    "*VISCO",
+    "*DYNAMIC",
+    "*FREQUENCY",
+    "*BUCKLE",
     "*HEAT TRANSFER",
     "*COUPLED TEMPERATURE-DISPLACEMENT",
     "*UNCOUPLED TEMPERATURE-DISPLACEMENT",
+];
+
+/// Fixture areas whose steps have an iterative solver.
+const AREAS: [&str; 8] = [
+    "static",
+    "heat",
+    "nonlinear",
+    "contact",
+    "dynamic",
+    "eigen",
+    "modal",
+    "cyclic",
 ];
 
 /// The input with `SOLVER=ITERATIVE CHOLESKY` on each procedure line that names no solver.
@@ -34,10 +51,13 @@ fn copy_area(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
     for entry in std::fs::read_dir(from).unwrap() {
         let path = entry.unwrap().path();
-        if !path.is_file() {
+        let target = to.join(path.file_name().unwrap());
+        if path.is_dir() {
+            // Files a fixture refers to (`<name>.files/`, e.g. the global model of a
+            // submodel), taken as they are.
+            copy_area(&path, &target);
             continue;
         }
-        let target = to.join(path.file_name().unwrap());
         if path.extension().is_some_and(|e| e == "inp") {
             let text = std::fs::read_to_string(&path).unwrap();
             std::fs::write(target, iterative(&text)).unwrap();
@@ -48,11 +68,11 @@ fn copy_area(from: &Path, to: &Path) {
 }
 
 #[test]
-fn static_and_heat_fixtures_match_calculix_with_the_iterative_solver() {
+fn fixtures_match_calculix_with_the_iterative_solver() {
     let root: PathBuf =
         std::env::temp_dir().join(format!("plxs-iterative-corpus-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    for area in ["static", "heat"] {
+    for area in AREAS {
         copy_area(
             &fixtures_root().join(area),
             &root.join("fixtures").join(area),

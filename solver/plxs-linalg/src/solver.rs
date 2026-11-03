@@ -67,6 +67,18 @@ pub struct LdltSolver {
     /// the Sturm checks of the eigensolvers) can meet pivots that are exactly zero without
     /// being singular, which LDLᵀ without pivoting cannot pass otherwise.
     regularization: f64,
+    /// Whether `values` holds the memory of the analyzed factor
+    /// ([`Self::estimate_factor_bytes`] analyzes without it).
+    allocated: bool,
+}
+
+/// The start of the message of a factorization that did not fit into the memory.
+pub const OUT_OF_MEMORY: &str = "not enough memory";
+
+/// Whether `error` is a factorization that did not fit into the memory.
+pub fn is_out_of_memory(error: &Error) -> bool {
+    matches!(error, Error::Numerical { message, .. }
+        if message.starts_with(OUT_OF_MEMORY) || message.starts_with("out of memory"))
 }
 
 impl LdltSolver {
@@ -90,6 +102,7 @@ impl LdltSolver {
             values: Vec::new(),
             factorized: false,
             regularization: 0.0,
+            allocated: false,
         }
     }
 
@@ -189,13 +202,25 @@ fn numerical(message: impl Into<String>) -> Error {
     }
 }
 
-impl LinearSolver for LdltSolver {
-    fn analyze(&mut self, pattern: &Pattern) -> Result<()> {
+impl LdltSolver {
+    /// Bytes the factor of `pattern` will take (its values; the structure is small beside
+    /// them), from the symbolic analysis alone: the factor's memory is not taken yet. The
+    /// analysis is kept, so an [`LinearSolver::analyze`] of the same pattern only allocates.
+    pub fn estimate_factor_bytes(&mut self, pattern: &Pattern) -> Result<u64> {
+        self.analyze_with(pattern, false)?;
+        Ok(self.factor_nonzeros().unwrap_or(0) as u64 * 8)
+    }
+
+    /// The symbolic analysis of `pattern`, and with `allocate` the memory of its factor.
+    fn analyze_with(&mut self, pattern: &Pattern, allocate: bool) -> Result<()> {
         if self.symbolic.is_some() && self.analyzed.as_ref() == Some(pattern) {
             // The factor of the previous values stays valid until the next factorize; the
             // ordering of the pattern stays too.
             self.coordinates = None;
             self.reused += 1;
+            if allocate && !self.allocated {
+                self.allocate()?;
+            }
             return Ok(());
         }
         let wide = Self::widen(pattern);
@@ -232,22 +257,8 @@ impl LinearSolver for LdltSolver {
             },
         )
         .map_err(|e| numerical(format!("symbolic factorization failed: {e:?}")))?;
-        // A factor larger than the memory is an error the run reports, not an abort of the
-        // process (the built-in solver runs inside Nodalis).
-        let len = symbolic.len_val();
         self.values = Vec::new();
-        self.values.try_reserve_exact(len).map_err(|_| {
-            numerical(format!(
-                "not enough memory: the factor of the {} equations needs {:.1} GB",
-                pattern.dimension(),
-                len as f64 * 8.0 / 1e9
-            ))
-        })?;
-        // The allocation is mapped lazily; writing it once here takes its page faults in one
-        // thread. Taken by the threads of the factorization at once they cost several times
-        // more (the kernel serializes them; measured in the cloud VM: 1.9 GB of factor 1.1 s
-        // here against about 3 s inside the parallel factorization).
-        self.values.resize(len, 0.0);
+        self.allocated = false;
         self.workspace.clear();
         self.tree = match symbolic.raw() {
             SymbolicCholeskyRaw::Supernodal(raw) => {
@@ -260,10 +271,45 @@ impl LinearSolver for LdltSolver {
         self.wide = wide;
         self.analyzed = Some(pattern.clone());
         self.factorized = false;
+        if allocate {
+            self.allocate()?;
+        }
         Ok(())
     }
 
+    /// Takes (and touches) the memory of the analyzed factor. A factor larger than the
+    /// memory is an error the run reports, not an abort of the process (the built-in solver
+    /// runs inside Nodalis).
+    fn allocate(&mut self) -> Result<()> {
+        let symbolic =
+            (self.symbolic.as_ref()).ok_or_else(|| numerical("allocate before analyze"))?;
+        let (len, n) = (symbolic.len_val(), symbolic.nrows());
+        self.values = Vec::new();
+        self.values.try_reserve_exact(len).map_err(|_| {
+            numerical(format!(
+                "{OUT_OF_MEMORY}: the factor of the {n} equations needs {:.1} GB",
+                len as f64 * 8.0 / 1e9
+            ))
+        })?;
+        // The allocation is mapped lazily; writing it once here takes its page faults in one
+        // thread. Taken by the threads of the factorization at once they cost several times
+        // more (the kernel serializes them; measured in the cloud VM: 1.9 GB of factor 1.1 s
+        // here against about 3 s inside the parallel factorization).
+        self.values.resize(len, 0.0);
+        self.allocated = true;
+        Ok(())
+    }
+}
+
+impl LinearSolver for LdltSolver {
+    fn analyze(&mut self, pattern: &Pattern) -> Result<()> {
+        self.analyze_with(pattern, true)
+    }
+
     fn factorize(&mut self, matrix: &SparseMatrix) -> Result<()> {
+        if self.symbolic.is_some() && !self.allocated {
+            self.allocate()?;
+        }
         let symbolic = self
             .symbolic
             .as_ref()

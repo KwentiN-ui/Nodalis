@@ -5090,6 +5090,7 @@ fn step_form(
 /// strain tolerance of the automatic increments.
 fn visco_form(ui: &mut Ui, settings: &mut ViscoStep, units: UnitSystem) {
     increments_form(ui, &mut settings.increments, units, true);
+    solver_row(ui, &mut settings.increments.solver);
     ui.label("Creep strain tolerance");
     ui.add(
         numeric::drag_value(&mut settings.creep_tolerance)
@@ -5208,6 +5209,7 @@ fn dynamic_form(ui: &mut Ui, settings: &mut DynamicStep, units: UnitSystem) {
     ui.weak("Numerical damping of the time integration, -1/3 to 0; -0.05 is the default.");
     ui.end_row();
     increments_form(ui, &mut settings.increments, units, true);
+    solver_row(ui, &mut settings.increments.solver);
     let mut damped = settings.damping.is_some();
     ui.label("");
     ui.checkbox(&mut damped, "Rayleigh damping");
@@ -5416,8 +5418,9 @@ fn validate_heat_transfer_step(settings: &HeatTransferStep) -> Result<(), String
     Ok(())
 }
 
-/// "Equation solver: Direct | Iterative" of the steps whose systems the iterative solver
-/// can solve: static and heat transfer.
+/// "Equation solver: Automatic | Direct | Iterative" of the steps whose systems the
+/// iterative solver can solve: static (also nonlinear and with contact), visco, dynamic,
+/// heat transfer, frequency and buckle.
 fn solver_row(ui: &mut Ui, solver: &mut LinearSolverChoice) {
     ui.label("Equation solver");
     ui.horizontal(|ui| {
@@ -5431,6 +5434,11 @@ fn solver_row(ui: &mut Ui, solver: &mut LinearSolverChoice) {
 
 fn solver_hint(choice: LinearSolverChoice) -> &'static str {
     match choice {
+        LinearSolverChoice::Automatic => {
+            "The solver chooses: direct while the factorization fits into the free memory, \
+             iterative for models too large for it. If the chosen solver fails, the other \
+             one takes over."
+        }
         LinearSolverChoice::Direct => {
             "Sparse direct factorization (LDL^T). Solves every system; needs memory for the \
              factor, which grows quickly with the model."
@@ -5438,7 +5446,8 @@ fn solver_hint(choice: LinearSolverChoice) -> &'static str {
         LinearSolverChoice::Iterative => {
             "Conjugate gradients with an incomplete Cholesky preconditioner. Needs a fraction \
              of the memory and is often faster on large solid models, but only solves \
-             positive definite systems: no contact, no unsupported rigid body motion."
+             positive definite systems; fails near buckling or with parts held only by \
+             contact."
         }
     }
 }
@@ -5485,6 +5494,7 @@ fn frequency_form(
     if let Some(sectors) = cyclic_sectors {
         nodal_diameter_rows(ui, &mut settings.nodal_diameters, sectors);
     }
+    solver_row(ui, &mut settings.solver);
     ui.label("");
     ui.weak("Loads have no effect in a frequency step; only the boundary conditions count.");
     ui.end_row();
@@ -5563,6 +5573,7 @@ fn buckle_form(ui: &mut Ui, settings: &mut BuckleStep) {
     ui.label("Accuracy");
     ui.add(numeric::drag_value(&mut settings.accuracy).speed(0.0));
     ui.end_row();
+    solver_row(ui, &mut settings.solver);
     ui.label("");
     ui.weak("The critical load is the buckling factor times the loads of this step.");
     ui.end_row();

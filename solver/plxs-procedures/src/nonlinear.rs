@@ -20,9 +20,10 @@ use plxs_assembly::{
 use plxs_constraints::ConstraintSet;
 use plxs_core::step::{DefaultAmplitude, Incrementation, Procedure as ProcedureKind};
 use plxs_core::{Error, Progress, ProgressEvent, Result, Step};
-use plxs_linalg::{LinearSolver, SparseMatrix};
+use plxs_linalg::SparseMatrix;
 use plxs_output::{CvgRow, StaRow};
 
+use crate::equations::{Equations, in_increment};
 use crate::fields::write_increment;
 use crate::{Procedure, ProcedureContext, StepOutcome};
 
@@ -157,15 +158,16 @@ impl Procedure for NonlinearStatic {
         progress: &mut dyn Progress,
     ) -> Result<StepOutcome> {
         ctx.table.require_elastic()?;
-        let (increments, visco, cetol): (Incrementation, bool, f64) = match &step.procedure {
-            ProcedureKind::Static(s) => (s.increments, false, 0.0),
-            ProcedureKind::Visco(v) => (v.increments, true, v.cetol),
-            _ => {
-                return Err(Error::Unsupported(
-                    "NonlinearStatic needs a *STATIC or *VISCO step".into(),
-                ));
-            }
-        };
+        let (increments, visco, cetol, solver): (Incrementation, bool, f64, _) =
+            match &step.procedure {
+                ProcedureKind::Static(s) => (s.increments, false, 0.0, s.solver),
+                ProcedureKind::Visco(v) => (v.increments, true, v.cetol, v.solver),
+                _ => {
+                    return Err(Error::Unsupported(
+                        "NonlinearStatic needs a *STATIC or *VISCO step".into(),
+                    ));
+                }
+            };
         // CalculiX applies the loads of a *VISCO step at once (step loading).
         let mut step = step.clone();
         if visco && step.default_amplitude == DefaultAmplitude::Ramp {
@@ -173,6 +175,7 @@ impl Procedure for NonlinearStatic {
         }
         let step = &step;
         let controls = Controls::of_step(step);
+        let mut equations = Equations::new(solver);
 
         let period = increments.period();
         if period <= 0.0 {
@@ -376,6 +379,7 @@ impl Procedure for NonlinearStatic {
                     average_force,
                     direct,
                     (visco && cetol > 0.0).then_some(cetol),
+                    &mut equations,
                 )?;
                 match result {
                     Ok(converged) => break converged,
@@ -595,6 +599,7 @@ impl NonlinearStatic {
         average_force: f64,
         direct: bool,
         cetol: Option<f64>,
+        equations: &mut Equations,
     ) -> Result<std::result::Result<Converged, Failure>> {
         let total_dofs = ctx.table.dofs.len();
         // Start from the converged displacements, u = T v + g_start. A change of the
@@ -787,19 +792,31 @@ impl NonlinearStatic {
             let k_reduced = set.reduce(k);
             ctx.profile.add(Phase::Reduction, started);
             let started = Instant::now();
-            ctx.solver.analyze(k_reduced.pattern())?;
-            ctx.profile.add(Phase::Analysis, started);
-            let started = Instant::now();
-            ctx.solver.factorize(&k_reduced).map_err(|e| match e {
-                Error::Numerical { message, .. } => Error::Numerical {
-                    step: ctx.step_number,
-                    increment,
-                    message: format!(
-                        "{message}; the model is probably not sufficiently constrained"
-                    ),
-                },
-                other => other,
-            })?;
+            let coordinates = || {
+                (set.free.iter())
+                    .map(|&dof| ctx.model.nodes.coordinates[dof as usize / 3])
+                    .collect()
+            };
+            // The solver's messages would repeat in every iteration: only those of the first
+            // system of the step and the warnings (fall-backs of the automatic choice).
+            let mut sink = crate::equations::FirstOrWarnings {
+                inner: &mut *progress,
+                all: increment == 1 && attempt == 1 && iteration == 1,
+            };
+            equations
+                .prepare(&mut ctx.solver, &k_reduced, coordinates, true, &mut sink)
+                .map_err(|e| match e {
+                    Error::Numerical { message, .. } => Error::Numerical {
+                        step: ctx.step_number,
+                        increment,
+                        message: if equations.hints_constraints() {
+                            format!("{message}; the model is probably not sufficiently constrained")
+                        } else {
+                            message
+                        },
+                    },
+                    other => other,
+                })?;
             ctx.profile.add(Phase::Factorization, started);
             let started = Instant::now();
             let unsymmetric: Vec<&plxs_contact::ContactElement> = contact
@@ -813,7 +830,13 @@ impl NonlinearStatic {
                 .unwrap_or_default();
             let dv = if unsymmetric.is_empty() {
                 let mut dv = residual;
-                ctx.solver.solve(&mut dv)?;
+                let mut sink = crate::equations::FirstOrWarnings {
+                    inner: &mut *progress,
+                    all: false,
+                };
+                equations
+                    .solve(&mut ctx.solver, &mut dv, &mut sink)
+                    .map_err(|e| in_increment(e, ctx.step_number, increment))?;
                 dv
             } else {
                 // Sliding friction makes the tangent unsymmetric: GMRES on the full
@@ -831,7 +854,7 @@ impl NonlinearStatic {
                         *o += r;
                     }
                 };
-                let precondition = |v: &mut [f64]| solver.solve(v);
+                let precondition = |v: &mut [f64]| equations.apply_inverse(solver, v);
                 plxs_linalg::gmres(&apply, &precondition, &residual, 1e-10, 60, 300)?.0
             };
             ctx.profile.add(Phase::Solve, started);
