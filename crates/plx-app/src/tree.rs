@@ -138,6 +138,8 @@ pub fn item_of(fe: &FeModel, item: &plx_model::ItemRef) -> Option<TreeItem> {
 #[derive(Default)]
 pub struct TreeState {
     pub selected: Option<(TreeView, TreeItem)>,
+    /// The last click on a row: its item and the frame time, for `Tree::double_click`.
+    last_click: Option<(TreeView, TreeItem, f64)>,
     /// Expand (true) or collapse an item with all its descendants in the next frame.
     expand: Option<(TreeView, TreeItem, bool)>,
     /// The selection was made in the 3D view: open its branches and scroll it into view.
@@ -389,6 +391,9 @@ fn acting_mark(rect: Rect) -> Shape {
         egui::StrokeKind::Inside,
     ))
 }
+
+/// Longest time between the two clicks of a double click in the tree.
+const DOUBLE_CLICK_SECONDS: f64 = 0.8;
 
 pub(crate) fn row_label(
     ui: &mut Ui,
@@ -935,6 +940,8 @@ struct Row {
 struct Tree<'a> {
     view: TreeView,
     state: &'a mut TreeState,
+    /// The row drawn last was double-clicked.
+    doubled: bool,
     response: TreeResponse,
     /// Rows of the open branches, innermost last, for the connector lines.
     levels: Vec<Vec<Row>>,
@@ -1027,6 +1034,25 @@ impl Tree<'_> {
         Some(format!("Step type: {}", glyph.name()))
     }
 
+    /// Whether the click on the row of `item` is the second of a double click. egui measures
+    /// 0.3 s between clicks in frame time, so a slow frame after the first click (the
+    /// selection redraws the 3D view) swallowed the second one; here the time is longer.
+    fn double_click(&mut self, ui: &Ui, item: &TreeItem, response: &Response) -> bool {
+        if !response.clicked() && !response.double_clicked() {
+            return false;
+        }
+        let now = ui.input(|i| i.time);
+        let last = self.state.last_click.take();
+        let double = response.double_clicked()
+            || last.is_some_and(|(view, last, at)| {
+                view == self.view && last == *item && now - at <= DOUBLE_CLICK_SECONDS
+            });
+        if !double {
+            self.state.last_click = Some((self.view, item.clone(), now));
+        }
+        double
+    }
+
     /// Selectable label of an item: a click selects it, a double click opens its properties.
     fn label(&mut self, ui: &mut Ui, item: TreeItem, text: impl Into<WidgetText>) -> Response {
         let findings = self.findings.get(&item).cloned();
@@ -1077,6 +1103,8 @@ impl Tree<'_> {
         }
         // Like PrePoMax, a right click selects the item its context menu belongs to; on a
         // part of several selected ones it keeps them, so that the menu deletes them all.
+        let double = self.double_click(ui, &item, &response);
+        self.doubled = double;
         if response.clicked() || response.double_clicked() || response.secondary_clicked() {
             let (ctrl, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
             match item {
@@ -1128,7 +1156,7 @@ impl Tree<'_> {
                 }
             });
         }
-        if response.double_clicked() {
+        if double {
             match creates {
                 // PrePoMax creates an item when its container is double-clicked.
                 Some(kind) => self.response.create = Some(kind),
@@ -1410,6 +1438,7 @@ impl Tree<'_> {
         text: impl Into<WidgetText>,
     ) -> (Row, Response, bool) {
         if self.hidden(&item) {
+            self.doubled = false;
             let response = ui.interact(
                 egui::Rect::NOTHING,
                 ui.id().with("hidden"),
@@ -1531,6 +1560,7 @@ impl Tree<'_> {
         let toggles = creates(&item).is_none() && !has_properties(&item);
         let icon = self.icon(&item, state.is_open());
         let (row, header, _) = self.row(ui, Some(&mut state), None, icon, item, text);
+        let doubled = self.doubled;
         // Lines go below the rows of the body, so that the boxes of sub-branches cover them.
         let lines = ui.painter().add(Shape::Noop);
         self.levels.push(Vec::new());
@@ -1542,7 +1572,7 @@ impl Tree<'_> {
             ui.painter().set(lines, shapes);
         }
         self.forced_open = outer;
-        if toggles && header.double_clicked() {
+        if toggles && doubled {
             let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, default_open);
             state.toggle(ui);
             state.store(ui.ctx());
@@ -1787,6 +1817,7 @@ pub fn show(
     let mut tree = Tree {
         view,
         state,
+        doubled: false,
         response: TreeResponse::default(),
         levels: vec![Vec::new()],
         forced_open: None,
@@ -2394,6 +2425,139 @@ mod tests {
         }
         for item in [TreeItem::Model, TreeItem::Part(0), TreeItem::Material(0)] {
             assert!(has_properties(&item), "{item:?}");
+        }
+    }
+
+    /// Drives the tree with synthetic pointer events, one frame per call.
+    struct Harness {
+        ctx: egui::Context,
+        model: Model,
+        state: TreeState,
+        time: f64,
+        opened: Vec<TreeItem>,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let mut model = Model::new(std::path::Path::new("t.inp"), plx_mesh::FeMesh::default());
+            model.fe.materials = vec![
+                plx_model::Material {
+                    name: "A".into(),
+                    ..Default::default()
+                },
+                plx_model::Material {
+                    name: "B".into(),
+                    ..Default::default()
+                },
+            ];
+            let mut h = Self {
+                ctx: egui::Context::default(),
+                model,
+                state: TreeState::default(),
+                time: 1.0,
+                opened: Vec::new(),
+            };
+            h.frame(vec![]);
+            h.frame(vec![]);
+            h
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) {
+            self.time += 0.03;
+            let input = egui::RawInput {
+                time: Some(self.time),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let (model, state, opened) = (&mut self.model, &mut self.state, &mut self.opened);
+            let mut out = self.ctx.run_ui(input, |ui| {
+                let r = show(ui, TreeView::FeModel, Some(model), &[], &[], state);
+                opened.extend(r.open);
+            });
+            out.textures_delta.clear();
+        }
+
+        fn button(&mut self, pos: egui::Pos2, pressed: bool) -> egui::Event {
+            let _ = self;
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            }
+        }
+
+        /// A click: press and release in separate frames, `gap` frames between the clicks.
+        fn click(&mut self, pos: egui::Pos2) {
+            self.frame(vec![egui::Event::PointerMoved(pos)]);
+            let e = self.button(pos, true);
+            self.frame(vec![e]);
+            let e = self.button(pos, false);
+            self.frame(vec![e]);
+        }
+    }
+
+    #[test]
+    fn double_click_on_a_material_opens_it_every_time() {
+        // Find the row of the first material by clicking down the tree.
+        let mut found = None;
+        for (x, y) in (150..200)
+            .step_by(4)
+            .flat_map(|y| (30..140).step_by(6).map(move |x| (x, y)))
+        {
+            let pos = egui::pos2(x as f32, y as f32);
+            let mut h = Harness::new();
+            h.click(pos);
+            eprintln!("{y} {:?}", h.state.selected);
+            if h.state.selected == Some((TreeView::FeModel, TreeItem::Material(0))) {
+                found = Some(pos);
+                break;
+            }
+        }
+        let pos = found.expect("material row found");
+        for round in 0..20 {
+            let mut h = Harness::new();
+            h.click(pos);
+            // Frames between the clicks, as at a slower frame rate.
+            for _ in 0..(round % 4) {
+                h.frame(vec![]);
+            }
+            h.opened.clear();
+            h.click(pos);
+            assert_eq!(h.opened, [TreeItem::Material(0)], "round {round}");
+        }
+    }
+
+    #[test]
+    fn double_click_survives_a_slow_frame_after_the_first_click() {
+        let mut found = None;
+        for (x, y) in (150..200)
+            .step_by(4)
+            .flat_map(|y| (30..140).step_by(6).map(move |x| (x, y)))
+        {
+            let pos = egui::pos2(x as f32, y as f32);
+            let mut h = Harness::new();
+            h.click(pos);
+            if h.state.selected == Some((TreeView::FeModel, TreeItem::Material(0))) {
+                found = Some(pos);
+                break;
+            }
+        }
+        let pos = found.expect("material row found");
+        // Selecting rebuilds the 3D view, which makes the frame after the first click slow;
+        // egui measures the time between clicks in frame time, which then exceeds its 0.3 s.
+        for slow in [0.1, 0.25, 0.35, 0.45] {
+            let mut h = Harness::new();
+            h.click(pos);
+            h.time += slow;
+            h.frame(vec![]);
+            h.opened.clear();
+            h.click(pos);
+            assert_eq!(h.opened, [TreeItem::Material(0)], "slow frame of {slow} s");
         }
     }
 }
