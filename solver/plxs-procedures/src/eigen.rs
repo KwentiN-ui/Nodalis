@@ -595,7 +595,8 @@ impl Procedure for BuckleProcedure {
             total_time: ctx.state.total_time + 1.0,
         });
         let started = std::time::Instant::now();
-        let mut equations = Equations::new(parameters.solver);
+        // One factorization serves every iteration step: direct while it fits.
+        let mut equations = Equations::new(parameters.solver).preferring_direct();
         let coordinates = || Unknowns::from_free(&reduction.free, 3, &ctx.model.nodes.coordinates);
         equations
             .prepare(&mut ctx.solver, &k_free, coordinates, true, progress)

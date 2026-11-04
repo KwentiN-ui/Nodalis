@@ -873,8 +873,9 @@ pub enum Incrementation {
 /// How a step solves its systems of equations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LinearSolverChoice {
-    /// The solver chooses: direct while the factor fits into the memory, iterative beyond
-    /// where the step allows it, and the other one when the first fails.
+    /// The solver chooses: iterative for large models of solids (translations only) in
+    /// static and heat transfer steps, otherwise direct while the factor fits into the
+    /// memory and iterative beyond; the other one takes over when the first fails.
     #[default]
     Automatic,
     /// A sparse direct factorization (LDLᵀ): any system, memory for the factor.

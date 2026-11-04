@@ -5532,9 +5532,10 @@ fn solver_row(ui: &mut Ui, solver: &mut LinearSolverChoice) {
 fn solver_hint(choice: LinearSolverChoice) -> &'static str {
     match choice {
         LinearSolverChoice::Automatic => {
-            "The solver chooses: direct while the factorization fits into the free memory, \
-             iterative for models too large for it. If the chosen solver fails, the other \
-             one takes over."
+            "The solver chooses: iterative for large solid models in static and heat \
+             transfer steps, otherwise direct while the factorization fits into the free \
+             memory and iterative beyond. If the chosen solver fails, the other one takes \
+             over."
         }
         LinearSolverChoice::Direct => {
             "Sparse direct factorization (LDL^T). Solves every system; needs memory for the \

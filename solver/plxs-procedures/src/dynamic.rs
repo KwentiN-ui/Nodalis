@@ -214,8 +214,9 @@ impl DynamicProcedure {
     ) -> Result<StepOutcome> {
         let n = ctx.table.dofs.len();
         // `K + c M` (and the matrix of the initial accelerations) is positive definite: the
-        // iterative solver can take the step's systems.
-        let mut equations = Equations::new(solver);
+        // iterative solver can take the step's systems; one factorization serves all the
+        // increments of one size, so the automatic choice is direct while it fits.
+        let mut equations = Equations::new(solver).preferring_direct();
         let period = increments.period();
         let initial = increments.initial().min(period);
         let maximum = increments
