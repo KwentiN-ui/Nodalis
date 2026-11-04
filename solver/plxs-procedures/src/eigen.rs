@@ -235,12 +235,17 @@ pub(crate) fn lanczos_modes(
     count: usize,
     lower: Option<f64>,
     solver: EquationSolver,
+    coordinates: Vec<[f64; 3]>,
     progress: &mut dyn Progress,
 ) -> Result<plxs_linalg::EigenPairs> {
     let lower_shift = lower
         .filter(|f| *f > 0.0)
         .map(|f| (2.0 * std::f64::consts::PI * f).powi(2));
     let mut lanczos = ShiftInvertLanczos::new(ctx.threads, lanczos_options(None));
+    // The positions of the unknowns make the nested dissection of the direct solver
+    // geometric. Without them it bisects along level structures, which on a 600k-equation
+    // mesh took minutes instead of seconds and filled more.
+    lanczos.direct_mut().set_coordinates(Some(coordinates));
     let started = std::time::Instant::now();
     let mut shifts = vec![lower_shift.unwrap_or(0.0)];
     if lower_shift.is_none() {
@@ -411,6 +416,7 @@ impl Procedure for FrequencyProcedure {
             count,
             parameters.lower,
             parameters.solver,
+            Unknowns::from_free(&reduction.free, 3, &ctx.model.nodes.coordinates).coordinates,
             progress,
         )?;
 
