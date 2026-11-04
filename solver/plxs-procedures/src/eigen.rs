@@ -659,6 +659,10 @@ impl Procedure for BuckleProcedure {
         let started = std::time::Instant::now();
         let mut lanczos =
             ShiftInvertLanczos::new(ctx.threads, lanczos_options(parameters.accuracy));
+        // Node positions for the geometric nested dissection, as in `lanczos_modes`.
+        lanczos.direct_mut().set_coordinates(Some(
+            Unknowns::from_free(&reduction.free, 3, &ctx.model.nodes.coordinates).coordinates,
+        ));
         let pairs = with_eigen_solver(
             &mut lanczos,
             parameters.solver,
