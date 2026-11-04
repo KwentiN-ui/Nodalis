@@ -105,6 +105,8 @@ pub struct VectorDisplay {
     pub representation: Representation,
     /// Which principal direction a tensor field gives.
     pub principal: Principal,
+    /// The field whose directions are drawn; `None` follows the field shown as contours.
+    pub field: Option<String>,
     pub arrows: ArrowOptions,
     pub lic: LicOptions,
 }
@@ -122,6 +124,14 @@ impl VectorDisplay {
             }),
             FieldRank::Scalar => None,
         }
+    }
+
+    /// The field whose directions are drawn over `shown`: the chosen one where `increment`
+    /// has it, else `shown` itself.
+    pub fn directions<'a>(&self, shown: &'a Field, increment: &'a crate::Increment) -> &'a Field {
+        (self.field.as_deref())
+            .and_then(|name| increment.field(name))
+            .unwrap_or(shown)
     }
 
     /// The representation drawn for the field: contours alone where it has no directions,

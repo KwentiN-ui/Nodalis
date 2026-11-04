@@ -6726,31 +6726,81 @@ struct ToolBarResponse {
 fn display_controls(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
     use plx_results::display::Representation;
     let before = view.vector_display.clone();
-    let field = view.current().map(|(f, _)| f.rank);
-    let directional = field.is_some_and(|rank| rank != plx_results::FieldRank::Scalar);
+    // The fields that give directions, for arrows or streaks over any shown contour.
+    let directional: Vec<String> = (view.current_increment().into_iter())
+        .flat_map(|inc| inc.fields.iter())
+        .filter(|f| f.rank != plx_results::FieldRank::Scalar)
+        .map(|f| f.name.clone())
+        .collect();
+    let shown_field = view.current().map(|(f, _)| f.name.clone());
+    let directions = view.directions_field().map(|f| (f.name.clone(), f.rank));
+    let shown = view.representation();
     let display = &mut view.vector_display;
     ui.label("Display");
-    let shown = if directional {
-        display.representation
-    } else {
-        Representation::Contour
-    };
-    ui.add_enabled_ui(directional, |ui| {
+    ui.add_enabled_ui(!directional.is_empty(), |ui| {
+        let mut choice = if directions
+            .as_ref()
+            .is_some_and(|(_, r)| *r != plx_results::FieldRank::Scalar)
+        {
+            display.representation
+        } else {
+            shown
+        };
+        let initial = choice;
         egui::ComboBox::from_id_salt("representation")
-            .selected_text(shown.label())
+            .selected_text(choice.label())
             .width(80.0)
             .show_ui(ui, |ui| {
-                for choice in Representation::ALL {
-                    ui.selectable_value(&mut display.representation, choice, choice.label());
+                for option in Representation::ALL {
+                    ui.selectable_value(&mut choice, option, option.label());
                 }
             })
             .response
             .on_disabled_hover_text(
                 "Arrows and LIC need a vector or tensor field, such as DISP or STRESS",
-            )
+            );
+        if choice != initial {
+            display.representation = choice;
+            // Over a scalar contour, the directions come from the first field that has them.
+            if choice != Representation::Contour
+                && directions
+                    .as_ref()
+                    .is_none_or(|(_, r)| *r == plx_results::FieldRank::Scalar)
+            {
+                display.field = directional.first().cloned();
+            }
+        }
     });
-    let tensor = field.is_some_and(|rank| rank.is_tensor());
-    if tensor && shown != Representation::Contour {
+    let drawn = shown != Representation::Contour;
+    ui.add_enabled_ui(drawn, |ui| {
+        let name = directions.as_ref().map(|(n, _)| n.clone());
+        let text = match name {
+            Some(name) if name != shown_field.clone().unwrap_or_default() => name,
+            _ => "Shown field".to_owned(),
+        };
+        egui::ComboBox::from_id_salt("directions field")
+            .selected_text(text)
+            .width(90.0)
+            .show_ui(ui, |ui| {
+                let shown_has = shown_field
+                    .as_ref()
+                    .is_some_and(|n| directional.contains(n));
+                if shown_has {
+                    ui.selectable_value(&mut display.field, None, "Shown field");
+                }
+                for name in &directional {
+                    if shown_has && Some(name) == shown_field.as_ref() {
+                        continue;
+                    }
+                    ui.selectable_value(&mut display.field, Some(name.clone()), name);
+                }
+            })
+            .response
+            .on_hover_text("The field whose directions the arrows or streaks follow")
+            .on_disabled_hover_text("Choose Arrows or LIC first");
+    });
+    let tensor = directions.is_some_and(|(_, rank)| rank.is_tensor());
+    ui.add_enabled_ui(drawn && tensor, |ui| {
         egui::ComboBox::from_id_salt("principal direction")
             .selected_text(display.principal.label())
             .width(70.0)
@@ -6760,8 +6810,9 @@ fn display_controls(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
                 }
             })
             .response
-            .on_hover_text("Principal direction the arrows or streaks follow");
-    }
+            .on_hover_text("Principal direction the arrows or streaks follow")
+            .on_disabled_hover_text("Principal directions need a tensor field, such as STRESS");
+    });
     if shown == Representation::Arrows {
         let arrows = &mut display.arrows;
         ui.menu_button("…", |ui| {

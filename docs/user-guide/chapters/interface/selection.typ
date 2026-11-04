@@ -23,7 +23,7 @@ button per region to switch between them.
 === Selection window <selection-window>
 
 While a dialog picks, the #ui("Selection") window opens next to it and decides what a click
-selects.
+selects. Drag it by its title bar to another place; it opens there from then on.
 
 #screenshot("selection.png", [Picking faces for a load with the selection window])
 

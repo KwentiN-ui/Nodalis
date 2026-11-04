@@ -18,7 +18,7 @@ portable Windows version in the folder `Settings` next to `nodalis.exe` (@portab
     annotations change with the theme; exported SVG plots and the images of the user guide stay
     light.],
   [Global axes at the origin], [Draws a coordinate triad at the global origin (default on).],
-  [Coordinate triad in the corner], [The clickable triad in the upper right (default on).],
+  [Coordinate triad in the corner], [The clickable triad in the lower right (default on).],
   [Scale bar], [Shows a scale bar (default on).],
 )
 

@@ -779,7 +779,7 @@ fn build() -> Vec<Command> {
         g,
         t,
         "Mesh Setup",
-        Tree(TreeIcon::MeshSetup),
+        Tool(Icon::MeshDefaults),
         "",
         "The default element sizes and settings of the mesher.",
     ));
@@ -789,7 +789,7 @@ fn build() -> Vec<Command> {
         g,
         t,
         "Mesh Setup",
-        Tree(TreeIcon::MeshSetup),
+        Tool(Icon::LocalMeshSize),
         "",
         "A smaller element size on picked faces or edges.",
     ));
@@ -799,7 +799,7 @@ fn build() -> Vec<Command> {
         g,
         t,
         "Mesh Setup",
-        Tree(TreeIcon::MeshSetup),
+        Tool(Icon::ExtrudeMesh),
         "",
         "Hexahedra swept from a face mesh through a part.",
     ));
@@ -809,7 +809,7 @@ fn build() -> Vec<Command> {
         g,
         t,
         "Mesh Setup",
-        Tree(TreeIcon::MeshSetup),
+        Tool(Icon::TetMesh),
         "",
         "The Gmsh algorithms used for picked parts.",
     ));

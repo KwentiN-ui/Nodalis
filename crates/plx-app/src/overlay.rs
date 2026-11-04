@@ -229,7 +229,12 @@ pub fn draw(
         );
     }
     if overlay.show_view_triad {
-        let corner = triad_center(rect);
+        // Left of the properties panel where it lies over the view.
+        let mut free = rect;
+        if let Some(panel) = crate::dock::over_view(ui.ctx()) {
+            free.max.x = free.max.x.min(panel.left()).max(free.min.x + 2.0 * TRIAD);
+        }
+        let corner = triad_center(free);
         triad(&painter, camera, corner, TRIAD, true);
         clicked.axis = triad_buttons(ui, &painter, camera, corner, TRIAD);
     }
@@ -276,17 +281,11 @@ pub fn draw(
         });
     }
     if !overlay.status.is_empty() {
-        // Left of the corner triad, which takes the top right corner.
-        let room = if overlay.show_view_triad {
-            2.0 * (TRIAD_INSET + TRIAD) - MARGIN
-        } else {
-            0.0
-        };
         draw_status(
             ui,
             &painter,
             rect,
-            room,
+            0.0,
             &overlay.status,
             &mut offsets.status,
         );
@@ -494,9 +493,10 @@ fn draw_legend(
     response
 }
 
-/// The centre of the corner triad, in the top right corner of the view.
+/// The centre of the corner triad, in the bottom right corner of the view, where the
+/// Selection window and the status text at the top right do not cover it.
 pub fn triad_center(rect: Rect) -> Pos2 {
-    rect.right_top() + vec2(-(TRIAD_INSET + TRIAD), TRIAD_INSET + TRIAD)
+    rect.right_bottom() - Vec2::splat(TRIAD_INSET + TRIAD)
 }
 
 /// Framed text block, by default in the top right corner, `room` points left of it.
@@ -874,6 +874,14 @@ fn arrows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_corner_triad_sits_at_the_bottom_right() {
+        let rect = Rect::from_min_size(pos2(100.0, 50.0), vec2(800.0, 600.0));
+        let c = triad_center(rect);
+        assert!(rect.contains(c));
+        assert!(c.x > rect.center().x && c.y > rect.center().y, "{c:?}");
+    }
 
     #[test]
     fn scale_bar_rounds_to_fifths_of_a_decade() {

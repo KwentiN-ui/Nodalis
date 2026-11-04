@@ -299,10 +299,21 @@ impl ResultsView {
         Some((field, field.components.get(self.component)?))
     }
 
-    /// The representation drawn for the shown field: contours alone for a scalar field.
+    /// The field whose directions arrows or streaks follow: the chosen one, else the shown
+    /// field.
+    pub fn directions_field(&self) -> Option<&Field> {
+        let (shown, _) = self.current()?;
+        Some(
+            self.vector_display
+                .directions(shown, self.current_increment()?),
+        )
+    }
+
+    /// The representation drawn: contours alone where the directions come from a scalar
+    /// field.
     pub fn representation(&self) -> Representation {
-        match self.current() {
-            Some((field, _)) if self.superposition.is_none() => self.vector_display.shown(field),
+        match self.directions_field() {
+            Some(field) if self.superposition.is_none() => self.vector_display.shown(field),
             _ => Representation::Contour,
         }
     }
@@ -313,7 +324,7 @@ impl ResultsView {
         if self.representation() == Representation::Contour {
             return None;
         }
-        self.vector_display.source(self.current()?.0)
+        self.vector_display.source(self.directions_field()?)
     }
 
     /// Switches to another increment, keeping field and component by name where possible.

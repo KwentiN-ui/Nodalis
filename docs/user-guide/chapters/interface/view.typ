@@ -59,11 +59,11 @@ The projection is orthographic. Y points up in the front view.
 - #menu("View", "Standard Views", "View Normal to X/Y/Z") looks along an axis onto the plane normal to it.
 - #menu("View", "Standard Views", "Isometric, X/Y/Z Up") shows the isometric view with the chosen axis
   pointing up, for models built with Z up.
-- The *coordinate triad* in the upper right corner can be clicked: a click on an axis tip (or on
+- The *coordinate triad* in the lower right corner can be clicked: a click on an axis tip (or on
   its grey negative half) looks along that axis.
 
 A 2D model always opens in the front view. The legend sits in the upper left corner, the info
-block left of the triad, the scale bar above the floating bar. Legend, info block, scale bar and
+block in the upper right corner, the scale bar above the floating bar. Legend, info block, scale bar and
 min/max labels can be dragged to another position in the view.
 
 === Showing and hiding parts

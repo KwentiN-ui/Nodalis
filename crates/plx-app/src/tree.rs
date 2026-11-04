@@ -1530,6 +1530,12 @@ impl Tree<'_> {
         self.part_indices = (0..model.parts.len())
             .filter(|i| !self.hidden(&TreeItem::Part(*i)))
             .collect();
+        // Before the mesh exists, Parts stays as the place the mesh will go, but without
+        // a box to expand.
+        if shown == 0 {
+            self.leaf(ui, TreeItem::Group("Parts"), parts);
+            return;
+        }
         self.branch(ui, TreeItem::Group("Parts"), parts, true, |tree, ui| {
             for (index, part) in model.parts.iter_mut().enumerate() {
                 if tree.hidden(&TreeItem::Part(index)) {
@@ -1563,9 +1569,7 @@ impl Tree<'_> {
     fn mesh(&mut self, ui: &mut Ui, model: Option<&mut Model>) {
         let Some(model) = model else {
             self.branch(ui, TreeItem::Mesh, "Mesh", true, |tree, ui| {
-                for name in ["Parts", "Node Sets", "Element Sets", "Surfaces"] {
-                    tree.leaf(ui, TreeItem::Group(name), name);
-                }
+                tree.leaf(ui, TreeItem::Group("Parts"), "Parts");
             });
             return;
         };
@@ -1603,8 +1607,8 @@ impl Tree<'_> {
                 ),
             ];
             for (name, items) in sets {
+                // Like the other containers, an empty one is not shown.
                 if items.is_empty() {
-                    tree.leaf(ui, TreeItem::Group(name), name);
                     continue;
                 }
                 let text = counted(name, items.len());
@@ -2165,10 +2169,10 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                     }
                 });
             }
+            // Empty containers are not shown; Field Outputs stays as the place the results
+            // go, like Parts in the mesh.
             let group = TreeItem::Group("History Outputs");
-            if history.is_empty() {
-                tree.leaf(ui, group, "History Outputs");
-            } else {
+            if !history.is_empty() {
                 let text = counted("History Outputs", history.len());
                 tree.branch(ui, group, text, true, |tree, ui| {
                     for (s, (name, fields)) in history.into_iter().enumerate() {
@@ -2200,9 +2204,7 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
             // The values where a plane cuts the model, shown alone
             // while checked.
             let group = TreeItem::Group(PLANE_RESULTS);
-            if fe.result_planes.is_empty() {
-                tree.leaf(ui, group, PLANE_RESULTS);
-            } else {
+            if !fe.result_planes.is_empty() {
                 let text = counted(PLANE_RESULTS, fe.result_planes.len());
                 tree.branch(ui, group, text, true, |tree, ui| {
                     for (i, result) in fe.result_planes.iter().enumerate() {
@@ -2439,7 +2441,7 @@ mod tests {
     fn double_click_on_a_material_opens_it_every_time() {
         // Find the row of the first material by clicking down the tree.
         let mut found = None;
-        for (x, y) in (150..200)
+        for (x, y) in (20..300)
             .step_by(4)
             .flat_map(|y| (30..140).step_by(6).map(move |x| (x, y)))
         {
@@ -2469,7 +2471,7 @@ mod tests {
     #[test]
     fn double_click_survives_a_slow_frame_after_the_first_click() {
         let mut found = None;
-        for (x, y) in (150..200)
+        for (x, y) in (20..300)
             .step_by(4)
             .flat_map(|y| (30..140).step_by(6).map(move |x| (x, y)))
         {
