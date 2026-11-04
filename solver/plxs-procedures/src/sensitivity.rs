@@ -779,6 +779,12 @@ fn strain_energy_adjoint(
         .constraints
         .step_set(ctx.model.nodes.len(), &active, &spc.dofs);
     let k_red = constraint_set.reduce(k);
+    // Node positions for the geometric nested dissection (without them it takes minutes
+    // on large meshes); ignored when the pattern was analyzed before.
+    ctx.solver.set_coordinates(Some(
+        plxs_linalg::Unknowns::from_free(&constraint_set.free, 3, &ctx.model.nodes.coordinates)
+            .coordinates,
+    ));
     ctx.solver.analyze(k_red.pattern())?;
     ctx.solver.factorize(&k_red)?;
     let mut v = constraint_set.reduce_rhs(&rhs);
