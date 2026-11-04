@@ -148,7 +148,7 @@ impl ModelPropertiesDialog {
 /// The model type. A submodel takes the results of its global model through a link
 /// in the project, not from a file picked here.
 fn model_type(ui: &mut egui::Ui, draft: &mut ModelProperties) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         for kind in ModelKind::ALL {
             ui.radio_value(&mut draft.kind, kind, kind.label());
         }

@@ -218,7 +218,7 @@ geometry, such as an imported mesh, is searched on its mesh as before.
 
 ==== Connection settings
 
-#menu("Connections", "Connection Settings") or the context menu of #ui("Connections") sets what
+#menu("Connections", "Connection Settings") sets what
 all contact regions share. CalculiX allows only one contact #ui("Formulation") per model (see
 "Which method?" below). Auto takes surface to surface, or the method of your manual contact
 pairs if you have any. The #ui("Stiffness factor") replaces the 10 of the normal stiffness.
@@ -254,8 +254,7 @@ Turn #ui("Weak springs") off to see the warning again and hold the parts yoursel
 
 ==== Contact worksheet
 
-#menu("Connections", "Contact Worksheet") or #ui("Contact Worksheet ...") in the context menu
-of #ui("Connections") lists all contact regions in a table: type, sides, master and what each
+#menu("Connections", "Contact Worksheet") lists all contact regions in a table: type, sides, master and what each
 is exported as, and which detection found it. A click on a row selects the region in the tree, #key("Ctrl")+click and
 #key("Shift")+click select more. The buttons change all selected regions at once: set the type
 or the friction coefficient, flip the sides, activate or deactivate, name them from their

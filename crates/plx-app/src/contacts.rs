@@ -243,7 +243,7 @@ fn sector_rows(
         return;
     };
     ui.label("Results show");
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.radio_value(&mut cyclic.display, SectorDisplay::Single, "Single sector")
             .on_hover_text("Only the modelled sector (NGRAPH=1).");
         ui.radio_value(&mut cyclic.display, SectorDisplay::All, "All sectors")
@@ -312,7 +312,7 @@ pub fn contact_pair_form(
     ui.label("Surface Interaction");
     egui::ComboBox::from_id_salt("contact interaction")
         .selected_text(pair.interaction.as_str())
-        .width(200.0)
+        .width(crate::dock::fit_width(ui, 200.0))
         .show_ui(ui, |ui| {
             for interaction in &model.fe.surface_interactions {
                 let name = interaction.name.clone();
@@ -323,7 +323,7 @@ pub fn contact_pair_form(
     ui.label("Method");
     egui::ComboBox::from_id_salt("contact method")
         .selected_text(pair.method.name())
-        .width(200.0)
+        .width(crate::dock::fit_width(ui, 200.0))
         .show_ui(ui, |ui| {
             for method in ContactMethod::ALL {
                 ui.selectable_value(&mut pair.method, method, method.name())
@@ -416,6 +416,7 @@ pub fn interaction_dialog(
     group(ui, "Data", |ui| {
         let mut focus = None;
         egui::Grid::new("interaction data")
+            .max_col_width(crate::dock::column_limit(ui))
             .num_columns(2)
             .min_col_width(110.0)
             .show(ui, |ui| {
@@ -781,7 +782,7 @@ impl Rows<'_> {
     fn gap_conductance(&mut self, ui: &mut Ui, conductance: &mut GapConductance) {
         let text = "Constant conductance or table over pressure and temperature.";
         self.row(ui, ("Kind", text), |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let constant = matches!(conductance, GapConductance::Constant(_));
                 let mut response = ui.radio(constant, "Constant");
                 if response.clicked() && !constant {

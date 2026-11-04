@@ -86,11 +86,10 @@ opens in the Geometry workspace, opening a result file switches to Results.
 
 === Context menus
 
-/ Containers: #ui("Expand All"), #ui("Collapse All"). Some containers have more entries:
-  #ui("Material Library ...") on #ui("Materials"), #ui("Default Mesh Parameters ...") and
-  #ui("Mesh All Parts") on #ui("Mesh Setup"), #ui("Search Contact Pairs ...") on
-  #ui("Constraints") and #ui("Contact Pairs"). Containers create no items: that is the job
-  of the ribbon (@ribbon). A container that cannot
+/ Containers: #ui("Expand All"), #ui("Collapse All"), and #ui("Show All")/#ui("Hide All")
+  where their items have symbols. Containers create no items and open no tools such as the
+  material library or the contact search: that is the job of the ribbon (@ribbon). An
+  empty container is not shown; it appears with its first item. A container that cannot
   take items explains why in a tooltip, for example "A frequency step has no loads."
 / Items: #ui("Edit ..."), #ui("Activate")/#ui("Deactivate"), #ui("Swap Master/Slave") (ties,
   spring connections and contact pairs), #ui("Delete"). Items that come from another analysis

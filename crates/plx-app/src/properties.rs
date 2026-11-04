@@ -77,6 +77,7 @@ pub fn show(
         rows.push(("", "Not implemented yet".into()));
     }
     egui::Grid::new("properties")
+        .max_col_width(crate::dock::column_limit(ui))
         .num_columns(2)
         .striped(true)
         .spacing([16.0, 4.0])

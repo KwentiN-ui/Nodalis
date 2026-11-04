@@ -23,7 +23,7 @@ Values can be typed in any unit of the right kind, for example `210 GPa` or `7.8
 
 === Material library <material-library>
 
-#ui("Material Library ...") in the context menu of #ui("Materials") opens the material library.
+#menu("Material", "Material Library") opens the material library.
 On the left are the library materials in categories, on the right the materials of the model.
 
 #screenshot("material-library.png", [Material library])

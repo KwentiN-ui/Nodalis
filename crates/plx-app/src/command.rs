@@ -57,7 +57,7 @@ impl Workspace {
     pub fn tabs(self) -> &'static [&'static str] {
         match self {
             Self::Project => &[
-                "Project",
+                "File",
                 "Sources",
                 "Parameters",
                 "Evaluate",
@@ -73,7 +73,7 @@ impl Workspace {
                 "Steps",
                 "View",
             ],
-            Self::Results => &["Results", "Evaluate", "View"],
+            Self::Results => &["File", "Evaluate", "Display"],
         }
     }
 }
@@ -303,6 +303,16 @@ pub struct Command {
 }
 
 impl Command {
+    /// The tab the command is on in `workspace`: the view commands join the controls of the
+    /// results on the Display tab of the Results workspace.
+    pub fn tab_in(&self, workspace: Workspace) -> &'static str {
+        if self.tab == "View" && workspace == Workspace::Results {
+            "Display"
+        } else {
+            self.tab
+        }
+    }
+
     /// The label on one line, for menus, the search and tooltips.
     pub fn name(&self) -> String {
         // A word split over the lines loses its hyphen ("Screen-\nshot"), a hyphenated word
@@ -397,7 +407,7 @@ fn build() -> Vec<Command> {
     };
 
     // Project workspace, tab Project.
-    let (p, t) = (PROJECT, "Project");
+    let (p, t) = (PROJECT, "File");
     add(command(
         C::NewProject,
         "New\nProject",
@@ -1343,14 +1353,14 @@ fn build() -> Vec<Command> {
         "Values printed for a region in the last step.",
     ));
 
-    // Results workspace.
-    let (r, t) = (RESULTS, "Results");
+    // Results workspace: File holds what reads and writes results.
+    let (r, t) = (RESULTS, "File");
     add(command(
         C::OpenResults,
         "Open\nResults",
         r,
         t,
-        "Result",
+        "Import",
         Tool(Icon::Open),
         "",
         "Opens the results the analysis keeps.",
@@ -1360,33 +1370,10 @@ fn build() -> Vec<Command> {
         "Remove",
         r,
         t,
-        "Result",
+        "Import",
         Tool(Icon::Remove),
         "",
         "Drops the results the analysis keeps; saving the project leaves them out.",
-    ));
-    add(tile(
-        command(
-            C::ResultsDisplay,
-            "",
-            r,
-            t,
-            "Display",
-            TileIcon::None,
-            "",
-            "",
-        ),
-        Tile::Custom,
-    ));
-    add(command(
-        C::ColorScale,
-        "Color\nScale",
-        r,
-        t,
-        "Display",
-        Shape(Glyph::Settings),
-        "",
-        "The colours and levels of the contours.",
     ));
     add(command(
         C::ExportVtu,
@@ -1740,7 +1727,35 @@ fn build() -> Vec<Command> {
         Tile::In(C::Screenshot),
     ));
 
+    // The controls of the shown results, on the Display tab of the Results workspace
+    // after the view commands.
+    add(tile(
+        command(
+            C::ResultsDisplay,
+            "",
+            r,
+            "Display",
+            "Results",
+            TileIcon::None,
+            "",
+            "",
+        ),
+        Tile::Custom,
+    ));
     // Only in the search.
+    add(tile(
+        command(
+            C::ColorScale,
+            "Color Scale",
+            r,
+            "Display",
+            "Results",
+            Shape(Glyph::Settings),
+            "",
+            "The colours and levels of the contours; also the button beside Color levels.",
+        ),
+        Tile::Hidden,
+    ));
     add(tile(
         command(
             C::ExportInp,
@@ -1895,7 +1910,7 @@ mod tests {
             }
             for w in c.workspaces {
                 assert!(
-                    c.tab == PINNED || w.tabs().contains(&c.tab),
+                    c.tab == PINNED || w.tabs().contains(&c.tab_in(*w)),
                     "{:?} is on tab {} that {} lacks",
                     c.cmd,
                     c.tab,

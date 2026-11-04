@@ -5,7 +5,7 @@
 == Opening results
 
 The Results workspace shows the results of its analysis: they open when a run is finished,
-with #ui("Results") in the monitor, with #menu("Results", "Open Results") and when an analysis
+with #ui("Results") in the monitor, with #menu("File", "Open Results") and when an analysis
 with kept results is opened (@bind-result). The `.dat` file of the run is read as well. Result
 files from elsewhere are not opened.
 
@@ -38,7 +38,7 @@ material of its own, and they carry no results of their own.
 
 == Result controls <results-toolbar>
 
-#screenshot("results-toolbar.png", [Result controls, on the #ui("Results") tab of the ribbon])
+#screenshot("results-display-tab.png", [The #ui("Display") tab: view tools on the left, result controls in two rows on the right])
 
 #fields(
   [Result], [The displayed result file.],
@@ -155,8 +155,7 @@ results of a project (@bind-result).
 == Color scale <color-scale>
 
 Each result file has its own colour scale. Double-click the legend, choose #ui("Color Scale ...")
-in its context menu, click #ui("...") next to #ui("Color levels") in the result controls, or use
-#menu("Results", "Color Scale"). Changes show at once and stay when #ui("Close") closes the
+in its context menu, or click #ui("...") next to #ui("Color levels") in the result controls. Changes show at once and stay when #ui("Close") closes the
 window; #ui("Defaults") returns to the rainbow with automatic limits.
 
 #screenshot("color-scale-dialog.png", [Color Scale dialog with manual limits: values above 40 MPa

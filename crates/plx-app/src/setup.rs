@@ -562,7 +562,7 @@ impl RegionDraft {
             let source = self.source;
             egui::ComboBox::from_id_salt("region source")
                 .selected_text(self.source.label())
-                .width(200.0)
+                .width(crate::dock::fit_width(ui, 200.0))
                 .show_ui(ui, |ui| {
                     // Remote points are listed with the reference points.
                     for &source in self.sources.iter().filter(|&&s| s != Source::RemotePoint) {
@@ -615,7 +615,7 @@ impl RegionDraft {
                     }
                     egui::ComboBox::from_id_salt("region set")
                         .selected_text(self.set.as_str())
-                        .width(200.0)
+                        .width(crate::dock::fit_width(ui, 200.0))
                         .show_ui(ui, |ui| {
                             for name in names {
                                 ui.selectable_value(&mut self.set, name.clone(), name);
@@ -657,7 +657,7 @@ impl RegionDraft {
         let (mut source, mut set) = (self.source, self.set.clone());
         egui::ComboBox::from_id_salt("region set")
             .selected_text(self.set.as_str())
-            .width(200.0)
+            .width(crate::dock::fit_width(ui, 200.0))
             .show_ui(ui, |ui| {
                 for &name in &points {
                     let chosen = source == Source::ReferencePoint && set == name;
@@ -779,7 +779,7 @@ fn moving_rows(ui: &mut Ui, moving: &mut MovingLoad, fe: &FeModel, two_d: bool, 
     ui.label("Coordinate system");
     egui::ComboBox::from_id_salt("moving load system")
         .selected_text(moving.system.as_str())
-        .width(200.0)
+        .width(crate::dock::fit_width(ui, 200.0))
         .show_ui(ui, |ui| {
             let names = std::iter::once(GLOBAL)
                 .chain(fe.coordinate_systems.iter().map(|c| c.name.as_str()));
@@ -1264,7 +1264,7 @@ fn displacement_rows(
     ui.label("Behavior");
     egui::ComboBox::from_id_salt("displacement behavior")
         .selected_text(remote.behavior.label())
-        .width(200.0)
+        .width(crate::dock::fit_width(ui, 200.0))
         .show_ui(ui, |ui| {
             for behavior in Behavior::ALL {
                 ui.selectable_value(&mut remote.behavior, behavior, behavior.label());
@@ -1284,7 +1284,7 @@ fn displacement_rows(
     ui.label("Coordinate system");
     egui::ComboBox::from_id_salt("remote system")
         .selected_text(remote.system.as_str())
-        .width(200.0)
+        .width(crate::dock::fit_width(ui, 200.0))
         .show_ui(ui, |ui| {
             let names = std::iter::once(GLOBAL)
                 .chain(fe.coordinate_systems.iter().map(|c| c.name.as_str()));
@@ -1302,7 +1302,7 @@ fn displacement_rows(
         .as_ref()
         .is_some_and(|s| s.kind == plx_model::CoordinateSystemKind::Cylindrical);
     ui.label("Location");
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if ui.radio(remote.location.is_none(), "Centroid").clicked() {
             remote.location = None;
         }
@@ -1460,7 +1460,7 @@ fn symmetry_rows(ui: &mut egui::Ui, normal: &mut Option<[f64; 3]>, region: &Regi
     let space = model.fe.properties.space;
     let plane = symmetry_plane(&model.mesh, region, space, *normal);
     ui.label("Plane normal");
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if ui.radio(normal.is_none(), "From selection").clicked() {
             *normal = None;
         }
@@ -2503,6 +2503,7 @@ impl Editor {
                 amplitude_dialog::amplitude_form(ui, amplitude, view, units);
             } else {
                 egui::Grid::new("item form")
+                    .max_col_width(crate::dock::column_limit(ui))
                     .num_columns(2)
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| self.exposing_form(ui, model));
@@ -2552,7 +2553,7 @@ impl Editor {
                 let before = section.kind.prefix();
                 egui::ComboBox::from_id_salt("section kind")
                     .selected_text(section.kind.label())
-                    .width(200.0)
+                    .width(crate::dock::fit_width(ui, 200.0))
                     .show_ui(ui, |ui| {
                         for kind in SectionKind::ALL {
                             // Shells and membranes live in 3D models; 2D elements get a
@@ -2582,7 +2583,7 @@ impl Editor {
                 ui.label("Material");
                 egui::ComboBox::from_id_salt("section material")
                     .selected_text(section.material.as_str())
-                    .width(200.0)
+                    .width(crate::dock::fit_width(ui, 200.0))
                     .show_ui(ui, |ui| {
                         for material in &model.fe.materials {
                             let name = material.name.clone();
@@ -2678,7 +2679,7 @@ impl Editor {
                     .map_or("", |(label, ..)| label);
                 egui::ComboBox::from_id_salt("boundary kind")
                     .selected_text(label)
-                    .width(200.0)
+                    .width(crate::dock::fit_width(ui, 200.0))
                     .show_ui(ui, |ui| {
                         for (label, name, kind) in boundary_kinds() {
                             // Only the kinds the step takes.
@@ -2813,7 +2814,7 @@ impl Editor {
                     .map_or("", |(label, ..)| label);
                 egui::ComboBox::from_id_salt("load kind")
                     .selected_text(label)
-                    .width(200.0)
+                    .width(crate::dock::fit_width(ui, 200.0))
                     .show_ui(ui, |ui| {
                         for (label, name, kind) in load_kinds() {
                             // Only the kinds the step takes.
@@ -2907,7 +2908,7 @@ impl Editor {
                         // Force, displacement or lock: one choice of the two flags.
                         let mut by = (*lock, *by_displacement);
                         ui.label("Preload by");
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             ui.radio_value(&mut by, (false, false), "Force");
                             ui.radio_value(&mut by, (false, true), "Displacement");
                             ui.radio_value(&mut by, (true, *by_displacement), "Lock")
@@ -3120,7 +3121,7 @@ impl Editor {
                     .map_or("", |(label, ..)| label);
                 egui::ComboBox::from_id_salt("initial condition kind")
                     .selected_text(label)
-                    .width(200.0)
+                    .width(crate::dock::fit_width(ui, 200.0))
                     .show_ui(ui, |ui| {
                         for (label, name, kind) in initial_condition_kinds() {
                             if ui.selectable_label(current == name, label).clicked()
@@ -3211,7 +3212,7 @@ impl Editor {
                 ui.end_row();
                 ui.label("Source");
                 let by_value = field.kind.takes_region();
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui.radio(by_value, "By value").clicked() && !by_value {
                         field.kind = DefinedFieldKind::Temperature(20.0);
                     }
@@ -4424,7 +4425,7 @@ fn history_output_form(
     ui.label("Totals");
     egui::ComboBox::from_id_salt("history totals")
         .selected_text(output.totals.label())
-        .width(200.0)
+        .width(crate::dock::fit_width(ui, 200.0))
         .show_ui(ui, |ui| {
             for totals in plx_model::Totals::ALL {
                 ui.selectable_value(&mut output.totals, totals, totals.label());
@@ -4436,7 +4437,7 @@ fn history_output_form(
             ui.label("Contact Pair");
             egui::ComboBox::from_id_salt("history contact pair")
                 .selected_text(pair.as_str())
-                .width(200.0)
+                .width(crate::dock::fit_width(ui, 200.0))
                 .show_ui(ui, |ui| {
                     for name in model.fe.contact_pair_names() {
                         ui.selectable_value(pair, name.to_owned(), name);
@@ -4537,7 +4538,7 @@ fn field_output_form(ui: &mut Ui, output: &mut FieldOutput, taken: &[&str], new:
     let on_off = |ui: &mut Ui, value: &mut bool, id: &str, labels: [&str; 2], hint: &str| {
         egui::ComboBox::from_id_salt(id)
             .selected_text(if *value { labels[0] } else { labels[1] })
-            .width(200.0)
+            .width(crate::dock::fit_width(ui, 200.0))
             .show_ui(ui, |ui| {
                 ui.selectable_value(value, true, labels[0]);
                 ui.selectable_value(value, false, labels[1]);
@@ -4567,7 +4568,7 @@ fn field_output_form(ui: &mut Ui, output: &mut FieldOutput, taken: &[&str], new:
         ui.label("Output (2D/3D)");
         egui::ComboBox::from_id_salt("field output dimension")
             .selected_text(output.dimension.label())
-            .width(200.0)
+            .width(crate::dock::fit_width(ui, 200.0))
             .show_ui(ui, |ui| {
                 for dimension in OutputDimension::ALL {
                     ui.selectable_value(&mut output.dimension, dimension, dimension.label());
@@ -4634,7 +4635,7 @@ fn step_row(ui: &mut Ui, step: &mut usize, fe: &FeModel, takes: impl Fn(&Step) -
     let current = fe.steps.get(*step).map_or("", |s| s.name.as_str());
     egui::ComboBox::from_id_salt("item step")
         .selected_text(current)
-        .width(200.0)
+        .width(crate::dock::fit_width(ui, 200.0))
         .show_ui(ui, |ui| {
             for (i, s) in fe.steps.iter().enumerate() {
                 if takes(s) || i == *step {
@@ -4667,7 +4668,7 @@ fn beam_form(ui: &mut Ui, beam: &mut BeamSection, fe: &FeModel, units: UnitSyste
     };
     egui::ComboBox::from_id_salt("beam cross-section")
         .selected_text(text)
-        .width(200.0)
+        .width(crate::dock::fit_width(ui, 200.0))
         .show_ui(ui, |ui| {
             for cross_section in &fe.cross_sections {
                 let label = format!("{} ({})", cross_section.name, cross_section.profile.label());
@@ -4698,7 +4699,7 @@ fn beam_form(ui: &mut Ui, beam: &mut BeamSection, fe: &FeModel, units: UnitSyste
         }
     }
     ui.label("Normal (1-direction)");
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let automatic = matches!(beam.orientation, BeamOrientation::Automatic);
         if ui.radio(automatic, "Automatic").clicked() && !automatic {
             beam.orientation = BeamOrientation::Automatic;
@@ -4844,7 +4845,7 @@ fn plastic_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     ui.add_enabled_ui(plastic, |ui| {
         egui::ComboBox::from_id_salt("plastic hardening")
             .selected_text(hardening_label(values.hardening))
-            .width(200.0)
+            .width(crate::dock::fit_width(ui, 200.0))
             .show_ui(ui, |ui| {
                 for hardening in Hardening::ALL {
                     ui.selectable_value(
@@ -5505,7 +5506,7 @@ fn validate_heat_transfer_step(settings: &HeatTransferStep) -> Result<(), String
 /// heat transfer, frequency and buckle.
 fn solver_row(ui: &mut Ui, solver: &mut LinearSolverChoice) {
     ui.label("Equation solver");
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         for choice in LinearSolverChoice::ALL {
             ui.radio_value(solver, choice, choice.name())
                 .on_hover_text(solver_hint(choice));

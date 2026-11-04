@@ -402,7 +402,7 @@ impl SectionDialog {
             PlaneDefinition::Feature { .. } => 1,
             PlaneDefinition::PointNormal { .. } => 2,
         };
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Plane:");
             if ui.radio(kind == 0, "Base plane").clicked() && kind != 0 {
                 let visible = self.draft.normal();

@@ -15,7 +15,18 @@ use crate::status::CellState;
 use crate::style::{border, control, highlight, hover_fill, pressed_fill, window};
 
 /// Height of the app bar.
-pub const APP_BAR: f32 = 30.0;
+pub const APP_BAR: f32 = 32.0;
+/// Height of a workspace segment, a ribbon tab and the other controls of the app bar, all
+/// centred on one line.
+const CONTROL: f32 = 24.0;
+/// The room left and right of the text of a segment or tab.
+const TAB_PADDING: f32 = 12.0;
+/// Corner radius of segments and tabs.
+const TAB_ROUNDING: f32 = 5.0;
+/// Space above and below the row of ribbon tabs.
+const ROW_GAP: f32 = 3.0;
+/// Where the first segment and the first tab start.
+const INSET: f32 = 6.0;
 const TILE: Vec2 = vec2(58.0, 62.0);
 /// A tile of a narrow window: the icon only.
 const COMPACT: Vec2 = vec2(32.0, 32.0);
@@ -45,9 +56,9 @@ impl RibbonState {
     pub fn reveal(&mut self, workspace: Workspace, cmd: Cmd) {
         if let Some(c) = (command::registry().iter())
             .find(|c| c.cmd == cmd && c.workspaces.contains(&workspace) && c.tab != PINNED)
-            && workspace.tabs().contains(&c.tab)
+            && workspace.tabs().contains(&c.tab_in(workspace))
         {
-            self.set_tab(workspace, c.tab);
+            self.set_tab(workspace, c.tab_in(workspace));
         }
     }
 }
@@ -80,16 +91,14 @@ pub fn show(
     let fit = crate::layout::current(ui.ctx());
     let folded = state.fold.folded(fit.fold_ribbon);
     let compact = fit.icons_only;
-    // The tab row.
+    // The tab row, on the same grid as the app bar above it.
+    ui.add_space(ROW_GAP);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
-        ui.add_space(6.0);
+        ui.add_space(INSET);
         for &title in workspace.tabs() {
             let selected = title == tab;
-            let text = egui::RichText::new(title).size(13.0);
-            let text = if selected { text.strong() } else { text };
-            let response = ui
-                .add(egui::Button::selectable(selected, text).min_size(vec2(64.0, 24.0)))
+            let response = tab_button(ui, title, selected, true)
                 .on_hover_text("Double-click folds the ribbon to its tabs, or opens it again.");
             if response.clicked() {
                 state.set_tab(workspace, title);
@@ -99,6 +108,7 @@ pub fn show(
             }
         }
     });
+    ui.add_space(ROW_GAP);
     if folded {
         return None;
     }
@@ -111,7 +121,9 @@ pub fn show(
             )
         })
         .collect();
-    let row: Vec<&Command> = commands.iter().copied().filter(|c| c.tab == tab).collect();
+    let row: Vec<&Command> = (commands.iter().copied())
+        .filter(|c| c.tab_in(workspace) == tab)
+        .collect();
     let pinned: Vec<&Command> = commands
         .iter()
         .copied()
@@ -290,7 +302,7 @@ fn folded_group(
             if response.hovered() {
                 painter.rect(
                     rect.shrink(1.0),
-                    3.0,
+                    TAB_ROUNDING,
                     hover_fill(),
                     Stroke::new(1.0, highlight()),
                     egui::StrokeKind::Inside,
@@ -403,8 +415,17 @@ fn arrow_room(c: &Command) -> f32 {
     }
 }
 
+/// Where the width a tile the workspace draws itself took in the last frame is kept.
+fn custom_width_id(cmd: Cmd) -> egui::Id {
+    egui::Id::new(("custom tile width", format!("{cmd:?}")))
+}
+
 fn tile_width(ui: &Ui, c: &Command, compact: bool) -> f32 {
-    if compact && c.tile != Tile::Custom {
+    if c.tile == Tile::Custom {
+        let id = custom_width_id(c.cmd);
+        return ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(TILE.x);
+    }
+    if compact {
         return COMPACT.x;
     }
     let font = FontId::proportional(11.5);
@@ -465,11 +486,14 @@ fn group(ui: &mut Ui, tiles: &[&Command], host: &mut dyn Host, compact: bool) ->
 /// A tile: the icon over a label of up to two lines. Returns the command to run.
 fn tile(ui: &mut Ui, c: &Command, host: &mut dyn Host, compact: bool) -> Option<Cmd> {
     if c.tile == Tile::Custom {
-        ui.vertical(|ui| {
+        let drawn = ui.vertical(|ui| {
             ui.set_height(TILE.y);
             ui.add_space(4.0);
             host.custom(ui, c.cmd);
         });
+        // Its width, for laying out the next frame: the groups fold by it.
+        let width = drawn.response.rect.width();
+        ui.data_mut(|d| d.insert_temp(custom_width_id(c.cmd), width));
         return None;
     }
     let enabled = host.enabled(c.cmd) && ui.is_enabled();
@@ -508,7 +532,7 @@ fn tile(ui: &mut Ui, c: &Command, host: &mut dyn Host, compact: bool) -> Option<
             };
             painter.rect(
                 rect.shrink(1.0),
-                3.0,
+                TAB_ROUNDING,
                 fill,
                 Stroke::new(1.0, highlight()),
                 egui::StrokeKind::Inside,
@@ -601,7 +625,7 @@ fn compact_tile(
             };
             painter.rect(
                 rect.shrink(1.0),
-                3.0,
+                TAB_ROUNDING,
                 fill,
                 Stroke::new(1.0, highlight()),
                 egui::StrokeKind::Inside,
@@ -969,17 +993,11 @@ pub fn app_bar(ui: &mut Ui, bar: &Bar, menus: &mut dyn FnMut(&mut Ui)) -> Vec<Ba
     let full = ui.max_rect();
     let mut left_end = full.left();
     ui.horizontal(|ui| {
-        ui.set_height(APP_BAR - 4.0);
+        ui.set_height(APP_BAR);
         ui.spacing_mut().item_spacing.x = 4.0;
-        // The logo.
-        let (rect, _) = ui.allocate_exact_size(vec2(20.0, 22.0), Sense::hover());
-        ui.painter().text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            "N",
-            FontId::proportional(17.0),
-            crate::style::adapt(Color32::from_rgb(70, 140, 215)),
-        );
+        // Every control is CONTROL high and centred on the middle of the bar.
+        ui.spacing_mut().interact_size.y = CONTROL;
+        ui.add_space(INSET - 4.0);
         if bar.workspace != Workspace::Project && crate::layout::current(ui.ctx()).fold_tree {
             let shown = !crate::layout::tree_folded(ui.ctx());
             let tip = if shown {
@@ -1017,7 +1035,7 @@ pub fn app_bar(ui: &mut Ui, bar: &Bar, menus: &mut dyn FnMut(&mut Ui)) -> Vec<Ba
             }
             ui.add_space(8.0);
         }
-        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.spacing_mut().item_spacing.x = 2.0;
         for workspace in Workspace::ANALYSIS {
             let tip = if analysis_enabled {
                 match workspace {
@@ -1126,17 +1144,42 @@ pub fn app_bar(ui: &mut Ui, bar: &Bar, menus: &mut dyn FnMut(&mut Ui)) -> Vec<Ba
 
 /// A workspace segment.
 fn segment(ui: &mut Ui, title: &str, selected: bool, enabled: bool, tip: &str) -> egui::Response {
-    let text = egui::RichText::new(title).size(13.0);
-    let text = if selected { text.strong() } else { text };
-    let button = egui::Button::selectable(selected, text)
-        .min_size(vec2(76.0, 24.0))
-        .stroke(Stroke::new(
-            1.0,
-            if selected { highlight() } else { border() },
-        ));
-    ui.add_enabled(enabled, button)
+    tab_button(ui, title, selected, enabled)
         .on_hover_text(tip)
         .on_disabled_hover_text(tip)
+}
+
+/// A rounded tab: a workspace segment of the app bar or a tab of the ribbon. The text sits
+/// in the middle of a box [`CONTROL`] high, with the same room on either side.
+fn tab_button(ui: &mut Ui, title: &str, selected: bool, enabled: bool) -> egui::Response {
+    let font = FontId::proportional(13.0);
+    let galley = ui.fonts_mut(|f| f.layout_no_wrap(title.to_string(), font, Color32::WHITE));
+    let size = vec2(galley.size().x + 2.0 * TAB_PADDING, CONTROL);
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(size, sense);
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.visuals();
+        let (fill, color) = if selected {
+            (visuals.selection.bg_fill, visuals.selection.stroke.color)
+        } else if enabled && response.hovered() {
+            (hover_fill(), visuals.text_color())
+        } else if enabled {
+            (Color32::TRANSPARENT, visuals.text_color())
+        } else {
+            (Color32::TRANSPARENT, visuals.weak_text_color())
+        };
+        ui.painter().rect_filled(rect, TAB_ROUNDING, fill);
+        let galley = ui
+            .fonts_mut(|f| f.layout_no_wrap(title.to_string(), FontId::proportional(13.0), color));
+        let at = rect.center() - galley.size() * 0.5;
+        ui.painter()
+            .galley(pos2(at.x.round(), at.y.round()), galley, color);
+    }
+    response
 }
 
 /// A small icon button of the app bar.
@@ -1146,9 +1189,9 @@ fn small(ui: &mut Ui, glyph: Glyph, tip: &str, enabled: bool) -> egui::Response 
     } else {
         Sense::hover()
     };
-    let (rect, response) = ui.allocate_exact_size(vec2(24.0, 22.0), sense);
+    let (rect, response) = ui.allocate_exact_size(vec2(CONTROL, CONTROL), sense);
     if enabled && response.hovered() {
-        ui.painter().rect_filled(rect, 3.0, hover_fill());
+        ui.painter().rect_filled(rect, TAB_ROUNDING, hover_fill());
     }
     let color = if enabled {
         crate::style::text()
@@ -1166,7 +1209,7 @@ fn search_box(ui: &mut Ui) -> egui::Response {
         // A narrow window: the magnifier only.
         return small(ui, Glyph::Search, "Search commands (Ctrl+K)", true);
     }
-    let (rect, response) = ui.allocate_exact_size(vec2(190.0, 22.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(190.0, CONTROL), Sense::click());
     let fill = if response.hovered() {
         hover_fill()
     } else {
@@ -1174,7 +1217,7 @@ fn search_box(ui: &mut Ui) -> egui::Response {
     };
     ui.painter().rect(
         rect,
-        3.0,
+        TAB_ROUNDING,
         fill,
         Stroke::new(1.0, border()),
         egui::StrokeKind::Inside,
@@ -1200,7 +1243,7 @@ fn pill(ui: &mut Ui, state: CellState, text: &str) -> egui::Response {
     let font = FontId::proportional(12.0);
     let galley =
         ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), font, ui.visuals().text_color()));
-    let size = vec2(galley.size().x + 30.0, 22.0);
+    let size = vec2(galley.size().x + 30.0, CONTROL);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let fill = if response.hovered() {
         hover_fill()

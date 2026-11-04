@@ -344,22 +344,12 @@ pub struct TreeResponse {
     pub swap_master_slave: Option<TreeItem>,
     /// Hide (`false`) or show the symbols of constraints, boundary conditions or loads.
     pub symbol_visibility: Vec<(TreeItem, bool)>,
-    /// Open the material library.
-    pub material_library: bool,
-    /// Open the default meshing parameters of the geometry.
-    pub mesh_defaults: bool,
-    /// Mesh all parts of the geometry.
-    pub generate_mesh: bool,
     /// Mesh one part of the geometry, by index.
     pub mesh_part: Option<usize>,
     /// Transform a mesh part (translate, rotate, mirror, scale), by index.
     pub transform_part: Option<usize>,
     /// Merge the selected mesh parts into one.
     pub merge_parts: bool,
-    /// Open Search Contact Pairs.
-    pub search_contacts: bool,
-    /// Open the table of all contact regions.
-    pub contact_worksheet: bool,
     /// Run this contact detection again.
     pub detect: Option<usize>,
     /// The warning sign of an item was clicked: explain its findings.
@@ -1133,12 +1123,6 @@ impl Tree<'_> {
         if item == TreeItem::Group("Parts") && !self.part_indices.is_empty() {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                if self.view == TreeView::Geometry {
-                    if ui.button("Mesh All Parts").clicked() {
-                        self.response.generate_mesh = true;
-                    }
-                    ui.separator();
-                }
                 for (label, visible) in [("Show All", true), ("Hide All", false)] {
                     if ui.button(label).clicked() {
                         (self.response.visibility)
@@ -1166,56 +1150,35 @@ impl Tree<'_> {
             );
         // The menu of one of several selected items acts on all of them.
         let several = self.is_selected(&item) && self.state.selected_items(self.view).len() > 1;
-        let connections = item == TreeItem::Group("Contacts");
-        if creates.is_some() || editable || connections {
+        if creates.is_some() || editable {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                if connections && ui.button("Connection Settings …").clicked() {
-                    self.response.open = Some(item.clone());
-                }
-                if connections || item == TreeItem::Group(CONTACT_REGIONS) {
-                    if ui.button("Contact Worksheet …").clicked() {
-                        self.response.contact_worksheet = true;
-                    }
-                    if creates.is_some() {
+                // Tools such as the material library or the contact search are on the
+                // ribbon only; the menu holds what acts on this item. A separator only
+                // goes below something.
+                let top = ui.cursor().top();
+                let separator = |ui: &mut Ui| {
+                    if ui.cursor().top() > top + 1.0 {
                         ui.separator();
                     }
-                }
-                if let TreeItem::ContactDetection(d) = item {
-                    if ui
+                };
+                if let TreeItem::ContactDetection(d) = item
+                    && ui
                         .button("Detect Again")
                         .on_hover_text(
                             "Searches again and replaces the regions found before, except \
                              those you changed since.",
                         )
                         .clicked()
-                    {
-                        self.response.detect = Some(d);
-                    }
-                    ui.separator();
+                {
+                    self.response.detect = Some(d);
                 }
-                if item == TreeItem::Group("Materials") {
-                    ui.separator();
-                    if ui.button("Material Library …").clicked() {
-                        self.response.material_library = true;
-                    }
-                }
-                if item == TreeItem::Group("Mesh Setup") {
-                    ui.separator();
-                    if ui.button("Default Mesh Parameters …").clicked() {
-                        self.response.mesh_defaults = true;
-                    }
-                    if ui.button("Mesh All Parts").clicked() {
-                        self.response.generate_mesh = true;
-                    }
-                }
-                // Nodalis offers the search on constraints and contact pairs.
                 let members: Vec<TreeItem> = (self.symbols.keys())
                     .filter(|member| shows_symbol_of(&item, member))
                     .cloned()
                     .collect();
                 if !members.is_empty() {
-                    ui.separator();
+                    separator(ui);
                     for (label, visible) in [("Show All", true), ("Hide All", false)] {
                         if ui.button(label).clicked() {
                             (self.response.symbol_visibility)
@@ -1223,14 +1186,8 @@ impl Tree<'_> {
                         }
                     }
                 }
-                if matches!(item, TreeItem::Group("Constraints" | "Contact Pairs")) {
-                    ui.separator();
-                    if ui.button("Search Contact Pairs …").clicked() {
-                        self.response.search_contacts = true;
-                    }
-                }
                 if creates.is_some() {
-                    ui.separator();
+                    separator(ui);
                     if ui.button("Expand All").clicked() {
                         self.state.expand = Some((self.view, item.clone(), true));
                     }
@@ -1239,6 +1196,7 @@ impl Tree<'_> {
                     }
                 }
                 if editable {
+                    separator(ui);
                     if ui.button("Edit …").clicked() {
                         self.response.open = Some(item.clone());
                     }
@@ -1251,7 +1209,7 @@ impl Tree<'_> {
                         }
                     }
                     if can_deactivate(&item) {
-                        ui.separator();
+                        separator(ui);
                         let label = match (inactive, several) {
                             (true, false) => "Activate",
                             (false, false) => "Deactivate",
@@ -1261,7 +1219,7 @@ impl Tree<'_> {
                         if ui.button(label).clicked() {
                             self.response.toggle_active = Some(item.clone());
                         }
-                        ui.separator();
+                        separator(ui);
                     }
                     if let TreeItem::Step(s) = item {
                         if ui
@@ -1276,7 +1234,7 @@ impl Tree<'_> {
                         {
                             self.response.move_step = Some((s, false));
                         }
-                        ui.separator();
+                        separator(ui);
                     }
                     let contact = match item {
                         TreeItem::ContactRegion(i) => Some(ContactItem::Region(i)),
@@ -1298,7 +1256,7 @@ impl Tree<'_> {
                              .frd file; a step that writes them already opens its output.",
                             NewItem::ContactFieldOutput,
                         );
-                        ui.separator();
+                        separator(ui);
                     }
                     if self.master_slave.contains(&item) {
                         let label = match (several, &item) {
@@ -1310,7 +1268,7 @@ impl Tree<'_> {
                         if ui.button(label).clicked() {
                             self.response.swap_master_slave = Some(item.clone());
                         }
-                        ui.separator();
+                        separator(ui);
                     }
                     let label = if several { "Delete Selected" } else { "Delete" };
                     if deletable(self.view, &item) && ui.button(label).clicked() {
@@ -1685,8 +1643,8 @@ impl Tree<'_> {
 
     fn container(&mut self, ui: &mut Ui, name: &'static str, mut items: Vec<(TreeItem, &str)>) {
         items.retain(|(item, _)| !self.hidden(item));
+        // An empty category is left out: items are created on the ribbon, not in the tree.
         if items.is_empty() {
-            self.leaf(ui, TreeItem::Group(name), name);
             return;
         }
         let text = counted(name, items.len());
@@ -1726,7 +1684,6 @@ impl Tree<'_> {
         items.retain(|(item, _)| !self.hidden(item));
         let group = TreeItem::StepGroup(step, name);
         if items.is_empty() {
-            self.leaf(ui, group, name);
             return;
         }
         let text = counted(name, items.len());
@@ -1744,6 +1701,9 @@ impl Tree<'_> {
         let open = !fe.reference_points.is_empty()
             || !fe.coordinate_systems.is_empty()
             || !fe.planes.is_empty();
+        if !open {
+            return;
+        }
         self.branch(
             ui,
             TreeItem::Group("Features"),
@@ -1904,14 +1864,16 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             .collect();
         // The cross-sections first, as the beam sections pick from them.
         let text = counted("Sections", sections.len());
-        tree.branch(ui, TreeItem::Group("Sections"), text, true, |tree, ui| {
-            tree.container(ui, CROSS_SECTIONS, cross_sections);
-            tree.siblings = sections.iter().map(|(item, _)| item.clone()).collect();
-            for (item, label) in sections {
-                tree.leaf(ui, item, label);
-            }
-            tree.siblings.clear();
-        });
+        if !sections.is_empty() || !cross_sections.is_empty() {
+            tree.branch(ui, TreeItem::Group("Sections"), text, true, |tree, ui| {
+                tree.container(ui, CROSS_SECTIONS, cross_sections);
+                tree.siblings = sections.iter().map(|(item, _)| item.clone()).collect();
+                for (item, label) in sections {
+                    tree.leaf(ui, item, label);
+                }
+                tree.siblings.clear();
+            });
+        }
         for (i, constraint) in fe.constraints.iter().enumerate() {
             if !constraint.active() {
                 tree.inactive.insert(TreeItem::Constraint(i));
@@ -1971,28 +1933,32 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             )
             .collect();
         // The group keeps its name "Contacts", which links of the project schematic use.
-        tree.branch(ui, contacts, "Connections", open, |tree, ui| {
-            for (d, detection) in fe.contact_detections.iter().enumerate() {
+        if open {
+            tree.branch(ui, contacts, "Connections", open, |tree, ui| {
+                for (d, detection) in fe.contact_detections.iter().enumerate() {
+                    let regions = (0..fe.contact_regions.len())
+                        .filter(|r| tree.detected.get(r) == Some(&d))
+                        .map(|r| (TreeItem::ContactRegion(r), region_names[r].as_str()))
+                        .collect();
+                    tree.detection(ui, d, &detection.name, regions);
+                }
                 let regions = (0..fe.contact_regions.len())
-                    .filter(|r| tree.detected.get(r) == Some(&d))
+                    .filter(|r| !tree.detected.contains_key(r))
                     .map(|r| (TreeItem::ContactRegion(r), region_names[r].as_str()))
                     .collect();
-                tree.detection(ui, d, &detection.name, regions);
-            }
-            let regions = (0..fe.contact_regions.len())
-                .filter(|r| !tree.detected.contains_key(r))
-                .map(|r| (TreeItem::ContactRegion(r), region_names[r].as_str()))
-                .collect();
-            tree.container(ui, CONTACT_REGIONS, regions);
-            let bolts = (fe.bolts.iter().enumerate())
-                .map(|(i, b)| (TreeItem::Bolt(i), b.name.as_str()))
-                .collect();
-            tree.container(ui, BOLTS, bolts);
-            let group = TreeItem::Group(ADVANCED_CONTACTS);
-            tree.branch(ui, group, ADVANCED_CONTACTS, advanced, |tree, ui| {
-                tree.advanced_contacts(ui, &fe);
+                tree.container(ui, CONTACT_REGIONS, regions);
+                let bolts = (fe.bolts.iter().enumerate())
+                    .map(|(i, b)| (TreeItem::Bolt(i), b.name.as_str()))
+                    .collect();
+                tree.container(ui, BOLTS, bolts);
+                let group = TreeItem::Group(ADVANCED_CONTACTS);
+                if advanced {
+                    tree.branch(ui, group, ADVANCED_CONTACTS, advanced, |tree, ui| {
+                        tree.advanced_contacts(ui, &fe);
+                    });
+                }
             });
-        });
+        }
         let distributions = (fe.distributions.iter().enumerate())
             .map(|(i, d)| (TreeItem::Distribution(i), d.name.as_str()))
             .collect();
@@ -2023,7 +1989,6 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             .filter(|s| !tree.hidden(&TreeItem::Step(*s)))
             .count();
         if shown == 0 {
-            tree.leaf(ui, steps, "Steps");
             return;
         }
         let text = counted("Steps", shown);
