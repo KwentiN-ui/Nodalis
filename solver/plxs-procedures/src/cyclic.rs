@@ -152,6 +152,10 @@ pub(crate) fn cyclic_frequency(
             count,
             parameters.lower,
             parameters.solver,
+            // Both copies of the sector at the nodes' positions.
+            (set.free.iter())
+                .map(|&d| ctx.model.nodes.coordinates[(d as usize % total_dofs) / 3])
+                .collect(),
             progress,
         )?;
 
