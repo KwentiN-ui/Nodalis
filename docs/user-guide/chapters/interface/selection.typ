@@ -31,11 +31,15 @@ selects.
   faces included (@geometry-import), or on a mesh without geometry the smooth patch of faces;
   near a feature edge or corner, within a few pixels, it selects that. #ui("Part") selects whole parts.
   #ui("Edge angle") and #ui("Surface angle") grow the selection across edges or faces as long as
-  the angle between neighbours stays below the given value (default 30°).
+  the angle between neighbours stays below the given value (default 30°). On a mesh generated
+  from geometry, #ui("Surface angle") selects and highlights whole CAD faces, like
+  #ui("Faces, edges and points"), so the selection survives remeshing.
 / Mesh based (#ui("More")): #ui("Node"), #ui("Element"), #ui("Edge"), #ui("Surface"),
   #ui("Part"), #ui("Edge angle"), #ui("Surface angle") and #ui("ID"). #ui("ID") takes a list such
   as `1, 5, 10-20` with #ui("Add") and #ui("Remove"); for face and edge regions the numbers are
   element numbers.
+
+#screenshot("surface-angle.png", [Surface angle on a shaft selects the three cylindrical faces])
 
 Modes that do not fit the region are disabled, for example #ui("Node") for a pressure load.
 On the Geometry tab, for mesh setup items such as a Local Mesh Size, the window offers only the
