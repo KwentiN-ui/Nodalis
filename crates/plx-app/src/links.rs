@@ -47,6 +47,9 @@ pub const VALUE: &str = "Value";
 pub const PARAMETERS: &str = "Parameters";
 /// The row of a measure block that takes the results of a step.
 pub const MEASURE: &str = "Measure";
+/// The row of a deformed mesh block that takes the results of a step, whose displacements
+/// move the nodes of the mesh of the analysis they belong to.
+pub const STEP_RESULT: &str = "Step Result";
 /// The inputs of a parameter study, `["Loop", column]`: value links that lead back to the
 /// blocks before the study, the feedback of its loop.
 pub const LOOP: &str = "Loop";
@@ -1053,7 +1056,7 @@ impl DataType {
             MESH => Self::Mesh,
             SETUP if is_step_input(path) => Self::Results,
             SETUP => Self::Setup,
-            RESULTS | STATE | MEASURE | GLOBAL_RESULTS => Self::Results,
+            RESULTS | STATE | MEASURE | STEP_RESULT | GLOBAL_RESULTS => Self::Results,
             VALUE | PARAMETERS | OUTPUTS => Self::Number,
             LOOP => Self::Loop,
             ANALYSIS => Self::Analysis,
@@ -1121,7 +1124,7 @@ pub fn compatible(item: &[String], slot: &[String]) -> bool {
 /// Whether the row of `path` takes the results of a step of another analysis.
 pub fn takes_results(path: &[String]) -> bool {
     match path {
-        [cell] => cell == STATE || cell == MEASURE || cell == GLOBAL_RESULTS,
+        [cell] => cell == STATE || cell == MEASURE || cell == STEP_RESULT || cell == GLOBAL_RESULTS,
         [cell, category] => cell == SETUP && category == INITIAL_CONDITIONS,
         [cell, category, _] if cell == SETUP && category == STEPS => true,
         _ => ResultsUse::of_slot(path).is_some(),

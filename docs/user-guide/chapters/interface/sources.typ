@@ -165,6 +165,50 @@ What the factor does depends on where the mesh comes from:
 Refine Mesh blocks can follow each other; their factors multiply. A mesh read from an input
 file has no parameters or geometry to mesh it again with, and the link is refused.
 
+=== Deformed Mesh <deformed-mesh-block>
+
+A Deformed Mesh block gives the mesh of an analysis with every node moved by its displacement in
+one mode or increment of a step, times a factor. Its main use is an imperfection: the buckling
+mode of a buckle step, scaled to a small amplitude, as the starting geometry of a geometrically
+nonlinear static analysis, which then shows how the imperfect structure deflects and fails below
+the ideal buckling load. Add it with #menu("Project", "Add Mesh", "Deformed Mesh"), drag the pin of
+a step under #ui("Results") of an analysis to its #ui("Step Result") row, and drag the pin on the
+right of its #ui("Mesh") row to the #ui("Mesh") row of the analysis that starts from the deformed
+mesh. The pin is there before anything is solved, so the whole chain can be linked first.
+
+#screenshot("deformed-mesh-block.png", [The first buckling mode of the analysis Buckle, at half
+  its size, is the mesh of the analysis Nonlinear, which takes its materials and sections from
+  Buckle too])
+
+#fields(
+  [Step Result], [The results of a step whose displacements move the nodes. Only the results of
+    an analysis can be linked.],
+  [Mode], [The mode of a buckle or frequency step, or the increment of any other step, counted
+    from 1.],
+  [Factor], [What the displacements are multiplied by; negative values turn the mode around.
+    Mode shapes are normalized, so the factor sets the amplitude of the imperfection.],
+  [Mesh], [The deformed mesh, with its state. Its row shows the largest displacement of a node
+    times the factor, the amplitude of the imperfection, in the units of the analysis.],
+)
+
+#ui("Mode") and #ui("Factor") take value links like other numbers (@parameters-block), so a
+parameter study can vary the amplitude or the mode of the imperfection (@parameter-study).
+
+The deformed mesh keeps the parts, node sets, element sets, surfaces and the faces of the
+geometry of the analysis it comes from, but not the geometry itself. What the analysis after it
+defines on that mesh, such as a section on a part, a boundary condition on a node set or a load
+on a picked face, therefore finds its region on the deformed mesh too. Link the materials and
+sections, or the whole setup, of the source analysis to it as usual (@links), and give it a
+static step with #ui("Nonlinear geometry (Nlgeom)") on.
+
+#ui("Update Project") solves the analysis the results come from first, then reads the
+displacements and makes the mesh, and only then solves the analyses that take it. The block makes
+its mesh again whenever the results, the mesh of the source analysis, the mode or the factor
+changed; until then its #ui("Mesh") row and the analyses after it are out of date. The mesh is
+kept in the project file. #menu("File", "Export Deformed Mesh (.inp) ...") in an analysis window
+still writes the mesh as displayed to a file (@export-deformed); a Mesh Export block after the
+Deformed Mesh block does the same from the schematic (@mesh-export).
+
 === File <file-block>
 
 A file block reads a file from outside the project and gives what it holds to analyses: the
