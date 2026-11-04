@@ -2,6 +2,14 @@
 
 use std::sync::Arc;
 
+use rayon::prelude::*;
+
+/// Matrices with at least this many stored entries are multiplied in parallel.
+const PARALLEL_MULTIPLY_FROM: usize = 1 << 17;
+/// At most this many column ranges in a parallel product (each holds a buffer of the rows
+/// before it).
+const MULTIPLY_CHUNKS: usize = 16;
+
 /// The structure of a symmetric sparse matrix: for every column the sorted row indices of
 /// the entries in the upper triangle (`row <= column`), the diagonal always present.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,24 +166,83 @@ impl SparseMatrix {
         }
     }
 
-    /// `y = A x` for the full symmetric matrix.
+    /// `y = A x` for the full symmetric matrix; in parallel when the matrix is large.
     pub fn multiply(&self, x: &[f64], y: &mut [f64]) {
         let n = self.pattern.n;
         assert_eq!(x.len(), n);
         assert_eq!(y.len(), n);
-        y.iter_mut().for_each(|v| *v = 0.0);
-        for col in 0..n {
+        let chunks = rayon::current_num_threads().min(MULTIPLY_CHUNKS);
+        if self.values.len() < PARALLEL_MULTIPLY_FROM || chunks < 2 {
+            y.iter_mut().for_each(|v| *v = 0.0);
+            self.multiply_columns(x, 0, y, &mut []);
+            return;
+        }
+        // Column ranges of about equal numbers of entries. Every range writes the rows of
+        // its own columns (the lower triangle, gathered, and the upper triangle within the
+        // range) and collects the contributions of its upper triangle to earlier rows in a
+        // buffer of its own, added afterwards.
+        let nnz = self.values.len();
+        let col_ptr = &self.pattern.col_ptr;
+        let mut bounds = vec![0usize];
+        for c in 1..chunks {
+            let target = (nnz * c / chunks) as u32;
+            let at = col_ptr.partition_point(|&p| p < target).min(n);
+            bounds.push(at.max(*bounds.last().unwrap()));
+        }
+        bounds.push(n);
+        let mut pieces: Vec<&mut [f64]> = Vec::with_capacity(chunks);
+        let mut rest = &mut y[..];
+        for c in 0..chunks {
+            let (piece, tail) = rest.split_at_mut(bounds[c + 1] - bounds[c]);
+            pieces.push(piece);
+            rest = tail;
+        }
+        let earlier: Vec<Vec<f64>> = pieces
+            .into_par_iter()
+            .enumerate()
+            .map(|(c, piece)| {
+                piece.iter_mut().for_each(|v| *v = 0.0);
+                let mut earlier = vec![0.0; bounds[c]];
+                self.multiply_columns(x, bounds[c], piece, &mut earlier);
+                earlier
+            })
+            .collect();
+        const ROWS: usize = 1 << 14;
+        y.par_chunks_mut(ROWS).enumerate().for_each(|(b, rows)| {
+            let first = b * ROWS;
+            for buffer in &earlier {
+                if buffer.len() <= first {
+                    continue;
+                }
+                let end = (first + rows.len()).min(buffer.len());
+                for (yi, e) in rows.iter_mut().zip(&buffer[first..end]) {
+                    *yi += e;
+                }
+            }
+        });
+    }
+
+    /// The product of the columns `first..first + own.len()`: their own rows go to `own`,
+    /// the rows before `first` to `earlier` (which must hold them).
+    fn multiply_columns(&self, x: &[f64], first: usize, own: &mut [f64], earlier: &mut [f64]) {
+        for (local, col) in (first..first + own.len()).enumerate() {
             let start = self.pattern.col_ptr[col] as usize;
             let end = self.pattern.col_ptr[col + 1] as usize;
             let xc = x[col];
+            let mut sum = 0.0;
             for k in start..end {
                 let row = self.pattern.row_idx[k] as usize;
                 let v = self.values[k];
-                y[row] += v * xc;
+                if row >= first {
+                    own[row - first] += v * xc;
+                } else {
+                    earlier[row] += v * xc;
+                }
                 if row != col {
-                    y[col] += v * x[row];
+                    sum += v * x[row];
                 }
             }
+            own[local] += sum;
         }
     }
 
@@ -257,6 +324,42 @@ impl SparseMatrix {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_parallel_product_equals_the_sequential_one() {
+        // A banded matrix large enough for the parallel product.
+        let n = 20_000;
+        let width = 12u32;
+        let blocks: Vec<Vec<u32>> = (0..n as u32 - width)
+            .map(|i| (i..i + width).collect())
+            .collect();
+        let pattern = Arc::new(Pattern::from_blocks(n, blocks.iter().map(Vec::as_slice)));
+        let mut a = SparseMatrix::zeros(pattern.clone());
+        for (k, v) in a.values_mut().iter_mut().enumerate() {
+            *v = ((k * 7919) % 1000) as f64 / 1000.0 - 0.3;
+        }
+        assert!(a.values().len() >= PARALLEL_MULTIPLY_FROM);
+        let x: Vec<f64> = (0..n).map(|i| ((i * 31) % 17) as f64 - 8.0).collect();
+        let mut expected = vec![0.0; n];
+        for col in 0..n {
+            for (k, &row) in pattern.column(col).iter().enumerate() {
+                let v = a.values()[pattern.col_ptr()[col] as usize + k];
+                expected[row as usize] += v * x[col];
+                if row as usize != col {
+                    expected[col] += v * x[row as usize];
+                }
+            }
+        }
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        let mut y = vec![1.0; n];
+        pool.install(|| a.multiply(&x, &mut y));
+        for (y, e) in y.iter().zip(&expected) {
+            assert!((y - e).abs() <= 1e-12 * e.abs().max(1.0), "{y} vs {e}");
+        }
+    }
 
     #[test]
     fn pattern_holds_blocks_and_diagonal() {

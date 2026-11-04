@@ -60,8 +60,22 @@ pub fn nested_dissection(pattern: &Pattern, coordinates: Option<&[[f64; 3]]>) ->
     if n == 0 {
         return Vec::new();
     }
+    let clock = std::time::Instant::now();
     let graph = Graph::from_pattern(pattern);
+    crate::solver::trace(&clock, "dissection: graph");
     let (quotient, members) = graph.compress();
+    crate::solver::trace(
+        &clock,
+        &format!(
+            "dissection: {n} unknowns compressed to {} vertices{}",
+            quotient.len(),
+            if coordinates.is_some_and(|c| c.len() == n) {
+                ""
+            } else {
+                " (no coordinates)"
+            }
+        ),
+    );
     let coordinates = coordinates.filter(|c| c.len() == n).map(|c| {
         (members.iter())
             .map(|m| c[m[0] as usize])
@@ -71,6 +85,7 @@ pub fn nested_dissection(pattern: &Pattern, coordinates: Option<&[[f64; 3]]>) ->
     let mut dissection = Dissection::new(&quotient, coordinates);
     let all: Vec<u32> = (0..quotient.len() as u32).collect();
     dissection.order(all, &mut order);
+    crate::solver::trace(&clock, "dissection: order");
     debug_assert_eq!(order.len(), quotient.len());
     let mut perm = Vec::with_capacity(n);
     for v in order {

@@ -663,6 +663,11 @@ impl Procedure for BuckleProcedure {
         // Lanczos solver takes that solver over, with its ordering and the memory of its
         // factor, instead of ordering again and holding a second factor.
         let regularization = ctx.solver.regularization();
+        // A direct reference solution left the factor of exactly this stiffness: no
+        // second factorization of it.
+        if !equations.is_iterative() && ctx.solver.is_factorized() {
+            lanczos.stiffness_is_factorized();
+        }
         std::mem::swap(lanczos.direct_mut(), &mut ctx.solver);
         lanczos.direct_mut().set_regularization(1e-12);
         // Taken by a fresh analysis only (the reference solution solved iteratively).

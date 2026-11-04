@@ -27,6 +27,7 @@
 //! agrees.
 
 use plxs_core::{Error, Result};
+use rayon::prelude::*;
 
 use crate::{LdltSolver, LinearSolver, PcgSolver, SparseMatrix};
 
@@ -93,6 +94,8 @@ pub struct ShiftInvertLanczos {
     /// ([`Self::set_iterative`]) instead of the factorization.
     iterative: Option<PcgSolver>,
     pub options: LanczosOptions,
+    /// The direct solver holds the factor of the stiffness of the next [`Self::buckling`].
+    stiffness_factorized: bool,
 }
 
 impl ShiftInvertLanczos {
@@ -103,6 +106,7 @@ impl ShiftInvertLanczos {
             solver,
             iterative: None,
             options,
+            stiffness_factorized: false,
         }
     }
 
@@ -120,6 +124,13 @@ impl ShiftInvertLanczos {
 
     pub fn is_iterative(&self) -> bool {
         self.iterative.is_some()
+    }
+
+    /// Tells the next [`Self::buckling`] that the direct solver (see [`Self::direct_mut`])
+    /// holds the factor of its stiffness matrix already, from the reference solution: the
+    /// first factorization is skipped.
+    pub fn stiffness_is_factorized(&mut self) {
+        self.stiffness_factorized = true;
     }
 
     /// The direct solver, for an estimate of its factor before the choice.
@@ -224,8 +235,8 @@ impl ShiftInvertLanczos {
                 .filter(|v| **v > lo_value && **v <= hi)
                 .count();
             if actual <= found || rounds >= self.options.max_sturm_rounds {
-                // Restore the factorization of the shifted matrix for later use.
-                self.solver.factorize(&shifted)?;
+                // The solver keeps the factor of the last Sturm count: refactorizing the
+                // shifted matrix would cost a factorization nobody uses.
                 let mut pairs = pairs;
                 pairs.truncate(count);
                 lanczos.sturm_confirmed = actual == found;
@@ -254,6 +265,8 @@ impl ShiftInvertLanczos {
     /// `(K + λ K_σ) x = 0`: the `count` smallest positive buckling factors `λ`, ascending,
     /// with `xᵀ K x = 1`. When fewer positive factors exist, negative ones (load reversal)
     /// follow by magnitude.
+    ///
+    /// The direct solver ends with the factor of a shifted matrix, not of `K`.
     pub fn buckling(
         &mut self,
         k: &SparseMatrix,
@@ -304,15 +317,22 @@ impl ShiftInvertLanczos {
                 sturm_confirmed: false,
             });
         }
-        self.solver.analyze(k.pattern())?;
-        self.solver.factorize(k).map_err(|e| match e {
-            Error::Numerical { message, .. } => Error::Numerical {
-                step: 0,
-                increment: 0,
-                message: format!("{message}; the model is probably not sufficiently constrained"),
-            },
-            other => other,
-        })?;
+        let clock = std::time::Instant::now();
+        let factorized = std::mem::take(&mut self.stiffness_factorized);
+        if !(factorized && self.solver.is_factorized()) {
+            self.solver.analyze(k.pattern())?;
+            self.solver.factorize(k).map_err(|e| match e {
+                Error::Numerical { message, .. } => Error::Numerical {
+                    step: 0,
+                    increment: 0,
+                    message: format!(
+                        "{message}; the model is probably not sufficiently constrained"
+                    ),
+                },
+                other => other,
+            })?;
+            crate::solver::trace(&clock, "buckling: factorization of K");
+        }
         if self.solver.inertia().unwrap_or(0) > 0 {
             return Err(Error::Numerical {
                 step: 0,
@@ -333,6 +353,7 @@ impl ShiftInvertLanczos {
                 let b_mul = |x: &[f64], y: &mut [f64]| k.multiply(x, y);
                 lanczos.run(count, &mut op, &b_mul, preference, &self.options)?;
             }
+            crate::solver::trace(&clock, "buckling: lanczos run");
             let mut pairs: Vec<(f64, Vec<f64>)> = lanczos
                 .wanted(count, preference)
                 .into_iter()
@@ -346,6 +367,7 @@ impl ShiftInvertLanczos {
                 // Eigenvalues λ in (0, hi]: negative pivots of K + hi·K_σ (K itself has none).
                 let shifted = SparseMatrix::linear_combination(k, 1.0, k_sigma, hi);
                 self.solver.factorize(&shifted)?;
+                crate::solver::trace(&clock, "buckling: sturm factorization");
                 let actual = self.solver.inertia().unwrap_or(positive);
                 let found = values.iter().filter(|v| **v > 0.0 && **v <= hi).count();
                 (actual, found)
@@ -354,7 +376,7 @@ impl ShiftInvertLanczos {
             };
             let _ = &mut scratch;
             if actual <= found || rounds >= self.options.max_sturm_rounds {
-                self.solver.factorize(k)?;
+                // The solver keeps the factor of the Sturm count (see above).
                 let mut pairs = pairs;
                 pairs.truncate(count);
                 lanczos.sturm_confirmed = actual == found;
@@ -365,6 +387,7 @@ impl ShiftInvertLanczos {
             }
             rounds += 1;
             self.solver.factorize(k)?;
+            crate::solver::trace(&clock, "buckling: factorization of K again");
             lanczos.lock_and_restart(self.options.tolerance);
             lanczos.extra_wanted += actual - found;
         };
@@ -500,6 +523,9 @@ struct Lanczos {
     /// Next basis vector (unnormalized residual) and its `B`-norm; `None` after a
     /// breakdown until a random vector is injected.
     next: Option<(Vec<f64>, f64)>,
+    /// `B` times `next` once it is known (after a regular step), so that the next step
+    /// need not multiply again.
+    next_b: Option<Vec<f64>>,
     /// Converged eigenvectors taken out of the iteration (locked): deflated from every
     /// new vector, so that a fresh Lanczos run finds the eigenvalues that are still
     /// missing (the other copies of a multiple eigenvalue).
@@ -524,6 +550,7 @@ impl Lanczos {
             b_basis: Vec::with_capacity(max_basis + 1),
             t: vec![0.0; (max_basis + 1) * (max_basis + 1)],
             next: None,
+            next_b: None,
             locked: Vec::new(),
             b_locked: Vec::new(),
             locked_theta: Vec::new(),
@@ -568,14 +595,8 @@ impl Lanczos {
             let (thetas, ys, residuals) = self.ritz();
             for (i, y) in ys.iter().enumerate() {
                 if residuals[i] <= tolerance * thetas[i].abs().max(f64::MIN_POSITIVE) {
-                    let mut x = vec![0.0; self.n];
-                    let mut bx = vec![0.0; self.n];
-                    for (c, &yc) in y.iter().enumerate() {
-                        axpy(yc, &self.basis[c], &mut x);
-                        axpy(yc, &self.b_basis[c], &mut bx);
-                    }
-                    self.locked.push(x);
-                    self.b_locked.push(bx);
+                    self.locked.push(combine(&self.basis, y, self.n));
+                    self.b_locked.push(combine(&self.b_basis, y, self.n));
                     self.locked_theta.push(thetas[i]);
                 }
             }
@@ -585,14 +606,32 @@ impl Lanczos {
         self.t.iter_mut().for_each(|v| *v = 0.0);
         let v = self.random_vector();
         self.next = Some((v, 0.0));
+        self.next_b = None;
     }
 
-    /// Removes the components along the locked eigenvectors and the basis.
-    fn deflate(&self, v: &mut [f64]) {
-        for (q, bq) in self.locked.iter().zip(&self.b_locked) {
-            let h = dot(bq, v);
-            axpy(-h, q, v);
+    /// One classical Gram-Schmidt pass: removes from `v` its `B`-components along the
+    /// locked eigenvectors and the basis, and the same combination from `bv` (`B v`) when
+    /// given. Returns the coefficients along the basis.
+    fn orthogonalize(&self, v: &mut [f64], bv: Option<&mut [f64]>) -> Vec<f64> {
+        let locked = self.locked.len();
+        let b_vectors: Vec<&[f64]> = self
+            .b_locked
+            .iter()
+            .chain(&self.b_basis)
+            .map(Vec::as_slice)
+            .collect();
+        let h = dots(&b_vectors, v);
+        let vectors: Vec<&[f64]> = self
+            .locked
+            .iter()
+            .chain(&self.basis)
+            .map(Vec::as_slice)
+            .collect();
+        subtract(&vectors, &h, v);
+        if let Some(bv) = bv {
+            subtract(&b_vectors, &h, bv);
         }
+        h[locked..].to_vec()
     }
 
     /// One Lanczos step: appends the next vector to the basis, applies the operator and
@@ -601,16 +640,14 @@ impl Lanczos {
         let Some((mut v, mut beta)) = self.next.take() else {
             return Ok(false);
         };
-        let mut bv = vec![0.0; self.n];
-        if beta <= 0.0 {
+        let known_b = self.next_b.take();
+        let mut bv;
+        if beta <= 0.0 || known_b.is_none() {
             // A fresh (start or injected) vector: orthogonalize and normalize in B.
             for _ in 0..2 {
-                self.deflate(&mut v);
-                for (q, bq) in self.basis.iter().zip(&self.b_basis) {
-                    let h = dot(bq, &v);
-                    axpy(-h, q, &mut v);
-                }
+                self.orthogonalize(&mut v, None);
             }
+            bv = vec![0.0; self.n];
             b_mul(&v, &mut bv);
             beta = dot(&bv, &v).max(0.0).sqrt();
             if beta <= 0.0 {
@@ -619,13 +656,10 @@ impl Lanczos {
         } else {
             // The residual of the previous step is B-orthogonal to the basis up to rounding
             // relative to the vector it was computed from; after normalization that error
-            // is amplified by 1/β, so orthogonalize once more.
-            self.deflate(&mut v);
-            for (q, bq) in self.basis.iter().zip(&self.b_basis) {
-                let h = dot(bq, &v);
-                axpy(-h, q, &mut v);
-            }
-            b_mul(&v, &mut bv);
+            // is amplified by 1/β, so orthogonalize once more. The correction is tiny, so
+            // `B v` follows it by the same combination instead of another product.
+            bv = known_b.unwrap_or_default();
+            self.orthogonalize(&mut v, Some(&mut bv));
             let actual = dot(&bv, &v).max(0.0).sqrt();
             if actual > 0.0 {
                 beta = actual;
@@ -647,25 +681,25 @@ impl Lanczos {
         let mut ba = vec![0.0; self.n];
         b_mul(&a, &mut ba);
         let norm_a = dot(&ba, &a).max(0.0).sqrt();
-        let mut beta_next = 0.0;
         // Gram-Schmidt passes until the remainder is not much smaller than the vector it
-        // came from (the DGKS criterion), at least two.
+        // came from (the DGKS criterion), at least two. `B a` follows each pass by the
+        // same combination, which is accurate enough for the decision; the norm that
+        // normalizes the next vector comes from a fresh product below.
         for pass in 0..4 {
-            self.deflate(&mut a);
-            for (i, coefficient) in coefficients.iter_mut().enumerate().take(k) {
-                let h = dot(&self.b_basis[i], &a);
-                axpy(-h, &self.basis[i], &mut a);
-                *coefficient += h;
+            let h = self.orthogonalize(&mut a, Some(&mut ba));
+            for (c, h) in coefficients.iter_mut().zip(h) {
+                *c += h;
             }
-            b_mul(&a, &mut ba);
-            beta_next = dot(&ba, &a).max(0.0).sqrt();
-            if pass >= 1 && beta_next > 0.5 * norm_a {
+            let estimate = dot(&ba, &a).max(0.0).sqrt();
+            if pass >= 1 && estimate > 0.5 * norm_a {
                 break;
             }
-            if beta_next <= 1e-14 * norm_a {
+            if estimate <= 1e-14 * norm_a {
                 break;
             }
         }
+        b_mul(&a, &mut ba);
+        let beta_next = dot(&ba, &a).max(0.0).sqrt();
         for (i, &h) in coefficients.iter().enumerate() {
             self.t[j * stride + i] = h;
             self.t[i * stride + j] = h;
@@ -675,6 +709,7 @@ impl Lanczos {
             return Ok(false);
         }
         self.next = Some((a, beta_next));
+        self.next_b = Some(ba);
         Ok(true)
     }
 
@@ -807,14 +842,8 @@ impl Lanczos {
         let stride = self.stride();
         for (new, &i) in order.iter().take(keep).enumerate() {
             let y = &ys[i];
-            let mut q = vec![0.0; self.n];
-            let mut bq = vec![0.0; self.n];
-            for (c, &yc) in y.iter().enumerate() {
-                axpy(yc, &self.basis[c], &mut q);
-                axpy(yc, &self.b_basis[c], &mut bq);
-            }
-            basis.push(q);
-            b_basis.push(bq);
+            basis.push(combine(&self.basis, y, self.n));
+            b_basis.push(combine(&self.b_basis, y, self.n));
             t[new * stride + new] = thetas[i];
             // Coupling of the kept Ritz vector to the next vector: β y_i[k−1], with the
             // sign of the component.
@@ -857,28 +886,86 @@ impl Lanczos {
 
     /// `V y`.
     fn vector(&self, y: &[f64]) -> Vec<f64> {
-        let mut x = vec![0.0; self.n];
-        for (c, &yc) in y.iter().enumerate() {
-            axpy(yc, &self.basis[c], &mut x);
-        }
-        x
+        combine(&self.basis, y, self.n)
     }
 }
+
+/// Rows per piece of the vector kernels: fixed, so that the sums do not depend on the
+/// number of threads.
+const ROWS: usize = 1 << 13;
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
+    let partial: Vec<f64> = a
+        .par_chunks(ROWS)
+        .zip(b.par_chunks(ROWS))
+        .map(|(a, b)| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>())
+        .collect();
+    partial.iter().sum()
 }
 
-fn axpy(alpha: f64, x: &[f64], y: &mut [f64]) {
-    for (yi, xi) in y.iter_mut().zip(x) {
-        *yi += alpha * xi;
+/// `vᵢ · x` for all vectors `vᵢ`, in one sweep over the rows.
+fn dots(vectors: &[&[f64]], x: &[f64]) -> Vec<f64> {
+    let count = vectors.len();
+    if count == 0 {
+        return Vec::new();
     }
+    let partial: Vec<Vec<f64>> = x
+        .par_chunks(ROWS)
+        .enumerate()
+        .map(|(piece, x)| {
+            let first = piece * ROWS;
+            vectors
+                .iter()
+                .map(|v| {
+                    v[first..first + x.len()]
+                        .iter()
+                        .zip(x)
+                        .map(|(a, b)| a * b)
+                        .sum::<f64>()
+                })
+                .collect()
+        })
+        .collect();
+    let mut sums = vec![0.0; count];
+    for p in &partial {
+        for (s, v) in sums.iter_mut().zip(p) {
+            *s += v;
+        }
+    }
+    sums
+}
+
+/// `x −= Σ hᵢ vᵢ`.
+fn subtract(vectors: &[&[f64]], h: &[f64], x: &mut [f64]) {
+    x.par_chunks_mut(ROWS).enumerate().for_each(|(piece, x)| {
+        let first = piece * ROWS;
+        for (v, &h) in vectors.iter().zip(h) {
+            let len = x.len();
+            for (xi, vi) in x.iter_mut().zip(&v[first..first + len]) {
+                *xi -= h * vi;
+            }
+        }
+    });
+}
+
+/// `Σ yᵢ vᵢ`.
+fn combine(vectors: &[Vec<f64>], y: &[f64], n: usize) -> Vec<f64> {
+    let mut x = vec![0.0; n];
+    x.par_chunks_mut(ROWS).enumerate().for_each(|(piece, x)| {
+        let first = piece * ROWS;
+        for (v, &yc) in vectors.iter().zip(y) {
+            let len = x.len();
+            for (xi, vi) in x.iter_mut().zip(&v[first..first + len]) {
+                *xi += yc * vi;
+            }
+        }
+    });
+    x
 }
 
 fn scale(alpha: f64, x: &mut [f64]) {
-    for xi in x.iter_mut() {
-        *xi *= alpha;
-    }
+    x.par_chunks_mut(ROWS)
+        .for_each(|x| x.iter_mut().for_each(|xi| *xi *= alpha));
 }
 
 #[cfg(test)]
