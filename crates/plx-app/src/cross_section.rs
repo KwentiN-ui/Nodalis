@@ -18,7 +18,7 @@ pub fn form(ui: &mut Ui, cross_section: &mut CrossSection, units: UnitSystem) {
     ui.label("Profile");
     egui::ComboBox::from_id_salt("cross-section profile")
         .selected_text(profile.label())
-        .width(200.0)
+        .width(crate::dock::fit_width(ui, 200.0))
         // All kinds without scrolling.
         .height(400.0)
         .show_ui(ui, |ui| {

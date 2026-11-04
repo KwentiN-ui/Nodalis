@@ -490,7 +490,7 @@ impl Picker {
     fn part_mode_row(&self, ui: &mut egui::Ui, mode: SelectBy) {
         let part = mode == SelectBy::GeometryPart;
         ui.add_enabled_ui(part, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let _ = ui.radio(part, mode.label(Target::Faces));
                 if mode.angle_mode() {
                     let mut angle = self.angle;
@@ -516,7 +516,7 @@ impl Picker {
 
     fn labelled_mode_row(&mut self, ui: &mut egui::Ui, mode: SelectBy, label: &str, enabled: bool) {
         ui.add_enabled_ui(enabled, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui.radio(self.select_by == mode, label).clicked() {
                     self.select_by = mode;
                 }

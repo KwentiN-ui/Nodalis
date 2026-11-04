@@ -424,6 +424,7 @@ impl MeshItemEditor {
             ui.separator();
             ui.strong("Properties");
             egui::Grid::new("mesh item form")
+                .max_col_width(crate::dock::column_limit(ui))
                 .num_columns(2)
                 .spacing([12.0, 6.0])
                 .show(ui, |ui| self.form(ui, view));
@@ -622,7 +623,7 @@ impl MeshItemEditor {
                     } else {
                         "Automatic"
                     })
-                    .width(160.0)
+                    .width(crate::dock::fit_width(ui, 160.0))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut selected, false, "Automatic");
                         ui.selectable_value(&mut selected, true, "Selected faces");
@@ -681,7 +682,7 @@ impl MeshItemEditor {
                 let mut kind = layer_type(&extrude.layers);
                 egui::ComboBox::from_id_salt("extrude layers")
                     .selected_text(LAYER_TYPES[kind])
-                    .width(160.0)
+                    .width(crate::dock::fit_width(ui, 160.0))
                     .show_ui(ui, |ui| {
                         for (index, label) in LAYER_TYPES.into_iter().enumerate() {
                             ui.selectable_value(&mut kind, index, label);
@@ -885,7 +886,7 @@ fn algorithm_combo<T: Copy + PartialEq>(
         .map_or("", |(_, l)| *l);
     egui::ComboBox::from_id_salt(id)
         .selected_text(label)
-        .width(160.0)
+        .width(crate::dock::fit_width(ui, 160.0))
         .show_ui(ui, |ui| {
             for &(choice, label) in choices {
                 ui.selectable_value(value, choice, label);

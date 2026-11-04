@@ -418,6 +418,7 @@ impl HistoryOutputDialog {
         });
         let focus = &mut self.focus;
         egui::Grid::new("history output properties")
+            .max_col_width(crate::dock::column_limit(ui))
             .num_columns(2)
             .striped(true)
             .min_col_width(100.0)
@@ -443,7 +444,7 @@ impl HistoryOutputDialog {
                             let mut changed = false;
                             let response = egui::ComboBox::from_id_salt("history field")
                                 .selected_text(field.as_str())
-                                .width(200.0)
+                                .width(crate::dock::fit_width(ui, 200.0))
                                 .show_ui(ui, |ui| {
                                     for (name, _) in fields {
                                         changed |= ui
@@ -507,7 +508,7 @@ impl HistoryOutputDialog {
                             };
                             let response = egui::ComboBox::from_id_salt("history hot spot")
                                 .selected_text(shown)
-                                .width(200.0)
+                                .width(crate::dock::fit_width(ui, 200.0))
                                 .show_ui(ui, |ui| {
                                     for name in hot_spots {
                                         ui.selectable_value(hot_spot, name.clone(), name);
@@ -520,7 +521,7 @@ impl HistoryOutputDialog {
                         row(ui, focus, MOVING_LOAD_ROW, |ui| {
                             let response = egui::ComboBox::from_id_salt("history moving load")
                                 .selected_text(moving_load.as_deref().unwrap_or(NO_MOVING_LOAD))
-                                .width(200.0)
+                                .width(crate::dock::fit_width(ui, 200.0))
                                 .show_ui(ui, |ui| {
                                     ui.selectable_value(moving_load, None, NO_MOVING_LOAD);
                                     for name in moving_loads {

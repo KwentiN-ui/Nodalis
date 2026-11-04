@@ -26,6 +26,7 @@ pub fn amplitude_form(
 ) {
     let time_unit = units.unit(Quantity::Time);
     egui::Grid::new("amplitude form")
+        .max_col_width(crate::dock::column_limit(ui))
         .num_columns(2)
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
@@ -35,7 +36,7 @@ pub fn amplitude_form(
             ui.label("Time span");
             egui::ComboBox::from_id_salt("amplitude time span")
                 .selected_text(time_span_label(amplitude.time_span))
-                .width(200.0)
+                .width(crate::dock::fit_width(ui, 200.0))
                 .show_ui(ui, |ui| {
                     for span in [AmplitudeTime::Step, AmplitudeTime::Total] {
                         ui.selectable_value(&mut amplitude.time_span, span, time_span_label(span));
@@ -230,7 +231,7 @@ pub fn amplitude_row_with(
     ui.horizontal(|ui| {
         egui::ComboBox::from_id_salt(id)
             .selected_text(text)
-            .width(200.0)
+            .width(crate::dock::fit_width(ui, 200.0))
             .show_ui(ui, |ui| {
                 ui.selectable_value(reference, None, DEFAULT);
                 for amplitude in &fe.amplitudes {

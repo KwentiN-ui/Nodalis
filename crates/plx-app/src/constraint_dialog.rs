@@ -303,7 +303,7 @@ impl ConstraintDraft {
                 } else {
                     egui::ComboBox::from_id_salt("rigid body point")
                         .selected_text(body.reference_point.as_str())
-                        .width(200.0)
+                        .width(crate::dock::fit_width(ui, 200.0))
                         .show_ui(ui, |ui| {
                             for point in points {
                                 ui.selectable_value(
@@ -381,7 +381,7 @@ fn spring_rows(
     }
     ui.label("Stiffness");
     ui.add_enabled_ui(!spring.each_node, |ui| {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.radio_value(&mut spring.per_area, false, "Total");
             ui.radio_value(&mut spring.per_area, true, "Per area")
                 .on_hover_text("Stiffness per area of the faces of the region.");
@@ -395,7 +395,7 @@ fn spring_rows(
     ui.end_row();
     ui.label("Connection");
     let mut surface = to_surface;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.radio_value(&mut surface, false, "Surface to World");
         ui.radio_value(&mut surface, true, "Surface to Surface");
     });

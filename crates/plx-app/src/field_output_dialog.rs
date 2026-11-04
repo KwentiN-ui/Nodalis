@@ -505,6 +505,7 @@ impl FieldOutputDialog {
         let focus = &mut self.focus;
         let draft = &mut self.drafts[self.kind];
         egui::Grid::new("field output properties")
+            .max_col_width(crate::dock::column_limit(ui))
             .num_columns(2)
             .striped(true)
             .min_col_width(130.0)
@@ -525,7 +526,7 @@ impl FieldOutputDialog {
                         prop_row(ui, focus, Row::Basis, |ui| {
                             let response = egui::ComboBox::from_id_salt("limit basis")
                                 .selected_text(basis_label(*basis))
-                                .width(180.0)
+                                .width(crate::dock::fit_width(ui, 180.0))
                                 .show_ui(ui, |ui| {
                                     for choice in LimitBasis::ALL {
                                         ui.selectable_value(basis, choice, basis_label(choice));
@@ -554,7 +555,7 @@ impl FieldOutputDialog {
                         prop_row(ui, focus, Row::Field, |ui| {
                             let response = egui::ComboBox::from_id_salt("transform field")
                                 .selected_text(field.as_str())
-                                .width(180.0)
+                                .width(crate::dock::fit_width(ui, 180.0))
                                 .show_ui(ui, |ui| {
                                     for (name, _) in fields {
                                         ui.selectable_value(field, name.clone(), name);
@@ -565,7 +566,7 @@ impl FieldOutputDialog {
                         prop_row(ui, focus, Row::CoordinateSystem, |ui| {
                             let response = egui::ComboBox::from_id_salt("transform system")
                                 .selected_text(coordinate_system.as_str())
-                                .width(180.0)
+                                .width(crate::dock::fit_width(ui, 180.0))
                                 .show_ui(ui, |ui| {
                                     for name in systems {
                                         ui.selectable_value(coordinate_system, name.clone(), name);
@@ -579,7 +580,7 @@ impl FieldOutputDialog {
                         prop_row(ui, focus, Row::Field, |ui| {
                             let response = egui::ComboBox::from_id_salt("principal field")
                                 .selected_text(field.as_str())
-                                .width(180.0)
+                                .width(crate::dock::fit_width(ui, 180.0))
                                 .show_ui(ui, |ui| {
                                     for name in tensors {
                                         ui.selectable_value(field, name.clone(), name);
@@ -590,7 +591,7 @@ impl FieldOutputDialog {
                         prop_row(ui, focus, Row::Principal, |ui| {
                             let response = egui::ComboBox::from_id_salt("principal value")
                                 .selected_text(which.label())
-                                .width(180.0)
+                                .width(crate::dock::fit_width(ui, 180.0))
                                 .show_ui(ui, |ui| {
                                     for choice in Principal::ALL {
                                         ui.selectable_value(which, choice, choice.label());
@@ -689,7 +690,7 @@ fn source_rows(
         let mut changed = false;
         let response = egui::ComboBox::from_id_salt("field output field")
             .selected_text(field.as_str())
-            .width(180.0)
+            .width(crate::dock::fit_width(ui, 180.0))
             .show_ui(ui, |ui| {
                 for (name, _) in fields {
                     changed |= ui.selectable_value(field, name.clone(), name).changed();
@@ -710,7 +711,7 @@ fn source_rows(
             .map_or(&[][..], |(_, c)| c.as_slice());
         let response = egui::ComboBox::from_id_salt("field output component")
             .selected_text(component.as_str())
-            .width(180.0)
+            .width(crate::dock::fit_width(ui, 180.0))
             .show_ui(ui, |ui| {
                 for name in components {
                     ui.selectable_value(component, name.clone(), name);

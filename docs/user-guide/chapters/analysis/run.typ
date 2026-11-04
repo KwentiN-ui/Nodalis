@@ -22,8 +22,8 @@ each other's files.
     solving it.],
   [Stop], [Stops meshing for a solve, or the running solver.],
   [Monitor], [Shows the #ui("Analysis") tab of the output pane (@monitor).],
-  [Open Results], [On the #ui("Results") tab: opens the results the analysis keeps.],
-  [Remove], [On the #ui("Results") tab: drops the results the analysis keeps, after asking
+  [Open Results], [On the #ui("File") tab: opens the results the analysis keeps.],
+  [Remove], [On the #ui("File") tab: drops the results the analysis keeps, after asking
     (@bind-result).],
 )
 
@@ -137,7 +137,7 @@ output pane lists what was dropped.
 #screenshot("rerun-keeps-view.png", [The results of a new run, shown from the front without mesh
   edges like the results before])
 
-#menu("Results", "Remove") drops the kept results after asking, since Undo cannot bring them
+#menu("File", "Remove") drops the kept results after asking, since Undo cannot bring them
 back; save the project to remove them from the file.
 
 To send only the meshes and the model definitions, use

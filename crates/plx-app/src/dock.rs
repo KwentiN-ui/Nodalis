@@ -6,6 +6,10 @@
 
 use egui::{Context, Id, InnerResponse, Rect, Ui, WidgetText};
 
+/// The narrowest the label column of a form in the panel gets before its labels wrap, and
+/// the width of its number fields (concept: label width 100).
+const LABEL_COLUMN: f32 = 100.0;
+
 /// The default width of the panel.
 const WIDTH: f32 = 440.0;
 
@@ -189,16 +193,37 @@ pub fn show<R>(
             if head(ui, title) {
                 *open = false;
             }
-            // Vertical only: layouts from the right need a bounded width.
-            egui::ScrollArea::vertical()
+            // Text wraps; what still does not fit, such as a row of options, scrolls
+            // sideways instead of running out of the panel.
+            egui::ScrollArea::both()
                 .auto_shrink(false)
                 .show(ui, |ui| {
                     ui.set_max_width(ui.available_width());
+                    // Text wraps at the edge of the panel instead of running out of it; the
+                    // label column of a form keeps a width that holds its labels in one or
+                    // two lines.
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                    ui.spacing_mut().interact_size.x = LABEL_COLUMN;
                     add(ui)
                 })
                 .inner
         });
     Some(InnerResponse::new(Some(area.inner), area.response))
+}
+
+/// The widest a column of a form gets in `ui`, so that the column of values wraps at the
+/// edge of a narrow panel: the room beside the label column and the expose buttons.
+pub fn column_limit(ui: &Ui) -> f32 {
+    (ui.available_width() - LABEL_COLUMN - 48.0).max(LABEL_COLUMN)
+}
+
+/// `width` for a field of a form, at most what the panel leaves beside the label column,
+/// so that a combo box shrinks with a narrow panel. Outside the panel `width` itself.
+pub fn fit_width(ui: &Ui, width: f32) -> f32 {
+    match rect(ui.ctx()) {
+        Some(panel) => width.min(panel.width() - LABEL_COLUMN - 48.0).max(80.0),
+        None => width,
+    }
 }
 
 /// The buttons at the foot of an editor, from the right: in the panel at its right edge,

@@ -2239,9 +2239,7 @@ impl Workbench {
             response.create = None;
         }
         let mesh = TreeItem::Mesh;
-        let geometry = TreeItem::Group("Mesh Setup");
-        let meshing = response.generate_mesh
-            || response.mesh_part.is_some()
+        let meshing = response.mesh_part.is_some()
             || response.transform_part.is_some()
             || response.merge_parts;
         let mesh_linked =
@@ -2250,14 +2248,9 @@ impl Workbench {
             if refused.is_none() {
                 refused = Some("The mesh comes from another analysis: mesh it there.".into());
             }
-            response.generate_mesh = false;
             response.mesh_part = None;
             response.transform_part = None;
             response.merge_parts = false;
-        }
-        if response.mesh_defaults && self.tree.linked.contains_key(&geometry) {
-            refused = Some("The mesh comes from another analysis: set it up there.".into());
-            response.mesh_defaults = false;
         }
         if let Some(line) = refused {
             self.output.push(line);
@@ -2429,15 +2422,6 @@ impl Workbench {
                 self.highlighted = None;
             }
         }
-        if response.material_library {
-            self.open_material_library();
-        }
-        if response.mesh_defaults {
-            self.open_mesh_setup();
-        }
-        if response.generate_mesh {
-            self.generate_mesh(ctx, None);
-        }
         if let Some(index) = response.mesh_part {
             // A part among several selected ones meshes them all.
             let selected = self.tree.selected_parts(view);
@@ -2458,12 +2442,6 @@ impl Workbench {
         }
         if let Some(index) = response.detect {
             self.detect_contacts(index);
-        }
-        if response.search_contacts {
-            self.open_contact_search();
-        }
-        if response.contact_worksheet {
-            self.contact_worksheet = true;
         }
         if let Some(index) = response.transform_part {
             // A part among several selected ones transforms them all.
@@ -2985,7 +2963,7 @@ impl Workbench {
     }
 
     fn results_tool_bar_row(&mut self, ui: &mut egui::Ui, enabled: bool) {
-        ui.horizontal(|ui| {
+        ui.vertical(|ui| {
             // Greyed out, the row shows the current results file, or empty controls.
             let mut placeholder = None;
             let current = self.results.get_mut(self.current_result);
@@ -6916,6 +6894,9 @@ fn display_controls(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
     view.vector_display != before
 }
 
+/// The width of the labels at the start of both rows of the results controls.
+const LABEL: f32 = 76.0;
+
 /// PrePoMax's results tool bar: deformation, colour bands, transformations and the increment
 /// with its navigation buttons.
 fn results_tool_bar(
@@ -6927,8 +6908,17 @@ fn results_tool_bar(
     let mut changed = false;
     let mut transformations = false;
     let mut color_scale = false;
+    // Two rows: the deformation and the transformations above, the colours, the display and
+    // the increment below, each label in a column of the same width.
+    let label = |ui: &mut egui::Ui, text: &str| {
+        ui.add_sized(
+            [LABEL, 20.0],
+            egui::Label::new(text).halign(egui::Align::LEFT),
+        );
+    };
+    ui.spacing_mut().item_spacing.y = 6.0;
     ui.horizontal(|ui| {
-        ui.label("Deformation");
+        label(ui, "Deformation");
         let before = view.deformation;
         egui::ComboBox::from_id_salt("deformation")
             .selected_text(view.deformation.label())
@@ -6989,7 +6979,11 @@ fn results_tool_bar(
                 .changed();
         }
         ui.separator();
-        ui.label("Color levels");
+        let tip = "Transformations: symmetries and patterns";
+        transformations = icons::button(ui, Icon::Transformation, tip, true, transformed).clicked();
+    });
+    ui.horizontal(|ui| {
+        label(ui, "Color levels");
         changed |= ui
             .add(
                 numeric::drag_value(&mut view.color_scale.levels)
@@ -7001,9 +6995,6 @@ fn results_tool_bar(
             .clicked();
         ui.separator();
         changed |= display_controls(ui, view);
-        ui.separator();
-        let tip = "Transformations: symmetries and patterns";
-        transformations = icons::button(ui, Icon::Transformation, tip, true, transformed).clicked();
         ui.separator();
 
         ui.label("Step, Increment");
