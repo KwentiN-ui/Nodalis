@@ -3826,6 +3826,27 @@ mod tests {
     }
 
     #[test]
+    fn modal_dynamics_needs_stored_modes_but_no_load_amplitude() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        model.steps.push(Step::new_modal_dynamics("Step-2"));
+        let stored = |model: &FeModel| {
+            (check(model, &mesh).into_iter())
+                .filter(|f| f.problem == Problem::NoStoredModes)
+                .map(|f| f.item)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(stored(&model), [ModelItem::Step(1)]);
+        let mut frequency = Step::new_frequency("Step-3");
+        let StepKind::Frequency(settings) = &mut frequency.kind else {
+            unreachable!()
+        };
+        settings.storage = true;
+        model.steps.insert(1, frequency);
+        assert_eq!(stored(&model), []);
+    }
+
+    #[test]
     fn contact_pairs_need_perturbation_in_frequency_steps_and_spoil_coriolis() {
         let mesh = cubes(2, true);
         let mut model = model(&mesh);
