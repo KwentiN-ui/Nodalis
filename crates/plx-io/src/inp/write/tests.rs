@@ -9784,3 +9784,92 @@ fn fingerprints_count_what_the_solver_computes_with() {
         [before.steps[0], before.steps[0], before.steps[1]]
     );
 }
+
+/// The value at `node` in the last increment of step `step` (from 1).
+fn step_node_value(frd: &FrdImport, step: u32, component: &str, node: NodeId) -> f64 {
+    let index = frd.mesh.node_index(node).unwrap();
+    let increment = (frd.increments.iter().rev())
+        .find(|i| i.step == step)
+        .unwrap();
+    let field = increment.field("DISP").unwrap();
+    f64::from(field.component(component).unwrap().values[index])
+}
+
+/// A face clamped node by node in Step-1 and turned by a rigid point in Step-2, both
+/// boundary conditions of the same name: the supports of one step do not keep the nodes out
+/// of the point of the other, and an error names the boundary condition of its own step.
+#[test]
+fn solver_turns_a_face_by_a_point_in_a_step_after_one_holding_its_nodes() {
+    let angle = 0.01;
+    let (mesh, mut model) = cantilever(tip_force());
+    model.steps[0].loads.clear();
+    let mut clamp = remote("Displacement_Rotation-1", [Some(0.0); 6]);
+    if let BoundaryKind::Displacement(d) = &mut clamp.kind {
+        d.behavior = Behavior::Automatic;
+    }
+    model.steps[0].boundary_conditions.push(clamp.clone());
+    let mut second = model.steps[0].clone();
+    second.name = "Step-2".into();
+    let turn = &mut second.boundary_conditions[1];
+    // The same nodes, picked differently: a point of its own.
+    turn.region = Region::Nodes(Region::Surface("TIP".into()).nodes(&mesh));
+    if let BoundaryKind::Displacement(d) = &mut turn.kind {
+        d.values = [Some(0.0), Some(0.0), Some(0.0), None, None, Some(angle)];
+    }
+    model.steps.push(second);
+    assert_eq!(model.formulation(&mesh, 0, 1), Some(Formulation::Nodes));
+    assert!(matches!(
+        model.formulation(&mesh, 1, 1),
+        Some(Formulation::Point(_))
+    ));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert_eq!(text.matches("*Rigid body").count(), 1, "{text}");
+    let Some(frd) = run_solver("clamp-then-turn", &text) else {
+        return;
+    };
+    let tip: Vec<_> = (1..=99)
+        .filter(|&id| mesh.node(id).is_some_and(|c| c[0] == 100.0))
+        .collect();
+    assert_eq!(tip.len(), 9);
+    for id in tip {
+        let y = mesh.node(id).unwrap()[1];
+        for c in ["U1", "U2", "U3"] {
+            let u = step_node_value(&frd, 1, c, id);
+            assert!(u.abs() < 1e-9, "step 1 {id} {c}: {u}");
+        }
+        let u1 = step_node_value(&frd, 2, "U1", id);
+        let expected = -angle * (y - 5.0);
+        assert!((u1 - expected).abs() < 1e-7, "{u1} != {expected}");
+    }
+}
+
+/// A point that cannot be set up in Step-2 is reported as the boundary condition of Step-2,
+/// not as the one of the same name in Step-1.
+#[test]
+fn an_error_of_a_point_names_the_boundary_condition_of_its_step() {
+    let (mesh, mut model) = cantilever(tip_force());
+    model.steps[0].loads.clear();
+    let mut clamp = remote("Displacement_Rotation-1", [Some(0.0); 6]);
+    if let BoundaryKind::Displacement(d) = &mut clamp.kind {
+        d.behavior = Behavior::Automatic;
+    }
+    model.steps[0].boundary_conditions.push(clamp);
+    let mut second = model.steps[0].clone();
+    second.name = "Step-2".into();
+    let turn = &mut second.boundary_conditions[1];
+    turn.region = Region::Surface("TIP".into());
+    if let BoundaryKind::Displacement(d) = &mut turn.kind {
+        d.location = Some([0.0; 3]);
+        d.pinball = Some(1e-3);
+    }
+    model.steps.push(second);
+    let error = match lower_unvalidated(&mesh, &model, "") {
+        Err(e) => e,
+        Ok(_) => panic!("the empty pinball region is an error"),
+    };
+    assert!(
+        matches!(error.error, WriteError::InvalidBoundary { .. }),
+        "{error}"
+    );
+    assert_eq!(error.item, Some(ModelItem::BoundaryCondition(1, 1)));
+}

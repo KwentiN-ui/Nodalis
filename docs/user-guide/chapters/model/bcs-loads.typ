@@ -102,10 +102,11 @@ angle Theta of a cylindrical system is the one number that cannot be exposed.
 #screenshot("displacement-expose.png", [The #ui("P") buttons of a displacement on a
   point: the location, the pinball radius and the prescribed components can be exposed])
 
-- Nodes of the selection that another boundary condition holds directly (a support of each
-  node, a symmetry plane, a submodel boundary) are left out of the point: CalculiX refuses a
-  node that is both held and coupled. A hinge face whose edge lies on a symmetry plane just
-  works.
+- Nodes of the selection that another boundary condition holds directly in the same step (a
+  support of each node, a symmetry plane, a submodel boundary) are left out of the point: a
+  node cannot be both held and coupled there. A hinge face whose edge lies on a symmetry plane
+  just works. Supports of other steps do not count: a face clamped node by node in Step-1 can
+  turn about a point in Step-2.
 - Displacements of several steps with the same name and selection share one point; when one
   step needs a point, all of them get it. Displacements with the same selection, behavior,
   coordinate system, location and pinball region share one point too. A study that varies the

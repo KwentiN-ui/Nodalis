@@ -115,7 +115,7 @@ impl Diagnostic {
             | Error::UndefinedReference { .. }
             | Error::Duplicate { .. } => DiagnosticCode::Input,
             Error::Unsupported(_) => DiagnosticCode::Unsupported,
-            Error::Numerical { .. } | Error::Io { .. } => DiagnosticCode::Solver,
+            Error::Numerical { .. } | Error::Io { .. } | Error::Cancelled => DiagnosticCode::Solver,
         };
         let diagnostic = Self::new(code, Severity::Error, error.to_string());
         match error.item() {

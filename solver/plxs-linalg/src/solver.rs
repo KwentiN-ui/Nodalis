@@ -344,7 +344,12 @@ impl LinearSolver for LdltSolver {
                     self.par,
                     &self.workspace,
                 )
-                .map_err(|e| numerical(format!("the stiffness matrix is singular: {e:?}")))?;
+                .map_err(|e| match e {
+                    supernodal::FactorError::Cancelled => Error::Cancelled,
+                    supernodal::FactorError::Ldlt(e) => {
+                        numerical(format!("the stiffness matrix is singular: {e:?}"))
+                    }
+                })?;
             }
             _ => {
                 let a = SparseColMatRef::new(

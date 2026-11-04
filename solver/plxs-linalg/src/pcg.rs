@@ -225,7 +225,15 @@ impl PcgSolver {
             *t += now - last;
             last = now;
         };
+        let cancel = plxs_core::CancelToken::current();
         for iteration in 1..=max_iterations {
+            // Every iteration: on large systems one takes a good part of a second.
+            if cancel
+                .as_ref()
+                .is_some_and(plxs_core::CancelToken::is_cancelled)
+            {
+                return Err(plxs_core::Error::Cancelled);
+            }
             if trace {
                 lap(&mut t_vectors);
             }

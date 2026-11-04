@@ -251,6 +251,23 @@ struct Context<'a> {
     /// Subtrees with at least this much work are split over tasks.
     parallel_subtree: f64,
     pool: &'a Workspace,
+    /// The run's token, looked at before every supernode.
+    cancel: Option<plxs_core::CancelToken>,
+}
+
+/// Why a factorization ended without a factor.
+#[derive(Clone, Copy, Debug)]
+pub enum FactorError {
+    /// A zero pivot without regularization.
+    Ldlt(LdltError),
+    /// The run was stopped ([`plxs_core::CancelToken`]).
+    Cancelled,
+}
+
+impl From<LdltError> for FactorError {
+    fn from(error: LdltError) -> Self {
+        Self::Ldlt(error)
+    }
 }
 
 /// Scratch buffers of the dense products, kept from one factorization to the next.
@@ -315,7 +332,8 @@ impl Workspace {
 
 /// Computes the numeric LDLᵀ factor of the matrix with values `values` (upper triangle,
 /// pattern of the symbolic analysis) into `factor` in `faer`'s supernodal layout. Returns
-/// the number of regularized pivots.
+/// the number of regularized pivots. A stop of the run of the calling thread
+/// ([`plxs_core::CancelToken::current`]) ends it before the next supernode.
 pub fn factorize<'a>(
     supernodal: &'a SymbolicSupernodalCholesky<FactorIndex>,
     tree: &'a TreeSymbolic,
@@ -324,7 +342,7 @@ pub fn factorize<'a>(
     regularization: Regularization<'a>,
     par: Par,
     workspace: &'a Workspace,
-) -> Result<usize, LdltError> {
+) -> Result<usize, FactorError> {
     assert_eq!(factor.len(), supernodal.len_val());
     let threads = par.degree().max(1);
     let col_ptr_val = supernodal.col_ptr_for_val();
@@ -348,6 +366,7 @@ pub fn factorize<'a>(
         par,
         parallel_subtree: (tree.total_work / (16.0 * threads as f64)).max(MIN_PARALLEL_SUBTREE),
         pool: workspace,
+        cancel: plxs_core::CancelToken::current(),
     };
     let counts: Vec<usize> = if threads > 1 {
         tree.roots
@@ -364,7 +383,7 @@ pub fn factorize<'a>(
 }
 
 /// Factorizes the subtree rooted at `s`; returns the number of regularized pivots.
-fn subtree(ctx: &Context<'_>, s: usize) -> Result<usize, LdltError> {
+fn subtree(ctx: &Context<'_>, s: usize) -> Result<usize, FactorError> {
     let children = ctx.tree.children(s);
     let parallel =
         ctx.threads > 1 && children.len() > 1 && ctx.tree.subtree_work[s] >= ctx.parallel_subtree;
@@ -380,7 +399,7 @@ fn subtree(ctx: &Context<'_>, s: usize) -> Result<usize, LdltError> {
 
 /// Factorizes the subtree rooted at `root` on the calling thread, in post-order without
 /// recursion (elimination trees of slender structures are deep).
-fn sequential(ctx: &Context<'_>, root: usize) -> Result<usize, LdltError> {
+fn sequential(ctx: &Context<'_>, root: usize) -> Result<usize, FactorError> {
     let mut count = 0;
     let mut stack = vec![(root, false)];
     while let Some((s, expanded)) = stack.pop() {
@@ -396,7 +415,14 @@ fn sequential(ctx: &Context<'_>, root: usize) -> Result<usize, LdltError> {
 
 /// Assembles and factorizes one supernode, left-looking: the updates of all descendants
 /// that reach into its columns are applied directly from their finished factor columns.
-fn node(ctx: &Context<'_>, s: usize) -> Result<usize, LdltError> {
+fn node(ctx: &Context<'_>, s: usize) -> Result<usize, FactorError> {
+    if ctx
+        .cancel
+        .as_ref()
+        .is_some_and(plxs_core::CancelToken::is_cancelled)
+    {
+        return Err(FactorError::Cancelled);
+    }
     let supernodal = ctx.supernodal;
     let tree = ctx.tree;
     let s_start = supernodal.supernode_begin()[s] as usize;
@@ -775,5 +801,31 @@ mod tests {
         let mut solver = LdltSolver::new(1).force_supernodal();
         solver.analyze(&pattern).unwrap();
         assert!(solver.factorize(&a).is_err());
+    }
+
+    #[test]
+    fn a_stopped_run_ends_the_factorization() {
+        let pattern = Arc::new(Pattern::from_blocks(3, [&[0u32, 1][..], &[1, 2][..]]));
+        let mut a = SparseMatrix::zeros(pattern.clone());
+        a.add(0, 0, 4.0);
+        a.add(1, 1, 3.0);
+        a.add(2, 2, 2.0);
+        a.add(0, 1, 1.0);
+        a.add(2, 1, 1.0);
+        let mut solver = LdltSolver::new(2).force_supernodal();
+        solver.analyze(&pattern).unwrap();
+        let cancel = plxs_core::CancelToken::new();
+        // Outside of a run, and in a run that goes on, the factorization is computed.
+        solver.factorize(&a).unwrap();
+        cancel.scope(|| solver.factorize(&a)).unwrap();
+        cancel.cancel();
+        let stopped = cancel.scope(|| solver.factorize(&a));
+        assert!(
+            matches!(stopped, Err(plxs_core::Error::Cancelled)),
+            "{stopped:?}"
+        );
+        // The token is the run's: once the scope is left, nothing is stopped.
+        assert!(plxs_core::CancelToken::current().is_none());
+        solver.factorize(&a).unwrap();
     }
 }

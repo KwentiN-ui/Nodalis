@@ -336,8 +336,8 @@ Nodalis (meshing, model checks, restart, keeping the results) around those of Ca
 #ui("Filter") narrows down to the lines containing a text.
 
 #fields(
-  [Stop], [Kills CalculiX for the picked analysis, or takes it out of the queue. It is not
-    solved; the update goes on with independent analyses.],
+  [Stop], [Stops the solver at once for the picked analysis, or takes it out of the queue. It
+    is not solved; the update goes on with independent analyses.],
   [Stop All], [Stops the update and every solve.],
   [Open Analysis], [Opens the window of the picked analysis in the Results workspace; a
     double-click on its name does the same. An analysis still being solved in the background
