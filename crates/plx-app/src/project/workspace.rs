@@ -94,22 +94,19 @@ impl ProjectApp {
         if let Some(id) = self.embedded().filter(|_| !self.in_project) {
             return self.node(id).and_then(Node::window_mut)?.pill();
         }
-        let analyses: Vec<&Node> = (self.nodes.iter())
+        // Found again only when an analysis changed: finding the state of an open analysis
+        // walks its whole mesh and results, too slow for every frame.
+        let states: Vec<Option<CellState>> = (self.nodes.iter_mut())
             .filter(|n| n.kind() == Kind::Analysis)
+            .map(|n| n.fresh_status().map(|s| s.solution))
             .collect();
-        let stale = (analyses.iter())
-            .filter(|n| {
-                n.current_status()
-                    .is_some_and(|s| s.solution == CellState::OutOfDate)
-            })
+        let stale = (states.iter())
+            .filter(|s| **s == Some(CellState::OutOfDate))
             .count();
-        let solved = (analyses.iter())
-            .filter(|n| {
-                n.current_status()
-                    .is_some_and(|s| s.solution == CellState::UpToDate)
-            })
+        let solved = (states.iter())
+            .filter(|s| **s == Some(CellState::UpToDate))
             .count();
-        let count = match analyses.len() {
+        let count = match states.len() {
             1 => "1 analysis".to_string(),
             n => format!("{n} analyses"),
         };
@@ -120,7 +117,7 @@ impl ProjectApp {
                 CellState::OutOfDate,
                 format!("{count}, {stale} out of date"),
             )
-        } else if solved == analyses.len() && solved > 0 {
+        } else if solved == states.len() && solved > 0 {
             (CellState::UpToDate, format!("{count}, up to date"))
         } else {
             (CellState::Missing, count)
