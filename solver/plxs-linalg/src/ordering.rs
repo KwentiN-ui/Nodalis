@@ -245,6 +245,9 @@ struct Dissection<'a> {
     generation: u32,
     level: Vec<u32>,
     side: Vec<Side>,
+    /// Index of a vertex among the right (side B) boundary vertices while a separator is
+    /// computed, `u32::MAX` otherwise.
+    right_slot: Vec<u32>,
     /// Search stamp of the vertices a breadth-first search reached: a vertex is visited in
     /// the current search when its stamp equals `search`. Saves clearing a flag per vertex
     /// of the whole graph for every subgraph.
@@ -269,6 +272,7 @@ impl<'a> Dissection<'a> {
             generation: 0,
             level: vec![0; graph.len()],
             side: vec![Side::Out; graph.len()],
+            right_slot: vec![u32::MAX; graph.len()],
             seen: vec![0; graph.len()],
             search: 0,
         }
@@ -358,18 +362,18 @@ impl<'a> Dissection<'a> {
         }
         // Boundary vertices of A (left) and B (right) and the edges between them.
         let mut left: Vec<u32> = Vec::new();
-        let mut right_index: HashMap<u32, u32> = HashMap::new();
         let mut right: Vec<u32> = Vec::new();
         let mut edges: Vec<Vec<u32>> = Vec::new();
         for &v in a {
             let mut list = Vec::new();
             for &u in self.graph.neighbors(v) {
                 if self.selected(u) && self.side[u as usize] == Side::B {
-                    let next = right.len() as u32;
-                    let j = *right_index.entry(u).or_insert_with(|| {
+                    let mut j = self.right_slot[u as usize];
+                    if j == u32::MAX {
+                        j = right.len() as u32;
+                        self.right_slot[u as usize] = j;
                         right.push(u);
-                        next
-                    });
+                    }
                     list.push(j);
                 }
             }
@@ -380,6 +384,9 @@ impl<'a> Dissection<'a> {
         }
         for &v in a.iter().chain(b) {
             self.side[v as usize] = Side::Out;
+        }
+        for &u in &right {
+            self.right_slot[u as usize] = u32::MAX;
         }
         let cover = minimum_vertex_cover(&edges, right.len());
         let mut separator = Vec::with_capacity(cover.0.len() + cover.1.len());
@@ -741,41 +748,79 @@ fn minimum_vertex_cover(edges: &[Vec<u32>], right_count: usize) -> (Vec<u32>, Ve
             }
         }
     }
-    // Augmenting paths, iteratively (a depth first search with an explicit stack).
-    let mut visited = vec![u32::MAX; right_count];
-    for start in 0..left_count {
-        if match_left[start] != u32::MAX {
-            continue;
+    // Hopcroft-Karp: phases of shortest augmenting paths, found by a breadth first search
+    // from all unmatched left vertices and taken vertex-disjointly by depth first searches
+    // along its layers. Simple augmenting paths one at a time (Kuhn) can search the whole
+    // boundary graph for every unmatched vertex: a cut along the plates of a welded sheet
+    // metal girder has boundaries of fifty thousand vertices, and its ordering took 30 s.
+    const FAR: u32 = u32::MAX;
+    let mut distance = vec![FAR; left_count];
+    let mut next_edge = vec![0usize; left_count];
+    let mut queue: Vec<u32> = Vec::with_capacity(left_count);
+    let mut stack: Vec<u32> = Vec::new();
+    loop {
+        queue.clear();
+        for (i, d) in distance.iter_mut().enumerate() {
+            if match_left[i] == u32::MAX {
+                *d = 0;
+                queue.push(i as u32);
+            } else {
+                *d = FAR;
+            }
         }
-        // stack of (left vertex, next edge index)
-        let mut stack: Vec<(u32, usize)> = vec![(start as u32, 0)];
-        let mut path: Vec<(u32, u32)> = Vec::new(); // (left, right) edges taken
         let mut found = false;
-        while let Some(&mut (l, ref mut k)) = stack.last_mut() {
-            let list = &edges[l as usize];
-            if *k >= list.len() {
-                stack.pop();
-                path.pop();
-                continue;
+        let mut head = 0;
+        while head < queue.len() {
+            let l = queue[head] as usize;
+            head += 1;
+            for &j in &edges[l] {
+                let m = match_right[j as usize];
+                if m == u32::MAX {
+                    found = true;
+                } else if distance[m as usize] == FAR {
+                    distance[m as usize] = distance[l] + 1;
+                    queue.push(m);
+                }
             }
-            let j = list[*k];
-            *k += 1;
-            if visited[j as usize] == start as u32 {
-                continue;
-            }
-            visited[j as usize] = start as u32;
-            path.push((l, j));
-            let next = match_right[j as usize];
-            if next == u32::MAX {
-                found = true;
-                break;
-            }
-            stack.push((next, 0));
         }
-        if found {
-            for &(l, j) in &path {
-                match_left[l as usize] = j;
-                match_right[j as usize] = l;
+        if !found {
+            break;
+        }
+        next_edge.iter_mut().for_each(|e| *e = 0);
+        for start in 0..left_count {
+            if match_left[start] != u32::MAX || distance[start] != 0 {
+                continue;
+            }
+            stack.clear();
+            stack.push(start as u32);
+            while let Some(&l) = stack.last() {
+                let l = l as usize;
+                let list = &edges[l];
+                if next_edge[l] >= list.len() {
+                    // A dead end for this phase.
+                    distance[l] = FAR;
+                    stack.pop();
+                    if let Some(&parent) = stack.last() {
+                        next_edge[parent as usize] += 1;
+                    }
+                    continue;
+                }
+                let j = list[next_edge[l]];
+                let m = match_right[j as usize];
+                if m == u32::MAX {
+                    // Augment along the stack: every left vertex takes its current edge.
+                    for &l in &stack {
+                        let j = edges[l as usize][next_edge[l as usize]];
+                        match_left[l as usize] = j;
+                        match_right[j as usize] = l;
+                    }
+                    break;
+                }
+                if distance[m as usize] != FAR && distance[m as usize] == distance[l] + 1 {
+                    stack.push(m);
+                } else {
+                    next_edge[l] += 1;
+                }
             }
         }
     }
