@@ -111,10 +111,10 @@ impl PcgSolver {
         let mut residual = 1.0;
         let cancel = plxs_core::CancelToken::current();
         for iteration in 1..=max_iterations {
-            if iteration % 32 == 0
-                && cancel
-                    .as_ref()
-                    .is_some_and(plxs_core::CancelToken::is_cancelled)
+            // Every iteration: on large systems one takes a good part of a second.
+            if cancel
+                .as_ref()
+                .is_some_and(plxs_core::CancelToken::is_cancelled)
             {
                 return Err(plxs_core::Error::Cancelled);
             }
