@@ -35,8 +35,10 @@ use crate::study::{PointView, StudyEdit, StudyEditor, StudyView};
 use crate::tree::TreeView;
 use crate::tree_icons::StepGlyph;
 use cad::{CAD_LENGTH, CadBlock};
+use deformed::{DEFORM_FACTOR, DEFORM_INCREMENT, DeformedBlock};
 
 mod cad;
+mod deformed;
 mod frames;
 mod history;
 mod minimap;
@@ -54,6 +56,7 @@ enum Kind {
     CrossSections,
     Mesh,
     RefineMesh,
+    DeformedMesh,
     CadOperation,
     Parameters,
     Measure,
@@ -80,6 +83,7 @@ impl Kind {
             Self::CrossSections => "cross-sections block",
             Self::Mesh => "mesh block",
             Self::RefineMesh => "refine mesh block",
+            Self::DeformedMesh => "deformed mesh block",
             Self::CadOperation => "CAD operation block",
             Self::Parameters => "parameters block",
             Self::Measure => "measure block",
@@ -124,6 +128,8 @@ enum Block {
     Mesh(Box<MeshBlock>),
     /// The mesh linked to it made again with a factor on its fineness.
     RefineMesh(Box<RefineBlock>),
+    /// The mesh of an analysis moved by the displacements of a step of its results.
+    DeformedMesh(Box<DeformedBlock>),
     /// A fillet, chamfer or push/pull of the geometry linked to it.
     CadOperation(Box<CadBlock>),
     /// Named numbers that value links give to other blocks.
@@ -701,6 +707,7 @@ impl Node {
             Block::CrossSections(_) => Kind::CrossSections,
             Block::Mesh(_) => Kind::Mesh,
             Block::RefineMesh(_) => Kind::RefineMesh,
+            Block::DeformedMesh(_) => Kind::DeformedMesh,
             Block::CadOperation(_) => Kind::CadOperation,
             Block::Parameters(_) => Kind::Parameters,
             Block::Measure(_) => Kind::Measure,
@@ -775,6 +782,20 @@ impl Node {
     fn as_refine_mut(&mut self) -> Option<&mut RefineBlock> {
         match &mut self.block {
             Block::RefineMesh(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    fn as_deformed(&self) -> Option<&DeformedBlock> {
+        match &self.block {
+            Block::DeformedMesh(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    fn as_deformed_mut(&mut self) -> Option<&mut DeformedBlock> {
+        match &mut self.block {
+            Block::DeformedMesh(d) => Some(d),
             _ => None,
         }
     }
@@ -942,6 +963,7 @@ impl Node {
                 _ => None,
             },
             Block::File(f) => f.space,
+            Block::DeformedMesh(d) => d.space,
             _ => None,
         }
     }
@@ -960,9 +982,11 @@ impl Node {
             Block::File(f) => f.units,
             Block::Math(n) | Block::Switch(n) => n.units,
             Block::CadOperation(c) => c.units,
-            Block::MeshExport(_) | Block::Campbell(_) | Block::RefineMesh(_) | Block::Note(_) => {
-                UnitSystem::default()
-            }
+            Block::MeshExport(_)
+            | Block::Campbell(_)
+            | Block::RefineMesh(_)
+            | Block::DeformedMesh(_)
+            | Block::Note(_) => UnitSystem::default(),
         }
     }
 
@@ -1120,6 +1144,11 @@ impl Node {
                 };
                 Self::refine_block(block.id, block.name, factor, block.mesh, block.generated)
             }
+            ProjectNode::DeformedMesh(block) => {
+                let (id, name) = (block.id, block.name.clone());
+                let deformed = DeformedBlock::read(*block);
+                Self::new(id, name, Block::DeformedMesh(Box::new(deformed)))
+            }
             ProjectNode::CadOperation(block) => {
                 let block = *block;
                 let cad =
@@ -1242,6 +1271,10 @@ impl Node {
                 },
                 generated: r.generated,
             })),
+            // The mesh it made is kept, so that the project opens without reading the results.
+            Block::DeformedMesh(d) => {
+                ProjectNode::DeformedMesh(Box::new(d.written(id, name, position)))
+            }
             // The geometry it made is kept, so that the project meshes without making it again.
             Block::CadOperation(c) => {
                 ProjectNode::CadOperation(Box::new(file::CadOperationBlock {
@@ -1385,6 +1418,9 @@ impl Node {
                     None,
                 ));
             }
+            Block::DeformedMesh(d) => {
+                Block::DeformedMesh(Box::new(DeformedBlock::new(d.factor, d.increment)))
+            }
             Block::CadOperation(c) => Block::CadOperation(Box::new(CadBlock::new(
                 c.operation.clone(),
                 c.units,
@@ -1469,6 +1505,7 @@ impl Node {
             Block::Materials(m) | Block::CrossSections(m) => Some(m.model.data()),
             Block::Mesh(m) => Some(m.model.data()),
             Block::RefineMesh(r) => Some(r.model.data()),
+            Block::DeformedMesh(d) => d.link_data(),
             Block::CadOperation(c) => c.link_data(),
             Block::MeshExport(e) => Some(e.model.data()),
             Block::File(f) => Some(f.model.data()),
@@ -1731,6 +1768,11 @@ enum Action {
     SetMeasurePoint(u64, &'static str, f64),
     /// A new CAD operation block at the position.
     AddCadOperation(egui::Pos2),
+    /// A new deformed mesh block at the position.
+    AddDeformedMesh(egui::Pos2),
+    /// The factor or the increment of a deformed mesh block changed in its block.
+    SetDeformFactor(u64, f64),
+    SetDeformIncrement(u64, f64),
 
     /// Make the mesh of a mesh block anew.
     Generate(u64),
@@ -2825,6 +2867,14 @@ impl ProjectApp {
                 Block::RefineMesh(refine) if !driven(links::PARAMETERS, REFINEMENT) => {
                     print.add(&refine.factor.to_le_bytes());
                 }
+                Block::DeformedMesh(deformed) => {
+                    if !driven(links::PARAMETERS, DEFORM_FACTOR) {
+                        print.add(&deformed.factor.to_le_bytes());
+                    }
+                    if !driven(links::PARAMETERS, DEFORM_INCREMENT) {
+                        print.add(&deformed.increment.to_le_bytes());
+                    }
+                }
                 Block::CadOperation(cad) => {
                     cad.body_print(driven(links::PARAMETERS, CAD_LENGTH), &mut print);
                 }
@@ -3126,6 +3176,7 @@ impl ProjectApp {
                     && self.update_queue.is_empty()
                     && self.updating.is_empty()
                     && self.measuring.is_empty()
+                    && !self.deforming()
                     && !self.restoring.values().any(Option::is_some);
                 if !idle {
                     return;
@@ -3296,6 +3347,14 @@ impl ProjectApp {
                 .find(|p| &p.name == name)
                 .map(|p| p.value),
             [cell, key] if cell == links::PARAMETERS && key == REFINEMENT => node.refinement(),
+            [cell, key] if cell == links::PARAMETERS && node.as_deformed().is_some() => {
+                let block = node.as_deformed()?;
+                match key.as_str() {
+                    DEFORM_FACTOR => Some(block.factor),
+                    DEFORM_INCREMENT => Some(f64::from(block.increment)),
+                    _ => None,
+                }
+            }
             [cell, key] if cell == links::PARAMETERS && node.as_measure().is_some() => {
                 let axis = POINT_AXES.iter().position(|a| a == key)?;
                 Some(node.as_measure()?.kind.point()?[axis])
@@ -3346,6 +3405,15 @@ impl ProjectApp {
                         }
                     }
                     [_, key] if key == REFINEMENT => node.set_refinement(value),
+                    [_, key] if node.as_deformed().is_some() => {
+                        if let Some(block) = node.as_deformed_mut() {
+                            match key.as_str() {
+                                DEFORM_FACTOR => block.set_factor(value),
+                                DEFORM_INCREMENT => block.set_increment(value),
+                                _ => {}
+                            }
+                        }
+                    }
                     [_, key] if node.as_measure().is_some() => {
                         if let Some(measure) = node.as_measure_mut() {
                             measure.kind.set_coordinate(key, value);
@@ -3829,6 +3897,7 @@ impl ProjectApp {
             || self.looping.is_some()
             || self.sync_due
             || self.update_after_sync
+            || self.deforming()
             || self.restoring.values().any(Option::is_some)
         {
             return;
@@ -4110,8 +4179,8 @@ impl ProjectApp {
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
                 return self.edit_mesh(id);
             }
-            // Its factor is edited in its block.
-            Some(Kind::RefineMesh) => return,
+            // Its numbers are edited in its block.
+            Some(Kind::RefineMesh | Kind::DeformedMesh) => return,
             Some(Kind::CadOperation) => {
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
                 return self.edit_cad(id);
@@ -4527,6 +4596,21 @@ impl ProjectApp {
         self.update_project();
     }
 
+    /// The deformed mesh blocks before the analysis `id`.
+    fn deformed_before(&self, id: u64) -> Vec<u64> {
+        (links::upstream(&self.links, id).into_iter())
+            .filter(|&b| (self.nodes.iter()).any(|n| n.id == b && n.kind() == Kind::DeformedMesh))
+            .collect()
+    }
+
+    /// Whether the analysis `id` takes a deformed mesh made from the results of an analysis
+    /// queued to be solved.
+    fn after_deformed(&self, id: u64) -> bool {
+        (self.deformed_before(id).into_iter()).any(|d| {
+            (links::upstream(&self.links, d).iter()).any(|s| self.update_queue.contains(s))
+        })
+    }
+
     /// The line an update that went well ends with.
     fn updated_line(&self) -> String {
         match self.update_scope.as_ref().and_then(|scope| scope.last()) {
@@ -4550,7 +4634,8 @@ impl ProjectApp {
         if made {
             self.sync_due = true;
         }
-        if self.sync_due {
+        // A deformed mesh being made decides whether the analyses after it are up to date.
+        if self.sync_due || self.deforming() {
             self.update_after_sync = true;
             return;
         }
@@ -4568,7 +4653,13 @@ impl ProjectApp {
             let after_source = (self.links.iter()).any(|l| {
                 l.target == id && links::is_results(l) && self.update_queue.contains(&l.source)
             });
+            // Its mesh is made from the results of an analysis solved before it: it has none
+            // yet, or an old one, until then.
+            let after_deformed = self.after_deformed(id);
             match &node.current_status() {
+                Some(status) if after_deformed && status.setup != CellState::Missing => {
+                    self.update_queue.push_back(node.id)
+                }
                 Some(status) if (status.needs_solve() || after_source) && status.solvable() => {
                     self.update_queue.push_back(node.id)
                 }
@@ -4665,14 +4756,37 @@ impl ProjectApp {
         if self.sync_due || self.restoring.values().any(Option::is_some) {
             return;
         }
+        // A deformed mesh that waits to be made from new results is made first.
+        let pending: Vec<u64> = if self.update_queue.is_empty() {
+            Vec::new()
+        } else {
+            (self.nodes.iter())
+                .filter(|n| n.as_deformed().is_some_and(DeformedBlock::pending))
+                .map(|n| n.id)
+                .collect()
+        };
+        if pending.iter().any(|&id| {
+            (self.nodes.iter().find(|n| n.id == id))
+                .and_then(Node::as_deformed)
+                .is_some_and(|d| d.making.is_none())
+        }) {
+            self.sync_due = true;
+        }
         let parallel = self.settings.solver.parallel_runs.max(1) as usize;
         while self.updating.len() < parallel {
-            // The first queued analysis whose sources are neither queued nor solving.
+            // The first queued analysis whose sources are neither queued nor solving, nor
+            // a deformed mesh being made.
             let busy = |source: u64| {
-                self.update_queue.contains(&source) || self.updating.contains(&source)
+                self.update_queue.contains(&source)
+                    || self.updating.contains(&source)
+                    || pending.contains(&source)
             };
             let ready = self.update_queue.iter().position(|&id| {
                 !(self.links.iter()).any(|l| l.target == id && l.source != id && busy(l.source))
+                    && !(self.deformed_before(id).iter()).any(|&d| {
+                        pending.contains(&d)
+                            || links::upstream(&self.links, d).iter().any(|&s| busy(s))
+                    })
             });
             let Some(index) = ready else {
                 return;
@@ -5351,6 +5465,15 @@ impl ProjectApp {
                     (Kind::RefineMesh, _) => {
                         refine_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
                     }
+                    (Kind::DeformedMesh, _) => deformed::deformed_rows(
+                        n,
+                        incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
+                        n.as_deformed()
+                            .map_or(CellState::Missing, DeformedBlock::state),
+                        (deformed::deformed_link(&self.links, n.id))
+                            .and_then(|l| self.nodes.iter().find(|s| s.id == l.source))
+                            .map_or_else(UnitSystem::default, Node::units),
+                    ),
                     (Kind::CadOperation, _) => {
                         cad::cad_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
                     }
@@ -5389,6 +5512,9 @@ impl ProjectApp {
                     open: n.window().is_some(),
                     primitive: n.as_mesh().map(|m| m.primitive.clone()),
                     refinement: n.refinement().unwrap_or(1.0),
+                    deform: n
+                        .as_deformed()
+                        .map_or((1.0, 1), |d| (d.factor, d.increment)),
                     cad_length: n.as_cad().map_or(0.0, |c| c.operation.value),
                     point: n.as_measure().and_then(|m| m.kind.point()),
                     parameters: (n.as_parameters()).map_or_else(Vec::new, |p| p.parameters.clone()),
@@ -5684,6 +5810,10 @@ impl ProjectApp {
             self.link_measure(source, item, target);
             return;
         }
+        if slot.first().is_some_and(|c| c == links::STEP_RESULT) {
+            self.link_deformed(source, item, target);
+            return;
+        }
         if slot.first().is_some_and(|c| c == links::ANALYSIS) {
             self.link_campbell(source, item, target);
             return;
@@ -5912,6 +6042,35 @@ impl ProjectApp {
             target,
             item,
             slot: vec![links::MEASURE.to_owned()],
+            ..Default::default()
+        });
+        self.sync_due = true;
+    }
+
+    /// Makes the deformed mesh block `target` take the displacements of the results of a step
+    /// of `source`, in place of those it took; value links to its numbers stay.
+    fn link_deformed(&mut self, source: u64, item: Vec<String>, target: u64) {
+        let (from, to) = (self.name_of(source), self.name_of(target));
+        let replaced = |l: &Link| {
+            l.target == target && matches!(links::slot(l), [cell] if cell == links::STEP_RESULT)
+        };
+        for link in self.links.iter().filter(|l| replaced(l)) {
+            self.output.push(format!(
+                "{to} no longer takes {} of {}.",
+                links::label(&link.item),
+                self.name_of(link.source)
+            ));
+        }
+        self.links.retain(|l| !replaced(l));
+        self.output.push(format!(
+            "{to} deforms the mesh of {from} by the displacements of {}.",
+            links::label(&item)
+        ));
+        self.links.push(Link {
+            source,
+            target,
+            item,
+            slot: vec![links::STEP_RESULT.to_owned()],
             ..Default::default()
         });
         self.sync_due = true;
@@ -6207,6 +6366,12 @@ impl ProjectApp {
                 self.sync_due = true;
             }
         }
+        if self.deforming() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+            if self.poll_deformed() {
+                self.sync_due = true;
+            }
+        }
         // Results that went out of date, or up to date again, change what the analyses that
         // take them are: however that came about, the links pass it on.
         if self.freshness() != self.synced_freshness {
@@ -6218,8 +6383,14 @@ impl ProjectApp {
         self.sync_due = false;
         self.apply_values();
         self.evaluate_measures();
+        self.evaluate_deformed();
         let ids: Vec<u64> = self.nodes.iter().map(|n| n.id).collect();
         for target in links::order(&ids, &self.links) {
+            // A deformed mesh block reads the results of its step itself, see
+            // [`Self::evaluate_deformed`].
+            if (self.nodes.iter()).any(|n| n.id == target && n.kind() == Kind::DeformedMesh) {
+                continue;
+            }
             if (self.nodes.iter()).any(|n| n.id == target && n.kind() == Kind::RefineMesh) {
                 take_refine_input(&mut self.nodes, &self.links, target);
                 continue;
@@ -6851,6 +7022,9 @@ impl ProjectApp {
             | Action::SetCadLength(..)
             | Action::SetMeasurePoint(..)
             | Action::AddCadOperation(_)
+            | Action::AddDeformedMesh(_)
+            | Action::SetDeformFactor(..)
+            | Action::SetDeformIncrement(..)
 
             | Action::AddMeshExport(_)
             | Action::AddCampbell(_)
@@ -6937,6 +7111,21 @@ impl ProjectApp {
             }
             Action::AddCadOperation(pos) => {
                 self.add_cad_operation(pos);
+            }
+            Action::AddDeformedMesh(pos) => {
+                self.add_deformed_mesh(pos);
+            }
+            Action::SetDeformFactor(id, value) => {
+                if let Some(block) = self.node(id).and_then(Node::as_deformed_mut) {
+                    block.set_factor(value);
+                }
+                self.sync_due = true;
+            }
+            Action::SetDeformIncrement(id, value) => {
+                if let Some(block) = self.node(id).and_then(Node::as_deformed_mut) {
+                    block.set_increment(value);
+                }
+                self.sync_due = true;
             }
 
             Action::SetExposed(id, key, value) => {
@@ -7200,7 +7389,7 @@ impl ProjectApp {
             Kind::Analysis => "with its model and results",
             Kind::Materials => "with its materials",
             Kind::CrossSections => "with its cross-sections",
-            Kind::Mesh | Kind::RefineMesh => "with its mesh",
+            Kind::Mesh | Kind::RefineMesh | Kind::DeformedMesh => "with its mesh",
             Kind::CadOperation => "with the geometry it made",
             Kind::Parameters => "with its parameters",
             Kind::Measure => "with its value",
@@ -7683,6 +7872,9 @@ enum RowWidget {
     Refinement,
     /// The length of a CAD operation, such as a fillet radius.
     CadLength,
+    /// The factor and the increment of a deformed mesh block.
+    DeformFactor,
+    DeformIncrement,
     /// A coordinate of the point of a measure block, by axis.
     Coordinate(usize),
     /// A number of a parameters block, by its index.
@@ -7736,6 +7928,8 @@ struct BlockView {
     primitive: Option<MeshPrimitive>,
     /// The factor of a refine mesh block.
     refinement: f64,
+    /// The factor and the increment of a deformed mesh block.
+    deform: (f64, u32),
     /// The length of a CAD operation block.
     cad_length: f64,
     /// The point of a measure block that measures at a point.
@@ -8262,6 +8456,9 @@ fn stale_meshes(nodes: &[Node], links: &[Link], id: u64) -> Vec<String> {
         .filter_map(|source| nodes.iter().find(|n| n.id == source))
         .filter(|n| match n.kind() {
             Kind::Mesh | Kind::RefineMesh => n.mesh_state() != CellState::UpToDate,
+            Kind::DeformedMesh => {
+                (n.as_deformed()).is_some_and(|d| d.state() != CellState::UpToDate)
+            }
             Kind::CadOperation => n.as_cad().is_some_and(|c| c.state() != CellState::UpToDate),
             _ => false,
         })
@@ -8562,7 +8759,7 @@ fn refusal(
     }
     // A refine mesh block takes the model space of the mesh it refines.
     let target_space = match target_node.kind() {
-        Kind::RefineMesh => None,
+        Kind::RefineMesh | Kind::DeformedMesh => None,
         _ => target_node.space(),
     };
     // Data of a model goes only between blocks of the same model space; materials and
@@ -8586,6 +8783,10 @@ fn refusal(
     let first = slot.first().map(String::as_str);
     if first == Some(links::MEASURE) {
         return None;
+    }
+    if first == Some(links::STEP_RESULT) {
+        return (source_node.kind() != Kind::Analysis)
+            .then(|| format!("{to} deforms the mesh of an analysis, and {from} is none."));
     }
     if target_node.kind() == Kind::RefineMesh && first == Some(links::MESH) {
         let remeshed = matches!(source_node.kind(), Kind::Mesh | Kind::RefineMesh)
@@ -8681,6 +8882,13 @@ fn parameter_label(nodes: &[Node], id: u64, slot: &[String]) -> String {
         return "Factor".into();
     }
     let node = nodes.iter().find(|n| n.id == id);
+    if node.and_then(Node::as_deformed).is_some() {
+        match key {
+            DEFORM_FACTOR => return "Factor".into(),
+            DEFORM_INCREMENT => return "Mode".into(),
+            _ => {}
+        }
+    }
     if node.and_then(Node::as_measure).is_some() && POINT_AXES.contains(&key) {
         return key.to_uppercase();
     }
@@ -8732,6 +8940,13 @@ fn value_kind(nodes: &[Node], id: u64, path: &[String]) -> Option<ValueKind> {
             table.inputs[table.input(name)?].kind
         }
         [cell, key] if cell == links::PARAMETERS && key == REFINEMENT => Some(ValueKind::Factor),
+        [cell, key] if cell == links::PARAMETERS && node.as_deformed().is_some() => {
+            match key.as_str() {
+                DEFORM_FACTOR => Some(ValueKind::Factor),
+                DEFORM_INCREMENT => Some(ValueKind::Count),
+                _ => None,
+            }
+        }
         [cell, key]
             if cell == links::PARAMETERS && key == CAD_LENGTH && node.as_cad().is_some() =>
         {
@@ -9392,6 +9607,7 @@ enum BlockKind {
     CrossSections,
     Mesh(MeshPrimitive),
     RefineMesh,
+    DeformedMesh,
     CadOperation,
     Parameters,
     Math,
@@ -9412,6 +9628,7 @@ fn block_kinds() -> Vec<BlockKind> {
         BlockKind::Mesh(MeshPrimitive::default_box()),
         BlockKind::Mesh(MeshPrimitive::default_rectangle()),
         BlockKind::RefineMesh,
+        BlockKind::DeformedMesh,
         BlockKind::CadOperation,
         BlockKind::Parameters,
         BlockKind::Math,
@@ -9461,6 +9678,16 @@ impl BlockKind {
                  factor: the divisions of a mesh block times the factor, or the element sizes \
                  of geometry divided by it. A parameter study over its factor shows whether \
                  the results converge.",
+            ),
+            Self::DeformedMesh => (
+                "Mesh",
+                "Deformed Mesh",
+                "imperfection buckling mode shape displaced displacement scale factor \
+                 nonlinear initial geometry eigenmode",
+                "Adds a block that gives the mesh of an analysis with every node moved by its \
+                 displacement in one mode or increment of a step, times a factor: link the \
+                 results of a buckle step to it, and its mesh to a nonlinear static analysis, \
+                 for a buckling mode as the imperfection.",
             ),
             Self::CadOperation => (
                 "Geometry",
@@ -9558,6 +9785,7 @@ impl BlockKind {
             Self::CrossSections => "Add Cross-Sections",
             Self::Mesh(primitive) => primitive.label(),
             Self::RefineMesh => "Refine Mesh",
+            Self::DeformedMesh => "Deformed Mesh",
             Self::CadOperation => "Add CAD Operation",
             Self::Parameters => "Parameters",
             Self::Math => "Math",
@@ -9579,6 +9807,7 @@ impl BlockKind {
             Self::CrossSections => Action::AddCrossSections(pos),
             Self::Mesh(primitive) => Action::AddMesh(pos, primitive.clone()),
             Self::RefineMesh => Action::AddRefineMesh(pos),
+            Self::DeformedMesh => Action::AddDeformedMesh(pos),
             Self::CadOperation => Action::AddCadOperation(pos),
             Self::Parameters => Action::AddParameters(pos),
             Self::Math => Action::AddMath(pos),
@@ -9724,10 +9953,12 @@ fn wire_color(path: &[String]) -> egui::Color32 {
         crate::style::adapt(egui::Color32::from_rgb(140, 80, 200))
     } else if path.first().is_some_and(|c| c == links::STATE) {
         crate::style::adapt(egui::Color32::from_rgb(40, 150, 60))
-    } else if path
-        .first()
-        .is_some_and(|c| c == links::RESULTS || c == links::MEASURE || c == links::GLOBAL_RESULTS)
-        || links::is_step_input(path)
+    } else if path.first().is_some_and(|c| {
+        c == links::RESULTS
+            || c == links::MEASURE
+            || c == links::STEP_RESULT
+            || c == links::GLOBAL_RESULTS
+    }) || links::is_step_input(path)
     {
         crate::style::adapt(egui::Color32::from_rgb(230, 130, 20))
     } else {
@@ -9740,7 +9971,9 @@ fn wire_color(path: &[String]) -> egui::Color32 {
 fn header_fill(kind: Kind) -> Option<egui::Color32> {
     Some(match kind {
         Kind::Materials | Kind::CrossSections => crate::style::materials_header(),
-        Kind::Mesh | Kind::RefineMesh | Kind::File => crate::style::mesh_header(),
+        Kind::Mesh | Kind::RefineMesh | Kind::DeformedMesh | Kind::File => {
+            crate::style::mesh_header()
+        }
         Kind::Parameters | Kind::Math | Kind::Switch => crate::style::parameters_header(),
         Kind::Measure => crate::style::measure_header(),
         Kind::Study | Kind::Campbell => crate::style::study_header(),
@@ -9855,6 +10088,7 @@ impl Viewer {
         }
         let (units, space, refinement) = (block.units, block.space, block.refinement);
         let cad_length = block.cad_length;
+        let deform = block.deform;
         let point = block.point;
         let parameters = block.parameters.clone();
         let exposed = block.exposed.clone();
@@ -10039,6 +10273,26 @@ impl Viewer {
                 }
                 return;
             }
+            RowWidget::DeformFactor => {
+                let mut value = deform.0;
+                let drag = crate::numeric::drag_value(&mut value).speed(0.01);
+                number_field(&mut ui, field, row, drag, &tip);
+                if value != deform.0 {
+                    self.actions.push(Action::SetDeformFactor(id, value));
+                }
+                return;
+            }
+            RowWidget::DeformIncrement => {
+                let mut value = deform.1;
+                let drag = crate::numeric::count(&mut value)
+                    .range(1..=100_000)
+                    .speed(0.05);
+                number_field(&mut ui, field, row, drag, &tip);
+                if value != deform.1 {
+                    (self.actions).push(Action::SetDeformIncrement(id, f64::from(value)));
+                }
+                return;
+            }
             RowWidget::Refinement => {
                 let mut value = refinement;
                 let drag = crate::numeric::drag_value(&mut value)
@@ -10117,6 +10371,8 @@ impl Viewer {
                 }
             },
             RowWidget::Refinement
+            | RowWidget::DeformFactor
+            | RowWidget::DeformIncrement
             | RowWidget::CadLength
             | RowWidget::Coordinate(_)
             | RowWidget::Value(_)
@@ -10221,6 +10477,13 @@ impl SnarlViewer<u64> for Viewer {
                 let ink = ui.visuals().text_color();
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Mesh, ink);
                 icon.on_hover_text("Makes the mesh linked to it again, finer or coarser");
+            }
+            Kind::DeformedMesh => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Mesh, ink);
+                icon.on_hover_text(
+                    "Gives the mesh of an analysis deformed by the displacements of a step",
+                );
             }
             Kind::CadOperation => {
                 let ink = ui.visuals().text_color();
@@ -10327,6 +10590,7 @@ impl SnarlViewer<u64> for Viewer {
             Kind::CrossSections => "Double-click edits the cross-sections.",
             Kind::Mesh => "Double-click edits the size and division of the mesh.",
             Kind::RefineMesh => "Its factor makes the mesh finer or coarser.",
+            Kind::DeformedMesh => "Its mode and factor are edited in the block.",
             Kind::CadOperation => "Double-click picks the edges and shows the result.",
             Kind::MeshExport => "Double-click chooses the file to write.",
             Kind::Parameters => "Double-click adds, renames or removes parameters.",
@@ -11195,7 +11459,7 @@ fn node_menu(
             entry(ui, "Read Again", "", Action::ReadFile(id));
         } else if kind == Kind::Campbell {
             entry(ui, "Open Diagram …", "", Action::Open(id, None));
-        } else if kind != Kind::RefineMesh {
+        } else if !matches!(kind, Kind::RefineMesh | Kind::DeformedMesh) {
             entry(ui, "Edit …", "", Action::Open(id, None));
         }
         if matches!(kind, Kind::Mesh | Kind::RefineMesh) {

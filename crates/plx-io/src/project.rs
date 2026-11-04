@@ -77,6 +77,9 @@ pub enum ProjectNode {
     Mesh(Box<MeshBlock>),
     /// The mesh linked to it, made again finer or coarser by a factor.
     RefineMesh(Box<RefineMesh>),
+    /// The mesh of an analysis moved by the displacements of a step, times a factor: e.g. a
+    /// buckling mode as the imperfection of a nonlinear analysis.
+    DeformedMesh(Box<DeformedMesh>),
     /// A fillet or chamfer of the geometry linked to it.
     CadOperation(Box<CadOperationBlock>),
     /// Named numbers that value links give to other blocks.
@@ -109,6 +112,7 @@ impl ProjectNode {
             Self::CrossSections(c) => c.id,
             Self::Mesh(m) => m.id,
             Self::RefineMesh(r) => r.id,
+            Self::DeformedMesh(d) => d.id,
             Self::CadOperation(c) => c.id,
             Self::Parameters(p) => p.id,
             Self::Measure(m) => m.id,
@@ -129,6 +133,7 @@ impl ProjectNode {
             Self::CrossSections(c) => &c.name,
             Self::Mesh(m) => &m.name,
             Self::RefineMesh(r) => &r.name,
+            Self::DeformedMesh(d) => &d.name,
             Self::CadOperation(c) => &c.name,
             Self::Parameters(p) => &p.name,
             Self::Measure(m) => &m.name,
@@ -150,6 +155,7 @@ impl ProjectNode {
             Self::CrossSections(c) => c.position,
             Self::Mesh(m) => m.position,
             Self::RefineMesh(r) => r.position,
+            Self::DeformedMesh(d) => d.position,
             Self::CadOperation(c) => c.position,
             Self::Parameters(p) => p.position,
             Self::Measure(m) => m.position,
@@ -231,6 +237,45 @@ pub struct RefineMesh {
 
 fn one() -> f64 {
     1.0
+}
+
+fn first() -> u32 {
+    1
+}
+
+/// A block that gives the mesh of the analysis whose step results are linked to it, each
+/// node moved by its displacement in one increment or mode of the step times a factor. Its
+/// mesh goes on to the Mesh row of another analysis, e.g. a buckling mode as the
+/// imperfection of a nonlinear static analysis.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeformedMesh {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    /// What the displacements are multiplied by.
+    #[serde(default = "one")]
+    pub factor: f64,
+    /// The increment of the step, or its mode for a buckling or frequency step, counted
+    /// from 1.
+    #[serde(default = "first")]
+    pub increment: u32,
+    /// The mesh as last made, with the sets and element types of the analysis it comes
+    /// from, kept so that the project opens without reading the results again.
+    #[serde(default)]
+    pub mesh: FeMesh,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mesh_sets: Vec<plx_model::MeshSet>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub element_types: Vec<plx_model::PartElementType>,
+    #[serde(default)]
+    pub space: plx_model::ModelSpace,
+    /// Fingerprint of the results, the mesh and the numbers the mesh was made from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub made_from: Option<u64>,
+    /// The largest displacement of a node as made, the displacement times the factor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub largest: Option<f64>,
 }
 
 /// A block that computes a key figure from the results of a step another block links to it,

@@ -289,7 +289,7 @@ file of the submodel's own analysis.]
 == Exporting a deformed mesh <export-deformed>
 
 #menu("File", "Export Deformed Mesh (.inp) ...") writes the mesh of the displayed result with its
-nodes moved by the displacements times the current deformation scale factor. A typical use is an
-imperfection for a buckling analysis: show the buckling mode, set #ui("Deformation") to #ui("User
-defined") with the imperfection amplitude as factor, export, and import the file into the model with
-#ui("Import Geometry") (@mesh-import). The file contains only the mesh.
+nodes moved by the displacements times the current deformation scale factor. The file contains
+only the mesh, for other programs or for another project. To start an analysis of the same project
+from a buckling mode as imperfection, use a Deformed Mesh block in the project schematic instead
+(@deformed-mesh-block): it keeps the sets of the mesh and is made again when the results change.

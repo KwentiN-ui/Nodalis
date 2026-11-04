@@ -62,6 +62,9 @@ fn same_data(a: Option<&ProjectNode>, b: Option<&ProjectNode>) -> bool {
         (Some(ProjectNode::RefineMesh(a)), Some(ProjectNode::RefineMesh(b))) => {
             a.factor == b.factor
         }
+        (Some(ProjectNode::DeformedMesh(a)), Some(ProjectNode::DeformedMesh(b))) => {
+            a.factor == b.factor && a.increment == b.increment
+        }
         (Some(ProjectNode::Parameters(a)), Some(ProjectNode::Parameters(b))) => a == b,
         (Some(ProjectNode::Measure(a)), Some(ProjectNode::Measure(b))) => {
             a.units == b.units && a.kind == b.kind
