@@ -129,6 +129,7 @@ pub enum Cmd {
     // Geometry workspace.
     Import,
     DefaultMeshParameters,
+    MeshParameters,
     LocalMeshSize,
     ExtrudeMesh,
     TetrahedralGmsh,
@@ -782,6 +783,16 @@ fn build() -> Vec<Command> {
         Tool(Icon::MeshDefaults),
         "",
         "The default element sizes and settings of the mesher.",
+    ));
+    add(command(
+        C::MeshParameters,
+        "Mesh\nParameters",
+        g,
+        t,
+        "Mesh Setup",
+        Tool(Icon::MeshParameters),
+        "",
+        "Element sizes and settings of the mesher for picked parts, instead of the defaults.",
     ));
     add(command(
         C::LocalMeshSize,

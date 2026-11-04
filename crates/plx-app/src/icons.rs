@@ -61,6 +61,8 @@ pub enum Icon {
     /// A face meshed with an even grid: the default mesh parameters.
     MeshDefaults,
     /// A coarse grid with one corner meshed finer: a local mesh size.
+    /// Two parts side by side, one meshed finer: mesh parameters of single parts.
+    MeshParameters,
     LocalMeshSize,
     /// A face mesh swept upward into layers of hexahedra: the extruded mesh.
     ExtrudeMesh,
@@ -514,6 +516,29 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
                 Stroke::new(1.0, OUTLINE),
                 egui::StrokeKind::Middle,
             ));
+        }
+        Icon::MeshParameters => {
+            // Two parts: the left one meshed coarse, the right one fine.
+            let left = Rect::from_min_max(p(1.5, 3.5), p(7.0, 12.5));
+            let right = Rect::from_min_max(p(9.0, 3.5), p(14.5, 12.5));
+            shapes.push(Shape::rect_filled(left, 0.0, FACE));
+            shapes.push(Shape::rect_filled(right, 0.0, FACE));
+            line(shapes, &[p(4.25, 3.5), p(4.25, 12.5)], 1.0, ACCENT);
+            line(shapes, &[p(1.5, 8.0), p(7.0, 8.0)], 1.0, ACCENT);
+            for t in [10.4, 11.75, 13.1] {
+                line(shapes, &[p(t, 3.5), p(t, 12.5)], 1.0, ACCENT);
+            }
+            for t in [5.75, 8.0, 10.25] {
+                line(shapes, &[p(9.0, t), p(14.5, t)], 1.0, ACCENT);
+            }
+            for r in [left, right] {
+                shapes.push(Shape::rect_stroke(
+                    r,
+                    0.0,
+                    Stroke::new(1.0, OUTLINE),
+                    egui::StrokeKind::Middle,
+                ));
+            }
         }
         Icon::LocalMeshSize => {
             let face = Rect::from_min_max(p(2.5, 2.5), p(13.5, 13.5));
