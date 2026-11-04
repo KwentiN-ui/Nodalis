@@ -4,4 +4,5 @@ class = "A"
 stage = "M2"
 features = ["*HEADING", "*NODE", "*ELEMENT", "B32R", "*NSET", "*ELSET", "*MATERIAL", "*ELASTIC", "*BEAM SECTION", "*STEP", "*STATIC", "*BOUNDARY", "*CLOAD", "*DLOAD", "*NODE FILE", "*EL FILE", "*END STEP"]
 source = "plx-io writer test"
-reference = "ccx 2.21"
+reference = "none"
+known_gap = "PIPE integration needs a section integration rule in the IR"

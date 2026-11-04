@@ -62,7 +62,7 @@ impl Camera {
         (self.distance * 0.5).max(MIN_HALF_EXTENT)
     }
 
-    /// Directions towards PrePoMax's three camera lights in world space. The lights sit at
+    /// Directions towards the three camera lights in world space. The lights sit at
     /// (-1, 1, 1), (1, 1, 1) and (0, -1, 0) in camera space and shine at the focal point.
     pub fn light_directions(&self) -> [Vec3; 3] {
         [
@@ -161,8 +161,8 @@ impl Camera {
         self.set_view(StandardView::Isometric);
     }
 
-    /// Looks at the target from one of PrePoMax's standard directions. The isometric view keeps
-    /// the global axis that is closest to up on the screen pointing up, as PrePoMax does, so a
+    /// Looks at the target from one of the standard directions. The isometric view keeps
+    /// the global axis that is closest to up on the screen pointing up, so a
     /// model standing on Z is not laid on its side.
     pub fn set_view(&mut self, view: StandardView) {
         use std::f32::consts::{FRAC_PI_2, PI};
@@ -180,14 +180,14 @@ impl Camera {
         };
     }
 
-    /// PrePoMax's "Vertical view": turns the view about the viewing direction until the global
+    /// The "Vertical view": turns the view about the viewing direction until the global
     /// axis closest to the screen's up direction points straight up.
     pub fn set_vertical_view(&mut self) {
         let up = closest_axis(self.up());
         self.orient(self.forward(), up);
     }
 
-    /// PrePoMax's axis view: looks down the global axis from its positive side, so the axis
+    /// The axis view: looks down the global axis from its positive side, so the axis
     /// is the normal of the view plane. Of the global axes perpendicular to it, the one that
     /// turns the current view the least points up.
     pub fn set_axis_view(&mut self, axis: Vec3) {
@@ -450,7 +450,7 @@ mod tests {
     #[test]
     fn isometric_view_keeps_the_upright_axis() {
         let third = 1.0 / 3.0_f32.sqrt();
-        // A fresh camera looks from (1, 1, 1) with Y up, like PrePoMax.
+        // A fresh camera looks from (1, 1, 1) with Y up.
         let camera = Camera::default();
         assert!((camera.forward() + Vec3::splat(third)).length() < EPS);
         assert!(camera.right().dot(Vec3::Y).abs() < EPS && camera.up().y > 0.0);

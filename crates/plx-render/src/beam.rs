@@ -1,6 +1,6 @@
 //! Beam and truss elements drawn as the solid their section gives them: the profile swept
 //! along the line, turned by the section's normal and moved off the nodes by its offset, as
-//! CalculiX expands the beam.
+//! the solver expands the beam.
 
 use std::collections::HashMap;
 
@@ -507,7 +507,7 @@ mod tests {
         assert!(swept(&beam(), Some(rect(0.0, 0.1))).vertices.is_empty());
     }
 
-    /// The profile lies where CalculiX puts the nodes of the expanded beam: a rectangle with
+    /// The profile lies where the solver puts the nodes of the expanded beam: a rectangle with
     /// offsets on a beam askew to the axes, its normal not perpendicular to it.
     #[test]
     fn rectangles_lie_where_calculix_expands_the_beam() {

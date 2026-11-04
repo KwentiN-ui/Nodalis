@@ -1,7 +1,7 @@
 //! Selections of CAD faces and edges on the Geometry tab, e.g. for a local mesh size: what
 //! a click selects in the modes of the selection window. The surface angle mode grows the
 //! clicked face across edges where the next face continues at less than the angle, the
-//! edge angle mode the clicked edge across vertices, as PrePoMax's geometry based modes do.
+//! edge angle mode the clicked edge across vertices.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 

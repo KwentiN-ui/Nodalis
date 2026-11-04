@@ -6,7 +6,7 @@ use crate::contour::NO_VALUE;
 use crate::mesh::{NodeBlend, RenderMesh, Vertex};
 
 pub(crate) const EDGE_COLOR: [f32; 3] = [0.0, 0.0, 0.0];
-/// Opacities of PrePoMax's edge actors; line vertices carry them in [`Vertex::scalar`], the
+/// Opacities of the edge actors; line vertices carry them in [`Vertex::scalar`], the
 /// shader draws mesh edges with [`MESH_EDGE_OPACITY`] (`viewport.wgsl` repeats it).
 pub const FEATURE_EDGE_OPACITY: f32 = 0.7;
 pub const MESH_EDGE_OPACITY: f32 = 0.4;
@@ -14,7 +14,7 @@ pub const WIREFRAME_OPACITY: f32 = 0.5;
 /// How far the mid node of a straight edge may lie off its centre, relative to its length.
 pub(crate) const STRAIGHT_TOLERANCE: f64 = 1e-3;
 
-/// PrePoMax's default part colours (System.Drawing names), cycled by part index.
+/// The default part colours (System.Drawing names), cycled by part index.
 const PART_COLORS_SRGB: [[u8; 3]; 10] = [
     [245, 245, 220], // Beige
     [143, 188, 143], // DarkSeaGreen
@@ -71,6 +71,18 @@ pub fn part_render_mesh(
                 scalar: scalar(node),
             };
             local.push(shared.index(&mut render, node, vertex));
+        }
+        if has_centre(face) {
+            local.push(centre_vertex(
+                &mut render,
+                &mut shared,
+                &local,
+                face,
+                coords,
+                origin,
+                color,
+                &scalar,
+            ));
         }
         (render.triangles).extend(face_triangles(face).iter().map(|&k| local[k as usize]));
     }
@@ -170,13 +182,22 @@ impl SharedVertices {
         index
     }
 
+    /// Index of a new vertex at no node, which no other face shares.
+    fn unshared(&mut self, render: &mut RenderMesh, vertex: Vertex, origin: NodeBlend) -> u32 {
+        let index = render.vertices.len() as u32;
+        render.vertices.push(vertex);
+        render.origins.push(origin);
+        self.next.push(Self::NONE);
+        index
+    }
+
     /// Index of some vertex of the node.
     fn any(&self, node: usize) -> Option<u32> {
         Some(self.first[node - self.offset]).filter(|&i| i != Self::NONE)
     }
 }
 
-/// Feature edges of a part as translucent black lines, PrePoMax's wireframe of the undeformed
+/// Feature edges of a part as translucent black lines, the wireframe of the undeformed
 /// shape behind deformed results.
 pub fn wireframe_edges(coords: &[[f64; 3]], skin: &PartSkin, origin: DVec3) -> Vec<Vertex> {
     let vertex = |node: usize| Vertex {
@@ -295,17 +316,84 @@ fn polygon_area(coords: &[[f64; 3]], corners: &[usize]) -> f64 {
         .max(f64::MIN_POSITIVE)
 }
 
-/// Triangles of a face as indices into its corner-then-mid vertex list.
+/// Triangles of a face as indices into its corner-then-mid vertex list, followed for a
+/// quadratic quad by its centre vertex (see [`has_centre`]).
 pub(crate) fn face_triangles(face: &SkinFace) -> &'static [u32] {
     match (face.corners.len(), face.mids.is_empty()) {
         (3, true) => &[0, 1, 2],
         (4, true) => &[0, 1, 2, 0, 2, 3],
         // Corners 0..3, mids 3..6 (m0 between c0 and c1, …).
         (3, false) => &[0, 3, 5, 3, 1, 4, 5, 4, 2, 3, 4, 5],
-        // Corners 0..4, mids 4..8.
-        (4, false) => &[0, 4, 7, 4, 1, 5, 5, 2, 6, 6, 3, 7, 4, 5, 7, 5, 6, 7],
+        // Corners 0..4, mids 4..8, centre 8: a triangle at each corner and four around the
+        // centre.
+        (4, false) => &[
+            0, 4, 7, 4, 1, 5, 5, 2, 6, 6, 3, 7, 4, 5, 8, 5, 6, 8, 6, 7, 8, 7, 4, 8,
+        ],
         _ => &[],
     }
+}
+
+/// Whether the face is drawn with a vertex at its centre: a quadratic quad. Its inner four
+/// mids would otherwise be split by a diagonal between two opposite mids, and a value that
+/// is high at both but low in between, such as the von Mises stress across the thickness of
+/// a bent shell, would be drawn high along that diagonal (a pattern per element).
+pub(crate) fn has_centre(face: &SkinFace) -> bool {
+    face.corners.len() == 4 && face.mids.len() == 4
+}
+
+/// The value at the centre of a quadratic quad from its corner and mid values, as the
+/// element interpolates it: -1/4 of each corner and 1/2 of each mid.
+pub(crate) fn quad8_centre<T>(values: impl IntoIterator<Item = T>) -> T
+where
+    T: std::ops::Add<Output = T> + std::ops::Mul<f64, Output = T> + Default,
+{
+    (values.into_iter().enumerate()).fold(T::default(), |sum, (k, v)| {
+        sum + v * if k < 4 { -0.25 } else { 0.5 }
+    })
+}
+
+/// The centre contour value of a quadratic quad from its normalized node values: none if a
+/// node has none, else kept in the normalized range.
+pub(crate) fn centre_scalar(scalars: impl IntoIterator<Item = f32>) -> f32 {
+    let scalars: Vec<f32> = scalars.into_iter().collect();
+    if scalars.iter().any(|&s| s < 0.0) {
+        return NO_VALUE;
+    }
+    quad8_centre(scalars.iter().map(|&s| f64::from(s))).clamp(0.0, 1.0) as f32
+}
+
+/// The centre vertex of a quadratic quad whose eight vertices are `local`: its position
+/// and value as the element interpolates them, the mean normal of its vertices.
+#[allow(clippy::too_many_arguments)]
+fn centre_vertex(
+    render: &mut RenderMesh,
+    shared: &mut SharedVertices,
+    local: &[u32],
+    face: &SkinFace,
+    coords: &[[f64; 3]],
+    origin: DVec3,
+    color: [f32; 3],
+    scalar: &impl Fn(usize) -> f32,
+) -> u32 {
+    let nodes: Vec<usize> = nodes(face).collect();
+    let position = quad8_centre(nodes.iter().map(|&n| DVec3::from(coords[n])));
+    let normal = (local.iter())
+        .map(|&v| glam::Vec3::from(render.vertices[v as usize].normal))
+        .sum::<glam::Vec3>()
+        .normalize_or_zero();
+    let vertex = Vertex {
+        position: (position - origin).as_vec3().to_array(),
+        normal: normal.to_array(),
+        color,
+        scalar: centre_scalar(nodes.iter().map(|&n| scalar(n))),
+    };
+    // Directions of LIC between two opposite mids.
+    let origin = NodeBlend {
+        a: face.mids[0] as u32,
+        b: face.mids[2] as u32,
+        t: 0.5,
+    };
+    shared.unshared(render, vertex, origin)
 }
 
 #[cfg(test)]
@@ -367,11 +455,127 @@ mod tests {
             30.0,
             None,
         );
-        assert_eq!(render.triangles.len(), 6 * 3);
+        assert_eq!(render.triangles.len(), 8 * 3);
         assert!((triangle_area_sum(&render) - 4.0).abs() < 1e-5);
         // Four curved boundary edges of two segments each, all on the outline.
         assert_eq!(render.feature_edges.len(), 4 * 2 * 2);
         assert!(render.mesh_edges.is_empty());
+    }
+
+    /// The side of a bent shell expanded to a solid: von Mises is high on the top and the
+    /// bottom and low in the middle of the thickness. With a diagonal between the top and
+    /// bottom mids, the middle of each element was drawn high, the edges low (a pattern
+    /// per element); with the centre vertex the middle line stays low throughout.
+    #[test]
+    fn quadratic_quad_centre_follows_the_element_interpolation() {
+        // Corners bottom-left, bottom-right, top-right, top-left; mids bottom, right, top,
+        // left. Thickness along y.
+        let coords = [
+            [0.0, -1.0, 0.0],
+            [1.0, -1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.5, -1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.5, 1.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ];
+        let scalars = [1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0];
+        let mesh = single_element(ElementShape::Quad8, &coords);
+        let skin = extract_part_skin(&mesh, &mesh.parts[0], 30.0);
+        let render = part_render_mesh(
+            mesh.coords(),
+            &skin,
+            DVec3::ZERO,
+            [1.0; 3],
+            |_| None,
+            30.0,
+            Some(&scalars),
+        );
+        let centre = (render.vertices.iter())
+            .find(|v| (v.position[0] - 0.5).abs() < 1e-6 && v.position[1].abs() < 1e-6)
+            .expect("a vertex at the centre");
+        assert!(centre.scalar.abs() < 1e-6, "centre {}", centre.scalar);
+        // No triangle edge joins the top and the bottom mid.
+        let bottom_top = |a: &Vertex, b: &Vertex| {
+            (a.position[0] - 0.5).abs() < 1e-6
+                && (b.position[0] - 0.5).abs() < 1e-6
+                && (a.position[1] - b.position[1]).abs() > 1.5
+        };
+        for t in render.triangles.chunks(3) {
+            for (i, j) in [(0, 1), (1, 2), (2, 0)] {
+                let (a, b) = (
+                    &render.vertices[t[i] as usize],
+                    &render.vertices[t[j] as usize],
+                );
+                assert!(!bottom_top(a, b));
+            }
+        }
+    }
+
+    #[test]
+    fn neighbouring_quadratic_quads_share_their_edge_nodes() {
+        let mut mesh = FeMesh::default();
+        // Two Quad8 side by side along x, sharing the edge at x = 1.
+        let xs = [0.0, 0.5, 1.0, 1.5, 2.0];
+        let mut id = 0;
+        let mut node = |x: f64, y: f64| {
+            id += 1;
+            mesh.set_node(id, [x, y, 0.0]);
+            id
+        };
+        let bottom: Vec<u32> = xs.iter().map(|&x| node(x, 0.0)).collect();
+        let top: Vec<u32> = xs.iter().map(|&x| node(x, 2.0)).collect();
+        let middle: Vec<u32> = [0.0, 1.0, 2.0].iter().map(|&x| node(x, 1.0)).collect();
+        for (e, k) in [0usize, 2].into_iter().enumerate() {
+            let nodes = vec![
+                bottom[k],
+                bottom[k + 2],
+                top[k + 2],
+                top[k],
+                bottom[k + 1],
+                middle[e + 1],
+                top[k + 1],
+                middle[e],
+            ];
+            mesh.add_element(Element {
+                id: e as u32 + 1,
+                type_name: "Quad8".into(),
+                shape: ElementShape::Quad8,
+                nodes,
+            })
+            .unwrap();
+        }
+        mesh.parts.push(Part {
+            name: "P".into(),
+            elements: vec![1, 2],
+        });
+        let skin = extract_part_skin(&mesh, &mesh.parts[0], 30.0);
+        let render = part_render_mesh(
+            mesh.coords(),
+            &skin,
+            DVec3::ZERO,
+            [1.0; 3],
+            |_| None,
+            30.0,
+            None,
+        );
+        // 13 nodes and a centre per face.
+        assert_eq!(render.vertices.len(), 13 + 2);
+        assert_eq!(render.origins.len(), render.vertices.len());
+        assert_eq!(render.triangles.len(), 2 * 8 * 3);
+        assert!((triangle_area_sum(&render) - 4.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn centre_scalar_is_missing_where_a_node_has_none() {
+        assert_eq!(
+            centre_scalar([0.5; 7].into_iter().chain([NO_VALUE])),
+            NO_VALUE
+        );
+        assert!((centre_scalar([0.5; 8]) - 0.5).abs() < 1e-6);
+        // Kept in range when the interpolation overshoots.
+        assert_eq!(centre_scalar([0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]), 1.0);
     }
 
     #[test]

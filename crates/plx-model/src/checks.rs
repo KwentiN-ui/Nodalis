@@ -1,11 +1,11 @@
-//! Checks of the model before CalculiX runs, for the mistakes that most often make a run abort
+//! Checks of the model before the solver runs, for the mistakes that most often make a run abort
 //! or give useless results: parts that are not held, elements without a material, materials
 //! without the constants a step needs, distorted elements, contradicting boundary conditions.
 //! Each finding names the tree item it belongs to and explains the problem and its fix.
 //!
 //! The checks are derived from the model like [`crate::validity`]; the expensive part that
 //! only depends on the mesh (connectivity and element distortion) is computed once in
-//! [`MeshCheck`]. CalculiX's own error messages after a failed run are mapped to the same
+//! [`MeshCheck`]. The solver's own error messages after a failed run are mapped to the same
 //! explanations by [`diagnose_solver_output`].
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -19,10 +19,10 @@ use crate::{
     ModelItem, ModelSpace, SectionKind, StepKind,
 };
 
-/// Whether CalculiX aborts or the results are likely wrong.
+/// Whether the solver aborts or the results are likely wrong.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
-    /// CalculiX aborts, or the results are meaningless.
+    /// The solver aborts, or the results are meaningless.
     Error,
     /// The run may work, but the model probably does not do what was intended.
     Warning,
@@ -33,16 +33,18 @@ pub enum Severity {
 pub enum Problem {
     MissingReference,
     /// A section whose type does not fit its elements, such as a beam section on solids or
-    /// a membrane section on quadratic elements, or whose values CalculiX rejects.
+    /// a membrane section on quadratic elements, or whose values the solver rejects.
     InvalidSection,
     NoSection,
+    /// Two sections whose regions share elements.
+    OverlappingSections,
     NoElastic,
     NoDensity,
     /// A boundary condition, load or history output on a reference point that no active
     /// rigid body is driven by: the point has no node in the input file.
     NoRigidBody,
     /// Nodes in two rigid bodies, of rigid body constraints or displacements on a point:
-    /// CalculiX keeps them in the first and only warns.
+    /// the solver keeps them in the first and only warns.
     SharedRigidBody,
     /// Nodes of a rigid body constraint that a boundary condition holds directly: CalculiX
     /// refuses them ("dependent side of a MPC and a SPC"), so the input file leaves them
@@ -56,7 +58,7 @@ pub enum Problem {
     /// equations, which hold for small rotations only. Warned of in steps with large
     /// deformations, and found in the output of a CalculiX run of another input file.
     RigidBeamNodes,
-    /// A plastic hardening curve CalculiX rejects: no elasticity, a row without a yield
+    /// A plastic hardening curve the solver rejects: no elasticity, a row without a yield
     /// stress, or plastic strains that do not start at 0 and grow.
     InvalidPlastic,
     /// A creep law with nonpositive constants, or without elasticity.
@@ -70,7 +72,7 @@ pub enum Problem {
     /// Truss nodes that no bar or support holds in some direction.
     Mechanism,
     /// A pre-tension load locked in the first step it acts in: there is no length of a
-    /// previous step to keep, so CalculiX holds the bolt at its unstretched length.
+    /// previous step to keep, so the solver holds the bolt at its unstretched length.
     LockWithoutPreload,
     /// A bolt whose cut cannot be made: no faces of solid elements, or a side missing.
     InvalidBolt,
@@ -88,7 +90,7 @@ pub enum Problem {
     ConflictingBoundaries,
     LoadOnFixedNodes,
     RotationsIgnored,
-    /// Beam nodes with some but not all of their rotations given: CalculiX holds them all.
+    /// Beam nodes with some but not all of their rotations given: the solver holds them all.
     PartialBeamRotations,
     /// A submodel boundary condition in a model without a global results file.
     NoGlobalResults,
@@ -117,30 +119,30 @@ pub enum Problem {
     /// A sensitivity step without the static or frequency step before it whose solution
     /// its design responses need.
     NoSensitivityBase,
-    /// A later sensitivity step with another design region: CalculiX reads one, the first.
+    /// A later sensitivity step with another design region: the solver reads one, the first.
     DesignRegionIgnored,
     /// A Visco step in a model whose materials have no creep law: it is a static step.
     NoCreep,
     /// A step CalculiX's general beam (user element U1) cannot take: large deformations,
     /// buckling, direct dynamics, heat transfer.
     GeneralBeamStep,
-    /// A cyclic symmetry tie CalculiX rejects, or nodal diameters beyond what its sectors
+    /// A cyclic symmetry tie the solver rejects, or nodal diameters beyond what its sectors
     /// carry.
     InvalidCyclicSymmetry,
     /// An initial velocity in a model without a Dynamic step.
     VelocityIgnored,
     /// A Coriolis complex frequency step without a centrifugal load before it.
     NoRotation,
-    /// Contact pairs in a frequency step without perturbation: CalculiX ignores them.
+    /// Contact pairs in a frequency step without perturbation: the solver ignores them.
     ContactIgnored,
     /// Contact pairs in a complex frequency step: the Coriolis coupling goes wrong.
     ContactWithCoriolis,
-    /// A contact pair with tied surface behavior that CalculiX rejects: without friction in
+    /// A contact pair with tied surface behavior that the solver rejects: without friction in
     /// its surface interaction or with another method than surface to surface.
     InvalidTiedContact,
-    /// Contact pairs of different formulations: CalculiX takes one for all of them.
+    /// Contact pairs of different formulations: the solver takes one for all of them.
     ContactFormulationsDiffer,
-    /// Mortar contact in a step that is not static: CalculiX takes mortar in static steps
+    /// Mortar contact in a step that is not static: the solver takes mortar in static steps
     /// only.
     MortarNotSupported,
     /// A contact region whose sides do not touch in the mesh: a bonded one ties nothing,
@@ -149,7 +151,7 @@ pub enum Problem {
     /// A region of no separation in a step with large deformations: its equations hold for
     /// small displacements only.
     NoSeparationLargeDeformation,
-    /// A step switches a contact region off or on that CalculiX cannot switch: a tie, the
+    /// A step switches a contact region off or on that the solver cannot switch: a tie, the
     /// equations of no separation, or a region deactivated as a whole.
     ContactChangeIgnored,
     /// A history output prints the contact values of a region that has none: a tie, the
@@ -165,6 +167,9 @@ pub enum Problem {
     RotationIn2d,
     /// Any other `*ERROR` of the solver output.
     SolverError,
+    /// An item the analysis cannot be set up with: the lowering of the model into the
+    /// solver's input stopped at it (an empty region, a missing amplitude).
+    NotLowered,
 }
 
 impl Problem {
@@ -209,6 +214,7 @@ impl Problem {
             Problem::MissingReference => "Missing reference",
             Problem::InvalidSection => "Section does not fit its elements",
             Problem::NoSection => "Elements without material",
+            Problem::OverlappingSections => "Part in more than one section",
             Problem::NoElastic => "Material without elasticity",
             Problem::NoDensity => "Material without density",
             Problem::NoConductivity => "Material without conductivity",
@@ -269,10 +275,11 @@ impl Problem {
             Problem::MpcAndSpc => "Degree of freedom bound twice",
             Problem::RotationIn2d => "Rotation in a 2D model",
             Problem::SolverError => "Solver error",
+            Problem::NotLowered => "Analysis not set up",
         }
     }
 
-    /// What goes wrong and why CalculiX cannot cope with it.
+    /// What goes wrong and why the solver cannot cope with it.
     pub fn explanation(self) -> &'static str {
         match self {
             Problem::MissingReference => {
@@ -284,28 +291,33 @@ impl Problem {
                 "The type of the section and the elements of its region do not go together: \
                  beams and trusses need line elements, solid sections solid or plane \
                  elements, shell and membrane sections surface elements of a 3D model. \
-                 Membranes must be linear, since CalculiX computes quadratic membranes \
-                 (M3D6, M3D8) wrongly. Dimensions such as a thickness of 0 are rejected too. \
+                 Membranes must be linear: quadratic membranes \
+                 (M3D6, M3D8) are not supported. Dimensions such as a thickness of 0 are rejected too. \
                  The input file cannot be written like this."
             }
             Problem::NoSection => {
-                "CalculiX needs a material for every element. Elements that no section \
-                 covers abort the run with \"no material was assigned to element\"."
+                "The solver needs a material for every element. Elements that no section \
+                 covers abort the run."
+            }
+            Problem::OverlappingSections => {
+                "An element may belong to one section only. When the regions of two sections \
+                 share elements (for example the same part in two sections), the element \
+                 would get two materials and two section definitions, and only one of them \
+                 can apply."
             }
             Problem::NoElastic => {
                 "A section uses this material, but it has no Young's modulus and no \
-                 Poisson's ratio. Without them there is no stiffness; CalculiX aborts \
-                 with \"no elastic constants were assigned\"."
+                 Poisson's ratio. Without them there is no stiffness and the \
+                 run aborts."
             }
             Problem::NoDensity => {
                 "A Frequency step, a Dynamic step, a transient heat transfer as well as \
                  gravity and centrifugal loads need the mass of the model. Without a \
-                 density CalculiX aborts with \"no density was assigned\"."
+                 density the run aborts."
             }
             Problem::RigidBeamNodes => {
-                "CalculiX refuses nodes of beams, trusses, shells and membranes in a rigid \
-                 body (\"nodes belonging to beam elements must not be subject to a RIGID \
-                 MPC\"), because it expands these elements into solids. Nodalis therefore \
+                "Nodes of beams, trusses, shells and membranes cannot be part of a rigid \
+                 body, because the solver expands these elements into solids. Nodalis therefore \
                  couples such nodes of a Rigid Body constraint or a rigid displacement point \
                  with linear equations to the point. They are exact for small rotations, as \
                  in a linear analysis; with large deformations (NLGEOM) and large rotations \
@@ -313,16 +325,14 @@ impl Problem {
                  the rotations of beam and shell nodes are not coupled."
             }
             Problem::TieNodesNotTied => {
-                "CalculiX ties a slave node of a bonded contact region or tie only if the \
+                "The solver ties a slave node of a bonded contact region or tie only if the \
                  master side is closer than the position tolerance. These nodes are further \
                  away: they stay unconnected, the parts can open there and the stresses next \
-                 to them are wrong. CalculiX lists the nodes in the file \
-                 <job>_WarnNodeMissTiedContact.nam of the working directory."
+                 to them are wrong. The solver output lists the nodes."
             }
             Problem::HeldRigidBodyNodes => {
                 "A node of a rigid body follows its reference point; a boundary condition on \
-                 it binds it a second time, which CalculiX refuses (\"dependent side of a MPC \
-                 and a SPC\"). Nodalis leaves these nodes out of the rigid body: they keep \
+                 it binds it a second time, which the solver refuses. Nodalis leaves these nodes out of the rigid body: they keep \
                  their boundary condition, and the rigid body is not held by it."
             }
             Problem::SharedRigidBody => {
@@ -337,42 +347,39 @@ impl Problem {
                  point there is no node to apply it to; the input file would be incomplete."
             }
             Problem::InvalidCreep => {
-                "CalculiX reads Norton's creep law only after an isotropic elasticity and \
+                "The solver reads Norton's creep law only after an isotropic elasticity and \
                  refuses a constant A or an exponent n that is not positive."
             }
             Problem::InvalidPlastic => {
                 "The hardening curve of a plastic material lists the yield stress over the \
                  plastic strain. Every row needs a stress above 0, the first row of each \
                  temperature starts at plastic strain 0 and the strain grows from row to \
-                 row; plasticity also needs the elastic constants. Otherwise CalculiX stops \
-                 with \"*PLASTIC: the plastic strain must be increasing\" or gives a wrong \
-                 stiffness."
+                 row; plasticity also needs the elastic constants. Otherwise the run stops \
+                 or gives a wrong stiffness."
             }
             Problem::NoConductivity => {
-                "A heat transfer needs the thermal conductivity of every material. \
-                 CalculiX only warns (\"no conductivity constants were assigned\") and \
-                 then crashes while solving."
+                "A heat transfer needs the thermal conductivity of every material; \
+                 without it the run fails."
             }
             Problem::NoSpecificHeat => {
-                "A transient heat transfer needs the specific heat. CalculiX aborts \
-                 with \"no specific heat was assigned\"."
+                "A transient heat transfer needs the specific heat; without it the \
+                 run aborts."
             }
             Problem::NoInitialTemperature => {
                 "A transient heat transfer starts from an initial temperature, and a \
                  prescribed temperature (Defined Field) expands the model relative to it. \
-                 Without it CalculiX aborts with \"please define initial conditions for \
-                 the temperature\" or \"no thermal *INITIAL CONDITIONS are given\"."
+                 Without it the run aborts."
             }
             Problem::InvalidElastic => {
                 "Young's modulus must be greater than 0 and Poisson's ratio must lie \
                  between -1 and 0.5 (0.5 would be an incompressible material, which a \
-                 linear elastic model cannot represent). CalculiX rejects the material \
+                 linear elastic model cannot represent). The solver rejects the material \
                  when reading the input."
             }
             Problem::DistortedElements => {
                 "These elements are inverted or so badly distorted that their Jacobian \
-                 determinant is not positive at an integration point. CalculiX aborts \
-                 with \"nonpositive jacobian determinant in element\". Typical causes \
+                 determinant is not positive at an integration point, and the run \
+                 aborts. Typical causes \
                  are quadratic tetrahedra whose midside nodes were moved onto a strongly \
                  curved face, very thin regions, or 2D elements whose nodes are numbered \
                  clockwise."
@@ -380,7 +387,7 @@ impl Problem {
             Problem::SpinAboutPins => {
                 "These beams are held by pins, nodes with all displacements and no rotation \
                  given, which leave them free to turn about the line through the pins. \
-                 Nothing loads this rotation, and CalculiX solves such models in linear and \
+                 Nothing loads this rotation, and the solver solves such models in linear and \
                  nonlinear steps alike; the results are valid. Only a moment about that line \
                  would turn the beams without limit."
             }
@@ -390,28 +397,28 @@ impl Problem {
                  tied contact connects them to supported parts. A Compression Only \
                  support holds only perpendicular to its surface: on a flat face the \
                  part can still slide and turn in the plane. The stiffness matrix is \
-                 then singular. Depending on the matrix solver CalculiX aborts with \"zero \
-                 pivot\" or returns huge, useless displacements without an error."
+                 then singular. Depending on the matrix solver the run aborts \
+                 or returns huge, useless displacements without an error."
             }
             Problem::Mechanism => {
                 "Trusses (Truss Section) carry axial force only. A node at which all \
                  trusses lie on one line or in one plane is not held across it: a truss \
                  of several elements buckles at every inner node without resistance, and \
                  a plane truss can move perpendicular to its plane. The stiffness matrix \
-                 is singular; CalculiX does not report this but returns huge, useless \
+                 is singular; the solver does not report this but returns huge, useless \
                  displacements."
             }
             Problem::HeldOnlyByContact => {
                 "These parts are held only by contact pairs without tied surface \
                  behavior. At the start of the \
                  analysis a contact carries load only once it is closed; until then the \
-                 parts can drift away freely. This often leads to \"zero pivot\", to \
-                 \"too many cutbacks\" or to very long analyses."
+                 parts can drift away freely. This often leads to a singular system, to \
+                 too many cutbacks or to very long analyses."
             }
             Problem::ConflictingBoundaries => {
                 "In this step the same nodes are prescribed by several boundary \
                  conditions with different values, e.g. a face fixed and an adjacent \
-                 edge with a displacement. CalculiX does not report this but uses the \
+                 edge with a displacement. The solver does not report this but uses the \
                  value written last; the result then depends on the order in the tree."
             }
             Problem::LoadOnFixedNodes => {
@@ -421,10 +428,10 @@ impl Problem {
             Problem::RotationsIgnored => {
                 "Only beam and shell nodes have rotations (UR1 to UR3). Solid and 2D \
                  elements have displacements only; prescribed rotations are ignored or \
-                 abort the run in 2D models (\"mpc of type is unknown\")."
+                 abort the run in 2D models."
             }
             Problem::PartialBeamRotations => {
-                "CalculiX expands beams into solid elements. A beam node with a given \
+                "The solver expands beams into solid elements. A beam node with a given \
                  rotation becomes a rigid knot of its cross section, and the knot is held \
                  in all three rotations even if only one of them is given: a pin that \
                  should only stop the twist acts as a clamp, and its reaction forces are \
@@ -456,14 +463,13 @@ impl Problem {
             }
             Problem::SkewedSymmetryShared => {
                 "A symmetry plane that is not a coordinate plane is written with a local \
-                 coordinate system for its nodes (*TRANSFORM). CalculiX then reads every \
+                 coordinate system for its nodes (*TRANSFORM). The solver then reads every \
                  boundary condition and point load at these nodes in that local system \
                  (x along the plane normal), and a node can have only one such system."
             }
             Problem::IncrementExceedsStep => {
-                "The initial increment is larger than the time period of the step. \
-                 CalculiX rejects the step with \"initial increment size exceeds step \
-                 size\"."
+                "The initial increment is larger than the time period of the step, \
+                 which the solver rejects."
             }
             Problem::WheelOffSurface => {
                 "At some positions of the moving load a wheel is partly or fully off the \
@@ -482,27 +488,26 @@ impl Problem {
             Problem::UnusedAmplitude => {
                 "No boundary condition, load or defined field refers to this amplitude, so it \
                  has no effect. Loads and boundary conditions without an amplitude follow \
-                 CalculiX's default ramp or step."
+                 the default ramp or step."
             }
             Problem::NoExpansion => {
                 "A defined temperature (Defined Field) deforms the model only through the \
                  thermal expansion of the materials. Without an expansion coefficient \
-                 CalculiX runs, but the temperature has no effect."
+                 the analysis runs, but the temperature has no effect."
             }
             Problem::NoStoredModes => {
                 "Modal Dynamics, Steady State Dynamics and Complex Frequency steps work on \
-                 the eigenmodes a previous Frequency step with Storage wrote to the .eig \
-                 file. Without it CalculiX stops with \"error opening the eigenvalue file\" \
-                 or \"the eigenvalue file does not exist\"."
+                 the eigenmodes a previous Frequency step with Storage keeps. Without \
+                 them the run stops."
             }
             Problem::NoSensitivityBase => {
                 "A Sensitivity step differentiates the solution of the step right before it: \
                  strain energy needs a Static step, eigenfrequencies a Frequency step that \
-                 stores its eigenmodes, mass either. Otherwise CalculiX stops (\"cannot open \
-                 eigenvalue file\") or computes the wrong responses."
+                 stores its eigenmodes, mass either. Otherwise the run stops \
+                 or computes the wrong responses."
             }
             Problem::DesignRegionIgnored => {
-                "CalculiX defines the design variables once for the model. Nodalis writes \
+                "The solver defines the design variables once for the model. Nodalis writes \
                  the design region of the first Sensitivity step; the regions of later ones \
                  are not used."
             }
@@ -511,16 +516,16 @@ impl Problem {
                  period. Without such a material it computes the same as a Static step."
             }
             Problem::GeneralBeamStep => {
-                "I, T, channel, angle and general profiles are not beam sections of CalculiX \
-                 itself: they are written as general sections of its user element U1, a \
+                "I, T, channel, angle and general profiles are not native beam sections: \
+                 they are written as general sections of the user element U1, a \
                  linear beam. It computes Static steps without large deformations (Nlgeom), \
-                 Frequency steps (CalculiX 2.23, not 2.21) and the modal and steady state \
-                 dynamics built on them; other steps stop CalculiX with an error."
+                 Frequency steps and the modal and steady state \
+                 dynamics built on them; other steps stop the run with an error."
             }
             Problem::InvalidCyclicSymmetry => {
                 "A cyclic symmetry tie models a whole part by one sector of a 3D mesh. The \
                  number of sectors N is 360 degrees over the angle between the two cut faces \
-                 about the axis, which must be a whole number: CalculiX solves only sectors \
+                 about the axis, which must be a whole number: the solver solves only sectors \
                  that close the full circle. A model of N sectors carries the nodal diameters \
                  0 to N/2 only."
             }
@@ -536,8 +541,8 @@ impl Problem {
             }
             Problem::BoltFacesUsedTwice => {
                 "The bolt joins the two sides of its cut itself. A tie or contact pair on the \
-                 same faces binds the nodes a second time: CalculiX then loops forever while \
-                 resolving the constraints, or the contact does not converge."
+                 same faces binds the nodes a second time: the constraints then conflict, \
+                 or the contact does not converge."
             }
             Problem::BoltHeldAtCut => {
                 "A bonded or rough contact region touches the cut of the \
@@ -546,7 +551,7 @@ impl Problem {
             }
             Problem::LockWithoutPreload => {
                 "Lock keeps the length the bolt had at the end of the previous step. In the \
-                 first step the pre-tension acts in there is none, and CalculiX holds the bolt \
+                 first step the pre-tension acts in there is none, and the solver holds the bolt \
                  at its unstretched length: the bolt carries no preload."
             }
             Problem::VelocityIgnored => {
@@ -559,19 +564,19 @@ impl Problem {
                  complex eigenfrequencies are those of the Frequency step."
             }
             Problem::ContactIgnored => {
-                "CalculiX takes contact into account in a Frequency step only as a \
+                "The solver takes contact into account in a Frequency step only as a \
                  perturbation of the static step before it. Without Perturbation the contact \
                  pairs, tied ones included, are left out without a message: parts held only \
                  by them float and give eigenfrequencies near zero or on weak springs."
             }
             Problem::ContactFormulationsDiffer => {
-                "CalculiX takes one formulation (node to surface, surface to surface, mortar \
+                "The solver takes one formulation (node to surface, surface to surface, mortar \
                  or massless) for all contact pairs of a model. A contact pair defined by hand \
                  has another one than the contact regions, which use the formulation of the \
                  Connections."
             }
             Problem::MortarNotSupported => {
-                "CalculiX takes mortar contact in static steps only. In frequency, \
+                "The solver takes mortar contact in static steps only. In frequency, \
                  buckling, dynamic and thermal steps the run aborts or the contact is left \
                  out."
             }
@@ -588,40 +593,39 @@ impl Problem {
                  them together: gaps open or the sides press into each other."
             }
             Problem::ContactOutputIgnored => {
-                "CalculiX prints contact values (*CONTACT PRINT) of contact pairs only: a \
+                "The solver prints contact values (*CONTACT PRINT) of contact pairs only: a \
                  bonded region written as a tie and a region of no separation have no \
                  contact elements, and a deactivated region is not written. The history \
                  output is left out."
             }
             Problem::ContactChangeIgnored => {
-                "CalculiX switches contact pairs off and on within the steps, but not ties \
+                "The solver switches contact pairs off and on within the steps, but not ties \
                  and constraint equations: a bonded region written as a tie and a region of \
                  no separation hold in every step. A region deactivated as a whole is not \
                  written at all, so no step can switch it on."
             }
             Problem::InvalidTiedContact => {
-                "CalculiX offers the Tied surface behavior only for Surface to surface \
+                "The solver offers the Tied surface behavior only for Surface to surface \
                  contact pairs, and it needs a Friction model in the same surface \
                  interaction: the stick slope of the friction is the stiffness of the tie \
                  along the surfaces (the friction coefficient is irrelevant). Without \
-                 friction the run aborts with \"a stick slope using the *FRICTION card is \
-                 mandatory\"; with Node to surface it aborts too, and Mortar fails."
+                 friction the run aborts; with Node to surface it aborts too, and Mortar fails."
             }
             Problem::ContactWithCoriolis => {
-                "CalculiX computes the Coriolis coupling of a Complex Frequency step without \
+                "The solver computes the Coriolis coupling of a Complex Frequency step without \
                  the contact springs of the Frequency step. With parts joined by contact \
                  pairs whirl pairs do not split, and modes go missing from the results."
             }
             Problem::NoConvergence => {
-                "The Newton iteration did not converge; CalculiX kept reducing the \
-                 increment and gave up (\"too many cutbacks\" or \"increment size \
-                 smaller than minimum\"). The cause is usually contacts, poorly supported \
+                "The Newton iteration did not converge; the solver kept reducing the \
+                 increment and gave up (too many cutbacks or an increment smaller than \
+                 the minimum). The cause is usually contacts, poorly supported \
                  parts or too large loads in a nonlinear analysis. An even smaller \
                  minimum increment rarely helps."
             }
             Problem::MpcAndSpc => {
                 "A degree of freedom is both fixed by a boundary condition and bound as \
-                 the dependent degree of freedom of an equation (MPC). CalculiX then aborts. \
+                 the dependent degree of freedom of an equation (MPC). The run then aborts. \
                  Nodalis keeps the equations and rigid bodies it writes itself off the \
                  degrees of freedom that boundary conditions or other constraints hold (the \
                  solver output lists what it changed), so the overlap comes from a \
@@ -629,9 +633,8 @@ impl Problem {
             }
             Problem::RotationIn2d => {
                 "Rotations (degrees of freedom 4 to 6) were fixed in a 2D model. \
-                 CalculiX expands 2D elements internally into solid elements and cannot \
-                 prescribe rotations for them; the run aborts with \"mpc of type is \
-                 unknown\" or a floating point error."
+                 The solver expands 2D elements internally into solid elements and cannot \
+                 prescribe rotations for them; the run aborts."
             }
             Problem::NoPhysicalConstants => {
                 "Radiation (*RADIATE) depends on the fourth power of the absolute \
@@ -642,6 +645,10 @@ impl Problem {
             Problem::SolverError => {
                 "The solver aborted with an error message that Nodalis does not know. \
                  The exact text is shown in the Monitor."
+            }
+            Problem::NotLowered => {
+                "The analysis cannot be set up with this item: the solver's input cannot \
+                 be built from it as it is."
             }
         }
     }
@@ -661,6 +668,10 @@ impl Problem {
             Problem::NoSection => {
                 "Under Sections create a section for the part or extend an existing one \
                  to it."
+            }
+            Problem::OverlappingSections => {
+                "Remove the part from all but one section, or split the part with element \
+                 sets so that every element is in exactly one section."
             }
             Problem::NoElastic => {
                 "Edit the material and enter Young's modulus and Poisson's ratio, or \
@@ -757,7 +768,7 @@ impl Problem {
             Problem::PartialBeamRotations => {
                 "Give all three rotations UR1 to UR3 of the node (a clamp) or none of them \
                  (a pin). A pin at each end of a beam may leave it free to spin about the \
-                 line through both; CalculiX copes with that."
+                 line through both; the solver copes with that."
             }
             Problem::NoSymmetryPlane => {
                 "Select the planar faces of the cut (or the edge of shells), or enter the \
@@ -777,7 +788,7 @@ impl Problem {
                  plane."
             }
             Problem::NoGlobalResults => {
-                "Open Model > Model Properties, set the model type to Submodel and pick the results \
+                "Open Model Properties (Material tab of the FE Model ribbon), set the model type to Submodel and pick the results \
                  file (.frd) of the global model."
             }
             Problem::IncrementExceedsStep => {
@@ -852,7 +863,7 @@ impl Problem {
             }
             Problem::ContactIgnored => {
                 "Tick Perturbation in the Frequency step (after a static step), or join \
-                 bonded parts with a Tie constraint instead of a tied contact pair (Interaction > Create Tie)."
+                 bonded parts with a Tie constraint instead of a tied contact pair (Connections > Tie)."
             }
             Problem::ContactFormulationsDiffer => {
                 "Set the contact pair to the formulation of the contact regions, or choose \
@@ -884,11 +895,11 @@ impl Problem {
             }
             Problem::InvalidTiedContact => {
                 "Edit the surface interaction and add Friction, and set the method of the \
-                 contact pairs to Surface to surface. To bond parts, a Tie (Interaction > \
-                 Create Tie) works with every method."
+                 contact pairs to Surface to surface. To bond parts, a Tie (Connections > \
+                 Tie) works with every method."
             }
             Problem::ContactWithCoriolis => {
-                "Join bonded parts with a Tie constraint (Interaction > Create Tie) instead \
+                "Join bonded parts with a Tie constraint (Connections > Tie) instead \
                  of a contact pair with tied surface behavior."
             }
             Problem::NoConvergence => {
@@ -904,13 +915,14 @@ impl Problem {
             }
             Problem::RotationIn2d => "In 2D models prescribe only U1 and U2.",
             Problem::NoPhysicalConstants => {
-                "Open Model > Model Properties and enter Absolute zero and Stefan-Boltzmann \
+                "Open Model Properties (Material tab of the FE Model ribbon) and enter Absolute zero and Stefan-Boltzmann \
                  under Physical Constants; Defaults fills them in for the unit system."
             }
             Problem::SolverError => {
                 "Read the message in the Monitor; \"Check Model\" in the context menu of \
                  the analysis often helps."
             }
+            Problem::NotLowered => "Correct the item as the message says.",
         }
     }
 }
@@ -925,7 +937,7 @@ pub struct Finding {
 }
 
 impl Finding {
-    pub(crate) fn new(item: ModelItem, problem: Problem, detail: impl Into<String>) -> Self {
+    pub fn new(item: ModelItem, problem: Problem, detail: impl Into<String>) -> Self {
         Self {
             item,
             problem,
@@ -1031,7 +1043,7 @@ impl MeshCheck {
 }
 
 impl FeModel {
-    /// Cyclic symmetry ties CalculiX rejects, such as cut faces that do not divide the
+    /// Cyclic symmetry ties the solver rejects, such as cut faces that do not divide the
     /// full circle, and nodal diameters the sectors cannot carry.
     fn check_cyclic_symmetry(&self, mesh: &FeMesh, findings: &mut Vec<Finding>) {
         for (i, tie) in self.ties.iter().enumerate().filter(|(_, t)| t.active) {
@@ -1118,7 +1130,7 @@ impl FeModel {
     }
 
     /// Weak springs to ground for the parts that only contacts hold in a static step, so
-    /// that CalculiX does not stall on the free motions before the contacts close: with
+    /// that the solver does not stall on the free motions before the contacts close: with
     /// frictionless contact, an initial gap or Nlgeom it otherwise gives up with "too many
     /// cutbacks", and node to surface contact drifts sideways by arbitrary amounts. Each
     /// part gets a stiffness of [`WEAK_SPRING_FACTOR`](crate::WEAK_SPRING_FACTOR) E L per
@@ -1189,7 +1201,7 @@ impl FeModel {
     }
 
     /// Contact regions whose sides do not touch, contact pairs whose formulation differs
-    /// from that of the others, and the mortar formulation where CalculiX does not take it.
+    /// from that of the others, and the mortar formulation where the solver does not take it.
     fn check_contact_regions(&self, mesh: &FeMesh, lowered: &FeModel, findings: &mut Vec<Finding>) {
         for (i, check) in self.check_contacts(mesh).into_iter().enumerate() {
             let region = &self.contact_regions[i];
@@ -1409,7 +1421,7 @@ impl FeModel {
                 let previous = (self.steps[..s].iter()).rev().find(|p| p.active);
                 let fits = match previous.map(|p| &p.kind) {
                     Some(StepKind::Static(_)) => !settings.eigenfrequency,
-                    // CalculiX reads the eigenmodes from the .eig file.
+                    // The solver reads the eigenmodes a previous frequency step stored.
                     Some(StepKind::Frequency(f)) => {
                         !settings.strain_energy && (f.storage || !settings.eigenfrequency)
                     }
@@ -1447,7 +1459,7 @@ impl FeModel {
                     format!("{} is transient", step.name),
                 ));
             }
-            // CalculiX refuses a *Temperature without an initial temperature.
+            // The solver refuses a *Temperature without an initial temperature.
             let defined =
                 step.kind.supports_defined_fields() && step.defined_fields.iter().any(|f| f.active);
             if defined && !initial_temperature {
@@ -1479,7 +1491,7 @@ impl FeModel {
         findings
     }
 
-    /// Contact pairs with tied surface behavior CalculiX rejects.
+    /// Contact pairs with tied surface behavior the solver rejects.
     /// Nodes in more than one rigid body: of rigid body constraints, and of remote
     /// displacements, one per selection as in the input file.
     fn check_shared_rigid_bodies(&self, mesh: &FeMesh, findings: &mut Vec<Finding>) {
@@ -1827,7 +1839,7 @@ impl FeModel {
 
     /// Parts with elements no section covers.
     /// The beam sections on elements whose cross-section is a general profile, which
-    /// CalculiX knows only as the user element U1.
+    /// the solver knows only as the user element U1.
     fn general_beam_sections(&self, mesh: &FeMesh) -> Vec<&str> {
         (self.sections.iter())
             .filter(|s| {
@@ -1840,6 +1852,31 @@ impl FeModel {
     }
 
     fn check_sections(&self, mesh: &FeMesh, findings: &mut Vec<Finding>) {
+        // Every element may be in one section only; the later section is flagged.
+        let mut owner: std::collections::HashMap<ElementId, usize> = Default::default();
+        let mut clashes: Vec<(usize, usize, usize)> = Vec::new();
+        for (j, section) in self.sections.iter().enumerate() {
+            let mut with: std::collections::BTreeMap<usize, usize> = Default::default();
+            for e in section.region.elements(mesh) {
+                match owner.get(&e) {
+                    Some(&i) => *with.entry(i).or_default() += 1,
+                    None => {
+                        owner.insert(e, j);
+                    }
+                }
+            }
+            clashes.extend(with.into_iter().map(|(i, n)| (j, i, n)));
+        }
+        for (j, i, n) in clashes {
+            findings.push(Finding::new(
+                ModelItem::Section(j),
+                Problem::OverlappingSections,
+                format!(
+                    "{} shares {n} elements with {}",
+                    self.sections[j].name, self.sections[i].name
+                ),
+            ));
+        }
         let whole: HashSet<&str> = (self.sections.iter())
             .filter_map(|s| match &s.region {
                 crate::Region::Parts(names) => Some(names.iter().map(String::as_str)),
@@ -2634,7 +2671,7 @@ impl FeModel {
     /// end nodes along its axis only, so a node is held when its bars, supports and springs
     /// span all three directions; tied nodes are written as one node and count together.
     /// Inner nodes of a bar meshed with several elements and the nodes of a plane truss
-    /// fail this, and CalculiX solves the singular system without a word.
+    /// fail this, and the solver solves the singular system without a word.
     fn check_trusses(
         &self,
         s: usize,
@@ -3074,60 +3111,29 @@ fn eigen(matrix: &[[f64; 6]; 6], n: usize) -> ([f64; 6], [[f64; 6]; 6]) {
     (values, vectors)
 }
 
-/// Warnings CalculiX gives in its output after any run that point to wrong results: slave
-/// nodes of ties it did not tie because the master side is too far away ("no tied MPC
-/// generated for node ... too far away; distance: ... tolerance: ...").
+/// Warnings the solver gives in its output after any run that point to wrong results: slave
+/// nodes of ties it did not tie because the master side is too far away ("*WARNING in *TIE
+/// <name>: <n> slave node(s) are too far away from the master surface and are not tied: <ids>").
 pub fn diagnose_solver_warnings(lines: &[String]) -> Vec<Finding> {
-    let text = lines.join(" ").to_ascii_lowercase();
-    let marker = "too far away; distance:";
-    let (mut count, mut distance, mut tolerance) = (0usize, 0.0f64, 0.0f64);
-    for (at, _) in text.match_indices(marker) {
-        let mut words = text[at + marker.len()..].split_whitespace();
-        let Some(d) = words.next().and_then(|w| w.parse::<f64>().ok()) else {
-            continue;
-        };
-        count += 1;
-        distance = distance.max(d);
-        if words.next() == Some("tolerance:")
-            && let Some(t) = words.next().and_then(|w| w.parse::<f64>().ok())
-        {
-            tolerance = tolerance.max(t);
-        }
-    }
-    // The Nodalis solver: "*WARNING in *TIE <name>: <n> slave node(s) are too far away
-    // from the master surface and are not tied: <ids>".
-    let plxs_marker = "slave node(s) are too far away from the master surface";
+    let marker = "slave node(s) are too far away from the master surface";
     let untied: usize = (lines.iter())
         .filter_map(|line| {
-            let at = line.find(plxs_marker)?;
+            let at = line.find(marker)?;
             line[..at].split_whitespace().last()?.parse::<usize>().ok()
         })
         .sum();
-    if count == 0 && untied == 0 {
+    if untied == 0 {
         return Vec::new();
-    }
-    if count == 0 {
-        return vec![Finding::new(
-            ModelItem::Analysis,
-            Problem::TieNodesNotTied,
-            format!(
-                "{untied} slave nodes not tied: farther than the tolerance from the master side"
-            ),
-        )];
     }
     vec![Finding::new(
         ModelItem::Analysis,
         Problem::TieNodesNotTied,
-        format!(
-            "{count} slave nodes not tied: up to {distance:.4e} from the master side, \
-             tolerance {tolerance:.4e} (lengths in the units of the input file)"
-        ),
+        format!("{untied} slave nodes not tied: farther than the tolerance from the master side"),
     )]
 }
 
 /// Problems the solver reports in its output after a failed run, mapped to the explanations of
-/// the checks. Distorted elements and elements without material are also attached to their
-/// parts.
+/// the checks. Elements without a section are also attached to their parts.
 pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
     let text = lines.join(" ").to_ascii_lowercase();
     let text: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -3137,104 +3143,72 @@ pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
             findings.push(Finding::new(ModelItem::Analysis, problem, detail));
         }
     };
-    let elements_after = |marker: &str| -> Vec<ElementId> {
-        let mut ids: Vec<ElementId> = (text.match_indices(marker))
-            .filter_map(|(at, _)| {
-                let rest = &text[at + marker.len()..];
-                rest.split_whitespace().next()?.parse().ok()
-            })
-            .collect();
-        ids.sort_unstable();
-        ids.dedup();
-        ids
-    };
+    // "element <id> has no section": the id is the word before the marker.
+    let mut no_section: Vec<ElementId> = (text.match_indices(" has no section"))
+        .filter_map(|(at, _)| text[..at].split_whitespace().last()?.parse().ok())
+        .collect();
+    no_section.sort_unstable();
+    no_section.dedup();
     let mut part_findings = Vec::new();
-    for (problem, marker) in [
-        (
-            Problem::DistortedElements,
-            "nonpositive jacobian determinant in element",
-        ),
-        (Problem::NoSection, "no material was assigned to element"),
-    ] {
-        let ids = elements_after(marker);
-        if ids.is_empty() {
-            continue;
-        }
+    if !no_section.is_empty() {
         add(
             &mut findings,
-            problem,
+            Problem::NoSection,
             format!(
                 "{} element(s), e.g. {}",
-                ids.len(),
-                list(ids.iter().take(5))
+                no_section.len(),
+                list(no_section.iter().take(5))
             ),
         );
         for (p, part) in mesh.parts.iter().enumerate() {
-            let in_part: Vec<ElementId> = (ids.iter())
+            let in_part: Vec<ElementId> = (no_section.iter())
                 .filter(|id| part.elements.contains(id))
                 .copied()
                 .collect();
             if !in_part.is_empty() {
                 part_findings.push(Finding::new(
                     ModelItem::Part(p),
-                    problem,
+                    Problem::NoSection,
                     format!(
-                        "According to CalculiX: element(s) {}",
+                        "According to the solver: element(s) {}",
                         list(in_part.iter().take(5))
                     ),
                 ));
             }
         }
     }
-    let known: [(Problem, &[&str]); 14] = [
-        (Problem::NoElastic, &["no elastic constants"]),
+    let known: [(Problem, &[&str]); 7] = [
         (
-            Problem::InvalidPlastic,
-            &["reading *plastic", "plastic strain must be"],
+            Problem::NoElastic,
+            &["young's modulus and poisson's ratio needed"],
         ),
-        (Problem::NoDensity, &["no density was assigned"]),
-        (Problem::NoConductivity, &["no conductivity constants"]),
-        (Problem::NoSpecificHeat, &["no specific heat was assigned"]),
+        (Problem::NoDensity, &["has no density", "has no *density"]),
+        (Problem::NoConductivity, &["has no *conductivity"]),
         (
-            Problem::NoInitialTemperature,
-            &["define initial conditions for the temperature"],
-        ),
-        (
-            Problem::InvalidElastic,
-            &["poisson coefficient should be less than 0.5"],
+            Problem::NoSpecificHeat,
+            &["has no *specific heat", "needs *density and *specific heat"],
         ),
         (
             Problem::RigidBodyMotion,
-            &["zero pivot", "matrix is singular", "singular matrix"],
+            &["matrix is singular", "free motion(s)"],
         ),
         (
             Problem::NoConvergence,
             &[
-                "too many cutbacks",
-                "increment size smaller than minimum",
-                "increment size is smaller than minimum",
-                "too far apart",
+                "cutbacks in one increment",
+                "fell below the minimum",
+                "would fall below the minimum",
+                "exceeds the maximum number of increments",
             ],
-        ),
-        (
-            Problem::IncrementExceedsStep,
-            &["initial increment size exceeds step size"],
         ),
         (
             Problem::NoPhysicalConstants,
-            &[
-                "*radiate card was selected",
-                "no *physical constants card",
-                "radiation needs *physical constants",
-            ],
+            &["radiation needs *physical constants"],
         ),
-        (Problem::MpcAndSpc, &["dependent side of a mpc and a spc"]),
-        (Problem::RotationIn2d, &["usermpc: mpc of type"]),
-        (Problem::RigidBeamNodes, &["must not be subject to a rigid"]),
     ];
     for (problem, markers) in known {
         if let Some(marker) = markers.iter().find(|m| text.contains(*m)) {
-            // The line as CalculiX wrote it, if the marker does not span two lines.
+            // The line as the solver wrote it, if the marker does not span two lines.
             let line = (lines.iter().map(|l| l.trim()))
                 .find(|l| l.to_ascii_lowercase().contains(marker))
                 .unwrap_or(marker);
@@ -3966,6 +3940,25 @@ mod tests {
     }
 
     #[test]
+    fn a_part_in_two_sections_is_an_error() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        let mut second = model.sections[0].clone();
+        second.name = "Section-2".into();
+        model.sections.push(second);
+        let found = check(&model, &mesh);
+        assert_eq!(
+            problems(&found),
+            [(ModelItem::Section(1), Problem::OverlappingSections)]
+        );
+        assert_eq!(found[0].severity(), Severity::Error);
+        // Disjoint parts are fine.
+        model.sections[0].region = Region::Parts(vec!["PART-1".into()]);
+        model.sections[1].region = Region::Parts(vec!["PART-2".into()]);
+        assert_eq!(problems(&check(&model, &mesh)), []);
+    }
+
+    #[test]
     fn materials_and_sections_are_checked() {
         let mesh = cubes(2, true);
         let mut model = model(&mesh);
@@ -4041,35 +4034,6 @@ mod tests {
             found.contains(&(ModelItem::Load(0, 0), Problem::NoRigidBody)),
             "{found:?}"
         );
-    }
-
-    #[test]
-    fn untied_slave_nodes_are_found_in_the_solver_output() {
-        let lines: Vec<String> = [
-            " *WARNING in gentiedmpc: no tied MPC",
-            "          generated for node       126382",
-            "          opposite master face found but",
-            "          too far away; distance:    1.6141397112631843E-003",
-            "          tolerance:    9.5492346099999999E-004",
-            " *WARNING in gentiedmpc: no tied MPC",
-            "          generated for node       126385",
-            "          opposite master face found but",
-            "          too far away; distance:    1.7738618684124165E-003",
-            "          tolerance:    9.5492346099999999E-004",
-        ]
-        .map(String::from)
-        .into();
-        let found = diagnose_solver_warnings(&lines);
-        assert_eq!(
-            problems(&found),
-            [(ModelItem::Analysis, Problem::TieNodesNotTied)]
-        );
-        assert_eq!(
-            found[0].detail,
-            "2 slave nodes not tied: up to 1.7739e-3 from the master side, tolerance \
-             9.5492e-4 (lengths in the units of the input file)"
-        );
-        assert!(diagnose_solver_warnings(&["Job finished".into()]).is_empty());
     }
 
     #[test]
@@ -4598,7 +4562,7 @@ mod tests {
         );
     }
 
-    /// CalculiX holds all rotations of a beam node as soon as one is given, so a beam node
+    /// The solver holds all rotations of a beam node as soon as one is given, so a beam node
     /// with some rotations left free is not what it seems.
     #[test]
     fn beam_nodes_take_all_rotations_or_none() {
@@ -4635,7 +4599,7 @@ mod tests {
         });
         // A clamp and a pin.
         assert_eq!(check(&model, &mesh), []);
-        // The pin also stops the twist: CalculiX makes a clamp of it.
+        // The pin also stops the twist: the solver makes a clamp of it.
         model.steps[0].boundary_conditions[1].kind =
             BoundaryKind::displacement([Some(0.0), Some(0.0), Some(0.0), Some(0.0), None, None]);
         assert_eq!(
@@ -4745,10 +4709,8 @@ mod tests {
         model.steps[0].loads[0].region = Region::Nodes(vec![3]);
         if tied {
             model.node_ties.push(crate::NodeTie {
-                name: "Node_Tie-1".into(),
-                active: true,
                 region: Region::Nodes(vec![3, 9]),
-                rotations: true,
+                ..crate::NodeTie::new("Node_Tie-1")
             });
         }
         (mesh, model)
@@ -4845,10 +4807,9 @@ mod tests {
     fn solver_errors_are_explained() {
         let mesh = cubes(2, true);
         let lines: Vec<String> = [
-            " *ERROR in e_c3d: nonpositive jacobian",
-            "        determinant in element           2",
-            "",
-            " *ERROR: too many cutbacks",
+            "*ERROR reading *ELEMENT: element 2 has no section",
+            "*ERROR: the residual force grew; more than 5 cutbacks in one increment \
+             (step 1, increment 3)",
         ]
         .map(String::from)
         .to_vec();
@@ -4856,9 +4817,9 @@ mod tests {
         assert_eq!(
             problems(&findings),
             [
-                (ModelItem::Analysis, Problem::DistortedElements),
+                (ModelItem::Analysis, Problem::NoSection),
                 (ModelItem::Analysis, Problem::NoConvergence),
-                (ModelItem::Part(1), Problem::DistortedElements),
+                (ModelItem::Part(1), Problem::NoSection),
             ]
         );
         let unknown = [" *ERROR in something: new message"].map(String::from);
@@ -4866,12 +4827,9 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].problem, Problem::SolverError);
         assert_eq!(findings[0].detail, "*ERROR in something: new message");
-        let radiate = [
-            " *ERROR reading *RADIATE: *RADIATE card was selected",
-            "        but no *PHYSICAL CONSTANTS card encountered",
-            "        or incomplete (Stefan Boltzmann constant",
-        ]
-        .map(String::from);
+        let radiate =
+            ["*ERROR: radiation needs *PHYSICAL CONSTANTS with ABSOLUTE ZERO and STEFAN BOLTZMANN"]
+                .map(String::from);
         let findings = diagnose_solver_output(&radiate, &mesh);
         assert_eq!(
             problems(&findings),
@@ -4879,22 +4837,24 @@ mod tests {
         );
         assert_eq!(
             findings[0].detail,
-            "The solver reports \"*ERROR reading *RADIATE: *RADIATE card was selected\""
+            "The solver reports \"*ERROR: radiation needs *PHYSICAL CONSTANTS with ABSOLUTE \
+             ZERO and STEFAN BOLTZMANN\""
         );
-        let rigid = [
-            " *ERROR in gen3dmpc: nodes belonging to",
-            "        beam elements must not be",
-            "        subject to a RIGID                MPC.",
+        let heat =
+            ["*ERROR reading *HEAT TRANSFER: material STEEL of element 1 has no *CONDUCTIVITY"]
+                .map(String::from);
+        assert_eq!(
+            problems(&diagnose_solver_output(&heat, &mesh)),
+            [(ModelItem::Analysis, Problem::NoConductivity)]
+        );
+        let singular = [
+            "*ERROR: 4 node(s) of part 1: 6 free motion(s), the stiffness matrix is singular \
+             (step 1, increment 1)",
         ]
         .map(String::from);
         assert_eq!(
-            problems(&diagnose_solver_output(&rigid, &mesh)),
-            [(ModelItem::Analysis, Problem::RigidBeamNodes)]
-        );
-        let unknown = [" *ERROR in something: new message".to_string()];
-        assert_eq!(
-            diagnose_solver_output(&unknown, &mesh)[0].problem,
-            Problem::SolverError
+            problems(&diagnose_solver_output(&singular, &mesh)),
+            [(ModelItem::Analysis, Problem::RigidBodyMotion)]
         );
     }
 }

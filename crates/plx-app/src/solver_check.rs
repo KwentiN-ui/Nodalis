@@ -91,7 +91,9 @@ fn check(name: &'static str, passed: bool, message: String) -> CheckResult {
 /// Timoshenko beam theory and the reactions must balance the load.
 fn tip_force(threads: u32, dir: &Path, equations: LinearSolverChoice) -> CheckResult {
     let (name, job) = match equations {
-        LinearSolverChoice::Direct => ("Cantilever with end load", "Cantilever"),
+        LinearSolverChoice::Direct | LinearSolverChoice::Automatic => {
+            ("Cantilever with end load", "Cantilever")
+        }
         LinearSolverChoice::Iterative => ("Iterative equation solver", "Iterative"),
     };
     let mesh = beam_mesh();
@@ -158,9 +160,11 @@ fn solve(
     mesh: &FeMesh,
     model: &FeModel,
 ) -> Result<FrdImport, String> {
-    let input = plx_io::inp::write_inp(mesh, model, "Nodalis self-test")
-        .map_err(|e| format!("Input file not written: {e}"))?;
-    let mut job = Run::start(threads, dir, name, &input).map_err(|e| format!("Start: {e}"))?;
+    let lowered = plx_io::inp::lower_unvalidated(mesh, model, "Nodalis self-test")
+        .map_err(|e| format!("Analysis not set up: {e}"))?;
+    let prepared = crate::analysis::prepare(lowered);
+    let mut job =
+        Run::start_analysis(threads, dir, name, prepared).map_err(|e| format!("Start: {e}"))?;
     let status = job.wait();
     let output = job.new_output();
     if status != JobStatus::Completed {
@@ -222,8 +226,9 @@ pub(crate) fn solve_beam_built_in(dir: &Path) -> std::path::PathBuf {
     let fixed = (mesh.node_ids().iter().copied()).filter(|&n| mesh.node(n).unwrap()[0] == 0.0);
     let output = plx_model::HistoryOutput::node("H-Output-1", Region::Nodes(fixed.collect()));
     fe.steps[0].history_outputs.push(output);
-    let input = plx_io::inp::write_inp(&mesh, &fe, "built-in").unwrap();
-    let mut run = Run::start(1, dir, "Beam", &input).unwrap();
+    let lowered = plx_io::inp::lower_unvalidated(&mesh, &fe, "built-in").unwrap();
+    let prepared = crate::analysis::prepare(lowered);
+    let mut run = Run::start_analysis(1, dir, "Beam", prepared).unwrap();
     assert_eq!(run.wait(), JobStatus::Completed, "{:?}", run.new_output());
     run.results().unwrap()
 }

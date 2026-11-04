@@ -1,20 +1,19 @@
-//! Constraints written as CalculiX elements, the way PrePoMax's `CalculixFileWriter` splits
+//! Constraints written as CalculiX elements, the way the `CalculixFileWriter` splits
 //! them: springs to ground become `SPRING1` elements with one `*Spring` section per node
 //! and direction, compression only supports become `GAPUNI` elements to fixed ground nodes.
-//! Springs to a surface, which PrePoMax lacks, become `SPRING2` elements from each node of
+//! Springs to a surface become `SPRING2` elements from each node of
 //! the region to a new node that `*Equation`s tie to the closest point of the master
 //! surface. Contact regions of no separation become one `*Equation` per slave node that
 //! holds it to the closest point of the master normal to the surface.
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 
 use plx_mesh::{ElementId, FeMesh, NodeId};
 use plx_model::{
     CompressionOnly, Constraint, ContactBehavior, ContactRegion, FeModel, SideRoles, Spring,
 };
 
-use super::{Keyword, Members, Sets, WriteError, empty, number};
+use super::{Members, Sets, WriteError, empty, number};
 
 /// What the constraints add to the input file besides the mesh.
 #[derive(Default)]
@@ -22,15 +21,42 @@ pub(super) struct Generated {
     /// New nodes, appended to the `*Node` block.
     pub nodes: Vec<(NodeId, [f64; 3])>,
     /// `*Element` blocks of spring and gap elements.
-    pub elements: Vec<Keyword>,
+    pub elements: Vec<ElementBlock>,
     /// `*Spring` and `*Gap` sections.
-    pub sections: Vec<Keyword>,
+    pub sections: Vec<GeneratedSection>,
     /// `*Equation`s, written under the "Constraints" title after the ties.
-    pub equations: Vec<Keyword>,
-    /// Holds the ground nodes of the gap elements in every step.
-    pub boundary: Option<Keyword>,
-    /// PrePoMax's dummy plastic material that makes CalculiX solve gaps nonlinearly.
-    pub material: Option<Keyword>,
+    pub equations: Vec<Vec<super::dofs::Term>>,
+    /// Holds the ground nodes of the gap elements in every step: the node set and the
+    /// number of translations held.
+    pub boundary: Option<(String, usize)>,
+    /// The dummy plastic material that makes the solver solve gaps nonlinearly, by
+    /// its name.
+    pub material: Option<String>,
+}
+
+/// An `*Element` block of generated elements.
+pub(super) struct ElementBlock {
+    pub kind: &'static str,
+    pub elset: Option<String>,
+    pub elements: Vec<(ElementId, Vec<NodeId>)>,
+}
+
+/// A section of generated elements.
+pub(super) enum GeneratedSection {
+    /// `*Spring`: the degrees of freedom (one for SPRING1, two for SPRING2) and the
+    /// stiffness.
+    Spring {
+        elset: String,
+        dofs: Vec<u8>,
+        stiffness: f64,
+    },
+    /// `*Gap`: clearance, direction, and spring stiffness and tensile force if given.
+    Gap {
+        elset: String,
+        clearance: f64,
+        direction: [f64; 3],
+        properties: Option<(f64, f64)>,
+    },
 }
 
 /// Adds the elements, sections and equations of the active springs and supports to `out`,
@@ -82,40 +108,25 @@ pub(super) fn springs(
     }
     *out = writer.out;
     if !writer.gaps.is_empty() {
-        let mut block = String::from("*Element, Type=GAPUNI\n");
-        for (element, [a, b]) in &writer.gaps {
-            let _ = writeln!(block, "{element}, {a}, {b}");
-        }
-        out.elements.push(Keyword::generated(block));
+        out.elements.push(ElementBlock {
+            kind: "GAPUNI",
+            elset: None,
+            elements: (writer.gaps.iter())
+                .map(|(element, nodes)| (*element, nodes.to_vec()))
+                .collect(),
+        });
         let set = sets.unique("Internal_All_Compression_Only_Constraints_NodeSet");
         sets.node_sets.push((set.clone(), writer.ground));
-        let mut text = String::from("** Name: Compression_Only_BC\n*Boundary\n");
-        for dof in 1..=writer.dofs {
-            let _ = writeln!(text, "{set}, {dof}, {dof}, 0");
-        }
-        out.boundary = Some(Keyword::generated(text));
+        out.boundary = Some((set, writer.dofs));
     }
     if nonlinear {
-        let name = sets.unique("Internal_compression_only-1");
-        out.material = Some(Keyword::generated(format!(
-            "*Material, Name={name}\n*Density\n1\n*Elastic\n1, 0\n*Plastic\n0, 0\n"
-        )));
+        out.material = Some(sets.unique("Internal_compression_only-1"));
     }
     for (item, mut equation) in writer.equations {
         let movable = |n: NodeId| mesh.node(n).is_some();
-        if !sets.dofs.claim_equation(&item, &mut equation, movable) {
-            continue;
+        if sets.dofs.claim_equation(&item, &mut equation, movable) {
+            out.equations.push(equation);
         }
-        let mut text = format!("*Equation\n{}\n", equation.len());
-        let terms: Vec<String> = (equation.iter())
-            .map(|(node, dof, factor)| format!("{node}, {dof}, {}", number(*factor)))
-            .collect();
-        // Four terms (twelve entries) per line, as PrePoMax writes them.
-        for chunk in terms.chunks(4) {
-            text.push_str(&chunk.join(", "));
-            text.push('\n');
-        }
-        out.equations.push(Keyword::generated(text));
     }
     Ok(())
 }
@@ -148,7 +159,7 @@ impl Writer {
         id
     }
 
-    /// Springs of one constraint and one element block with all of them, like PrePoMax's
+    /// Springs of one constraint and one element block with all of them, like
     /// point springs. Each group of springs shares the stiffness, an element set and a
     /// `*Spring` section per direction; it is (name, nodes of each spring, stiffness).
     fn springs(
@@ -160,7 +171,7 @@ impl Writer {
         let two_nodes = (groups.first())
             .and_then(|(_, springs, _)| springs.first())
             .is_some_and(|nodes| nodes.len() == 2);
-        let mut block = String::new();
+        let mut block = Vec::new();
         for (group, springs, stiffness) in groups {
             for (dof, k) in (1..)
                 .zip(stiffness)
@@ -171,21 +182,17 @@ impl Writer {
                 for nodes in &springs {
                     let element = self.element();
                     elements.push(element);
-                    let nodes: Vec<String> = nodes.iter().map(u32::to_string).collect();
-                    let _ = writeln!(block, "{element}, {}", nodes.join(", "));
+                    block.push((element, nodes.clone()));
                 }
                 let set = sets.unique(&format!("{group}_DOF_{dof}"));
                 sets.element_sets
                     .push((set.clone(), Members::Ids(elements)));
-                let dofs = if two_nodes {
-                    format!("{dof}, {dof}")
-                } else {
-                    dof.to_string()
-                };
-                self.out.sections.push(Keyword::generated(format!(
-                    "*Spring, Elset={set}\n{dofs}\n{}\n",
-                    real(k)
-                )));
+                let dof = dof as u8;
+                self.out.sections.push(GeneratedSection::Spring {
+                    elset: set,
+                    dofs: if two_nodes { vec![dof, dof] } else { vec![dof] },
+                    stiffness: k,
+                });
             }
         }
         if block.is_empty() {
@@ -193,9 +200,11 @@ impl Writer {
         }
         let kind = if two_nodes { "SPRING2" } else { "SPRING1" };
         let set = sets.unique(&format!("{name}_All"));
-        self.out.elements.push(Keyword::generated(format!(
-            "*Element, Type={kind}, Elset={set}\n{block}"
-        )));
+        self.out.elements.push(ElementBlock {
+            kind,
+            elset: Some(set),
+            elements: block,
+        });
     }
 
     fn spring(&mut self, sets: &mut Sets, spring: &Spring) -> Result<(), WriteError> {
@@ -368,14 +377,15 @@ impl Writer {
         };
         let name = super::name(&support.name);
         // Gaps of the same direction and properties, such as those of a flat face, share an
-        // element set and a `*Gap` section: CalculiX makes a material of each section.
-        let mut sections: Vec<(String, Vec<ElementId>)> = Vec::new();
+        // element set and a `*Gap` section: the solver makes a material of each section.
+        type Line = (String, [f64; 3], Option<(f64, f64)>);
+        let mut sections: Vec<(Line, Vec<ElementId>)> = Vec::new();
         let mut by_line: BTreeMap<String, usize> = BTreeMap::new();
         for (&node, &w) in weights.iter().filter(|(_, w)| **w != 0.0) {
             let (Some(coords), Some(normal)) = (mesh.node(node), normals.get(&node)) else {
                 continue;
             };
-            // Like PrePoMax the gap points the way the support pushes, from the ground node
+            // The gap points the way the support pushes, from the ground node
             // to the surface node, so that it closes when the surface moves towards the
             // ground: into the material from outside, or out of it when flipped.
             let normal = support.push_direction(normalized(*normal));
@@ -387,24 +397,24 @@ impl Writer {
             self.ground.push(ground);
             let element = self.element();
             self.gaps.push((element, [ground, node]));
-            let properties =
-                if support.spring_stiffness.is_some() || support.tensile_force.is_some() {
-                    format!(
-                        ", , {}, {}",
-                        number(share(
+            let values = (support.spring_stiffness.is_some() || support.tensile_force.is_some())
+                .then(|| {
+                    (
+                        share(
                             support.spring_stiffness,
                             CompressionOnly::DEFAULT_STIFFNESS,
-                            w
-                        )),
-                        number(share(
+                            w,
+                        ),
+                        share(
                             support.tensile_force,
                             CompressionOnly::DEFAULT_TENSILE_FORCE,
-                            w
-                        ))
+                            w,
+                        ),
                     )
-                } else {
-                    String::new()
-                };
+                });
+            let properties = values
+                .map(|(k, f)| format!(", , {}, {}", number(k), number(f)))
+                .unwrap_or_default();
             let line = format!(
                 "{}, {}, {}, {}{properties}",
                 number(support.clearance),
@@ -413,18 +423,21 @@ impl Writer {
                 number(direction[2])
             );
             let index = *by_line.entry(line.clone()).or_insert_with(|| {
-                sections.push((line, Vec::new()));
+                sections.push(((line, direction, values), Vec::new()));
                 sections.len() - 1
             });
             sections[index].1.push(element);
         }
-        for (count, (line, elements)) in (1..).zip(sections) {
+        for (count, ((_, direction, properties), elements)) in (1..).zip(sections) {
             let set = sets.unique(&format!("{name}_ElementSet-{count}"));
             sets.element_sets
                 .push((set.clone(), Members::Ids(elements)));
-            self.out
-                .sections
-                .push(Keyword::generated(format!("*Gap, Elset={set}\n{line}\n")));
+            self.out.sections.push(GeneratedSection::Gap {
+                elset: set,
+                clearance: support.clearance,
+                direction,
+                properties,
+            });
         }
         Ok(())
     }
@@ -458,20 +471,8 @@ fn spring_shares(mesh: &FeMesh, spring: &Spring) -> BTreeMap<NodeId, f64> {
     shares.into_iter().filter(|(_, w)| *w != 0.0).collect()
 }
 
-/// A number with a decimal point: CalculiX takes an integer on the line after the degrees of
-/// freedom of `*Spring` for more data and reports the card as empty, so PrePoMax writes
-/// stiffnesses this way.
-fn real(value: f64) -> String {
-    let text = number(value);
-    if text.contains(['.', 'E', 'e']) || !value.is_finite() {
-        text
-    } else {
-        format!("{text}.")
-    }
-}
-
-/// Share of the area of the faces that each node takes and the total area, PrePoMax's
-/// `GetDistributedNodalValuesFromSurface`. Within a face the share follows the equivalent
+/// Share of the area of the faces that each node takes and the total area.
+/// Within a face the share follows the equivalent
 /// nodal forces of a constant pressure: equal parts on linear faces, only midside nodes on
 /// quadratic triangles, and -1/12 per corner and 1/3 per midside node on quadratic
 /// quadrilaterals. With `lumped` quadratic faces share their area as the diagonal of their

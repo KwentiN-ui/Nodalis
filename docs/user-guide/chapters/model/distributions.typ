@@ -7,7 +7,7 @@ condition, an initial temperature or a defined temperature that uses it takes it
 the factor at every element face or node instead of one value for the whole region. Typical uses
 are a hydrostatic pressure that grows with depth, a pressure map from a CFD analysis or a
 temperature gradient for thermal expansion. Create a distribution with
-#menu("Model", "Create Distribution ...") or a double-click on #ui("Distributions") in the tree.
+#menu("Steps", "Distribution") or a double-click on #ui("Distributions") in the tree.
 
 #screenshot("distribution-dialog.png", [Distribution by an equation: the factor falls from 1 to 0
   along the beam])

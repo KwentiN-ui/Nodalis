@@ -16,7 +16,7 @@ use plx_results::ResultsSettings;
 use serde::{Deserialize, Serialize};
 
 /// A nodalis project as saved in a `.ndl` file: its analyses, like the systems of an Ansys
-/// Workbench project, and the blocks that give them data. Like PrePoMax's `.pmx` it stores
+/// Workbench project, and the blocks that give them data. It stores
 /// what the user defined, not the CalculiX input files.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
@@ -552,7 +552,7 @@ pub struct BoundResults {
     /// only later steps change.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<u64>,
-    /// CalculiX reported errors but wrote results.
+    /// The solver reported errors but wrote results.
     #[serde(default)]
     pub with_errors: bool,
     pub files: Vec<BoundFile>,

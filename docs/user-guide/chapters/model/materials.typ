@@ -2,7 +2,7 @@
 
 == Materials <materials>
 
-#menu("Model", "Create Material ...") creates a material. Each property is switched on with its
+#menu("Material", "Material") creates a material. Each property is switched on with its
 check box. A new material starts with #ui("Elasticity") switched on.
 
 #screenshot("material.png", [Material dialog])
@@ -23,7 +23,7 @@ Values can be typed in any unit of the right kind, for example `210 GPa` or `7.8
 
 === Material library <material-library>
 
-#ui("Material Library ...") in the context menu of #ui("Materials") opens the material library.
+#menu("Material", "Material Library") opens the material library.
 On the left are the library materials in categories, on the right the materials of the model.
 
 #screenshot("material-library.png", [Material library])

@@ -1,4 +1,4 @@
-//! PrePoMax's "Create History Output" dialog of the Results tree: values of a field at
+//! The "Create History Output" dialog of the Results tree: values of a field at
 //! nodes over all increments, an equation of other history outputs, element sizes, or the
 //! values of a hot spot beside the position of a moving load.
 
@@ -14,7 +14,7 @@ use crate::setup::{FACE_SOURCES, NODE_SOURCES, RegionDraft, SOLID_SOURCES};
 use crate::tree_rows::{frame, tree_row};
 use crate::viewport::{BoxSelect, Preview};
 
-/// The types of the list, in PrePoMax's order, with the prefix of their default names.
+/// The types of the list, in order, with the prefix of their default names.
 const TYPES: [(&str, &str); 4] = [
     ("From Field Output", "From_Field"),
     ("From History Output by Equation", "From_Equation"),
@@ -335,66 +335,66 @@ impl HistoryOutputDialog {
     pub fn show(&mut self, ctx: &egui::Context, model: &Model) -> DialogAction<HistoryOutput> {
         let mut action = DialogAction::Open;
         let mut open = true;
-        let window = egui::Window::new(self.title())
+        let title = self.title();
+        let builder = egui::Window::new(title)
             .id(crate::ids::window(ctx, "history output dialog"))
-            .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .default_width(520.0)
-            .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0))
-            .show(ctx, |ui| {
-                ui.set_width(500.0);
-                ui.label("Type");
-                frame().show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.set_min_height(58.0);
-                    for (index, (label, _)) in TYPES.iter().enumerate() {
-                        let selected = self.kind == index;
-                        let row = ui.add_enabled_ui(self.edit.is_none() || selected, |ui| {
-                            tree_row(ui, 0, None, selected, RichText::new(*label))
-                        });
-                        if row.inner.clicked() && !selected {
-                            self.kind = index;
-                            self.focus = NAME;
-                            self.error = None;
-                        }
-                    }
-                });
-                ui.add_space(6.0);
-                ui.label("Properties");
-                frame().show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.set_min_height(240.0);
-                    self.properties(ui, model);
-                });
-                ui.add_space(4.0);
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.set_height(76.0);
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.strong(self.focus);
-                        ui.label(description(self.focus));
+            .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0));
+        let window = crate::dock::show(ctx, builder, title, &mut open, |ui| {
+            ui.set_width(ui.available_width().clamp(340.0, 500.0));
+            ui.label("Type");
+            frame().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_min_height(58.0);
+                for (index, (label, _)) in TYPES.iter().enumerate() {
+                    let selected = self.kind == index;
+                    let row = ui.add_enabled_ui(self.edit.is_none() || selected, |ui| {
+                        tree_row(ui, 0, None, selected, RichText::new(*label))
                     });
-                });
-                if let Some(error) = &self.error {
-                    ui.colored_label(crate::style::error(), error);
+                    if row.inner.clicked() && !selected {
+                        self.kind = index;
+                        self.focus = NAME;
+                        self.error = None;
+                    }
                 }
-                ui.add_space(4.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Cancel").clicked() {
-                        action = DialogAction::Cancel;
-                    }
-                    let ok = ui.button("OK").clicked();
-                    let next = self.edit.is_none() && ui.button("OK - New").clicked();
-                    if ok || next {
-                        match self.output() {
-                            Ok(output) => action = DialogAction::Ok { output, next },
-                            Err(error) => self.error = Some(error),
-                        }
-                    }
+            });
+            ui.add_space(6.0);
+            ui.label("Properties");
+            frame().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_min_height(240.0);
+                self.properties(ui, model);
+            });
+            ui.add_space(4.0);
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_height(76.0);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.strong(self.focus);
+                    ui.label(description(self.focus));
                 });
             });
+            if let Some(error) = &self.error {
+                ui.colored_label(crate::style::error(), error);
+            }
+            ui.add_space(4.0);
+            crate::dock::footer(ui, |ui| {
+                if ui.button("Cancel").clicked() {
+                    action = DialogAction::Cancel;
+                }
+                let ok = ui.button("OK").clicked();
+                let next = self.edit.is_none() && ui.button("OK - New").clicked();
+                if ok || next {
+                    match self.output() {
+                        Ok(output) => action = DialogAction::Ok { output, next },
+                        Err(error) => self.error = Some(error),
+                    }
+                }
+            });
+        });
         if let Some(window) = window {
             let mut picker = std::mem::take(&mut self.picker);
             if let Some(region) = self.region_mut() {
@@ -418,6 +418,7 @@ impl HistoryOutputDialog {
         });
         let focus = &mut self.focus;
         egui::Grid::new("history output properties")
+            .max_col_width(crate::dock::column_limit(ui))
             .num_columns(2)
             .striped(true)
             .min_col_width(100.0)
@@ -443,7 +444,7 @@ impl HistoryOutputDialog {
                             let mut changed = false;
                             let response = egui::ComboBox::from_id_salt("history field")
                                 .selected_text(field.as_str())
-                                .width(200.0)
+                                .width(crate::dock::fit_width(ui, 200.0))
                                 .show_ui(ui, |ui| {
                                     for (name, _) in fields {
                                         changed |= ui
@@ -507,7 +508,7 @@ impl HistoryOutputDialog {
                             };
                             let response = egui::ComboBox::from_id_salt("history hot spot")
                                 .selected_text(shown)
-                                .width(200.0)
+                                .width(crate::dock::fit_width(ui, 200.0))
                                 .show_ui(ui, |ui| {
                                     for name in hot_spots {
                                         ui.selectable_value(hot_spot, name.clone(), name);
@@ -520,7 +521,7 @@ impl HistoryOutputDialog {
                         row(ui, focus, MOVING_LOAD_ROW, |ui| {
                             let response = egui::ComboBox::from_id_salt("history moving load")
                                 .selected_text(moving_load.as_deref().unwrap_or(NO_MOVING_LOAD))
-                                .width(200.0)
+                                .width(crate::dock::fit_width(ui, 200.0))
                                 .show_ui(ui, |ui| {
                                     ui.selectable_value(moving_load, None, NO_MOVING_LOAD);
                                     for name in moving_loads {

@@ -1,4 +1,4 @@
-//! Contact and tie definitions: PrePoMax's surface interactions, contact pairs and tie
+//! Contact and tie definitions: the surface interactions, contact pairs and tie
 //! constraints. Master and slave are regions the user picked; their surfaces are written to
 //! the input file only when it is exported.
 
@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{CompressionOnly, NodeTie, Region, RigidBody, Spring};
 
-/// PrePoMax's default colour of contact and constraint surfaces, yellow.
+/// The default colour of contact and constraint surfaces, yellow.
 pub const DEFAULT_SURFACE_COLOR: [u8; 3] = [255, 255, 0];
 
 /// Mechanical and thermal behaviour of touching surfaces (`*SURFACE INTERACTION`), referred to
@@ -33,7 +33,7 @@ impl SurfaceInteraction {
         (self.properties.iter()).any(|p| matches!(p, InteractionProperty::Friction(_)))
     }
 
-    /// Adds the friction CalculiX requires with a tied surface behavior: its stick slope is
+    /// Adds the friction the solver requires with a tied surface behavior: its stick slope is
     /// the stiffness of the tie along the surfaces. Returns whether it was added.
     pub fn add_friction_if_tied(&mut self) -> bool {
         let add = self.is_tied() && !self.has_friction();
@@ -52,7 +52,7 @@ pub enum InteractionProperty {
 }
 
 impl InteractionProperty {
-    /// PrePoMax's names of the interaction models, which are also the default models.
+    /// The names of the interaction models, which are also the default models.
     pub fn all() -> [InteractionProperty; 3] {
         [
             InteractionProperty::SurfaceBehavior(SurfaceBehavior::default()),
@@ -70,7 +70,7 @@ impl InteractionProperty {
     }
 }
 
-/// Pressure-overclosure relation of the contact (`*SURFACE BEHAVIOR`), with PrePoMax's default
+/// Pressure-overclosure relation of the contact (`*SURFACE BEHAVIOR`), with the default
 /// values for mm, N and MPa.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum SurfaceBehavior {
@@ -78,7 +78,7 @@ pub enum SurfaceBehavior {
     #[default]
     Hard,
     /// Linear spring: slope `k`, tension `sigma_inf` at large clearances and the clearance
-    /// `c0` up to which the spring acts (`None` lets CalculiX choose it).
+    /// `c0` up to which the spring acts (`None` lets the solver choose it).
     Linear {
         k: f64,
         sigma_inf: f64,
@@ -94,9 +94,9 @@ pub enum SurfaceBehavior {
 }
 
 impl SurfaceBehavior {
-    /// Kinds of the relation with PrePoMax's default values, as offered in the dialog.
+    /// Kinds of the relation with the default values, as offered in the dialog.
     pub fn kinds() -> [SurfaceBehavior; 5] {
-        // PrePoMax's values for mm, t, s, stored in SI units. E = 200 GPa: K = 50 E,
+        // The values for mm, t, s, stored in SI units. E = 200 GPa: K = 50 E,
         // sigma_inf = E / 70000.
         use crate::{Quantity, UnitSystem::MmTonSC};
         let k = MmTonSC.stored(1e7, Quantity::ForcePerVolume);
@@ -134,7 +134,7 @@ impl SurfaceBehavior {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Friction {
     pub coefficient: f64,
-    /// Shear stress over tangential displacement while sticking; `None` lets CalculiX choose.
+    /// Shear stress over tangential displacement while sticking; `None` lets the solver choose.
     pub stick_slope: Option<f64>,
 }
 
@@ -161,7 +161,7 @@ impl Default for GapConductance {
     }
 }
 
-/// How CalculiX treats a contact pair (`TYPE=`). All pairs of a model must use the same.
+/// How the solver treats a contact pair (`TYPE=`). All pairs of a model must use the same.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContactMethod {
     NodeToSurface,
@@ -179,7 +179,7 @@ impl ContactMethod {
         ContactMethod::Massless,
     ];
 
-    /// PrePoMax's name, which is also the value of `TYPE=`.
+    /// The name, which is also the value of `TYPE=`.
     pub fn name(self) -> &'static str {
         match self {
             ContactMethod::NodeToSurface => "Node to surface",
@@ -263,7 +263,7 @@ pub struct ContactPair {
     pub slave_color: [u8; 3],
 }
 
-/// PrePoMax's name of a swapped pair: `<slave>_to_<master>` for `<master>_to_<slave>`, other
+/// The name of a swapped pair: `<slave>_to_<master>` for `<master>_to_<slave>`, other
 /// names as they are.
 pub fn swapped_name(name: &str) -> String {
     match name.split("_to_").collect::<Vec<_>>()[..] {
@@ -273,7 +273,7 @@ pub fn swapped_name(name: &str) -> String {
 }
 
 impl ContactPair {
-    /// Swaps master and slave, like PrePoMax also in a name `<master>_to_<slave>`.
+    /// Swaps master and slave, also in a name `<master>_to_<slave>`.
     pub fn swap_master_slave(&mut self) {
         std::mem::swap(&mut self.master, &mut self.slave);
         self.name = swapped_name(&self.name);
@@ -297,7 +297,7 @@ impl ContactPair {
     }
 }
 
-/// A constraint between parts of the model or to ground, PrePoMax's Constraints.
+/// A constraint between parts of the model or to ground.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Constraint {
     Spring(Spring),
@@ -372,7 +372,7 @@ impl Constraint {
         }
     }
 
-    /// Swaps master and slave of a tie or spring connection, like PrePoMax also in a name
+    /// Swaps master and slave of a tie or spring connection, also in a name
     /// `<master>_to_<slave>`; returns false for constraints without the two.
     pub fn swap_master_slave(&mut self) -> bool {
         let (name, master, slave) = match self {
@@ -427,7 +427,7 @@ pub struct Tie {
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,
-    /// Distance within which slave nodes are tied; `None` lets CalculiX choose.
+    /// Distance within which slave nodes are tied; `None` lets the solver choose.
     pub position_tolerance: Option<f64>,
     /// Moves the tied slave nodes onto the master surface.
     pub adjust: bool,
@@ -479,12 +479,12 @@ impl Default for CyclicSymmetry {
 const SECTOR_ANGLE_TOLERANCE: f64 = 2e-3;
 
 impl CyclicSymmetry {
-    /// The highest nodal diameter `sectors` sectors can carry, PrePoMax's limit.
+    /// The highest nodal diameter `sectors` sectors can carry.
     pub fn highest_nodal_diameter(sectors: u32) -> u32 {
         sectors / 2
     }
 
-    /// Why CalculiX would reject the settings, whatever the sides.
+    /// Why the solver would reject the settings, whatever the sides.
     pub fn problem(&self) -> Option<String> {
         if self.axis_direction.iter().all(|v| *v == 0.0) {
             Some("The axis direction must not be the zero vector.".into())
@@ -542,7 +542,7 @@ impl CyclicSymmetry {
         if whole < 2.0 || (360.0 / whole - degrees).abs() > SECTOR_ANGLE_TOLERANCE * degrees {
             return Err(format!(
                 "The cut faces are {} degrees apart, which does not divide 360 degrees \
-                 (360 / {} = {}). CalculiX needs sectors that close the full circle; check \
+                 (360 / {} = {}). The solver needs sectors that close the full circle; check \
                  the cut faces and the axis.",
                 round_to(degrees, 4),
                 round_to(degrees, 4),

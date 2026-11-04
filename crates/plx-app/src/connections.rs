@@ -1,5 +1,5 @@
 //! The forms of contact regions and of the connections they share: the user picks two sides
-//! and a type, and everything CalculiX needs besides is derived ("Auto"), shown and can be
+//! and a type, and everything the solver needs besides is derived ("Auto"), shown and can be
 //! overridden one setting at a time. Side A shows in the primary, side B in the secondary
 //! highlight colour.
 
@@ -206,9 +206,13 @@ pub fn detect(
                 face_edges: display.face_edges(),
                 part_dimensions: &dimensions,
             };
-            model
-                .fe
-                .detect_contacts_on_geometry(index, &geometry, &visible)
+            let mut report = (model.fe).detect_contacts_on_geometry(index, &geometry, &visible)?;
+            // Line ends are tied by their nodes, which only the mesh has.
+            let visible: Vec<bool> = model.parts.iter().map(|p| p.visible).collect();
+            let mut fe = std::mem::take(&mut model.fe);
+            fe.detect_line_ends(index, &model.mesh, &visible, &mut report);
+            model.fe = fe;
+            Some(report)
         }
         None => {
             let visible: Vec<bool> = model.parts.iter().map(|p| p.visible).collect();
@@ -334,6 +338,9 @@ pub fn detection_form(
                 .on_hover_text("Top and bottom of shells and membranes.");
             ui.checkbox(&mut filter.shell_edge, "Shell edge")
                 .on_hover_text("Free edges of shells and membranes.");
+            ui.checkbox(&mut filter.line_end, "Line end").on_hover_text(
+                "Ends of beams and trusses of different parts at one point, tied as node ties.",
+            );
         });
         ui.end_row();
     }
@@ -413,7 +420,7 @@ pub fn validate_detection(detection: &ContactDetection) -> Result<(), String> {
         return Err("The tolerance must be positive.".into());
     }
     let filter = detection.filter;
-    if !(filter.solid || filter.shell || filter.shell_edge) {
+    if !(filter.solid || filter.shell || filter.shell_edge || filter.line_end) {
         return Err("Choose at least one kind of surface to search.".into());
     }
     if let ContactBehavior::Frictional { mu } = detection.behavior
@@ -506,7 +513,7 @@ fn stiffness_row(
 ) {
     ui.label(label);
     ui.horizontal(|ui| {
-        let auto_text = auto.map_or("CalculiX".into(), |k| {
+        let auto_text = auto.map_or("solver".into(), |k| {
             with_unit(k, units, Quantity::ForcePerVolume)
         });
         let kind = match value {
@@ -619,7 +626,7 @@ fn advanced_rows(ui: &mut Ui, model: &Model, region: &mut ContactRegion, resolve
         let auto = resolved
             .tolerance()
             .or(resolved.mesh_size.map(|h| 0.25 * h));
-        let auto_text = auto.map_or("CalculiX".into(), |t| with_unit(t, units, Quantity::Length));
+        let auto_text = auto.map_or("solver".into(), |t| with_unit(t, units, Quantity::Length));
         ui.checkbox(&mut set, "")
             .on_hover_text(format!("Untick for Auto ({auto_text})"));
         if set {
@@ -767,7 +774,7 @@ pub fn connections_form(ui: &mut Ui, fe: &FeModel, defaults: &mut ContactDefault
     ui.add(
         egui::Label::new(
             RichText::new(format!(
-                "{description}\n\nCalculiX takes one formulation for all contacts of a model. \
+                "{description}\n\nThe solver takes one formulation for all contacts of a model. \
              Bonded regions written as ties are not affected."
             ))
             .weak(),
@@ -922,7 +929,7 @@ pub fn check_summary(check: &ContactCheck, units: UnitSystem) -> String {
     text
 }
 
-/// What CalculiX found in a contact region, from the contact results (`CONTACT`) of the
+/// What the solver found in a contact region, from the contact results (`CONTACT`) of the
 /// last increment that has them, at the slave nodes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SolvedContact {
@@ -1076,9 +1083,11 @@ pub fn worksheet(
     let mut change = None;
     let mu_id = egui::Id::new("contact worksheet mu");
     let mut mu: f64 = ctx.data(|d| d.get_temp(mu_id)).unwrap_or(0.15);
+    let mut close = false;
     egui::Window::new("Contact Worksheet")
         .id(crate::ids::window(ctx, "contact worksheet"))
         .open(open)
+        .collapsible(false)
         .default_width(900.0)
         .default_height(360.0)
         .resizable(true)
@@ -1132,8 +1141,12 @@ pub fn worksheet(
                 });
             });
             ui.separator();
+            // A work window: Close at the bottom right, below the table.
+            close = crate::dialog::close_bar(ui, "contact worksheet");
             if rows.is_empty() {
-                ui.weak("No contact regions. Create one in the Interaction menu.");
+                ui.weak(
+                    "No contact regions. Create one with Contact Region on the Connections tab.",
+                );
                 return;
             }
             egui::ScrollArea::both()
@@ -1259,6 +1272,9 @@ pub fn worksheet(
                         });
                 });
         });
+    if close {
+        *open = false;
+    }
     ctx.data_mut(|d| d.insert_temp(mu_id, mu));
     let Some(change) = change else {
         return;
@@ -1482,7 +1498,7 @@ mod tests {
     /// The detection on the geometry finds them bonded before anything is meshed: one
     /// region of the block's bottom and the plate's top, whole CAD faces, although the block
     /// covers only part of the plate. Meshed, and meshed again finer, the region finds its
-    /// faces on each mesh, and CalculiX holds the pressed block on the fixed plate.
+    /// faces on each mesh, and the solver holds the pressed block on the fixed plate.
     #[test]
     fn contacts_detected_on_the_geometry_hold_on_every_mesh() {
         if !gmsh_available() {
@@ -1631,7 +1647,7 @@ mod tests {
 
     /// A beam 40 x 5 lying on a block 10 x 10 in a plane stress model, two faces that only
     /// touch along y = 0: the detection on the geometry ties the block's top edge to the
-    /// beam's bottom edge, whole CAD edges, before anything is meshed, and CalculiX holds
+    /// beam's bottom edge, whole CAD edges, before anything is meshed, and the solver holds
     /// the pressed beam on the fixed block.
     #[test]
     fn edges_detected_on_the_geometry_of_a_2d_model_hold() {

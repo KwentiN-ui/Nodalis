@@ -28,7 +28,7 @@ pub fn parse_count(text: &str) -> Option<f64> {
 }
 
 /// A field for a value of a physical quantity, stored in SI units ([`plx_model::STORED`]) and
-/// shown in the model's units, PrePoMax's typed converters: the unit stands after the number,
+/// shown in the model's units: the unit stands after the number,
 /// and a value typed with another unit is converted, so "3 cm" becomes "30 mm" in a
 /// millimetre model.
 pub fn quantity(value: &mut f64, units: UnitSystem, quantity: Quantity) -> egui::DragValue<'_> {

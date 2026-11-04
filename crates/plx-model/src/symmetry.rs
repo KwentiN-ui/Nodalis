@@ -84,7 +84,7 @@ impl SymmetryPlane {
         (t1, t2)
     }
 
-    /// Why the plane makes no sense as a symmetry plane although CalculiX would accept it.
+    /// Why the plane makes no sense as a symmetry plane although the solver would accept it.
     pub fn warning(&self, space: ModelSpace) -> Option<String> {
         if !self.is_planar() {
             return Some(format!(

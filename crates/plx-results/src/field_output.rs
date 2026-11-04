@@ -1,4 +1,4 @@
-//! Field outputs the user derives from the results, PrePoMax's "Create Field Output": a
+//! Field outputs the user derives from the results: a
 //! limit (utilisation and safety factor), the envelope over all increments, an equation of
 //! other components, a field in another coordinate system, and the principal direction of a
 //! tensor field with the anisotropy that tells where that direction is defined.
@@ -15,7 +15,7 @@ use crate::principal::{Principal, anisotropy, principal_direction};
 use crate::transformation::{ComponentKind, component_kind};
 use crate::{Component, Field, FieldRank, Increment, principal_values};
 
-/// Component names PrePoMax gives the computed fields.
+/// Component names of the computed fields.
 pub const RATIO: &str = "RATIO";
 pub const SAFETY_FACTOR: &str = "SAFETY_FACTOR";
 pub const MAX: &str = "MAX";
@@ -41,7 +41,7 @@ impl LimitBasis {
         LimitBasis::AllElements,
     ];
 
-    /// PrePoMax's name, also the item name of the single "All elements" limit.
+    /// The name, also the item name of the single "All elements" limit.
     pub fn name(self) -> &'static str {
         match self {
             LimitBasis::Parts => "Parts",

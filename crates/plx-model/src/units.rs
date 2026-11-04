@@ -1,4 +1,4 @@
-//! Units of the model's values, PrePoMax's unit system with its typed property converters.
+//! Units of the model's values.
 //!
 //! Values are stored as plain numbers in the units of the model's [`UnitSystem`]. What a
 //! number means is told by its [`Quantity`]: the GUI shows the unit next to it, takes values
@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The units the model's values are given in, PrePoMax's unit system types.
+/// The units the model's values are given in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnitSystem {
     Unitless,
@@ -18,7 +18,7 @@ pub enum UnitSystem {
     InLbSF,
 }
 
-/// Kinds of quantities the unit system names a unit for, PrePoMax's base and derived units.
+/// Kinds of quantities the unit system names a unit for.
 pub const BASE_QUANTITIES: [Quantity; 5] = [
     Quantity::Length,
     Quantity::Angle,
@@ -239,11 +239,11 @@ const INCH: f64 = 0.0254;
 /// degree Celsius. An analysis' own unit system only says in which units its dialogs and
 /// views show the values, and in which units files without units are read, so analyses of
 /// different unit systems can take values and results from each other as they are.
-/// CalculiX gets the values in these units, too.
+/// The solver gets the values in these units, too.
 pub const STORED: UnitSystem = UnitSystem::MKgSC;
 
 impl UnitSystem {
-    /// In PrePoMax's order of the list.
+    /// In the order of the list.
     pub const ALL: [UnitSystem; 5] = [
         UnitSystem::Unitless,
         UnitSystem::MKgSC,
@@ -252,7 +252,7 @@ impl UnitSystem {
         UnitSystem::InLbSF,
     ];
 
-    /// PrePoMax's name of the unit system.
+    /// The name of the unit system.
     pub fn label(self) -> &'static str {
         match self {
             UnitSystem::Unitless => "Unitless",

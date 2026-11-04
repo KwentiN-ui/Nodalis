@@ -10,13 +10,17 @@ mod bolts;
 mod cad_editor;
 mod cad_selection;
 mod campbell;
+mod checklist;
 mod color_scale_dialog;
+mod command;
 mod connections;
 mod constraint_dialog;
-mod contact_search;
 mod contacts;
+mod crash_log;
 mod cross_section;
+mod dialog;
 mod distribution_dialog;
+mod dock;
 mod exploded;
 mod expose;
 mod features;
@@ -30,6 +34,7 @@ mod hot_spot_dialog;
 mod hot_spots;
 mod icons;
 mod ids;
+mod layout;
 mod lic;
 mod links;
 mod material_library;
@@ -53,6 +58,7 @@ mod project;
 mod properties;
 mod query;
 mod results;
+mod ribbon;
 mod screenshot;
 mod section;
 mod selection;
@@ -60,6 +66,7 @@ mod settings;
 mod setup;
 mod sketch;
 mod solution_monitor;
+mod solve_fingerprint;
 mod solver_check;
 mod sound;
 mod status;
@@ -67,6 +74,7 @@ mod study;
 mod style;
 mod symbols;
 mod table_export;
+mod toast;
 mod transformation_dialog;
 mod tree;
 mod tree_icons;
@@ -82,7 +90,7 @@ fn main() -> eframe::Result {
     if let Some(code) = meshing::worker_main() {
         std::process::exit(code);
     }
-    env_logger::init();
+    crash_log::install();
     if let Ok(program) = std::env::current_exe() {
         meshing::set_worker(program);
     }
@@ -152,8 +160,8 @@ mod tests {
             ("analysis.rs", include_str!("analysis.rs")),
             ("animation.rs", include_str!("animation.rs")),
             ("app.rs", include_str!("app.rs")),
-            ("contact_search.rs", include_str!("contact_search.rs")),
             ("contacts.rs", include_str!("contacts.rs")),
+            ("crash_log.rs", include_str!("crash_log.rs")),
             (
                 "field_output_dialog.rs",
                 include_str!("field_output_dialog.rs"),

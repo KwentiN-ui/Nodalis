@@ -4,7 +4,7 @@
 
 A #ui("Dynamic (time integration)") step computes the motion of the model over time
 (`*DYNAMIC`): the response to a suddenly applied load, an impact or an initial velocity
-(@initial-conditions). Create it with #menu("Model", "Create Step ...") and choose the type in
+(@initial-conditions). Create it with #menu("Steps", "Step") and choose the type in
 the dialog.
 
 #screenshot("dynamic-step.png", [Dynamic step])
@@ -15,8 +15,9 @@ the dialog.
     #ui("Explicit / Implicit") or #ui("Explicit / Explicit").],
   [Alpha (HHT)], [Numerical damping of the Hilber-Hughes-Taylor integration (`ALPHA=`), between
     −1/3 and 0; −0.05 is the default of CalculiX and damps high frequencies a little.],
-  [Nonlinear geometry, Incrementation], [As in a static step (@steps); the equations are
-    always solved directly (@equation-solver). A new dynamic
+  [Nonlinear geometry, Incrementation, Equation solver], [As in a static step (@steps,
+    @equation-solver); the effective matrix of the time integration is positive definite,
+    so the iterative solver takes it as well. A new dynamic
     step starts with #ui("Automatic") incrementation and an initial increment of 0.01; choose
     the increment from the highest frequency you want to resolve, about a tenth to a twentieth
     of its period.],

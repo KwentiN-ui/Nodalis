@@ -8,7 +8,7 @@ use plx_mesh::{FeMesh, Fnv};
 
 use crate::{ContactRegion, FeModel, Geometry, MeshSetupKind, ModelSpace};
 
-/// The inputs of the solution: everything that goes into the input file CalculiX runs, the
+/// The inputs of the solution: everything that goes into the input file the solver runs, the
 /// mesh and the model definition. Items only used to evaluate results, result paths and
 /// planes, are left out: they never need a new solution.
 pub fn solve_input(mesh: &FeMesh, fe: &FeModel) -> u64 {
@@ -16,7 +16,7 @@ pub fn solve_input(mesh: &FeMesh, fe: &FeModel) -> u64 {
 }
 
 /// The inputs of the results of each step, in the order of the steps: the model and the
-/// steps up to it. CalculiX solves the steps one after the other, so steps after a step never
+/// steps up to it. The solver solves the steps one after the other, so steps after a step never
 /// change its results. The last one is [`solve_input`].
 pub fn step_inputs(mesh: &FeMesh, fe: &FeModel) -> Vec<u64> {
     (1..=fe.steps.len())
@@ -79,7 +79,10 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
     hash.add_debug(surface_interactions);
     hash.add_debug(contact_pairs);
     hash.add_debug(ties);
-    hash.add_debug(node_ties);
+    // Who found a node tie and whether it was changed since is no input of the solver.
+    for tie in node_ties {
+        hash.add_debug(&(&tie.name, tie.active, &tie.region, tie.rotations));
+    }
     if !contact_regions.is_empty() {
         // Who found a region and whether it was changed since is no input of the solver.
         let regions: Vec<_> = (contact_regions.iter())

@@ -188,54 +188,55 @@ impl HotSpotDialog {
     pub fn show(&mut self, ctx: &egui::Context, model: &Model) -> DialogAction<HotSpot> {
         let mut action = DialogAction::Open;
         let mut open = true;
-        let window = egui::Window::new(self.title())
+        let title = self.title();
+        let builder = egui::Window::new(title)
             .id(crate::ids::window(ctx, "hot spot dialog"))
-            .open(&mut open)
             .collapsible(false)
             .resizable(true)
             .pivot(egui::Align2::LEFT_TOP)
-            .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0))
-            .show(ctx, |ui| {
-                ui.set_min_width(420.0);
-                // The plot takes the height the window is resized to beyond its other rows.
-                let plot_height = match self.rows_height {
-                    Some(rows) => (ui.max_rect().height() - rows).max(MIN_PLOT_HEIGHT),
-                    None => PLOT_HEIGHT,
-                };
-                egui::Grid::new("hot spot form")
-                    .num_columns(2)
-                    .spacing([12.0, 6.0])
-                    .show(ui, |ui| {
-                        form(
-                            ui,
-                            model,
-                            &mut self.hot_spot,
-                            &mut self.toe,
-                            &mut self.distances,
-                        )
-                    });
-                ui.separator();
-                self.results(ui, model, plot_height);
-                if let Some(error) = &self.error {
-                    ui.colored_label(crate::style::error(), error);
-                }
-                ui.separator();
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Cancel").clicked() {
-                        action = DialogAction::Cancel;
-                    }
-                    let ok = ui.button("OK").clicked();
-                    let next = self.edit.is_none() && ui.button("OK - New").clicked();
-                    if ok || next {
-                        match self.output() {
-                            Ok(output) => action = DialogAction::Ok { output, next },
-                            Err(error) => self.error = Some(error),
-                        }
-                    }
+            .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0));
+        let window = crate::dock::show(ctx, builder, title, &mut open, |ui| {
+            ui.set_min_width(420.0);
+            // The plot takes the height the window is resized to beyond its other rows.
+            let plot_height = match self.rows_height {
+                Some(rows) => (ui.max_rect().height() - rows).max(MIN_PLOT_HEIGHT),
+                None => PLOT_HEIGHT,
+            };
+            egui::Grid::new("hot spot form")
+                .max_col_width(crate::dock::column_limit(ui))
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    form(
+                        ui,
+                        model,
+                        &mut self.hot_spot,
+                        &mut self.toe,
+                        &mut self.distances,
+                    )
                 });
-                // Only a drawn plot tells the height of the rest.
-                self.rows_height = self.plotted.then(|| ui.min_rect().height() - plot_height);
+            ui.separator();
+            self.results(ui, model, plot_height);
+            if let Some(error) = &self.error {
+                ui.colored_label(crate::style::error(), error);
+            }
+            ui.separator();
+            crate::dock::footer(ui, |ui| {
+                if ui.button("Cancel").clicked() {
+                    action = DialogAction::Cancel;
+                }
+                let ok = ui.button("OK").clicked();
+                let next = self.edit.is_none() && ui.button("OK - New").clicked();
+                if ok || next {
+                    match self.output() {
+                        Ok(output) => action = DialogAction::Ok { output, next },
+                        Err(error) => self.error = Some(error),
+                    }
+                }
             });
+            // Only a drawn plot tells the height of the rest.
+            self.rows_height = self.plotted.then(|| ui.min_rect().height() - plot_height);
+        });
         if let Some(window) = window
             && self.toe.source == Source::Selection
         {

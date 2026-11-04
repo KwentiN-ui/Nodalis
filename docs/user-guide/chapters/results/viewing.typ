@@ -4,12 +4,12 @@
 
 == Opening results
 
-The #ui("Results") tab shows the results of its analysis: they open when a run is finished,
-with #ui("Results") in the monitor, with #menu("Analysis", "Open Results") and when an analysis
+The Results workspace shows the results of its analysis: they open when a run is finished,
+with #ui("Results") in the monitor, with #menu("File", "Open Results") and when an analysis
 with kept results is opened (@bind-result). The `.dat` file of the run is read as well. Result
 files from elsewhere are not opened.
 
-When results are opened, Nodalis shows the #ui("Results") tab with the last increment.
+When results are opened, Nodalis shows the Results workspace with the last increment.
 
 #screenshot("results.png", [von Mises stress of a static step])
 
@@ -23,7 +23,7 @@ When results are opened, Nodalis shows the #ui("Results") tab with the last incr
 / History Outputs: values from the `.dat` file and history outputs you create (@history-outputs).
 / Hot Spot Stresses, Paths, Plane Results: evaluations described in the following sections.
 
-Results list the parts of the model they were computed from, as in the #ui("FE Model") tab, also
+Results list the parts of the model they were computed from, as in the FE Model workspace, also
 when several parts share a section. A `.frd` file itself only groups the elements by material;
 Nodalis reads the parts from the input file CalculiX ran, the `.inp` file of the same name next
 to the results. Results of an analysis run from Nodalis always have it. The spring and gap
@@ -36,9 +36,9 @@ material of its own, and they carry no results of their own.
 #screenshot("results-without-gaps.png", [A plate on compression only supports: its results show
   the plate as the only part])
 
-== Results toolbar <results-toolbar>
+== Result controls <results-toolbar>
 
-#screenshot("results-toolbar.png", [Results toolbar])
+#screenshot("results-display-tab.png", [The #ui("Display") tab: view tools on the left, result controls in two rows on the right])
 
 #fields(
   [Result], [The displayed result file.],
@@ -53,11 +53,12 @@ material of its own, and they carry no results of their own.
   [Show Undeformed], [Draws the undeformed outline behind the deformed shape.],
   [Color levels], [Number of colour bands (2 to 24). The #ui("...") button next to it opens the
     colour scale (@color-scale).],
-  [Display], [#ui("Contour"), #ui("Arrows") (@arrows) or #ui("LIC") streaks (@lic) along the
-    directions of the shown field. For a tensor field such as `STRESS` the box next to it picks
-    the principal direction: #ui("Max"), #ui("Mid"), #ui("Min") or #ui("Abs Max");
-    #ui("...") holds the options
-    of the arrows or streaks.],
+  [Display], [#ui("Contour"), #ui("Arrows") (@arrows) or #ui("LIC") streaks (@lic). The next
+    box picks the field whose directions they follow: #ui("Shown field") or any vector or tensor
+    field of the increment, so that, for example, the principal stresses run over the
+    displacement contours. For a tensor field such as `STRESS` the box after it picks the
+    principal direction: #ui("Max"), #ui("Mid"), #ui("Min") or #ui("Abs Max"). Boxes that do
+    not apply stay greyed out; #ui("...") holds the options of the arrows or streaks.],
   [Transformations], [Symmetries and patterns (@transformations).],
   [Step, Increment], [The displayed increment, with buttons for the first, previous, next and
     last increment.],
@@ -72,12 +73,12 @@ The legend shows the field, the unit and the range in nine colour bands from blu
 (maximum) by default. The info block in the upper right shows file, date, step, increment or mode
 with its frequency or buckling factor, and the deformation scale factor. Labels mark the node with
 the maximum (and optionally the minimum) value. Legend, info block and labels can be dragged.
-Which of them appear is set under #menu("Tools", "Settings ...", "Post-processing").
+Which of them appear is set under #menu("Edit", "Settings ...", "Post-processing").
 
 == Arrows <arrows>
 
-#ui("Display") > #ui("Arrows") in the results toolbar draws arrows along the directions of the
-shown field over the surface: a vector field such as `DISP`, `FORC` or `FLUX` gives its own
+#ui("Display") > #ui("Arrows") in the result controls draws arrows along the directions of the
+shown field, or of the field picked next to it, over the surface: a vector field such as `DISP`, `FORC` or `FLUX` gives its own
 direction, a tensor field such as `STRESS` or `TOSTRAIN` the principal direction picked next to
 it. The arrows take the colours of the shown component and its legend, so `STRESS` with
 #ui("PRINCIPAL_MAX") and the #ui("Max") direction shows how the load runs through the part, its
@@ -154,10 +155,9 @@ results of a project (@bind-result).
 
 == Color scale <color-scale>
 
-Each result file has its own colour scale. Double-click the legend, choose #ui("Color Scale...")
-in its context menu, click #ui("...") next to #ui("Color levels") on the results toolbar, or use
-#menu("Results", "Color Scale ..."). Changes show at once; #ui("Cancel") restores the scale the
-dialog was opened with and #ui("Defaults") returns to the rainbow with automatic limits.
+Each result file has its own colour scale. Double-click the legend, choose #ui("Color Scale ...")
+in its context menu, or click #ui("...") next to #ui("Color levels") in the result controls. Changes show at once and stay when #ui("Close") closes the
+window; #ui("Defaults") returns to the rainbow with automatic limits.
 
 #screenshot("color-scale-dialog.png", [Color Scale dialog with manual limits: values above 40 MPa
 and below 5 MPa are grey])
@@ -167,7 +167,7 @@ and below 5 MPa are grey])
     Cividis, Viridis, Plasma, Black body, Inferno, Kindlmann or Grayscale.],
   [Brightness], [Lightens the colours towards white, from 0 to 1 (default 0.2).],
   [Reverse colors], [Puts the maximum colour at the minimum and vice versa.],
-  [Number of colors], [The colour bands, the same as #ui("Color levels") on the toolbar.],
+  [Number of colors], [The colour bands, the same as #ui("Color levels") in the result controls.],
   [Min/max limit type], [#ui("Automatic") spans the smallest to the largest shown value (over
     all frames of an animation if it is set so). #ui("Manual") uses #ui("Minimum") and
     #ui("Maximum"); the values are kept exactly as typed. The minimum must be smaller than the

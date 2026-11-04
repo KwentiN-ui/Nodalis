@@ -14,9 +14,11 @@ plx-mesh.workspace = true
 plx-model.workspace = true
 plx-results.workspace = true
 plxs-core.workspace = true
+plxs-input.workspace = true
 plxs-output.workspace = true
 ron.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

@@ -4,7 +4,7 @@
 
 A #ui("Shell") section gives surface elements of a 3D model a thickness, so that a thin plate
 or a sheet-metal part can be computed with shell elements (`S3`, `S4`, `S6`, `S8`) instead of
-solids. Create it with #menu("Model", "Create Section ...") and choose #ui("Shell").
+solids. Create it with #menu("Material", "Section") and choose #ui("Shell").
 
 #screenshot("shell-section.png", [Shell section])
 
@@ -51,6 +51,5 @@ Results with `OUTPUT=2D` hold the shells as surfaces; the Results workspace then
 thickened like the FE model, with thickness and offset from the input file CalculiX ran, and
 the value of each node across the whole thickness.
 
-Turn the display off and on with #menu("View", "Shell Thickness") or in the
-#link(<settings>)[settings] under #ui("Graphics"); the setting applies to both workspaces.
+Turn the display off and on with #menu("View", "Shell Thickness"); the setting applies to both workspaces.
 Picking still selects the elements on the mesh.

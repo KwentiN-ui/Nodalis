@@ -419,3 +419,99 @@ fn a_no_analysis_step_reads_the_model_only() {
     let analysis = read(&cube("*Step\n*No analysis\n*End step\n")).unwrap();
     assert!(matches!(analysis.steps[0].procedure, Procedure::NoAnalysis));
 }
+
+/// Every fixture of the solver corpus, rendered as text and read again, is the same
+/// analysis: the renderer says everything the reader took from the file.
+#[test]
+fn every_fixture_renders_as_text_that_reads_back_the_same() {
+    let files = inp_files(&repo().join("solver/fixtures"));
+    assert!(files.len() > 200, "{}", files.len());
+    let mut failed = Vec::new();
+    for file in files {
+        let mut first = super::read_inp(&file)
+            .unwrap_or_else(|e| panic!("{}: {e:?}", file.display()))
+            .analysis;
+        first.model.stored_modes_file = None;
+        let text = super::render(&first);
+        assert!(
+            super::unwritable_names(&first).is_empty(),
+            "{}",
+            file.display()
+        );
+        let again = match read_inp_str(&text, None) {
+            Ok(reading) => reading.analysis,
+            Err(e) => {
+                failed.push(format!("{}: {e:?}", file.display()));
+                continue;
+            }
+        };
+        if again != first {
+            failed.push(format!(
+                "{}: {}",
+                file.display(),
+                first_difference(&first, &again)
+            ));
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "{} differ:\n{}",
+        failed.len(),
+        failed.join("\n")
+    );
+}
+
+/// Where two analyses differ first, for the message of a failed comparison.
+fn first_difference(a: &Analysis, b: &Analysis) -> String {
+    fn walk(path: &str, a: &serde_json::Value, b: &serde_json::Value) -> Option<String> {
+        use serde_json::Value;
+        match (a, b) {
+            (Value::Object(x), Value::Object(y)) => {
+                for (key, value) in x {
+                    let other = y.get(key).unwrap_or(&Value::Null);
+                    if let Some(d) = walk(&format!("{path}.{key}"), value, other) {
+                        return Some(d);
+                    }
+                }
+                None
+            }
+            (Value::Array(x), Value::Array(y)) => {
+                for (i, (p, q)) in x.iter().zip(y).enumerate() {
+                    if let Some(d) = walk(&format!("{path}[{i}]"), p, q) {
+                        return Some(d);
+                    }
+                }
+                (x.len() != y.len()).then(|| format!("{path}: {} vs {} entries", x.len(), y.len()))
+            }
+            _ => (a != b).then(|| format!("{path}: {a} vs {b}")),
+        }
+    }
+    let (a, b) = (
+        serde_json::to_value(a).unwrap(),
+        serde_json::to_value(b).unwrap(),
+    );
+    walk("", &a, &b).unwrap_or_else(|| "only in the indices".into())
+}
+
+#[test]
+fn numbers_render_exactly_and_short() {
+    use super::render::number;
+    for value in [
+        0.0,
+        1.0,
+        -2.5,
+        0.1,
+        1e-9,
+        7.85e-9,
+        210000.0,
+        1.0 / 3.0,
+        f64::MAX,
+        1e300,
+    ] {
+        let text = number(value);
+        assert_eq!(text.parse::<f64>().unwrap(), value, "{text}");
+        assert!(text.len() <= 24, "{text}");
+    }
+    assert_eq!(number(210000.0), "210000");
+    assert_eq!(number(7.85e-9), "7.85e-9");
+}

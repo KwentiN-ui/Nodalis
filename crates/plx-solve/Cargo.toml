@@ -12,6 +12,9 @@ plx-results.workspace = true
 plxs-core.workspace = true
 plxs-session.workspace = true
 
+[dev-dependencies]
+plxs-input.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

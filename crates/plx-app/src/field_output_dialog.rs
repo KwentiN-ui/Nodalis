@@ -1,4 +1,4 @@
-//! PrePoMax's "Create Field Output" dialog of the Results tree: a type list, the properties
+//! The "Create Field Output" dialog of the Results tree: a type list, the properties
 //! of the chosen type with a description below, and for limits a table of limit values.
 
 use egui::{RichText, Ui};
@@ -11,7 +11,7 @@ use crate::numeric;
 use crate::results::ResultsView;
 use crate::tree_rows::{frame, tree_row};
 
-/// The types of the list, PrePoMax's first in its order, with the prefix of their default
+/// The types of the list, in order, with the prefix of their default
 /// names.
 const TYPES: [(&str, &str); 6] = [
     ("Limit", "Limit"),
@@ -116,7 +116,7 @@ pub struct FieldOutputDialog {
     /// Index of the edited output; `None` creates a new one.
     pub edit: Option<usize>,
     kind: usize,
-    /// One draft per type, as PrePoMax keeps the values of each type while switching.
+    /// One draft per type, so the values of each type are kept while switching.
     drafts: [FieldOutput; 6],
     /// Limit values per part, per element set and for all elements.
     part_limits: Vec<(String, f64)>,
@@ -213,7 +213,7 @@ impl FieldOutputDialog {
                 .map(|o| o.name.clone())
                 .filter(|n| Some(n) != own.as_ref()),
         );
-        // PrePoMax proposes STRESS.MISES, else the first component there is.
+        // Nodalis proposes STRESS.MISES, else the first component there is.
         let (field, component) = fields
             .iter()
             .find(|(f, c)| f == "STRESS" && c.iter().any(|c| c == "MISES"))
@@ -384,76 +384,76 @@ impl FieldOutputDialog {
     pub fn show(&mut self, ctx: &egui::Context) -> DialogAction<FieldOutput> {
         let mut action = DialogAction::Open;
         let mut open = true;
-        egui::Window::new(self.title())
+        let title = self.title();
+        let builder = egui::Window::new(title)
             .id(crate::ids::window(ctx, "field output dialog"))
-            .open(&mut open)
             .collapsible(false)
             .resizable(false)
             // Anchored at the top, so that a longer description or an error never moves it.
-            .default_pos(ctx.content_rect().center() - egui::vec2(175.0, 290.0))
-            .show(ctx, |ui| {
-                ui.set_width(340.0);
-                ui.label("Type");
-                frame().show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.set_min_height(76.0);
-                    for (index, (label, _)) in TYPES.iter().enumerate() {
-                        let selected = self.kind == index;
-                        let row = ui.add_enabled_ui(self.edit.is_none() || selected, |ui| {
-                            tree_row(ui, 0, None, selected, RichText::new(*label))
-                        });
-                        if row.inner.clicked() && !selected {
-                            self.kind = index;
-                            self.tab = Tab::Properties;
-                            self.focus = Row::Name;
-                            self.error = None;
-                        }
-                    }
-                });
-                ui.add_space(6.0);
-                self.tabs(ui);
-                frame().show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.set_min_height(220.0);
-                    match self.tab {
-                        Tab::Properties => self.properties(ui),
-                        Tab::LimitValues => self.limit_values(ui),
-                    }
-                });
-                ui.add_space(4.0);
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.set_height(76.0);
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        self.description(ui);
+            .default_pos(ctx.content_rect().center() - egui::vec2(175.0, 290.0));
+        crate::dock::show(ctx, builder, title, &mut open, |ui| {
+            ui.set_width(340.0);
+            ui.label("Type");
+            frame().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_min_height(76.0);
+                for (index, (label, _)) in TYPES.iter().enumerate() {
+                    let selected = self.kind == index;
+                    let row = ui.add_enabled_ui(self.edit.is_none() || selected, |ui| {
+                        tree_row(ui, 0, None, selected, RichText::new(*label))
                     });
-                });
-                if let Some(error) = &self.error {
-                    ui.colored_label(crate::style::error(), error);
+                    if row.inner.clicked() && !selected {
+                        self.kind = index;
+                        self.tab = Tab::Properties;
+                        self.focus = Row::Name;
+                        self.error = None;
+                    }
                 }
-                ui.add_space(4.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Cancel").clicked() {
-                        action = DialogAction::Cancel;
-                    }
-                    let ok = ui.button("OK").clicked();
-                    let next = self.edit.is_none() && ui.button("OK - New").clicked();
-                    if ok || next {
-                        match self.output() {
-                            Ok(output) => action = DialogAction::Ok { output, next },
-                            Err(error) => self.error = Some(error),
-                        }
-                    }
+            });
+            ui.add_space(6.0);
+            self.tabs(ui);
+            frame().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_min_height(220.0);
+                match self.tab {
+                    Tab::Properties => self.properties(ui),
+                    Tab::LimitValues => self.limit_values(ui),
+                }
+            });
+            ui.add_space(4.0);
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_height(76.0);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    self.description(ui);
                 });
             });
+            if let Some(error) = &self.error {
+                ui.colored_label(crate::style::error(), error);
+            }
+            ui.add_space(4.0);
+            crate::dock::footer(ui, |ui| {
+                if ui.button("Cancel").clicked() {
+                    action = DialogAction::Cancel;
+                }
+                let ok = ui.button("OK").clicked();
+                let next = self.edit.is_none() && ui.button("OK - New").clicked();
+                if ok || next {
+                    match self.output() {
+                        Ok(output) => action = DialogAction::Ok { output, next },
+                        Err(error) => self.error = Some(error),
+                    }
+                }
+            });
+        });
         if !open {
             action = DialogAction::Cancel;
         }
         action
     }
 
-    /// PrePoMax's help box below the property grid: what the focused row means.
+    /// The help box below the property grid: what the focused row means.
     fn description(&self, ui: &mut Ui) {
         if self.unavailable().is_some() {
             return;
@@ -491,7 +491,7 @@ impl FieldOutputDialog {
             ui.label(reason);
             return;
         }
-        // Category header like PrePoMax's property grid.
+        // Category header of the property grid.
         let header = egui::Frame::new()
             .fill(crate::style::control())
             .inner_margin(egui::Margin::symmetric(4, 1));
@@ -505,6 +505,7 @@ impl FieldOutputDialog {
         let focus = &mut self.focus;
         let draft = &mut self.drafts[self.kind];
         egui::Grid::new("field output properties")
+            .max_col_width(crate::dock::column_limit(ui))
             .num_columns(2)
             .striped(true)
             .min_col_width(130.0)
@@ -525,7 +526,7 @@ impl FieldOutputDialog {
                         prop_row(ui, focus, Row::Basis, |ui| {
                             let response = egui::ComboBox::from_id_salt("limit basis")
                                 .selected_text(basis_label(*basis))
-                                .width(180.0)
+                                .width(crate::dock::fit_width(ui, 180.0))
                                 .show_ui(ui, |ui| {
                                     for choice in LimitBasis::ALL {
                                         ui.selectable_value(basis, choice, basis_label(choice));
@@ -554,7 +555,7 @@ impl FieldOutputDialog {
                         prop_row(ui, focus, Row::Field, |ui| {
                             let response = egui::ComboBox::from_id_salt("transform field")
                                 .selected_text(field.as_str())
-                                .width(180.0)
+                                .width(crate::dock::fit_width(ui, 180.0))
                                 .show_ui(ui, |ui| {
                                     for (name, _) in fields {
                                         ui.selectable_value(field, name.clone(), name);
@@ -565,7 +566,7 @@ impl FieldOutputDialog {
                         prop_row(ui, focus, Row::CoordinateSystem, |ui| {
                             let response = egui::ComboBox::from_id_salt("transform system")
                                 .selected_text(coordinate_system.as_str())
-                                .width(180.0)
+                                .width(crate::dock::fit_width(ui, 180.0))
                                 .show_ui(ui, |ui| {
                                     for name in systems {
                                         ui.selectable_value(coordinate_system, name.clone(), name);
@@ -579,7 +580,7 @@ impl FieldOutputDialog {
                         prop_row(ui, focus, Row::Field, |ui| {
                             let response = egui::ComboBox::from_id_salt("principal field")
                                 .selected_text(field.as_str())
-                                .width(180.0)
+                                .width(crate::dock::fit_width(ui, 180.0))
                                 .show_ui(ui, |ui| {
                                     for name in tensors {
                                         ui.selectable_value(field, name.clone(), name);
@@ -590,7 +591,7 @@ impl FieldOutputDialog {
                         prop_row(ui, focus, Row::Principal, |ui| {
                             let response = egui::ComboBox::from_id_salt("principal value")
                                 .selected_text(which.label())
-                                .width(180.0)
+                                .width(crate::dock::fit_width(ui, 180.0))
                                 .show_ui(ui, |ui| {
                                     for choice in Principal::ALL {
                                         ui.selectable_value(which, choice, choice.label());
@@ -689,7 +690,7 @@ fn source_rows(
         let mut changed = false;
         let response = egui::ComboBox::from_id_salt("field output field")
             .selected_text(field.as_str())
-            .width(180.0)
+            .width(crate::dock::fit_width(ui, 180.0))
             .show_ui(ui, |ui| {
                 for (name, _) in fields {
                     changed |= ui.selectable_value(field, name.clone(), name).changed();
@@ -710,7 +711,7 @@ fn source_rows(
             .map_or(&[][..], |(_, c)| c.as_slice());
         let response = egui::ComboBox::from_id_salt("field output component")
             .selected_text(component.as_str())
-            .width(180.0)
+            .width(crate::dock::fit_width(ui, 180.0))
             .show_ui(ui, |ui| {
                 for name in components {
                     ui.selectable_value(component, name.clone(), name);

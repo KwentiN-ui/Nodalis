@@ -1,4 +1,4 @@
-//! PrePoMax's "Model Properties" dialog: the model space, the unit system and the physical
+//! The "Model Properties" dialog: the model space, the unit system and the physical
 //! constants, asked for when an analysis is made. Its model space and unit system stay as
 //! they are then; the rest can be edited later from the model's context.
 
@@ -54,89 +54,87 @@ impl ModelPropertiesDialog {
         let mut result = DialogResult::Open;
         let error = (mesh.and_then(|mesh| space_error(self.draft.space, mesh)))
             .or_else(|| geometry.and_then(|g| geometry_check(self.draft.space, g).err()));
-        egui::Window::new("Model Properties")
+        let title = "Model Properties";
+        let builder = egui::Window::new(title)
             .id(crate::ids::window(ctx, "model properties"))
-            .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
-            .show(ctx, |ui| {
-                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                ui.set_width(340.0);
-                let draft = &mut self.draft;
-                let fixed = self.editing;
-                group(ui, "Model Space", |ui| {
-                    egui::Grid::new("model space")
-                        .num_columns(2)
-                        .spacing([24.0, 4.0])
-                        .show(ui, |ui| {
-                            for pair in ModelSpace::ALL.chunks(2) {
-                                for &space in pair {
-                                    let radio =
-                                        egui::RadioButton::new(draft.space == space, space.label());
-                                    let clicked = ui
-                                        .add_enabled(!fixed || draft.space == space, radio)
-                                        .on_hover_ui(|ui| {
-                                            crate::model_space_sketch::hover(ui, space)
-                                        })
-                                        .on_disabled_hover_ui(|ui| {
-                                            crate::model_space_sketch::hover(ui, space)
-                                        })
-                                        .clicked();
-                                    if clicked && !fixed {
-                                        draft.space = space;
-                                    }
-                                }
-                                ui.end_row();
-                            }
-                        });
-                });
-                group(ui, "Model Type", |ui| model_type(ui, draft));
-                group(ui, "Unit System", |ui| {
-                    egui::Frame::new()
-                        .fill(crate::style::window())
-                        .stroke(egui::Stroke::new(1.0, crate::style::border()))
-                        .inner_margin(4)
-                        .show(ui, |ui| {
-                            ui.set_min_width(ui.available_width());
-                            for units in UnitSystem::ALL {
-                                let selected = draft.units == units;
-                                let label = egui::Button::selectable(selected, units.label());
-                                let clicked = ui.add_enabled(!fixed || selected, label).clicked();
+            .default_pos(ctx.content_rect().center());
+        crate::dock::show(ctx, builder, title, &mut open, |ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            ui.set_width(340.0);
+            let draft = &mut self.draft;
+            let fixed = self.editing;
+            group(ui, "Model Space", |ui| {
+                egui::Grid::new("model space")
+                    .num_columns(2)
+                    .spacing([24.0, 4.0])
+                    .show(ui, |ui| {
+                        for pair in ModelSpace::ALL.chunks(2) {
+                            for &space in pair {
+                                let radio =
+                                    egui::RadioButton::new(draft.space == space, space.label());
+                                let clicked = ui
+                                    .add_enabled(!fixed || draft.space == space, radio)
+                                    .on_hover_ui(|ui| crate::model_space_sketch::hover(ui, space))
+                                    .on_disabled_hover_ui(|ui| {
+                                        crate::model_space_sketch::hover(ui, space)
+                                    })
+                                    .clicked();
                                 if clicked && !fixed {
-                                    draft.units = units;
+                                    draft.space = space;
                                 }
                             }
-                        });
-                });
-                group(ui, "Units", |ui| units_table(ui, draft.units));
-                group(ui, "Physical Constants", |ui| constants(ui, draft));
-                let note = if fixed {
-                    "The model space and the unit system are set when the analysis is made."
-                } else {
-                    "The model space and the unit system cannot be changed once the analysis \
+                            ui.end_row();
+                        }
+                    });
+            });
+            group(ui, "Model Type", |ui| model_type(ui, draft));
+            group(ui, "Unit System", |ui| {
+                egui::Frame::new()
+                    .fill(crate::style::window())
+                    .stroke(egui::Stroke::new(1.0, crate::style::border()))
+                    .inner_margin(4)
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        for units in UnitSystem::ALL {
+                            let selected = draft.units == units;
+                            let label = egui::Button::selectable(selected, units.label());
+                            let clicked = ui.add_enabled(!fixed || selected, label).clicked();
+                            if clicked && !fixed {
+                                draft.units = units;
+                            }
+                        }
+                    });
+            });
+            group(ui, "Units", |ui| units_table(ui, draft.units));
+            group(ui, "Physical Constants", |ui| constants(ui, draft));
+            let note = if fixed {
+                "The model space and the unit system are set when the analysis is made."
+            } else {
+                "The model space and the unit system cannot be changed once the analysis \
                      is made. The unit system only says in which units the analysis shows \
                      and reads its values; they are stored in SI units."
-                };
-                ui.add(egui::Label::new(egui::RichText::new(note).weak()).wrap());
-                if let Some(error) = &error {
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(error).color(crate::style::error()))
-                            .wrap(),
-                    );
+            };
+            ui.add(egui::Label::new(egui::RichText::new(note).weak()).wrap());
+            if let Some(error) = &error {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(error).color(crate::style::error()))
+                        .wrap(),
+                );
+            }
+            ui.add_space(4.0);
+            crate::dock::footer(ui, |ui| {
+                if ui.button("Cancel").clicked() {
+                    result = DialogResult::Cancel;
                 }
-                ui.add_space(4.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Cancel").clicked() {
-                        result = DialogResult::Cancel;
-                    }
-                    let ok = ui.add_enabled(error.is_none(), egui::Button::new("OK"));
-                    if ok.clicked() {
-                        result = DialogResult::Ok(draft.clone());
-                    }
-                });
+                let ok = ui.add_enabled(error.is_none(), egui::Button::new("OK"));
+                if ok.clicked() {
+                    result = DialogResult::Ok(draft.clone());
+                }
             });
+        });
         if error.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
             result = DialogResult::Ok(self.draft.clone());
         }
@@ -147,10 +145,10 @@ impl ModelPropertiesDialog {
     }
 }
 
-/// PrePoMax's model type. A submodel takes the results of its global model through a link
+/// The model type. A submodel takes the results of its global model through a link
 /// in the project, not from a file picked here.
 fn model_type(ui: &mut egui::Ui, draft: &mut ModelProperties) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         for kind in ModelKind::ALL {
             ui.radio_value(&mut draft.kind, kind, kind.label());
         }
@@ -248,8 +246,8 @@ fn group(ui: &mut egui::Ui, title: &str, contents: impl FnOnce(&mut egui::Ui)) {
         });
 }
 
-/// Absolute zero and the Stefan-Boltzmann constant, which radiation needs; undefined as in
-/// PrePoMax until the user sets them.
+/// Absolute zero and the Stefan-Boltzmann constant, which radiation needs; undefined
+/// until the user sets them.
 fn constants(ui: &mut egui::Ui, draft: &mut ModelProperties) {
     let units = draft.units;
     egui::Grid::new("physical constants")
@@ -290,7 +288,7 @@ fn constants(ui: &mut egui::Ui, draft: &mut ModelProperties) {
     );
 }
 
-/// The units of the system, PrePoMax's base and derived units.
+/// The units of the system.
 fn units_table(ui: &mut egui::Ui, units: UnitSystem) {
     egui::ScrollArea::vertical()
         .max_height(220.0)

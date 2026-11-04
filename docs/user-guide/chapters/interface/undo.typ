@@ -13,7 +13,7 @@ returns to the state at each change.
 
 The shortcuts act on the model when no text field has the focus; in a text field,
 #key("Ctrl+Z") undoes the typing there. Undo and Redo are greyed out while a dialog is open,
-while meshing runs and on the #ui("Results") tab; the tooltip of the greyed-out entry says why.
+while meshing runs and in the Results workspace; the tooltip of the greyed-out entry says why.
 The output pane notes each undo and redo.
 
 The last 100 changes can be undone, of which at most 10 that replaced the mesh, as each keeps a

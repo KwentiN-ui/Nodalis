@@ -4,6 +4,6 @@ class = "A"
 stage = "M2"
 features = ["*HEADING", "*NODE", "*ELEMENT", "C3D8", "*NSET", "*ELSET", "*SURFACE", "*MATERIAL", "*DENSITY", "*ELASTIC", "*EXPANSION", "*CONDUCTIVITY", "*SPECIFIC HEAT", "*SOLID SECTION", "*RIGID BODY", "*INITIAL CONDITIONS", "*STEP", "*STATIC", "*BOUNDARY", "*CLOAD", "*DLOAD", "*TEMPERATURE", "*NODE FILE", "*EL FILE", "*END STEP"]
 source = "plx-io writer test"
-reference = "ccx 2.21"
+reference = "plxs 0.2.0"
 note = "The rigid body face and the held nodes 1 and 12 leave the rotations about y and z free (only the reference node's x, node 1's y and z and node 12's z are held), so every displacement component is arbitrary in any solver; stresses, strains and forces are determined."
 undetermined = ["DISP U1", "DISP U2", "DISP U3"]

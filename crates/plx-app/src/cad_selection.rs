@@ -1,5 +1,5 @@
-//! Selections on a mesh generated from CAD geometry by its faces, edges and vertices, as
-//! PrePoMax's geometry based selection does. They are stored as CAD entities and found on
+//! Selections on a mesh generated from CAD geometry by its faces, edges and vertices.
+//! They are stored as CAD entities and found on
 //! the mesh again after remeshing, see [`plx_model::Region::Geometry`].
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -167,6 +167,11 @@ pub fn pick(model: &Model, hit: &Hit, target: Target, precision: f32) -> Option<
             }
         }
     }
+}
+
+/// The CAD face an element face lies on.
+pub fn face_of(model: &Model, face: (ElementId, u8)) -> Option<i32> {
+    model.cad_index().face(&model.mesh, face)
 }
 
 /// The CAD vertex nearest to a click, whatever its distance: of the edge for a line part,
@@ -381,7 +386,7 @@ mod tests {
 
     /// The plate with a hole (100 x 40 x 10) fixed at x = 0 and pulled by a pressure on its
     /// end at x = 100, both picked on the geometry: meshed coarse, then the part remeshed
-    /// fine. The regions find the end faces on both meshes, and CalculiX gives about the
+    /// fine. The regions find the end faces on both meshes, and the solver gives about the
     /// same elongation.
     #[test]
     fn selections_on_the_geometry_survive_remeshing() {
@@ -433,6 +438,19 @@ mod tests {
         };
         let point: Vec<NodeId> = point.into_iter().collect();
         assert_eq!(coords(&model.mesh, &point), [[0.0, 0.0, 10.0]]);
+
+        // The surface angle mode picks CAD faces too, not the nodes it grows over; the end
+        // face meets its neighbours at right angles, so it is the only one.
+        let hit = model
+            .pick(model.to_render([-50.0, 2.0, 7.0]), Vec3::X)
+            .unwrap();
+        let mut by_angle = Picker::default();
+        by_angle.select_by = crate::selection::SelectBy::GeometrySurfaceAngle;
+        let items = by_angle.pick(&model, &hit, Target::Nodes, 0.1);
+        assert!(
+            matches!(&items, crate::selection::Items::Geometry(e) if e.len() == 1 && matches!(e.first(), Some(CadEntity::Face(_)))),
+            "{items:?}"
+        );
 
         // Mixed with picked nodes the geometry turns into nodes; undo goes back to it.
         let mut draft = RegionDraft::from_region(&fixed, NODE_SOURCES, Target::Nodes, &model.mesh);
@@ -554,7 +572,7 @@ mod tests {
     /// A cantilever of two CAD lines along x, 0..60 and 60..100, meshed as beams: fixed at
     /// x = 0, the lines tied at x = 60 and pulled down at x = 100, all picked on the lines
     /// in the geometry mode. Meshed coarse, then both lines remeshed fine: the picks are CAD
-    /// vertices and edges, which find their nodes on both meshes, and CalculiX gives the
+    /// vertices and edges, which find their nodes on both meshes, and the solver gives the
     /// beam theory's tip deflection both times.
     #[test]
     fn selections_on_lines_survive_remeshing() {

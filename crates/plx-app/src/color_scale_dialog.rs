@@ -1,4 +1,4 @@
-//! The Color Scale dialog of a results file, PrePoMax's legend settings: colour spectrum,
+//! The Color Scale dialog of a results file: colour spectrum,
 //! number of colours and automatic or manual limits with colours for the values beyond them.
 
 use egui::{Color32, Rect, Sense, Stroke, StrokeKind, vec2};
@@ -19,6 +19,7 @@ pub struct ColorScaleDialog {
     range: [f64; 2],
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DialogResult {
     Open,
     Ok,
@@ -111,7 +112,7 @@ impl ColorScaleDialog {
                     .spacing([12.0, 4.0])
                     .show(ui, |ui| {
                         ui.label("Min/max limit type");
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             let automatic = ui.radio_value(&mut manual, false, "Automatic");
                             let user = ui.radio_value(&mut manual, true, "Manual");
                             if automatic.changed() || user.changed() {
@@ -153,26 +154,27 @@ impl ColorScaleDialog {
                         "The minimum must be smaller than the maximum.",
                     );
                 }
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui
+                // A tool window: the results show the scale as it is edited.
+                let mut defaults = false;
+                let footer = crate::dialog::tool_footer_with(ui, None, |ui| {
+                    defaults = ui
                         .button("Defaults")
-                        .on_hover_text("PrePoMax's rainbow with automatic limits")
-                        .clicked()
-                    {
-                        *draft = ColorScale::default();
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                        if ui.button("Cancel").clicked() {
-                            result = DialogResult::Cancel;
-                        }
-                        if ui.add_enabled(valid, egui::Button::new("OK")).clicked() {
-                            result = DialogResult::Ok;
-                        }
-                    });
+                        .on_hover_text("Rainbow with automatic limits")
+                        .clicked();
                 });
+                if defaults {
+                    *draft = ColorScale::default();
+                }
+                if footer == crate::dialog::Tool::Close {
+                    result = DialogResult::Ok;
+                }
             });
         if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            result = DialogResult::Ok;
+        }
+        // Limits that cannot be shown are dropped on closing.
+        if result == DialogResult::Ok && self.draft.manual.is_some_and(|[a, b]| !valid_limits(a, b))
+        {
             result = DialogResult::Cancel;
         }
         result

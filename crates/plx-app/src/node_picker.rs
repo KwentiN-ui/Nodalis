@@ -31,6 +31,10 @@ pub struct NodePicker {
     selected: usize,
     /// Whether it was shown before, so that the click that opened it does not close it.
     shown: bool,
+    /// The most entries it lists.
+    limit: usize,
+    /// The text in the empty search field.
+    hint: &'static str,
 }
 
 const WIDTH: f32 = 240.0;
@@ -43,11 +47,21 @@ impl NodePicker {
             query: String::new(),
             selected: 0,
             shown: false,
+            limit: usize::MAX,
+            hint: "Search …",
         }
     }
 
+    /// A picker that lists at most `limit` entries, with this text in the empty field.
+    pub fn with_limit(mut self, limit: usize, hint: &'static str) -> Self {
+        self.limit = limit;
+        self.hint = hint;
+        self
+    }
+
     pub fn show(&mut self, ctx: &egui::Context, entries: &[Entry]) -> Outcome {
-        let list = ranked(&self.query, entries);
+        let mut list = ranked(&self.query, entries);
+        list.truncate(self.limit);
         let (up, down, enter, escape) = ctx.input_mut(|i| {
             (
                 i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
@@ -81,7 +95,7 @@ impl NodePicker {
                     ui.set_width(WIDTH);
                     let search = ui.add(
                         egui::TextEdit::singleline(&mut self.query)
-                            .hint_text("Search …")
+                            .hint_text(self.hint)
                             .desired_width(f32::INFINITY),
                     );
                     if !self.shown || !search.has_focus() {

@@ -1,5 +1,5 @@
 //! Properties of a tree item as a two-column grid. The grid does not care where it is shown:
-//! today in PrePoMax's double-click dialog, it fits a side panel just as well.
+//! today in the double-click dialog, it fits a side panel just as well.
 
 use plx_mesh::{ElementShape, SurfaceDefinition};
 use plx_model::{ModelSpace, element_type_options};
@@ -77,6 +77,7 @@ pub fn show(
         rows.push(("", "Not implemented yet".into()));
     }
     egui::Grid::new("properties")
+        .max_col_width(crate::dock::column_limit(ui))
         .num_columns(2)
         .striped(true)
         .spacing([16.0, 4.0])
@@ -109,7 +110,7 @@ pub fn show(
         });
 }
 
-/// PrePoMax's element type of a part: the CalculiX types with the same nodes, as a combo
+/// The element type of a part: the CalculiX types with the same nodes, as a combo
 /// box with the element count after it. `row` shows `type_name (count)`; a shape with one
 /// type only keeps it as text.
 fn element_type_combo(

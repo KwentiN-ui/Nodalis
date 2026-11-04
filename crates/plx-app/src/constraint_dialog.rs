@@ -1,4 +1,4 @@
-//! The constraint dialog, PrePoMax's "Create Constraint": a list of constraint types above the
+//! The constraint dialog: a list of constraint types above the
 //! properties of the chosen one.
 
 use egui::Ui;
@@ -19,7 +19,7 @@ use crate::setup::{
 /// The fixed width of the dialog's content, so it does not change with the type.
 pub(crate) const WIDTH: f32 = 440.0;
 
-/// PrePoMax's list of constraint types, its point and surface springs merged into one spring
+/// The list of constraint types, its point and surface springs merged into one spring
 /// that also connects two surfaces.
 const TYPES: [(&str, Type); 3] = [
     ("Spring", Type::Spring),
@@ -46,7 +46,7 @@ impl Type {
         }
     }
 
-    /// PrePoMax's default name without the number.
+    /// The default name without the number.
     fn prefix(self) -> &'static str {
         match self {
             Type::Spring => "Spring",
@@ -55,7 +55,7 @@ impl Type {
         }
     }
 
-    /// The constraint with PrePoMax's default values and empty regions.
+    /// The constraint with the default values and empty regions.
     fn create(self, name: String) -> Constraint {
         let faces = || Region::Faces(Vec::new());
         match self {
@@ -272,7 +272,7 @@ impl ConstraintDraft {
         show_dropped_note(ui);
         hint(
             ui,
-            "Ties are not constraints: create them with Interaction > Create Tie, they are \
+            "Ties are not constraints: create them with FE Model > Connections > Tie, they are \
              listed under Contact Pairs.",
         );
         name_row(ui, &mut self.constraint);
@@ -303,7 +303,7 @@ impl ConstraintDraft {
                 } else {
                     egui::ComboBox::from_id_salt("rigid body point")
                         .selected_text(body.reference_point.as_str())
-                        .width(200.0)
+                        .width(crate::dock::fit_width(ui, 200.0))
                         .show_ui(ui, |ui| {
                             for point in points {
                                 ui.selectable_value(
@@ -381,7 +381,7 @@ fn spring_rows(
     }
     ui.label("Stiffness");
     ui.add_enabled_ui(!spring.each_node, |ui| {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.radio_value(&mut spring.per_area, false, "Total");
             ui.radio_value(&mut spring.per_area, true, "Per area")
                 .on_hover_text("Stiffness per area of the faces of the region.");
@@ -395,7 +395,7 @@ fn spring_rows(
     ui.end_row();
     ui.label("Connection");
     let mut surface = to_surface;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.radio_value(&mut surface, false, "Surface to World");
         ui.radio_value(&mut surface, true, "Surface to Surface");
     });
@@ -523,7 +523,7 @@ fn compression_only_rows(ui: &mut Ui, support: &mut CompressionOnly, units: Unit
             "Gap elements carry compression only; the small tensile force in the open state \
              keeps the model solvable. Stiffness and tensile force are those of the whole \
              surface, spread over its nodes by area. Without a value every gap gets \
-             CalculiX's default, practically rigid."
+             the solver's default, practically rigid."
         },
     );
 }
@@ -534,7 +534,7 @@ fn length_row(ui: &mut Ui, label: &str, value: &mut f64, units: UnitSystem) {
     ui.end_row();
 }
 
-/// A value PrePoMax leaves at its default until the user enters one.
+/// A value left at its default until the user enters one.
 fn optional_row(
     ui: &mut Ui,
     label: &str,

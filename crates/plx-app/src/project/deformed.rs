@@ -614,8 +614,8 @@ mod tests {
         let mut model = plx_model::FeModel::default();
         model.steps.push(plx_model::Step::new_static("Step-1"));
         let results = plx_io::project::BoundResults {
-            input: Some(plx_model::fingerprint::solve_input(mesh, &model)),
-            steps: plx_model::fingerprint::step_inputs(mesh, &model),
+            input: Some(crate::solve_fingerprint::solve_input(mesh, &model)),
+            steps: crate::solve_fingerprint::step_inputs(mesh, &model),
             ..Default::default()
         };
         ProjectAnalysis {

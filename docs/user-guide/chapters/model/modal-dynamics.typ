@@ -8,7 +8,7 @@ Both steps superpose the eigenmodes of the structure instead of integrating the 
 harmonic excitation (`*STEADY STATE DYNAMICS`). Both need a #ui("Frequency") step with
 #ui("Store matrices and eigenmodes") before them, with the same boundary conditions; the model
 check (@model-check) reports a missing one as "No stored eigenmodes". Create the steps with
-#menu("Model", "Create Step ...").
+#menu("Steps", "Step").
 
 #screenshot("modal-dynamics-step.png", [Modal Dynamics step with a constant damping ratio])
 

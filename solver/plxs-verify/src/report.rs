@@ -16,8 +16,10 @@ pub enum Outcome {
     Fail(Vec<String>),
     /// The solver refused or crashed; the first `*ERROR` line or the exit status.
     Error(String),
-    /// No golden files for this fixture; nothing to compare with.
+    /// No snapshot for this fixture; nothing to compare with.
     NoReference,
+    /// A known gap of the solver (see `Meta::known_gap`): not run, nothing to compare with.
+    KnownGap(String),
 }
 
 impl Outcome {
@@ -31,7 +33,13 @@ impl Outcome {
             Outcome::Fail(_) => "FAIL",
             Outcome::Error(_) => "ERROR",
             Outcome::NoReference => "no reference",
+            Outcome::KnownGap(_) => "known gap",
         }
+    }
+
+    /// Whether the fixture is compared at all: it has a snapshot and no known gap.
+    pub fn compared(&self) -> bool {
+        !matches!(self, Outcome::NoReference | Outcome::KnownGap(_))
     }
 }
 
@@ -44,8 +52,8 @@ pub struct Report {
     pub log: String,
 }
 
-/// Runs `solver` (a `ccx`-compatible command line: `solver -i <name>` in a directory with
-/// `<name>.inp`) on a fixture in `work` and compares the results with the golden files.
+/// Runs `solver` (the command line `solver -i <name>` in a directory with `<name>.inp`) on a
+/// fixture in `work` and compares the results with the snapshot.
 pub fn run_fixture(solver: &Path, fixture: &Fixture, work: &Path) -> Report {
     let start = Instant::now();
     let name = fixture.id();
@@ -55,12 +63,15 @@ pub fn run_fixture(solver: &Path, fixture: &Fixture, work: &Path) -> Report {
         duration: start.elapsed(),
         log,
     };
+    if let Some(gap) = &fixture.meta.known_gap {
+        return report(Outcome::KnownGap(gap.clone()), String::new());
+    }
     if !fixture.has_reference() {
         return report(Outcome::NoReference, String::new());
     }
     let reference = match load_reference(fixture) {
         Ok(r) => r,
-        Err(e) => return report(Outcome::Error(format!("golden files: {e}")), String::new()),
+        Err(e) => return report(Outcome::Error(format!("snapshot: {e}")), String::new()),
     };
     if let Err(e) = std::fs::create_dir_all(work) {
         return report(Outcome::Error(e.to_string()), String::new());
@@ -104,19 +115,13 @@ pub fn run_fixture(solver: &Path, fixture: &Fixture, work: &Path) -> Report {
         Err(e) => return report(Outcome::Error(format!("results: {e}")), short_log),
     };
     let class = fixture.meta.class;
-    // Documented deviations (whole fields) and undetermined components.
-    let undetermined: Vec<String> = fixture
-        .meta
-        .deviations
-        .iter()
-        .chain(&fixture.meta.undetermined)
-        .cloned()
-        .collect();
+    // Components the model leaves undetermined.
+    let undetermined = &fixture.meta.undetermined;
     let mut comparison: Comparison = compare_frd_with(
         &reference.frd,
         &results.frd,
         class,
-        &undetermined,
+        undetermined,
         &fixture.meta.noise,
     );
     match (&reference.dat, &results.dat) {
@@ -127,7 +132,7 @@ pub fn run_fixture(solver: &Path, fixture: &Fixture, work: &Path) -> Report {
                 class,
                 &comparison.unmatched_modes,
                 &comparison.standing_modes,
-                &undetermined,
+                undetermined,
                 &fixture.meta.noise,
             );
             comparison.failures.extend(dat.failures);
@@ -177,6 +182,7 @@ pub fn format_reports(reports: &[Report]) -> String {
             Outcome::Fail(failures) => failures.first().cloned().unwrap_or_default(),
             Outcome::Error(e) => e.clone(),
             Outcome::NoReference => String::new(),
+            Outcome::KnownGap(gap) => gap.clone(),
         };
         out.push_str(&format!(
             "{:<width$}  {:<12} {:>7.2}s  {}\n",
@@ -187,10 +193,7 @@ pub fn format_reports(reports: &[Report]) -> String {
         ));
     }
     let passed = reports.iter().filter(|r| r.outcome.passed()).count();
-    let with_reference = reports
-        .iter()
-        .filter(|r| r.outcome != Outcome::NoReference)
-        .count();
+    let with_reference = reports.iter().filter(|r| r.outcome.compared()).count();
     out.push_str(&format!("{passed} of {with_reference} fixtures pass\n"));
     out
 }

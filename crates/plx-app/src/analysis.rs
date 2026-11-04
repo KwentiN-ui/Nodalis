@@ -1,5 +1,5 @@
 //! Running the analysis: writes the input file, starts the solver (see [`plx_solve::Run`])
-//! and shows PrePoMax's monitor window with the solver output, progress and the button to
+//! and shows the monitor window with the solver output, progress and the button to
 //! open the results.
 
 use std::path::PathBuf;
@@ -18,10 +18,10 @@ pub struct Analysis {
     job: Run,
     /// Name of the analysis, also of its input and results files.
     name: String,
-    /// Fingerprint of the model the run solves, see [`plx_model::fingerprint::solve_input`];
+    /// Fingerprint of the model the run solves, see [`crate::solve_fingerprint`];
     /// kept with its results to tell when they are out of date.
     pub input: u64,
-    /// The fingerprint of each step's results, see [`plx_model::fingerprint::step_inputs`].
+    /// The fingerprint of each step's results, see [`crate::solve_fingerprint`].
     pub steps: Vec<u64>,
     output: Vec<String>,
     /// Lines dropped from the front of `output` to keep it at [`MAX_OUTPUT_LINES`].
@@ -31,6 +31,50 @@ pub struct Analysis {
     started: Instant,
     finished: Option<f32>,
     status: JobStatus,
+    /// The item of the model each item of the solver's analysis came from, which leads the
+    /// solver's diagnostics back to the tree.
+    origins: plx_model::Origins,
+}
+
+/// Why an analysis did not start, with the item of the model it is about when the lowering
+/// named one.
+#[derive(Debug)]
+pub struct StartError {
+    pub message: String,
+    pub item: Option<plx_model::ModelItem>,
+}
+
+impl StartError {
+    /// The error as a finding on its item, for the tree.
+    pub fn finding(&self) -> Option<plx_model::Finding> {
+        let item = self.item?;
+        Some(plx_model::Finding::new(
+            item,
+            plx_model::Problem::NotLowered,
+            self.message.clone(),
+        ))
+    }
+}
+
+impl From<String> for StartError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            item: None,
+        }
+    }
+}
+
+impl From<&str> for StartError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+
+impl std::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 pub enum MonitorEvent {
@@ -135,7 +179,7 @@ impl RunView {
     }
 }
 
-/// The analysis name as the name of its files: CalculiX takes no spaces in them, and the
+/// The analysis name as the name of its files: the solver takes no spaces in them, and the
 /// file system no path separators.
 pub fn job_name(name: &str) -> String {
     let name: String = (name.trim().chars())
@@ -155,7 +199,7 @@ pub fn job_name(name: &str) -> String {
 }
 
 /// Copies the results file of a submodel's global model next to the input file `<name>.inp`
-/// in `dir`, as `<name>-global.frd`, and lets `fe` refer to the copy: CalculiX reads it from
+/// in `dir`, as `<name>-global.frd`, and lets `fe` refer to the copy: the solver reads it from
 /// the directory of the input file and cannot take paths with spaces. Does nothing unless a
 /// submodel boundary condition needs the file.
 pub fn stage_global_results(
@@ -196,14 +240,52 @@ pub fn stage_global_results(
     Ok(())
 }
 
+/// The lowered analysis for the solver, with its input text for reference.
+pub fn prepare(lowered: plx_io::inp::Lowered) -> plx_solve::Prepared {
+    plx_solve::Prepared {
+        text: lowered.text(),
+        analysis: lowered.analysis,
+        warnings: lowered.warnings,
+    }
+}
+
+/// Initial temperatures taken from the results of another analysis.
+#[derive(Debug)]
+pub struct InitialTemperatures {
+    /// Where they come from, in words.
+    pub source: String,
+    /// The temperature of each node.
+    pub values: Vec<(u32, f64)>,
+}
+
+impl InitialTemperatures {
+    /// Sets them as the initial conditions of `analysis`, after those of the model. Every
+    /// node has to be one of the model's.
+    pub fn apply(&self, analysis: &mut plxs_core::Analysis) -> Result<(), String> {
+        let model = &mut analysis.model;
+        if let Some(&(node, _)) =
+            (self.values.iter()).find(|(n, _)| model.nodes.index(*n).is_none())
+        {
+            return Err(format!(
+                "Initial temperatures not set: node {node} of {} is not in the model.",
+                self.source
+            ));
+        }
+        let values = self.values.iter();
+        (model.initial.temperatures)
+            .extend(values.map(|&(node, value)| (plxs_core::mesh::NodeRef::Node(node), value)));
+        Ok(())
+    }
+}
+
 /// Prepares what the model takes from the results of other analyses: the stored eigenmodes
-/// are copied to `<name>.eig`, where CalculiX reads them; the initial temperatures are read
-/// from their results file and returned as the keyword that sets them.
+/// are copied to `<name>.eig`, where the solver reads them; the initial temperatures are
+/// read from their results file.
 pub fn stage_linked_results(
     fe: &plx_model::FeModel,
     dir: &std::path::Path,
     name: &str,
-) -> Result<Option<String>, String> {
+) -> Result<Option<InitialTemperatures>, String> {
     if let Some(modes) = &fe.properties.stored_modes {
         if !modes.is_file() {
             return Err(format!(
@@ -232,32 +314,17 @@ pub fn stage_linked_results(
                 file.display()
             )
         })?;
-    let mut keyword = format!(
-        "** Initial temperatures: step {step} of {}\n*Initial conditions, Type=Temperature\n",
-        file.display()
-    );
-    for (node, value) in results.mesh.node_ids().iter().zip(&temperatures.values) {
-        keyword.push_str(&format!("{node}, {value:e}\n"));
-    }
-    Ok(Some(keyword))
-}
-
-/// The input file with `keyword` inserted after the model definition, before the first step.
-fn before_first_step(input: &str, keyword: &str) -> String {
-    let at = (input.match_indices('\n'))
-        .map(|(i, _)| i + 1)
-        .find(|&i| {
-            input[i..]
-                .get(..5)
-                .is_some_and(|k| k.eq_ignore_ascii_case("*step"))
-        })
-        .unwrap_or(input.len());
-    format!("{}{keyword}{}", &input[..at], &input[at..])
+    Ok(Some(InitialTemperatures {
+        source: format!("step {step} of {}", file.display()),
+        values: (results.mesh.node_ids().iter().copied())
+            .zip(temperatures.values.iter().map(|&t| f64::from(t)))
+            .collect(),
+    }))
 }
 
 impl Analysis {
     /// Writes the input file of the analysis `name` into `work_dir` and starts the solver on
-    /// it. With `check_model` the solver only checks the model (PrePoMax's "Check Model").
+    /// it. With `check_model` the solver only checks the model (Check Model).
     /// `continuation` tells which analyses continue from its state, whose sets its input
     /// file holds too.
     pub fn start(
@@ -267,15 +334,17 @@ impl Analysis {
         name: &str,
         work_dir: &std::path::Path,
         continuation: &crate::links::Continuation,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, StartError> {
         if model.fe.steps.is_empty() && !check_model {
             return Err(
-                "Analysis not started: the model has no step (Model > Create Step …).".into(),
+                "Analysis not started: the model has no step (FE Model > Steps > Step).".into(),
             );
         }
         if !check_model && !model.fe.steps.iter().any(|s| s.active) {
             return Err("Analysis not started: all steps are deactivated.".into());
         }
+        // What the run solves, before anything of the run (linked results) is added.
+        let prints = crate::solve_fingerprint::fingerprints(&model.mesh, &model.fe);
         let heading = format!("Nodalis: {}", model.file_name());
         let mut fe = model.fe.clone();
         let job_name = job_name(name);
@@ -285,18 +354,23 @@ impl Analysis {
         // The model check reads the whole input with its steps: it checks every step's
         // supports.
         let dependent = &continuation.dependent_steps;
-        let input = plx_io::inp::write_inp_with_sets_of(&model.mesh, &fe, &heading, dependent)
-            .map_err(|e| format!("Input file not written: {e}"))?;
-        let input = match &initial {
-            Some(keyword) => before_first_step(&input, keyword),
-            None => input,
-        };
-        let overlaps = plx_io::inp::resolved_overlaps(&input);
+        let mut lowered =
+            plx_io::inp::lower_with_sets_unvalidated(&model.mesh, &fe, &heading, dependent)
+                .map_err(|e| StartError {
+                    message: format!("Analysis not set up: {e}"),
+                    item: e.item,
+                })?;
+        if let Some(initial) = &initial {
+            initial.apply(&mut lowered.analysis)?;
+        }
+        let overlaps = std::mem::take(&mut lowered.resolved_overlaps);
+        let origins = std::mem::take(&mut lowered.origins);
+        let prepared = prepare(lowered);
         let copied = copy_result_files(&fe, work_dir);
         let job = if check_model {
-            Run::check(solver.threads, work_dir, &job_name, &input)
+            Run::check_analysis(solver.threads, work_dir, &job_name, prepared)
         } else {
-            Run::start(solver.threads, work_dir, &job_name, &input)
+            Run::start_analysis(solver.threads, work_dir, &job_name, prepared)
         }
         .map_err(|e| format!("Solver not started: {e}"))?;
         let mut output = vec![format!(
@@ -309,6 +383,9 @@ impl Analysis {
             work_dir.display()
         )];
         output.extend(copied);
+        if let Some(initial) = &initial {
+            output.push(format!("Initial temperatures: {}", initial.source));
+        }
         // Constraints the input file writer had to change so that they do not bind a degree of
         // freedom twice.
         output.extend(
@@ -320,12 +397,18 @@ impl Analysis {
             filter: String::new(),
             job,
             name: name.to_owned(),
-            input: plx_model::fingerprint::solve_input(&model.mesh, &model.fe),
-            steps: plx_model::fingerprint::step_inputs(&model.mesh, &model.fe),
+            input: prints.input,
+            steps: prints.steps,
             started: Instant::now(),
             finished: None,
             status: JobStatus::Running,
+            origins,
         })
+    }
+
+    /// The item of the model each item of the solver's analysis came from.
+    pub fn origins(&self) -> &plx_model::Origins {
+        &self.origins
     }
 
     /// Adds a line of nodalis's own to the monitor output.
@@ -416,7 +499,7 @@ impl Analysis {
         }
     }
 
-    /// PrePoMax's monitor, in the Analysis tab below the 3D view: status, progress and
+    /// The monitor, in the Analysis tab below the 3D view: status, progress and
     /// filter in one row over the output of the run.
     pub fn monitor(&mut self, ui: &mut egui::Ui) -> MonitorEvent {
         let mut event = MonitorEvent::None;
@@ -662,7 +745,12 @@ mod tests {
         };
         assert_eq!(status, JobStatus::Failed, "{:?}", analysis.output());
         let diagnostics = analysis.diagnostics().expect("typed diagnostics");
-        let findings = plx_model::diagnose_solver_check(&diagnostics, &model.mesh, &model.fe);
+        let findings = plx_model::diagnose_solver_check(
+            &diagnostics,
+            &model.mesh,
+            &model.fe,
+            analysis.origins(),
+        );
         let at = |item| {
             findings
                 .iter()
@@ -686,6 +774,71 @@ mod tests {
         );
     }
 
+    /// The solver names the element it found without a section; the finding points at its
+    /// part, which the section leaves out.
+    #[test]
+    fn the_model_check_points_at_the_part_without_a_section() {
+        let mut model = pulled_cubes(0.03);
+        model.mesh.parts[0].elements = vec![1, 2];
+        model.mesh.parts.push(plx_mesh::Part {
+            name: "Solid-2".into(),
+            elements: vec![3],
+        });
+        let solver = Solver::default();
+        let dir = std::env::temp_dir().join(format!("nodalis-unsectioned-{}", std::process::id()));
+        let mut analysis =
+            Analysis::start(&solver, &model, true, "Cubes", &dir, &Default::default()).unwrap();
+        let status = loop {
+            if let Some(status) = analysis.poll() {
+                break status;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(status, JobStatus::Failed, "{:?}", analysis.output());
+        let diagnostics = analysis.diagnostics().expect("typed diagnostics");
+        let findings = plx_model::diagnose_solver_check(
+            &diagnostics,
+            &model.mesh,
+            &model.fe,
+            analysis.origins(),
+        );
+        let part = (findings.iter())
+            .find(|f| f.item == plx_model::ModelItem::Part(1))
+            .unwrap_or_else(|| panic!("{findings:?}"));
+        assert!(
+            part.detail.contains("element 3 has no section"),
+            "{}",
+            part.detail
+        );
+    }
+
+    /// A model the analysis cannot be set up with names the item, for the tree.
+    #[test]
+    fn a_model_that_cannot_be_set_up_names_the_item() {
+        let mut model = pulled_cubes(0.03);
+        model.fe.steps[1].boundary_conditions[1].region = plx_model::Region::Nodes(Vec::new());
+        let dir = std::env::temp_dir().join(format!("nodalis-not-set-up-{}", std::process::id()));
+        let error = Analysis::start(
+            &Solver::default(),
+            &model,
+            false,
+            "Cubes",
+            &dir,
+            &Default::default(),
+        )
+        .err()
+        .expect("the empty region stops the lowering");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            error.item,
+            Some(plx_model::ModelItem::BoundaryCondition(1, 1)),
+            "{error}"
+        );
+        let finding = error.finding().unwrap();
+        assert_eq!(finding.problem, plx_model::Problem::NotLowered);
+    }
+
     #[test]
     fn an_analysis_continuing_another_solves_all_its_steps() {
         let dir = std::env::temp_dir().join(format!("nodalis-continue-{}", std::process::id()));
@@ -704,7 +857,10 @@ mod tests {
         };
         solve_as(&source, &dir.join("Source"), "Source", &continuation);
         let source_inp = std::fs::read_to_string(dir.join("Source/Source.inp")).unwrap();
-        assert!(source_inp.contains("Hold"), "{source_inp}");
+        assert!(
+            source_inp.to_ascii_uppercase().contains("HOLD"),
+            "{source_inp}"
+        );
         assert_eq!(source_inp.matches("*Step").count(), 2);
         let continuation = crate::links::Continuation {
             upstream: vec![(dir.join("Source"), "Source".into())],
@@ -801,21 +957,20 @@ mod tests {
         plx_io::solver::export_calculix(&solved, &dir.join("Thermal/Thermal.frd")).unwrap();
         let mut fe = cubes().fe;
         fe.properties.initial_temperatures = Some((dir.join("Thermal/Thermal.frd"), 1));
-        let keyword = stage_linked_results(&fe, &dir, "Start").unwrap().unwrap();
-        let lines: Vec<&str> = keyword.lines().collect();
-        assert_eq!(lines[1], "*Initial conditions, Type=Temperature");
-        assert_eq!(lines.len(), 2 + 16);
-        let value = |node: &str| -> f64 {
-            let line = lines
-                .iter()
-                .find(|l| l.starts_with(&format!("{node}, ")))
-                .unwrap();
-            line.split(", ").nth(1).unwrap().parse().unwrap()
-        };
-        assert!((value("1") - 100.0).abs() < 1e-3 && (value("16") - 20.0).abs() < 1e-3);
-        assert!((value("8") - 100.0 + 80.0 / 3.0).abs() < 1e-2, "{keyword}");
-        let input = before_first_step("*Node\n1, 0, 0, 0\n*Step\n*Static\n", &keyword);
-        assert!(input.find("*Initial").unwrap() < input.find("*Step").unwrap());
+        let initial = stage_linked_results(&fe, &dir, "Start").unwrap().unwrap();
+        assert_eq!(initial.values.len(), 16);
+        let value = |node: u32| initial.values.iter().find(|(n, _)| *n == node).unwrap().1;
+        assert!((value(1) - 100.0).abs() < 1e-3 && (value(16) - 20.0).abs() < 1e-3);
+        assert!((value(8) - 100.0 + 80.0 / 3.0).abs() < 1e-2, "{initial:?}");
+        let mut lowered = plx_io::inp::lower_unvalidated(&cubes().mesh, &fe, "Start").unwrap();
+        initial.apply(&mut lowered.analysis).unwrap();
+        let temperatures = &lowered.analysis.model.initial.temperatures;
+        assert_eq!(temperatures.len(), 16);
+        assert!(
+            lowered
+                .text()
+                .contains("*Initial conditions, Type=Temperature")
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -130,7 +130,7 @@ impl ElementShape {
                 _ => None,
             };
         }
-        // U1 is the user element CalculiX has general beam sections for, a 2-node beam.
+        // U1 is the user element the solver has general beam sections for, a 2-node beam.
         if name.starts_with("B31")
             || name.starts_with("T3D2")
             || name.starts_with("T2D2")

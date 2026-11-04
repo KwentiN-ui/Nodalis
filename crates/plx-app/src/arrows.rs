@@ -201,6 +201,25 @@ mod tests {
     }
 
     #[test]
+    fn arrows_can_follow_another_field_than_the_contours() {
+        let (mut view, mesh, skins) = cantilever();
+        let coords = mesh.coords();
+        show(&mut view, "DISP", "ALL");
+        view.vector_display.representation = Representation::Arrows;
+        // The principal stresses over the displacement contours.
+        view.vector_display.field = Some("STRESS".into());
+        view.vector_display.principal = plx_results::Principal::Max;
+        let arrows = PartArrows::new(&view, coords, &skins, |_| true).unwrap();
+        assert!(arrows.line_field);
+        let title = view.legend().unwrap().title;
+        assert!(title.contains("Principal Max of STRESS"), "{title}");
+        // A field this increment lacks: the shown field again.
+        view.vector_display.field = Some("NOPE".into());
+        let arrows = PartArrows::new(&view, coords, &skins, |_| true).unwrap();
+        assert!(!arrows.line_field);
+    }
+
+    #[test]
     fn arrow_settings_are_saved_with_the_view() {
         let (mut view, mesh, _) = cantilever();
         view.vector_display.representation = Representation::Arrows;

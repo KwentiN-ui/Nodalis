@@ -78,16 +78,17 @@ pub struct Meta {
     pub features: Vec<String>,
     /// Where the input came from: `plx-io writer test` or `testdata`.
     pub source: String,
-    /// Which CalculiX computed the golden files, `none` when it could not (the fixture
+    /// Which plxs computed the snapshot of the results, `none` without one (the fixture
     /// then checks parsing only).
     pub reference: String,
-    /// Why there is no reference, when `reference` is `none`.
+    /// Why there is no snapshot, when `reference` is `none`, or other remarks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    /// Documented deviations from CalculiX: `.frd` fields (`FORC`) that are not compared,
-    /// each with the reason in `note` and docs/solver/SCHNITTSTELLEN.md.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub deviations: Vec<String>,
+    /// Where plxs is known to compute something else than it should (it differed from
+    /// CalculiX when the snapshots replaced CalculiX's golden files): the fixture has no
+    /// snapshot, so that the gap is not frozen as the expected result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_gap: Option<String>,
     /// Field components (`"DISP U1"`) the model leaves undetermined (a part held in one
     /// direction only), whose values in any solver are arbitrary; they are not compared.
     /// The reason belongs in `note`.
@@ -273,7 +274,7 @@ pub fn classify(name: &str, input: &str, source: &str) -> Meta {
         source: source.to_string(),
         reference: "none".into(),
         note: None,
-        deviations: Vec::new(),
+        known_gap: None,
         undetermined: Vec::new(),
         noise: BTreeMap::new(),
     }

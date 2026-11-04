@@ -3,8 +3,7 @@
 == Constraints <constraints>
 
 Parts meshed separately share no nodes. Constraints connect them or attach springs to the model.
-Create them with #menu("Interaction", "Create Constraint ...") or with #ui("Create ...") on
-#ui("Constraints").
+Create them with #ui("Constraint") on the #ui("Connections") tab of the ribbon.
 
 #screenshot("constraint.png", [Spring dialog: springs from a surface to ground])
 
@@ -84,12 +83,11 @@ Contacts and glued joints between parts are listed under #ui("Connections") in t
 model. The usual way is a contact region: you say which two regions touch and how they behave,
 and Nodalis works out how CalculiX should model it. The manual objects of CalculiX (surface
 interactions, contact pairs, ties) are still there under #ui("Connections") #sym.arrow.r
-#ui("Advanced") and in #menu("Interaction", "Advanced").
+#ui("Advanced") and in the #ui("Advanced") group of the #ui("Connections") tab.
 
 === Contact regions <contact-regions>
 
-#menu("Interaction", "Create Contact Region ...") or #ui("Create Contact Region ...") in the
-context menu of #ui("Connections") connects two regions, #ui("Side A") and #ui("Side B"). Which
+#menu("Connections", "Contact Region") connects two regions, #ui("Side A") and #ui("Side B"). Which
 side is A does not matter: Nodalis chooses the master side itself.
 
 #screenshot("contact-region-dialog.png", [A frictional contact region with its advanced settings.
@@ -161,8 +159,7 @@ millimetres or metres. Bonded regions whose slave sides share nodes are written 
 ==== Contact detection <contact-detection>
 
 Instead of picking every pair of sides by hand, let Nodalis find them:
-#menu("Interaction", "Detect Contacts ...") or #ui("Detect Contacts ...") in the context menu of
-#ui("Connections") creates a contact detection. #ui("OK") searches the parts for surfaces that
+#menu("Connections", "Detect Contacts") creates a contact detection. #ui("OK") searches the parts for surfaces that
 touch and adds a contact region for every pair it finds, listed under the detection in the tree.
 
 #screenshot("contact-detection-dialog.png", [A contact detection of all visible parts with the
@@ -177,7 +174,9 @@ touch and adds a contact region for every pair it finds, listed under the detect
     detection saw touching.],
   [Angle], [Largest angle between the surfaces facing each other (default 35°).],
   [Surfaces], [What is searched in 3D: outer faces of #ui("Solid") parts, the top and bottom of
-    #ui("Shell") and membrane parts, and their free edges (#ui("Shell edge")).],
+    #ui("Shell") and membrane parts, and their free edges (#ui("Shell edge")). #ui("Line end")
+    finds ends of beams and trusses of different parts at one point and ties them with a node
+    tie (@node-ties).],
   [Group by], [#ui("Parts") (default): one region per pair of touching parts. #ui("Faces"): one
     per pair of touching faces. #ui("Graph"): touching faces sharing nodes are merged, so that
     every node is on the slave side of one region only.],
@@ -221,7 +220,7 @@ geometry, such as an imported mesh, is searched on its mesh as before.
 
 ==== Connection settings
 
-#menu("Interaction", "Connection Settings ...") or the context menu of #ui("Connections") sets what
+#menu("Connections", "Connection Settings") sets what
 all contact regions share. CalculiX allows only one contact #ui("Formulation") per model (see
 "Which method?" below). Auto takes surface to surface, or the method of your manual contact
 pairs if you have any. The #ui("Stiffness factor") replaces the 10 of the normal stiffness.
@@ -257,8 +256,7 @@ Turn #ui("Weak springs") off to see the warning again and hold the parts yoursel
 
 ==== Contact worksheet
 
-#menu("Interaction", "Contact Worksheet ...") or #ui("Contact Worksheet ...") in the context menu
-of #ui("Connections") lists all contact regions in a table: type, sides, master and what each
+#menu("Connections", "Contact Worksheet") lists all contact regions in a table: type, sides, master and what each
 is exported as, and which detection found it. A click on a row selects the region in the tree, #key("Ctrl")+click and
 #key("Shift")+click select more. The buttons change all selected regions at once: set the type
 or the friction coefficient, flip the sides, activate or deactivate, name them from their
@@ -344,7 +342,7 @@ export leaves it out.
 === Bolts <bolts>
 
 A bolt joins the two sides of a cut through a bolt shank and tightens them with a preload.
-Create it with #menu("Interaction", "Create Bolt ...") or #ui("Create Bolt ...") in the context
+Create it with #menu("Connections", "Bolt") or #ui("Create Bolt ...") in the context
 menu of #ui("Connections"); it is listed under #ui("Connections") #sym.arrow.r #ui("Bolts").
 You pick the faces on the two sides of the cut and give the preload, Nodalis works out the
 rest.
@@ -421,7 +419,7 @@ step in which the bolt is tightened or locked (@history-outputs). An open bolt c
 
 === Surface interactions
 
-#menu("Interaction", "Advanced", "Create Surface Interaction ...") defines the contact behaviour
+#menu("Connections", "Surface Interaction") defines the contact behaviour
 that contact pairs refer to. Move the models you need from #ui("Available") to #ui("Selected").
 
 #screenshot("surface-interaction.png", [Surface interaction with surface behaviour])
@@ -477,7 +475,7 @@ For a #ui("Hard") contact the input file names E and h in a comment. A #ui("Line
 
 === Contact pairs
 
-#menu("Interaction", "Advanced", "Create Contact Pair ...") creates a contact between a master and a slave
+#menu("Connections", "Contact Pair") creates a contact between a master and a slave
 surface.
 
 #screenshot("contact-pair.png", [Create Contact Pair; the grey text below #ui("Method") explains
@@ -527,12 +525,11 @@ the shell (S3 and up). For a contact on a shell edge use #ui("Surface to surface
   (node-to-face, face-to-face penalty, face-to-face mortar and massless contact) for the exact
   formulations and limits.]
 
-Hover over a method in the list to see a short description. The Search Contact Pairs window shows
-the same texts.
+Hover over a method in the list to see a short description.
 
 === Ties <ties>
 
-#menu("Interaction", "Advanced", "Create Tie ...") or #ui("Create Tie ...") in the context menu of
+#menu("Connections", "Tie") or #ui("Create Tie ...") in the context menu of
 #ui("Contact Pairs") glues a slave surface to a master surface (`*TIE`). Ties are listed under
 #ui("Contact Pairs"), with the contact pairs and node ties; projects that kept them under
 #ui("Constraints") open with them moved there.
@@ -548,55 +545,31 @@ the same texts.
     @cyclic-symmetry.],
 )
 
-=== Node ties
+CalculiX ties the edge faces of membranes to nothing (the solver stops with a singular stiffness
+matrix), so Nodalis writes the slave side of a tie on membrane edges as a node surface of the
+edge's nodes; a membrane has no rotations that would need more.
 
-#ui("Create Node Tie ...") in the context menu of #ui("Contact Pairs") makes all nodes of a region
-move together. It connects the ends of beams and trusses of different parts. With
-#ui("Rotations: rigid") the connection also transmits moments; without it, beams are connected
-by a hinge.
+=== Node ties <node-ties>
 
-=== Searching contact pairs
+#menu("Connections", "Node Tie") makes all nodes of a region move together. It connects the
+ends of beams and trusses of different parts. With #ui("Rotations: rigid") the connection also
+transmits moments; without it, beams are connected by a hinge.
 
-#menu("Interaction", "Advanced", "Search Contact Pairs ...") finds surfaces of different parts that touch and
-creates ties or contact pairs for them. It is the manual counterpart of the contact detection
-(@contact-detection): what it creates is not found again when the model changes.
+A contact detection with #ui("Line end") (@contact-detection) makes the node ties itself: one
+rigid node tie for every point where ends of different line parts meet within its tolerance,
+named after the parts, e.g. #ui("Node Tie - BEAM-1, BEAM-2"), and listed under
+#ui("Contact Pairs"). Like the regions, they are replaced when detecting again, except those you
+changed since, and go with the detection when it is deleted. On a model from CAD geometry the
+line ends are found on the mesh, so mesh the line parts first.
 
-#screenshot("contact-search.png", [Search Contact Pairs])
+#screenshot("node-ties-detected.png", [The node ties a detection found at the corners of a
+  frame of four beams; the selected one shows its corner in red])
 
-#fields(
-  [Distance], [Surfaces closer than this count as touching (default 0.01 mm). For a tie it also
-    becomes the position tolerance, for a contact the adjust distance.],
-  [Angle], [Largest angle between the surface normals (default 35°).],
-  [Group by], [#ui("None"): one pair per touching surface pair. #ui("Parts") (default): one pair
-    per pair of parts. #ui("Graph"): merges surfaces so that each node is slave only once.],
-  [Geometry Filter], [Which geometry is searched: in 3D the faces of #ui("Solid") parts, the top
-    and bottom of #ui("Shell") and membrane parts, and their free edges (#ui("Shell edge")); in
-    2D the element edges. #ui("Line end") finds beam and truss ends at the same point;
-    #ui("Ignore hidden parts") leaves out hidden parts.],
-  [Type], [#ui("Tie") or #ui("Contact"), for contacts with #ui("Surface Interaction") and
-    #ui("Method"): node to surface, surface to surface or mortar.],
-  [Adjust mesh], [Writes the pairs with adjust.],
-)
+=== Many pairs at once
 
-#ui("Search") fills the table; its #ui("Geometry") column tells what touches, e.g.
-#ui("Solid-Shell edge") where the edge of a shell or membrane stands on a solid. Each row can be edited and switched off with its check box; select
-several rows to edit them together. The context menu of a row has #ui("Swap Master/Slave") and
-#ui("Merge by Master/Slave"). Nodalis chooses the coarser mesh as master, then the stiffer
-material, then the larger surface; an edge of a shell is always the slave of a face. A shell
-touches with the side facing the other part: CalculiX ties its top (S2) or bottom (S1). #ui("OK") creates the checked pairs, all under
-#ui("Contact Pairs"); line ends become node ties. Surfaces that are whole CAD faces or edges are stored by geometry and
-survive remeshing.
-
-#screenshot("contact-search-shell-edge.png", [A tie found by the search between the bottom of a
-  block (master, red) and the top edge of a shell standing under it (slave, violet)])
-
-The search can make hundreds of pairs. To delete, deactivate or swap many of them at once, select
+To delete, deactivate or swap many contact pairs or ties at once, select
 them in the tree with #key("Shift")+click (a range) and #key("Ctrl")+click (one more or one less)
 and use the context menu of one of them (@model-tree).
 
 #screenshot("contact-pairs-selected.png", [Four of five ties selected and deactivated together;
   the context menu acts on all of them])
-
-CalculiX ties the edge faces of membranes to nothing (the solver stops with a singular stiffness
-matrix), so Nodalis writes the slave side of a tie on membrane edges as a node surface of the
-edge's nodes; a membrane has no rotations that would need more.

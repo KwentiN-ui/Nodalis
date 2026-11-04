@@ -1,4 +1,4 @@
-//! Model tree icons after PrePoMax's 16 x 16 tree images, drawn as pixel rectangles with the
+//! Model tree icons, 16 x 16 images drawn as pixel rectangles with the
 //! egui painter. The pixel patterns are traced from PrePoMax's `Icons` folder (GPL-3.0, by
 //! Matej Borovinsek), gradients reduced to a few shades.
 
@@ -9,7 +9,7 @@ use plx_model::StepKind;
 /// Edge length of a tree icon in points.
 pub const SIZE: f32 = 16.0;
 
-/// The images PrePoMax shows in front of tree nodes.
+/// The images shown in front of tree nodes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TreeIcon {
     Mesh,
@@ -24,7 +24,7 @@ pub enum TreeIcon {
     Shell,
     Wire,
     Hidden,
-    /// A deactivated item: the red no-entry sign PrePoMax shows (`Unactive_old_2.ico`).
+    /// A deactivated item: the red no-entry sign.
     Inactive,
     Material,
     Section,
@@ -1254,7 +1254,7 @@ const FIELD_OUTPUT: Pixmap = Pixmap {
 };
 
 /// History_output.ico
-/// Not one of PrePoMax's images: stress rising towards a weld toe with two read-out points.
+/// Stress rising towards a weld toe with two read-out points.
 const HOT_SPOT: Pixmap = Pixmap {
     colors: &[
         [60, 60, 60, 255],
@@ -1542,7 +1542,7 @@ const MESH_SETUP: Pixmap = Pixmap {
     ],
 };
 
-/// Not in PrePoMax: a plane with its normal.
+/// A plane with its normal.
 const PLANE: Pixmap = Pixmap {
     colors: &[
         [0, 110, 160, 255],
@@ -1570,7 +1570,7 @@ const PLANE: Pixmap = Pixmap {
     ],
 };
 
-/// Not in PrePoMax: a straight path between two points.
+/// A straight path between two points.
 const PATH: Pixmap = Pixmap {
     colors: &[[200, 0, 160, 255], [255, 255, 255, 255]],
     rows: [
@@ -1593,7 +1593,7 @@ const PATH: Pixmap = Pixmap {
     ],
 };
 
-/// Not in PrePoMax: a plane coloured by results.
+/// A plane coloured by results.
 const PLANE_RESULT: Pixmap = Pixmap {
     colors: &[
         [70, 70, 70, 255],

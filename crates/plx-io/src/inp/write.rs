@@ -1,12 +1,13 @@
-//! Writer for CalculiX input files, following the layout of PrePoMax's `CalculixFileWriter`.
+//! Lowering of a [`FeModel`] with its mesh into the solver's input, a
+//! [`plxs_core::Analysis`], in the layout of a CalculiX input file.
 //!
-//! The mesh is written together with the analysis of a [`FeModel`]. Regions the user picked in
-//! the GUI become node sets, element sets and surfaces named like PrePoMax's internal
-//! selections (`Internal_Selection-1_Fixed-1`), so the user never defines sets by hand. The
-//! file is built as a [`Keyword`] tree first.
+//! Regions the user picked in the GUI become node sets, element sets and surfaces named
+//! as internal selections (`Internal_Selection-1_Fixed-1`), so the user never
+//! defines sets by hand. The steps are assembled with CalculiX's carry-over between them
+//! resolved ([`plxs_input::steps`]), as the solver reads an input file. An input file is
+//! the analysis rendered as text ([`plxs_input::render`]), for the export only.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
 
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
@@ -14,12 +15,16 @@ use plx_model::{
     ComplexFrequencyStep, Constraint, ContactMethod, ContactPair, ContactScale, DefinedFieldKind,
     DynamicStep, FeModel, FieldOutput, Formulation, FrequencyStep, GapConductance,
     HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialConditionKind,
-    InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep, ModelSpace, MovingFrame,
-    NodeTie, OutputDimension, OutputKind, Quantity, Region, RemoteBehavior, RemoteDof, Sampler,
-    Section, SectionKind, SectorDisplay, SensitivityStep, StaticStep, SteadyStateDynamicsStep,
-    Step, StepKind, SurfaceBehavior, SurfaceInteraction, Tie, Totals, UnitSystem, ViscoStep,
-    line_tangent, symmetry_dofs, symmetry_plane,
+    InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep, ModelItem, ModelSpace,
+    MovingFrame, NodeTie, Origins, OutputDimension, OutputKind, Quantity, Region, RemoteBehavior,
+    RemoteDof, Sampler, Section, SectionKind, SectorDisplay, SensitivityStep, StaticStep,
+    SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, Tie, Totals,
+    UnitSystem, ViscoStep, line_tangent, symmetry_dofs, symmetry_plane,
 };
+use plxs_core as ir;
+use plxs_core::mesh::{ElementRef, NodeRef};
+use plxs_core::normalized_name;
+use plxs_input::steps::{Assembler, Card};
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum WriteError {
@@ -52,7 +57,7 @@ pub enum WriteError {
     InvalidSection { item: String, reason: String },
     #[error("{item}: {reason}")]
     InvalidCyclicSymmetry { item: String, reason: String },
-    /// A defined field reads a result file whose name CalculiX cannot take.
+    /// A defined field reads a result file whose name the solver cannot take.
     #[error("{item}: the result file {file} has no valid name")]
     InvalidResultFile { item: String, file: String },
     /// A boundary condition or load on a reference point no active rigid body is driven by,
@@ -78,76 +83,158 @@ pub enum WriteError {
     /// A symmetry boundary condition whose region fixes no plane.
     #[error("{item}: {reason}")]
     NoSymmetryPlane { item: String, reason: String },
+    /// Something of the model the solver does not compute, such as massless contact.
+    #[error("{item}: {reason}")]
+    Unsupported { item: String, reason: String },
 }
 
-/// One entry of the keyword tree of an input file: section titles hold the keywords written under them, a step holds its loads and
-/// outputs. The text of the file is the tree written depth first.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Keyword {
-    pub kind: KeywordKind,
-    /// The lines of a generated keyword, each ending in a newline.
-    pub text: String,
-    pub children: Vec<Keyword>,
+impl WriteError {
+    /// The name of the item the error is about.
+    pub fn item_name(&self) -> &str {
+        use WriteError as E;
+        match self {
+            E::EmptyRegion { item, .. }
+            | E::UnknownMaterial { item, .. }
+            | E::UnknownInteraction { item, .. }
+            | E::UnknownAmplitude { item, .. }
+            | E::InvalidAmplitude { item, .. }
+            | E::UnknownDistribution { item, .. }
+            | E::InvalidDistribution { item, .. }
+            | E::UnknownSurface { item, .. }
+            | E::UnknownContactPair { item, .. }
+            | E::InvalidSection { item, .. }
+            | E::InvalidCyclicSymmetry { item, .. }
+            | E::InvalidResultFile { item, .. }
+            | E::UnknownReferencePoint { item, .. }
+            | E::UnknownRemotePoint { item, .. }
+            | E::InvalidLoad { item, .. }
+            | E::InvalidBoundary { item, .. }
+            | E::NoGlobalResults { item }
+            | E::NoSymmetryPlane { item, .. }
+            | E::Unsupported { item, .. } => item,
+        }
+    }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum KeywordKind {
-    /// Section banner such as `** Materials ++++`; the text is empty.
-    Title(String),
-    /// Written from the mesh and the FE model.
-    Generated,
+/// An error of the model with the item of the tree it is about, so that the GUI can point
+/// at it. `item` is `None` when the error is about something the lowering derived (a tie of
+/// a contact region's detection) that has no item of its own.
+#[derive(Debug, thiserror::Error, PartialEq)]
+#[error("{error}")]
+pub struct ModelError {
+    pub item: Option<ModelItem>,
+    pub error: WriteError,
 }
 
-impl Keyword {
-    fn title(name: &str, children: Vec<Keyword>) -> Self {
+impl ModelError {
+    /// The error with the item it names, looked up in `model` (in the step that was being
+    /// lowered first).
+    fn new(model: &FeModel, error: WriteError, step: Option<usize>) -> Self {
         Self {
-            kind: KeywordKind::Title(name.to_owned()),
-            text: String::new(),
-            children,
-        }
-    }
-
-    fn generated(text: String) -> Self {
-        Self::parent(text, Vec::new())
-    }
-
-    fn parent(text: String, children: Vec<Keyword>) -> Self {
-        Self {
-            kind: KeywordKind::Generated,
-            text,
-            children,
-        }
-    }
-
-    /// What this keyword adds to the file, without its children.
-    pub fn output(&self) -> String {
-        match &self.kind {
-            KeywordKind::Title(name) => format!("**\n{:+<60}\n**\n", format!("** {name} ")),
-            KeywordKind::Generated => self.text.clone(),
+            item: model.item_named(error.item_name(), step),
+            error,
         }
     }
 }
 
-/// Writes the mesh and the analysis as the text of an input file.
-pub fn write_inp(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<String, WriteError> {
-    Ok(write_keywords(&model_keywords(mesh, model, heading)?))
+/// Why a model cannot be lowered: the model itself (an empty region, a missing material),
+/// or the analysis made of it, which the solver's validation refuses.
+#[derive(Debug, thiserror::Error)]
+pub enum LowerError {
+    #[error(transparent)]
+    Model(#[from] ModelError),
+    #[error("{}", .0.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))]
+    Solver(Vec<ir::Error>),
 }
 
-/// Writes the input file of `model` with the sets of `extra` steps too, which are not
-/// written themselves: the steps of analyses that continue from the state after a step of
-/// this one. CalculiX takes no new sets after reading a state, so the run that writes it has
-/// to define them. Each entry holds the index of the step of `model` the steps follow; they
-/// take the place in the order of the sets they have in the input file of the analysis that
-/// continues, so that the sets are named as there. When the extra steps cannot be written,
-/// the file is written without their sets.
-pub fn write_inp_with_sets_of(
+/// The analysis of a model as the solver takes it.
+#[derive(Clone, Debug, Default)]
+pub struct Lowered {
+    pub analysis: ir::Analysis,
+    /// What the assembly of the steps and the validation noticed but did not stop for.
+    pub warnings: Vec<String>,
+    /// The constraints whose overlaps with others were resolved, each with what was
+    /// changed, in words (see [`resolved_overlaps`]).
+    pub resolved_overlaps: Vec<String>,
+    /// Set names that were shortened, each with the full name it stands for.
+    pub shortened_names: Vec<(String, String)>,
+    /// The names of the parts of the mesh, which are element sets.
+    pub part_sets: Vec<String>,
+    /// The profile of each general beam section, by its element set, as the comment the
+    /// input file names it with (see [`super::PROFILE_COMMENT`]): the solver knows the
+    /// section by its values only, the results draw it from the comment.
+    pub profile_comments: Vec<(String, String)>,
+    /// The item of the model each section, tie, rigid body, contact pair, material,
+    /// amplitude and step of the analysis came from, for the solver's diagnostics.
+    pub origins: Origins,
+}
+
+impl Lowered {
+    /// The input file of the analysis: the comments naming the shortened names and the
+    /// resolved overlaps, then the analysis rendered as text.
+    pub fn text(&self) -> String {
+        let mut out = String::new();
+        for (short, full) in &self.shortened_names {
+            out.push_str(&format!("{SHORTENED_NAME}{short} = {full}\n"));
+        }
+        for overlap in &self.resolved_overlaps {
+            out.push_str(&format!("{}{overlap}\n", dofs::PREFIX));
+        }
+        let text = plxs_input::render_with_parts(&self.analysis, &self.part_sets);
+        for line in text.split_inclusive('\n') {
+            if let Some(rest) = line.strip_prefix("*Beam section, Elset=") {
+                let set = rest.split(',').next().unwrap_or_default();
+                for (_, comment) in (self.profile_comments.iter()).filter(|(s, _)| s == set) {
+                    out.push_str(comment);
+                    out.push('\n');
+                }
+            }
+            out.push_str(line);
+        }
+        out
+    }
+}
+
+/// Lowers the mesh and the analysis of `model` into the solver's input, validated.
+pub fn lower(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Lowered, LowerError> {
+    validated(lower_unvalidated(mesh, model, heading)?)
+}
+
+/// [`lower`] with the sets of `extra` steps too, see [`write_inp_with_sets_of`].
+pub fn lower_with_sets_of(
     mesh: &FeMesh,
     model: &FeModel,
     heading: &str,
     extra: &[(usize, Vec<Step>)],
-) -> Result<String, WriteError> {
+) -> Result<Lowered, LowerError> {
+    validated(lower_with_sets_unvalidated(mesh, model, heading, extra)?)
+}
+
+fn validated(mut lowered: Lowered) -> Result<Lowered, LowerError> {
+    let warnings = ir::validate(&mut lowered.analysis).map_err(LowerError::Solver)?;
+    lowered.warnings.extend(warnings);
+    Ok(lowered)
+}
+
+/// The analysis before the solver's validation, for a run that validates it itself and
+/// reports what it finds as its diagnostics.
+pub fn lower_unvalidated(
+    mesh: &FeMesh,
+    model: &FeModel,
+    heading: &str,
+) -> Result<Lowered, ModelError> {
+    Ok(lower_model(mesh, model, heading)?.assemble(|_| true))
+}
+
+/// [`lower_with_sets_of`] before the solver's validation, see [`lower_unvalidated`].
+pub fn lower_with_sets_unvalidated(
+    mesh: &FeMesh,
+    model: &FeModel,
+    heading: &str,
+    extra: &[(usize, Vec<Step>)],
+) -> Result<Lowered, ModelError> {
     if extra.iter().all(|(_, steps)| steps.is_empty()) {
-        return write_inp(mesh, model, heading);
+        return lower_unvalidated(mesh, model, heading);
     }
     let mut combined = model.clone();
     combined.steps.clear();
@@ -160,21 +247,39 @@ pub fn write_inp_with_sets_of(
             written.extend(steps.iter().map(|_| false));
         }
     }
-    let Ok(mut tree) = model_keywords(mesh, &combined, heading) else {
-        return write_inp(mesh, model, heading);
+    let Ok(built) = lower_model(mesh, &combined, heading) else {
+        return lower_unvalidated(mesh, model, heading);
     };
-    if let Some(steps) = tree
-        .iter_mut()
-        .find(|k| matches!(&k.kind, KeywordKind::Title(name) if name == "Steps"))
-    {
-        let mut written = written.into_iter();
-        steps.children.retain(|_| written.next().unwrap_or(true));
-    }
-    Ok(write_keywords(&tree))
+    Ok(built.assemble(|s| written.get(s).copied().unwrap_or(true)))
+}
+
+/// Writes the mesh and the analysis as the text of an input file.
+pub fn write_inp(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<String, WriteError> {
+    Ok(lower_unvalidated(mesh, model, heading)
+        .map_err(|e| e.error)?
+        .text())
+}
+
+/// Writes the input file of `model` with the sets of `extra` steps too, which are not
+/// written themselves: the steps of analyses that continue from the state after a step of
+/// this one. The solver takes no new sets after reading a state, so the run that writes it has
+/// to define them. Each entry holds the index of the step of `model` the steps follow; they
+/// take the place in the order of the sets they have in the input file of the analysis that
+/// continues, so that the sets are named as there. When the extra steps cannot be written,
+/// the file is written without their sets.
+pub fn write_inp_with_sets_of(
+    mesh: &FeMesh,
+    model: &FeModel,
+    heading: &str,
+    extra: &[(usize, Vec<Step>)],
+) -> Result<String, WriteError> {
+    Ok(lower_with_sets_unvalidated(mesh, model, heading, extra)
+        .map_err(|e| e.error)?
+        .text())
 }
 
 /// An input file with only the mesh, its nodes moved by `scale` times `displacements` (one per
-/// node, in the order of [`FeMesh::coords`]), as PrePoMax's "Export deformed mesh": the
+/// node, in the order of [`FeMesh::coords`]), for "Export deformed mesh": the
 /// deformed shape, e.g. a buckling mode as imperfection, can be imported into another model.
 pub fn write_deformed_mesh_inp(
     mesh: &FeMesh,
@@ -190,31 +295,126 @@ pub fn write_deformed_mesh_inp(
     write_inp(&deformed, &FeModel::default(), heading)
 }
 
-/// The text of a keyword tree.
-pub fn write_keywords(tree: &[Keyword]) -> String {
-    fn write(out: &mut String, keyword: &Keyword) {
-        out.push_str(&keyword.output());
-        for child in &keyword.children {
-            write(out, child);
-        }
-    }
-    let mut out = String::new();
-    for keyword in tree {
-        write(&mut out, keyword);
-    }
-    out
+/// One `*STEP` of the analysis before the carry-over between the steps: its settings and
+/// its cards in the order of the input file.
+#[derive(Clone, Debug)]
+struct StepBlock {
+    /// The settings; boundaries, loads, fields and outputs come from the cards.
+    step: ir::Step,
+    /// Whether the step keeps its name; the blocks of a step with moving loads are named
+    /// by their number, `Step-n`, as a step without a name.
+    named: bool,
+    /// The cards of its boundary conditions, then those of everything after them.
+    boundaries: Vec<Card>,
+    cards: Vec<Card>,
 }
 
-/// The keyword tree written from mesh and model. Like PrePoMax it always has every section
-/// title.
-pub fn model_keywords(
+/// Everything of the analysis but the assembly of the steps.
+struct Built {
+    model: ir::Model,
+    /// The cards before the first step: the boundary conditions of a first step that works
+    /// on stored modes (see [`boundaries_before_stored_modes`]).
+    model_cards: Vec<Card>,
+    /// The blocks of each step of the model; none for a deactivated step.
+    steps: Vec<Vec<StepBlock>>,
+    resolved_overlaps: Vec<String>,
+    shortened_names: Vec<(String, String)>,
+    part_sets: Vec<String>,
+    profile_comments: Vec<(String, String)>,
+    /// The origins of everything but the steps, which [`Built::assemble`] adds.
+    origins: Origins,
+}
+
+impl Built {
+    /// The analysis with the steps `written` takes, by their index in the model.
+    fn assemble(self, written: impl Fn(usize) -> bool) -> Lowered {
+        let model = self.model;
+        let mut assembler = Assembler::new();
+        for card in self.model_cards {
+            // Boundaries outside of a step belong to the first one.
+            let _ = assembler.apply(&model, card);
+        }
+        let mut steps = Vec::new();
+        let mut origins = self.origins;
+        // The steps written are those of the model, in order; the others are of the
+        // analyses that continue from it.
+        let mut model_step = 0;
+        for (index, blocks) in self.steps.into_iter().enumerate() {
+            if !written(index) {
+                continue;
+            }
+            let origin = model_step;
+            model_step += 1;
+            for block in blocks {
+                let mut step = block.step;
+                if !block.named {
+                    step.name = format!("Step-{}", steps.len() + 1);
+                }
+                assembler.begin(step);
+                for card in block.boundaries.into_iter().chain(block.cards) {
+                    let _ = assembler.apply(&model, card);
+                }
+                let first = steps.len();
+                steps.extend(assembler.end(&model));
+                for step in first..steps.len() {
+                    origins.insert(ir::ItemRef::Step(step), ModelItem::Step(origin));
+                }
+            }
+        }
+        Lowered {
+            warnings: assembler.take_warnings(),
+            analysis: ir::Analysis { model, steps },
+            resolved_overlaps: self.resolved_overlaps,
+            shortened_names: self.shortened_names,
+            part_sets: self.part_sets,
+            profile_comments: self.profile_comments,
+            origins,
+        }
+    }
+}
+
+/// The name of a set, surface, material or amplitude as the solver compares it.
+fn ir_name(name: &str) -> String {
+    normalized_name(name)
+}
+
+fn node_set_ref(set: &str) -> NodeRef {
+    NodeRef::Set(ir_name(set))
+}
+
+fn element_set_ref(set: &str) -> ElementRef {
+    ElementRef::Set(ir_name(set))
+}
+
+/// The name a step gets: its own, as the title comment before `*STEP` gives it, or the
+/// number when the title has no room for its name.
+fn step_title(name: &str) -> Option<String> {
+    let title = format!("{:+<60}", format!("** {name} "));
+    let text = title.strip_prefix("**")?.trim();
+    text.ends_with('+')
+        .then(|| text.trim_end_matches('+').trim().to_string())
+        .filter(|t| !t.is_empty())
+}
+
+/// The analysis lowered from mesh and model, without the assembly of its steps; an error
+/// names the item it is about.
+fn lower_model(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Built, ModelError> {
+    let mut step = None;
+    lower_model_named(mesh, model, heading, &mut step)
+        .map_err(|error| ModelError::new(model, error, step))
+}
+
+/// [`lower_model`], keeping the index of the step being lowered in `lowering`.
+fn lower_model_named(
     mesh: &FeMesh,
     model: &FeModel,
     heading: &str,
-) -> Result<Vec<Keyword>, WriteError> {
+    lowering: &mut Option<usize>,
+) -> Result<Built, WriteError> {
+    let original = model;
     // The faces of 2D elements are their edges; a mesh whose surface elements are still
-    // typed as shells is written as the model space types them. Parts get the element
-    // types the user chose for them, and linear shells of membrane sections are written as
+    // typed as shells is lowered as the model space types them. Parts get the element
+    // types the user chose for them, and linear shells of membrane sections become
     // membranes.
     let space = model.properties.space;
     let retyped;
@@ -234,20 +434,52 @@ pub fn model_keywords(
     };
     // Bolts become pre-tension loads and ties, and switch off the contact regions on
     // their cuts.
-    let bolted;
+    let (bolted, bolt_items);
     let model = if model.bolts.is_empty() {
+        bolt_items = None;
         model
     } else {
-        bolted = model.lower_bolts(mesh).0;
+        let (copy, items) = model.lower_bolts(mesh);
+        (bolted, bolt_items) = (copy, Some(items));
         &bolted
     };
     // Contact regions become the ties and contact pairs they stand for.
-    let lowered;
+    let (lowered, contact_items);
     let model = if model.contact_regions.is_empty() {
+        contact_items = None;
         model
     } else {
-        lowered = model.lower_contacts(mesh).0;
+        let (copy, items) = model.lower_contacts(mesh);
+        (lowered, contact_items) = (copy, Some(items));
         &lowered
+    };
+    // The item of the original model an item of the lowered one stands for: a tie or
+    // contact pair of a contact region the region, one of a bolt the bolt, an item the
+    // lowering added itself (a weak spring) none.
+    let origin = |item: ModelItem| -> Option<ModelItem> {
+        if let Some(items) = &contact_items {
+            if let Some(region) = items.region_of(item) {
+                return Some(ModelItem::ContactRegion(region));
+            }
+            match item {
+                ModelItem::Tie(i) if i >= items.first_tie => return None,
+                ModelItem::ContactPair(i) if i >= items.first_pair => return None,
+                ModelItem::ContactRegion(_) => return None,
+                _ => {}
+            }
+        }
+        if let Some(items) = &bolt_items {
+            if let Some(bolt) = items.bolt_of(item) {
+                return Some(ModelItem::Bolt(bolt));
+            }
+            if matches!(item, ModelItem::Tie(i) if i >= items.first_tie) {
+                return None;
+            }
+        }
+        match item {
+            ModelItem::Constraint(i) if i >= original.constraints.len() => None,
+            item => Some(item),
+        }
     };
     // Parts held only by contact get weak springs to ground.
     let springs = model.weak_springs(mesh);
@@ -262,7 +494,7 @@ pub fn model_keywords(
         &sprung
     };
     let lines = LineElements::new(mesh, model)?;
-    // Node ties of beams, and of anything without rotations, are written as one shared node.
+    // Node ties of beams, and of anything without rotations, become one shared node.
     let merged_nodes = node_merges(mesh, model, &lines);
     let (merged_mesh, merged_model);
     let (mesh, model) = if merged_nodes.is_empty() {
@@ -297,24 +529,29 @@ pub fn model_keywords(
     held.retain(|n, _| !cyclic_slaves.contains(n));
     sets.dofs = dofs::Dofs::new(held);
     sets.dofs.mark_nodes(cyclic_slaves.iter().copied());
-    // Regions are resolved first: their sets must precede the materials and steps. The
-    // constraints come in their order of precedence for the dependent degrees of freedom
-    // (see [`dofs`]): rigid bodies and remote points, pre-tension cuts, node ties, last
-    // springs and contact regions.
-    let materials = materials(model);
-    let mut sections = sections(&mut sets, model)?;
+    // Regions are resolved first, in the order of the input file that the names of their
+    // sets follow. The constraints come in their order of precedence for the dependent
+    // degrees of freedom (see [`dofs`]): rigid bodies and remote points, pre-tension cuts,
+    // node ties, last springs and contact regions.
+    let mut materials = materials(model);
+    let (mut sections, profile_comments, section_owners) = sections(&mut sets, model)?;
     let mut generated = constraints::Generated::default();
-    let mut constraints = constraints(&mut sets, model, &mut generated)?;
-    let pre_tension_sections = pre_tension_sections(&mut sets, model, &cuts, &mut generated);
-    let node_ties = node_ties(&mut sets, model, &lines)?;
+    let (mut constraints, mut constraint_owners) = constraints(&mut sets, model, &mut generated)?;
+    let pre_tension_equations = pre_tension_sections(&mut sets, model, &cuts, &mut generated);
+    let node_tie_equations = node_ties(&mut sets, model, &lines)?;
     constraints::springs(&mut sets, model, &mut generated)?;
-    constraints.extend(generated.equations);
-    if let Some(comments) = sets.dofs.comments() {
-        constraints.insert(0, Keyword::generated(comments));
-    }
-    sections.extend(generated.sections);
-    let mut materials = materials;
-    materials.extend(generated.material);
+    constraints.extend(
+        (generated.equations.iter()).map(|terms| ConstraintItem::Equation(equation(terms))),
+    );
+    sections.extend(generated.sections.iter().map(generated_section));
+    materials.extend(generated.material.as_deref().map(gap_material));
+    // The boundary condition holding the ground nodes of the gaps, in every mechanical step.
+    let extra_boundary = (generated.boundary.as_ref()).map(|(set, dofs)| Card::Boundary {
+        op_new: false,
+        items: (1..=*dofs as u8)
+            .map(|dof| boundary(node_set_ref(set), dof, dof, Some(0.0), None))
+            .collect(),
+    });
     let young = if model.surface_interactions.is_empty() {
         Default::default()
     } else {
@@ -323,22 +560,18 @@ pub fn model_keywords(
     let interactions = (model.surface_interactions.iter())
         .map(|i| interaction(i, &InteractionDefaults::of(i, mesh, model, &young)))
         .collect();
-    let (mut contact_pairs, pair_surfaces) = contact_pairs(&mut sets, model)?;
-    contact_pairs.extend(node_ties);
+    let (contact_pairs, clearances, pair_surfaces) = contact_pairs(&mut sets, model)?;
     let initial_conditions = initial_conditions(&mut sets, model)?;
     let design_variables = design_variables(&mut sets, model)?;
     let amplitudes = amplitudes(model)?;
     let flux_kinds = FluxKinds::of(model);
-    let steps = model
-        .steps
-        .iter()
-        .enumerate()
+    let mut steps = (model.steps.iter().enumerate())
         .map(|(s, step)| {
             let context = StepContext {
                 stored_perturbation: stored_perturbation(&model.steps[..s]),
                 cyclic: (model.ties.iter()).any(|t| t.active && t.cyclic.is_some()),
                 cyclic_slaves: &cyclic_slaves,
-                extra_boundary: generated.boundary.as_ref(),
+                extra_boundary: extra_boundary.as_ref(),
                 space,
                 lines: &lines,
                 flux_kinds,
@@ -346,99 +579,166 @@ pub fn model_keywords(
                 pair_surfaces: &pair_surfaces,
                 model,
             };
-            write_step(&mut sets, step, &context)
+            *lowering = Some(s);
+            lower_step(&mut sets, step, &context)
         })
         .collect::<Result<Vec<_>, _>>()?;
+    *lowering = None;
 
-    let mut nodes = String::from("*Node\n");
-    for (id, &[x, y, z]) in mesh.node_ids().iter().zip(mesh.coords()) {
-        let _ = writeln!(nodes, "{id}, {:.8E}, {:.8E}, {:.8E}", x, y, z);
+    // The model in the order of the input file, which the solver reads it in: submodel,
+    // nodes, elements, sets, surfaces, coordinate systems, materials, sections,
+    // constraints, contact, amplitudes, initial conditions, design variables.
+    let mut ir_model = ir::Model::default();
+    ir_model.heading = heading
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    ir_model.constraints.submodel = submodel(model, &sets.submodel_sets)?;
+    for (id, &coords) in mesh.node_ids().iter().zip(mesh.coords()) {
+        ir_model.nodes.insert(*id, coords);
     }
-    for (id, [x, y, z]) in &generated.nodes {
-        let _ = writeln!(nodes, "{id}, {:.8E}, {:.8E}, {:.8E}", x, y, z);
+    for &(id, coords) in &generated.nodes {
+        ir_model.nodes.insert(id, coords);
     }
-    let mut element_blocks = elements(mesh, space, &lines);
-    element_blocks.extend(generated.elements);
-    let node_sets =
-        (shortened_names(&sets.shortened).into_iter())
-            .chain(sets.node_sets.iter().map(|(name, ids)| {
-                Keyword::generated(id_list(&format!("*Nset, Nset={name}"), ids))
-            }))
-            .collect();
-    let element_sets = sets
-        .element_sets
-        .iter()
-        .map(|(name, members)| {
-            let header = format!("*Elset, Elset={name}");
-            Keyword::generated(match members {
-                Members::Ids(ids) => id_list(&header, ids),
-                Members::Parts(parts) => format!("{header}\n{}\n", parts.join(",\n")),
-            })
-        })
-        .collect();
-    let surfaces = sets
-        .surfaces
-        .iter()
-        .map(|(name, surface)| {
-            Keyword::generated(match surface {
-                Surface::Faces(faces) => {
-                    let mut out = format!("*Surface, Name={name}, Type=Element\n");
-                    for (set, face) in faces {
-                        let _ = writeln!(out, "{set}, S{face}");
-                    }
-                    out
+    elements(&mut ir_model, mesh, space, &lines)?;
+    for block in &generated.elements {
+        generated_elements(&mut ir_model, block);
+    }
+    for (name, ids) in &sets.node_sets {
+        ir_model.sets.add_nodes(&ir_name(name), ids.iter().copied());
+    }
+    for (name, members) in &sets.element_sets {
+        let ids = match members {
+            Members::Ids(ids) => ids.clone(),
+            Members::Parts(parts) => (parts.iter())
+                .flat_map(|p| ir_model.sets.element_sets.get(&ir_name(p)).cloned())
+                .flatten()
+                .collect(),
+        };
+        ir_model.sets.add_elements(&ir_name(name), ids);
+    }
+    for (name, surface) in &sets.surfaces {
+        let surface = match surface {
+            Surface::Faces(faces) => ir::mesh::Surface::Element(
+                (faces.iter())
+                    .flat_map(|(set, face)| {
+                        let members = ir_model.sets.element_sets.get(&ir_name(set));
+                        (members.into_iter().flatten()).map(|&element| ir::mesh::SurfaceFace {
+                            element,
+                            face: *face,
+                        })
+                    })
+                    .collect(),
+            ),
+            Surface::Nodes(set) => ir::mesh::Surface::Node(
+                (ir_model.sets.node_sets.get(&ir_name(set)).cloned()).unwrap_or_default(),
+            ),
+        };
+        ir_model.sets.surfaces.insert(ir_name(name), surface);
+    }
+    ir_model.physical = physical_constants(model);
+    ir_model.constraints.transforms = transforms(&sets.transforms);
+    ir_model.materials = materials;
+    ir_model.sections = sections;
+    let mut origins = Origins::default();
+    for (i, &section) in section_owners.iter().enumerate() {
+        if let Some(item) = origin(ModelItem::Section(section)) {
+            origins.insert(ir::ItemRef::Section(i), item);
+        }
+    }
+    let constraint_list = &mut ir_model.constraints;
+    constraint_list.equations.extend(pre_tension_equations);
+    // The equations generated after them have no item of their own.
+    constraint_owners.resize(constraints.len(), None);
+    for (item, owner) in constraints.into_iter().zip(constraint_owners) {
+        match item {
+            ConstraintItem::Equation(equation) => constraint_list.equations.push(equation),
+            ConstraintItem::RigidBody(body) => {
+                if let Some(item) = owner.and_then(origin) {
+                    let index = constraint_list.rigid_bodies.len();
+                    origins.insert(ir::ItemRef::RigidBody(index), item);
                 }
-                Surface::Nodes(set) => format!("*Surface, Name={name}, Type=Node\n{set}\n"),
-            })
-        })
-        .collect();
-    let heading = format!("*Heading\n{}\n", heading.lines().next().unwrap_or_default());
-    let mut tree = vec![Keyword::title("Heading", vec![Keyword::generated(heading)])];
-    if let Some(submodel) = submodel(model, &sets.submodel_sets)? {
-        tree.push(Keyword::title("Submodel", vec![submodel]));
+                constraint_list.rigid_bodies.push(body);
+            }
+            ConstraintItem::Tie(tie, cyclic) => {
+                constraint_list.ties.push(tie);
+                if cyclic.is_some() {
+                    constraint_list.cyclic_symmetry = cyclic;
+                }
+            }
+        }
     }
-    tree.extend([
-        Keyword::title("Nodes", vec![Keyword::generated(nodes)]),
-        Keyword::title("Elements", element_blocks),
-        Keyword::title("Node sets", node_sets),
-        Keyword::title("Element sets", element_sets),
-        Keyword::title("Surfaces", surfaces),
-        Keyword::title("Physical constants", physical_constants(model)),
-        Keyword::title("Coordinate systems", transforms(&sets.transforms)),
-        Keyword::title("Materials", materials),
-        Keyword::title("Sections", sections),
-        Keyword::title("Pre-tension sections", pre_tension_sections),
-        Keyword::title("Constraints", constraints),
-        Keyword::title("Surface interactions", interactions),
-        Keyword::title("Contact pairs", contact_pairs),
-        Keyword::title("Amplitudes", amplitudes),
-        Keyword::title("Initial conditions", initial_conditions),
-    ]);
-    if !design_variables.is_empty() {
-        tree.push(Keyword::title("Design variables", design_variables));
+    for (i, tie) in model.ties.iter().enumerate().filter(|(_, t)| t.active) {
+        if let Some(item) = origin(ModelItem::Tie(i)) {
+            origins.insert(ir::ItemRef::Tie(ir_name(&name(&tie.name))), item);
+        }
     }
-    let mut steps = Keyword::title("Steps", steps);
-    if let Some(boundaries) = boundaries_before_stored_modes(model, &mut steps) {
-        tree.push(Keyword::title("Boundary conditions", boundaries));
+    let active_pairs = (model.contact_pairs.iter().enumerate()).filter(|(_, p)| p.active);
+    for (index, (i, _)) in active_pairs.enumerate().take(contact_pairs.len()) {
+        if let Some(item) = origin(ModelItem::ContactPair(i)) {
+            origins.insert(ir::ItemRef::ContactPair(index), item);
+        }
     }
-    tree.push(steps);
-    Ok(tree)
+    for (i, material) in original.materials.iter().enumerate() {
+        let item = ir::ItemRef::Material(ir_name(&name(&material.name)));
+        origins.insert(item, ModelItem::Material(i));
+    }
+    for (i, amplitude) in original.amplitudes.iter().enumerate() {
+        let item = ir::ItemRef::Amplitude(ir_name(&name(&amplitude.name)));
+        origins.insert(item, ModelItem::Amplitude(i));
+    }
+    ir_model.contact = ir::contact::Contact {
+        interactions,
+        pairs: contact_pairs,
+        clearances,
+    };
+    ir_model.constraints.equations.extend(node_tie_equations);
+    ir_model.amplitudes = amplitudes;
+    ir_model.initial = initial_conditions;
+    ir_model.design_variables = design_variables;
+    let model_cards = boundaries_before_stored_modes(model, &mut steps).unwrap_or_default();
+    let resolved_overlaps = (sets.dofs.comments())
+        .map(|comments| resolved_overlaps(&comments))
+        .unwrap_or_default();
+    Ok(Built {
+        model: ir_model,
+        model_cards,
+        steps,
+        resolved_overlaps,
+        shortened_names: sets.shortened.clone(),
+        part_sets: mesh.parts.iter().map(|p| p.name.clone()).collect(),
+        profile_comments,
+        origins,
+    })
+}
+
+/// A constraint in the order of the input file.
+enum ConstraintItem {
+    Equation(ir::constraints::Equation),
+    RigidBody(ir::constraints::RigidBody),
+    Tie(
+        ir::constraints::Tie,
+        Option<ir::constraints::CyclicSymmetryModel>,
+    ),
 }
 
 /// The boundary conditions of a first step that works on the eigenmodes of another
-/// analysis, taken out of the step: CalculiX allows no new boundary conditions in a modal
+/// analysis, taken out of the step: the solver allows no new boundary conditions in a modal
 /// dynamics or steady state dynamics step, so they go into the model definition, where the
 /// run that stored the eigenmodes had them before its frequency step.
-fn boundaries_before_stored_modes(model: &FeModel, steps: &mut Keyword) -> Option<Vec<Keyword>> {
+fn boundaries_before_stored_modes(
+    model: &FeModel,
+    steps: &mut [Vec<StepBlock>],
+) -> Option<Vec<Card>> {
     model.properties.stored_modes.as_ref()?;
     let first = model.steps.iter().position(|s| s.active)?;
     if !model.steps[first].kind.uses_stored_modes() {
         return None;
     }
-    let block = steps.children.get_mut(first)?.children.first_mut()?;
-    let boundaries = (block.children.iter_mut())
-        .find(|k| matches!(&k.kind, KeywordKind::Title(t) if t == "Boundary conditions"))?;
-    Some(std::mem::take(&mut boundaries.children))
+    let block = steps.get_mut(first)?.first_mut()?;
+    Some(std::mem::take(&mut block.boundaries))
 }
 
 /// A local coordinate system of a node set.
@@ -450,31 +750,32 @@ enum Transform {
     Cylindrical([f64; 3], [f64; 3]),
 }
 
-/// `*Transform` of each node set that a skewed symmetry plane or a displacement in a
-/// coordinate system of its own holds.
-fn transforms(transforms: &[(String, Transform)]) -> Vec<Keyword> {
+/// The local coordinate system of each node set that a skewed symmetry plane or a
+/// displacement in a coordinate system of its own holds.
+fn transforms(transforms: &[(String, Transform)]) -> Vec<ir::constraints::Transform> {
     (transforms.iter())
         .map(|(set, transform)| {
-            let (kind, a, b) = match transform {
-                Transform::Rectangular(a, b) => ("R", a, b),
-                Transform::Cylindrical(a, b) => ("C", a, b),
+            let (kind, a, b) = match *transform {
+                Transform::Rectangular(a, b) => (ir::constraints::TransformKind::Rectangular, a, b),
+                Transform::Cylindrical(a, b) => (ir::constraints::TransformKind::Cylindrical, a, b),
             };
-            let values: Vec<String> = a.iter().chain(b).map(|&v| number(v)).collect();
-            Keyword::generated(format!(
-                "*Transform, Nset={set}, Type={kind}\n{}\n",
-                values.join(", ")
-            ))
+            ir::constraints::Transform {
+                nset: ir_name(set),
+                kind,
+                a,
+                b,
+            }
         })
         .collect()
 }
 
-/// `*SUBMODEL` with the node sets of the submodel boundary conditions, as PrePoMax writes it
-/// after the heading. The global results file is named without its directory; it has to be
-/// next to the input file, where the analysis and the export put it.
+/// The submodel with the node sets of the submodel boundary conditions. The global results
+/// file is named without its directory; it has to be next to the input file, where the
+/// analysis and the export put it.
 fn submodel(
     model: &FeModel,
     node_sets: &[(String, String)],
-) -> Result<Option<Keyword>, WriteError> {
+) -> Result<Option<ir::constraints::Submodel>, WriteError> {
     let Some((_, first)) = node_sets.first() else {
         return Ok(None);
     };
@@ -483,14 +784,11 @@ fn submodel(
         .ok_or_else(|| WriteError::NoGlobalResults {
             item: first.clone(),
         })?;
-    let mut out = format!(
-        "*Submodel, Type=Node, Input=\"{}\"\n",
-        input.to_string_lossy()
-    );
-    for (set, _) in node_sets {
-        let _ = writeln!(out, "{set}");
-    }
-    Ok(Some(Keyword::generated(out)))
+    Ok(Some(ir::constraints::Submodel {
+        input: input.to_string_lossy().into_owned(),
+        node_sets: node_sets.iter().map(|(set, _)| ir_name(set)).collect(),
+        global_elset: None,
+    }))
 }
 
 /// The line elements of beam and truss sections: the CalculiX type each one is written
@@ -571,10 +869,15 @@ impl LineElements {
     }
 }
 
-/// One `*Element` block per part and element type; the part name is the element set.
-/// Surface elements get the type of the model space, e.g. `CAX6` in an axisymmetric model,
-/// line elements the type of their beam or truss section.
-fn elements(mesh: &FeMesh, space: ModelSpace, lines: &LineElements) -> Vec<Keyword> {
+/// The elements, per part and element type; the part name is their element set. Surface
+/// elements get the type of the model space, e.g. `CAX6` in an axisymmetric model, line
+/// elements the type of their beam or truss section.
+fn elements(
+    out: &mut ir::Model,
+    mesh: &FeMesh,
+    space: ModelSpace,
+    lines: &LineElements,
+) -> Result<(), WriteError> {
     let mut written = vec![false; mesh.element_count()];
     let mut groups: Vec<(Option<&str>, String, Vec<ElementId>)> = Vec::new();
     let type_name = |element: &plx_mesh::Element| lines.written(element, space).0;
@@ -594,33 +897,48 @@ fn elements(mesh: &FeMesh, space: ModelSpace, lines: &LineElements) -> Vec<Keywo
             group(&mut groups, None, type_name(element)).push(element.id);
         }
     }
-    let mut blocks = Vec::new();
-    let mut user_element = false;
     for (set, type_name, mut ids) in groups {
-        let mut out = String::new();
-        // General beam sections exist for CalculiX's user element U1 only, which the input
-        // declares before its first element.
-        if type_name == "U1" && !std::mem::replace(&mut user_element, true) {
-            out.push_str("*User element, Type=U1, Nodes=2, Integration points=2, Maxdof=6\n");
-        }
-        out += &match set {
-            Some(set) => format!("*Element, Type={type_name}, Elset={set}\n"),
-            None => format!("*Element, Type={type_name}\n"),
-        };
+        let kind = element_type(set.unwrap_or("Mesh"), &type_name)?;
         ids.sort_unstable();
         for element in ids.iter().filter_map(|&id| mesh.element(id)) {
-            let _ = write!(out, "{}", element.id);
             let (_, nodes) = lines.written(element, space);
-            // A line holds 16 entries; the rest continues on the next line.
-            for (entry, node) in (2..).zip(&nodes) {
-                let separator = if entry == 17 { ",\n" } else { ", " };
-                let _ = write!(out, "{separator}{node}");
-            }
-            out.push('\n');
+            out.insert_element(ir::element::Element {
+                id: element.id,
+                kind,
+                nodes,
+                section: None,
+            });
         }
-        blocks.push(Keyword::generated(out));
+        if let Some(set) = set {
+            out.sets.add_elements(&ir_name(set), ids);
+        }
     }
-    blocks
+    Ok(())
+}
+
+/// The solver's element type of a type name.
+fn element_type(item: &str, type_name: &str) -> Result<ir::element::ElementType, WriteError> {
+    ir::element::ElementType::parse(type_name).ok_or_else(|| WriteError::Unsupported {
+        item: item.to_owned(),
+        reason: format!("the solver has no element type {type_name}"),
+    })
+}
+
+/// The spring and gap elements of constraints.
+fn generated_elements(out: &mut ir::Model, block: &constraints::ElementBlock) {
+    let kind = element_type(block.kind, block.kind).expect("a spring or gap type");
+    for (id, nodes) in &block.elements {
+        out.insert_element(ir::element::Element {
+            id: *id,
+            kind,
+            nodes: nodes.clone(),
+            section: None,
+        });
+    }
+    if let Some(set) = &block.elset {
+        let ids = block.elements.iter().map(|(id, _)| *id);
+        out.sets.add_elements(&ir_name(set), ids);
+    }
 }
 
 fn group<'a, 'b>(
@@ -778,7 +1096,7 @@ impl<'a> Sets<'a> {
             .expect("unbounded range")
     }
 
-    /// Next free name `<prefix>-<n>_<postfix>`, like PrePoMax's `GetNextNumberedKey`.
+    /// Next free name `<prefix>-<n>_<postfix>`.
     fn free_name(&mut self, prefix: &str, postfix: &str) -> String {
         let (name, full) = (1..)
             .map(|n| {
@@ -793,7 +1111,7 @@ impl<'a> Sets<'a> {
         name
     }
 
-    /// An element surface as PrePoMax builds it: one element set per face number and a node
+    /// An element surface: one element set per face number and a node
     /// set with all face nodes for boundary conditions.
     fn add_face_surface(&mut self, name: &str, faces: &[(ElementId, u8)]) {
         let mut by_face: BTreeMap<u8, BTreeSet<ElementId>> = BTreeMap::new();
@@ -874,7 +1192,7 @@ impl<'a> Sets<'a> {
     }
 
     /// Surface of a contact or tie side: a surface of the input file, or one built from
-    /// picked faces and named like PrePoMax's `Internal_Selection-1_Tie-1_Master`.
+    /// picked faces and named like `Internal_Selection-1_Tie-1_Master`.
     fn surface(&mut self, item: &str, side: &str, region: &Region) -> Result<String, WriteError> {
         match region {
             Region::Surface(surface) if self.mesh.surfaces.contains_key(surface) => {
@@ -949,94 +1267,126 @@ fn membrane_edges(mesh: &FeMesh, region: &Region) -> bool {
     })
 }
 
-fn materials(model: &FeModel) -> Vec<Keyword> {
-    model
-        .materials
-        .iter()
-        .map(|material| {
-            let mut properties = Vec::new();
-            if let Some(density) = material.density {
-                properties.push(Keyword::generated(format!(
-                    "*Density\n{}\n",
-                    number(density)
-                )));
-            }
-            if let Some(elastic) = material.elastic {
-                let (young, poisson) = (number(elastic.young), number(elastic.poisson));
-                properties.push(Keyword::generated(format!(
-                    "*Elastic\n{young}, {poisson}\n"
-                )));
-            }
-            if let Some(plastic) = &material.plastic {
-                let mut out = format!("*Plastic, Hardening={}\n", plastic.hardening.keyword());
-                for point in &plastic.points {
-                    let _ = writeln!(
-                        out,
-                        "{}, {}, {}",
-                        number(point.stress),
-                        number(point.plastic_strain),
-                        number(point.temperature)
-                    );
-                }
-                properties.push(Keyword::generated(out));
-            }
-            // CalculiX reads the creep law after the elasticity and the plasticity.
-            if let Some(creep) = material.creep {
-                properties.push(Keyword::generated(format!(
-                    "*Creep, Law=Norton\n{}, {}, {}\n",
-                    number(creep.a),
-                    number(creep.n),
-                    number(creep.m)
-                )));
-            }
-            // Thermal properties in PrePoMax's order.
-            if let Some(expansion) = material.expansion {
-                let mut out = String::from("*Expansion");
-                if expansion.zero_temperature != 0.0 {
-                    let _ = write!(out, ", Zero={}", number(expansion.zero_temperature));
-                }
-                let _ = writeln!(out, "\n{}", number(expansion.coefficient));
-                properties.push(Keyword::generated(out));
-            }
-            if let Some(conductivity) = material.conductivity {
-                properties.push(Keyword::generated(format!(
-                    "*Conductivity\n{}\n",
-                    number(conductivity)
-                )));
-            }
-            if let Some(specific_heat) = material.specific_heat {
-                properties.push(Keyword::generated(format!(
-                    "*Specific heat\n{}\n",
-                    number(specific_heat)
-                )));
-            }
-            let header = format!("*Material, Name={}\n", name(&material.name));
-            Keyword::parent(header, properties)
-        })
-        .collect()
+/// A value that does not depend on the temperature.
+fn constant(value: f64) -> Vec<ir::material::TemperatureValue> {
+    vec![ir::material::TemperatureValue::constant(value)]
 }
 
-/// `*Physical constants` as PrePoMax's `CalPhysicalConstants` writes it, if any is defined.
-fn physical_constants(model: &FeModel) -> Vec<Keyword> {
-    let properties = &model.properties;
-    let mut out = String::from("*Physical constants");
-    if let Some(zero) = properties.absolute_zero {
-        let _ = write!(out, ", Absolute zero={}", number(zero));
+fn materials(model: &FeModel) -> Vec<ir::material::Material> {
+    use ir::material as m;
+    let mut materials: Vec<m::Material> = Vec::new();
+    for material in &model.materials {
+        let mut out = m::Material {
+            name: ir_name(&name(&material.name)),
+            ..Default::default()
+        };
+        out.density = (material.density).map(|rho| m::Density {
+            rows: constant(rho),
+        });
+        out.elastic = material.elastic.map(|elastic| m::Elastic {
+            rows: vec![m::ElasticRow {
+                young: elastic.young,
+                poisson: elastic.poisson,
+                temperature: 0.0,
+            }],
+        });
+        out.plastic = material.plastic.as_ref().map(|plastic| m::Plastic {
+            hardening: match plastic.hardening {
+                plx_model::Hardening::Isotropic => m::Hardening::Isotropic,
+                plx_model::Hardening::Kinematic => m::Hardening::Kinematic,
+                plx_model::Hardening::Combined => m::Hardening::Combined,
+            },
+            rows: (plastic.points.iter())
+                .map(|point| m::PlasticRow {
+                    stress: point.stress,
+                    plastic_strain: point.plastic_strain,
+                    temperature: point.temperature,
+                })
+                .collect(),
+        });
+        out.creep = material.creep.map(|creep| m::Creep {
+            rows: vec![m::CreepRow {
+                a: creep.a,
+                n: creep.n,
+                m: creep.m,
+                temperature: 0.0,
+            }],
+        });
+        out.expansion = material.expansion.map(|expansion| m::Expansion {
+            zero: expansion.zero_temperature,
+            rows: constant(expansion.coefficient),
+        });
+        out.conductivity = (material.conductivity).map(|k| m::Conductivity { rows: constant(k) });
+        out.specific_heat = (material.specific_heat).map(|c| m::SpecificHeat { rows: constant(c) });
+        add_material(&mut materials, out);
     }
-    if let Some(sigma) = properties.stefan_boltzmann {
-        let _ = write!(out, ", Stefan Boltzmann={}", number(sigma));
-    }
-    if properties.absolute_zero.is_none() && properties.stefan_boltzmann.is_none() {
-        return Vec::new();
-    }
-    out.push('\n');
-    vec![Keyword::generated(out)]
+    materials
 }
 
-/// `*Amplitude` as PrePoMax's `CalAmplitude` writes it: four points per line, the most
-/// CalculiX reads on one.
-fn amplitudes(model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
-    let mut keywords = Vec::new();
+/// Adds a material; one of the same name, which the solver does not tell apart from it,
+/// takes its properties.
+fn add_material(materials: &mut Vec<ir::material::Material>, material: ir::material::Material) {
+    let Some(known) = materials.iter_mut().find(|m| m.name == material.name) else {
+        materials.push(material);
+        return;
+    };
+    macro_rules! take {
+        ($($field:ident),*) => {
+            $(if material.$field.is_some() {
+                known.$field = material.$field;
+            })*
+        };
+    }
+    take!(
+        elastic,
+        plastic,
+        creep,
+        expansion,
+        conductivity,
+        specific_heat,
+        density
+    );
+}
+
+/// The dummy plastic material that makes the solver solve gaps nonlinearly.
+fn gap_material(name: &str) -> ir::material::Material {
+    use ir::material as m;
+    m::Material {
+        name: ir_name(name),
+        density: Some(m::Density {
+            rows: constant(1.0),
+        }),
+        elastic: Some(m::Elastic {
+            rows: vec![m::ElasticRow {
+                young: 1.0,
+                poisson: 0.0,
+                temperature: 0.0,
+            }],
+        }),
+        plastic: Some(m::Plastic {
+            hardening: m::Hardening::Isotropic,
+            rows: vec![m::PlasticRow {
+                stress: 0.0,
+                plastic_strain: 0.0,
+                temperature: 0.0,
+            }],
+        }),
+        ..Default::default()
+    }
+}
+
+/// The physical constants.
+fn physical_constants(model: &FeModel) -> ir::PhysicalConstants {
+    ir::PhysicalConstants {
+        absolute_zero: model.properties.absolute_zero,
+        stefan_boltzmann: model.properties.stefan_boltzmann,
+        newton_gravity: None,
+    }
+}
+
+/// The amplitudes.
+fn amplitudes(model: &FeModel) -> Result<Vec<ir::amplitude::Amplitude>, WriteError> {
+    let mut amplitudes = Vec::new();
     for amplitude in &model.amplitudes {
         if let Some(reason) = amplitude.points_problem() {
             return Err(WriteError::InvalidAmplitude {
@@ -1044,39 +1394,26 @@ fn amplitudes(model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
                 reason,
             });
         }
-        let mut out = format!("*Amplitude, Name={}", name(&amplitude.name));
-        if amplitude.time_span == AmplitudeTime::Total {
-            out.push_str(", Time=Total time");
-        }
-        if amplitude.shift_time != 0.0 {
-            let _ = write!(out, ", Shiftx={}", number(amplitude.shift_time));
-        }
-        if amplitude.shift_amplitude != 0.0 {
-            let _ = write!(out, ", Shifty={}", number(amplitude.shift_amplitude));
-        }
-        out.push('\n');
-        for line in amplitude.points.chunks(4) {
-            let pairs: Vec<String> = line
-                .iter()
-                .map(|[t, a]| format!("{}, {}", number(*t), number(*a)))
-                .collect();
-            let _ = writeln!(out, "{}", pairs.join(", "));
-        }
-        keywords.push(Keyword::generated(out));
+        amplitudes.push(ir::amplitude::Amplitude {
+            name: ir_name(&name(&amplitude.name)),
+            total_time: amplitude.time_span == AmplitudeTime::Total,
+            shift_x: amplitude.shift_time,
+            shift_y: amplitude.shift_amplitude,
+            points: amplitude.points.iter().map(|&[t, a]| (t, a)).collect(),
+        });
     }
-    Ok(keywords)
+    Ok(amplitudes)
 }
 
-/// The amplitude parameter of a boundary condition or load, such as `, Amplitude=Ramp`;
-/// empty without one. `parameter` is the name CalculiX gives it on the keyword.
+/// The amplitude a boundary condition or load refers to, by its name in the analysis;
+/// `None` without one.
 fn amplitude_parameter(
     amplitudes: &[Amplitude],
     item: &str,
-    parameter: &str,
     reference: &Option<String>,
-) -> Result<String, WriteError> {
+) -> Result<Option<String>, WriteError> {
     let Some(reference) = reference else {
-        return Ok(String::new());
+        return Ok(None);
     };
     if !amplitudes.iter().any(|a| &a.name == reference) {
         return Err(WriteError::UnknownAmplitude {
@@ -1084,7 +1421,7 @@ fn amplitude_parameter(
             amplitude: reference.clone(),
         });
     }
-    Ok(format!(", {parameter}={}", name(reference)))
+    Ok(Some(ir_name(&name(reference))))
 }
 
 /// The distribution an item scales its value by, ready to sample; `None` without one.
@@ -1111,23 +1448,21 @@ fn distribution(
         })
 }
 
-/// One line per node of `nodes` with the value scaled by the distribution at the node, after
-/// the node and `columns` (such as `11, 11, ` for a temperature boundary condition).
+/// The value at each node of `nodes`, scaled by the distribution at the node.
 fn distributed_nodes(
-    out: &mut String,
     mesh: &FeMesh,
     nodes: &[NodeId],
-    columns: &str,
     value: f64,
     sampler: &Sampler,
     units: UnitSystem,
-) {
-    for &node in nodes {
-        if let Some(position) = mesh.node(node) {
+) -> Vec<(NodeRef, f64)> {
+    (nodes.iter())
+        .filter_map(|&node| {
+            let position = mesh.node(node)?;
             let scaled = sampler.scale(value, Quantity::Temperature, units, position);
-            let _ = writeln!(out, "{node}, {columns}{}", number(scaled));
-        }
-    }
+            Some((NodeRef::Node(node), scaled))
+        })
+        .collect()
 }
 
 /// Center of an element face, the mean of its corners.
@@ -1144,25 +1479,22 @@ fn face_center(mesh: &FeMesh, element: ElementId, face: u8) -> Option<[f64; 3]> 
     Some(center)
 }
 
-/// Initial temperatures and velocities as PrePoMax's `CalInitialTemperature`,
-/// `CalInitialTranslationalVelocity` and `CalInitialAngularVelocity` write them: one line
+/// Initial temperatures and velocities: one entry
 /// per set or node and non-zero component, 2D models without the third.
-fn initial_conditions(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
+fn initial_conditions(
+    sets: &mut Sets,
+    model: &FeModel,
+) -> Result<ir::InitialConditions, WriteError> {
     let components = if model.properties.space.is_2d() { 2 } else { 3 };
-    let mut keywords = Vec::new();
-    for condition in &model.initial_conditions {
-        if !condition.active {
-            keywords.push(deactivated(&condition.name));
-            continue;
-        }
-        let mut out = format!("** Name: {}\n", condition.name);
-        let velocity_lines = |out: &mut String, target: &str, v: [f64; 3]| {
-            for (dof, value) in v.iter().enumerate().take(components) {
-                if *value != 0.0 {
-                    out.push_str(&format!("{target}, {}, {}\n", dof + 1, number(*value)));
-                }
+    let mut out = ir::InitialConditions::default();
+    let velocities = |out: &mut ir::InitialConditions, target: NodeRef, v: [f64; 3]| {
+        for (dof, value) in (1..).zip(v).take(components) {
+            if value != 0.0 {
+                out.velocities.push((target.clone(), dof, value));
             }
-        };
+        }
+    };
+    for condition in model.initial_conditions.iter().filter(|c| c.active) {
         match condition.kind {
             InitialConditionKind::Temperature(t) => {
                 match distribution(model, &condition.name, &condition.distribution)? {
@@ -1171,119 +1503,203 @@ fn initial_conditions(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, 
                         if nodes.is_empty() {
                             return Err(empty(&condition.name, "nodes"));
                         }
-                        out.push_str("*Initial conditions, Type=Temperature\n");
                         let units = model.properties.units;
-                        distributed_nodes(&mut out, sets.mesh, &nodes, "", t, &sampler, units);
+                        (out.temperatures)
+                            .extend(distributed_nodes(sets.mesh, &nodes, t, &sampler, units));
                     }
                     None => {
                         let set = sets.node_set(&condition.name, &condition.region)?;
-                        out.push_str(&format!(
-                            "*Initial conditions, Type=Temperature\n{set}, {}\n",
-                            number(t)
-                        ));
+                        out.temperatures.push((node_set_ref(&set), t));
                     }
                 }
             }
             InitialConditionKind::Velocity(v) => {
                 let set = sets.node_set(&condition.name, &condition.region)?;
-                out.push_str("*Initial conditions, Type=Velocity\n");
-                velocity_lines(&mut out, &set, v);
+                velocities(&mut out, node_set_ref(&set), v);
             }
             InitialConditionKind::AngularVelocity { .. } => {
                 let nodes = condition.region.nodes(sets.mesh);
                 if nodes.is_empty() {
                     return Err(empty(&condition.name, "nodes"));
                 }
-                out.push_str("*Initial conditions, Type=Velocity\n");
                 for id in nodes {
                     let Some(position) = sets.mesh.node(id) else {
                         continue;
                     };
                     let v = condition.kind.velocity_at(position).unwrap_or_default();
-                    velocity_lines(&mut out, &id.to_string(), v);
+                    velocities(&mut out, NodeRef::Node(id), v);
                 }
             }
         }
-        keywords.push(Keyword::generated(out));
     }
-    Ok(keywords)
+    Ok(out)
 }
 
-fn sections(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
-    let mut keywords = Vec::new();
-    for section in &model.sections {
+fn sections(sets: &mut Sets, model: &FeModel) -> Result<SectionsAndProfiles, WriteError> {
+    use ir::section::{Section as IrSection, SectionKind as Kind};
+    let mut out = Vec::new();
+    let mut comments = Vec::new();
+    let mut owners = Vec::new();
+    for (index, section) in model.sections.iter().enumerate() {
         if !model.materials.iter().any(|m| m.name == section.material) {
             return Err(WriteError::UnknownMaterial {
                 item: section.name.clone(),
                 material: section.material.clone(),
             });
         }
-        let material = name(&section.material);
-        let mut out = format!("** Name: {}\n", section.name);
+        let material = ir_name(&name(&section.material));
         match &section.kind {
             SectionKind::Solid => {
                 let set = sets.element_set(&section.name, &section.region)?;
-                let _ = writeln!(out, "*Solid section, Elset={set}, Material={material}");
-                // Plane stress and plane strain sections have a thickness, as in PrePoMax.
-                if model.properties.space.has_thickness() {
-                    let _ = writeln!(out, "{}", number(section.thickness));
-                }
+                // Plane stress and plane strain sections have a thickness.
+                let thickness =
+                    (model.properties.space.has_thickness()).then_some(section.thickness);
+                out.push(IrSection {
+                    elset: ir_name(&set),
+                    kind: Kind::Solid {
+                        material,
+                        thickness,
+                    },
+                });
             }
             SectionKind::Truss { area } => {
                 let set = sets.element_set(&section.name, &section.region)?;
-                let _ = writeln!(out, "*Solid section, Elset={set}, Material={material}");
-                let _ = writeln!(out, "{}", number(*area));
+                out.push(IrSection {
+                    elset: ir_name(&set),
+                    kind: Kind::Solid {
+                        material,
+                        thickness: Some(*area),
+                    },
+                });
             }
-            SectionKind::Shell { thickness, offset }
-            | SectionKind::Membrane { thickness, offset } => {
+            &SectionKind::Shell { thickness, offset } => {
                 let set = sets.element_set(&section.name, &section.region)?;
-                let keyword = match section.kind {
-                    SectionKind::Membrane { .. } => "Membrane",
-                    _ => "Shell",
-                };
-                let _ = write!(out, "*{keyword} section, Elset={set}, Material={material}");
-                if *offset != 0.0 {
-                    let _ = write!(out, ", Offset={}", number(*offset));
-                }
-                let _ = writeln!(out, "\n{}", number(*thickness));
+                out.push(IrSection {
+                    elset: ir_name(&set),
+                    kind: Kind::Shell {
+                        material,
+                        thickness,
+                        offset,
+                        nodal_thickness: false,
+                    },
+                });
+            }
+            &SectionKind::Membrane { thickness, offset } => {
+                let set = sets.element_set(&section.name, &section.region)?;
+                out.push(IrSection {
+                    elset: ir_name(&set),
+                    kind: Kind::Membrane {
+                        material,
+                        thickness,
+                        offset,
+                    },
+                });
             }
             SectionKind::Beam(beam) => {
                 let profile = profile_of(model, &section.name, beam)?;
-                let _ = writeln!(out, "** Cross-Section: {}", beam.cross_section);
-                let mut options = format!("Section={}", profile.keyword());
-                for (k, offset) in (1..).zip(beam.offset) {
-                    if offset != 0.0 {
-                        let _ = write!(options, ", Offset{k}={}", number(offset));
-                    }
-                }
-                let dimensions: Vec<String> =
-                    profile.data_line().iter().map(|&v| number(v)).collect();
-                // One keyword per normal: CalculiX takes one normal per section, and an
+                let ir_profile = beam_profile(&profile);
+                // One section per normal: the solver takes one normal per section, and an
                 // automatic orientation may differ between the beams of the region.
                 for (normal, drawn, set) in beam_groups(sets, section, &profile)? {
                     if !profile.is_native() {
-                        // CalculiX knows a general section by its values only: the profile
-                        // and the normal it is drawn with, for the results.
-                        let _ = writeln!(out, "{}", profile_comment(&profile, drawn));
+                        comments.push((ir_name(&set), profile_comment(&profile, drawn)));
                     }
-                    let _ = writeln!(
-                        out,
-                        "*Beam section, Elset={set}, Material={material}, {options}"
-                    );
-                    let _ = writeln!(out, "{}", dimensions.join(", "));
-                    let _ = writeln!(
-                        out,
-                        "{}, {}, {}",
-                        number(normal[0]),
-                        number(normal[1]),
-                        number(normal[2])
-                    );
+                    out.push(IrSection {
+                        elset: ir_name(&set),
+                        kind: Kind::Beam {
+                            material: material.clone(),
+                            profile: ir_profile.clone(),
+                            normal,
+                            offset1: beam.offset[0],
+                            offset2: beam.offset[1],
+                        },
+                    });
                 }
             }
         }
-        keywords.push(Keyword::generated(out));
+        owners.resize(out.len(), index);
     }
-    Ok(keywords)
+    Ok((out, comments, owners))
+}
+
+/// The sections, the profile comments of the general beam sections (see
+/// [`Lowered::profile_comments`]) and the section of the model each section came from.
+type SectionsAndProfiles = (Vec<ir::section::Section>, Vec<(String, String)>, Vec<usize>);
+
+/// The comment before the `*Beam section` of a general profile: the profile, in RON, and
+/// the normal it is drawn with, which [`read_inp`](super::read_inp) takes back.
+fn profile_comment(profile: &BeamProfile, normal: [f64; 3]) -> String {
+    let ron = ron::to_string(profile).unwrap_or_default();
+    let normal = normal.map(number).join(", ");
+    format!("{}{ron}; Normal: {normal}", super::PROFILE_COMMENT)
+}
+
+/// The profile of a beam section as the solver takes it: a general profile by its values
+/// about its principal axes (see [`BeamProfile::data_line`]).
+fn beam_profile(profile: &BeamProfile) -> ir::section::BeamProfile {
+    use ir::section::BeamProfile as P;
+    let v = profile.data_line();
+    let at = |i: usize| v.get(i).copied().unwrap_or(0.0);
+    match profile.keyword() {
+        "RECT" => P::Rect { a: at(0), b: at(1) },
+        "CIRC" => P::Circ { a: at(0), b: at(1) },
+        "PIPE" => P::Pipe {
+            radius: at(0),
+            thickness: at(1),
+        },
+        "BOX" => P::Box {
+            a: at(0),
+            b: at(1),
+            t1: at(2),
+            t2: at(3),
+            t3: at(4),
+            t4: at(5),
+        },
+        _ => P::General {
+            area: at(0),
+            i11: at(1),
+            i12: at(2),
+            i22: at(3),
+            torsion: at(4),
+            shear_area_1: None,
+            shear_area_2: None,
+        },
+    }
+}
+
+/// The section of generated spring and gap elements.
+fn generated_section(section: &constraints::GeneratedSection) -> ir::section::Section {
+    use ir::section::{Gap, SectionKind as Kind, Spring, SpringStiffness};
+    match section {
+        constraints::GeneratedSection::Spring {
+            elset,
+            dofs,
+            stiffness,
+        } => ir::section::Section {
+            elset: ir_name(elset),
+            kind: Kind::Spring(Spring {
+                dof1: dofs[0],
+                dof2: *dofs.get(1).unwrap_or(&dofs[0]),
+                stiffness: SpringStiffness::Linear(constant(*stiffness)),
+                orientation: None,
+            }),
+        },
+        constraints::GeneratedSection::Gap {
+            elset,
+            clearance,
+            direction,
+            properties,
+            ..
+        } => ir::section::Section {
+            elset: ir_name(elset),
+            kind: Kind::Gap(Gap {
+                clearance: *clearance,
+                direction: *direction,
+                stiffness: properties.map(|(k, _)| k).filter(|&k| k > 0.0),
+                friction: None,
+            }),
+        },
+    }
 }
 
 /// The profile of a beam section's cross-section.
@@ -1297,14 +1713,6 @@ fn profile_of(
         item: section.to_owned(),
         reason: format!("Cross-Section {} does not exist", beam.cross_section),
     })
-}
-
-/// The comment before the `*Beam section` of a general profile: the profile, in RON, and
-/// the normal it is drawn with, which [`read_inp`](super::read_inp) takes back.
-fn profile_comment(profile: &BeamProfile, normal: [f64; 3]) -> String {
-    let ron = ron::to_string(profile).unwrap_or_default();
-    let normal = normal.map(number).join(", ");
-    format!("{}{ron}; Normal: {normal}", super::PROFILE_COMMENT)
 }
 
 /// The normal a group of beams is written with, the one its profile is drawn with, and its
@@ -1382,21 +1790,22 @@ fn beam_groups(
     Ok(named)
 }
 
-/// Tie constraints as PrePoMax's `CalTie` writes them: slave surface first. Springs and
-/// supports are written as elements, see [`constraints::springs`].
+/// Rigid bodies, remote points and ties; ties take the slave surface
+/// first. Springs and supports become elements, see [`constraints::springs`].
 fn constraints(
     sets: &mut Sets,
     model: &FeModel,
     generated: &mut constraints::Generated,
-) -> Result<Vec<Keyword>, WriteError> {
-    let mut keywords = Vec::new();
+) -> Result<(Vec<ConstraintItem>, Vec<Option<ModelItem>>), WriteError> {
+    let mut items = Vec::new();
+    // The item each of `items` came from, where the solver can name it (a rigid body).
+    let mut owners: Vec<Option<ModelItem>> = Vec::new();
     let mut next_node = (sets.mesh.node_ids().iter().copied())
         .chain(generated.nodes.iter().map(|(id, _)| *id))
         .max()
         .map_or(1, |n| n + 1);
-    for constraint in &model.constraints {
+    for (index, constraint) in model.constraints.iter().enumerate() {
         if !constraint.active() {
-            keywords.push(deactivated(constraint.name()));
             continue;
         }
         match constraint {
@@ -1410,7 +1819,7 @@ fn constraints(
                         point: body.reference_point.clone(),
                     });
                 };
-                // Both nodes sit on the reference point, as PrePoMax writes them.
+                // Both nodes sit on the reference point.
                 let (reference, rotation) = (next_node, next_node + 1);
                 next_node += 2;
                 generated.nodes.push((reference, point.position));
@@ -1423,9 +1832,9 @@ fn constraints(
                         set: None,
                     },
                 );
-                let mut text = format!("** Name: {}\n", body.name);
+                owners.resize(items.len(), None);
                 rigid_body(
-                    &mut text,
+                    &mut items,
                     sets,
                     &body.name,
                     &body.region,
@@ -1433,16 +1842,16 @@ fn constraints(
                     None,
                     [reference, rotation],
                 )?;
-                keywords.push(Keyword::generated(text));
+                owners.resize(items.len(), Some(ModelItem::Constraint(index)));
             }
-            Constraint::Tie(t) => keywords.push(tie(sets, t)?),
+            Constraint::Tie(t) => items.push(tie(sets, t)?),
         }
     }
     // A displacement that needs a point drives its region from it, by default at the centre
-    // of the region; the point exists only in the input file. Its reference node takes the
+    // of the region; the point exists only in the analysis. Its reference node takes the
     // translations, its rotation node the rotations as displacements, both in the directions
     // of the displacement's coordinate system. Nodes that boundary conditions hold directly
-    // stay out of the coupling: CalculiX refuses them there.
+    // stay out of the coupling: the solver refuses them there.
     let mut excluded = None;
     for (s, step) in model.steps.iter().enumerate().filter(|(_, s)| s.active) {
         for (i, bc) in step.boundary_conditions.iter().enumerate() {
@@ -1483,7 +1892,6 @@ fn constraints(
                     .push((set.clone(), vec![reference, rotation]));
                 sets.transforms.push((set, Transform::Rectangular(x, y)));
             }
-            let mut text = format!("** Name: {}: Remote point\n", bc.name);
             match behavior {
                 RemoteBehavior::Rigid => {
                     let whole = remote.pinball.is_none()
@@ -1493,8 +1901,9 @@ fn constraints(
                     } else {
                         Region::Nodes(point.nodes.clone())
                     };
+                    owners.resize(items.len(), None);
                     rigid_body(
-                        &mut text,
+                        &mut items,
                         sets,
                         &bc.name,
                         &region,
@@ -1502,35 +1911,34 @@ fn constraints(
                         point.axes,
                         [reference, rotation],
                     )?;
+                    owners.resize(items.len(), Some(ModelItem::BoundaryCondition(s, i)));
                 }
                 RemoteBehavior::Deformable => {
                     let space = model.properties.space;
-                    for equation in point.equations(sets.mesh, space) {
-                        let mut terms = remote_terms(&equation, point.axes, [reference, rotation]);
+                    for equation_terms in point.equations(sets.mesh, space) {
+                        let mut terms =
+                            remote_terms(&equation_terms, point.axes, [reference, rotation]);
                         let mesh = sets.mesh;
                         if (sets.dofs).claim_equation(&bc.name, &mut terms, |n| {
                             n != reference && n != rotation && mesh.node(n).is_some()
                         }) {
-                            equation_text(&mut text, &terms);
+                            items.push(ConstraintItem::Equation(equation(&terms)));
                         }
                     }
                 }
             }
-            keywords.push(Keyword::generated(text));
         }
     }
-    for t in &model.ties {
-        if t.active {
-            keywords.push(tie(sets, t)?);
-        } else {
-            keywords.push(deactivated(&t.name));
-        }
+    for t in model.ties.iter().filter(|t| t.active) {
+        items.push(tie(sets, t)?);
     }
-    Ok(keywords)
+    owners.resize(items.len(), None);
+    Ok((items, owners))
 }
 
-/// `*Tie` of a slave surface glued to its master.
-fn tie(sets: &mut Sets, tie: &Tie) -> Result<Keyword, WriteError> {
+/// A tie of a slave surface glued to its master, with its cyclic symmetry model if it is
+/// one.
+fn tie(sets: &mut Sets, tie: &Tie) -> Result<ConstraintItem, WriteError> {
     // A bolt split into two parts is tied at its pre-tension cut. The faces on the cut side
     // belong to the copies of the cut nodes then, and a tie to them would bypass the preload:
     // the original nodes, which the cut's equations hold apart from the copies, become the
@@ -1574,43 +1982,49 @@ fn tie(sets: &mut Sets, tie: &Tie) -> Result<Keyword, WriteError> {
     } else {
         sets.surface(&tie.name, "Slave", slave_region)?
     };
-    let mut out = format!("*Tie, Name={}", name(&tie.name));
-    if let Some(tolerance) = tie.position_tolerance {
-        let _ = write!(out, ", Position tolerance={}", number(tolerance));
-    }
-    if !tie.adjust {
-        out.push_str(", Adjust=No");
-    }
-    if tie.cyclic.is_some() {
-        out.push_str(", Cyclic symmetry");
-    }
-    let _ = writeln!(out, "\n{slave}, {master}");
-    if let Some(cyclic) = &tie.cyclic {
-        let sectors = (tie.cyclic_sectors(sets.mesh))
-            .unwrap_or_else(|| Err("not a cyclic symmetry".into()))
-            .map_err(|reason| WriteError::InvalidCyclicSymmetry {
-                item: tie.name.clone(),
-                reason,
-            })?;
-        // As PrePoMax's CalCyclicSymmetry: the axis by a point and a second point on it.
-        let _ = write!(
-            out,
-            "*Cyclic symmetry model, N={sectors}, Tie={}",
-            name(&tie.name)
-        );
-        if cyclic.display == SectorDisplay::All {
-            let _ = write!(out, ", Ngraph={sectors}");
+    let tie_name = ir_name(&name(&tie.name));
+    let cyclic = match &tie.cyclic {
+        Some(cyclic) => {
+            let sectors = (tie.cyclic_sectors(sets.mesh))
+                .unwrap_or_else(|| Err("not a cyclic symmetry".into()))
+                .map_err(|reason| WriteError::InvalidCyclicSymmetry {
+                    item: tie.name.clone(),
+                    reason,
+                })?;
+            // The axis by a point and a second point on it.
+            let [x, y, z] = cyclic.axis_point;
+            let [dx, dy, dz] = cyclic.axis_direction;
+            Some(ir::constraints::CyclicSymmetryModel {
+                sectors,
+                ngraph: if cyclic.display == SectorDisplay::All {
+                    sectors
+                } else {
+                    1
+                },
+                tie: tie_name.clone(),
+                axis: [[x, y, z], [x + dx, y + dy, z + dz]],
+                elset: None,
+                check: true,
+            })
         }
-        let [x, y, z] = cyclic.axis_point;
-        let [dx, dy, dz] = cyclic.axis_direction;
-        let points = [x, y, z, x + dx, y + dy, z + dz].map(number);
-        let _ = writeln!(out, "\n{}", points.join(", "));
-    }
-    Ok(Keyword::generated(out))
+        None => None,
+    };
+    Ok(ConstraintItem::Tie(
+        ir::constraints::Tie {
+            name: tie_name,
+            slave: ir_name(&slave),
+            master: ir_name(&master),
+            position_tolerance: tie.position_tolerance,
+            adjust: tie.adjust,
+            cyclic_symmetry: tie.cyclic.is_some(),
+            multistage: false,
+        },
+        cyclic,
+    ))
 }
 
 /// Nodes on the slave side of an active cyclic symmetry and not on its master side (the
-/// axis). CalculiX computes them from the master side and stops when a boundary condition
+/// axis). The solver computes them from the master side and stops when a boundary condition
 /// prescribes them too ("dependent side of a MPC and a SPC"), so boundary conditions leave
 /// them out; they follow the prescribed master nodes anyway.
 fn cyclic_slave_nodes(mesh: &FeMesh, model: &FeModel) -> BTreeSet<NodeId> {
@@ -1627,16 +2041,16 @@ fn cyclic_slave_nodes(mesh: &FeMesh, model: &FeModel) -> BTreeSet<NodeId> {
     nodes
 }
 
-/// One cut per pre-tension load, written as the `*Equation`s that tie its two sides to a new
-/// node carrying the preload (see [`pre_tension`]): loads of the same name in several steps
+/// One cut per pre-tension load, as the equations that tie its two sides to a new node
+/// carrying the preload (see [`pre_tension`]): loads of the same name in several steps
 /// share the cut, as the bolt is one.
 fn pre_tension_sections(
     sets: &mut Sets,
     model: &FeModel,
     cuts: &BTreeMap<String, pre_tension::Cut>,
     generated: &mut constraints::Generated,
-) -> Vec<Keyword> {
-    let mut keywords = Vec::new();
+) -> Vec<ir::constraints::Equation> {
+    let mut equations = Vec::new();
     let mut next_node = (sets.mesh.node_ids().iter().copied())
         .chain(generated.nodes.iter().map(|(id, _)| *id))
         .max()
@@ -1653,7 +2067,7 @@ fn pre_tension_sections(
             if sets.pre_tension_nodes.contains_key(&load.name) {
                 continue;
             }
-            // The node sits at the centre of the cut; CalculiX does not use its position.
+            // The node sits at the centre of the cut; the solver does not use its position.
             let mut centre = [0.0; 3];
             for coords in cut.pairs.iter().filter_map(|&(n, _)| sets.mesh.node(n)) {
                 for (c, x) in centre.iter_mut().zip(coords) {
@@ -1667,38 +2081,30 @@ fn pre_tension_sections(
             let set = sets.free_name("Internal_Selection", &name(&load.name));
             sets.node_sets.push((set.clone(), vec![node]));
             sets.pre_tension_sets.insert(load.name.clone(), set);
-            let mut out = format!("** Name: {}\n", load.name);
             let mesh = sets.mesh;
-            for mut equation in pre_tension::equations(cut, node) {
-                if (sets.dofs).claim_equation(&load.name, &mut equation, |n| {
+            for mut terms in pre_tension::equations(cut, node) {
+                if (sets.dofs).claim_equation(&load.name, &mut terms, |n| {
                     n != node && mesh.node(n).is_some()
                 }) {
-                    equation_text(&mut out, &equation);
+                    equations.push(equation(&terms));
                 }
             }
-            keywords.push(Keyword::generated(out));
         }
     }
-    keywords
+    equations
 }
 
-/// The node ties, listed with the contact pairs.
+/// The equations of the node ties, which follow the contact pairs.
 fn node_ties(
     sets: &mut Sets,
     model: &FeModel,
     lines: &LineElements,
-) -> Result<Vec<Keyword>, WriteError> {
-    model
-        .node_ties
-        .iter()
-        .map(|tie| {
-            if tie.active {
-                node_tie(sets, tie, lines)
-            } else {
-                Ok(deactivated(&tie.name))
-            }
-        })
-        .collect()
+) -> Result<Vec<ir::constraints::Equation>, WriteError> {
+    let mut equations = Vec::new();
+    for tie in model.node_ties.iter().filter(|t| t.active) {
+        node_tie(&mut equations, sets, tie, lines)?;
+    }
+    Ok(equations)
 }
 
 /// Whether a node tie is a hinge between beams, written as equations of the translations.
@@ -1731,8 +2137,13 @@ fn node_merges(mesh: &FeMesh, model: &FeModel, lines: &LineElements) -> BTreeMap
 }
 
 /// A node tie: a hinge between beams as equations of the translations, every other tie as
-/// one shared node, which [`node_merges`] put into the mesh already; the comment names it.
-fn node_tie(sets: &mut Sets, tie: &NodeTie, lines: &LineElements) -> Result<Keyword, WriteError> {
+/// one shared node, which [`node_merges`] put into the mesh already.
+fn node_tie(
+    equations: &mut Vec<ir::constraints::Equation>,
+    sets: &mut Sets,
+    tie: &NodeTie,
+    lines: &LineElements,
+) -> Result<(), WriteError> {
     let nodes = tie.region.nodes(sets.mesh);
     let Some((&first, rest)) = nodes.split_first() else {
         return Err(WriteError::EmptyRegion {
@@ -1740,20 +2151,18 @@ fn node_tie(sets: &mut Sets, tie: &NodeTie, lines: &LineElements) -> Result<Keyw
             what: "nodes",
         });
     };
-    let mut out = format!("** Name: {}\n", tie.name);
     if !hinge_between_beams(tie, &nodes, lines) {
-        let _ = writeln!(out, "** Node {first} (merged)");
-        return Ok(Keyword::generated(out));
+        return Ok(());
     }
     for &node in rest {
         for dof in 1..=3 {
             let mut terms = [(node, dof, 1.0), (first, dof, -1.0)];
             if sets.dofs.claim_equation(&tie.name, &mut terms, |_| true) {
-                equation_text(&mut out, &terms);
+                equations.push(equation(&terms));
             }
         }
     }
-    Ok(Keyword::generated(out))
+    Ok(())
 }
 
 /// The values the writer puts in where a surface interaction leaves them to CalculiX: its
@@ -1831,105 +2240,99 @@ impl InteractionDefaults {
     }
 }
 
-/// A surface interaction with its models as children, like PrePoMax's
-/// `CalSurfaceInteraction`, with the defaults filled in.
-fn interaction(interaction: &SurfaceInteraction, defaults: &InteractionDefaults) -> Keyword {
-    let properties = (interaction.properties.iter())
-        .filter(|property| {
-            !(defaults.true_hard
-                && matches!(
-                    property,
-                    InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)
-                ))
-        })
-        .map(|property| {
-            let mut out = String::new();
-            match property {
-                InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)
-                    if defaults.hard_as_linear.is_some() =>
-                {
-                    let (k, sigma_inf, note) = defaults.hard_as_linear.as_ref().unwrap();
-                    let _ = writeln!(
-                        out,
-                        "{note}\n*Surface behavior, Pressure-overclosure=Linear\n{}, {}",
-                        number(*k),
-                        number(*sigma_inf)
-                    );
-                }
-                InteractionProperty::SurfaceBehavior(behavior) => {
-                    let kind = behavior.keyword();
-                    let _ = writeln!(out, "*Surface behavior, Pressure-overclosure={kind}");
-                    match behavior {
-                        SurfaceBehavior::Hard => {}
-                        SurfaceBehavior::Linear { k, sigma_inf, c0 } => {
-                            let _ = write!(out, "{}, {}", number(*k), number(*sigma_inf));
-                            if let Some(c0) = c0 {
-                                let _ = write!(out, ", {}", number(*c0));
-                            }
-                            out.push('\n');
-                        }
-                        SurfaceBehavior::Exponential { c0, p0 } => {
-                            let _ = writeln!(out, "{}, {}", number(*c0), number(*p0));
-                        }
-                        SurfaceBehavior::Tabular(rows) => {
-                            for [pressure, overclosure] in rows {
-                                let _ = writeln!(
-                                    out,
-                                    "{}, {}",
-                                    number(*pressure),
-                                    number(*overclosure)
-                                );
-                            }
-                        }
-                        SurfaceBehavior::Tied { k } => {
-                            let _ = writeln!(out, "{}", number(*k));
-                        }
-                    }
-                }
-                InteractionProperty::Friction(friction) => {
-                    let _ = write!(out, "*Friction\n{}", number(friction.coefficient));
-                    if let Some(slope) = friction.stick_slope.or(defaults.stick_slope) {
-                        let _ = write!(out, ", {}", number(slope));
-                    }
-                    out.push('\n');
-                }
-                InteractionProperty::GapConductance(conductance) => {
-                    out.push_str("*Gap conductance\n");
-                    match conductance {
-                        GapConductance::Constant(value) => {
-                            let _ = writeln!(out, "{}", number(*value));
-                        }
-                        GapConductance::Tabular(rows) => {
-                            for row in rows {
-                                let row: Vec<String> = row.iter().map(|&v| number(v)).collect();
-                                let _ = writeln!(out, "{}", row.join(", "));
-                            }
-                        }
-                    }
-                }
+/// A surface interaction, with the defaults filled
+/// in.
+fn interaction(
+    interaction: &SurfaceInteraction,
+    defaults: &InteractionDefaults,
+) -> ir::contact::SurfaceInteraction {
+    use ir::contact as c;
+    let mut out = c::SurfaceInteraction {
+        name: ir_name(&name(&interaction.name)),
+        behavior: None,
+        friction: None,
+        gap_conductance: None,
+    };
+    for property in &interaction.properties {
+        match property {
+            InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard) if defaults.true_hard => {}
+            InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)
+                if defaults.hard_as_linear.is_some() =>
+            {
+                let (k, sigma_inf, _) = defaults.hard_as_linear.as_ref().unwrap();
+                out.behavior = Some(c::SurfaceBehavior::Linear {
+                    k: *k,
+                    sigma_inf: Some(*sigma_inf),
+                    c0: None,
+                });
             }
-            Keyword::generated(out)
-        })
-        .collect();
-    let header = format!("*Surface interaction, Name={}\n", name(&interaction.name));
-    Keyword::parent(header, properties)
+            InteractionProperty::SurfaceBehavior(behavior) => {
+                out.behavior = Some(match behavior {
+                    SurfaceBehavior::Hard => c::SurfaceBehavior::Hard,
+                    &SurfaceBehavior::Linear { k, sigma_inf, c0 } => c::SurfaceBehavior::Linear {
+                        k,
+                        sigma_inf: Some(sigma_inf),
+                        c0,
+                    },
+                    &SurfaceBehavior::Exponential { c0, p0 } => {
+                        c::SurfaceBehavior::Exponential { c0, p0 }
+                    }
+                    SurfaceBehavior::Tabular(rows) => {
+                        c::SurfaceBehavior::Tabular(rows.iter().map(|&[p, u]| (p, u)).collect())
+                    }
+                    &SurfaceBehavior::Tied { k } => c::SurfaceBehavior::Tied { k },
+                });
+            }
+            InteractionProperty::Friction(friction) => {
+                out.friction = Some(c::Friction {
+                    coefficient: friction.coefficient,
+                    stick_slope: friction.stick_slope.or(defaults.stick_slope),
+                });
+            }
+            InteractionProperty::GapConductance(conductance) => {
+                out.gap_conductance = Some(match conductance {
+                    GapConductance::Constant(value) => c::GapConductance::Constant(*value),
+                    GapConductance::Tabular(rows) => {
+                        let rows: Vec<(f64, f64, f64)> = (rows.iter())
+                            .map(|row| {
+                                let at = |i: usize| row.get(i).copied().unwrap_or(0.0);
+                                (at(0), at(1), at(2))
+                            })
+                            .collect();
+                        match rows.as_slice() {
+                            [(c, p, t)] if *p == 0.0 && *t == 0.0 => {
+                                c::GapConductance::Constant(*c)
+                            }
+                            _ => c::GapConductance::Table(rows),
+                        }
+                    }
+                });
+            }
+        }
+    }
+    out
 }
 
-/// Contact pairs as PrePoMax's `CalContactPair` writes them: slave surface first.
 /// Master and slave surface of each active contact pair, by the pair's name.
 type PairSurfaces = BTreeMap<String, (String, String)>;
 
+/// Contact pairs: slave surface first; with
+/// their clearances.
 fn contact_pairs(
     sets: &mut Sets,
     model: &FeModel,
-) -> Result<(Vec<Keyword>, PairSurfaces), WriteError> {
-    let mut keywords = Vec::new();
+) -> Result<
+    (
+        Vec<ir::contact::ContactPair>,
+        Vec<ir::contact::Clearance>,
+        PairSurfaces,
+    ),
+    WriteError,
+> {
+    use ir::contact as c;
+    let (mut pairs, mut clearances) = (Vec::new(), Vec::new());
     let mut surfaces = PairSurfaces::new();
-    for pair in &model.contact_pairs {
-        if !pair.active {
-            keywords.push(deactivated(&pair.name));
-            continue;
-        }
+    for pair in model.contact_pairs.iter().filter(|p| p.active) {
         if !(model.surface_interactions.iter()).any(|s| s.name == pair.interaction) {
             return Err(WriteError::UnknownInteraction {
                 item: pair.name.clone(),
@@ -1938,47 +2341,47 @@ fn contact_pairs(
         }
         let master = sets.surface(&pair.name, "Master", &pair.master)?;
         let slave = sets.surface(&pair.name, "Slave", &pair.slave)?;
-        keywords.push(Keyword::generated(contact_pair(pair, &master, &slave)));
+        let kind = match pair.method {
+            ContactMethod::NodeToSurface => c::ContactKind::NodeToSurface,
+            ContactMethod::SurfaceToSurface => c::ContactKind::SurfaceToSurface,
+            ContactMethod::Mortar => c::ContactKind::Mortar,
+            ContactMethod::Massless => {
+                return Err(WriteError::Unsupported {
+                    item: pair.name.clone(),
+                    reason: "the solver has no massless contact".into(),
+                });
+            }
+        };
+        pairs.push(c::ContactPair {
+            interaction: ir_name(&name(&pair.interaction)),
+            kind,
+            small_sliding: pair.method == ContactMethod::NodeToSurface && pair.small_sliding,
+            adjust: (pair.adjust).then(|| c::Adjust::Distance(pair.adjustment_size.unwrap_or(0.0))),
+            slave: ir_name(&slave),
+            master: ir_name(&master),
+        });
+        if let Some(value) = pair.clearance {
+            clearances.push(c::Clearance {
+                master: ir_name(&master),
+                slave: ir_name(&slave),
+                value,
+            });
+        }
         surfaces.insert(pair.name.clone(), (master, slave));
     }
-    Ok((keywords, surfaces))
+    Ok((pairs, clearances, surfaces))
 }
 
-fn contact_pair(pair: &ContactPair, master: &str, slave: &str) -> String {
-    let mut out = format!(
-        "** Name: {}\n*Contact pair, Interaction={}, Type={}",
-        pair.name,
-        name(&pair.interaction),
-        pair.method.name()
-    );
-    if pair.method == ContactMethod::NodeToSurface && pair.small_sliding {
-        out.push_str(", Small sliding");
-    }
-    if pair.adjust {
-        let size = pair.adjustment_size.unwrap_or(0.0);
-        let _ = write!(out, ", Adjust={}", number(size));
-    }
-    let _ = writeln!(out, "\n{slave}, {master}");
-    if let Some(clearance) = pair.clearance {
-        let _ = writeln!(
-            out,
-            "*Clearance, Master={master}, Slave={slave}, Value={}",
-            number(clearance)
-        );
-    }
-    out
-}
-
-/// What the steps share: the model's settings and the items written before them.
+/// What the steps share: the model's settings and the items lowered before them.
 struct StepContext<'a> {
-    extra_boundary: Option<&'a Keyword>,
+    extra_boundary: Option<&'a Card>,
     space: ModelSpace,
     lines: &'a LineElements,
     flux_kinds: FluxKinds,
     amplitudes: &'a [Amplitude],
     pair_surfaces: &'a PairSurfaces,
     /// `*STEP, PERTURBATION` of the frequency step whose stored modes a complex frequency
-    /// step uses; CalculiX stops when the two differ.
+    /// step uses; the solver stops when the two differ.
     stored_perturbation: bool,
     /// The model, for the coordinate systems of moving loads.
     model: &'a FeModel,
@@ -1998,18 +2401,20 @@ fn stored_perturbation(before: &[Step]) -> bool {
         .unwrap_or(false)
 }
 
-/// A step as PrePoMax structures it: the step title holds `*Step`, which holds the procedure
-/// and a title for each kind of item, down to the one holding `*End step`.
+/// A step as the solver takes it: the procedure, then the
+/// boundary conditions, loads, defined fields, history and field outputs. A deactivated
+/// step, or item, is left out, and so are its sets.
 ///
-/// Like PrePoMax, a deactivated step or item keeps its place in the file as a comment
-/// (`** Name: Fixed-1: Deactivated`), and nothing of it is written, not even its sets.
-///
-/// A step with moving loads holds one `*Step` per position of the loads, all alike but for
-/// the forces of the moving loads; a moving load with fewer positions than another stays at
-/// its last one.
-fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Keyword, WriteError> {
+/// A step with moving loads becomes one `*STEP` per position of the loads, all alike but
+/// for the forces of the moving loads; a moving load with fewer positions than another
+/// stays at its last one.
+fn lower_step(
+    sets: &mut Sets,
+    step: &Step,
+    context: &StepContext,
+) -> Result<Vec<StepBlock>, WriteError> {
     if !step.active {
-        return Ok(deactivated_step(step));
+        return Ok(Vec::new());
     }
     let two_d = context.space.is_2d();
     let mut moving = Vec::new();
@@ -2042,53 +2447,43 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
         let (_, _, frames) = moving.iter().find(|(i, ..)| *i == index)?;
         frames.first()
     })?;
+    let title = step_title(&step.name).filter(|_| moving.is_empty());
     let count = moving.iter().map(|(_, s, _)| s.len()).max().unwrap_or(1);
     let mut blocks = Vec::with_capacity(count);
     for position in 0..count {
-        let mut block = first.clone();
-        if !moving.is_empty() {
-            let mut comment = format!("** Moving load position {} of {count}", position + 1);
-            for (index, stations, _) in &moving {
-                let station = stations[position.min(stations.len() - 1)];
-                let _ = write!(
-                    comment,
-                    ", {} at {}",
-                    step.loads[*index].name,
-                    number(station)
-                );
-            }
-            block.text = format!("{comment}\n{}", block.text);
-        }
-        if position > 0
-            && let Some(loads) = (block.children.iter_mut())
-                .find(|k| matches!(&k.kind, KeywordKind::Title(t) if t == "Loads"))
-        {
+        let mut parts = first.clone();
+        if position > 0 {
             for (index, _, frames) in &moving {
                 let load = &step.loads[*index];
                 let frame = &frames[position.min(frames.len() - 1)];
-                let text = moving_load_text(load, frame, context)?;
-                let marker = format!("** Name: {}", load.name);
-                if let Some(keyword) = (loads.children.iter_mut()).find(|k| {
-                    k.text
-                        .strip_prefix(&marker)
-                        .is_some_and(|rest| rest.starts_with(['\n', ':']))
-                }) {
-                    keyword.text = text;
+                let cards = moving_load_cards(load, frame, context)?;
+                if let Some((_, slot)) = (parts.loads.iter_mut()).find(|(i, _)| *i == Some(*index))
+                {
+                    *slot = cards;
                 }
             }
         }
-        blocks.push(block);
+        let mut ir_step = parts.step;
+        ir_step.name = title.clone().unwrap_or_default();
+        let mut cards: Vec<Card> = parts.loads.into_iter().flat_map(|(_, c)| c).collect();
+        cards.extend(parts.rest);
+        blocks.push(StepBlock {
+            step: ir_step,
+            named: title.is_some(),
+            boundaries: parts.boundaries,
+            cards,
+        });
     }
-    Ok(Keyword::title(&step.name, blocks))
+    Ok(blocks)
 }
 
 /// A rigid body of the nodes of `region` driven by a reference and a rotation node at
-/// `position`: a `*Rigid body`, but with the nodes of beams, trusses, shells and membranes
-/// rigidly coupled by `*Equation`s. CalculiX 2.23 stops on a rigid body containing such a
+/// `position`: a rigid body, but with the nodes of beams, trusses, shells and membranes
+/// rigidly coupled by equations. CalculiX 2.23 stops on a rigid body containing such a
 /// node ("nodes belonging to beam elements must not be subject to a RIGID MPC"); the
 /// equations hold them for small rotations as the rigid body does in a linear analysis.
 fn rigid_body(
-    text: &mut String,
+    items: &mut Vec<ConstraintItem>,
     sets: &mut Sets,
     item: &str,
     region: &Region,
@@ -2104,11 +2499,12 @@ fn rigid_body(
     let whole = kept.len() == count;
     let (expanded, others): (Vec<NodeId>, Vec<NodeId>) =
         (kept.into_iter()).partition(|n| sets.expanded.contains(n));
-    let rigid = |text: &mut String, set: String| {
-        let _ = writeln!(
-            text,
-            "*Rigid body, Nset={set}, Ref node={reference}, Rot node={rotation}"
-        );
+    let rigid = |set: String| {
+        ConstraintItem::RigidBody(ir::constraints::RigidBody {
+            nodes: ir::constraints::RigidBodyNodes::NodeSet(ir_name(&set)),
+            reference_node: reference,
+            rotation_node: rotation,
+        })
     };
     if expanded.is_empty() {
         let set = if whole {
@@ -2116,15 +2512,17 @@ fn rigid_body(
         } else {
             sets.node_set(item, &Region::Nodes(others))?
         };
-        rigid(text, set);
+        items.push(rigid(set));
         return Ok(());
     }
     if !others.is_empty() {
-        rigid(text, sets.node_set(item, &Region::Nodes(others))?);
+        items.push(rigid(sets.node_set(item, &Region::Nodes(others))?));
     }
-    text.push_str("** Nodes of beams and shells, which CalculiX refuses in a rigid body\n");
+    // Nodes of beams and shells, which the solver refuses in a rigid body.
     for row in plx_model::rigid_rows(sets.mesh, &expanded, position) {
-        equation_text(text, &remote_terms(&row, axes, nodes));
+        items.push(ConstraintItem::Equation(equation(&remote_terms(
+            &row, axes, nodes,
+        ))));
     }
     Ok(())
 }
@@ -2177,29 +2575,81 @@ fn remote_terms(
     terms
 }
 
-/// An `*Equation` of its terms, the dependent one first.
-fn equation_text(out: &mut String, terms: &[dofs::Term]) {
-    let _ = writeln!(out, "*Equation\n{}", terms.len());
-    let terms: Vec<String> = (terms.iter())
-        .map(|(node, dof, value)| format!("{node}, {dof}, {}", number(*value)))
-        .collect();
-    // Four terms (twelve entries) per line, as PrePoMax writes them.
-    for chunk in terms.chunks(4) {
-        out.push_str(&chunk.join(", "));
-        out.push('\n');
+/// An equation of its terms, the dependent one first.
+fn equation(terms: &[dofs::Term]) -> ir::constraints::Equation {
+    ir::constraints::Equation {
+        terms: (terms.iter())
+            .map(|&(node, dof, coefficient)| ir::constraints::EquationTerm {
+                node: NodeRef::Node(node),
+                dof,
+                coefficient,
+            })
+            .collect(),
     }
 }
 
-/// The `*Boundary` lines of prescribed displacements and rotations of the first `dofs`
+/// A boundary condition on the degrees of freedom `first` to `last` of `region`.
+fn boundary(
+    region: NodeRef,
+    first: u8,
+    last: u8,
+    value: Option<f64>,
+    amplitude: Option<String>,
+) -> ir::step::Boundary {
+    ir::step::Boundary {
+        region,
+        first_dof: first,
+        last_dof: last,
+        value,
+        amplitude,
+        fixed: false,
+        submodel_step: None,
+        load_case: None,
+    }
+}
+
+/// A concentrated load on a degree of freedom of `region`.
+fn cload(
+    region: NodeRef,
+    dof: u8,
+    value: f64,
+    amplitude: &Option<String>,
+) -> ir::step::ConcentratedLoad {
+    ir::step::ConcentratedLoad {
+        region,
+        dof,
+        value,
+        amplitude: amplitude.clone(),
+        load_case: None,
+        sector: None,
+    }
+}
+
+/// A distributed load on `region`.
+fn dload(
+    region: ElementRef,
+    kind: ir::step::DistributedLoadKind,
+    amplitude: &Option<String>,
+) -> ir::step::DistributedLoad {
+    ir::step::DistributedLoad {
+        region,
+        kind,
+        amplitude: amplitude.clone(),
+        load_case: None,
+        sector: None,
+    }
+}
+
+/// The boundary conditions of prescribed displacements and rotations of the first `dofs`
 /// degrees of freedom, a range for each run of equal values. The rotations go to the
 /// translations of `rotation`, the rotation node of a rigid body, if there is one.
-fn displacement_lines(
-    out: &mut String,
-    nodes: &str,
-    rotation: Option<&str>,
+fn displacement_boundaries(
+    nodes: &NodeRef,
+    rotation: Option<&NodeRef>,
     values: &[Option<f64>; 6],
     dofs: usize,
-) {
+    amplitude: &Option<String>,
+) -> Vec<ir::step::Boundary> {
     // Each held degree of freedom as (target, its number there, value).
     let held = (1..).zip(values).take(dofs).filter_map(|(dof, value)| {
         let value = (*value)?;
@@ -2208,7 +2658,8 @@ fn displacement_lines(
             _ => (nodes, dof, value),
         })
     });
-    let mut run: Option<(&str, usize, usize, f64)> = None;
+    let mut out = Vec::new();
+    let mut run: Option<(&NodeRef, u8, u8, f64)> = None;
     for (target, dof, value) in held {
         match &mut run {
             Some((t, _, last, v)) if *t == target && *last + 1 == dof && *v == value => {
@@ -2216,49 +2667,62 @@ fn displacement_lines(
             }
             _ => {
                 if let Some((t, first, last, v)) = run {
-                    let _ = writeln!(out, "{t}, {first}, {last}, {}", number(v));
+                    out.push(boundary(t.clone(), first, last, Some(v), amplitude.clone()));
                 }
                 run = Some((target, dof, dof, value));
             }
         }
     }
     if let Some((t, first, last, v)) = run {
-        let _ = writeln!(out, "{t}, {first}, {last}, {}", number(v));
+        out.push(boundary(t.clone(), first, last, Some(v), amplitude.clone()));
     }
+    out
 }
 
-/// The keyword of a moving load at one position: its nodal forces as `*Cload`.
-fn moving_load_text(
+/// The cards of a moving load at one position: its nodal forces as concentrated loads;
+/// none while all wheels are off the region.
+fn moving_load_cards(
     load: &plx_model::Load,
     frame: &MovingFrame,
     context: &StepContext,
-) -> Result<String, WriteError> {
-    // All wheels off the region: nothing to load, and an empty `*Cload` is no keyword.
+) -> Result<Vec<Card>, WriteError> {
     if frame.forces.is_empty() {
-        return Ok(format!("** Name: {}: No wheel on the region\n", load.name));
+        return Ok(Vec::new());
     }
     let dofs = if context.space.is_2d() { 2 } else { 3 };
-    let amplitude =
-        amplitude_parameter(context.amplitudes, &load.name, "Amplitude", &load.amplitude)?;
-    let mut out = format!("** Name: {}\n*Cload{amplitude}\n", load.name);
+    let amplitude = amplitude_parameter(context.amplitudes, &load.name, &load.amplitude)?;
+    let mut items = Vec::new();
     for (node, values) in &frame.forces {
         for (dof, value) in (1..).zip(values).take(dofs) {
             if *value != 0.0 {
-                let _ = writeln!(out, "{node}, {dof}, {}", number(*value));
+                items.push(cload(NodeRef::Node(*node), dof, *value, &amplitude));
             }
         }
     }
-    Ok(out)
+    Ok(vec![Card::Cload {
+        op_new: false,
+        items,
+    }])
 }
 
-/// The `*Step` of a step and everything in it, with the moving loads at the positions
-/// `moving` gives by load index.
+/// A step before its moving loads are placed: its settings, the cards of its boundary
+/// conditions, those of each load (by the load's index) and those after the loads.
+#[derive(Clone)]
+struct StepParts {
+    step: ir::Step,
+    boundaries: Vec<Card>,
+    loads: Vec<(Option<usize>, Vec<Card>)>,
+    rest: Vec<Card>,
+}
+
+/// A step and everything in it, with the moving loads at the positions `moving` gives by
+/// load index.
 fn step_block<'f>(
     sets: &mut Sets,
     step: &Step,
     context: &StepContext,
     moving: impl Fn(usize) -> Option<&'f MovingFrame>,
-) -> Result<Keyword, WriteError> {
+) -> Result<StepParts, WriteError> {
     let &StepContext {
         extra_boundary,
         space,
@@ -2270,49 +2734,41 @@ fn step_block<'f>(
         cyclic,
         cyclic_slaves,
         model,
-        ..
     } = context;
-    // Nodes of 2D models move in the x-y plane only; CalculiX fails on rotations there.
+    // Nodes of 2D models move in the x-y plane only; the solver fails on rotations there.
     let dofs = if space.is_2d() { 2 } else { 6 };
-    let (header, procedure) = match &step.kind {
+    let mut ir_step = match &step.kind {
         StepKind::Static(settings) => static_step(settings),
-        StepKind::Frequency(settings) => {
-            let (header, mut procedure) = frequency_step(settings, cyclic);
-            if cyclic {
-                procedure.push_str(&select_cyclic_symmetry_modes(settings));
-            }
-            (header, procedure)
-        }
+        StepKind::Frequency(settings) => frequency_step(settings, cyclic),
         StepKind::ComplexFrequency(settings) => {
             complex_frequency_step(settings, stored_perturbation)
         }
         StepKind::Buckle(settings) => buckle_step(settings),
-        StepKind::HeatTransfer(settings) => heat_transfer_step(settings, "*Heat transfer", false),
-        StepKind::CoupledTempDisp(settings) => {
-            heat_transfer_step(settings, "*Coupled temperature-displacement", true)
-        }
-        StepKind::UncoupledTempDisp(settings) => {
-            heat_transfer_step(settings, "*Uncoupled temperature-displacement", false)
-        }
+        StepKind::HeatTransfer(settings) => heat_transfer_step(settings, HeatKind::Heat),
+        StepKind::CoupledTempDisp(settings) => heat_transfer_step(settings, HeatKind::Coupled),
+        StepKind::UncoupledTempDisp(settings) => heat_transfer_step(settings, HeatKind::Uncoupled),
         StepKind::Dynamic(settings) => dynamic_step(settings),
         StepKind::Visco(settings) => visco_step(settings),
         StepKind::ModalDynamics(settings) => modal_dynamics_step(settings),
         StepKind::SteadyStateDynamics(settings) => steady_state_dynamics_step(settings),
         StepKind::Sensitivity(settings) => sensitivity_step(sets, &step.name, settings)?,
     };
+    ir_step.contact_changes = contact_changes(step, model, pair_surfaces);
     // A modal step keeps the supports of the frequency step that stored the modes;
-    // CalculiX refuses new ones ("in a modal dynamic step new SPCs are not allowed"), and
-    // the reset would make the same supports new. Writing them again is accepted.
+    // The solver refuses new ones ("in a modal dynamic step new SPCs are not allowed"), and
+    // the reset would make the same supports new. Giving them again is accepted.
     let mut boundaries = if step.kind.uses_stored_modes() || step.kind.keeps_previous_boundaries() {
         Vec::new()
     } else {
-        vec![Keyword::generated("*Boundary, op=New\n".into())]
+        vec![Card::Boundary {
+            op_new: true,
+            items: Vec::new(),
+        }]
     };
     for bc in &step.boundary_conditions {
         // A step leaves out what it cannot take, like a deactivated item: displacements in
         // a heat transfer step, temperatures in a static one.
         if !bc.active || !step.kind.supports_boundary(&bc.kind) {
-            boundaries.push(deactivated(&bc.name));
             continue;
         }
         let on_point = sets.remote_names.contains_key(&bc.name)
@@ -2328,17 +2784,18 @@ fn step_block<'f>(
             else {
                 return Err(empty(&bc.name, "nodes"));
             };
-            let amplitude = amplitude_parameter(amplitudes, &bc.name, "Amplitude", &bc.amplitude)?;
+            let amplitude = amplitude_parameter(amplitudes, &bc.name, &bc.amplitude)?;
             // The translations are those of the reference node, the rotations the
             // displacements of the rotation node.
-            let mut out = format!("** Name: {}\n*Boundary{amplitude}\n", bc.name);
-            let (reference, rotation) = (reference.to_string(), rotation.to_string());
             let held = remote.held(space);
-            displacement_lines(&mut out, &reference, Some(&rotation), &held, 6);
-            boundaries.push(Keyword::generated(out));
+            let (reference, rotation) = (NodeRef::Node(reference), NodeRef::Node(rotation));
+            boundaries.push(Card::Boundary {
+                op_new: false,
+                items: displacement_boundaries(&reference, Some(&rotation), &held, 6, &amplitude),
+            });
             continue;
         }
-        // Truss nodes have no rotations either; CalculiX fails when they are fixed.
+        // Truss nodes have no rotations either; the solver fails when they are fixed.
         let dofs = if dofs == 6 && lines.all_truss(&bc.region.nodes(sets.mesh)) {
             3
         } else {
@@ -2356,13 +2813,18 @@ fn step_block<'f>(
             if nodes.is_empty() {
                 return Err(empty(&bc.name, "nodes"));
             }
-            let amplitude = amplitude_parameter(amplitudes, &bc.name, "Amplitude", &bc.amplitude)?;
-            let mut out = format!("** Name: {}\n*Boundary{amplitude}\n", bc.name);
+            let amplitude = amplitude_parameter(amplitudes, &bc.name, &bc.amplitude)?;
+            let mut items = Vec::new();
             if let BoundaryKind::Temperature(t) = bc.kind {
                 let units = model.properties.units;
-                distributed_nodes(&mut out, sets.mesh, &nodes, "11, 11, ", t, sampler, units);
+                for (node, value) in distributed_nodes(sets.mesh, &nodes, t, sampler, units) {
+                    items.push(boundary(node, 11, 11, Some(value), amplitude.clone()));
+                }
             }
-            boundaries.push(Keyword::generated(out));
+            boundaries.push(Card::Boundary {
+                op_new: false,
+                items,
+            });
             continue;
         } else if cyclic_slaves.is_empty() {
             sets.node_set(&bc.name, &bc.region)?
@@ -2375,6 +2837,7 @@ fn step_block<'f>(
                 sets.node_set(&bc.name, &bc.region)?
             }
         };
+        let target = node_set_ref(&set);
         // The rotations of a rigid body are the displacements of its rotation node.
         let rotation_node = match bc.region.reference_point() {
             Some(point) => Some(sets.reference_nodes(&bc.name, point)?.rotation),
@@ -2382,13 +2845,8 @@ fn step_block<'f>(
         };
         // Symmetry supports stay zero; an amplitude would not change them.
         let reference = bc.amplitude.as_ref().filter(|_| bc.kind.takes_amplitude());
-        let amplitude =
-            amplitude_parameter(amplitudes, &bc.name, "Amplitude", &reference.cloned())?;
-        let options = match bc.kind {
-            BoundaryKind::Submodel { step, .. } => format!(", Submodel, Step={}", step.max(1)),
-            _ => amplitude,
-        };
-        let mut out = format!("** Name: {}\n*Boundary{options}\n", bc.name);
+        let amplitude = amplitude_parameter(amplitudes, &bc.name, &reference.cloned())?;
+        let mut items = Vec::new();
         match bc.kind {
             BoundaryKind::Displacement(ref displacement) => {
                 let values = displacement.values;
@@ -2420,7 +2878,7 @@ fn step_block<'f>(
                         sets.transforms.push((set.clone(), transform));
                     }
                 }
-                let rotation = rotation_node.map(|n| n.to_string());
+                let rotation = rotation_node.map(NodeRef::Node);
                 // The point of a rigid body turns in a plane model too: about z, the
                 // rotation node's third degree of freedom. Its other directions do not exist.
                 if rotation.is_some() && space.is_2d() {
@@ -2431,18 +2889,29 @@ fn step_block<'f>(
                             .then(|| values[i])
                             .flatten()
                     });
-                    displacement_lines(&mut out, &set, rotation.as_deref(), &held, 6);
+                    items =
+                        displacement_boundaries(&target, rotation.as_ref(), &held, 6, &amplitude);
                 } else {
-                    displacement_lines(&mut out, &set, rotation.as_deref(), &values, dofs);
+                    items = displacement_boundaries(
+                        &target,
+                        rotation.as_ref(),
+                        &values,
+                        dofs,
+                        &amplitude,
+                    );
                 }
             }
             BoundaryKind::Temperature(t) => {
-                let _ = writeln!(out, "{set}, 11, 11, {}", number(t));
+                items.push(boundary(target, 11, 11, Some(t), amplitude));
             }
             // The global results hold displacements, no rotations.
-            BoundaryKind::Submodel { dofs: held, .. } => {
+            BoundaryKind::Submodel {
+                dofs: held, step, ..
+            } => {
                 for dof in (1..=dofs.min(3)).filter(|&d| held[d - 1]) {
-                    let _ = writeln!(out, "{set}, {dof}, {dof}");
+                    let mut item = boundary(target.clone(), dof as u8, dof as u8, None, None);
+                    item.submodel_step = Some(step.max(1));
+                    items.push(item);
                 }
                 if !sets.submodel_sets.iter().any(|(s, _)| *s == set) {
                     sets.submodel_sets.push((set, bc.name.clone()));
@@ -2469,36 +2938,68 @@ fn step_block<'f>(
                     }
                 }
                 for dof in symmetry_dofs(axis, dofs) {
-                    let dof = dof + 1;
-                    let _ = writeln!(out, "{set}, {dof}, {dof}, 0");
+                    let dof = dof as u8 + 1;
+                    items.push(boundary(
+                        target.clone(),
+                        dof,
+                        dof,
+                        Some(0.0),
+                        amplitude.clone(),
+                    ));
                 }
             }
         }
-        boundaries.push(Keyword::generated(out));
+        boundaries.push(Card::Boundary {
+            op_new: false,
+            items,
+        });
     }
-    // Boundary conditions that constraints need, PrePoMax's additional boundary conditions.
+    // Boundary conditions that constraints need.
     if step.kind.is_mechanical() {
         boundaries.extend(extra_boundary.cloned());
     }
-    let mut loads = Vec::new();
-    // Like PrePoMax, a step resets the loads it takes; one that takes no loads gets none
-    // written, not even the reset. Distributed fluxes, films and radiation are reset only
-    // when the model has them.
+    let mut loads: Vec<(Option<usize>, Vec<Card>)> = Vec::new();
+    // A step resets the loads it takes; one that takes no loads gets none,
+    // not even the reset. Distributed fluxes, films and radiation are reset only when the
+    // model has them.
     let kind = &step.kind;
-    let resets = [
-        ("Cload", kind.supports_load(&LoadKind::Pressure(0.0))),
-        ("Dload", kind.supports_load(&LoadKind::Pressure(0.0))),
-        (
-            "Cflux",
-            kind.supports_load(&LoadKind::ConcentratedFlux(0.0)),
-        ),
-        ("Dflux", kind.is_thermal() && flux_kinds.distributed),
-        ("Film", kind.is_thermal() && flux_kinds.film),
-        ("Radiate", kind.is_thermal() && flux_kinds.radiation),
-    ];
-    for (keyword, _) in resets.into_iter().filter(|(_, reset)| *reset) {
-        loads.push(Keyword::generated(format!("*{keyword}, op=New\n")));
+    let mechanical_loads = kind.supports_load(&LoadKind::Pressure(0.0));
+    let mut resets = Vec::new();
+    if mechanical_loads {
+        resets.push(Card::Cload {
+            op_new: true,
+            items: Vec::new(),
+        });
+        resets.push(Card::Dload {
+            op_new: true,
+            items: Vec::new(),
+        });
     }
+    if kind.supports_load(&LoadKind::ConcentratedFlux(0.0)) {
+        resets.push(Card::Cflux {
+            op_new: true,
+            items: Vec::new(),
+        });
+    }
+    if kind.is_thermal() && flux_kinds.distributed {
+        resets.push(Card::Dflux {
+            op_new: true,
+            items: Vec::new(),
+        });
+    }
+    if kind.is_thermal() && flux_kinds.film {
+        resets.push(Card::Film {
+            op_new: true,
+            items: Vec::new(),
+        });
+    }
+    if kind.is_thermal() && flux_kinds.radiation {
+        resets.push(Card::Radiate {
+            op_new: true,
+            items: Vec::new(),
+        });
+    }
+    loads.push((None, resets));
     let step_loads: &[_] = if kind.supports_loads() {
         &step.loads
     } else {
@@ -2506,27 +3007,21 @@ fn step_block<'f>(
     };
     for (index, load) in step_loads.iter().enumerate() {
         if !load.active || !kind.supports_load(&load.kind) {
-            loads.push(deactivated(&load.name));
             continue;
         }
-        let mut out = format!("** Name: {}\n", load.name);
-        let amplitude = amplitude_parameter(amplitudes, &load.name, "Amplitude", &load.amplitude)?;
+        let amplitude = amplitude_parameter(amplitudes, &load.name, &load.amplitude)?;
         // The second amplitude of a film scales its coefficient, of radiation the emissivity.
-        let factor = match load.kind {
-            LoadKind::Film { .. } => Some("Film amplitude"),
-            LoadKind::Radiation { .. } => Some("Radiation amplitude"),
+        let factor_amplitude = match load.kind {
+            LoadKind::Film { .. } | LoadKind::Radiation { .. } => {
+                amplitude_parameter(amplitudes, &load.name, &load.factor_amplitude)?
+            }
             _ => None,
         };
-        let factor_amplitude = match factor {
-            Some(parameter) => {
-                amplitude_parameter(amplitudes, &load.name, parameter, &load.factor_amplitude)?
-            }
-            None => String::new(),
-        };
-        match load.kind {
+        let cards = match load.kind {
             LoadKind::Moving(_) => {
                 let frame = moving(index).cloned().unwrap_or_default();
-                out = moving_load_text(load, &frame, context)?;
+                loads.push((Some(index), moving_load_cards(load, &frame, context)?));
+                continue;
             }
             LoadKind::Moment(moment) => {
                 // Moments at a reference point act on the rotation node of its rigid body,
@@ -2534,19 +3029,24 @@ fn step_block<'f>(
                 let (target, first_dof) = match load.region.reference_point() {
                     Some(point) => {
                         let nodes = sets.reference_nodes(&load.name, point)?;
-                        (nodes.rotation.to_string(), 1)
+                        (NodeRef::Node(nodes.rotation), 1)
                     }
-                    None => (sets.node_set(&load.name, &load.region)?, 4),
+                    None => (node_set_ref(&sets.node_set(&load.name, &load.region)?), 4),
                 };
-                let _ = writeln!(out, "*Cload{amplitude}");
+                let mut items = Vec::new();
                 for (dof, value) in (0..).zip(moment) {
-                    if value != 0.0 && dof + 4 <= dofs {
-                        let _ = writeln!(out, "{target}, {}, {}", first_dof + dof, number(value));
+                    if value != 0.0 && dof as usize + 4 <= dofs {
+                        items.push(cload(target.clone(), first_dof + dof, value, &amplitude));
                     }
                 }
+                vec![Card::Cload {
+                    op_new: false,
+                    items,
+                }]
             }
             LoadKind::Pressure(pressure) => {
-                let _ = writeln!(out, "*Dload{amplitude}");
+                use ir::step::DistributedLoadKind::Pressure;
+                let mut items = Vec::new();
                 match distribution(model, &load.name, &load.distribution)? {
                     // Every face takes the pressure scaled at its center.
                     Some(sampler) => {
@@ -2556,17 +3056,26 @@ fn step_block<'f>(
                         }
                         for (element, face) in faces {
                             if let Some(center) = face_center(sets.mesh, element, face) {
-                                let p = pressure * sampler.factor(center);
-                                let _ = writeln!(out, "{element}, P{face}, {}", number(p));
+                                let value = pressure * sampler.factor(center);
+                                let region = ElementRef::Element(element);
+                                items.push(dload(region, Pressure { face, value }, &amplitude));
                             }
                         }
                     }
                     None => {
                         for (set, face) in sets.face_sets(&load.name, &load.region)? {
-                            let _ = writeln!(out, "{set}, P{face}, {}", number(pressure));
+                            let kind = Pressure {
+                                face,
+                                value: pressure,
+                            };
+                            items.push(dload(element_set_ref(&set), kind, &amplitude));
                         }
                     }
                 }
+                vec![Card::Dload {
+                    op_new: false,
+                    items,
+                }]
             }
             LoadKind::PreTension {
                 value,
@@ -2577,13 +3086,24 @@ fn step_block<'f>(
                 // The preload is the first degree of freedom of the pre-tension node: a
                 // force, or the shortening of the bolt since the start as a prescribed
                 // displacement. Locked, the node keeps the shortening of the previous step.
-                let node = sets.pre_tension_nodes[&load.name];
+                let node = NodeRef::Node(sets.pre_tension_nodes[&load.name]);
                 if lock {
-                    let _ = writeln!(out, "*Boundary, Fixed\n{node}, 1, 1");
+                    let mut item = boundary(node, 1, 1, None, None);
+                    item.fixed = true;
+                    vec![Card::Boundary {
+                        op_new: false,
+                        items: vec![item],
+                    }]
                 } else if by_displacement {
-                    let _ = writeln!(out, "*Boundary{amplitude}\n{node}, 1, 1, {}", number(value));
+                    vec![Card::Boundary {
+                        op_new: false,
+                        items: vec![boundary(node, 1, 1, Some(value), amplitude)],
+                    }]
                 } else {
-                    let _ = writeln!(out, "*Cload{amplitude}\n{node}, 1, {}", number(value));
+                    vec![Card::Cload {
+                        op_new: false,
+                        items: vec![cload(node, 1, value, &amplitude)],
+                    }]
                 }
             }
             LoadKind::Force {
@@ -2593,7 +3113,7 @@ fn step_block<'f>(
                 let faces = load.region.faces(sets.mesh);
                 let edges = load.region.edges(sets.mesh);
                 let axisymmetric = space == ModelSpace::Axisymmetric;
-                let _ = writeln!(out, "*Cload{amplitude}");
+                let mut items = Vec::new();
                 // On points the nodes share the force equally, a reference point takes it
                 // whole: the share at every node of their set. With `each_node` every node
                 // of the region takes the whole force.
@@ -2603,11 +3123,11 @@ fn step_block<'f>(
                         Some(_) => 1,
                         None => load.region.nodes(sets.mesh).len(),
                     };
-                    let set = sets.node_set(&load.name, &load.region)?;
+                    let set = node_set_ref(&sets.node_set(&load.name, &load.region)?);
                     for (dof, value) in (1..).zip(force).take(dofs) {
                         if value != 0.0 {
                             let share = value / count as f64;
-                            let _ = writeln!(out, "{set}, {dof}, {}", number(share));
+                            items.push(cload(set.clone(), dof, share, &amplitude));
                         }
                     }
                 } else {
@@ -2623,41 +3143,87 @@ fn step_block<'f>(
                     for (node, values) in nodal {
                         for (dof, value) in (1..).zip(values).take(dofs) {
                             if value != 0.0 {
-                                let _ = writeln!(out, "{node}, {dof}, {}", number(value));
+                                items.push(cload(NodeRef::Node(node), dof, value, &amplitude));
                             }
                         }
                     }
                 }
+                vec![Card::Cload {
+                    op_new: false,
+                    items,
+                }]
             }
             LoadKind::ConcentratedFlux(flux) => {
                 let set = sets.node_set(&load.name, &load.region)?;
-                let _ = writeln!(out, "*Cflux{amplitude}\n{set}, 11, {}", number(flux));
+                vec![Card::Cflux {
+                    op_new: false,
+                    items: vec![ir::step::ConcentratedFlux {
+                        region: node_set_ref(&set),
+                        value: flux,
+                        amplitude,
+                    }],
+                }]
             }
             LoadKind::SurfaceFlux(flux) => {
-                let _ = writeln!(out, "*Dflux{amplitude}");
-                for (set, face) in sets.face_sets(&load.name, &load.region)? {
-                    let _ = writeln!(out, "{set}, S{face}, {}", number(flux));
-                }
+                let items = (sets.face_sets(&load.name, &load.region)?.into_iter())
+                    .map(|(set, face)| ir::step::DistributedFlux {
+                        region: element_set_ref(&set),
+                        kind: ir::step::FluxKind::Face(face),
+                        value: flux,
+                        amplitude: amplitude.clone(),
+                    })
+                    .collect();
+                vec![Card::Dflux {
+                    op_new: false,
+                    items,
+                }]
             }
             LoadKind::BodyFlux(flux) => {
                 let set = sets.element_set(&load.name, &load.region)?;
-                let _ = writeln!(out, "*Dflux{amplitude}\n{set}, BF, {}", number(flux));
+                vec![Card::Dflux {
+                    op_new: false,
+                    items: vec![ir::step::DistributedFlux {
+                        region: element_set_ref(&set),
+                        kind: ir::step::FluxKind::Body,
+                        value: flux,
+                        amplitude,
+                    }],
+                }]
             }
             LoadKind::Film { sink, coefficient } => {
-                let _ = writeln!(out, "*Film{amplitude}{factor_amplitude}");
-                for (set, face) in sets.face_sets(&load.name, &load.region)? {
-                    let (sink, h) = (number(sink), number(coefficient));
-                    let _ = writeln!(out, "{set}, F{face}, {sink}, {h}");
-                }
+                let items = (sets.face_sets(&load.name, &load.region)?.into_iter())
+                    .map(|(set, face)| ir::step::Film {
+                        region: element_set_ref(&set),
+                        face,
+                        sink_temperature: sink,
+                        coefficient,
+                        amplitude: amplitude.clone(),
+                        film_amplitude: factor_amplitude.clone(),
+                    })
+                    .collect();
+                vec![Card::Film {
+                    op_new: false,
+                    items,
+                }]
             }
             LoadKind::Radiation { sink, emissivity } => {
-                let _ = writeln!(out, "*Radiate{amplitude}{factor_amplitude}");
-                for (set, face) in sets.face_sets(&load.name, &load.region)? {
-                    let (sink, e) = (number(sink), number(emissivity));
-                    let _ = writeln!(out, "{set}, R{face}, {sink}, {e}");
-                }
+                let items = (sets.face_sets(&load.name, &load.region)?.into_iter())
+                    .map(|(set, face)| ir::step::Radiate {
+                        region: element_set_ref(&set),
+                        face,
+                        cavity: false,
+                        sink_temperature: sink,
+                        emissivity,
+                        amplitude: amplitude.clone(),
+                        radiation_amplitude: factor_amplitude.clone(),
+                    })
+                    .collect();
+                vec![Card::Radiate {
+                    op_new: false,
+                    items,
+                }]
             }
-            // As PrePoMax's CalGravityLoad: the size of the acceleration and its direction.
+            // Gravity: the size of the acceleration and its direction.
             LoadKind::Gravity(acceleration) => {
                 let set = sets.element_set(&load.name, &load.region)?;
                 let Some((size, direction)) = unit_vector(acceleration) else {
@@ -2666,11 +3232,16 @@ fn step_block<'f>(
                         reason: "the gravitational acceleration is zero".into(),
                     });
                 };
-                let _ = writeln!(out, "*Dload{amplitude}");
-                let [x, y, z] = direction.map(number);
-                let _ = writeln!(out, "{set}, Grav, {}, {x}, {y}, {z}", number(size));
+                let kind = ir::step::DistributedLoadKind::Gravity {
+                    magnitude: size,
+                    direction,
+                };
+                vec![Card::Dload {
+                    op_new: false,
+                    items: vec![dload(element_set_ref(&set), kind, &amplitude)],
+                }]
             }
-            // As PrePoMax's CalCentrifLoad: the square of the rotational speed, a point on
+            // Centrifugal load: the square of the rotational speed, a point on
             // the axis and the axis direction.
             LoadKind::Centrifugal { point, axis, speed } => {
                 let set = sets.element_set(&load.name, &load.region)?;
@@ -2680,82 +3251,65 @@ fn step_block<'f>(
                         reason: "the rotation axis has no direction".into(),
                     });
                 };
-                let _ = writeln!(out, "*Dload{amplitude}");
-                let [px, py, pz] = point.map(number);
-                let [x, y, z] = direction.map(number);
-                let _ = writeln!(
-                    out,
-                    "{set}, Centrif, {}, {px}, {py}, {pz}, {x}, {y}, {z}",
-                    number(speed * speed)
-                );
+                let kind = ir::step::DistributedLoadKind::Centrifugal {
+                    omega_squared: speed * speed,
+                    point,
+                    axis: direction,
+                };
+                vec![Card::Dload {
+                    op_new: false,
+                    items: vec![dload(element_set_ref(&set), kind, &amplitude)],
+                }]
             }
-        }
-        loads.push(Keyword::generated(out));
+        };
+        loads.push((Some(index), cards));
     }
-    let defined_fields = defined_fields(sets, step, amplitudes, model)?;
-    let mut history_outputs = Vec::new();
-    for output in &step.history_outputs {
-        if !output.active {
-            history_outputs.push(deactivated(&output.name));
-        } else if let Some(keyword) = history_output(sets, output, pair_surfaces)? {
-            history_outputs.push(keyword);
-        }
+    let mut rest = defined_fields(sets, step, amplitudes, model)?;
+    for output in step.history_outputs.iter().filter(|o| o.active) {
+        rest.extend(history_output(sets, output, pair_surfaces)?);
     }
     // The force of a bolt is the reaction of its pre-tension node, also while it is locked,
     // and its shortening the node's displacement: shown under the name of the load.
     for load in step.loads.iter().filter(|l| l.active) {
         if let Some(set) = sets.pre_tension_sets.get(&load.name) {
-            history_outputs.push(Keyword::generated(format!(
-                "** Name: {}\n*Node print, Nset={set}\nRF, U\n",
-                load.name
-            )));
+            rest.push(Card::NodePrint(node_print(set, &["RF", "U"], Totals::No)));
         }
     }
-    // CalculiX writes all results of the step in one form: the node outputs follow the
+    // The solver writes all results of the step in one form: the node outputs follow the
     // element outputs.
     let dimension = (step.field_outputs.iter())
         .filter(|o| o.active && o.kind == OutputKind::Element)
         .map(|o| o.dimension)
         .find(|&d| d != OutputDimension::Default)
         .unwrap_or_default();
-    let field_outputs = (step.field_outputs.iter())
-        .filter_map(|output| field_output(output, dimension))
-        .collect();
-    let end = Keyword::generated("*End step\n".into());
-    let mut contents = vec![
-        Keyword::generated(procedure),
-        Keyword::title("Controls", Vec::new()),
-        Keyword::title("Output frequency", Vec::new()),
-        Keyword::title("Boundary conditions", boundaries),
-        Keyword::title("Loads", loads),
-        Keyword::title("Defined fields", defined_fields),
-        Keyword::title("History outputs", history_outputs),
-        Keyword::title("Field outputs", field_outputs),
-        Keyword::title("End step", vec![end]),
-    ];
-    let changes = contact_changes(step, model, pair_surfaces);
-    if !changes.is_empty() {
-        contents.insert(3, Keyword::title("Contacts", changes));
-    }
-    Ok(Keyword::parent(header, contents))
+    rest.extend((step.field_outputs.iter()).filter_map(|output| field_output(output, dimension)));
+    Ok(StepParts {
+        step: ir_step,
+        boundaries,
+        loads,
+        rest,
+    })
 }
 
-/// The contact pairs a step switches off or on (`*Model change, Type=Contact pair`) and
-/// whose friction it changes (`*Change friction`, with the stick slope of the interaction).
-/// Changes of pairs not written, deactivated or unknown, are left out.
-fn contact_changes(step: &Step, model: &FeModel, pair_surfaces: &PairSurfaces) -> Vec<Keyword> {
-    let mut keywords = Vec::new();
+/// The contact pairs a step switches off or on and whose friction it changes, with the
+/// stick slope of the interaction. Changes of pairs not lowered, deactivated or unknown,
+/// are left out.
+fn contact_changes(
+    step: &Step,
+    model: &FeModel,
+    pair_surfaces: &PairSurfaces,
+) -> Vec<ir::step::ContactChange> {
+    let mut changes = Vec::new();
     for change in &step.contact_changes {
         let Some((master, slave)) = pair_surfaces.get(&change.region) else {
             continue;
         };
-        let mut out = format!("** Name: {}\n", change.region);
-        if let Some(active) = change.active {
-            let action = if active { "Add" } else { "Remove" };
-            let _ = writeln!(
-                out,
-                "*Model change, Type=Contact pair, {action}\n{slave}, {master}"
-            );
+        if let Some(add) = change.active {
+            changes.push(ir::step::ContactChange::ContactPair {
+                add,
+                slave: ir_name(slave),
+                master: ir_name(master),
+            });
         }
         let pair = (model.contact_pairs.iter()).find(|p| p.name == change.region);
         let friction = pair
@@ -2767,63 +3321,59 @@ fn contact_changes(step: &Step, model: &FeModel, pair_surfaces: &PairSurfaces) -
                 })
             });
         if let (Some(mu), Some((interaction, friction))) = (change.friction, friction) {
-            let _ = write!(
-                out,
-                "*Change friction, Interaction={}\n*Friction\n{}",
-                name(&interaction.name),
-                number(mu)
-            );
             let default = (model.materials.first())
                 .and_then(|m| m.elastic)
                 .map(|e| e.young / 2.0);
-            if let Some(slope) = friction.stick_slope.or(default) {
-                let _ = write!(out, ", {}", number(slope));
-            }
-            out.push('\n');
+            changes.push(ir::step::ContactChange::Friction {
+                interaction: ir_name(&name(&interaction.name)),
+                friction: ir::contact::Friction {
+                    coefficient: mu,
+                    stick_slope: friction.stick_slope.or(default),
+                },
+            });
         }
-        keywords.push(Keyword::generated(out));
     }
-    keywords
+    changes
 }
 
-/// The defined temperatures of a step as PrePoMax's `CalDefinedTemperature` writes them:
-/// `*Temperature` with the node set and the value, or with the result file of a previous
-/// analysis and the step to read. CalculiX 2.21 takes the file name with its extension and
-/// looks for it next to the input file; `BStep` is the only step parameter it knows.
+/// The defined temperatures of a step: on
+/// the node set with the value, or from the result file of a previous analysis and the step
+/// to read. CalculiX 2.21 takes the file name with its extension and looks for it next to
+/// the input file; `BStep` is the only step parameter it knows.
 fn defined_fields(
     sets: &mut Sets,
     step: &Step,
     amplitudes: &[Amplitude],
     model: &FeModel,
-) -> Result<Vec<Keyword>, WriteError> {
-    let mut keywords = Vec::new();
-    for field in &step.defined_fields {
-        // A thermal step solves for the temperatures; it leaves the field out like a
-        // deactivated one.
-        if !field.active || !step.kind.supports_defined_fields() {
-            keywords.push(deactivated(&field.name));
-            continue;
-        }
-        let out = match &field.kind {
+) -> Result<Vec<Card>, WriteError> {
+    let mut cards = Vec::new();
+    // A thermal step solves for the temperatures; it leaves the fields out like
+    // deactivated ones.
+    if !step.kind.supports_defined_fields() {
+        return Ok(cards);
+    }
+    for field in step.defined_fields.iter().filter(|f| f.active) {
+        let field = match &field.kind {
             DefinedFieldKind::Temperature(t) => {
-                let amplitude =
-                    amplitude_parameter(amplitudes, &field.name, "Amplitude", &field.amplitude)?;
-                let mut out = format!("** Name: {}\n*Temperature{amplitude}\n", field.name);
-                match distribution(model, &field.name, &field.distribution)? {
+                let amplitude = amplitude_parameter(amplitudes, &field.name, &field.amplitude)?;
+                let values = match distribution(model, &field.name, &field.distribution)? {
                     Some(sampler) => {
                         let nodes = field.region.nodes(sets.mesh);
                         if nodes.is_empty() {
                             return Err(empty(&field.name, "nodes"));
                         }
                         let units = model.properties.units;
-                        distributed_nodes(&mut out, sets.mesh, &nodes, "", *t, &sampler, units);
+                        distributed_nodes(sets.mesh, &nodes, *t, &sampler, units)
                     }
                     None => {
                         let set = sets.node_set(&field.name, &field.region)?;
-                        let _ = writeln!(out, "{set}, {}", number(*t));
+                        vec![(node_set_ref(&set), *t)]
                     }
+                };
+                ir::step::DefinedField {
+                    kind: ir::step::DefinedFieldKind::Temperature(values),
+                    amplitude,
                 }
-                out
             }
             DefinedFieldKind::TemperatureFromFile { file, step } => {
                 let name = file.file_name().map(|n| n.to_string_lossy());
@@ -2833,79 +3383,28 @@ fn defined_fields(
                         file: file.display().to_string(),
                     });
                 };
-                format!(
-                    "** Name: {}\n*Temperature, File={name}, BStep={step}\n",
-                    field.name
-                )
+                ir::step::DefinedField {
+                    kind: ir::step::DefinedFieldKind::TemperatureFile {
+                        file: name.into_owned(),
+                        bstep: Some(*step),
+                        estep: None,
+                        binc: None,
+                        einc: None,
+                    },
+                    amplitude: None,
+                }
             }
         };
-        keywords.push(Keyword::generated(out));
+        cards.push(Card::Temperature {
+            op_new: false,
+            field,
+        });
     }
-    Ok(keywords)
-}
-
-/// Comment that stands for a deactivated item, PrePoMax's `CalDeactivated`.
-fn deactivated(name: &str) -> Keyword {
-    Keyword::generated(format!("** Name: {name}: Deactivated\n"))
-}
-
-/// A deactivated step as PrePoMax writes it: the titles of the step with a comment for the
-/// step, its procedure and each of its items, but no keyword CalculiX would read.
-fn deactivated_step(step: &Step) -> Keyword {
-    let procedure = match step.kind {
-        StepKind::Static(_) => "StaticStep",
-        StepKind::Frequency(_) => "FrequencyStep",
-        StepKind::ComplexFrequency(_) => "ComplexFrequencyStep",
-        StepKind::Buckle(_) => "BuckleStep",
-        StepKind::HeatTransfer(_) => "HeatTransferStep",
-        StepKind::CoupledTempDisp(_) => "CoupledTempDispStep",
-        StepKind::UncoupledTempDisp(_) => "UncoupledTempDispStep",
-        StepKind::Dynamic(_) => "DynamicStep",
-        StepKind::Visco(_) => "ViscoStep",
-        StepKind::ModalDynamics(_) => "ModalDynamicsStep",
-        StepKind::SteadyStateDynamics(_) => "SteadyStateDynamicsStep",
-        StepKind::Sensitivity(_) => "SensitivityStep",
-    };
-    fn all<'a>(names: impl Iterator<Item = &'a str>) -> Vec<Keyword> {
-        names.map(deactivated).collect()
-    }
-    let loads = if step.kind.supports_loads() {
-        all(step.loads.iter().map(|l| l.name.as_str()))
-    } else {
-        Vec::new()
-    };
-    let contents = vec![
-        deactivated(procedure),
-        Keyword::title(
-            "Boundary conditions",
-            all(step.boundary_conditions.iter().map(|b| b.name.as_str())),
-        ),
-        Keyword::title("Loads", loads),
-        Keyword::title(
-            "Defined fields",
-            all(step.defined_fields.iter().map(|f| f.name.as_str())),
-        ),
-        Keyword::title(
-            "History outputs",
-            all(step.history_outputs.iter().map(|h| h.name.as_str())),
-        ),
-        Keyword::title(
-            "Field outputs",
-            all(step.field_outputs.iter().map(|f| f.name.as_str())),
-        ),
-        Keyword::title("End step", vec![deactivated(&step.name)]),
-    ];
-    Keyword::title(
-        &step.name,
-        vec![Keyword::parent(
-            format!("** Name: {}: Deactivated\n", step.name),
-            contents,
-        )],
-    )
+    Ok(cards)
 }
 
 /// Equivalent nodal forces of a total force spread evenly over element faces, the way
-/// PrePoMax turns a surface traction into concentrated loads. Each face takes its share by
+/// a surface traction is turned into concentrated loads. Each face takes its share by
 /// area; within a face the share follows the shape functions: equal parts on linear faces,
 /// only midside nodes on quadratic triangles, and -1/12 per corner and 1/3 per midside
 /// node on quadratic quadrilaterals.
@@ -3009,8 +3508,8 @@ fn polygon_area(corners: &[[f64; 3]]) -> f64 {
     0.5 * (sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]).sqrt()
 }
 
-/// Which kinds of heat loads the model has in any step: PrePoMax resets distributed fluxes,
-/// films and radiation only then.
+/// Which kinds of heat loads the model has in any step: distributed fluxes,
+/// films and radiation are reset only then.
 #[derive(Clone, Copy, Debug, Default)]
 struct FluxKinds {
     distributed: bool,
@@ -3033,389 +3532,406 @@ impl FluxKinds {
     }
 }
 
-/// The `*Step` line and the procedure keyword of a static step.
-fn static_step(settings: &StaticStep) -> (String, String) {
-    let mut keyword = String::from("*Static");
-    if let Some(solver) = settings.solver.keyword() {
-        let _ = write!(keyword, ", Solver={solver}");
+/// The equation solver a step asks for.
+fn equation_solver(choice: plx_model::LinearSolverChoice) -> ir::step::EquationSolver {
+    use ir::step::EquationSolver as S;
+    match choice {
+        plx_model::LinearSolverChoice::Automatic => S::Default,
+        plx_model::LinearSolverChoice::Direct => S::Pastix,
+        plx_model::LinearSolverChoice::Iterative => S::IterativeCholesky,
     }
-    incremented_step(settings, keyword, settings.nlgeom)
 }
 
-/// The `*Step` line and the procedure of a visco step: a static step whose automatic
-/// increments the creep strain tolerance limits.
-fn visco_step(settings: &ViscoStep) -> (String, String) {
+/// A step of `procedure` with the solver's defaults, named later.
+fn new_step(procedure: ir::step::Procedure) -> ir::Step {
+    ir::Step::new(String::new(), procedure)
+}
+
+/// A static step.
+fn static_step(settings: &StaticStep) -> ir::Step {
+    let increments = incrementation(settings);
+    incremented_step(
+        settings,
+        ir::step::Procedure::Static(ir::step::Static {
+            solver: equation_solver(settings.solver),
+            increments,
+            time_reset: false,
+            total_time_at_start: None,
+        }),
+        settings.nlgeom,
+    )
+}
+
+/// A visco step: a static step whose automatic increments the creep strain tolerance
+/// limits.
+fn visco_step(settings: &ViscoStep) -> ir::Step {
     let increments = &settings.increments;
-    let mut keyword = String::from("*Visco");
-    if let Some(solver) = increments.solver.keyword() {
-        let _ = write!(keyword, ", Solver={solver}");
-    }
-    let _ = write!(keyword, ", Cetol={}", number(settings.creep_tolerance));
-    incremented_step(increments, keyword, increments.nlgeom)
+    incremented_step(
+        increments,
+        ir::step::Procedure::Visco(ir::step::Visco {
+            solver: equation_solver(increments.solver),
+            increments: incrementation(increments),
+            cetol: settings.creep_tolerance,
+        }),
+        increments.nlgeom,
+    )
 }
 
-/// The `*Step` line and the procedure of a sensitivity step: one `*Design response` per
-/// response, named like it, on all elements of the model, then the optional filter.
+/// A sensitivity step: one design response per response, named like it, on all elements of
+/// the model, then the optional filter.
 fn sensitivity_step(
     sets: &mut Sets,
     step: &str,
     settings: &SensitivityStep,
-) -> Result<(String, String), WriteError> {
-    let mut procedure = String::from("*Sensitivity\n");
+) -> Result<ir::Step, WriteError> {
     let responses = settings.responses();
-    if responses.iter().any(|r| *r != "EIGENFREQUENCY") {
+    let elements = if responses.iter().any(|r| *r != "EIGENFREQUENCY") {
         let parts = sets.mesh.parts.iter().map(|p| p.name.clone()).collect();
-        let elements = sets.element_set(step, &Region::Parts(parts))?;
-        for response in &responses {
-            let _ = writeln!(
-                procedure,
-                "*Design response, Name={response}\n{response}, {elements}"
-            );
-        }
+        Some(ir_name(&sets.element_set(step, &Region::Parts(parts))?))
     } else {
-        for response in &responses {
-            let _ = writeln!(procedure, "*Design response, Name={response}\n{response}");
-        }
-    }
-    if let Some(radius) = settings.filter_radius {
-        let _ = writeln!(procedure, "*Filter, Type=Linear\n{}", number(radius));
-    }
-    Ok(("*Step\n".into(), procedure))
+        None
+    };
+    let responses = (responses.iter())
+        .map(|response| ir::step::DesignResponse {
+            name: ir_name(response),
+            kind: ir_name(response),
+            elset: elements.clone(),
+            data: Vec::new(),
+        })
+        .collect();
+    Ok(new_step(ir::step::Procedure::Sensitivity(
+        ir::step::Sensitivity {
+            nlgeom: false,
+            responses,
+            filter: (settings.filter_radius).map(|radius| ir::step::Filter {
+                kind: "LINEAR".into(),
+                radius,
+            }),
+            objectives: Vec::new(),
+        },
+    )))
 }
 
-/// The design variables of the model (`*Design variables`): the design region of the first
-/// active sensitivity step. CalculiX reads them before the steps.
-fn design_variables(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
+/// The design variables of the model: the design region of the first active sensitivity
+/// step. The solver reads them before the steps.
+fn design_variables(
+    sets: &mut Sets,
+    model: &FeModel,
+) -> Result<Option<ir::model::DesignVariables>, WriteError> {
     let Some((name, region)) = (model.steps.iter())
         .filter(|s| s.active)
         .find_map(|s| Some((&s.name, s.kind.design_region()?)))
     else {
-        return Ok(Vec::new());
+        return Ok(None);
     };
     let set = sets.node_set(&format!("{name}_Design"), region)?;
-    Ok(vec![Keyword::generated(format!(
-        "*Design variables, Type=Coordinate\n{set}\n"
-    ))])
+    Ok(Some(ir::model::DesignVariables {
+        nset: ir_name(&set),
+    }))
 }
 
-/// The `*Step` line and the procedure keyword of a heat transfer or coupled step, as
-/// PrePoMax's `CalHeatTransferStep` and `CalCoupledTempDispStep` write them.
-fn heat_transfer_step(
-    settings: &HeatTransferStep,
-    keyword: &str,
-    coupled: bool,
-) -> (String, String) {
+#[derive(Clone, Copy)]
+enum HeatKind {
+    Heat,
+    Coupled,
+    Uncoupled,
+}
+
+/// A heat transfer or coupled step.
+fn heat_transfer_step(settings: &HeatTransferStep, kind: HeatKind) -> ir::Step {
     let increments = &settings.increments;
-    let mut keyword = keyword.to_string();
-    if let Some(solver) = increments.solver.keyword() {
-        let _ = write!(keyword, ", Solver={solver}");
-    }
-    if settings.steady_state {
-        keyword.push_str(", Steady state");
-    }
-    if let Some(deltmx) = settings.deltmx.filter(|_| !settings.steady_state) {
-        let _ = write!(keyword, ", Deltmx={}", number(deltmx));
-    }
-    incremented_step(increments, keyword, coupled && increments.nlgeom)
+    let heat = ir::step::HeatTransfer {
+        solver: equation_solver(increments.solver),
+        steady_state: settings.steady_state,
+        increments: incrementation(increments),
+        deltmx: settings.deltmx.filter(|_| !settings.steady_state),
+        frequency_count: None,
+        direct: increments.incrementation == Incrementation::Direct,
+    };
+    let (procedure, nlgeom) = match kind {
+        HeatKind::Heat => (ir::step::Procedure::HeatTransfer(heat), false),
+        HeatKind::Coupled => (
+            ir::step::Procedure::CoupledTemperatureDisplacement(heat),
+            increments.nlgeom,
+        ),
+        HeatKind::Uncoupled => (
+            ir::step::Procedure::UncoupledTemperatureDisplacement(heat),
+            false,
+        ),
+    };
+    incremented_step(increments, procedure, nlgeom)
 }
 
-/// The `*Step` line and the procedure keyword of a dynamic step, as PrePoMax's
-/// `CalDynamicStep` and `CalDamping` write them: the Rayleigh damping follows the
-/// procedure in the step, where CalculiX applies it to the whole model.
-fn dynamic_step(settings: &DynamicStep) -> (String, String) {
-    let mut keyword = String::from("*Dynamic");
-    if let Some(solver) = settings.increments.solver.keyword() {
-        let _ = write!(keyword, ", Solver={solver}");
-    }
-    if settings.alpha != -0.05 {
-        let _ = write!(keyword, ", Alpha={}", number(settings.alpha));
-    }
-    if let Some(explicit) = settings.procedure.keyword() {
-        let _ = write!(keyword, ", Explicit={explicit}");
-    }
-    let (header, mut procedure) =
-        incremented_step(&settings.increments, keyword, settings.increments.nlgeom);
-    if let Some(damping) = &settings.damping {
-        let _ = writeln!(
-            procedure,
-            "*Damping, Alpha={}, Beta={}",
-            number(damping.alpha),
-            number(damping.beta)
-        );
-    }
-    (header, procedure)
+/// A dynamic step: the Rayleigh
+/// damping belongs to the step. Its loads act at once, as in CalculiX.
+fn dynamic_step(settings: &DynamicStep) -> ir::Step {
+    let increments = &settings.increments;
+    let mut step = incremented_step(
+        increments,
+        ir::step::Procedure::Dynamic(ir::step::Dynamic {
+            solver: equation_solver(increments.solver),
+            alpha: (settings.alpha != -0.05).then_some(settings.alpha),
+            explicit: settings.procedure.keyword().is_some(),
+            increments: incrementation(increments),
+            rayleigh: (settings.damping.as_ref()).map(|d| ir::step::Rayleigh {
+                alpha: d.alpha,
+                beta: d.beta,
+            }),
+        }),
+        increments.nlgeom,
+    );
+    step.default_amplitude = ir::step::DefaultAmplitude::Step;
+    step
 }
 
-/// The `*Step` line and the procedure keyword of a modal dynamics step, as PrePoMax's
-/// `CalModalDynamicsStep` writes them, with the modal damping after the procedure.
-fn modal_dynamics_step(settings: &ModalDynamicsStep) -> (String, String) {
-    let header = format!("*Step, Inc={}\n", settings.increments());
-    let mut procedure = String::from("*Modal dynamics");
-    if settings.steady_state {
-        procedure.push_str(", Steady state");
-    }
-    let second = if settings.steady_state {
+/// A modal dynamics step, with the modal
+/// damping. Its loads act at once, as in CalculiX.
+fn modal_dynamics_step(settings: &ModalDynamicsStep) -> ir::Step {
+    let period = if settings.steady_state {
         settings.relative_error
     } else {
         settings.time_period
     };
-    let _ = writeln!(
-        procedure,
-        "\n{}, {}",
-        number(settings.increment),
-        number(second)
-    );
-    modal_damping(&mut procedure, settings.damping.as_ref());
-    (header, procedure)
+    let mut step = new_step(ir::step::Procedure::ModalDynamics(
+        ir::step::ModalDynamics {
+            solver: ir::step::EquationSolver::Default,
+            steady_state: settings.steady_state,
+            increment: settings.increment,
+            period,
+            damping: modal_damping(settings.damping.as_ref()),
+        },
+    ));
+    step.max_increments = settings.increments();
+    step.default_amplitude = ir::step::DefaultAmplitude::Step;
+    step
 }
 
-/// The `*Step` line and the procedure keyword of a steady state dynamics step, as
-/// PrePoMax's `CalSteadyStateDynamicsStep` writes them.
-fn steady_state_dynamics_step(settings: &SteadyStateDynamicsStep) -> (String, String) {
-    let mut procedure = String::from("*Steady state dynamics");
-    if !settings.harmonic {
-        procedure.push_str(", Harmonic=No");
-    }
-    let _ = write!(
-        procedure,
-        "\n{}, {}, {}, {}",
-        number(settings.lower_frequency),
-        number(settings.upper_frequency),
-        settings.data_points,
-        number(settings.bias)
-    );
-    if !settings.harmonic {
-        let _ = write!(
-            procedure,
-            ", {}, {}, {}",
-            settings.fourier_terms,
-            number(settings.time_lower),
-            number(settings.time_upper)
-        );
-    }
-    procedure.push('\n');
-    modal_damping(&mut procedure, settings.damping.as_ref());
-    ("*Step\n".into(), procedure)
+/// A steady state dynamics step.
+fn steady_state_dynamics_step(settings: &SteadyStateDynamicsStep) -> ir::Step {
+    new_step(ir::step::Procedure::SteadyStateDynamics(
+        ir::step::SteadyStateDynamics {
+            solver: ir::step::EquationSolver::Default,
+            harmonic: settings.harmonic,
+            lower: settings.lower_frequency,
+            upper: settings.upper_frequency,
+            points: settings.data_points,
+            bias: settings.bias,
+            fourier_terms: (!settings.harmonic).then_some(settings.fourier_terms),
+            damping: modal_damping(settings.damping.as_ref()),
+        },
+    ))
 }
 
-/// `*Modal damping` as PrePoMax's `CalModalDamping` writes it: a constant ratio covers
-/// modes 1 to 1000000, Rayleigh damping leaves the mode range empty.
-fn modal_damping(out: &mut String, damping: Option<&ModalDamping>) {
-    match damping {
-        None => {}
-        Some(ModalDamping::Constant(ratio)) => {
-            let _ = writeln!(out, "*Modal damping\n1, 1000000, {}", number(*ratio));
+/// The modal damping: a constant ratio covers
+/// modes 1 to 1000000.
+fn modal_damping(damping: Option<&ModalDamping>) -> Option<ir::step::ModalDamping> {
+    Some(match damping? {
+        ModalDamping::Constant(ratio) => {
+            ir::step::ModalDamping::Direct(vec![(1, 1_000_000, *ratio)])
         }
-        Some(ModalDamping::Direct(ranges)) => {
-            out.push_str("*Modal damping\n");
-            for range in ranges {
-                let _ = writeln!(
-                    out,
-                    "{}, {}, {}",
-                    range.lowest,
-                    range.highest,
-                    number(range.ratio)
-                );
-            }
-        }
-        Some(ModalDamping::Rayleigh(r)) => {
-            let _ = writeln!(
-                out,
-                "*Modal damping, Rayleigh\n , , {}, {}",
-                number(r.alpha),
-                number(r.beta)
-            );
-        }
-    }
-}
-
-/// The `*Step` line and the procedure with its increments, for steps with a time period.
-fn incremented_step(settings: &StaticStep, keyword: String, nlgeom: bool) -> (String, String) {
-    let default = settings.incrementation == Incrementation::Default;
-    let mut header = String::from("*Step");
-    if nlgeom {
-        header.push_str(", Nlgeom");
-    }
-    if !default {
-        let _ = write!(header, ", Inc={}", settings.max_increments);
-    }
-    header.push('\n');
-    let procedure = match settings.incrementation {
-        Incrementation::Default => format!("{keyword}\n"),
-        Incrementation::Automatic => format!(
-            "{keyword}\n{}, {}, {}, {}\n",
-            number(settings.initial_increment),
-            number(settings.time_period),
-            number(settings.min_increment),
-            number(settings.max_increment)
+        ModalDamping::Direct(ranges) => ir::step::ModalDamping::Direct(
+            (ranges.iter())
+                .map(|r| (r.lowest, r.highest, r.ratio))
+                .collect(),
         ),
-        Incrementation::Direct => format!(
-            "{keyword}, Direct\n{}, {}\n",
-            number(settings.initial_increment),
-            number(settings.time_period)
-        ),
-    };
-    (header, procedure)
+        ModalDamping::Rayleigh(r) => ir::step::ModalDamping::Rayleigh {
+            alpha: r.alpha,
+            beta: r.beta,
+        },
+    })
 }
 
-/// The `*Step` line and the procedure keyword of a frequency step, as PrePoMax writes them:
-/// the lower bound is written as 0 when only an upper bound is given. In a cyclic symmetric
-/// model CalculiX finds every mode twice, as a cosine and a sine part, so it is asked for
-/// twice the number of eigenfrequencies per nodal diameter.
-fn frequency_step(settings: &FrequencyStep, cyclic: bool) -> (String, String) {
-    let mut header = String::from("*Step");
-    if settings.perturbation {
-        header.push_str(", Perturbation");
+/// The increments of a step with a time period.
+fn incrementation(settings: &StaticStep) -> ir::step::Incrementation {
+    let mut increments = ir::step::Incrementation::default();
+    match settings.incrementation {
+        Incrementation::Default => {}
+        Incrementation::Automatic => {
+            increments.initial = Some(settings.initial_increment);
+            increments.period = Some(settings.time_period);
+            increments.minimum = Some(settings.min_increment);
+            increments.maximum = Some(settings.max_increment);
+        }
+        Incrementation::Direct => {
+            increments.initial = Some(settings.initial_increment);
+            increments.period = Some(settings.time_period);
+            increments.direct = true;
+        }
     }
-    header.push('\n');
-    let mut procedure = String::from("*Frequency");
-    if settings.storage {
-        procedure.push_str(", Storage=Yes");
+    increments
+}
+
+/// A step of `procedure` with the increments of `settings`.
+fn incremented_step(
+    settings: &StaticStep,
+    procedure: ir::step::Procedure,
+    nlgeom: bool,
+) -> ir::Step {
+    let mut step = new_step(procedure);
+    step.nlgeom = nlgeom;
+    if settings.incrementation != Incrementation::Default {
+        step.max_increments = settings.max_increments;
     }
+    step
+}
+
+/// A frequency step: the lower bound is 0 when only an upper bound
+/// is given. In a cyclic symmetric model the solver finds every mode twice, as a cosine and a
+/// sine part, so it is asked for twice the number of eigenfrequencies per nodal diameter,
+/// in the range of nodal diameters if one is set.
+fn frequency_step(settings: &FrequencyStep, cyclic: bool) -> ir::Step {
     let count = settings.num_frequencies * if cyclic { 2 } else { 1 };
-    let _ = write!(procedure, "\n{count}");
-    match (settings.lower_frequency, settings.upper_frequency) {
-        (None, None) => {}
-        (lower, None) => {
-            let _ = write!(procedure, ", {}", number(lower.unwrap_or(0.0)));
-        }
-        (lower, Some(upper)) => {
-            let lower = number(lower.unwrap_or(0.0));
-            let _ = write!(procedure, ", {lower}, {}", number(upper));
-        }
-    }
-    procedure.push('\n');
-    (header, procedure)
+    let (lower, upper) = match (settings.lower_frequency, settings.upper_frequency) {
+        (None, None) => (None, None),
+        (lower, upper) => (Some(lower.unwrap_or(0.0)), upper),
+    };
+    let mut step = new_step(ir::step::Procedure::Frequency(ir::step::Frequency {
+        solver: equation_solver(settings.solver),
+        storage: settings.storage,
+        global: true,
+        cycmpc_active: true,
+        count,
+        lower,
+        upper,
+        cyclic_modes: cyclic.then(|| ir::step::CyclicModes {
+            nmin: settings.nodal_diameters.map(|[min, _]| min),
+            nmax: settings.nodal_diameters.map(|[_, max]| max),
+        }),
+    }));
+    step.perturbation = settings.perturbation;
+    step
 }
 
-/// `*Select cyclic symmetry modes` of a frequency step in a cyclic symmetric model, with the
-/// range of nodal diameters if one is set.
-fn select_cyclic_symmetry_modes(settings: &FrequencyStep) -> String {
-    match settings.nodal_diameters {
-        Some([min, max]) => format!("*Select cyclic symmetry modes, Nmin={min}, Nmax={max}\n"),
-        None => "*Select cyclic symmetry modes\n".into(),
-    }
+/// A complex frequency step.
+/// `perturbation` is the flag of the frequency step that stored the modes: CalculiX
+/// requires the same on both steps.
+fn complex_frequency_step(settings: &ComplexFrequencyStep, perturbation: bool) -> ir::Step {
+    let mut step = new_step(ir::step::Procedure::ComplexFrequency(
+        ir::step::ComplexFrequency {
+            coriolis: settings.coriolis,
+            fluid: false,
+            count: settings.num_frequencies,
+        },
+    ));
+    step.perturbation = perturbation;
+    step
 }
 
-/// The `*Step` line and the procedure keyword of a complex frequency step, as PrePoMax's
-/// `CalComplexFrequency` writes them. `perturbation` is the flag of the frequency step that
-/// stored the modes: CalculiX requires the same on both `*STEP` cards.
-fn complex_frequency_step(settings: &ComplexFrequencyStep, perturbation: bool) -> (String, String) {
-    let mut header = String::from("*Step");
-    if perturbation {
-        header.push_str(", Perturbation");
-    }
-    header.push('\n');
-    let mut procedure = String::from("*Complex frequency");
-    if settings.coriolis {
-        procedure.push_str(", Coriolis");
-    }
-    let _ = writeln!(procedure, "\n{}", settings.num_frequencies);
-    (header, procedure)
+/// A buckle step.
+fn buckle_step(settings: &BuckleStep) -> ir::Step {
+    let mut step = new_step(ir::step::Procedure::Buckle(ir::step::Buckle {
+        solver: equation_solver(settings.solver),
+        count: settings.num_factors,
+        accuracy: Some(settings.accuracy),
+    }));
+    step.perturbation = settings.perturbation;
+    step
 }
 
-/// The `*Step` line and the procedure keyword of a buckle step, as PrePoMax's
-/// `CalBuckleStep` writes them.
-fn buckle_step(settings: &BuckleStep) -> (String, String) {
-    let mut header = String::from("*Step");
-    if settings.perturbation {
-        header.push_str(", Perturbation");
-    }
-    header.push('\n');
-    let mut procedure = String::from("*Buckle");
-    let _ = writeln!(
-        procedure,
-        "\n{}, {}",
-        settings.num_factors,
-        number(settings.accuracy)
-    );
-    (header, procedure)
+/// The variables of an output request as the solver compares them.
+fn variables<'a>(variables: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    (variables.into_iter())
+        .map(|v| v.trim().to_ascii_uppercase())
+        .collect()
 }
 
-/// `*Node file`, `*El file` or `*Contact file` of a field output, as PrePoMax's
-/// `CalNodeFile`, `CalElFile` and `CalContactFile` write them; none without variables.
-/// Node outputs are written in the form `dimension` of the step's element outputs.
-fn field_output(output: &FieldOutput, dimension: OutputDimension) -> Option<Keyword> {
-    if !output.active {
-        return Some(deactivated(&output.name));
-    }
-    if output.variables.is_empty() {
+/// The field output request of a field output; none without variables. Node outputs take the form
+/// `dimension` of the step's element outputs.
+fn field_output(output: &FieldOutput, dimension: OutputDimension) -> Option<Card> {
+    if !output.active || output.variables.is_empty() {
         return None;
     }
-    let mut variables = output.variables.join(", ");
-    let mut header = match output.kind {
-        OutputKind::Node => "*Node file",
-        OutputKind::Element => {
-            // PrePoMax adds nodal extrapolation of stresses unless error estimators are requested.
-            let has = |v: &str| output.variables.iter().any(|x| x == v);
-            if has("S") && !has("ERR") && !has("HER") && !has("ZZS") {
-                variables.push_str(", NOE");
-            }
-            "*El file"
+    let mut names = variables(output.variables.iter().map(String::as_str));
+    if output.kind == OutputKind::Element {
+        // Nodalis adds nodal extrapolation of stresses unless error estimators are
+        // requested.
+        let has = |v: &str| output.variables.iter().any(|x| x == v);
+        if has("S") && !has("ERR") && !has("HER") && !has("ZZS") {
+            names.push("NOE".into());
         }
-        OutputKind::Contact => "*Contact file",
     }
-    .to_string();
-    if output.last_iterations {
-        header.push_str(", Last iterations");
-    }
-    if output.contact_elements {
-        header.push_str(", Contact elements");
-    }
-    if output.kind != OutputKind::Contact {
-        let dimension = match output.kind {
-            OutputKind::Element => output.dimension,
-            _ => dimension,
-        };
+    let contact = output.kind == OutputKind::Contact;
+    let dimension = match output.kind {
+        OutputKind::Element => output.dimension,
+        _ => dimension,
+    };
+    let request = ir::step::FieldOutput {
+        variables: names,
+        frequency: 1,
+        nset: None,
+        last_iterations: output.last_iterations,
+        contact_elements: output.contact_elements,
         // CalculiX's default writes shells and beams as the solids it expands them to; at
         // the shell nodes (2D) the stresses are those of the mid-surface, without bending.
-        match dimension {
-            OutputDimension::Default => {}
-            OutputDimension::TwoD => header.push_str(", Output=2D"),
-            OutputDimension::ThreeD => header.push_str(", Output=3D"),
-        }
-        if !output.global {
-            header.push_str(", Global=No");
-        }
-    }
-    Some(Keyword::generated(format!(
-        "** Name: {}\n{header}\n{variables}\n",
-        output.name
-    )))
+        output: match dimension {
+            _ if contact => ir::step::OutputDimension::Expanded,
+            OutputDimension::Default => ir::step::OutputDimension::Expanded,
+            OutputDimension::TwoD => ir::step::OutputDimension::TwoD,
+            OutputDimension::ThreeD => ir::step::OutputDimension::ThreeD,
+        },
+        global: contact || output.global,
+        section_forces: false,
+        time_points: None,
+    };
+    Some(match output.kind {
+        OutputKind::Node => Card::NodeFile(request),
+        OutputKind::Element => Card::ElFile(request),
+        OutputKind::Contact => Card::ContactFile(request),
+    })
 }
 
-/// `*Node print`, `*El print` or `*Contact print` of a history output, as PrePoMax's
-/// `CalNodePrint`, `CalElPrint` and `CalContactPrint` write them; none without variables.
+/// The totals of a history output.
+fn totals(totals: Totals) -> ir::step::Totals {
+    match totals {
+        Totals::No => ir::step::Totals::No,
+        Totals::Yes => ir::step::Totals::Yes,
+        Totals::Only => ir::step::Totals::Only,
+    }
+}
+
+/// A nodal history output of a node set.
+fn node_print(set: &str, names: &[&str], totals_of: Totals) -> ir::step::HistoryOutput {
+    ir::step::HistoryOutput {
+        set: Some(ir_name(set)),
+        variables: variables(names.iter().copied()),
+        frequency: 1,
+        totals: totals(totals_of),
+        global: true,
+        time_points: None,
+        surfaces: None,
+    }
+}
+
+/// The history output requests of a history output; none without variables.
 fn history_output(
     sets: &mut Sets,
     output: &HistoryOutput,
     pair_surfaces: &PairSurfaces,
-) -> Result<Option<Keyword>, WriteError> {
+) -> Result<Vec<Card>, WriteError> {
     if output.variables.is_empty() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
-    let totals = match output.totals {
-        Totals::No => "",
-        Totals::Yes => ", Totals=Yes",
-        Totals::Only => ", Totals=Only",
-    };
-    let header = match &output.kind {
+    let names: Vec<&str> = output.variables.iter().map(String::as_str).collect();
+    let card = match &output.kind {
         HistoryKind::Node {
             region: region @ (Region::ReferencePoint(_) | Region::RemotePoint(_)),
         } => {
-            return point_output(sets, output, region, totals);
+            return point_output(sets, output, region);
         }
         HistoryKind::Node { region } => {
             let set = sets.node_set(&output.name, region)?;
-            format!("*Node print, Nset={set}{totals}")
+            Card::NodePrint(node_print(&set, &names, output.totals))
         }
         HistoryKind::Element { region } => {
             let set = sets.element_set(&output.name, region)?;
-            format!("*El print, Elset={set}{totals}")
+            let mut request = node_print(&set, &names, output.totals);
+            request.set = Some(ir_name(&set));
+            Card::ElPrint(request)
         }
         HistoryKind::Contact { pair } => {
             // Contact forces are summed over the slave surface of the pair.
-            let mut header = format!("*Contact print{totals}");
+            let mut request = node_print("", &names, output.totals);
+            request.set = None;
             if output.variables.iter().any(|v| v == "CF") {
                 let (master, slave) =
                     pair_surfaces
@@ -3424,16 +3940,12 @@ fn history_output(
                             item: output.name.clone(),
                             pair: pair.clone(),
                         })?;
-                let _ = write!(header, ", Master={master}, Slave={slave}");
+                request.surfaces = Some((ir_name(slave), ir_name(master)));
             }
-            header
+            Card::ContactPrint(request)
         }
     };
-    Ok(Some(Keyword::generated(format!(
-        "** Name: {}\n{header}\n{}\n",
-        output.name,
-        output.variables.join(", ")
-    ))))
+    Ok(vec![card])
 }
 
 /// Reference and rotation node of a reference point or the point of a remote displacement,
@@ -3465,17 +3977,16 @@ fn point_nodes(
 /// The nodal history output of a point: the values of its reference node, and the
 /// rotations, moments and angular velocities as the displacements, forces and velocities
 /// of its rotation node. The rotation node's set is named `Internal_Rotation-n_<output>`,
-/// by which the `.dat` reader shows its values under the output's name.
+/// by which the history reader shows its values under the output's name.
 ///
-/// CalculiX has reaction forces at the point of a rigid body only: the point of equations,
+/// The solver has reaction forces at the point of a rigid body only: the point of equations,
 /// a deformable or coupled remote displacement, prints zeros, so its `RF` is left out. A
 /// coupled point does not turn.
 fn point_output(
     sets: &mut Sets,
     output: &HistoryOutput,
     region: &Region,
-    totals: &str,
-) -> Result<Option<Keyword>, WriteError> {
+) -> Result<Vec<Card>, WriteError> {
     let ([reference, rotation], behavior) = point_nodes(sets, &output.name, region)?;
     let reactions = behavior == RemoteBehavior::Rigid;
     let printed: Vec<&str> = (output.variables.iter())
@@ -3483,49 +3994,29 @@ fn point_output(
         .filter(|&v| reactions || v != "RF")
         .collect();
     if printed.is_empty() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let set = sets.free_name("Internal_Selection", &name(&output.name));
     sets.node_sets.push((set.clone(), vec![reference]));
-    let mut text = format!(
-        "** Name: {}\n*Node print, Nset={set}{totals}\n{}\n",
-        output.name,
-        printed.join(", ")
-    );
+    let mut cards = vec![Card::NodePrint(node_print(&set, &printed, output.totals))];
     let turning: Vec<&str> = (printed.iter().copied())
         .filter(|v| ["RF", "U", "V"].contains(v))
         .collect();
     if !turning.is_empty() {
         let set = sets.free_name("Internal_Rotation", &name(&output.name));
         sets.node_sets.push((set.clone(), vec![rotation]));
-        let _ = write!(
-            text,
-            "*Node print, Nset={set}{totals}\n{}\n",
-            turning.join(", ")
-        );
+        cards.push(Card::NodePrint(node_print(&set, &turning, output.totals)));
     }
-    Ok(Some(Keyword::generated(text)))
+    Ok(cards)
 }
 
-/// A keyword line followed by ids, 16 per line, the most CalculiX reads on one line.
-fn id_list(header: &str, ids: &[u32]) -> String {
-    let lines: Vec<String> = ids
-        .chunks(16)
-        .map(|chunk| {
-            let ids: Vec<String> = chunk.iter().map(u32::to_string).collect();
-            ids.join(", ")
-        })
-        .collect();
-    format!("{header}\n{}\n", lines.join(",\n"))
-}
-
-/// A real number in at most 16 characters, CalculiX's field width.
 /// Length and direction of a vector; `None` for the zero vector.
 fn unit_vector(v: [f64; 3]) -> Option<(f64, [f64; 3])> {
     let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
     (length > 0.0).then(|| (length, v.map(|c| c / length)))
 }
 
+/// A real number in at most 16 characters, CalculiX's field width.
 fn number(value: f64) -> String {
     let short = value.to_string();
     if short.len() <= 16 {
@@ -3536,7 +4027,7 @@ fn number(value: f64) -> String {
 }
 
 /// Item names as CalculiX accepts them: no spaces, commas or other special characters.
-/// Longest set or surface name CalculiX reads.
+/// Longest set or surface name the solver reads.
 const NAME_LIMIT: usize = 80;
 
 /// Longest name of a set made for a region: an element surface appends the face (`_S6`) to
@@ -3547,7 +4038,7 @@ const SET_NAME_LIMIT: usize = NAME_LIMIT - 3;
 /// the `.dat` file puts back.
 pub const SHORTENED_NAME: &str = "** Shortened name: ";
 
-/// `head` and `postfix` as one name, which CalculiX reads: a name too long keeps its start
+/// `head` and `postfix` as one name, which the solver reads: a name too long keeps its start
 /// and ends in a hash of the whole name, so that names alike in their start differ.
 fn fitted_name(head: &str, postfix: &str) -> String {
     let full = format!("{head}{postfix}");
@@ -3561,18 +4052,6 @@ fn fitted_name(head: &str, postfix: &str) -> String {
     let keep = SET_NAME_LIMIT.saturating_sub(head.len() + 9);
     let start: String = postfix.chars().take(keep).collect();
     format!("{head}{start}_{hash:08X}")
-}
-
-/// The comments naming what each shortened name stands for.
-fn shortened_names(shortened: &[(String, String)]) -> Vec<Keyword> {
-    if shortened.is_empty() {
-        return Vec::new();
-    }
-    let mut text = String::new();
-    for (short, full) in shortened {
-        let _ = writeln!(text, "{SHORTENED_NAME}{short} = {full}");
-    }
-    vec![Keyword::generated(text)]
 }
 
 fn name(item: &str) -> String {

@@ -1,4 +1,4 @@
-//! Diagram of curves over a common x axis, PrePoMax's diagram view of a table selection: a
+//! Diagram of curves over a common x axis: a
 //! curve per y column, a legend, grid lines at round numbers and the value of the nearest
 //! point under the mouse.
 
@@ -356,13 +356,14 @@ pub struct WindowResponse {
     pub plot: Rect,
 }
 
-/// The diagram in its own window, PrePoMax's diagram view; `shown` is whether it is also an
+/// The diagram in its own window; `shown` is whether it is also an
 /// annotation in the 3D view.
 pub fn window(ctx: &egui::Context, data: &XyData, shown: bool) -> WindowResponse {
     let mut open = true;
     let mut toggle_view = false;
     let mut export = None;
     let mut plot = Rect::NOTHING;
+    let mut close = false;
     egui::Window::new(format!("Plot: {}", data.title))
         .id(crate::ids::window(ctx, "history plot"))
         .open(&mut open)
@@ -391,14 +392,17 @@ pub fn window(ctx: &egui::Context, data: &XyData, shown: bool) -> WindowResponse
                     ui.menu_button("Export", |ui| {
                         for (label, choice) in [
                             ("Copy to Clipboard", Export::Clipboard),
-                            ("Save as PNG...", Export::Png),
-                            ("Save as SVG...", Export::Svg),
+                            ("Save as PNG …", Export::Png),
+                            ("Save as SVG …", Export::Svg),
                         ] {
                             if ui.button(label).clicked() {
                                 export = Some(choice);
                                 ui.close();
                             }
                         }
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        close = ui.button("Close").clicked();
                     });
                 });
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
@@ -407,7 +411,7 @@ pub fn window(ctx: &egui::Context, data: &XyData, shown: bool) -> WindowResponse
             });
         });
     WindowResponse {
-        closed: !open,
+        closed: !open || close,
         toggle_view,
         export,
         plot,

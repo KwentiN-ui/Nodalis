@@ -44,10 +44,11 @@ use plxs_core::results::{IncrementKind, ResultField, ResultsIncrement};
 use plxs_core::state::{IntegrationPointField, NodalField};
 use plxs_core::step::{Dynamic, Procedure as ProcedureKind};
 use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Step};
-use plxs_linalg::{LinearSolver, SparseMatrix};
+use plxs_linalg::SparseMatrix;
 use plxs_output::StaRow;
 use rayon::prelude::*;
 
+use crate::equations::{Equations, FirstOrWarnings, in_increment};
 use crate::fields::{build_fields, internal_energy_density, nodal_average_scalar, node_order};
 use crate::static_linear::{integration_point_results, writes_increment};
 use crate::{Procedure, ProcedureContext, StepOutcome};
@@ -189,6 +190,7 @@ impl Procedure for DynamicProcedure {
             scheme,
             rayleigh,
             &parameters.increments,
+            parameters.solver,
         );
         ctx.stiffness = Some(k);
         outcome
@@ -207,8 +209,12 @@ impl DynamicProcedure {
         scheme: Scheme,
         rayleigh: plxs_core::step::Rayleigh,
         increments: &plxs_core::step::Incrementation,
+        solver: plxs_core::step::EquationSolver,
     ) -> Result<StepOutcome> {
         let n = ctx.table.dofs.len();
+        // `K + c M` (and the matrix of the initial accelerations) is positive definite: the
+        // iterative solver can take the step's systems.
+        let mut equations = Equations::new(solver);
         let period = increments.period();
         let initial = increments.initial().min(period);
         let maximum = increments
@@ -329,12 +335,25 @@ impl DynamicProcedure {
             let a0_matrix =
                 initial_acceleration_matrix(ctx.table, ctx.model, &ctx.pattern, c_m, c_k, true)?;
             let a_red = set.reduce(&a0_matrix);
-            ctx.solver.analyze(a_red.pattern())?;
-            ctx.solver
-                .factorize(&a_red)
-                .map_err(|e| numerical(e, ctx.step_number, 0))?;
+            let coordinates = || {
+                (set.free.iter())
+                    .map(|&dof| ctx.model.nodes.coordinates[dof as usize / 3])
+                    .collect()
+            };
+            equations
+                .prepare(&mut ctx.solver, &a_red, coordinates, true, progress)
+                .map_err(|e| numerical(e, ctx.step_number, 0, &equations))?;
             let mut a = set.reduce_rhs(&r);
-            ctx.solver.solve(&mut a)?;
+            equations
+                .solve(
+                    &mut ctx.solver,
+                    &mut a,
+                    &mut FirstOrWarnings {
+                        inner: &mut *progress,
+                        all: false,
+                    },
+                )
+                .map_err(|e| in_increment(e, ctx.step_number, 0))?;
             motion.a = set.expand(&a, &vec![0.0; n]);
             progress.event(ProgressEvent::Info(format!(
                 "initial accelerations in {:.2} s",
@@ -407,10 +426,23 @@ impl DynamicProcedure {
             if factored_dt.is_none_or(|d| (d - dt).abs() > 1e-12 * dt) {
                 let started = std::time::Instant::now();
                 let a_red = set.reduce(&a_matrix);
-                ctx.solver.analyze(a_red.pattern())?;
-                ctx.solver
-                    .factorize(&a_red)
-                    .map_err(|e| numerical(e, ctx.step_number, increment))?;
+                let coordinates = || {
+                    (set.free.iter())
+                        .map(|&dof| ctx.model.nodes.coordinates[dof as usize / 3])
+                        .collect()
+                };
+                equations
+                    .prepare(
+                        &mut ctx.solver,
+                        &a_red,
+                        coordinates,
+                        true,
+                        &mut FirstOrWarnings {
+                            inner: &mut *progress,
+                            all: false,
+                        },
+                    )
+                    .map_err(|e| numerical(e, ctx.step_number, increment, &equations))?;
                 progress.event(ProgressEvent::Info(format!(
                     "system matrix factorized in {:.2} s",
                     started.elapsed().as_secs_f64()
@@ -448,7 +480,16 @@ impl DynamicProcedure {
             let r = combine(&[(1.0, &f_eff), (c1, &mu), (-(1.0 + alpha), &cd)], n);
             let ag = multiply(&a_matrix, &g1);
             let mut x = set.reduce_rhs(&combine(&[(1.0, &r), (-1.0, &ag)], n));
-            ctx.solver.solve(&mut x)?;
+            equations
+                .solve(
+                    &mut ctx.solver,
+                    &mut x,
+                    &mut FirstOrWarnings {
+                        inner: &mut *progress,
+                        all: false,
+                    },
+                )
+                .map_err(|e| in_increment(e, ctx.step_number, increment))?;
             let u1 = set.expand(&x, &g1);
             let a1 = combine(&[(c1, &u1), (-c1, &u_tilde)], n);
             let v1 = combine(&[(1.0, &v_tilde), (gamma * dt, &a1)], n);
@@ -639,12 +680,16 @@ fn ctx_max_increments(step: &Step) -> u32 {
     }
 }
 
-fn numerical(e: Error, step: u32, increment: u32) -> Error {
+fn numerical(e: Error, step: u32, increment: u32, equations: &Equations) -> Error {
     match e {
         Error::Numerical { message, .. } => Error::Numerical {
             step,
             increment,
-            message: format!("{message}; the model is probably not sufficiently constrained"),
+            message: if equations.hints_constraints() {
+                format!("{message}; the model is probably not sufficiently constrained")
+            } else {
+                message
+            },
         },
         other => other,
     }

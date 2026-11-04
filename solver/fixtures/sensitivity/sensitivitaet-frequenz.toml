@@ -4,4 +4,4 @@ class = "B"
 stage = "M3"
 features = ["*HEADING", "*NODE", "*ELEMENT", "C3D8", "*NSET", "*ELSET", "*SURFACE", "*MATERIAL", "*DENSITY", "*ELASTIC", "*SOLID SECTION", "*DESIGN VARIABLES", "*STEP", "*FREQUENCY", "*BOUNDARY", "*NODE FILE", "*EL FILE", "*END STEP", "*SENSITIVITY", "*DESIGN RESPONSE"]
 source = "plx-io writer test"
-reference = "ccx 2.21"
+reference = "plxs 0.2.0"

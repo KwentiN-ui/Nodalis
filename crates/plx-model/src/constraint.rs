@@ -1,8 +1,8 @@
-//! PrePoMax's spring and support constraints, with springs also between two surfaces. Ties
+//! The spring and support constraints, with springs also between two surfaces. Ties
 //! are in [`crate::contact`].
 //!
 //! Like everything in the model they store what the user defined. The spring and gap elements,
-//! extra nodes and equations CalculiX needs for them are generated when the input file is
+//! extra nodes and equations the solver needs for them are generated when the input file is
 //! written.
 
 use serde::{Deserialize, Serialize};
@@ -11,8 +11,8 @@ use crate::Region;
 
 /// Nodes tied to each other, nodalis's node tie: the ends of beams or trusses meeting at a
 /// point, which have nodes of their own since parts share no nodes. Every node of the region
-/// moves with the first. Node ties are listed with the contact pairs, as the contact search
-/// finds them.
+/// moves with the first. Node ties are listed with the contact pairs; a contact detection
+/// finds them at the line ends.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NodeTie {
     pub name: String,
@@ -22,6 +22,12 @@ pub struct NodeTie {
     /// Ties the rotations too, a rigid joint between beams; a hinge otherwise. Nodes
     /// without rotations (trusses, solids) are tied in their translations only either way.
     pub rotations: bool,
+    /// The contact detection that found the tie at line ends; `None` for one made by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_by: Option<String>,
+    /// Changed by the user after its detection: detecting again keeps it as it is.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub edited: bool,
 }
 
 impl NodeTie {
@@ -31,19 +37,21 @@ impl NodeTie {
             active: true,
             region: Region::Nodes(Vec::new()),
             rotations: true,
+            detected_by: None,
+            edited: false,
         }
     }
 }
 
-/// Nodes that move as one rigid body with a reference point (`*RIGID BODY`), PrePoMax's rigid
-/// body constraint. Boundary conditions and loads on the reference point drive the body:
+/// Nodes that move as one rigid body with a reference point (`*RIGID BODY`).
+/// Boundary conditions and loads on the reference point drive the body:
 /// its translations and rotations, forces and moments.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RigidBody {
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,
-    /// Hidden constraints have no symbol in the 3D view unless selected, as in PrePoMax.
+    /// Hidden constraints have no symbol in the 3D view unless selected.
     #[serde(default = "crate::active")]
     pub visible: bool,
     pub region: Region,
@@ -64,8 +72,8 @@ impl RigidBody {
 }
 
 /// Springs in the global directions from the nodes of a region to ground (`SPRING1`), or to
-/// the closest points of a target surface (`SPRING2`), which PrePoMax lacks. One spring
-/// constraint covers PrePoMax's point and surface springs: like a force, the stiffness is
+/// the closest points of a target surface (`SPRING2`). One spring
+/// constraint covers the point and surface springs: like a force, the stiffness is
 /// that of the whole region and spread over its nodes, on faces by area, on edges by length
 /// and on points in equal shares.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -73,7 +81,7 @@ pub struct Spring {
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,
-    /// Hidden constraints have no symbol in the 3D view unless selected, as in PrePoMax.
+    /// Hidden constraints have no symbol in the 3D view unless selected.
     #[serde(default = "crate::active")]
     pub visible: bool,
     /// The nodes that get springs: the slave side of a connection to a surface.
@@ -109,14 +117,14 @@ impl Spring {
     }
 }
 
-/// Gap elements on a surface that only take pressure (`GAPUNI`), PrePoMax's compression only
-/// support.
+/// Gap elements on a surface that only take pressure (`GAPUNI`), a
+/// compression only support.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompressionOnly {
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,
-    /// Hidden constraints have no symbol in the 3D view unless selected, as in PrePoMax.
+    /// Hidden constraints have no symbol in the 3D view unless selected.
     #[serde(default = "crate::active")]
     pub visible: bool,
     pub region: Region,
@@ -143,9 +151,9 @@ pub struct CompressionOnly {
 }
 
 impl CompressionOnly {
-    /// PrePoMax's `GapSectionData.InitialSpringStiffness`.
+    /// Default spring stiffness of the gap elements.
     pub const DEFAULT_STIFFNESS: f64 = 1e12;
-    /// PrePoMax's `GapSectionData.InitialTensileForceAtNegativeInfinity`.
+    /// Default tensile force of the gap elements at large clearances.
     pub const DEFAULT_TENSILE_FORCE: f64 = 1e-3;
 
     /// The direction the support pushes a face with the given outward normal in.

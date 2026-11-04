@@ -246,7 +246,10 @@ impl ModelConstraints {
         // Ties: slave DOFs held otherwise stay untied, as in CalculiX.
         for (origin, couplings) in tie_constraints {
             for c in couplings {
-                for d in 0..PER_NODE {
+                // An edge of a plane element ties the in-plane displacements; the
+                // out-of-plane DOF (thickness change) of each side stays its own.
+                let dofs = if c.planar { 2 } else { PER_NODE };
+                for d in 0..dofs {
                     let mut global = vec![(c.slave * PER_NODE + d, 1.0)];
                     for &(m, w) in &c.masters {
                         if w != 0.0 {

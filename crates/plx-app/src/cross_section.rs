@@ -18,7 +18,7 @@ pub fn form(ui: &mut Ui, cross_section: &mut CrossSection, units: UnitSystem) {
     ui.label("Profile");
     egui::ComboBox::from_id_salt("cross-section profile")
         .selected_text(profile.label())
-        .width(200.0)
+        .width(crate::dock::fit_width(ui, 200.0))
         // All kinds without scrolling.
         .height(400.0)
         .show_ui(ui, |ui| {
@@ -40,13 +40,13 @@ pub fn form(ui: &mut Ui, cross_section: &mut CrossSection, units: UnitSystem) {
         ui.label("");
         ui.scope(|ui| {
             ui.set_max_width(SKETCH.x);
-            let note = "A general beam of CalculiX (U1): lines with 2 nodes, the axis through \
+            let note = "A general beam (user element U1): lines with 2 nodes, the axis through \
                         the centroid, linear Static and Frequency steps only.";
             ui.add(egui::Label::new(egui::RichText::new(note).weak()).wrap())
         })
         .inner
         .on_hover_text(
-            "CalculiX has beam sections of its own for rectangles, circles, pipes and boxes \
+            "The solver has beam sections of its own for rectangles, circles, pipes and boxes \
              only. Other profiles are written by their area and second moments of area about \
              the principal axes, for the user element U1. It takes neither large \
              deformations (Nlgeom) nor buckling, its torsion stiffness is k G (I11 + I22), \

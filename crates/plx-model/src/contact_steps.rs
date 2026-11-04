@@ -1,5 +1,5 @@
 //! Contacts changed per step, Ansys' step controls of a contact region: switched off for
-//! some steps, or sliding with another friction coefficient. CalculiX needs every contact
+//! some steps, or sliding with another friction coefficient. The solver needs every contact
 //! pair before the first step and changes it within a step by `*MODEL CHANGE, TYPE=CONTACT
 //! PAIR` and `*CHANGE FRICTION`; a change holds from its step on, until another one.
 

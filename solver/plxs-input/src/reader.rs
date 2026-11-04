@@ -23,14 +23,15 @@ use plxs_core::step::{
     Boundary, Buckle, ComplexFrequency, ConcentratedFlux, ConcentratedLoad, ContactChange,
     Controls, CyclicModes, DefaultAmplitude, DefinedField, DefinedFieldKind, DesignResponse,
     DistributedFlux, DistributedLoad, DistributedLoadKind, Dynamic, EquationSolver, FieldOutput,
-    Film, Filter, FluxKind, Frequency, HeatTransfer, HistoryOutput, Incrementation, Loads,
-    ModalDamping, ModalDynamics, OutputDimension, Outputs, Procedure, Radiate, Rayleigh,
-    RestartWrite, Sensitivity, Static, SteadyStateDynamics, Step, Totals, Visco,
+    Film, Filter, FluxKind, Frequency, HeatTransfer, HistoryOutput, Incrementation, ModalDamping,
+    ModalDynamics, OutputDimension, Procedure, Radiate, Rayleigh, RestartWrite, Sensitivity,
+    Static, SteadyStateDynamics, Step, Totals, Visco,
 };
 use plxs_core::{Error, normalized_name};
 
 use crate::Reading;
 use crate::lexer::{Keyword, Line, split_fields};
+use crate::steps::{Assembler, Card};
 
 /// A data line with its origin.
 #[derive(Clone, Debug)]
@@ -117,58 +118,18 @@ enum FrictionTarget {
     None,
 }
 
-/// What a step starts with: the boundaries, loads and fields in force at the end of the
-/// previous step, and the output requests, which CalculiX keeps unless a step gives new ones.
-#[derive(Clone, Debug, Default)]
-struct Carried {
-    boundaries: Vec<Boundary>,
-    loads: Loads,
-    fields: Vec<DefinedField>,
-    outputs: Outputs,
-}
-
-/// Which load kinds a step has reset with `OP=NEW` or defined already, so that only the first
-/// card of a kind in a step decides between keeping and dropping the carried ones.
-#[derive(Clone, Debug, Default)]
-struct StepFlags {
-    boundary: bool,
-    cload: bool,
-    dload: bool,
-    cflux: bool,
-    dflux: bool,
-    film: bool,
-    radiate: bool,
-    temperature: bool,
-    node_file: bool,
-    el_file: bool,
-    contact_file: bool,
-    node_print: bool,
-    el_print: bool,
-    contact_print: bool,
-}
-
 pub(crate) struct Reader {
     reading: Reading,
     material: Option<usize>,
     interaction: Option<usize>,
     friction_target: FrictionTarget,
     user_elements: HashSet<String>,
-    /// The step being read, with whether it has a procedure yet.
-    step: Option<Step>,
+    /// The steps, with the one being read, and whether it has a procedure yet.
+    steps: Assembler,
     procedure_seen: bool,
     /// Whether the current `*STEP` names its default amplitude (`AMPLITUDE=`); without it
     /// dynamic procedures apply their loads at once (CalculiX's default `STEP` for them).
     step_amplitude_given: bool,
-    flags: StepFlags,
-    /// `*BOUNDARY` before the first step.
-    model_boundaries: Vec<Boundary>,
-    carried: Carried,
-    /// How many of the current step's concentrated and distributed loads (at the front of
-    /// the lists) were carried over from the previous step; a new definition replaces those
-    /// at the same node and DOF or face (`carry`), the step's own add up.
-    carried_loads: (usize, usize),
-    /// The same for `*CFLUX`, `*DFLUX`, `*FILM` and `*RADIATE`.
-    carried_heat: [usize; 4],
     last_comment: Option<String>,
 }
 
@@ -180,14 +141,9 @@ impl Reader {
             interaction: None,
             friction_target: FrictionTarget::None,
             user_elements: HashSet::new(),
-            step: None,
+            steps: Assembler::new(),
             procedure_seen: false,
             step_amplitude_given: false,
-            flags: StepFlags::default(),
-            model_boundaries: Vec::new(),
-            carried: Carried::default(),
-            carried_loads: (0, 0),
-            carried_heat: [0; 4],
             last_comment: None,
         }
     }
@@ -199,11 +155,8 @@ impl Reader {
         let mut reader = Self::new();
         reader.reading.analysis = base;
         reader.reading.analysis.model.rebuild_indices();
-        let steps = std::mem::take(&mut reader.reading.analysis.steps);
-        if let Some(last) = steps.last() {
-            reader.carry_on(last);
-        }
-        reader.reading.analysis.steps = steps;
+        let analysis = &reader.reading.analysis;
+        reader.steps = Assembler::continuing(&analysis.model, &analysis.steps);
         reader
     }
 
@@ -234,7 +187,13 @@ impl Reader {
                                 file,
                                 line: *line,
                             }),
-                            Line::Comment { .. } => {}
+                            // A comment after the data names what follows, e.g. the
+                            // step (`** Step-1 ++`).
+                            Line::Comment { text, .. } => {
+                                if !text.is_empty() {
+                                    self.last_comment = Some(text.clone());
+                                }
+                            }
                             Line::Keyword(_) => break,
                         }
                         j += 1;
@@ -244,7 +203,7 @@ impl Reader {
                 }
             }
         }
-        if let Some(step) = &self.step {
+        if let Some(step) = &self.steps.step {
             return Err(Error::input(
                 "*STEP",
                 format!("step {} has no *END STEP", step.name),
@@ -263,7 +222,7 @@ impl Reader {
 
     fn keyword(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
         // Cards that only make sense inside a step, and the ones only outside.
-        let in_step = self.step.is_some();
+        let in_step = self.steps.step.is_some();
         match k.name.as_str() {
             "*HEADING" => {
                 k.check_parameters(&[])?;
@@ -1295,7 +1254,7 @@ impl Reader {
                 self.model().contact.interactions[i].friction = Some(friction);
             }
             FrictionTarget::Change(i) => {
-                let Some(step) = &mut self.step else {
+                let Some(step) = &mut self.steps.step else {
                     return Err(k.error("*CHANGE FRICTION outside of a step"));
                 };
                 if let ContactChange::Friction { friction: f, .. } = &mut step.contact_changes[i] {
@@ -1489,7 +1448,7 @@ impl Reader {
                 step: k.integer("STEP")?,
             });
         } else if k.has("WRITE") {
-            let Some(step) = &mut self.step else {
+            let Some(step) = &mut self.steps.step else {
                 return Err(k.error("WRITE belongs into a step"));
             };
             step.restart_write = Some(RestartWrite {
@@ -1515,7 +1474,7 @@ impl Reader {
             "SHOCK SMOOTHING",
             "TURBULENCE MODEL",
         ])?;
-        if self.step.is_some() {
+        if self.steps.step.is_some() {
             return Err(k.error("a step inside a step"));
         }
         let number = self.reading.analysis.steps.len() as u32 + 1;
@@ -1540,30 +1499,15 @@ impl Reader {
             _ => DefaultAmplitude::Ramp,
         };
         // What the step starts with.
-        if number == 1 {
-            self.carried.boundaries = self.model_boundaries.clone();
-        }
-        step.boundaries = self.carried.boundaries.clone();
-        step.loads = self.carried.loads.clone();
-        step.fields = self.carried.fields.clone();
-        step.outputs = self.carried.outputs.clone();
-        self.carried_loads = (step.loads.concentrated.len(), step.loads.distributed.len());
-        self.carried_heat = [
-            step.loads.concentrated_flux.len(),
-            step.loads.distributed_flux.len(),
-            step.loads.films.len(),
-            step.loads.radiations.len(),
-        ];
-        self.step = Some(step);
+        self.steps.begin(step);
         self.procedure_seen = false;
-        self.flags = StepFlags::default();
         self.friction_target = FrictionTarget::None;
         Ok(())
     }
 
     fn step_end(&mut self, k: &Keyword) -> Result<(), Error> {
         k.check_parameters(&[])?;
-        let Some(step) = self.step.take() else {
+        let Some(step) = &self.steps.step else {
             return Err(k.error("*END STEP without a step"));
         };
         if !self.procedure_seen {
@@ -1576,35 +1520,25 @@ impl Reader {
             )
             .at(&k.file, k.line));
         }
-        self.carry_on(&step);
-        self.reading.analysis.steps.push(step);
+        let analysis = &mut self.reading.analysis;
+        if let Some(step) = self.steps.end(&analysis.model) {
+            analysis.steps.push(step);
+        }
         self.friction_target = FrictionTarget::None;
         Ok(())
     }
 
-    /// What the next step starts with after `step`. A perturbation step does not carry its
-    /// loads on; its boundaries it does. Step-time amplitudes end with the step: their loads
-    /// go on with their final value.
-    fn carry_on(&mut self, step: &Step) {
-        let step_time = crate::carry::step_period(&step.procedure);
-        let mut boundaries = step.boundaries.clone();
-        let mut loads = step.loads.clone();
-        crate::carry::freeze_step_amplitudes(
-            &self.reading.analysis.model,
-            step_time,
-            &mut boundaries,
-            &mut loads,
-        );
-        self.carried.boundaries = boundaries;
-        if !step.perturbation {
-            self.carried.loads = loads;
-            self.carried.fields = step.fields.clone();
-        }
-        self.carried.outputs = step.outputs.clone();
+    /// Applies a card of a step to the step being read.
+    fn apply(&mut self, k: &Keyword, card: Card) -> Result<(), Error> {
+        (self.steps.apply(&self.reading.analysis.model, card))
+            .map_err(|_| k.error("outside of a step"))?;
+        let warnings = self.steps.take_warnings();
+        self.reading.warnings.extend(warnings);
+        Ok(())
     }
 
     fn current_step(&mut self, k: &Keyword) -> Result<&mut Step, Error> {
-        match &mut self.step {
+        match &mut self.steps.step {
             Some(step) => Ok(step),
             None => Err(k.error("outside of a step")),
         }
@@ -2035,59 +1969,7 @@ impl Reader {
             });
         }
         let op_new = k.value("OP") == Some("NEW");
-        match &mut self.step {
-            None => {
-                if op_new {
-                    self.model_boundaries.clear();
-                }
-                self.model_boundaries.extend(new);
-            }
-            Some(step) => {
-                if op_new && !self.flags.boundary {
-                    step.boundaries.clear();
-                }
-                self.flags.boundary = true;
-                step.boundaries.extend(new);
-            }
-        }
-        Ok(())
-    }
-
-    /// The loads of the current step, with the carried ones dropped on `OP=NEW` of the
-    /// first card of the kind.
-    fn step_loads(
-        &mut self,
-        k: &Keyword,
-        flag: fn(&mut StepFlags) -> &mut bool,
-    ) -> Result<&mut Loads, Error> {
-        let op_new = k.value("OP") == Some("NEW");
-        let seen = flag(&mut self.flags);
-        let reset = op_new && !*seen;
-        *seen = true;
-        if reset {
-            match k.name.as_str() {
-                "*CLOAD" => self.carried_loads.0 = 0,
-                "*DLOAD" => self.carried_loads.1 = 0,
-                "*CFLUX" => self.carried_heat[0] = 0,
-                "*DFLUX" => self.carried_heat[1] = 0,
-                "*FILM" => self.carried_heat[2] = 0,
-                "*RADIATE" => self.carried_heat[3] = 0,
-                _ => {}
-            }
-        }
-        let step = self.current_step(k)?;
-        if reset {
-            match k.name.as_str() {
-                "*CLOAD" => step.loads.concentrated.clear(),
-                "*DLOAD" => step.loads.distributed.clear(),
-                "*CFLUX" => step.loads.concentrated_flux.clear(),
-                "*DFLUX" => step.loads.distributed_flux.clear(),
-                "*FILM" => step.loads.films.clear(),
-                "*RADIATE" => step.loads.radiations.clear(),
-                _ => {}
-            }
-        }
-        Ok(&mut step.loads)
+        self.apply(k, Card::Boundary { op_new, items: new })
     }
 
     fn cload(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
@@ -2125,18 +2007,8 @@ impl Reader {
                 sector,
             });
         }
-        self.step_loads(k, |f| &mut f.cload)?;
-        let carried = self.carried_loads.0;
-        let sets = &self.reading.analysis.model.sets;
-        let Some(step) = self.step.as_mut() else {
-            return Err(k.error("outside of a step"));
-        };
-        let own = step.loads.concentrated.split_off(carried);
-        crate::carry::replace_concentrated(&mut step.loads.concentrated, &new, sets);
-        self.carried_loads.0 = step.loads.concentrated.len();
-        step.loads.concentrated.extend(own);
-        step.loads.concentrated.extend(new);
-        Ok(())
+        let op_new = k.value("OP") == Some("NEW");
+        self.apply(k, Card::Cload { op_new, items: new })
     }
 
     fn dload(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
@@ -2200,22 +2072,8 @@ impl Reader {
                 sector,
             });
         }
-        self.step_loads(k, |f| &mut f.dload)?;
-        let carried = self.carried_loads.1;
-        let sets = &self.reading.analysis.model.sets;
-        let Some(step) = self.step.as_mut() else {
-            return Err(k.error("outside of a step"));
-        };
-        let own = step.loads.distributed.split_off(carried);
-        let warnings =
-            crate::carry::replace_distributed(&mut step.loads.distributed, &mut new, sets);
-        self.carried_loads.1 = step.loads.distributed.len();
-        step.loads.distributed.extend(own);
-        step.loads.distributed.extend(new);
-        for warning in warnings {
-            self.warn(warning);
-        }
-        Ok(())
+        let op_new = k.value("OP") == Some("NEW");
+        self.apply(k, Card::Dload { op_new, items: new })
     }
 
     fn cflux(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
@@ -2233,18 +2091,8 @@ impl Reader {
                 amplitude: amplitude.clone(),
             });
         }
-        self.step_loads(k, |f| &mut f.cflux)?;
-        let carried = self.carried_heat[0];
-        let sets = &self.reading.analysis.model.sets;
-        let Some(step) = self.step.as_mut() else {
-            return Err(k.error("outside of a step"));
-        };
-        let own = step.loads.concentrated_flux.split_off(carried);
-        crate::carry::replace_concentrated_flux(&mut step.loads.concentrated_flux, &new, sets);
-        self.carried_heat[0] = step.loads.concentrated_flux.len();
-        step.loads.concentrated_flux.extend(own);
-        step.loads.concentrated_flux.extend(new);
-        Ok(())
+        let op_new = k.value("OP") == Some("NEW");
+        self.apply(k, Card::Cflux { op_new, items: new })
     }
 
     fn dflux(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
@@ -2271,18 +2119,8 @@ impl Reader {
                 amplitude: amplitude.clone(),
             });
         }
-        self.step_loads(k, |f| &mut f.dflux)?;
-        let carried = self.carried_heat[1];
-        let sets = &self.reading.analysis.model.sets;
-        let Some(step) = self.step.as_mut() else {
-            return Err(k.error("outside of a step"));
-        };
-        let own = step.loads.distributed_flux.split_off(carried);
-        crate::carry::replace_distributed_flux(&mut step.loads.distributed_flux, &new, sets);
-        self.carried_heat[1] = step.loads.distributed_flux.len();
-        step.loads.distributed_flux.extend(own);
-        step.loads.distributed_flux.extend(new);
-        Ok(())
+        let op_new = k.value("OP") == Some("NEW");
+        self.apply(k, Card::Dflux { op_new, items: new })
     }
 
     fn film(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
@@ -2315,18 +2153,8 @@ impl Reader {
                 film_amplitude: film_amplitude.clone(),
             });
         }
-        self.step_loads(k, |f| &mut f.film)?;
-        let carried = self.carried_heat[2];
-        let sets = &self.reading.analysis.model.sets;
-        let Some(step) = self.step.as_mut() else {
-            return Err(k.error("outside of a step"));
-        };
-        let own = step.loads.films.split_off(carried);
-        crate::carry::replace_films(&mut step.loads.films, &new, sets);
-        self.carried_heat[2] = step.loads.films.len();
-        step.loads.films.extend(own);
-        step.loads.films.extend(new);
-        Ok(())
+        let op_new = k.value("OP") == Some("NEW");
+        self.apply(k, Card::Film { op_new, items: new })
     }
 
     fn radiate(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
@@ -2367,18 +2195,8 @@ impl Reader {
                 radiation_amplitude: radiation_amplitude.clone(),
             });
         }
-        self.step_loads(k, |f| &mut f.radiate)?;
-        let carried = self.carried_heat[3];
-        let sets = &self.reading.analysis.model.sets;
-        let Some(step) = self.step.as_mut() else {
-            return Err(k.error("outside of a step"));
-        };
-        let own = step.loads.radiations.split_off(carried);
-        crate::carry::replace_radiations(&mut step.loads.radiations, &new, sets);
-        self.carried_heat[3] = step.loads.radiations.len();
-        step.loads.radiations.extend(own);
-        step.loads.radiations.extend(new);
-        Ok(())
+        let op_new = k.value("OP") == Some("NEW");
+        self.apply(k, Card::Radiate { op_new, items: new })
     }
 
     fn temperature(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
@@ -2415,14 +2233,8 @@ impl Reader {
             }
         };
         let op_new = k.value("OP") == Some("NEW");
-        let reset = op_new && !self.flags.temperature;
-        self.flags.temperature = true;
-        let step = self.current_step(k)?;
-        if reset {
-            step.fields.clear();
-        }
-        step.fields.push(DefinedField { kind, amplitude });
-        Ok(())
+        let field = DefinedField { kind, amplitude };
+        self.apply(k, Card::Temperature { op_new, field })
     }
 
     fn model_change(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
@@ -2518,24 +2330,12 @@ impl Reader {
             section_forces: k.has("SECTION FORCES"),
             time_points: k.value("TIME POINTS").map(normalized_name),
         };
-        let seen = match kind {
-            FileKind::Node => &mut self.flags.node_file,
-            FileKind::Element => &mut self.flags.el_file,
-            FileKind::Contact => &mut self.flags.contact_file,
+        let card = match kind {
+            FileKind::Node => Card::NodeFile(output),
+            FileKind::Element => Card::ElFile(output),
+            FileKind::Contact => Card::ContactFile(output),
         };
-        let first = !*seen;
-        *seen = true;
-        let step = self.current_step(k)?;
-        let list = match kind {
-            FileKind::Node => &mut step.outputs.node_file,
-            FileKind::Element => &mut step.outputs.el_file,
-            FileKind::Contact => &mut step.outputs.contact_file,
-        };
-        if first {
-            list.clear();
-        }
-        list.push(output);
-        Ok(())
+        self.apply(k, card)
     }
 
     fn history_output(
@@ -2586,24 +2386,12 @@ impl Reader {
                 _ => None,
             },
         };
-        let seen = match kind {
-            FileKind::Node => &mut self.flags.node_print,
-            FileKind::Element => &mut self.flags.el_print,
-            FileKind::Contact => &mut self.flags.contact_print,
+        let card = match kind {
+            FileKind::Node => Card::NodePrint(output),
+            FileKind::Element => Card::ElPrint(output),
+            FileKind::Contact => Card::ContactPrint(output),
         };
-        let first = !*seen;
-        *seen = true;
-        let step = self.current_step(k)?;
-        let list = match kind {
-            FileKind::Node => &mut step.outputs.node_print,
-            FileKind::Element => &mut step.outputs.el_print,
-            FileKind::Contact => &mut step.outputs.contact_print,
-        };
-        if first {
-            list.clear();
-        }
-        list.push(output);
-        Ok(())
+        self.apply(k, card)
     }
 }
 

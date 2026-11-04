@@ -1,8 +1,8 @@
-//! PrePoMax's selection dialog ("Set Selection"): while an item dialog picks a region in the
+//! The selection dialog ("Set Selection"): while an item dialog picks a region in the
 //! 3D view, this window chooses what a click selects, and keeps the history of picks so that
 //! Undo works.
 //!
-//! As in PrePoMax a click without modifier replaces the selection, Shift adds, Ctrl removes
+//! A click without modifier replaces the selection, Shift adds, Ctrl removes
 //! and Shift+Ctrl keeps the intersection. A click into empty space clears the selection.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -98,7 +98,7 @@ pub enum Target {
     /// Pressure and forces act on element faces.
     Faces,
     /// Contacts and ties in 3D models: element faces, or the edges of shells, which
-    /// CalculiX takes as faces too.
+    /// the solver takes as faces too.
     Surfaces,
     /// In 2D models they act on the outline: the edges of the 2D elements, stored as faces.
     Edges,
@@ -110,7 +110,7 @@ pub enum Target {
     Point,
 }
 
-/// What a click selects, PrePoMax's radio buttons in the dialog.
+/// What a click selects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectBy {
     /// The surface patch under the mouse, or the edge or corner point near the click.
@@ -276,7 +276,7 @@ impl Items {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Picker {
     pub select_by: SelectBy,
-    /// Angles in degrees for the angle modes, PrePoMax's default 30°.
+    /// Angles in degrees for the angle modes, the default 30°.
     angle: f64,
     ids: String,
     /// Shows the mesh based modes next to the geometry based ones.
@@ -321,7 +321,7 @@ impl Picker {
         self.show(ctx, anchor, WindowKind::Region(target), can_undo)
     }
 
-    /// The selection window of a region of whole parts: as in PrePoMax only the part mode
+    /// The selection window of a region of whole parts: only the part mode
     /// is enabled, the mode chosen for other regions stays.
     pub fn parts_window(
         &mut self,
@@ -369,28 +369,31 @@ impl Picker {
             _ => None,
         };
         let mut action = None;
-        // egui's own constraint uses a default size before the first layout and pins the
-        // window there; keep it on screen with its real size instead. It follows the dialog,
-        // so it is not movable: egui keeps a movable window where it first was.
+        // It first opens beside the dialog; after that it stays where the user dragged it.
+        // egui's own constraint uses a default size before the first layout, so the first
+        // place is worked out with the real size where it is known.
         let id = crate::ids::window(ctx, "selection window");
         let width = egui::AreaState::load(ctx, id)
             .and_then(|s| s.size)
             .map_or(350.0, |s| s.x);
         let screen = ctx.content_rect();
-        let pos = egui::pos2(
-            (anchor.right() + 8.0)
-                .min(screen.right() - width)
-                .max(screen.left()),
-            anchor.top(),
-        );
+        // Right of the dialog, or left of it where the screen ends: beside the properties
+        // panel, over the 3D view.
+        let right = anchor.right() + 8.0;
+        let x = if right + width > screen.right() {
+            anchor.left() - 8.0 - width
+        } else {
+            right
+        };
+        let pos = egui::pos2(x.max(screen.left()), anchor.top());
         egui::Window::new("Selection")
             .id(id)
-            .constrain(false)
-            .movable(false)
+            .constrain(true)
+            .movable(true)
             .collapsible(false)
             .resizable(false)
             .title_bar(true)
-            .current_pos(pos)
+            .default_pos(pos)
             .show(ctx, |ui| {
                 ui.horizontal_top(|ui| {
                     ui.group(|ui| {
@@ -487,7 +490,7 @@ impl Picker {
     fn part_mode_row(&self, ui: &mut egui::Ui, mode: SelectBy) {
         let part = mode == SelectBy::GeometryPart;
         ui.add_enabled_ui(part, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let _ = ui.radio(part, mode.label(Target::Faces));
                 if mode.angle_mode() {
                     let mut angle = self.angle;
@@ -513,7 +516,7 @@ impl Picker {
 
     fn labelled_mode_row(&mut self, ui: &mut egui::Ui, mode: SelectBy, label: &str, enabled: bool) {
         ui.add_enabled_ui(enabled, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui.radio(self.select_by == mode, label).clicked() {
                     self.select_by = mode;
                 }
@@ -567,6 +570,19 @@ impl Picker {
         }
         let face = hit.face;
         let angle = self.angle.to_radians();
+        // The surface angle mode on a mesh generated from geometry selects whole CAD faces,
+        // like the geometry mode, instead of the nodes or element faces it grew over.
+        if self.select_by == SelectBy::GeometrySurfaceAngle && model.has_cad() {
+            let entities: BTreeSet<CadEntity> = picker
+                .faces_by_angle(face, angle)
+                .into_iter()
+                .filter_map(|f| crate::cad_selection::face_of(model, picker.face_id(f)))
+                .map(CadEntity::Face)
+                .collect();
+            if !entities.is_empty() {
+                return Items::Geometry(entities);
+            }
+        }
         let faces: Vec<usize> = match self.select_by {
             SelectBy::Geometry => {
                 if target == Target::Surfaces
@@ -865,7 +881,7 @@ impl PartPicks {
     pub fn click(&mut self, model: &Model, hit: Option<&Hit>, operation: Operation) {
         match hit.and_then(|hit| model.parts.get(hit.part)) {
             Some(part) => (self.history).push(operation, BTreeSet::from([part.name.clone()])),
-            // PrePoMax clears the selection on a plain click into empty space.
+            // Nodalis clears the selection on a plain click into empty space.
             None if operation == Operation::Replace => self.clear(),
             None => {}
         }
@@ -1463,7 +1479,7 @@ mod tests {
     use plx_model::Region;
 
     #[test]
-    fn history_replays_prepomax_operations() {
+    fn history_replays_operations() {
         let mut history = History::default();
         history.push(Operation::Replace, BTreeSet::from([1, 2, 3]));
         history.push(Operation::Add, BTreeSet::from([4]));

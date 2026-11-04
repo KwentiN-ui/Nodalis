@@ -5,21 +5,21 @@
 Nodalis meshes each geometry part separately with Gmsh. Parts do not share nodes; connect them
 with ties, contacts or node ties (@constraints).
 
-- #menu("Mesh", "Mesh All Parts") meshes every part.
+- #menu("Geometry", "Mesh All Parts") meshes every part.
 - #ui("Create Mesh") in the context menu of a part meshes only this part. Its old mesh is
   replaced; the other parts keep their node and element numbers.
 
 The output pane lists each part with its element count and size range. Afterwards Nodalis
-switches to the #ui("FE Model") tab.
+switches to the FE Model workspace.
 
 === Cancelling the meshing <cancel-meshing>
 
 Gmsh runs in a separate process, so a meshing that takes too long, for example because the
 element size is too small, can be cancelled at any time. While it runs, the status bar shows
-#ui("Meshing ...") with a #ui("Cancel") button; #menu("Mesh", "Cancel Meshing") and the
-#ui("Stop") button of the toolbar do the same. The mesher stops at once and the parts keep
+#ui("Meshing ...") with a #ui("Cancel") button; #menu("Geometry", "Cancel") and the
+#ui("Stop") tile of the ribbon do the same. The mesher stops at once and the parts keep
 the mesh they had before. During #ui("Update Project") the #ui("Stop") buttons of the
-Solution Monitor and the project toolbar cancel a meshing in the same way.
+Solution Monitor and #ui("Stop") in the Project workspace cancel a meshing in the same way.
 
 #screenshot("meshing-cancel.png", [The status bar while meshing, with the Cancel button])
 
@@ -47,7 +47,7 @@ section on shells is reported as an invalid section.
 
 === Changing the element type <element-type>
 
-A part on the #ui("FE Model") tab can be given another element type with the
+A part in the FE Model workspace can be given another element type with the
 same nodes: double-click the part and choose it in the #ui("Element type") box, then #ui("OK").
 A part with several element types has one box per type.
 
@@ -75,18 +75,18 @@ new elements the same type, and in a 2D model a new model space keeps the reduce
 === Meshing errors
 
 If Gmsh fails, the output pane shows "Meshing failed: ..." with the message of Gmsh. The faces,
-edges and points the message names are marked red on the #ui("Geometry") tab, so you can see
+edges and points the message names are marked red in the Geometry workspace, so you can see
 where the problem is. The marking disappears with the next meshing.
 
 == Mesh setup <mesh-setup>
 
-The mesh is controlled by the #ui("Mesh Setup") items on the #ui("Geometry") tab. Create them
-with #menu("Mesh", "Create Mesh Setup Item ...") or #ui("Create ...") on the #ui("Mesh Setup")
-container.
+The mesh is controlled by the #ui("Mesh Setup") items in the Geometry workspace. Create them
+with #ui("Local Mesh Size"), #ui("Extrude Mesh") or #ui("Tetra. Gmsh") on the #ui("Geometry")
+tab of the ribbon.
 
 === Default mesh parameters
 
-#menu("Mesh", "Default Mesh Parameters ...") sets the parameters for every part that is not
+#menu("Geometry", "Default Parameters") sets the parameters for every part that is not
 covered by a #ui("Meshing Parameters") item. #ui("Mesh All Parts") in this dialog applies the
 values and meshes at once.
 
@@ -102,12 +102,16 @@ values and meshes at once.
     straight edge between the corner nodes (only with second order).],
   [Optimize mesh (Netgen)], [Improves the element quality after meshing (default on).],
   [Quad-dominated surface mesh], [Creates mainly quadrilaterals on faces: plane elements of 2D
-    models and shells of 3D models.],
+    models and shells of 3D models. Solids are not affected: their tetrahedra need triangles on
+    the faces. The option is greyed out when the parameters reach only solids.],
   [Hexahedra where possible], [Meshes every solid that is a straight extrusion of one of its
     faces, as an Extrude Mesh item with its defaults would (@extrude-mesh), or a body of
     revolution with hexahedra (@revolve-mesh); the other solids keep tetrahedra (default
     off).],
 )
+
+#screenshot("quad-dominated-solids.png", [Quad-dominated surface mesh greyed out for a geometry of
+  solids only])
 
 === Mesh setup items
 
@@ -200,6 +204,6 @@ of revolution, a plain ring for example, is meshed as an extrusion.
 
 == Using an existing mesh
 
-A CalculiX mesh can be imported with #menu("Geometry", "Import ...") (@mesh-import). Its node sets, element
+A CalculiX mesh can be imported with #menu("Geometry", "Import Geometry") (@mesh-import). Its node sets, element
 sets and surfaces appear under #ui("Mesh") in the #ui("FE Model") tree and can be used as
 regions. Such a mesh has no geometry, so regions are picked on the mesh.

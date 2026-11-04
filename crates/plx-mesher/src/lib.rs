@@ -209,12 +209,12 @@ pub struct GeneratedMesh {
 }
 
 /// Reads a STEP, IGES or BREP file in the stored SI units, see [`read_files`]. The mesh setup
-/// starts with PrePoMax's sizes for the geometry's extent.
+/// starts with the sizes for the geometry's extent.
 pub fn import_cad(path: &Path, units: UnitSystem) -> Result<CadImport, GmshError> {
     import_cad_files(&[path.to_path_buf()], units)
 }
 
-/// Reads several STEP, IGES or BREP files into one geometry, like PrePoMax's import of
+/// Reads several STEP, IGES or BREP files into one geometry, the import of
 /// several selected files: their parts sit side by side, numbered on from file to file.
 pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImport, GmshError> {
     if paths.is_empty() {
@@ -459,7 +459,7 @@ pub struct CadAddition {
     pub added: Vec<String>,
 }
 
-/// Adds the parts of CAD files to a geometry, PrePoMax's import into a model that has
+/// Adds the parts of CAD files to a geometry: the import into a model that has
 /// one, or into a model with a mesh but no geometry (`None`). The parts already there keep
 /// their names, local mesh sizes and selections (through [`CadAddition::renumbered`]); the
 /// new ones get names neither the geometry nor `taken`, e.g. the mesh parts of the model,
@@ -694,7 +694,7 @@ fn angle(a: [f64; 3], b: [f64; 3]) -> f64 {
     cos.clamp(-1.0, 1.0).acos()
 }
 
-/// Meshes every part of the geometry, one after the other as PrePoMax does. Parts share no
+/// Meshes every part of the geometry, one after the other. Parts share no
 /// nodes, line parts meeting at a point included: the contact search finds such ends and
 /// ties them.
 pub fn generate_mesh(geometry: &Geometry) -> Result<GeneratedMesh, GmshError> {
@@ -833,7 +833,7 @@ fn free_edges(gmsh: &Gmsh) -> Result<Vec<i32>, GmshError> {
         .collect())
 }
 
-/// Deletes a part of the geometry, PrePoMax's Delete of a geometry part; `None` once no
+/// Deletes a part of the geometry; `None` once no
 /// part is left. The other parts keep their names. Gmsh numbers the faces and edges anew
 /// when it reads the smaller geometry, so the local mesh sizes are renumbered after where
 /// the faces and edges lie; those of the deleted part are dropped.
@@ -1116,7 +1116,11 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
             return extrude::extrude_part_mesh(gmsh, geometry, part, volume, extrude)?
                 .map_err(GmshError::Other);
         }
-        let options = MeshOptions::of_part(geometry, part);
+        let mut options = MeshOptions::of_part(geometry, part);
+        // Recombined boundary faces would make Gmsh fill the solid with pyramids next to
+        // them, which neither the solver nor the tetrahedra read here take: solids get
+        // triangles on their faces whatever the quad-dominated option says.
+        options.quads = false;
         options.apply(gmsh)?;
         let faces: BTreeSet<i32> = gmsh.adjacencies(3, volume)?.1.into_iter().collect();
         local_sizes(gmsh, geometry, &faces)?;
@@ -1234,7 +1238,7 @@ fn shell_part_mesh(
 }
 
 /// Meshes an edge outside the faces with 2- or 3-node lines, typed as beams (`B31`, `B32`);
-/// the section decides what CalculiX makes of them. The mesh holds the one part, numbered
+/// the section decides what the solver makes of them. The mesh holds the one part, numbered
 /// from 1.
 fn line_part_mesh(
     gmsh: &Gmsh,
@@ -1277,7 +1281,7 @@ fn line_part_mesh(
     };
     let (_, nodes) = gmsh.elements(gmsh_type, edge)?;
     for element in nodes.chunks_exact(shape.node_count()) {
-        // Gmsh lists the end nodes first and the midside node last; CalculiX wants the
+        // Gmsh lists the end nodes first and the midside node last; the solver wants the
         // midside node in the middle.
         let order: &[usize] = if shape == ElementShape::Line3 {
             &[0, 2, 1]
@@ -1483,8 +1487,8 @@ pub fn merge_part(mesh: &FeMesh, part_mesh: FeMesh) -> FeMesh {
     merged
 }
 
-/// Deletes a part of a mesh with its elements and the nodes no other part uses, PrePoMax's
-/// Delete of a mesh part. Sets and surfaces lose them too; the other parts keep their
+/// Deletes a part of a mesh with its elements and the nodes no other part uses.
+/// Sets and surfaces lose them too; the other parts keep their
 /// numbers.
 pub fn delete_mesh_part(mesh: &FeMesh, part: &str) -> FeMesh {
     delete_mesh_parts(mesh, &[part.to_owned()])
@@ -1531,7 +1535,8 @@ struct MeshOptions {
     straight_midside_nodes: bool,
     netgen: bool,
     algorithms: (Algorithm2d, Algorithm3d),
-    /// Recombines triangles into quadrilaterals where Gmsh can (faces only).
+    /// Recombines triangles into quadrilaterals where Gmsh can; for faces only, never for
+    /// the boundary of a solid meshed with tetrahedra.
     quads: bool,
 }
 
@@ -1814,7 +1819,7 @@ fn label_name(label: &str) -> Option<String> {
     calculix_name(last)
 }
 
-/// A name CalculiX accepts: letters, digits, `-` and `_`, upper case, at most 60 characters.
+/// A name the solver accepts: letters, digits, `-` and `_`, upper case, at most 60 characters.
 /// German umlauts are written out, as "Ä" as "AE".
 fn calculix_name(label: &str) -> Option<String> {
     let name: String = label

@@ -28,7 +28,7 @@
 
 use plxs_core::{Error, Result};
 
-use crate::{LdltSolver, LinearSolver, SparseMatrix};
+use crate::{LdltSolver, LinearSolver, PcgSolver, SparseMatrix};
 
 /// Eigenpairs, sorted by eigenvalue (frequencies ascending; buckling factors ascending
 /// among the positive ones).
@@ -89,6 +89,9 @@ pub trait EigenSolver {
 
 pub struct ShiftInvertLanczos {
     solver: LdltSolver,
+    /// The inner solver when the shifted systems are solved by conjugate gradients
+    /// ([`Self::set_iterative`]) instead of the factorization.
+    iterative: Option<PcgSolver>,
     pub options: LanczosOptions,
 }
 
@@ -96,7 +99,32 @@ impl ShiftInvertLanczos {
     pub fn new(threads: usize, options: LanczosOptions) -> Self {
         let mut solver = LdltSolver::new(threads);
         solver.set_regularization(1e-12);
-        Self { solver, options }
+        Self {
+            solver,
+            iterative: None,
+            options,
+        }
+    }
+
+    /// Solves the shifted systems of the Lanczos steps by conjugate gradients with an
+    /// incomplete Cholesky preconditioner instead of factorizing them: far less memory, for
+    /// models whose factor does not fit. The shifted matrix must then be positive definite
+    /// (frequencies: a shift at or below the spectrum; buckling: `K`), and without a
+    /// factorization there is no Sturm count. In its place every run ends with rounds of a
+    /// fresh random start vector orthogonal to the found eigenvectors, until a round finds
+    /// no new eigenvalue among the wanted ones (the missing copies of a multiple eigenvalue
+    /// show up there); [`EigenPairs::sturm_confirmed`] stays false.
+    pub fn set_iterative(&mut self, iterative: bool) {
+        self.iterative = iterative.then(PcgSolver::new);
+    }
+
+    pub fn is_iterative(&self) -> bool {
+        self.iterative.is_some()
+    }
+
+    /// The direct solver, for an estimate of its factor before the choice.
+    pub fn direct_mut(&mut self) -> &mut LdltSolver {
+        &mut self.solver
     }
 
     /// `K x = λ M x`: the `count` eigenvalues nearest to `shift` (the smallest ones for
@@ -114,6 +142,36 @@ impl ShiftInvertLanczos {
             return Ok(EigenPairs::default());
         }
         let shifted = SparseMatrix::linear_combination(k, 1.0, m, -shift);
+        let basis = self.basis_size(count);
+        if let Some(pcg) = self.iterative.as_mut() {
+            pcg.analyze(shifted.pattern())?;
+            pcg.factorize(&shifted)?;
+            let pcg = &*pcg;
+            let mut op = |x: &[f64], y: &mut [f64]| -> Result<()> {
+                m.multiply(x, y);
+                pcg.solve(y)
+            };
+            let b_mul = |x: &[f64], y: &mut [f64]| m.multiply(x, y);
+            let (values, vectors, steps) = confirmed_by_rounds(
+                n,
+                count,
+                basis,
+                &self.options,
+                &mut op,
+                &b_mul,
+                |theta: f64| theta.abs(),
+                |theta| shift + 1.0 / theta,
+                |a, b| a.total_cmp(&b),
+            )?;
+            let residual = residual_norm(k, m, &values, &vectors, |lambda| -lambda);
+            return Ok(EigenPairs {
+                values,
+                vectors,
+                residual,
+                steps,
+                sturm_confirmed: false,
+            });
+        }
         self.solver.analyze(k.pattern())?;
         self.solver.factorize(&shifted).map_err(|e| match e {
             Error::Numerical { message, .. } => Error::Numerical {
@@ -207,6 +265,45 @@ impl ShiftInvertLanczos {
         if count == 0 {
             return Ok(EigenPairs::default());
         }
+        // Most negative μ = −1/λ first; positive μ (negative λ) only when nothing else is left.
+        let preference = |theta: f64| {
+            if theta < 0.0 { -theta } else { -1e300 + theta }
+        };
+        // Positive factors ascending, then negative ones by magnitude.
+        let order = |a: f64, b: f64| {
+            let key = |v: f64| if v > 0.0 { (0, v) } else { (1, -v) };
+            key(a).partial_cmp(&key(b)).unwrap()
+        };
+        let basis = self.basis_size(count);
+        if let Some(pcg) = self.iterative.as_mut() {
+            pcg.analyze(k.pattern())?;
+            pcg.factorize(k)?;
+            let pcg = &*pcg;
+            let mut op = |x: &[f64], y: &mut [f64]| -> Result<()> {
+                k_sigma.multiply(x, y);
+                pcg.solve(y)
+            };
+            let b_mul = |x: &[f64], y: &mut [f64]| k.multiply(x, y);
+            let (values, vectors, steps) = confirmed_by_rounds(
+                n,
+                count,
+                basis,
+                &self.options,
+                &mut op,
+                &b_mul,
+                preference,
+                |theta| -1.0 / theta,
+                order,
+            )?;
+            let residual = residual_norm(k, k_sigma, &values, &vectors, |lambda| lambda);
+            return Ok(EigenPairs {
+                values,
+                vectors,
+                residual,
+                steps,
+                sturm_confirmed: false,
+            });
+        }
         self.solver.analyze(k.pattern())?;
         self.solver.factorize(k).map_err(|e| match e {
             Error::Numerical { message, .. } => Error::Numerical {
@@ -223,10 +320,6 @@ impl ShiftInvertLanczos {
                 message: "the stiffness matrix is not positive definite; buckling needs a stable reference state".into(),
             });
         }
-        // Most negative μ = −1/λ first; positive μ (negative λ) only when nothing else is left.
-        let preference = |theta: f64| {
-            if theta < 0.0 { -theta } else { -1e300 + theta }
-        };
         let mut scratch = vec![0.0; n];
         let mut lanczos = Lanczos::new(n, self.basis_size(count), self.options.seed);
         let mut rounds = 0;
@@ -245,11 +338,7 @@ impl ShiftInvertLanczos {
                 .into_iter()
                 .map(|(theta, x)| (-1.0 / theta, x))
                 .collect();
-            // Positive factors ascending, then negative ones by magnitude.
-            pairs.sort_by(|a, b| {
-                let key = |v: f64| if v > 0.0 { (0, v) } else { (1, -v) };
-                key(a.0).partial_cmp(&key(b.0)).unwrap()
-            });
+            pairs.sort_by(|a, b| order(a.0, b.0));
             let values: Vec<f64> = pairs.iter().map(|p| p.0).collect();
             let positive = values.iter().filter(|v| **v > 0.0).count().min(count);
             let (actual, found) = if positive > 0 {
@@ -318,6 +407,57 @@ impl EigenSolver for ShiftInvertLanczos {
         shift: f64,
     ) -> Result<EigenPairs> {
         self.frequencies(k, m, count, shift)
+    }
+}
+
+/// Lanczos runs on `op` until a round with a fresh random start vector (orthogonal to the
+/// converged eigenvectors) and one more wanted eigenpair changes none of the `count`
+/// wanted eigenvalues: the check without a Sturm count of the iterative inner solver.
+/// `value` maps a Ritz value to the eigenvalue, `order` sorts the eigenvalues. Returns
+/// values, vectors and the number of Lanczos steps.
+#[allow(clippy::too_many_arguments)]
+fn confirmed_by_rounds(
+    n: usize,
+    count: usize,
+    basis: usize,
+    options: &LanczosOptions,
+    op: &mut Operator<'_>,
+    b_mul: &dyn Fn(&[f64], &mut [f64]),
+    preference: impl Fn(f64) -> f64 + Copy,
+    value: impl Fn(f64) -> f64,
+    order: impl Fn(f64, f64) -> std::cmp::Ordering,
+) -> Result<(Vec<f64>, Vec<Vec<f64>>, usize)> {
+    let mut lanczos = Lanczos::new(n, basis, options.seed);
+    let mut previous: Option<Vec<f64>> = None;
+    let mut rounds = 0;
+    loop {
+        lanczos.run(count, op, b_mul, preference, options)?;
+        let mut pairs: Vec<(f64, Vec<f64>)> = lanczos
+            .wanted(count, preference)
+            .into_iter()
+            .map(|(theta, x)| (value(theta), x))
+            .collect();
+        pairs.sort_by(|a, b| order(a.0, b.0));
+        pairs.truncate(count);
+        let values: Vec<f64> = pairs.iter().map(|p| p.0).collect();
+        let same = previous.as_ref().is_some_and(|p| {
+            p.len() == values.len()
+                && p.iter()
+                    .zip(&values)
+                    .all(|(a, b)| (a - b).abs() <= 1e-6 * a.abs().max(b.abs()))
+        });
+        let exhausted = lanczos.locked.len() + lanczos.k() >= n;
+        if same || exhausted || rounds >= options.max_sturm_rounds {
+            return Ok((
+                values,
+                pairs.into_iter().map(|p| p.1).collect(),
+                lanczos.steps,
+            ));
+        }
+        previous = Some(values);
+        rounds += 1;
+        lanczos.lock_and_restart(options.tolerance);
+        lanczos.extra_wanted += 1;
     }
 }
 
@@ -848,6 +988,71 @@ mod tests {
         let mut mx = vec![0.0; 2 * n];
         m.multiply(&pairs.vectors[0], &mut mx);
         assert!(dot(&pairs.vectors[1], &mx).abs() < 1e-8);
+    }
+
+    #[test]
+    fn the_iterative_inner_solver_finds_the_same_eigenvalues() {
+        let n = 300;
+        let (k, m) = chain(n, 1000.0, 0.5);
+        let exact = exact_chain(n, 1000.0, 0.5);
+        let mut solver = ShiftInvertLanczos::new(1, LanczosOptions::default());
+        solver.set_iterative(true);
+        let pairs = solver.frequencies(&k, &m, 8, 0.0).unwrap();
+        assert_eq!(pairs.values.len(), 8);
+        for (v, e) in pairs.values.iter().zip(&exact) {
+            assert!((v - e).abs() <= 1e-8 * e, "{v} vs {e}");
+        }
+        assert!(!pairs.sturm_confirmed);
+        assert!(pairs.residual < 1e-7, "{}", pairs.residual);
+
+        // Two identical chains: every eigenvalue double; the rounds with a fresh start
+        // vector find the second copies without a Sturm count.
+        let n = 60;
+        let blocks: Vec<[u32; 2]> = (0..n as u32 - 1)
+            .flat_map(|i| [[i, i + 1], [i + n as u32, i + n as u32 + 1]])
+            .collect();
+        let pattern = Arc::new(Pattern::from_blocks(2 * n, blocks.iter().map(|b| &b[..])));
+        let mut k = SparseMatrix::zeros(pattern.clone());
+        let mut m = SparseMatrix::zeros(pattern);
+        for c in 0..2 {
+            for i in 0..n as u32 {
+                let g = i + c * n as u32;
+                k.add(g, g, 2.0);
+                m.add(g, g, 1.0);
+                if i + 1 < n as u32 {
+                    k.add(g, g + 1, -1.0);
+                }
+            }
+        }
+        let exact = exact_chain(n, 1.0, 1.0);
+        let pairs = solver.frequencies(&k, &m, 7, 0.0).unwrap();
+        let expected = [
+            exact[0], exact[0], exact[1], exact[1], exact[2], exact[2], exact[3],
+        ];
+        for (v, e) in pairs.values.iter().zip(&expected) {
+            assert!(
+                (v - e).abs() <= 1e-8,
+                "{:?} vs {:?}",
+                pairs.values,
+                expected
+            );
+        }
+
+        // Buckling: the same factors as with the factorization.
+        let n = 40;
+        let (k, _) = chain(n, 100.0, 1.0);
+        let mut k_sigma = k.clone();
+        k_sigma.fill_zero();
+        for i in 0..n as u32 {
+            k_sigma.add(i, i, -(1.0 + i as f64 / n as f64));
+        }
+        let direct = ShiftInvertLanczos::new(1, LanczosOptions::default())
+            .buckling(&k, &k_sigma, 4)
+            .unwrap();
+        let iterative = solver.buckling(&k, &k_sigma, 4).unwrap();
+        for (a, b) in iterative.values.iter().zip(&direct.values) {
+            assert!((a - b).abs() <= 1e-8 * b.abs(), "{a} vs {b}");
+        }
     }
 
     #[test]

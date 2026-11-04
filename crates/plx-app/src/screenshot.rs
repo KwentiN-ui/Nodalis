@@ -34,6 +34,8 @@ struct Request {
 pub struct Screenshot {
     /// Requested capture, sent with the next frame.
     pending: Option<Request>,
+    /// The pass the last capture was sent in.
+    sent: Option<u64>,
 }
 
 impl Screenshot {
@@ -42,6 +44,13 @@ impl Screenshot {
             target,
             region: None,
         });
+    }
+
+    /// Whether a capture is under way: what should not show in it, such as the floating
+    /// bar, stays hidden.
+    pub fn capturing(&self, ctx: &Context) -> bool {
+        self.pending.is_some()
+            || (self.sent).is_some_and(|pass| ctx.cumulative_pass_nr() <= pass + 2)
     }
 
     /// A capture of `region` of the window, in points, instead of the 3D view.
@@ -86,6 +95,7 @@ impl Screenshot {
         if let Some(request) = self.pending.take() {
             ctx.send_viewport_cmd(ViewportCommand::Screenshot(UserData::new(request)));
             ctx.request_repaint();
+            self.sent = Some(ctx.cumulative_pass_nr());
         }
     }
 }

@@ -349,7 +349,7 @@ pub fn draw(ui: &Ui, rect: Rect, camera: &Camera, boxes: &mut [PlotBox]) -> Vec<
             events.push(PlotEvent::Edit(plot.index));
         }
         response.context_menu(|ui| {
-            if ui.button("Edit...").clicked() {
+            if ui.button("Edit …").clicked() {
                 events.push(PlotEvent::Edit(plot.index));
                 ui.close();
             }
@@ -751,7 +751,7 @@ impl EditDialog {
                     .show(ui, |ui| {
                         if !table {
                             ui.label("Display");
-                            ui.horizontal(|ui| {
+                            ui.horizontal_wrapped(|ui| {
                                 ui.radio_value(&mut draft.on_path, false, "In Box");
                                 ui.radio_value(&mut draft.on_path, true, "On Path");
                             });

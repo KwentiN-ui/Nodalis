@@ -2,7 +2,7 @@
 
 == Animation <animation>
 
-The animation button on the results toolbar opens the animation window.
+The animation button among the result controls of the ribbon opens the animation window.
 
 #screenshot("animation.png", [Animation window])
 
@@ -22,7 +22,7 @@ The buttons step through the frames or play them; the slider selects a frame. Cl
 shows the increment that was shown at the start, or the one you selected meanwhile.
 
 The window can stay open while you change the increment: the #ui("Step, Increment") list and the
-First, Previous, Next and Last Increment buttons of the results toolbar keep working. The
+First, Previous, Next and Last Increment buttons of the result controls keep working. The
 animation continues with the new increment (or the increments of its step) and keeps its
 settings, so you can page through modes or steps without reopening the window.
 
@@ -48,7 +48,7 @@ settings of the window:
 GIF needs nothing else; its frame times are counted in hundredths of a second, so above 50 frames
 per second it plays slower. MP4 and MKV are written by #link("https://ffmpeg.org")[FFmpeg], which
 has to be installed: Nodalis looks for `ffmpeg` on the `PATH`, or uses the executable set under
-#menu("Tools", "Settings …") > #ui("Post-processing") > #ui("FFmpeg executable"). The video is
+#menu("Edit", "Settings ...") > #ui("Post-processing") > #ui("FFmpeg executable"). The video is
 H.264 (or FFmpeg's default codec if it lacks H.264); its width and height are rounded down to even
 numbers. The output pane reports the saved file or what went wrong.
 

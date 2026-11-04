@@ -1,5 +1,5 @@
 //! The dependent degrees of freedom of the input file, kept in one place so that the
-//! constraints Nodalis writes itself never bind the same one twice. CalculiX aborts when a
+//! constraints Nodalis writes itself never bind the same one twice. The solver aborts when a
 //! degree of freedom is the dependent one of an `*EQUATION` or `*RIGID BODY` and a boundary
 //! condition holds it ("dependent side of a MPC and a SPC"), or when two of them depend on
 //! it ("dependent side of two different MPC's"); `*TIE` skips such degrees of freedom by
@@ -160,7 +160,7 @@ impl Dofs {
 }
 
 /// The start of the comment lines that list the changes.
-const PREFIX: &str = "** Overlapping constraints resolved: ";
+pub(super) const PREFIX: &str = "** Overlapping constraints resolved: ";
 
 /// What was changed for an item, in words.
 fn describe(changes: &Changes) -> String {

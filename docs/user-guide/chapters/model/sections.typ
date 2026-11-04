@@ -3,7 +3,9 @@
 == Sections <sections>
 
 A section assigns a material to elements. Every element needs a section, otherwise the model check
-reports "Elements without material". Create sections with #menu("Model", "Create Section ...").
+reports "Elements without material". Likewise an element may be in only one section: if the same
+part (or overlapping element sets) appears in two sections, the model check reports
+"Part in more than one section" on the later section. Create sections with #menu("Material", "Section").
 
 #screenshot("section.png", [Section dialog])
 
@@ -30,8 +32,7 @@ check reports "Truss structure is a mechanism".]
 
 The profile of a beam is a cross-section of its own, kept under #ui("Sections") >
 #ui("Cross-Sections") in the FE Model tree, so that several beam sections share one definition.
-Double-click #ui("Cross-Sections"), right-click it and choose #ui("Create ..."), or use
-#menu("Model", "Create Cross-Section ...").
+Create one with #ui("Cross-Section") on the #ui("Material") tab of the ribbon.
 
 #fields(
   [Profile], [#ui("Rectangular") (thicknesses a and b in the 1- and 2-direction),
@@ -152,7 +153,6 @@ In the Results workspace CalculiX hands the beams back as the solids it expanded
 lines, coloured by the shown result. Such a profile is moved with its nodes, not turned by
 their rotations.
 
-Turn the profiles off with #menu("View", "Beam Profiles") or in the #link(<settings>)[settings]
-under #ui("Graphics") to see the lines only. Picking still selects the lines.
+Turn the profiles off with #menu("View", "Beam Profiles") to see the lines only. Picking still selects the lines.
 
 #limitation[Line elements can only be used in 3D models.]

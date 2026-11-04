@@ -2,7 +2,7 @@
 //!
 //! An `.frd` file carries its own mesh (nodes and elements, shells and beams already expanded
 //! to solids by CalculiX) followed by one block per result field and increment. Component names
-//! follow PrePoMax: `D1` becomes `U1`, `SXX` becomes `S11` and so on.
+//! follow the common names: `D1` becomes `U1`, `SXX` becomes `S11` and so on.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -83,7 +83,7 @@ struct Reader<'a> {
     blocks: Vec<ResultBlock<'a>>,
 }
 
-/// CalculiX writes a buckle step as data sets of one increment, telling them apart only by
+/// The solver writes a buckle step as data sets of one increment, telling them apart only by
 /// the set number of their headers (`100CL  102`): first the static solution of the step's
 /// loads with the value 0, then one set per buckling mode with its buckling factor. The
 /// reference state becomes increment 0 and the modes count from 1, as in the `.dat` file.
@@ -405,7 +405,7 @@ impl<'a> Reader<'a> {
             0 => AnalysisKind::Static,
             1 => AnalysisKind::Dynamic,
             2 => AnalysisKind::Frequency,
-            // CalculiX writes 3 for every other procedure; with a mode number it is a
+            // The solver writes 3 for every other procedure; with a mode number it is a
             // complex frequency step, with the surface normals and sensitivities a
             // sensitivity step.
             3 if step.mode.is_some() => AnalysisKind::ComplexFrequency,
@@ -444,7 +444,7 @@ impl<'a> Reader<'a> {
         // points are then only told apart by the increment counter of the block header.
         let increment = match (kind, step.mode) {
             // Each nodal diameter counts its modes from 1 again; the block header numbers
-            // them on through the step. CalculiX solves for a cosine and a sine part, so
+            // them on through the step. The solver solves for a cosine and a sine part, so
             // every mode comes twice and only the first of each pair (1, 3, 5) is written.
             (AnalysisKind::Frequency, Some(_)) if step.nodal_diameter.is_some() => {
                 (int_field(header, 58..63).unwrap_or(1).max(1) as u32).div_ceil(2)
@@ -676,7 +676,7 @@ fn float_at(bytes: &[u8], offset: usize, size: usize) -> f64 {
     }
 }
 
-/// The nodes CalculiX expanded each node of the shells, membranes and beams of `input` to,
+/// The nodes the solver expanded each node of the shells, membranes and beams of `input` to,
 /// by the ids of `input`'s nodes, where `results` holds the expanded solids (`OUTPUT=3D`,
 /// CalculiX's default). The expanded elements keep their element numbers, their nodes get new
 /// ones. A node lies off the one it was expanded from along the shell's normal, or across

@@ -1,8 +1,8 @@
-//! PrePoMax's Query tool (Tools > Query): clicks in the 3D view write what was hit to the
-//! output pane, as aligned lines like PrePoMax does, and leave an annotation in the view.
+//! The Query tool (Query on the View and Evaluate tabs): clicks in the 3D view write what was hit to the
+//! output pane, as aligned lines, and leave an annotation in the view.
 //! Nodes, elements, edges, surfaces and parts are queried with one click, edges and
 //! surfaces picked as the geometry based selection picks them; distances, angles and
-//! circles need two or three nodes. As in PrePoMax the annotations stay when the window is closed;
+//! circles need two or three nodes. The annotations stay when the window is closed;
 //! a right click on one deletes it, Remove Annotations deletes them all.
 
 use std::collections::HashMap;
@@ -221,19 +221,20 @@ impl QueryWindow {
                     ),
                 };
                 ui.weak(hint);
-                ui.add_space(8.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Close").clicked() {
-                        action = QueryAction::Close;
-                    }
+                let any = model.is_some_and(|m| !m.query_annotations.is_empty())
+                    || !self.picked.is_empty();
+                let mut remove = false;
+                let footer = crate::dialog::tool_footer_with(ui, None, |ui| {
                     let clear = egui::Button::new("Remove Annotations");
-                    let any = model.is_some_and(|m| !m.query_annotations.is_empty())
-                        || !self.picked.is_empty();
-                    if ui.add_enabled(any, clear).clicked() {
-                        self.picked.clear();
-                        action = QueryAction::RemoveAll;
-                    }
+                    remove = ui.add_enabled(any, clear).clicked();
                 });
+                if remove {
+                    self.picked.clear();
+                    action = QueryAction::RemoveAll;
+                }
+                if footer == crate::dialog::Tool::Close {
+                    action = QueryAction::Close;
+                }
             });
         if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             action = QueryAction::Close;
@@ -529,7 +530,7 @@ pub fn marks(model: &Model, picked: &[NodeId]) -> QueryMarks {
     marks
 }
 
-/// A value with six significant digits, PrePoMax's default number format of the query.
+/// A value with six significant digits.
 fn number(value: f64) -> String {
     let value: f64 = format!("{value:.5e}").parse().unwrap_or(value);
     if value != 0.0 && !(1e-4..1e7).contains(&value.abs()) {
@@ -539,7 +540,7 @@ fn number(value: f64) -> String {
     }
 }
 
-/// PrePoMax's layout of a query line: the item, its unit in brackets, the names of the
+/// The layout of a query line: the item, its unit in brackets, the names of the
 /// values and the values, in columns.
 fn row(item: &str, unit: &str, names: &str, values: &[String]) -> String {
     let unit = if unit.is_empty() {
@@ -1102,7 +1103,7 @@ mod tests {
     }
 
     #[test]
-    fn lines_are_aligned_like_prepomax() {
+    fn lines_are_aligned() {
         let line = row("Base", "mm", "x, y, z:", &xyz(DVec3::new(1.0, 2.5, -3.0)));
         assert_eq!(
             line,

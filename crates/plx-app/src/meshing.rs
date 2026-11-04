@@ -1,4 +1,4 @@
-//! Meshing the CAD geometry with Gmsh: PrePoMax's mesh setup with its items, the default
+//! Meshing the CAD geometry with Gmsh: the mesh setup with its items, the default
 //! meshing parameters and the mesh generation part by part on a worker thread.
 
 use std::collections::BTreeSet;
@@ -22,8 +22,18 @@ use crate::numeric;
 use crate::selection::{GeometryRegion, History, Operation, PartPicks, Picker, PickerAction};
 use crate::viewport::{BoxSelect, Preview};
 
-/// The rows of the meshing parameters in a two-column grid.
-fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters, units: UnitSystem) {
+/// Whether the parameters reach a part of faces, the only parts the quad-dominated option
+/// changes: of the parts named, or of all parts if none are; true without a geometry view.
+fn reaches_faces(view: Option<&Model>, parts: &BTreeSet<String>) -> bool {
+    view.is_none_or(|view| {
+        (view.parts.iter())
+            .any(|p| p.dimension == Some(2) && (parts.is_empty() || parts.contains(&p.name)))
+    })
+}
+
+/// The rows of the meshing parameters in a two-column grid. `faces`: whether they reach a
+/// part of faces; the quad-dominated option is greyed out otherwise.
+fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters, units: UnitSystem, faces: bool) {
     ui.label("Max. element size");
     ui.add(numeric::quantity(&mut d.max_size, units, Quantity::Length).range(0.0..=f64::MAX));
     ui.end_row();
@@ -48,8 +58,18 @@ fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters, units: UnitSystem
             ),
         );
         ui.checkbox(&mut d.optimize, "Optimize mesh (Netgen)");
-        ui.checkbox(&mut d.quad_dominated, "Quad-dominated surface mesh")
-            .on_hover_text("Mesh faces (2D models and shells) mostly with quadrilaterals.");
+        ui.add_enabled(
+            faces,
+            egui::Checkbox::new(&mut d.quad_dominated, "Quad-dominated surface mesh"),
+        )
+        .on_hover_text(
+            "Mesh faces (2D models and shells) mostly with quadrilaterals. Solids keep \
+             triangles on their faces, as tetrahedra need them.",
+        )
+        .on_disabled_hover_text(
+            "Only for faces (2D models and shells): the parts are solids, meshed with \
+             tetrahedra, which need triangles on their faces.",
+        );
         ui.checkbox(&mut d.hexahedra_where_possible, "Hexahedra where possible")
             .on_hover_text(
                 "Parts that are straight extrusions of a face or bodies of revolution get a \
@@ -63,6 +83,8 @@ fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters, units: UnitSystem
 /// Meshing Parameters item covers.
 pub struct MeshSetupWindow {
     draft: MeshingParameters,
+    /// Whether the geometry has a part of faces, for the quad-dominated option.
+    faces: bool,
     /// Unit system of the model, the unit of the sizes.
     units: UnitSystem,
 }
@@ -77,9 +99,10 @@ pub enum MeshSetupResult {
 }
 
 impl MeshSetupWindow {
-    pub fn new(setup: &MeshingParameters, units: UnitSystem) -> Self {
+    pub fn new(setup: &MeshingParameters, units: UnitSystem, view: Option<&Model>) -> Self {
         Self {
             draft: *setup,
+            faces: reaches_faces(view, &BTreeSet::new()),
             units,
         }
     }
@@ -96,12 +119,12 @@ impl MeshSetupWindow {
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                let (d, units) = (&mut self.draft, self.units);
+                let (d, units, faces) = (&mut self.draft, self.units, self.faces);
                 ui.weak("Apply to all parts without their own Meshing Parameters.");
                 egui::Grid::new("mesh size")
                     .num_columns(2)
                     .spacing([12.0, 6.0])
-                    .show(ui, |ui| parameters_ui(ui, d, units));
+                    .show(ui, |ui| parameters_ui(ui, d, units, faces));
                 if d.max_size <= 0.0 {
                     ui.colored_label(
                         crate::style::error(),
@@ -134,7 +157,7 @@ impl MeshSetupWindow {
     }
 }
 
-/// The item types of PrePoMax's "Create Mesh Setup Item" that nodalis supports.
+/// The item types of "Create Mesh Setup Item" that Nodalis supports.
 const TYPES: [&str; 4] = [
     "Meshing Parameters",
     "Local Mesh Size",
@@ -211,7 +234,7 @@ fn layer_type(layers: &ExtrudeLayers) -> usize {
     }
 }
 
-/// Numbers separated by semicolons or spaces, as PrePoMax writes layer sizes.
+/// Numbers separated by semicolons or spaces, the way layer sizes are written.
 fn list_text<T: ToString>(values: &[T]) -> String {
     values
         .iter()
@@ -233,7 +256,7 @@ const ALGORITHMS_3D: [(Algorithm3d, &str); 3] = [
     (Algorithm3d::Hxt, "HXT"),
 ];
 
-/// PrePoMax's dialog to create or edit a mesh setup item. Parts, and the faces and edges of
+/// The dialog to create or edit a mesh setup item. Parts, and the faces and edges of
 /// a local mesh size, are clicked on the geometry.
 pub struct MeshItemEditor {
     draft: MeshSetupItem,
@@ -285,6 +308,16 @@ impl MeshItemEditor {
             layer_text: ["0.2; 0.6; 0.2;".into(), "2; 4; 2;".into()],
             face_parts: Default::default(),
         }
+    }
+
+    /// A new item of the kind at `index` of the dialog's list: meshing parameters of parts,
+    /// local mesh size, tetrahedral Gmsh or extrude mesh.
+    pub fn create_kind(geometry: &Geometry, units: UnitSystem, index: usize) -> Self {
+        let mut editor = Self::create(geometry, units);
+        let kind = new_kind(index, geometry);
+        editor.draft.name = next_name(kind.type_name(), editor.others.iter().map(String::as_str));
+        editor.draft.kind = kind;
+        editor
     }
 
     pub fn edit(geometry: &Geometry, index: usize, units: UnitSystem) -> Option<Self> {
@@ -355,71 +388,72 @@ impl MeshItemEditor {
         if let Some(view) = view {
             self.update_face_parts(view);
         }
-        let window = egui::Window::new(self.title())
+        let title = self.title();
+        let builder = egui::Window::new(title.clone())
             .id(crate::ids::window(ctx, "mesh item editor"))
-            .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .pivot(egui::Align2::LEFT_TOP)
-            .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0))
-            .show(ctx, |ui| {
-                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                ui.strong("Type");
-                let current = type_index(&self.draft.kind);
-                // PrePoMax's list of item types; an edited item keeps its type.
-                egui::Frame::group(ui.style())
-                    .fill(crate::style::window())
-                    .show(ui, |ui| {
-                        ui.set_min_width(360.0);
-                        ui.add_enabled_ui(self.index.is_none(), |ui| {
-                            for (index, label) in TYPES.into_iter().enumerate() {
-                                if ui.selectable_label(index == current, label).clicked()
-                                    && index != current
-                                {
-                                    self.draft.kind = new_kind(index, geometry);
-                                    self.draft.name = next_name(
-                                        self.draft.kind.type_name(),
-                                        self.others.iter().map(String::as_str),
-                                    );
-                                    self.picks.clear();
-                                    self.source_faces = false;
-                                    self.sync_parts();
-                                }
+            .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0));
+        let window = crate::dock::show(ctx, builder, title, &mut open, |ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            ui.strong("Type");
+            let current = type_index(&self.draft.kind);
+            // The list of item types; an edited item keeps its type.
+            egui::Frame::group(ui.style())
+                .fill(crate::style::window())
+                .show(ui, |ui| {
+                    ui.set_min_width(360.0);
+                    ui.add_enabled_ui(self.index.is_none(), |ui| {
+                        for (index, label) in TYPES.into_iter().enumerate() {
+                            if ui.selectable_label(index == current, label).clicked()
+                                && index != current
+                            {
+                                self.draft.kind = new_kind(index, geometry);
+                                self.draft.name = next_name(
+                                    self.draft.kind.type_name(),
+                                    self.others.iter().map(String::as_str),
+                                );
+                                self.picks.clear();
+                                self.source_faces = false;
+                                self.sync_parts();
                             }
-                        });
+                        }
                     });
-                ui.separator();
-                ui.strong("Properties");
-                egui::Grid::new("mesh item form")
-                    .num_columns(2)
-                    .spacing([12.0, 6.0])
-                    .show(ui, |ui| self.form(ui));
-                if let Some(error) = &self.error {
-                    ui.colored_label(crate::style::error(), error);
-                }
-                ui.separator();
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Cancel").clicked() {
-                        result = MeshItemResult::Cancel;
-                    }
-                    if ui.button("OK").clicked() {
-                        match self.finish() {
-                            Ok(item) => result = MeshItemResult::Ok(self.index, item),
-                            Err(error) => self.error = Some(error),
-                        }
-                    }
-                    if ui
-                        .button("OK & Remesh")
-                        .on_hover_text("Apply the item and mesh the parts it applies to again")
-                        .clicked()
-                    {
-                        match self.finish() {
-                            Ok(item) => result = MeshItemResult::OkRemesh(self.index, item),
-                            Err(error) => self.error = Some(error),
-                        }
-                    }
                 });
+            ui.separator();
+            ui.strong("Properties");
+            egui::Grid::new("mesh item form")
+                .max_col_width(crate::dock::column_limit(ui))
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| self.form(ui, view));
+            if let Some(error) = &self.error {
+                ui.colored_label(crate::style::error(), error);
+            }
+            ui.separator();
+            crate::dock::footer(ui, |ui| {
+                if ui.button("Cancel").clicked() {
+                    result = MeshItemResult::Cancel;
+                }
+                if ui.button("OK").clicked() {
+                    match self.finish() {
+                        Ok(item) => result = MeshItemResult::Ok(self.index, item),
+                        Err(error) => self.error = Some(error),
+                    }
+                }
+                if ui
+                    .button("OK & Remesh")
+                    .on_hover_text("Apply the item and mesh the parts it applies to again")
+                    .clicked()
+                {
+                    match self.finish() {
+                        Ok(item) => result = MeshItemResult::OkRemesh(self.index, item),
+                        Err(error) => self.error = Some(error),
+                    }
+                }
             });
+        });
         if let (Some(window), Some(view)) = (window, view) {
             let anchor = window.response.rect;
             if self.has_parts() {
@@ -528,14 +562,15 @@ impl MeshItemEditor {
         self.sync_parts();
     }
 
-    fn form(&mut self, ui: &mut egui::Ui) {
+    fn form(&mut self, ui: &mut egui::Ui, view: Option<&Model>) {
         ui.label("Name");
         ui.text_edit_singleline(&mut self.draft.name);
         ui.end_row();
         match &mut self.draft.kind {
             MeshSetupKind::MeshingParameters { parameters, .. } => {
                 parts_ui(ui, &mut self.parts);
-                parameters_ui(ui, parameters, self.units);
+                let faces = reaches_faces(view, &self.parts.names());
+                parameters_ui(ui, parameters, self.units, faces);
             }
             MeshSetupKind::LocalMeshSize { size, .. } => {
                 ui.label("Region");
@@ -588,7 +623,7 @@ impl MeshItemEditor {
                     } else {
                         "Automatic"
                     })
-                    .width(160.0)
+                    .width(crate::dock::fit_width(ui, 160.0))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut selected, false, "Automatic");
                         ui.selectable_value(&mut selected, true, "Selected faces");
@@ -647,7 +682,7 @@ impl MeshItemEditor {
                 let mut kind = layer_type(&extrude.layers);
                 egui::ComboBox::from_id_salt("extrude layers")
                     .selected_text(LAYER_TYPES[kind])
-                    .width(160.0)
+                    .width(crate::dock::fit_width(ui, 160.0))
                     .show_ui(ui, |ui| {
                         for (index, label) in LAYER_TYPES.into_iter().enumerate() {
                             ui.selectable_value(&mut kind, index, label);
@@ -851,7 +886,7 @@ fn algorithm_combo<T: Copy + PartialEq>(
         .map_or("", |(_, l)| *l);
     egui::ComboBox::from_id_salt(id)
         .selected_text(label)
-        .width(160.0)
+        .width(crate::dock::fit_width(ui, 160.0))
         .show_ui(ui, |ui| {
             for &(choice, label) in choices {
                 ui.selectable_value(value, choice, label);
@@ -1349,7 +1384,7 @@ mod tests {
         assert_eq!(extrude.parts, vec!["SOLID-1".to_string()]);
         assert!(!editor.highlight(&view).faces.is_empty());
 
-        // Multi-layered sizes are typed as PrePoMax writes them.
+        // Multi-layered sizes are typed as a list.
         if let MeshSetupKind::ExtrudeMesh(extrude) = &mut editor.draft.kind {
             extrude.layers = ExtrudeLayers::MultiLayered {
                 sizes: Vec::new(),

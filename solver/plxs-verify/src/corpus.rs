@@ -88,7 +88,7 @@ pub struct FixtureResults {
     pub dat: Option<DatImport>,
 }
 
-/// Loads the golden files of a fixture.
+/// Loads the snapshots of a fixture.
 pub fn load_reference(fixture: &Fixture) -> Result<FixtureResults, String> {
     let gz = std::fs::read(fixture.ref_frd())
         .map_err(|e| format!("{}: {e}", fixture.ref_frd().display()))?;
@@ -150,7 +150,7 @@ pub fn stage_files(fixture: &Fixture, work: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Gzips bytes for a golden file.
+/// Gzips bytes for a snapshot.
 pub fn gzip(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     use std::io::Write;
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());

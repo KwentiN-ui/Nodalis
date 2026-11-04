@@ -1,4 +1,4 @@
-//! PrePoMax's "Create Transformation" dialog of the results tool bar: available types on the
+//! The "Create Transformation" dialog of the results tool bar: available types on the
 //! left, the active transformations on the right, the properties of the selected one below.
 
 use std::collections::BTreeSet;
@@ -124,8 +124,8 @@ impl TransformationDialog {
         }
     }
 
-    /// The points of the selected transformation in render coordinates, highlighted like
-    /// PrePoMax does.
+    /// The points of the selected transformation in render coordinates, highlighted.
+    ///
     pub fn points(&self, model: &Model) -> Vec<Vec3> {
         let Some(transformation) = self.selected.and_then(|i| self.active.get(i)) else {
             return Vec::new();
@@ -254,7 +254,7 @@ impl TransformationDialog {
     pub fn show(&mut self, ctx: &egui::Context, model: &Model) -> TransformationAction {
         let mut action = TransformationAction::Open;
         let mut open = true;
-        let window = egui::Window::new("Create Transformation")
+        let window = egui::Window::new("Transformations")
             .id(crate::ids::window(ctx, "transformation dialog"))
             .open(&mut open)
             .collapsible(false)
@@ -285,31 +285,29 @@ impl TransformationDialog {
                 if let Some(error) = &self.error {
                     ui.colored_label(crate::style::error(), error);
                 }
-                ui.add_space(4.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Cancel").clicked() {
-                        action = TransformationAction::Cancel;
-                    }
-                    let clear = ui
-                        .button("Clear")
-                        .on_hover_text("Shows the results again without transformations.");
-                    if clear.clicked() {
-                        // OK then keeps the results as they are, as in PrePoMax.
+                // A tool window: Off shows the results without transformations, Apply
+                // shows the edited ones, Close applies them and closes.
+                let mut apply = false;
+                let footer = crate::dialog::tool_footer_with(ui, Some(true), |ui| {
+                    apply = ui.button("Apply").clicked();
+                });
+                if apply {
+                    self.changed = true;
+                    action = self.apply(false);
+                }
+                match footer {
+                    crate::dialog::Tool::Off => {
+                        // Close then keeps the results as they are, like OK.
                         self.changed = false;
                         self.error = None;
                         action = TransformationAction::Apply {
                             transformations: Vec::new(),
-                            close: false,
+                            close: true,
                         };
                     }
-                    if ui.button("Apply").clicked() {
-                        self.changed = true;
-                        action = self.apply(false);
-                    }
-                    if ui.button("OK").clicked() {
-                        action = self.apply(true);
-                    }
-                });
+                    crate::dialog::Tool::Close => action = self.apply(true),
+                    crate::dialog::Tool::None => {}
+                }
             });
         if let Some(window) = window
             && self.picking.is_some()
@@ -542,7 +540,7 @@ struct Grid<'a> {
 }
 
 impl Grid<'_> {
-    /// Category header like PrePoMax's property grid.
+    /// Category header of the property grid.
     fn category(&self, ui: &mut Ui, title: &str) {
         let header = egui::Frame::new()
             .fill(crate::style::control())

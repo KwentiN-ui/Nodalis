@@ -668,7 +668,9 @@ ccx), dazu die Übernahmetests in `plxs-input/src/tests.rs`.
     nicht unter `*TRANSFORM`) als linearisierter dehnbarer Starrkörper mit Hilfsknoten für
     Rotation und Dehnung; Rotations-Randbedingungen und Momente über Mittelwert-Rotations-
     MPCs (Hilfsknoten, DOF 1 = Winkel). Voll gehaltene Balkenknoten sind keine Knoten; an
-    gehaltenen B32-Endknoten folgen die Kantenmitten dem Knoten (ccx-Beobachtung).
+    gehaltenen B32-Endknoten folgen die Kantenmitten dem Knoten nur längs der Achse; in
+    der Querschnittsebene bewegen sich gegenüberliegende Kantenmitten symmetrisch zum Knoten
+    (Querkontraktion und Verzerrung frei; ccx-Beobachtung, balken_b32*_laengs).
   - Einzelkräfte auf Knoten ohne Knoten wirken direkt auf die expandierten Knoten:
     Schale (−1/2, 2, −1/2) an Ecken quadratischer Elemente, sonst 1/2, 1/2; Balken 1/4 je
     Ecke (FORC von ccx zeigt genau diese Werte).
@@ -703,7 +705,8 @@ ccx), dazu die Übernahmetests in `plxs-input/src/tests.rs`.
   Knoten abhängig, der Tie bindet den Originalknoten (ccx 2.21: die expandierten Knoten
   folgen nur im Mittel, die Schale bleibt drehbar). Jeder Knoten eines `*RIGID BODY`
   verschiebt die erste expandierte Knotennummer um eins (ccx-Beobachtung).
-- **Dokumentierte Abweichungen** (Fixture-`deviations`, `FIXTURES.md`):
+- **Dokumentierte Abweichungen** (Fixture-`deviations`, `FIXTURES.md`; seit Stufe 7 der
+  CalculiX-Ablösung entfallen, die Referenzen sind plxs-Snapshots):
   - Balken mit Rotations-Randbedingung: ccx schreibt an den expandierten Knoten der
     gehaltenen Balkenknoten FORC, die nicht K·u sind (Summe nicht im Gleichgewicht mit den
     Lasten); plxs schreibt K·u.

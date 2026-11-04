@@ -69,7 +69,7 @@ pub enum SurfaceDefinition {
     Nodes(Vec<NodeId>),
 }
 
-/// A named group of elements shown and hidden together, like a part in PrePoMax.
+/// A named group of elements shown and hidden together.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Part {
     pub name: String,
@@ -91,7 +91,7 @@ pub enum MeshError {
 
 /// Finite element mesh with nodes, elements, sets and parts.
 ///
-/// Set, surface and part names are stored upper case, because CalculiX treats them case-insensitively.
+/// Set, surface and part names are stored upper case, because the solver treats them case-insensitively.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(try_from = "MeshFile", into = "MeshFile")]
 pub struct FeMesh {
@@ -384,7 +384,7 @@ impl FeMesh {
             .collect();
     }
 
-    /// Adds another mesh as new parts, as PrePoMax's import of a mesh into a model: the
+    /// Adds another mesh as new parts, for the import of a mesh into a model: the
     /// other mesh is numbered after the highest node and element numbers this one has, so
     /// that nothing that refers to the existing parts points into the new ones. A part, set
     /// or surface whose name is taken gets a number appended (`NAME-2`). Returns the parts
@@ -462,7 +462,7 @@ impl FeMesh {
         added
     }
 
-    /// Whether a part, set or surface already has this name; CalculiX ignores case.
+    /// Whether a part, set or surface already has this name; the solver ignores case.
     pub fn name_in_use(&self, name: &str) -> bool {
         let same = |n: &String| n.eq_ignore_ascii_case(name);
         self.parts.iter().any(|p| same(&p.name))
@@ -472,7 +472,7 @@ impl FeMesh {
     }
 
     /// Removes the parts named `names` (in any case) with their elements and the nodes no
-    /// other element uses, PrePoMax's Delete of mesh parts; sets, surfaces and the CAD map
+    /// other element uses; sets, surfaces and the CAD map
     /// lose them too. The rest keep their numbers. In place, as a large mesh takes long to
     /// copy.
     pub fn remove_parts(&mut self, names: &[String]) {
@@ -579,7 +579,7 @@ impl FeMesh {
         }
     }
 
-    /// Merges parts into the first of them (by index), as PrePoMax's Merge of mesh parts:
+    /// Merges parts into the first of them (by index), as the Merge of mesh parts:
     /// the others' elements join it and their element sets of the same name join its set.
     /// Returns the name kept and the names that went.
     pub fn merge_parts(&mut self, indices: &[usize]) -> Option<(String, Vec<String>)> {
@@ -618,7 +618,7 @@ impl FeMesh {
         Some(old)
     }
 
-    /// Groups the elements into the parts of the mesh they were computed from, as PrePoMax
+    /// Groups the elements into the parts of the mesh they were computed from
     /// maps the parts of the model onto its results: each part takes its elements this mesh
     /// has, in the order of `parts`; elements no part claims stay in the parts they were in.
     /// Returns false, leaving the parts alone, when none of the elements is claimed.

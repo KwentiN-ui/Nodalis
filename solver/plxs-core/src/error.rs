@@ -55,6 +55,14 @@ pub enum Error {
     /// A file of the job could not be read or written.
     #[error("*ERROR: {path}: {message}")]
     Io { path: String, message: String },
+    /// An error about one item of the analysis (a section, a tie, a step), which the
+    /// validation names so that Nodalis can point at what the item came from without
+    /// reading the message.
+    #[error("{error}")]
+    Concerning {
+        item: crate::diagnostic::ItemRef,
+        error: Box<Error>,
+    },
 }
 
 /// Where in the input an error was found.
@@ -102,9 +110,37 @@ impl Error {
         self
     }
 
+    /// The error as about `item`, unless it names an item already.
+    pub fn concerning(self, item: crate::diagnostic::ItemRef) -> Self {
+        match self {
+            Error::Concerning { .. } => self,
+            error => Error::Concerning {
+                item,
+                error: Box::new(error),
+            },
+        }
+    }
+
+    /// The item of the analysis the error is about, when the validation named one.
+    pub fn item(&self) -> Option<&crate::diagnostic::ItemRef> {
+        match self {
+            Error::Concerning { item, .. } => Some(item),
+            _ => None,
+        }
+    }
+
+    /// The error without the item it is about.
+    pub fn plain(&self) -> &Error {
+        match self {
+            Error::Concerning { error, .. } => error.plain(),
+            error => error,
+        }
+    }
+
     /// The location of the error in the input, when it has one.
     pub fn location(&self) -> Option<&Location> {
         match self {
+            Error::Concerning { error, .. } => error.location(),
             Error::Input { location, .. } | Error::UnknownKeyword { location, .. } => {
                 location.as_ref()
             }

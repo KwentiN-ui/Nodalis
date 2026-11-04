@@ -1,6 +1,6 @@
 //! Campbell diagram of a rotor: the complex eigenfrequencies over the rotational speed.
 //!
-//! PrePoMax has no such tool; CalculiX computes the whirling modes for one speed per run.
+//! A single Complex Frequency step computes the whirling modes for one speed only.
 //! The sweep runs the analysis once per speed, scaling the centrifugal loads of the model,
 //! reads the complex frequencies and the turning direction of every mode from the `.dat`
 //! file and plots them over the speed, with the engine order lines (1x, 2x, ...) whose
@@ -9,7 +9,7 @@
 //! The sweep is adaptive: after a coarse grid over the speed range it keeps adding speeds
 //! where the curves bend most, until it is stopped or reaches its number of runs. The modes
 //! are followed from speed to speed by their course, not by their rank, so a spurious root
-//! CalculiX finds at one speed does not shift every curve above it.
+//! the solver finds at one speed does not shift every curve above it.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -43,7 +43,7 @@ const WIDTH_WEIGHT: f64 = 0.01;
 const MIN_TRACK: usize = 3;
 
 /// Speeds in a row a curve may be missing at, as when a spurious root takes its place among
-/// the modes CalculiX computes, before it counts as ended.
+/// the modes the solver computes, before it counts as ended.
 const MAX_MISSED: usize = 2;
 
 /// A crossing of a mode with an engine order line.
@@ -284,7 +284,7 @@ pub fn track(points: &[SpeedPoint]) -> Tracks {
             // spectrum, so curves near zero still find their continuation.
             let tolerance = (0.2 * expected.abs()).max(0.05 * scale);
             for (m, mode) in modes.iter().enumerate() {
-                // CalculiX gives the size of a frequency: a curve heading below zero
+                // The solver gives the size of a frequency: a curve heading below zero
                 // comes back up mirrored.
                 let distance = (mode.frequency.abs() - expected.abs()).abs();
                 if distance <= tolerance {
@@ -398,7 +398,7 @@ fn bends(tracks: &Tracks) -> Vec<(f64, f64)> {
 /// weighted with the width of the gap. The resolution is relative to the range, so a marked
 /// range is sampled finer. Gaps next to a failed or running speed and
 /// gaps narrower than twice the resolution are left alone, so the sweep does not chase
-/// a speed CalculiX cannot solve. `None` when no gap is left to split.
+/// a speed the solver cannot solve. `None` when no gap is left to split.
 pub fn next_speed(
     points: &[SpeedPoint],
     failed: &[f64],
@@ -492,7 +492,7 @@ pub fn diagram(tracks: &Tracks, orders: &[f64], max_speed: f64) -> Diagram {
 }
 
 /// The sweep as a table for a spreadsheet, its cells separated by `separator`: the speed,
-/// the frequency and whirl of each curve, the other roots CalculiX found at that speed and
+/// the frequency and whirl of each curve, the other roots the solver found at that speed and
 /// the frequency of each engine order line.
 pub fn table_text(points: &[SpeedPoint], orders: &[f64], separator: char) -> String {
     let tracks = track(points);
@@ -639,10 +639,11 @@ fn run_speed(
     let label = format!("{} rpm", numeric::format_physical(rpm(speed)));
     let fe = with_speed(&input.fe, speed);
     let heading = format!("Nodalis Campbell sweep: {label}");
-    let text = plx_io::inp::write_inp(&input.mesh, &fe, &heading)
-        .map_err(|e| format!("{label}: input file not written: {e}"))?;
+    let lowered = plx_io::inp::lower_unvalidated(&input.mesh, &fe, &heading)
+        .map_err(|e| format!("{label}: analysis not set up: {e}"))?;
     let name = job_name(index);
-    let mut job = Run::start(input.threads, &input.work_dir, &name, &text)
+    let prepared = crate::analysis::prepare(lowered);
+    let mut job = Run::start_analysis(input.threads, &input.work_dir, &name, prepared)
         .map_err(|e| format!("{label}: solver not started: {e}"))?;
     let status = loop {
         let status = job.poll();
@@ -1052,6 +1053,7 @@ impl CampbellWindow {
     ) -> bool {
         self.poll();
         let mut open = true;
+        let mut close = false;
         let running = self.is_running();
         egui::Window::new(format!("Campbell diagram: {title}"))
             .id(crate::ids::window(ctx, ("campbell", id)))
@@ -1066,7 +1068,7 @@ impl CampbellWindow {
                 self.setup_row(ui, running);
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(can_start && !running, egui::Button::new("Start sweep"))
+                        .add_enabled(can_start && !running, egui::Button::new("Start Sweep"))
                         .on_hover_text("Starts a new sweep; the speeds of the last one go.")
                         .clicked()
                         && let Err(error) = start(self, false)
@@ -1122,7 +1124,7 @@ impl CampbellWindow {
                         ));
                     }
                     if ui
-                        .add_enabled(!self.points.is_empty(), egui::Button::new("Copy table"))
+                        .add_enabled(!self.points.is_empty(), egui::Button::new("Copy Table"))
                         .on_hover_text("Copies the sweep with tabs, for a spreadsheet.")
                         .clicked()
                     {
@@ -1130,8 +1132,8 @@ impl CampbellWindow {
                             .copy_text(table_text(&self.points, &self.shown_orders(), '\t'));
                     }
                     for (label, format) in [
-                        ("Export CSV ...", table_export::Format::Csv),
-                        ("Export JSON ...", table_export::Format::Json),
+                        ("Export CSV …", table_export::Format::Csv),
+                        ("Export JSON …", table_export::Format::Json),
                     ] {
                         let button = egui::Button::new(label);
                         if ui.add_enabled(!self.points.is_empty(), button).clicked() {
@@ -1140,6 +1142,7 @@ impl CampbellWindow {
                     }
                 });
                 ui.separator();
+                close = crate::dialog::close_bar(ui, "campbell");
                 if self.points.len() >= 2 {
                     self.diagram_and_table(ui);
                 } else if self.swept && !running {
@@ -1178,7 +1181,7 @@ impl CampbellWindow {
         if running {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
-        open
+        open && !close
     }
 
     fn setup_row(&mut self, ui: &mut Ui, running: bool) {
@@ -1546,7 +1549,7 @@ mod tests {
                     (1000.0 + 0.05 * s, Whirl::Forward),
                     (2000.0, Whirl::Backward),
                 ];
-                // CalculiX finds a root near zero at two speeds, which pushes the top mode
+                // The solver finds a root near zero at two speeds, which pushes the top mode
                 // out of the requested number of modes.
                 if i == 9 || i == 14 {
                     modes.insert(0, (-3.0, Whirl::Unknown));

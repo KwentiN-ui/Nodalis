@@ -7,8 +7,8 @@ Named sets are useful when several items share the same region, or when you want
 selection under a name. They are listed under #ui("Mesh") in the #ui("FE Model") tree, together
 with the sets and surfaces of an imported `.inp` mesh.
 
-Double-click #ui("Node Sets"), #ui("Element Sets") or #ui("Surfaces"), or choose
-#ui("Create ...") in their context menu, to define a new one. Double-click a set, or choose
+#ui("Node Set"), #ui("Element Set") and #ui("Surface") on the #ui("Mesh") tab of the FE Model
+workspace define a new one. Double-click a set, or choose
 #ui("Edit ...") in its context menu, to change it; #ui("Delete") or the #key("Delete") key
 removes it. Selecting a set in the tree highlights it in the 3D view.
 

@@ -262,7 +262,7 @@ impl StaticLinear {
                 v = set.reduce_rhs(&rhs_full);
                 let started = std::time::Instant::now();
                 equations
-                    .solve(&ctx.solver, &mut v, progress)
+                    .solve(&mut ctx.solver, &mut v, progress)
                     .map_err(|e| in_increment(e, ctx.step_number, increment))?;
                 ctx.profile.add(Phase::Solve, started);
                 u = set.expand(&v, &g);

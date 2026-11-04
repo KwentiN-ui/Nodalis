@@ -1,7 +1,8 @@
 //! Running an analysis: the solver `plxs` as a library in this process, on a thread of its
 //! own ([`Run`]), plus what other helper processes need ([`process`], [`hide_console`]).
 //!
-//! A run takes the input text of a CalculiX-style `.inp` file. Its results stay in memory
+//! A run takes the analysis lowered from the model ([`Run::start_analysis`]), or the input
+//! text of a CalculiX-style `.inp` file ([`Run::start`]). Its results stay in memory
 //! ([`Run::solver_results`]) and are written as one binary file `<name>.ndlr`
 //! ([`plx_results::SolverResults`]) instead of CalculiX's `.frd` and `.dat`, which Nodalis
 //! reads without parsing text; the `.sta` file is written as by CalculiX. Its progress comes
@@ -128,6 +129,110 @@ pub struct Run {
     diagnostics: Arc<Mutex<Option<Vec<Diagnostic>>>>,
 }
 
+/// An analysis lowered from the model for the solver, which validates it first.
+#[derive(Clone, Debug)]
+pub struct Prepared {
+    pub analysis: plxs_core::Analysis,
+    /// The analysis as input text, written as `<name>.inp` beside the results.
+    pub text: String,
+    /// What the lowering noticed but did not stop for, shown as the solver's warnings.
+    pub warnings: Vec<String>,
+}
+
+/// What a run computes: an input text the solver reads, or an analysis given directly.
+enum Job {
+    Text(String),
+    Analysis(Box<Prepared>),
+}
+
+impl Job {
+    fn text(&self) -> &str {
+        match self {
+            Job::Text(text) => text,
+            Job::Analysis(prepared) => &prepared.text,
+        }
+    }
+
+    /// A copy for the model check after a failed run: of a text, the text again.
+    fn spare(&self) -> Job {
+        match self {
+            Job::Text(text) => Job::Text(text.clone()),
+            Job::Analysis(prepared) => Job::Analysis(prepared.clone()),
+        }
+    }
+
+    /// The validated analysis, with the warnings of the lowering and the validation
+    /// reported; else the errors the validation found.
+    fn validated(
+        prepared: Prepared,
+        progress: &mut dyn plxs_core::Progress,
+    ) -> Result<plxs_core::Analysis, Vec<Error>> {
+        let Prepared {
+            mut analysis,
+            warnings,
+            ..
+        } = prepared;
+        let found = plxs_core::validate(&mut analysis)?;
+        for warning in warnings.into_iter().chain(found) {
+            progress.event(ProgressEvent::Warning(warning));
+        }
+        Ok(analysis)
+    }
+
+    fn check(
+        self,
+        path: &Path,
+        options: &plxs_session::JobOptions,
+        progress: &mut dyn plxs_core::Progress,
+    ) -> plxs_session::Check {
+        match self {
+            Job::Text(text) => plxs_session::check_input(&text, Some(path), options, progress),
+            Job::Analysis(prepared) => {
+                let started = std::time::Instant::now();
+                match Self::validated(*prepared, progress) {
+                    Ok(analysis) => plxs_session::check_analysis(analysis, options, progress),
+                    Err(errors) => plxs_session::Check {
+                        diagnostics: errors.iter().map(Diagnostic::from_error).collect(),
+                        seconds: started.elapsed().as_secs_f64(),
+                        ..Default::default()
+                    },
+                }
+            }
+        }
+    }
+
+    fn run(
+        self,
+        path: &Path,
+        options: &plxs_session::JobOptions,
+        progress: &mut dyn plxs_core::Progress,
+        kept: &mut Option<plxs_session::KeptResults>,
+    ) -> plxs_core::Result<plxs_session::JobOutcome> {
+        match self {
+            Job::Text(text) => {
+                plxs_session::run_job_keeping(&text, Some(path), options, progress, kept)
+            }
+            Job::Analysis(prepared) => {
+                // As the reader of an input text: the first error stops the run, the others
+                // are reported.
+                let analysis = Self::validated(*prepared, progress).map_err(|mut errors| {
+                    for error in errors.iter().skip(1) {
+                        progress.event(ProgressEvent::Warning(error.to_string()));
+                    }
+                    errors.swap_remove(0)
+                })?;
+                progress.event(ProgressEvent::Info(format!(
+                    "number of nodes: {}, elements: {}, steps: {}",
+                    analysis.model.nodes.len(),
+                    analysis.model.elements.len(),
+                    analysis.steps.len()
+                )));
+                plxs_session::run_analysis_keeping(analysis, options, progress, kept)
+            }
+        }
+    }
+}
+
 /// How the solver thread ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Finished {
@@ -140,21 +245,56 @@ impl Run {
     /// Writes `<work_dir>/<name>.inp` and starts the solver on it, on the shared [`pool`]
     /// of `threads` threads (0: all cores).
     pub fn start(threads: u32, work_dir: &Path, name: &str, input: &str) -> std::io::Result<Self> {
-        Self::spawn(threads, work_dir, name, input, false)
+        Self::spawn(threads, work_dir, name, Job::Text(input.to_owned()), false)
     }
 
     /// Writes `<work_dir>/<name>.inp` and starts the model check of it: the whole input
     /// including its steps (free motions per step) without computing results, see
     /// [`Run::diagnostics`].
     pub fn check(threads: u32, work_dir: &Path, name: &str, input: &str) -> std::io::Result<Self> {
-        Self::spawn(threads, work_dir, name, input, true)
+        Self::spawn(threads, work_dir, name, Job::Text(input.to_owned()), true)
+    }
+
+    /// Starts the solver on an analysis lowered from the model, as [`Run::start`] but
+    /// without reading it from text: the input text is written as `<name>.inp` for
+    /// reference only.
+    pub fn start_analysis(
+        threads: u32,
+        work_dir: &Path,
+        name: &str,
+        prepared: Prepared,
+    ) -> std::io::Result<Self> {
+        Self::spawn(
+            threads,
+            work_dir,
+            name,
+            Job::Analysis(Box::new(prepared)),
+            false,
+        )
+    }
+
+    /// The model check of an analysis lowered from the model, see [`Run::check`] and
+    /// [`Run::start_analysis`].
+    pub fn check_analysis(
+        threads: u32,
+        work_dir: &Path,
+        name: &str,
+        prepared: Prepared,
+    ) -> std::io::Result<Self> {
+        Self::spawn(
+            threads,
+            work_dir,
+            name,
+            Job::Analysis(Box::new(prepared)),
+            true,
+        )
     }
 
     fn spawn(
         threads: u32,
         work_dir: &Path,
         name: &str,
-        input: &str,
+        mut job: Job,
         check: bool,
     ) -> std::io::Result<Self> {
         std::fs::create_dir_all(work_dir)?;
@@ -165,7 +305,16 @@ impl Run {
             }
         }
         let input_path = work_dir.join(format!("{name}.inp"));
-        std::fs::write(&input_path, input)?;
+        std::fs::write(&input_path, job.text())?;
+        // `<name>.eig` beside the input: the modes of an earlier run, as the reader of an
+        // input file takes them.
+        let eig = input_path.with_extension("eig");
+        if let Job::Analysis(prepared) = &mut job
+            && prepared.analysis.model.stored_modes_file.is_none()
+            && eig.is_file()
+        {
+            prepared.analysis.model.stored_modes_file = Some(eig);
+        }
         let output = Arc::new(Mutex::new(vec![
             "************************************************************".to_owned(),
             format!("Nodalis solver plxs {VERSION}"),
@@ -179,7 +328,6 @@ impl Run {
             cancel: cancel.clone(),
             ..plxs_session::JobOptions::new(work_dir, name)
         };
-        let input = input.to_owned();
         let lines = Arc::clone(&output);
         let solved = Arc::new(Mutex::new(None));
         let keep_results = Arc::clone(&solved);
@@ -201,12 +349,7 @@ impl Run {
                 };
                 if check {
                     let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        plxs_session::check_input(
-                            &input,
-                            Some(&input_path),
-                            &options,
-                            &mut progress,
-                        )
+                        job.check(&input_path, &options, &mut progress)
                     }));
                     return match checked {
                         Ok(checked) => {
@@ -231,14 +374,11 @@ impl Run {
                         }
                     };
                 }
+                // The analysis is used up by the run; the model check after a failure takes
+                // a copy.
+                let spare = job.spare();
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    plxs_session::run_job_keeping(
-                        &input,
-                        Some(&input_path),
-                        &options,
-                        &mut progress,
-                        &mut kept,
-                    )
+                    job.run(&input_path, &options, &mut progress, &mut kept)
                 }));
                 // The results so far, also of a step that did not converge.
                 if let Some((model, results)) = kept {
@@ -262,12 +402,7 @@ impl Run {
                         say(" *INFO: looking for the cause with the model check".into());
                         let checked =
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                plxs_session::check_input(
-                                    &input,
-                                    Some(&input_path),
-                                    &options,
-                                    &mut |_| {},
-                                )
+                                spare.check(&input_path, &options, &mut |_| {})
                             }));
                         if let Ok(checked) = checked {
                             for diagnostic in checked
@@ -552,6 +687,70 @@ S
             output.iter().any(|l| l.contains("cannot be interpreted")),
             "{output:#?}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The cube as an analysis given directly, as the lowering of a model gives it.
+    fn prepared(text: &str) -> Prepared {
+        let analysis = plxs_input::read_inp_str(text, None).unwrap().analysis;
+        Prepared {
+            analysis,
+            text: text.to_owned(),
+            warnings: vec!["a lowering warning".into()],
+        }
+    }
+
+    #[test]
+    fn an_analysis_runs_without_reading_its_input_text() {
+        let dir = std::env::temp_dir().join(format!("plx-solve-ir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // The text is for reference only: the run takes the analysis.
+        let mut cube = prepared(CUBE);
+        cube.text = "not an input file".into();
+        let mut run = Run::start_analysis(1, &dir, "Cube", cube).unwrap();
+        let status = run.wait();
+        let output = run.new_output();
+        assert_eq!(status, JobStatus::Completed, "{output:#?}");
+        assert!(
+            output.iter().any(|l| l.contains("a lowering warning")),
+            "{output:#?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(run.file("inp")).unwrap(),
+            "not an input file"
+        );
+        let solved = run.solver_results().unwrap();
+        let u1 = plx_results::from_solver(&solved).increments[0]
+            .field("DISP")
+            .unwrap()
+            .component("U1")
+            .unwrap()
+            .values
+            .clone();
+        assert!(u1.iter().any(|&v| v > 0.0), "{u1:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_validation_of_an_analysis_reports_its_errors() {
+        let dir = std::env::temp_dir().join(format!("plx-solve-ir-err-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // A load on a set the lowering left out.
+        let mut cube = prepared(CUBE);
+        cube.analysis.model.sets.node_sets.remove("PULL");
+        let mut check = Run::check_analysis(1, &dir, "Check", cube.clone()).unwrap();
+        assert_eq!(check.wait(), JobStatus::Failed);
+        let found = check.diagnostics().unwrap();
+        assert!(
+            found
+                .iter()
+                .any(|d| d.severity == plxs_core::Severity::Error),
+            "{found:?}"
+        );
+        let mut run = Run::start_analysis(1, &dir, "Run", cube).unwrap();
+        assert_eq!(run.wait(), JobStatus::Failed);
+        let output = run.new_output();
+        assert!(output.iter().any(|l| l.contains("PULL")), "{output:#?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
