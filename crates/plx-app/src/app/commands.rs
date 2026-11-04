@@ -212,6 +212,19 @@ impl AnalysisWindow {
             Cmd::DefinedField => last_step.is_some_and(|s| s.kind.supports_defined_fields()),
             Cmd::OpenResults | Cmd::RemoveResults => !running && kept,
             Cmd::ColorScale => w.tree_view == TreeView::Results && results_open,
+            Cmd::Deformation
+            | Cmd::ShowUndeformed
+            | Cmd::GlobalContours
+            | Cmd::Representation
+            | Cmd::ColorLevels
+            | Cmd::Transformations
+            | Cmd::Increment
+            | Cmd::FirstIncrement
+            | Cmd::PreviousIncrement
+            | Cmd::NextIncrement
+            | Cmd::LastIncrement
+            | Cmd::Animate
+            | Cmd::ModeSound => w.results_command_enabled(cmd),
             Cmd::ExportVtu | Cmd::ExportVtk | Cmd::ExportFrd | Cmd::ExportDeformedMesh => {
                 results_open
             }
@@ -265,6 +278,11 @@ impl AnalysisWindow {
             Cmd::ExplodedView => w.exploded_applied() || w.exploded_dialog.is_some(),
             Cmd::Query => w.query.is_some(),
             Cmd::ColorScale => w.color_scale_dialog.is_some(),
+            Cmd::ShowUndeformed
+            | Cmd::GlobalContours
+            | Cmd::Transformations
+            | Cmd::Animate
+            | Cmd::ModeSound => w.results_command_checked(cmd),
             Cmd::Monitor => w.analysis_tab,
             Cmd::ContactWorksheet => w.contact_worksheet,
             _ => false,
@@ -405,6 +423,15 @@ impl AnalysisWindow {
             Cmd::OpenResults => w.open_bound_results(),
             Cmd::RemoveResults => w.confirm_remove_results = true,
             Cmd::ColorScale => w.open_color_scale(),
+            Cmd::ShowUndeformed
+            | Cmd::GlobalContours
+            | Cmd::Transformations
+            | Cmd::FirstIncrement
+            | Cmd::PreviousIncrement
+            | Cmd::NextIncrement
+            | Cmd::LastIncrement
+            | Cmd::Animate
+            | Cmd::ModeSound => w.run_results_command(cmd),
             Cmd::ExportVtu => w.open_vtk_export(plx_io::vtk::VtkFormat::Xml),
             Cmd::ExportVtk => w.open_vtk_export(plx_io::vtk::VtkFormat::Legacy),
             Cmd::ExportFrd => w.export_calculix_results(),
@@ -481,11 +508,17 @@ impl crate::ribbon::Host for RibbonHost<'_> {
         self.0.command_checked(cmd)
     }
 
+    fn value(&self, cmd: Cmd) -> Option<String> {
+        self.0.workbench.results_value(cmd)
+    }
+
+    fn panel(&mut self, ui: &mut egui::Ui, cmd: Cmd) {
+        self.0.workbench.results_panel(ui, cmd);
+    }
+
     fn custom(&mut self, ui: &mut egui::Ui, cmd: Cmd) {
-        match cmd {
-            Cmd::ResultsDisplay => self.0.workbench.results_tool_bar(ui),
-            Cmd::ActiveStep => self.0.workbench.active_step_combo(ui),
-            _ => {}
+        if cmd == Cmd::ActiveStep {
+            self.0.workbench.active_step_combo(ui);
         }
     }
 }
