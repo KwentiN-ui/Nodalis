@@ -183,6 +183,10 @@ pub struct Amg {
     gpu: Option<Box<crate::gpu::GpuCycle>>,
     /// Why the cycle runs on the processor although the card was considered (or failed).
     cpu_reason: Mutex<Option<String>>,
+    /// Why the conjugate gradients stay on the processor although the cycle runs on the
+    /// card.
+    #[cfg(feature = "gpu")]
+    cg_note: Mutex<Option<String>>,
 }
 
 impl Amg {
@@ -348,6 +352,8 @@ impl Amg {
             #[cfg(feature = "gpu")]
             gpu,
             cpu_reason: Mutex::new(cpu_reason),
+            #[cfg(feature = "gpu")]
+            cg_note: Mutex::new(None),
         })
     }
 
@@ -378,6 +384,33 @@ impl Amg {
         }
     }
 
+    /// Gives the cycle on the graphics card the operator in double precision, so that
+    /// the conjugate gradients run there too (when the card computes in double
+    /// precision); called after every build and refresh.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn attach_operator(&mut self, a: &Bsr) {
+        if let Some(gpu) = self.gpu.as_mut()
+            && let Err(e) = gpu.attach(a)
+        {
+            let mut note = self.cg_note.lock().unwrap_or_else(|e| e.into_inner());
+            *note = Some(e);
+        }
+    }
+
+    /// The cycle on the graphics card when the conjugate gradients run there too;
+    /// `None`: the processor solves.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn gpu_cycle(&self) -> Option<&crate::gpu::GpuCycle> {
+        self.gpu.as_deref().filter(|g| g.solves())
+    }
+
+    /// Notes that the conjugate gradients on the card failed.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn note_gpu_failure(&self, reason: String) {
+        let mut note = self.cg_note.lock().unwrap_or_else(|e| e.into_inner());
+        note.get_or_insert(reason);
+    }
+
     /// Where the cycle runs, for the monitor: the graphics card's name, or why the
     /// processor serves although the card was considered; `None` when it was not.
     pub fn placement(&self) -> Option<String> {
@@ -387,9 +420,19 @@ impl Amg {
         }
         #[cfg(feature = "gpu")]
         if let Some(gpu) = self.gpu.as_ref() {
+            if gpu.solves() {
+                return Some(format!(
+                    "conjugate gradients and V-cycle on the graphics card {}",
+                    gpu.device_name()
+                ));
+            }
+            let note = self.cg_note.lock().unwrap_or_else(|e| e.into_inner());
             return Some(format!(
-                "V-cycle on the graphics card {}",
-                gpu.device_name()
+                "V-cycle on the graphics card {}{}",
+                gpu.device_name(),
+                note.as_ref()
+                    .map(|n| format!(", conjugate gradients on the processor ({n})"))
+                    .unwrap_or_default()
             ));
         }
         None

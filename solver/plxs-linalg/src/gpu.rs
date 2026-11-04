@@ -57,7 +57,22 @@ struct Context {
     products: Mutex<HashMap<(usize, usize), Arc<wgpu::ComputePipeline>>>,
     vector_layout: wgpu::BindGroupLayout,
     vector: Arc<wgpu::ComputePipeline>,
+    /// Whether the card computes in double precision (the conjugate gradients run on
+    /// it then), and their pipelines, built at the first use.
+    f64: bool,
+    cg: OnceLock<Result<CgPipelines, String>>,
     error: Arc<Mutex<Option<String>>>,
+}
+
+/// The pipelines of the conjugate gradients on the card (auto layouts).
+struct CgPipelines {
+    /// The double precision product per block shape.
+    products: Mutex<HashMap<(usize, usize), Arc<wgpu::ComputePipeline>>>,
+    product_module: wgpu::ShaderModule,
+    dot: Arc<wgpu::ComputePipeline>,
+    scalar: Arc<wgpu::ComputePipeline>,
+    update: Arc<wgpu::ComputePipeline>,
+    convert: Arc<wgpu::ComputePipeline>,
 }
 
 /// The device for discrete cards only (automatic mode) and for any adapter (`On`),
@@ -120,9 +135,14 @@ fn open(any: bool) -> Result<Context, String> {
         max_buffer_size: supported.max_buffer_size,
         ..Default::default()
     };
+    let f64 = adapter.features().contains(wgpu::Features::SHADER_F64);
     let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("plxs multigrid"),
-        required_features: wgpu::Features::empty(),
+        required_features: if f64 {
+            wgpu::Features::SHADER_F64
+        } else {
+            wgpu::Features::empty()
+        },
         required_limits: limits.clone(),
         experimental_features: wgpu::ExperimentalFeatures::disabled(),
         memory_hints: wgpu::MemoryHints::Performance,
@@ -212,11 +232,66 @@ fn open(any: bool) -> Result<Context, String> {
         products: Mutex::default(),
         vector_layout,
         vector: Arc::new(vector),
+        f64,
+        cg: OnceLock::new(),
         error,
     })
 }
 
 impl Context {
+    /// The pipelines of the conjugate gradients, when the card has double precision.
+    fn cg(&self) -> Result<&CgPipelines, String> {
+        if !self.f64 {
+            return Err("no double precision on the card".to_owned());
+        }
+        self.cg
+            .get_or_init(|| {
+                let device = &self.device;
+                let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                let module = |label: &str, source: &'static str| {
+                    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: Some(label),
+                        source: wgpu::ShaderSource::Wgsl(source.into()),
+                    })
+                };
+                let pipeline = |module: &wgpu::ShaderModule, entry: &str| {
+                    Arc::new(
+                        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                            label: Some(entry),
+                            layout: None,
+                            module,
+                            entry_point: Some(entry),
+                            compilation_options: Default::default(),
+                            cache: None,
+                        }),
+                    )
+                };
+                let pipelines = CgPipelines {
+                    products: Mutex::default(),
+                    product_module: module("cg product", include_str!("gpu_cg_product.wgsl")),
+                    dot: pipeline(&module("dot", include_str!("gpu_cg_dot.wgsl")), "dot"),
+                    scalar: pipeline(
+                        &module("scalar", include_str!("gpu_cg_scalar.wgsl")),
+                        "scalar",
+                    ),
+                    update: pipeline(
+                        &module("update", include_str!("gpu_cg_update.wgsl")),
+                        "update",
+                    ),
+                    convert: pipeline(
+                        &module("convert", include_str!("gpu_cg_convert.wgsl")),
+                        "convert",
+                    ),
+                };
+                match block_on(scope.pop()) {
+                    Some(e) => Err(e.to_string()),
+                    None => Ok(pipelines),
+                }
+            })
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
     /// The product pipeline for blocks of `br × bc`.
     fn product(&self, br: usize, bc: usize) -> Arc<wgpu::ComputePipeline> {
         let mut map = self.products.lock().unwrap_or_else(|e| e.into_inner());
@@ -327,9 +402,9 @@ impl Sliced {
     }
 
     /// The values of `a` (the matrix this was built from, new values) in sliced order.
-    fn values_of(&self, a: &Bsr<f32>) -> Vec<f32> {
+    fn values_of<T: Scalar>(&self, a: &Bsr<T>) -> Vec<T> {
         let size = self.br * self.bc;
-        let mut val = vec![0.0f32; self.val.len()];
+        let mut val = vec![T::default(); self.val.len()];
         for (at, &k) in self.source.iter().enumerate() {
             if k != u32::MAX {
                 let k = k as usize;
@@ -421,8 +496,10 @@ pub(crate) struct GpuCycle {
     lambdas: Vec<f64>,
     /// The finest operator: its storage (for new values) and buffers.
     fine: Sliced,
-    fine_val: wgpu::Buffer,
+    fine_matrix: GpuMatrix,
     fine_diag: wgpu::Buffer,
+    /// The conjugate gradients on the card, once [`GpuCycle::attach`] gave the operator.
+    cg: Option<Cg>,
     lock: Mutex<()>,
     failed: AtomicBool,
 }
@@ -753,8 +830,9 @@ impl GpuCycle {
             degree,
             lambdas,
             fine,
-            fine_val: level0.a.val,
+            fine_matrix: level0.a,
             fine_diag: level0.diag,
+            cg: None,
             lock: Mutex::new(()),
             failed: AtomicBool::new(false),
         })
@@ -835,7 +913,7 @@ impl GpuCycle {
         let queue = &self.ctx.queue;
         write(
             self.ctx,
-            &self.fine_val,
+            &self.fine_matrix.val,
             bytemuck::cast_slice(&self.fine.values_of(fine)),
         );
         queue.write_buffer(&self.fine_diag, 0, bytemuck::cast_slice(inv_diag));
@@ -846,6 +924,428 @@ impl GpuCycle {
             }
             let (c1, c2) = coefficients(&self.lambdas, self.degree, 0, op.coefficient);
             queue.write_buffer(&op.params, 0, &params_bytes(op.header, c1, c2));
+        }
+    }
+}
+
+/// How the conjugate gradients on the card ended.
+pub(crate) enum CgOutcome {
+    Converged {
+        iterations: usize,
+        residual: f64,
+    },
+    /// `p·q <= 0`: the matrix is not positive definite.
+    Indefinite,
+    NotConverged {
+        residual: f64,
+    },
+}
+
+/// Iterations per submission; the state comes back after each.
+const BATCH: usize = 4;
+/// Scalars of the iteration (see gpu_cg_scalar.wgsl).
+const SCALARS: usize = 16;
+const DOT_GROUPS: usize = 256;
+
+/// The conjugate gradients on the card: the double precision copy of the finest
+/// operator, the vectors, and the recorded dispatches.
+struct Cg {
+    val: wgpu::Buffer,
+    b: wgpu::Buffer,
+    x: wgpu::Buffer,
+    scalars: wgpu::Buffer,
+    scalars_staging: wgpu::Buffer,
+    x_staging: wgpu::Buffer,
+    start: Vec<Op>,
+    iteration: Vec<Op>,
+}
+
+impl GpuCycle {
+    /// Gives the cycle the operator in double precision (the matrix the hierarchy was
+    /// built on, or new values of it), so that the conjugate gradients run on the card
+    /// too. Without double precision on the card nothing happens and the conjugate
+    /// gradients stay on the processor.
+    pub(crate) fn attach(&mut self, a: &Bsr) -> Result<(), String> {
+        if self.failed.load(Ordering::Relaxed)
+            || a.blocks() != self.fine.source.iter().filter(|&&k| k != u32::MAX).count()
+        {
+            return Err("the operator does not match the hierarchy".to_owned());
+        }
+        let values = self.fine.values_of(a);
+        if let Some(cg) = &self.cg {
+            write(self.ctx, &cg.val, bytemuck::cast_slice(&values));
+            return match self.ctx.take_error() {
+                Some(e) => {
+                    self.cg = None;
+                    Err(e)
+                }
+                None => Ok(()),
+            };
+        }
+        let built =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.build_cg(&values)))
+                .unwrap_or_else(|_| Err("building the conjugate gradients panicked".to_owned()));
+        self.cg = Some(built?);
+        Ok(())
+    }
+
+    /// Whether the conjugate gradients run on the card.
+    pub(crate) fn solves(&self) -> bool {
+        self.cg.is_some() && !self.failed.load(Ordering::Relaxed)
+    }
+
+    fn build_cg(&self, values: &[f64]) -> Result<Cg, String> {
+        let ctx = self.ctx;
+        let pipelines = ctx.cg()?;
+        let device = &ctx.device;
+        let oom = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let n = self.n;
+        let usage = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC;
+        let buffer = |label: &str, bytes: u64| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: bytes.max(8),
+                usage,
+                mapped_at_creation: false,
+            })
+        };
+        let limit = ctx
+            .limits
+            .max_storage_buffer_binding_size
+            .min(ctx.limits.max_buffer_size);
+        if 8 * values.len() as u64 > limit {
+            return Err(format!(
+                "the operator in double precision ({} MB) exceeds the card's limit of {} MB",
+                (8 * values.len()) >> 20,
+                limit >> 20
+            ));
+        }
+        let val = buffer("val64", 8 * values.len() as u64);
+        write(ctx, &val, bytemuck::cast_slice(values));
+        let vector = |label: &str| buffer(label, 8 * n as u64);
+        let (b, x, r, z, p, q) = (
+            vector("b"),
+            vector("x"),
+            vector("r"),
+            vector("z"),
+            vector("p"),
+            vector("q"),
+        );
+        let partial = buffer("partial", (8 * 5 * DOT_GROUPS) as u64);
+        let scalars = buffer("scalars", (8 * SCALARS) as u64);
+        let staging = |label: &str, bytes: u64| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: bytes.max(8),
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let scalars_staging = staging("scalars staging", (8 * SCALARS) as u64);
+        let x_staging = staging("x staging", 8 * n as u64);
+        let max_groups = ctx.limits.max_compute_workgroups_per_dimension.max(1) as usize;
+        let fold = |groups: usize| -> (u32, u32) {
+            let gx = groups.clamp(1, max_groups);
+            (gx as u32, groups.div_ceil(gx).max(1) as u32)
+        };
+        let op = |pipeline: &Arc<wgpu::ComputePipeline>,
+                  header: [u32; 4],
+                  groups: (u32, u32),
+                  buffers: &[&wgpu::Buffer]| {
+            let params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("params"),
+                contents: bytemuck::cast_slice(&header),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+            let mut entries = vec![entry(0, &params)];
+            entries.extend(
+                buffers
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| entry(i as u32 + 1, b)),
+            );
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &entries,
+            });
+            Op {
+                pipeline: pipeline.clone(),
+                bind_group,
+                groups,
+                params,
+                header,
+                level: usize::MAX,
+                coefficient: Coefficient::None,
+            }
+        };
+        let m = &self.fine_matrix;
+        let product_pipeline = {
+            let mut map = pipelines.products.lock().unwrap_or_else(|e| e.into_inner());
+            map.entry((m.br, m.bc))
+                .or_insert_with(|| {
+                    let constants = [("BR", m.br as f64), ("BC", m.bc as f64)];
+                    Arc::new(
+                        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                            label: Some("cg product"),
+                            layout: None,
+                            module: &pipelines.product_module,
+                            entry_point: Some("product"),
+                            compilation_options: wgpu::PipelineCompilationOptions {
+                                constants: &constants,
+                                zero_initialize_workgroup_memory: false,
+                            },
+                            cache: None,
+                        }),
+                    )
+                })
+                .clone()
+        };
+        let product_groups = fold((m.brows.div_ceil(SLICE) * SLICE * m.br).div_ceil(PRODUCT_GROUP));
+        let vector_groups = fold(n.div_ceil(VECTOR_GROUP));
+        let nn = n as u32;
+        let product = |x: &wgpu::Buffer, y: &wgpu::Buffer| {
+            op(
+                &product_pipeline,
+                [m.brows as u32, 0, product_groups.0, 0],
+                product_groups,
+                &[&m.start, &m.rows, &m.col, &val, x, y],
+            )
+        };
+        let dot = |a: &wgpu::Buffer, b: &wgpu::Buffer, slot: u32| {
+            op(
+                &pipelines.dot,
+                [nn, slot, 0, 0],
+                (DOT_GROUPS as u32, 1),
+                &[a, b, &partial],
+            )
+        };
+        let scalar = |phase: u32| {
+            op(
+                &pipelines.scalar,
+                [phase, 0, 0, 0],
+                (1, 1),
+                &[&partial, &scalars],
+            )
+        };
+        let update = |code: u32, q: &wgpu::Buffer| {
+            op(
+                &pipelines.update,
+                [nn, code, vector_groups.0, 0],
+                vector_groups,
+                &[&scalars, q, &z, &x, &r, &p],
+            )
+        };
+        let to_cycle = op(
+            &pipelines.convert,
+            [nn, 0, vector_groups.0, 0],
+            vector_groups,
+            &[&r, &self.b0],
+        );
+        let from_cycle = || {
+            op(
+                &pipelines.convert,
+                [nn, 1, vector_groups.0, 0],
+                vector_groups,
+                &[&z, &self.x0],
+            )
+        };
+        let cycle = || self.ops.iter().map(Op::clone_handles);
+        // r = b, x = 0, b·b; z = M r; rz; p = z.
+        let mut start = vec![update(2, &b), dot(&b, &b, 4), to_cycle.clone_handles()];
+        start.extend(cycle());
+        start.extend([from_cycle(), dot(&r, &z, 2), scalar(0), update(3, &q)]);
+        // q = A p; alpha; x, r; r·r and the check; z = M r; beta; p.
+        let mut iteration = vec![
+            product(&p, &q),
+            dot(&p, &q, 0),
+            scalar(1),
+            update(0, &q),
+            dot(&r, &r, 1),
+            scalar(2),
+            to_cycle,
+        ];
+        iteration.extend(cycle());
+        iteration.extend([
+            from_cycle(),
+            dot(&r, &z, 2),
+            dot(&z, &q, 3),
+            scalar(3),
+            update(1, &q),
+        ]);
+        if let Some(e) = block_on(validation.pop()) {
+            return Err(e.to_string());
+        }
+        if let Some(e) = block_on(oom.pop()) {
+            return Err(format!("not enough memory on the card ({e})"));
+        }
+        if let Some(e) = ctx.take_error() {
+            return Err(e);
+        }
+        Ok(Cg {
+            val,
+            b,
+            x,
+            scalars,
+            scalars_staging,
+            x_staging,
+            start,
+            iteration,
+        })
+    }
+
+    /// Solves `A x = b` by conjugate gradients on the card (the flexible form of
+    /// `PcgSolver::solve_counted`, same stopping rule `|r| <= tolerance |b|`). `Err`: the
+    /// card failed, the processor has to solve.
+    pub(crate) fn solve(
+        &self,
+        b: &[f64],
+        x: &mut [f64],
+        tolerance: f64,
+        max_iterations: usize,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<std::result::Result<CgOutcome, plxs_core::Error>, String> {
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(cg) = self
+            .cg
+            .as_ref()
+            .filter(|_| !self.failed.load(Ordering::Relaxed))
+        else {
+            return Err("the conjugate gradients are not on the card".to_owned());
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.iterate(cg, b, x, tolerance, max_iterations, cancelled)
+        }))
+        .unwrap_or_else(|_| Err("the conjugate gradients panicked".to_owned()));
+        if result.is_err() {
+            self.failed.store(true, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn submit(&self, ops: &[Op], repeat: usize, read: Option<(&wgpu::Buffer, &wgpu::Buffer, u64)>) {
+        let mut encoder = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("cg") });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("cg"),
+                timestamp_writes: None,
+            });
+            for _ in 0..repeat {
+                for op in ops {
+                    pass.set_pipeline(&op.pipeline);
+                    pass.set_bind_group(0, &op.bind_group, &[]);
+                    pass.dispatch_workgroups(op.groups.0, op.groups.1, 1);
+                }
+            }
+        }
+        if let Some((from, to, bytes)) = read {
+            encoder.copy_buffer_to_buffer(from, 0, to, 0, bytes);
+        }
+        self.ctx.queue.submit([encoder.finish()]);
+    }
+
+    fn read<T: bytemuck::Pod>(&self, staging: &wgpu::Buffer, out: &mut [T]) -> Result<(), String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        staging.map_async(wgpu::MapMode::Read, .., move |result| {
+            let _ = tx.send(result);
+        });
+        self.ctx
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| e.to_string())?;
+        rx.recv()
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        {
+            let view = staging.get_mapped_range(..).map_err(|e| e.to_string())?;
+            let data: &[T] = bytemuck::cast_slice(&view);
+            out.copy_from_slice(&data[..out.len()]);
+        }
+        staging.unmap();
+        match self.ctx.take_error() {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    fn iterate(
+        &self,
+        cg: &Cg,
+        b: &[f64],
+        x: &mut [f64],
+        tolerance: f64,
+        max_iterations: usize,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<std::result::Result<CgOutcome, plxs_core::Error>, String> {
+        let queue = &self.ctx.queue;
+        queue.write_buffer(&cg.b, 0, bytemuck::cast_slice(b));
+        let mut init = [0.0f64; SCALARS];
+        init[7] = tolerance * tolerance;
+        init[8] = max_iterations as f64;
+        queue.write_buffer(&cg.scalars, 0, bytemuck::cast_slice(&init));
+        let bytes = (8 * SCALARS) as u64;
+        self.submit(
+            &cg.start,
+            1,
+            Some((&cg.scalars, &cg.scalars_staging, bytes)),
+        );
+        let mut state = [0.0f64; SCALARS];
+        self.read(&cg.scalars_staging, &mut state)?;
+        while state[5] == 0.0 {
+            if cancelled() {
+                return Ok(Err(plxs_core::Error::Cancelled));
+            }
+            self.submit(
+                &cg.iteration,
+                BATCH,
+                Some((&cg.scalars, &cg.scalars_staging, bytes)),
+            );
+            self.read(&cg.scalars_staging, &mut state)?;
+        }
+        let residual = if state[3] > 0.0 {
+            (state[4] / state[3]).sqrt()
+        } else {
+            0.0
+        };
+        let outcome = match state[5] as u32 {
+            1 => {
+                let n = 8 * self.n as u64;
+                let mut encoder = self
+                    .ctx
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                encoder.copy_buffer_to_buffer(&cg.x, 0, &cg.x_staging, 0, n);
+                queue.submit([encoder.finish()]);
+                self.read(&cg.x_staging, x)?;
+                CgOutcome::Converged {
+                    iterations: state[6] as usize,
+                    residual,
+                }
+            }
+            2 => CgOutcome::Indefinite,
+            _ => CgOutcome::NotConverged { residual },
+        };
+        Ok(Ok(outcome))
+    }
+}
+
+impl Op {
+    /// Another handle to the same dispatch (wgpu objects are reference counted).
+    fn clone_handles(&self) -> Op {
+        Op {
+            pipeline: self.pipeline.clone(),
+            bind_group: self.bind_group.clone(),
+            groups: self.groups,
+            params: self.params.clone(),
+            header: self.header,
+            level: self.level,
+            coefficient: self.coefficient,
         }
     }
 }
@@ -1018,6 +1518,57 @@ mod tests {
         cpu.refresh(&b);
         gpu.refresh(&b);
         compare(&cpu, &gpu);
+    }
+
+    #[test]
+    fn conjugate_gradients_on_the_card_solve_the_system() {
+        let (a, unknowns) = grid(16);
+        let options = AmgOptions {
+            gpu: GpuMode::On,
+            coarse_size: 300,
+            ..AmgOptions::default()
+        };
+        let mut amg = Amg::build(&a, Some(&unknowns), options).unwrap();
+        amg.attach_operator(&a);
+        let Some(gpu) = amg.gpu_cycle() else {
+            eprintln!("skipped: {:?}", amg.placement());
+            return;
+        };
+        let n = a.rows();
+        let b: Vec<f64> = (0..n).map(|i| ((i * 37) % 23) as f64 - 11.0).collect();
+        let mut x = vec![0.0; n];
+        let outcome = gpu
+            .solve(&b, &mut x, 1e-12, 1000, &|| false)
+            .unwrap()
+            .unwrap();
+        let CgOutcome::Converged {
+            iterations,
+            residual,
+        } = outcome
+        else {
+            panic!("did not converge");
+        };
+        assert!(
+            iterations > 1 && residual <= 1e-12,
+            "{iterations} {residual:e}"
+        );
+        let mut r = vec![0.0; n];
+        a.residual(&b, &x, &mut r);
+        let norm = |v: &[f64]| v.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!(norm(&r) <= 1e-11 * norm(&b), "{:e}", norm(&r) / norm(&b));
+        // New values (a Newton iteration): the solution follows.
+        let mut a2 = a.clone();
+        a2.val.iter_mut().for_each(|v| *v *= 2.0);
+        amg.refresh(&a2);
+        amg.attach_operator(&a2);
+        let gpu = amg.gpu_cycle().expect("still on the card");
+        let mut y = vec![0.0; n];
+        gpu.solve(&b, &mut y, 1e-12, 1000, &|| false)
+            .unwrap()
+            .unwrap();
+        for (x, y) in x.iter().zip(&y) {
+            assert!((x - 2.0 * y).abs() <= 1e-9 * x.abs().max(1.0), "{x} vs {y}");
+        }
     }
 
     #[test]

@@ -102,15 +102,18 @@ iterations and the remaining relative residual (below 1e-12). The results of bot
 agree to that accuracy. In a nonlinear step the hierarchy is rebuilt for every Newton
 iteration, which costs about as much as a few iterations of the solve.
 
-On a computer with a discrete graphics card, the iterative solver runs the multigrid
-cycle on the card for models of 100 000 equations and more. It detects this by itself,
-and there is nothing to set. The conjugate gradients stay on the processor in double
-precision, so the results are the same as without the card. The card has many times the
+On a computer with a discrete graphics card, the iterative solver runs on the card for
+models of 100 000 equations and more. It detects this by itself, and there is nothing to
+set. The multigrid cycle runs in single precision as on the processor; the conjugate
+gradients around it, including the product with the matrix, run in double precision on the
+card as well when it supports that (otherwise they stay on the processor), so the results
+are the same as without the card. The card has many times the
 memory bandwidth of the processor, which is what limits the cycle: on a 591 000 equation
 model of quadratic tetrahedra the preconditioner time drops from 11.4 s to 1.5 s on an
 RTX 4070, and the whole solve from 15.9 s to 5.8 s. Integrated graphics share the memory
 of the processor and gain nothing, so they are not used. The monitor line of the
-preconditioner ends with "V-cycle on the graphics card" and its name. If a card was found
+preconditioner ends with "conjugate gradients and V-cycle on the graphics card" (or only
+"V-cycle on the graphics card", with the reason) and its name. If a card was found
 but cannot be used, for example because the model does not fit into its memory, the line
 says "V-cycle on the processor" with the reason, and the solve continues on the processor.
 For measurements the environment variable `PLXS_GPU=off` keeps the cycle on the processor
