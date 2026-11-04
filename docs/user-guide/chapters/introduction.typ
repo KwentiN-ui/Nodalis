@@ -128,6 +128,8 @@ the version; under Windows a message box names the file before the program close
 file, together with `nodalis.previous.log`, when you report a crash. The newest 20 reports are
 kept. #menu("Help", "Open Log Folder") opens the folder:
 
+#screenshot("help-open-log-folder.png", [The Help menu with #ui("Open Log Folder")])
+
 #table(
   columns: 2,
   [Windows], [`%APPDATA%\nodalis\data\logs`],
