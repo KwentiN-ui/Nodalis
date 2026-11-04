@@ -1,10 +1,11 @@
-//! The iterative solver: conjugate gradients preconditioned by an incomplete Cholesky
-//! factorization without fill, IC(0), for symmetric positive definite systems.
+//! The iterative solver: conjugate gradients for symmetric positive definite systems,
+//! preconditioned by algebraic multigrid ([`crate::amg`], the default) or by an incomplete
+//! Cholesky factorization without fill, IC(0).
 //!
-//! It needs a fraction of the memory of the direct solver (the matrix twice and one
-//! triangle of the same pattern, no fill), which is what it is for: models whose factor
-//! would not fit. It solves only positive definite systems; contact, eigenvalue problems
-//! and unsymmetric tangents stay with the direct solver.
+//! It needs a fraction of the memory of the direct solver (the matrix in full storage and
+//! a multigrid hierarchy of a fraction of its size), which is what it is for: models
+//! whose factor would not fit. It solves only positive definite systems; eigenvalue
+//! problems and unsymmetric tangents stay with the direct solver.
 //!
 //! Sources: Hestenes and Stiefel's conjugate gradient method in the preconditioned form of
 //! Saad, "Iterative Methods for Sparse Linear Systems", 2nd ed., algorithm 9.1; IC(0) as in
@@ -12,22 +13,34 @@
 //! diagonal shift on breakdown after Manteuffel, "An incomplete factorization technique for
 //! positive definite linear systems", Math. Comp. 34 (1980). No CalculiX code was consulted.
 //!
-//! The matrix-vector product and the vector operations run in parallel on the current
-//! rayon pool; the triangular solves of the preconditioner are sequential (each row needs
-//! the ones before it).
+//! The matrix-vector product, the vector operations and the multigrid cycle run in
+//! parallel on the current rayon pool; the triangular solves of IC(0) are sequential (each
+//! row needs the ones before it). `PLXS_PRECONDITIONER=ic0|amg` chooses for measurements.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rayon::prelude::*;
 
 use plxs_core::{Error, Result};
 
+use crate::amg::{Amg, AmgOptions, Unknowns};
+use crate::bsr::Bsr;
 use crate::solver::LinearSolver;
 use crate::{Pattern, SparseMatrix};
 
 /// The iteration stops when `|r| <= TOLERANCE |b|` (Euclidean norms).
 pub const TOLERANCE: f64 = 1e-12;
+/// `PLXS_AMG_REBUILD=1` rebuilds the hierarchy at every factorization (measurements).
+fn reuse_disabled() -> bool {
+    std::env::var("PLXS_AMG_REBUILD").is_ok()
+}
 
 /// Vectors shorter than this are handled by one thread.
 const PARALLEL_FROM: usize = 8192;
+
+/// Systems of at least this many unknowns are stored in blocks when the unknowns are
+/// known; the scalar storage is simpler for the small ones.
+const BLOCKED_FROM: usize = 3000;
 
 /// How the last solve went.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -37,29 +50,134 @@ pub struct PcgStats {
     pub relative_residual: f64,
 }
 
-/// Preconditioned conjugate gradients with an IC(0) preconditioner.
-#[derive(Default)]
+/// Which preconditioner the solver builds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preconditioner {
+    /// Smoothed aggregation multigrid (one V-cycle).
+    Multigrid,
+    /// Incomplete Cholesky without fill.
+    IncompleteCholesky,
+}
+
+impl Preconditioner {
+    /// The default, or what `PLXS_PRECONDITIONER` asks for.
+    fn from_environment() -> Self {
+        match std::env::var("PLXS_PRECONDITIONER").as_deref() {
+            Ok("ic0") | Ok("IC0") => Self::IncompleteCholesky,
+            _ => Self::Multigrid,
+        }
+    }
+}
+
+/// Preconditioned conjugate gradients.
 pub struct PcgSolver {
     /// The pattern of the last `analyze`, the upper triangle in columns, which read as rows
     /// is the lower triangle: row `i` holds the columns `k <= i`, the diagonal last.
     pattern: Option<std::sync::Arc<Pattern>>,
-    /// The whole matrix in rows, for the product: row starts, columns, and for each entry
-    /// its position in the values of the upper triangle.
-    full_ptr: Vec<u32>,
-    full_col: Vec<u32>,
+    /// The whole matrix in rows (scalar, or in `3 × 3` blocks padded to three unknowns per
+    /// node when the unknowns are known), for the product, and for each of its stored
+    /// values the position in the values of the upper triangle (`u32::MAX`: a padding
+    /// entry, fixed at analysis).
+    full: Bsr,
     full_src: Vec<u32>,
-    full_val: Vec<f64>,
+    /// Blocked storage: the padded index of every unknown, and the padded dimension.
+    slot_of: Vec<u32>,
+    padded: usize,
+    /// The unknowns the storage was analyzed for.
+    analyzed_unknowns: Option<Unknowns>,
+    choice: Preconditioner,
+    /// The multigrid hierarchy of the last factorization.
+    amg: Option<Amg>,
+    /// What the unknowns are (nodes, components, positions), for the aggregation and the
+    /// rigid body modes of the multigrid; without it the hierarchy is scalar.
+    unknowns: Option<Unknowns>,
     /// The incomplete factor `L` on the pattern of the lower triangle (`A ≈ L Lᵀ`).
     factor: Vec<f64>,
     /// The relative diagonal shift the factorization needed (0 when none).
     shift: f64,
     factorized: bool,
     max_iterations: Option<usize>,
+    /// Iterations of the first solve after the hierarchy was built, and of the last
+    /// solve (0: none yet); a factorization keeps the hierarchy while the count stays
+    /// reasonable.
+    iterations_after_build: AtomicUsize,
+    last_iterations: AtomicUsize,
+    /// Whether the last factorization kept the hierarchy of the one before.
+    reused: bool,
+}
+
+impl Default for PcgSolver {
+    fn default() -> Self {
+        Self {
+            pattern: None,
+            full: Bsr::default(),
+            full_src: Vec::new(),
+            slot_of: Vec::new(),
+            padded: 0,
+            analyzed_unknowns: None,
+            choice: Preconditioner::from_environment(),
+            amg: None,
+            unknowns: None,
+            factor: Vec::new(),
+            shift: 0.0,
+            factorized: false,
+            max_iterations: None,
+            iterations_after_build: AtomicUsize::new(0),
+            last_iterations: AtomicUsize::new(0),
+            reused: false,
+        }
+    }
 }
 
 impl PcgSolver {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Chooses the preconditioner (default: multigrid, or `PLXS_PRECONDITIONER`).
+    pub fn set_preconditioner(&mut self, choice: Preconditioner) {
+        self.choice = choice;
+    }
+
+    /// Tells the solver what the unknowns of the next systems are, before `analyze`;
+    /// `None` makes the storage and the multigrid scalar (every unknown its own block, the
+    /// constant as nullspace).
+    pub fn set_unknowns(&mut self, unknowns: Option<Unknowns>) {
+        self.unknowns = unknowns;
+    }
+
+    /// Whether the matrix is stored in `3 × 3` blocks.
+    pub fn is_blocked(&self) -> bool {
+        self.full.br == 3
+    }
+
+    /// A line describing the preconditioner of the last factorization.
+    pub fn preconditioner(&self) -> String {
+        match &self.amg {
+            Some(amg) => {
+                let sizes = amg.sizes();
+                let levels: Vec<String> = sizes.iter().map(|n| n.to_string()).collect();
+                format!(
+                    "algebraic multigrid in single precision, {} levels ({}), \
+                     {:.2} x the matrix{}",
+                    amg.levels(),
+                    levels.join(" > "),
+                    // Memory: single precision values against the double precision matrix.
+                    amg.nonzeros() as f64 / (2 * self.full.nnz().max(1)) as f64,
+                    if self.reused { ", kept" } else { "" }
+                )
+            }
+            None if self.shift.is_infinite() => {
+                "diagonal (incomplete Cholesky broke down)".to_owned()
+            }
+            None if self.shift > 0.0 => {
+                format!(
+                    "incomplete Cholesky, diagonal shifted by {:.0e}",
+                    self.shift
+                )
+            }
+            None => "incomplete Cholesky".to_owned(),
+        }
     }
 
     /// Limits the iterations of a solve (default: the dimension, at least 1000, at most
@@ -68,9 +186,12 @@ impl PcgSolver {
         self.max_iterations = Some(max);
     }
 
-    /// Entries of the preconditioner after `analyze`, its memory in values.
+    /// Entries of the preconditioner, its memory in values.
     pub fn preconditioner_nonzeros(&self) -> Option<usize> {
-        self.pattern.as_ref().map(|p| p.nnz())
+        match &self.amg {
+            Some(amg) => Some(amg.nonzeros()),
+            None => self.pattern.as_ref().map(|p| p.nnz()),
+        }
     }
 
     /// The relative diagonal shift `α` of the last factorization: the preconditioner is
@@ -84,9 +205,13 @@ impl PcgSolver {
         let pattern = (self.pattern.as_ref())
             .filter(|_| self.factorized)
             .ok_or_else(|| numerical("solve before factorize"))?;
-        let n = pattern.dimension();
-        assert_eq!(rhs.len(), n, "right-hand side of the wrong size");
-        let b = rhs.to_vec();
+        assert_eq!(
+            rhs.len(),
+            pattern.dimension(),
+            "right-hand side of the wrong size"
+        );
+        let n = self.padded;
+        let b = self.pad(rhs);
         let b_norm = norm(&b);
         rhs.iter_mut().for_each(|x| *x = 0.0);
         if b_norm == 0.0 {
@@ -101,14 +226,24 @@ impl PcgSolver {
         let max_iterations = self
             .max_iterations
             .unwrap_or_else(|| n.clamp(1000, 100_000));
-        let x = rhs;
+        let mut x_padded = vec![0.0; n];
+        let x = &mut x_padded;
         let mut r = b;
         let mut z = vec![0.0; n];
-        self.precondition(&r, &mut z);
+        self.precondition(&r, &mut z)?;
         let mut p = z.clone();
         let mut q = vec![0.0; n];
         let mut rz = dot(&r, &z);
         let mut residual = 1.0;
+        let trace = std::env::var("PLXS_PCG_TRACE").is_ok();
+        let (mut t_product, mut t_precondition, mut t_vectors) = (0.0, 0.0, 0.0);
+        let clock = std::time::Instant::now();
+        let mut last = 0.0;
+        let mut lap = |t: &mut f64| {
+            let now = clock.elapsed().as_secs_f64();
+            *t += now - last;
+            last = now;
+        };
         let cancel = plxs_core::CancelToken::current();
         for iteration in 1..=max_iterations {
             // Every iteration: on large systems one takes a good part of a second.
@@ -118,7 +253,13 @@ impl PcgSolver {
             {
                 return Err(plxs_core::Error::Cancelled);
             }
+            if trace {
+                lap(&mut t_vectors);
+            }
             self.product(&p, &mut q);
+            if trace {
+                lap(&mut t_product);
+            }
             let pq = dot(&p, &q);
             if pq <= 0.0 || !pq.is_finite() {
                 return Err(numerical(
@@ -131,14 +272,37 @@ impl PcgSolver {
             axpy(-alpha, &q, &mut r);
             residual = norm(&r) / b_norm;
             if residual <= TOLERANCE {
+                self.unpad(x, rhs);
+                self.last_iterations.store(iteration, Ordering::Relaxed);
+                if self.iterations_after_build.load(Ordering::Relaxed) == 0 {
+                    self.iterations_after_build
+                        .store(iteration, Ordering::Relaxed);
+                }
+                if trace {
+                    eprintln!(
+                        "pcg: {iteration} iterations, product {t_product:.2} s, \
+                         preconditioner {t_precondition:.2} s, vectors {t_vectors:.2} s"
+                    );
+                }
                 return Ok(PcgStats {
                     iterations: iteration,
                     relative_residual: residual,
                 });
             }
-            self.precondition(&r, &mut z);
+            if trace {
+                lap(&mut t_vectors);
+            }
+            self.precondition(&r, &mut z)?;
+            if trace {
+                lap(&mut t_precondition);
+            }
             let rz_new = dot(&r, &z);
-            let beta = rz_new / rz;
+            // Polak-Ribière form of beta (flexible conjugate gradients),
+            // `z_new · (r_new - r_old) / (z_old · r_old)` with `r_new - r_old = -alpha q`:
+            // one more dot product, and the directions stay conjugate when the
+            // preconditioner is not exactly the same operator in every iteration (its
+            // single precision rounding). Equal to `rz_new / rz` for a fixed operator.
+            let beta = -alpha * dot(&z, &q) / rz;
             rz = rz_new;
             // p = z + beta p
             zip_mut(&mut p, &z, |p, z| *p = z + beta * *p);
@@ -151,25 +315,256 @@ impl PcgSolver {
 
     /// `y = A x` with the whole matrix in rows, rows in parallel.
     fn product(&self, x: &[f64], y: &mut [f64]) {
-        let row = |(i, y): (usize, &mut f64)| {
-            let (start, end) = (self.full_ptr[i] as usize, self.full_ptr[i + 1] as usize);
-            *y = (self.full_col[start..end].iter())
-                .zip(&self.full_val[start..end])
-                .map(|(&c, &a)| a * x[c as usize])
-                .sum();
-        };
-        if y.len() < PARALLEL_FROM {
-            y.iter_mut().enumerate().for_each(row);
-        } else {
-            y.par_iter_mut()
-                .enumerate()
-                .with_min_len(1024)
-                .for_each(row);
+        self.full.multiply(x, y);
+    }
+
+    /// `z = M⁻¹ r` (padded vectors).
+    fn precondition(&self, r: &[f64], z: &mut [f64]) -> Result<()> {
+        match &self.amg {
+            Some(amg) => amg.apply(r, z),
+            None => {
+                // The incomplete factor lives in the original numbering.
+                let mut r_u = vec![0.0; self.slot_of.len()];
+                let mut z_u = vec![0.0; self.slot_of.len()];
+                self.unpad(r, &mut r_u);
+                self.incomplete_cholesky_solve(&r_u, &mut z_u);
+                z.iter_mut().for_each(|v| *v = 0.0);
+                for (i, &slot) in self.slot_of.iter().enumerate() {
+                    z[slot as usize] = z_u[i];
+                }
+                Ok(())
+            }
         }
     }
 
+    /// The unknowns in the padded numbering: a padding unknown belongs to its node without
+    /// a component, so that it has no rigid body mode and stays decoupled.
+    fn padded_unknowns(&self) -> Option<Unknowns> {
+        let u = self.unknowns.as_ref()?;
+        if u.node.len() != self.slot_of.len() {
+            return None;
+        }
+        if !self.is_blocked() {
+            let mut renumbered = u.clone();
+            for (i, &slot) in self.slot_of.iter().enumerate() {
+                let slot = slot as usize;
+                renumbered.node[slot] = u.node[i];
+                renumbered.component[slot] = u.component[i];
+                renumbered.coordinates[slot] = u.coordinates[i];
+            }
+            return Some(renumbered);
+        }
+        let nodes = self.padded / 3;
+        let mut padded = Unknowns {
+            node: (0..nodes as u32).flat_map(|b| [b, b, b]).collect(),
+            component: vec![u8::MAX; self.padded],
+            coordinates: vec![[0.0; 3]; self.padded],
+        };
+        for (i, &slot) in self.slot_of.iter().enumerate() {
+            let slot = slot as usize;
+            padded.component[slot] = u.component[i];
+            let node = slot / 3;
+            for c in 0..3 {
+                padded.coordinates[3 * node + c] = u.coordinates[i];
+            }
+        }
+        Some(padded)
+    }
+
+    /// The vector of the unknowns in the solver's (renumbered, padded) numbering, zero
+    /// on the padding.
+    fn pad(&self, v: &[f64]) -> Vec<f64> {
+        let mut padded = vec![0.0; self.padded];
+        for (i, &slot) in self.slot_of.iter().enumerate() {
+            padded[slot as usize] = v[i];
+        }
+        padded
+    }
+
+    fn unpad(&self, padded: &[f64], v: &mut [f64]) {
+        for (i, &slot) in self.slot_of.iter().enumerate() {
+            v[i] = padded[slot as usize];
+        }
+    }
+
+    /// Scalar storage: every entry of the upper triangle mirrored into rows, the unknowns
+    /// renumbered by reverse Cuthill-McKee.
+    fn analyze_scalar(&mut self, pattern: &Pattern) {
+        let n = pattern.dimension();
+        let (ptr, rows) = (pattern.col_ptr(), pattern.row_idx());
+        let mut adjacency: Vec<Vec<u32>> = vec![Vec::new(); n];
+        for j in 0..n {
+            for &i in &rows[ptr[j] as usize..ptr[j + 1] as usize] {
+                if i as usize != j {
+                    adjacency[j].push(i);
+                    adjacency[i as usize].push(j as u32);
+                }
+            }
+        }
+        let slot = reverse_cuthill_mckee(&adjacency);
+        drop(adjacency);
+        // Entries per row of the whole matrix: column j of the upper triangle gives row j
+        // (its lower part) and, mirrored, one entry in each row i < j.
+        let mut count = vec![0u32; n + 1];
+        for j in 0..n {
+            for &i in &rows[ptr[j] as usize..ptr[j + 1] as usize] {
+                count[slot[j] as usize + 1] += 1;
+                if i as usize != j {
+                    count[slot[i as usize] as usize + 1] += 1;
+                }
+            }
+        }
+        for i in 0..n {
+            count[i + 1] += count[i];
+        }
+        let nnz = count[n] as usize;
+        let mut next = count.clone();
+        let mut full_col = vec![0u32; nnz];
+        let mut full_src = vec![0u32; nnz];
+        for j in 0..n {
+            let (start, end) = (ptr[j] as usize, ptr[j + 1] as usize);
+            let sj = slot[j] as usize;
+            for (k, &i) in rows.iter().enumerate().take(end).skip(start) {
+                let si = slot[i as usize] as usize;
+                let at = next[sj] as usize;
+                full_col[at] = si as u32;
+                full_src[at] = k as u32;
+                next[sj] += 1;
+                if si != sj {
+                    let at = next[si] as usize;
+                    full_col[at] = sj as u32;
+                    full_src[at] = k as u32;
+                    next[si] += 1;
+                }
+            }
+        }
+        self.full = Bsr {
+            brows: n,
+            bcols: n,
+            br: 1,
+            bc: 1,
+            ptr: count.iter().map(|&c| c as usize).collect(),
+            col: full_col,
+            val: vec![0.0; nnz],
+        };
+        self.full_src = full_src;
+        self.slot_of = slot;
+        self.padded = n;
+    }
+
+    /// Blocked storage: the unknowns padded to three per node, in `3 × 3` blocks.
+    fn analyze_blocked(&mut self, pattern: &Pattern, unknowns: &Unknowns) {
+        let n = pattern.dimension();
+        let (ptr, rows) = (pattern.col_ptr(), pattern.row_idx());
+        // Nodes in the order of their first unknown.
+        let max_node = unknowns
+            .node
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |m| m as usize + 1);
+        let mut dense = vec![u32::MAX; max_node];
+        let mut nodes = 0u32;
+        let mut node_of = Vec::with_capacity(n);
+        for &node in &unknowns.node {
+            let slot = &mut dense[node as usize];
+            if *slot == u32::MAX {
+                *slot = nodes;
+                nodes += 1;
+            }
+            node_of.push(*slot);
+        }
+        let nodes = nodes as usize;
+        // Block columns per block row, from the entries of the upper triangle and their
+        // mirror images.
+        let mut lists: Vec<Vec<u32>> = vec![Vec::new(); nodes];
+        for j in 0..n {
+            let bj = node_of[j];
+            for &i in &rows[ptr[j] as usize..ptr[j + 1] as usize] {
+                let bi = node_of[i as usize];
+                lists[bj as usize].push(bi);
+                if bi != bj {
+                    lists[bi as usize].push(bj);
+                }
+            }
+        }
+        for list in &mut lists {
+            list.sort_unstable();
+            list.dedup();
+        }
+        // Nodes renumbered by reverse Cuthill-McKee for the locality of the product.
+        let adjacency: Vec<Vec<u32>> = lists
+            .iter()
+            .enumerate()
+            .map(|(b, list)| list.iter().copied().filter(|&c| c as usize != b).collect())
+            .collect();
+        let renumbered = reverse_cuthill_mckee(&adjacency);
+        drop(adjacency);
+        let node_of: Vec<u32> = node_of.iter().map(|&b| renumbered[b as usize]).collect();
+        let slot_of: Vec<u32> = (0..n)
+            .map(|i| 3 * node_of[i] + unknowns.component[i] as u32)
+            .collect();
+        let mut by_new: Vec<Vec<u32>> = vec![Vec::new(); nodes];
+        for (old, list) in lists.into_iter().enumerate() {
+            let mut list: Vec<u32> = list.into_iter().map(|c| renumbered[c as usize]).collect();
+            list.sort_unstable();
+            by_new[renumbered[old] as usize] = list;
+        }
+        let mut bptr = Vec::with_capacity(nodes + 1);
+        let mut bcol = Vec::new();
+        bptr.push(0);
+        for list in &by_new {
+            bcol.extend_from_slice(list);
+            bptr.push(bcol.len());
+        }
+        drop(by_new);
+        let blocks = bcol.len();
+        let mut val = vec![0.0; 9 * blocks];
+        let mut src = vec![u32::MAX; 9 * blocks];
+        let position = |bi: u32, bj: u32| -> usize {
+            let (s, e) = (bptr[bi as usize], bptr[bi as usize + 1]);
+            s + bcol[s..e].binary_search(&bj).expect("block in the pattern")
+        };
+        for j in 0..n {
+            let (bj, cj) = (node_of[j], unknowns.component[j] as usize);
+            let (start, end) = (ptr[j] as usize, ptr[j + 1] as usize);
+            for (k, &row) in rows.iter().enumerate().take(end).skip(start) {
+                let i = row as usize;
+                let (bi, ci) = (node_of[i], unknowns.component[i] as usize);
+                // Row i, column j of the full matrix and its mirror image.
+                src[9 * position(bi, bj) + 3 * ci + cj] = k as u32;
+                src[9 * position(bj, bi) + 3 * cj + ci] = k as u32;
+            }
+        }
+        // The padding: unit diagonal entries, coupled with nothing.
+        let mut present = vec![false; 3 * nodes];
+        for &slot in &slot_of {
+            present[slot as usize] = true;
+        }
+        for b in 0..nodes {
+            let d = position(b as u32, b as u32);
+            for c in 0..3 {
+                if !present[3 * b + c] {
+                    val[9 * d + 4 * c] = 1.0;
+                }
+            }
+        }
+        self.full = Bsr {
+            brows: nodes,
+            bcols: nodes,
+            br: 3,
+            bc: 3,
+            ptr: bptr,
+            col: bcol,
+            val,
+        };
+        self.full_src = src;
+        self.slot_of = slot_of;
+        self.padded = 3 * nodes;
+    }
+
     /// `z = (L Lᵀ)⁻¹ r`.
-    fn precondition(&self, r: &[f64], z: &mut [f64]) {
+    fn incomplete_cholesky_solve(&self, r: &[f64], z: &mut [f64]) {
         let pattern = self.pattern.as_ref().expect("analyzed");
         let (ptr, col, l) = (pattern.col_ptr(), pattern.row_idx(), &self.factor);
         let n = pattern.dimension();
@@ -235,52 +630,24 @@ impl PcgSolver {
 
 impl LinearSolver for PcgSolver {
     fn analyze(&mut self, pattern: &Pattern) -> Result<()> {
-        if self.pattern.as_deref() == Some(pattern) {
+        if self.pattern.as_deref() == Some(pattern) && self.analyzed_unknowns == self.unknowns {
             // The Newton iterations of a step keep their pattern.
             return Ok(());
         }
         let n = pattern.dimension();
-        let (ptr, rows) = (pattern.col_ptr(), pattern.row_idx());
-        // Entries per row of the whole matrix: column j of the upper triangle gives row j
-        // (its lower part) and, mirrored, one entry in each row i < j.
-        let mut count = vec![0u32; n + 1];
-        for j in 0..n {
-            for &i in &rows[ptr[j] as usize..ptr[j + 1] as usize] {
-                count[j + 1] += 1;
-                if i as usize != j {
-                    count[i as usize + 1] += 1;
-                }
-            }
+        let blocked = self.unknowns.clone().filter(|u| {
+            u.node.len() == n && n >= BLOCKED_FROM && u.component.iter().all(|&c| c < 3)
+        });
+        match &blocked {
+            Some(unknowns) => self.analyze_blocked(pattern, unknowns),
+            None => self.analyze_scalar(pattern),
         }
-        for i in 0..n {
-            count[i + 1] += count[i];
-        }
-        let nnz = count[n] as usize;
-        let mut next = count.clone();
-        let mut full_col = vec![0u32; nnz];
-        let mut full_src = vec![0u32; nnz];
-        for j in 0..n {
-            let (start, end) = (ptr[j] as usize, ptr[j + 1] as usize);
-            for (k, &i) in rows.iter().enumerate().take(end).skip(start) {
-                let i = i as usize;
-                let at = next[j] as usize;
-                full_col[at] = i as u32;
-                full_src[at] = k as u32;
-                next[j] += 1;
-                if i != j {
-                    let at = next[i] as usize;
-                    full_col[at] = j as u32;
-                    full_src[at] = k as u32;
-                    next[i] += 1;
-                }
-            }
-        }
-        self.full_ptr = count;
-        self.full_col = full_col;
-        self.full_src = full_src;
-        self.full_val = vec![0.0; nnz];
         self.factor = vec![0.0; pattern.nnz()];
         self.pattern = Some(std::sync::Arc::new(pattern.clone()));
+        self.analyzed_unknowns = self.unknowns.clone();
+        self.amg = None;
+        self.reused = false;
+        self.iterations_after_build.store(0, Ordering::Relaxed);
         self.factorized = false;
         Ok(())
     }
@@ -305,11 +672,47 @@ impl LinearSolver for PcgSolver {
             }
         }
         let src = &self.full_src;
-        self.full_val
+        self.full
+            .val
             .par_iter_mut()
             .zip(src.par_iter())
             .with_min_len(4096)
-            .for_each(|(v, &s)| *v = values[s as usize]);
+            .for_each(|(v, &s)| {
+                if s != u32::MAX {
+                    *v = values[s as usize]
+                }
+            });
+        if self.choice == Preconditioner::Multigrid {
+            // The hierarchy of the previous factorization (same pattern) serves on while
+            // the solves with it do not take many more iterations than the first one.
+            let after_build = self.iterations_after_build.load(Ordering::Relaxed);
+            let last = self.last_iterations.load(Ordering::Relaxed);
+            if let Some(amg) = self
+                .amg
+                .as_mut()
+                .filter(|_| after_build > 0 && last * 2 <= after_build * 3 && !reuse_disabled())
+            {
+                amg.refresh(&self.full);
+                self.reused = true;
+                self.factorized = true;
+                return Ok(());
+            }
+            self.amg = None;
+            self.reused = false;
+            self.iterations_after_build.store(0, Ordering::Relaxed);
+            let unknowns = self.padded_unknowns();
+            match Amg::build(&self.full, unknowns.as_ref(), AmgOptions::default()) {
+                Ok(amg) => {
+                    self.amg = Some(amg);
+                    self.factorized = true;
+                    return Ok(());
+                }
+                // A hierarchy that cannot be built (coarsening stalled, indefinite coarse
+                // system): the incomplete factorization serves instead.
+                Err(Error::Numerical { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
         // A positive definite matrix can still break IC(0) down; shift the diagonal until
         // it does not (Manteuffel). Without a usable factor fall back to the diagonal.
         let mut shift = 0.0;
@@ -342,6 +745,63 @@ impl LinearSolver for PcgSolver {
     fn inertia(&self) -> Option<usize> {
         None
     }
+}
+
+/// The reverse Cuthill-McKee numbering of a graph given by its adjacency lists (without
+/// self loops): `new[old]`. Neighbouring vertices get nearby numbers, which keeps the
+/// vector of a product in the cache.
+fn reverse_cuthill_mckee(adjacency: &[Vec<u32>]) -> Vec<u32> {
+    let n = adjacency.len();
+    let degree: Vec<u32> = adjacency.iter().map(|a| a.len() as u32).collect();
+    let mut visited = vec![false; n];
+    let mut order: Vec<u32> = Vec::with_capacity(n);
+    let mut by_degree: Vec<u32> = (0..n as u32).collect();
+    by_degree.sort_by_key(|&v| degree[v as usize]);
+    let bfs = |start: u32, visited: &mut [bool], order: &mut Vec<u32>| {
+        let first = order.len();
+        order.push(start);
+        visited[start as usize] = true;
+        let mut head = first;
+        let mut neighbours: Vec<u32> = Vec::new();
+        while head < order.len() {
+            let v = order[head] as usize;
+            head += 1;
+            neighbours.clear();
+            neighbours.extend(
+                adjacency[v]
+                    .iter()
+                    .copied()
+                    .filter(|&w| !visited[w as usize]),
+            );
+            neighbours.sort_by_key(|&w| degree[w as usize]);
+            for &w in &neighbours {
+                visited[w as usize] = true;
+                order.push(w);
+            }
+        }
+        first
+    };
+    for &candidate in &by_degree {
+        if visited[candidate as usize] {
+            continue;
+        }
+        // A pseudo-peripheral start: the last vertex of a breadth-first search from the
+        // vertex of least degree, twice.
+        let mut start = candidate;
+        for _ in 0..2 {
+            let mut trial_visited = visited.clone();
+            let mut trial = Vec::new();
+            bfs(start, &mut trial_visited, &mut trial);
+            start = *trial.last().expect("the start itself");
+        }
+        bfs(start, &mut visited, &mut order);
+    }
+    order.reverse();
+    let mut new = vec![0u32; n];
+    for (position, &old) in order.iter().enumerate() {
+        new[old as usize] = position as u32;
+    }
+    new
 }
 
 fn numerical(message: impl Into<String>) -> Error {
@@ -424,6 +884,45 @@ mod tests {
             for (x, e) in x.iter().zip(&expected) {
                 assert!((x - e).abs() <= 1e-7 * scale, "n = {n}: {x} vs {e}");
             }
+        }
+    }
+
+    #[test]
+    fn the_hierarchy_is_kept_over_factorizations_with_the_same_pattern() {
+        // Newton iterations: the values change a little, the hierarchy serves on.
+        let n = 20_000;
+        let a = chain(n);
+        let mut pcg = PcgSolver::new();
+        pcg.analyze(a.pattern()).unwrap();
+        pcg.factorize(&a).unwrap();
+        assert!(
+            !pcg.preconditioner().contains("kept"),
+            "{}",
+            pcg.preconditioner()
+        );
+        let mut x = vec![1.0; n];
+        pcg.solve_counted(&mut x).unwrap();
+        let mut b = SparseMatrix::zeros(a.pattern().clone());
+        for (v, w) in b.values_mut().iter_mut().zip(a.values()) {
+            *v = 1.1 * w;
+        }
+        pcg.factorize(&b).unwrap();
+        assert!(
+            pcg.preconditioner().contains("kept"),
+            "{}",
+            pcg.preconditioner()
+        );
+        let mut direct = LdltSolver::new(1);
+        direct.analyze(b.pattern()).unwrap();
+        direct.factorize(&b).unwrap();
+        let mut expected = vec![1.0; n];
+        direct.solve(&mut expected).unwrap();
+        let mut x = vec![1.0; n];
+        let stats = pcg.solve_counted(&mut x).unwrap();
+        assert!(stats.relative_residual <= TOLERANCE, "{stats:?}");
+        let scale = expected.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        for (x, e) in x.iter().zip(&expected) {
+            assert!((x - e).abs() <= 1e-7 * scale, "{x} vs {e}");
         }
     }
 

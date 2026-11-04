@@ -5541,8 +5541,8 @@ fn solver_hint(choice: LinearSolverChoice) -> &'static str {
              factor, which grows quickly with the model."
         }
         LinearSolverChoice::Iterative => {
-            "Conjugate gradients with an incomplete Cholesky preconditioner. Needs a fraction \
-             of the memory and is often faster on large solid models, but only solves \
+            "Conjugate gradients with an algebraic multigrid preconditioner. Needs a fraction \
+             of the memory and is usually faster on large solid models, but only solves \
              positive definite systems; fails near buckling or with parts held only by \
              contact."
         }

@@ -15,14 +15,24 @@
 //!    neighborhood (the three displacement DOFs of a node share theirs) become one weighted
 //!    vertex, which keeps the DOFs of a node together as a dense block of the factor.
 //! 2. A subgraph is bisected. With node coordinates (the solver knows them, the DOFs of a
-//!    node share them) at the median of the axis of largest extent, which cuts a mesh along
-//!    a nearly flat surface; without coordinates along a level structure rooted at a
-//!    pseudo-peripheral vertex, taking among the levels whose cumulative weight lies between
-//!    35 % and 65 % of the subgraph the cut with the smallest separator. In both cases the
-//!    vertex separator is the smaller of the two boundaries of the cut (the vertices of one
-//!    side with a neighbor on the other), so that only vertices touching both sides are in it.
+//!    node share them) by a plane normal to one of the axes, which cuts a mesh along a
+//!    nearly flat surface: every axis and several positions (30 % to 70 % of the weight) are
+//!    tried and the cut with the smallest separator wins, which matters on parts with holes
+//!    and ribs. Without coordinates along a level structure rooted at a pseudo-peripheral
+//!    vertex, taking among the levels whose cumulative weight lies between 35 % and 65 % of
+//!    the subgraph the cut with the smallest separator. In both cases the vertex separator
+//!    is a minimum vertex cover of the edges between the sides (König's theorem on a maximum
+//!    matching of the boundary graph), never larger than the smaller boundary, and is then
+//!    refined by moving its vertices into a side where fewer vertices of the other side have
+//!    to take their place (the greedy part of Fiduccia-Mattheyses).
 //! 3. Both sides are ordered recursively and the separator is numbered after them; small
 //!    subgraphs are ordered breadth first (Cuthill-McKee), which keeps their small profile.
+//!
+//! On Quentin's 591k-equation bracket (C3D10) the median cut on the longest axis with the
+//! smaller boundary as separator gave a factor of 2.35 billion nonzeros (18.8 GB, beyond
+//! the memory); the choice of axis and position and the vertex cover 740 million, the
+//! refinement 690 million, leaves of 60 instead of 240 DOFs 650 million (5.2 GB, factorized
+//! in 12 s on 4 threads); PaStiX with Scotch 387 million.
 //!
 //! Disconnected subgraphs are ordered component by component without a separator. Nothing of
 //! CalculiX was consulted; PaStiX/Scotch are only the measuring stick.
@@ -33,7 +43,11 @@ use std::hash::{Hash, Hasher};
 use crate::Pattern;
 
 /// Subgraphs with at most this many DOFs are ordered breadth first instead of dissected.
-const LEAF_WEIGHT: usize = 240;
+const LEAF_WEIGHT: usize = 60;
+
+/// Where along an axis a geometric cut is tried (fraction of the weight on the lower
+/// side); the cut with the smallest separator wins.
+const CUT_FRACTIONS: [f64; 5] = [0.5, 0.4, 0.6, 0.3, 0.7];
 
 /// The nested dissection ordering of `pattern` as the forward permutation `faer` takes:
 /// `perm[new] = old`, the old index eliminated at position `new`. `coordinates`, when given,
@@ -193,6 +207,16 @@ enum Side {
     Out,
     A,
     B,
+    /// In the separator (during its refinement).
+    S,
+}
+
+/// A candidate bisection: the two sides, the separator (a subset of them) and its weight.
+struct Split {
+    a: Vec<u32>,
+    b: Vec<u32>,
+    separator: Vec<u32>,
+    weight: usize,
 }
 
 struct Dissection<'a> {
@@ -218,11 +242,11 @@ impl<'a> Dissection<'a> {
         }
     }
 
-    /// Splits the subgraph at the median of the axis of largest extent; `None` when the
-    /// vertices have no coordinates or all lie at one point. Returns the vertices of the two
-    /// sides, each nonempty.
-    fn geometric_bisection(&self, vertices: &[u32]) -> Option<(Vec<u32>, Vec<u32>)> {
-        let coordinates = self.coordinates.as_ref()?;
+    /// The axes along which the subgraph extends, the largest extent first.
+    fn axes_by_extent(&self, vertices: &[u32]) -> Vec<usize> {
+        let Some(coordinates) = self.coordinates.as_ref() else {
+            return Vec::new();
+        };
         let mut low = [f64::INFINITY; 3];
         let mut high = [f64::NEG_INFINITY; 3];
         for &v in vertices {
@@ -231,17 +255,24 @@ impl<'a> Dissection<'a> {
                 high[axis] = high[axis].max(c);
             }
         }
-        let (axis, extent) = (0..3)
+        let mut axes: Vec<(usize, f64)> = (0..3)
             .map(|a| (a, high[a] - low[a]))
-            .max_by(|a, b| a.1.total_cmp(&b.1))?;
-        if extent <= 0.0 || extent.is_nan() {
-            return None;
-        }
-        // Weighted median: sort by coordinate and cut where half the weight is reached.
-        let mut sorted: Vec<u32> = vertices.to_vec();
-        sorted.sort_unstable_by(|&a, &b| {
-            coordinates[a as usize][axis].total_cmp(&coordinates[b as usize][axis])
-        });
+            .filter(|&(_, e)| e > 0.0 && e.is_finite())
+            .collect();
+        axes.sort_by(|a, b| b.1.total_cmp(&a.1));
+        axes.into_iter().map(|(a, _)| a).collect()
+    }
+
+    /// Splits the subgraph along `axis` where `fraction` of its weight is reached; `None`
+    /// when the vertices all lie at one coordinate. Returns the vertices of the two sides,
+    /// each nonempty.
+    fn geometric_bisection(
+        &self,
+        sorted: &[u32],
+        axis: usize,
+        fraction: f64,
+    ) -> Option<(Vec<u32>, Vec<u32>)> {
+        let coordinates = self.coordinates.as_ref()?;
         let total: usize = (sorted.iter())
             .map(|&v| self.graph.weight[v as usize] as usize)
             .sum();
@@ -249,7 +280,7 @@ impl<'a> Dissection<'a> {
         let mut split = sorted.len();
         for (i, &v) in sorted.iter().enumerate() {
             cumulative += self.graph.weight[v as usize] as usize;
-            if cumulative * 2 >= total {
+            if cumulative as f64 >= fraction * total as f64 {
                 split = i + 1;
                 break;
             }
@@ -261,7 +292,7 @@ impl<'a> Dissection<'a> {
             split += 1;
         }
         if split == sorted.len() {
-            // Everything up to the median has one coordinate: cut below it instead.
+            // Everything up to the cut has one coordinate: cut below it instead.
             split = sorted
                 .iter()
                 .position(|&v| coordinates[v as usize][axis] == cut_value)?;
@@ -269,54 +300,175 @@ impl<'a> Dissection<'a> {
                 return None;
             }
         }
-        let b = sorted.split_off(split);
-        Some((sorted, b))
+        Some((sorted[..split].to_vec(), sorted[split..].to_vec()))
     }
 
-    /// Orders a subgraph split into the sides `a` and `b`: the separator is the smaller
-    /// boundary, both sides without it are ordered recursively, the separator last.
-    fn order_split(&mut self, a: Vec<u32>, b: Vec<u32>, out: &mut Vec<u32>) {
-        for &v in &a {
+    /// The vertices sorted by their coordinate along `axis`.
+    fn sorted_along(&self, vertices: &[u32], axis: usize) -> Vec<u32> {
+        let coordinates = self.coordinates.as_ref().expect("coordinates");
+        let mut sorted: Vec<u32> = vertices.to_vec();
+        sorted.sort_unstable_by(|&a, &b| {
+            coordinates[a as usize][axis].total_cmp(&coordinates[b as usize][axis])
+        });
+        sorted
+    }
+
+    /// The vertex separator of a subgraph split into the sides `a` and `b`: a minimum
+    /// vertex cover of the edges between the sides (König's theorem on a maximum matching
+    /// of the bipartite boundary graph), which is never larger than the smaller boundary.
+    /// Returns the separator and its weight.
+    fn separator(&mut self, a: &[u32], b: &[u32]) -> (Vec<u32>, usize) {
+        for &v in a {
             self.side[v as usize] = Side::A;
         }
-        for &v in &b {
+        for &v in b {
             self.side[v as usize] = Side::B;
         }
-        let boundary = |this: &Self, own: &[u32], other: Side| -> (Vec<bool>, usize) {
-            let mut mark = vec![false; own.len()];
-            let mut weight = 0usize;
-            for (i, &v) in own.iter().enumerate() {
-                if (this.graph.neighbors(v).iter())
-                    .any(|&u| this.selected(u) && this.side[u as usize] == other)
-                {
-                    mark[i] = true;
-                    weight += this.graph.weight[v as usize] as usize;
+        // Boundary vertices of A (left) and B (right) and the edges between them.
+        let mut left: Vec<u32> = Vec::new();
+        let mut right_index: HashMap<u32, u32> = HashMap::new();
+        let mut right: Vec<u32> = Vec::new();
+        let mut edges: Vec<Vec<u32>> = Vec::new();
+        for &v in a {
+            let mut list = Vec::new();
+            for &u in self.graph.neighbors(v) {
+                if self.selected(u) && self.side[u as usize] == Side::B {
+                    let next = right.len() as u32;
+                    let j = *right_index.entry(u).or_insert_with(|| {
+                        right.push(u);
+                        next
+                    });
+                    list.push(j);
                 }
             }
-            (mark, weight)
-        };
-        let (mark_a, weight_a) = boundary(self, &a, Side::B);
-        let (mark_b, weight_b) = boundary(self, &b, Side::A);
-        for &v in a.iter().chain(&b) {
+            if !list.is_empty() {
+                left.push(v);
+                edges.push(list);
+            }
+        }
+        for &v in a.iter().chain(b) {
             self.side[v as usize] = Side::Out;
         }
-        let take_a = weight_a <= weight_b;
-        let mut separator = Vec::new();
-        let mut rest_a = Vec::with_capacity(a.len());
-        let mut rest_b = Vec::with_capacity(b.len());
-        for (i, v) in a.into_iter().enumerate() {
-            if take_a && mark_a[i] {
-                separator.push(v);
-            } else {
-                rest_a.push(v);
-            }
+        let cover = minimum_vertex_cover(&edges, right.len());
+        let mut separator = Vec::with_capacity(cover.0.len() + cover.1.len());
+        separator.extend(cover.0.iter().map(|&i| left[i as usize]));
+        separator.extend(cover.1.iter().map(|&j| right[j as usize]));
+        let weight = separator
+            .iter()
+            .map(|&v| self.graph.weight[v as usize] as usize)
+            .sum();
+        (separator, weight)
+    }
+
+    /// Improves a separator by moving its vertices into a side when fewer vertices of the
+    /// other side have to take their place (the greedy half of Fiduccia-Mattheyses, until
+    /// no move helps), keeping both sides at least a quarter of the subgraph.
+    fn refine(&mut self, a: &mut Vec<u32>, b: &mut Vec<u32>, separator: &mut Vec<u32>) {
+        let weight = |this: &Self, v: u32| this.graph.weight[v as usize] as usize;
+        for &v in a.iter() {
+            self.side[v as usize] = Side::A;
         }
-        for (i, v) in b.into_iter().enumerate() {
-            if !take_a && mark_b[i] {
-                separator.push(v);
-            } else {
-                rest_b.push(v);
+        for &v in b.iter() {
+            self.side[v as usize] = Side::B;
+        }
+        for &v in separator.iter() {
+            self.side[v as usize] = Side::S;
+        }
+        let mut wa: usize = a.iter().map(|&v| weight(self, v)).sum();
+        let mut wb: usize = b.iter().map(|&v| weight(self, v)).sum();
+        let total = wa + wb + separator.iter().map(|&v| weight(self, v)).sum::<usize>();
+        let floor = total / 4;
+        let mut queue: Vec<u32> = separator.clone();
+        let mut passes = 0;
+        while !queue.is_empty() && passes < 8 {
+            passes += 1;
+            let mut next = Vec::new();
+            for v in queue.drain(..) {
+                if self.side[v as usize] != Side::S {
+                    continue;
+                }
+                let (mut na, mut nb) = (0usize, 0usize);
+                for &u in self.graph.neighbors(v) {
+                    if self.selected(u) {
+                        match self.side[u as usize] {
+                            Side::A => na += weight(self, u),
+                            Side::B => nb += weight(self, u),
+                            _ => {}
+                        }
+                    }
+                }
+                let wv = weight(self, v);
+                // To A: v leaves the separator, its B neighbors enter it.
+                let gain_a = wv as isize - nb as isize;
+                let gain_b = wv as isize - na as isize;
+                let to_a = if gain_a >= gain_b {
+                    gain_a > 0 && wb >= nb + floor
+                } else {
+                    false
+                };
+                let to_b = !to_a && gain_b > gain_a && gain_b > 0 && wa >= na + floor;
+                if !(to_a || to_b) {
+                    continue;
+                }
+                let (own, other, gained) = if to_a {
+                    (Side::A, Side::B, nb)
+                } else {
+                    (Side::B, Side::A, na)
+                };
+                self.side[v as usize] = own;
+                if to_a {
+                    wa += wv;
+                    wb -= gained;
+                } else {
+                    wb += wv;
+                    wa -= gained;
+                }
+                for &u in self.graph.neighbors(v) {
+                    if self.selected(u) && self.side[u as usize] == other {
+                        self.side[u as usize] = Side::S;
+                        next.push(u);
+                    }
+                }
+                // Neighbors already in the separator may now have a better move.
+                for &u in self.graph.neighbors(v) {
+                    if self.selected(u) && self.side[u as usize] == Side::S {
+                        next.push(u);
+                    }
+                }
             }
+            queue = next;
+        }
+        let all: Vec<u32> = a
+            .drain(..)
+            .chain(b.drain(..))
+            .chain(separator.drain(..))
+            .collect();
+        // The separator came as a subset of the sides: every vertex once.
+        for v in all {
+            match self.side[v as usize] {
+                Side::A => a.push(v),
+                Side::B => b.push(v),
+                Side::S => separator.push(v),
+                Side::Out => continue,
+            }
+            self.side[v as usize] = Side::Out;
+        }
+    }
+
+    /// Orders a subgraph split into the sides `a` and `b` with the given `separator`
+    /// (vertices of either side): both sides without it recursively, the separator last.
+    fn order_split(&mut self, a: Vec<u32>, b: Vec<u32>, separator: Vec<u32>, out: &mut Vec<u32>) {
+        for &v in &separator {
+            self.side[v as usize] = Side::A;
+        }
+        let rest_a: Vec<u32> = (a.into_iter())
+            .filter(|&v| self.side[v as usize] == Side::Out)
+            .collect();
+        let rest_b: Vec<u32> = (b.into_iter())
+            .filter(|&v| self.side[v as usize] == Side::Out)
+            .collect();
+        for &v in &separator {
+            self.side[v as usize] = Side::Out;
         }
         // The generation changes in the recursion; the separator needs no further searches.
         self.order(rest_a, out);
@@ -394,8 +546,36 @@ impl<'a> Dissection<'a> {
             out.extend(order);
             return;
         }
-        if let Some((a, b)) = self.geometric_bisection(&vertices) {
-            self.order_split(a, b, out);
+        // Geometric: the cut with the smallest separator among the axes (the largest
+        // extent first; a cut along another axis often has a much smaller separator on
+        // meshes with holes and ribs).
+        let mut best: Option<Split> = None;
+        for axis in self.axes_by_extent(&vertices) {
+            let sorted = self.sorted_along(&vertices, axis);
+            for fraction in CUT_FRACTIONS {
+                let Some((a, b)) = self.geometric_bisection(&sorted, axis, fraction) else {
+                    continue;
+                };
+                let (separator, weight) = self.separator(&a, &b);
+                if best.as_ref().is_none_or(|s| weight < s.weight) {
+                    best = Some(Split {
+                        a,
+                        b,
+                        separator,
+                        weight,
+                    });
+                }
+            }
+        }
+        if let Some(Split {
+            mut a,
+            mut b,
+            mut separator,
+            ..
+        }) = best
+        {
+            self.refine(&mut a, &mut b, &mut separator);
+            self.order_split(a, b, separator, out);
             return;
         }
         let far = *first.last().unwrap();
@@ -448,7 +628,10 @@ impl<'a> Dissection<'a> {
             out.extend(structure);
             return;
         }
-        self.order_split(a, b, out);
+        let (mut a, mut b) = (a, b);
+        let (mut separator, _) = self.separator(&a, &b);
+        self.refine(&mut a, &mut b, &mut separator);
+        self.order_split(a, b, separator, out);
     }
 
     /// Weights of the vertices of level `cut` with a neighbor in level `cut + 1`, and of the
@@ -473,6 +656,97 @@ impl<'a> Dissection<'a> {
         }
         (a, b)
     }
+}
+
+/// A minimum vertex cover of a bipartite graph given as the neighbor lists `edges` of the
+/// left vertices (indices into the `right_count` right vertices): the maximum matching by
+/// augmenting paths (Kuhn), then König's theorem: with `Z` the vertices reachable from the
+/// unmatched left vertices along alternating paths, the cover is `(L \ Z) ∪ (R ∩ Z)`.
+/// Returns the left and the right vertices of the cover.
+fn minimum_vertex_cover(edges: &[Vec<u32>], right_count: usize) -> (Vec<u32>, Vec<u32>) {
+    let left_count = edges.len();
+    let mut match_right = vec![u32::MAX; right_count]; // right -> left
+    let mut match_left = vec![u32::MAX; left_count]; // left -> right
+    // Greedy start.
+    for (i, list) in edges.iter().enumerate() {
+        for &j in list {
+            if match_right[j as usize] == u32::MAX {
+                match_right[j as usize] = i as u32;
+                match_left[i] = j;
+                break;
+            }
+        }
+    }
+    // Augmenting paths, iteratively (a depth first search with an explicit stack).
+    let mut visited = vec![u32::MAX; right_count];
+    for start in 0..left_count {
+        if match_left[start] != u32::MAX {
+            continue;
+        }
+        // stack of (left vertex, next edge index)
+        let mut stack: Vec<(u32, usize)> = vec![(start as u32, 0)];
+        let mut path: Vec<(u32, u32)> = Vec::new(); // (left, right) edges taken
+        let mut found = false;
+        while let Some(&mut (l, ref mut k)) = stack.last_mut() {
+            let list = &edges[l as usize];
+            if *k >= list.len() {
+                stack.pop();
+                path.pop();
+                continue;
+            }
+            let j = list[*k];
+            *k += 1;
+            if visited[j as usize] == start as u32 {
+                continue;
+            }
+            visited[j as usize] = start as u32;
+            path.push((l, j));
+            let next = match_right[j as usize];
+            if next == u32::MAX {
+                found = true;
+                break;
+            }
+            stack.push((next, 0));
+        }
+        if found {
+            for &(l, j) in &path {
+                match_left[l as usize] = j;
+                match_right[j as usize] = l;
+            }
+        }
+    }
+    // Alternating reachability from the unmatched left vertices.
+    let mut left_in_z = vec![false; left_count];
+    let mut right_in_z = vec![false; right_count];
+    let mut queue: Vec<u32> = (0..left_count as u32)
+        .filter(|&i| match_left[i as usize] == u32::MAX)
+        .collect();
+    for &i in &queue {
+        left_in_z[i as usize] = true;
+    }
+    let mut head = 0;
+    while head < queue.len() {
+        let l = queue[head] as usize;
+        head += 1;
+        for &j in &edges[l] {
+            if match_left[l] == j || right_in_z[j as usize] {
+                continue;
+            }
+            right_in_z[j as usize] = true;
+            let m = match_right[j as usize];
+            if m != u32::MAX && !left_in_z[m as usize] {
+                left_in_z[m as usize] = true;
+                queue.push(m);
+            }
+        }
+    }
+    let left: Vec<u32> = (0..left_count as u32)
+        .filter(|&i| !left_in_z[i as usize])
+        .collect();
+    let right: Vec<u32> = (0..right_count as u32)
+        .filter(|&j| right_in_z[j as usize])
+        .collect();
+    (left, right)
 }
 
 #[cfg(test)]
@@ -532,6 +806,34 @@ mod tests {
             seen[p as usize] = true;
             !was
         })
+    }
+
+    #[test]
+    fn vertex_cover_is_minimum() {
+        // A path l0-r0-l1-r1: matching of size 2, cover of size 2.
+        let edges = vec![vec![0], vec![0, 1]];
+        let (l, r) = minimum_vertex_cover(&edges, 2);
+        assert_eq!(l.len() + r.len(), 2, "{l:?} {r:?}");
+        // A star: one left vertex to five right ones: cover = the left vertex.
+        let edges = vec![vec![0, 1, 2, 3, 4]];
+        let (l, r) = minimum_vertex_cover(&edges, 5);
+        assert_eq!((l, r), (vec![0], vec![]));
+        // Five left vertices to one right one: cover = the right vertex.
+        let edges = vec![vec![0]; 5];
+        let (l, r) = minimum_vertex_cover(&edges, 1);
+        assert_eq!((l, r), (vec![], vec![0]));
+        // Every edge is covered.
+        let edges = vec![vec![0, 1], vec![1, 2], vec![2, 3], vec![0, 3], vec![1]];
+        let (l, r) = minimum_vertex_cover(&edges, 4);
+        for (i, list) in edges.iter().enumerate() {
+            for &j in list {
+                assert!(
+                    l.contains(&(i as u32)) || r.contains(&j),
+                    "{i}-{j} uncovered"
+                );
+            }
+        }
+        assert!(l.len() + r.len() <= 4);
     }
 
     #[test]

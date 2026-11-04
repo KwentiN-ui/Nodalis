@@ -32,6 +32,7 @@ use plxs_core::results::{IncrementKind, ResultsIncrement};
 use plxs_core::state::{IntegrationPointField, NodalField, StoredModes};
 use plxs_core::step::{EquationSolver, Procedure as ProcedureKind, SolverMode};
 use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Step};
+use plxs_linalg::Unknowns;
 use plxs_linalg::{LanczosOptions, ShiftInvertLanczos, SparseMatrix};
 use plxs_output::{EigenTable, StaRow};
 use rayon::prelude::*;
@@ -595,11 +596,7 @@ impl Procedure for BuckleProcedure {
         });
         let started = std::time::Instant::now();
         let mut equations = Equations::new(parameters.solver);
-        let coordinates = || {
-            (reduction.free.iter())
-                .map(|&dof| ctx.model.nodes.coordinates[dof as usize / 3])
-                .collect()
-        };
+        let coordinates = || Unknowns::from_free(&reduction.free, 3, &ctx.model.nodes.coordinates);
         equations
             .prepare(&mut ctx.solver, &k_free, coordinates, true, progress)
             .map_err(|e| match e {

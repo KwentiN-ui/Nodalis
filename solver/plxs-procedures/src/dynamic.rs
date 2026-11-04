@@ -45,6 +45,7 @@ use plxs_core::state::{IntegrationPointField, NodalField};
 use plxs_core::step::{Dynamic, Procedure as ProcedureKind};
 use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Step};
 use plxs_linalg::SparseMatrix;
+use plxs_linalg::Unknowns;
 use plxs_output::StaRow;
 use rayon::prelude::*;
 
@@ -335,11 +336,7 @@ impl DynamicProcedure {
             let a0_matrix =
                 initial_acceleration_matrix(ctx.table, ctx.model, &ctx.pattern, c_m, c_k, true)?;
             let a_red = set.reduce(&a0_matrix);
-            let coordinates = || {
-                (set.free.iter())
-                    .map(|&dof| ctx.model.nodes.coordinates[dof as usize / 3])
-                    .collect()
-            };
+            let coordinates = || Unknowns::from_free(&set.free, 3, &ctx.model.nodes.coordinates);
             equations
                 .prepare(&mut ctx.solver, &a_red, coordinates, true, progress)
                 .map_err(|e| numerical(e, ctx.step_number, 0, &equations))?;
@@ -426,11 +423,8 @@ impl DynamicProcedure {
             if factored_dt.is_none_or(|d| (d - dt).abs() > 1e-12 * dt) {
                 let started = std::time::Instant::now();
                 let a_red = set.reduce(&a_matrix);
-                let coordinates = || {
-                    (set.free.iter())
-                        .map(|&dof| ctx.model.nodes.coordinates[dof as usize / 3])
-                        .collect()
-                };
+                let coordinates =
+                    || Unknowns::from_free(&set.free, 3, &ctx.model.nodes.coordinates);
                 equations
                     .prepare(
                         &mut ctx.solver,

@@ -1328,3 +1328,67 @@ Was T15 gebaut hat:
 - Offen: faer's dichte Kerne erreichen in der VM 40-50 GFlop/s je Kern (OpenBLAS in PaStiX
   ca. 55-60); Dreieckslösung und dichte LDLᵀ ca. 25-35. Multithreaded Vorwärts-/
   Rückwärtseinsetzen; Separator-Verfeinerung im Ordering (Scotch füllt 11 % weniger).
+
+## Stand nach dem iterativen Solver mit Multigrid (2026-11-04, Thread "Speed up the iterative solver")
+
+- `plxs-linalg::pcg`: PCG mit algebraischem Multigrid als Vorkonditionierer
+  (`plxs-linalg::amg`, Smoothed Aggregation nach Vaněk/Mandel/Brezina): Aggregate aus
+  Knoten über die Frobenius-Normen der Kopplungsblöcke, je Aggregat die orthonormierten
+  Starrkörpermoden (6 bei Verschiebungen, die Konstante bei Temperatur) als tentativer
+  Prolongator, ein gedämpfter Jacobi-Schritt glättet ihn, Galerkin-Produkt `PᵀAP`, gröbste
+  Ebene (≤ 1500 Unbekannte) wird mit `LdltSolver` faktorisiert. Ein V-Zyklus mit
+  Chebyshev-Glätter (Grad 2, oberes Spektrum von `D⁻¹A`, λ_max per Potenziteration) pro
+  CG-Iteration; symmetrisch, also bleibt CG anwendbar. IC(0) bleibt als Rückfall
+  (`PLXS_PRECONDITIONER=ic0`, oder wenn die Hierarchie nicht gebaut werden kann:
+  Vergröberung stockt, Matrix indefinit).
+- Speicherformat `plxs-linalg::bsr`: alle Matrizen der Hierarchie in dichten Blöcken (BSR,
+  Blockgröße zur Laufzeit): 3×3 je Knotenpaar auf der feinsten Ebene (Unbekannte auf drei je
+  Knoten aufgefüllt, gesperrte Komponenten als entkoppelte Einheitszeilen), 6×6 je
+  Aggregatpaar darüber, 3×6 für den Prolongator. Die Knoten werden intern per Reverse
+  Cuthill-McKee umnummeriert (Cache-Lokalität des Produkts; auf Quentins Tet-Modell
+  Faktor 1,5 im Produkt und bessere Aggregate). `Unknowns` (Knoten, Komponente, Position je
+  Unbekannte) kommt von den Prozeduren über `Equations::prepare`
+  (`Unknowns::from_free`); ohne sie ist alles skalar (Eigenwert-Iteration).
+- Messungen (Container, 4 Threads, Lösen ohne Aufbau; vorher = IC(0)-PCG):
+  Hex-Block C3D8 173k: 171 → 27 Iterationen, 5,2 s → 0,5 s (Aufbau 1,0 s);
+  dünne Platte C3D8 123k: 1872 → 36 It., 27 s → 0,4 s; C3D20R-Block 223k: 449 → 50 It.,
+  44 s → 4,6 s; Quentins C3D10-Halter 591k: 1556 → 198 It., 230 s → 23 s (Aufbau 4,6 s);
+  Kontaktmodell Lasche 73k, 14 Newton-Iterationen: Aufbau je Iteration 1,2 s, Lösen 1,3 s.
+  Quadratische Elemente brauchen etwa doppelt so viele Iterationen wie lineare.
+- Benchmark-Werkzeuge: `solver/benchmarks/gen_block.py` (Hex-/Tet-Blöcke beliebiger
+  Größe, C3D8/C3D20R/C3D4/C3D10), Eingaben in `/mnt/project-files/nodalis/benchmark/`.
+  Messknöpfe: `PLXS_PCG_TRACE=1` (Zeit in Produkt/Vorkonditionierer), `PLXS_AMG_TRACE=1`
+  (Phasen des Aufbaus), `PLXS_AMG_STRENGTH/DEGREE/COARSE/LEVELS/MAX_AGG`.
+- Zweite Runde (gleicher Thread): die ganze Hierarchie liegt in einfacher Genauigkeit
+  (`Bsr<f32>`, auch eine Kopie der feinsten Ebene; nur die gröbste Ebene wird in f64
+  faktorisiert, das CG außen bleibt f64). Halbiert den Speicherverkehr des V-Zyklus und
+  den Speicher des Vorkonditionierers (Halter: 1,8 → 0,9 × Matrix), kostet aber
+  Iterationen, weil das CG mit einem gerundeten Vorkonditionierer seine Richtungshistorie
+  nicht mehr voll nutzt (Hex 30 → 39, C3D10-Halter 200 → 220, dünne C3D20R-Platte
+  65 → 115); netto trotzdem schneller (Halter 23 → 14,6 s, C3D20R-Block 2,9 → 1,8 s).
+  Versucht und verworfen: nur die feine Ebene oder nur die groben Ebenen in f32, Residuen
+  der feinen Ebene in f64, Umschalten auf f64 unter 1e-7 — jede f32-Komponente kostet
+  dieselben Iterationen. `beta` im CG in der Polak-Ribière-Form (flexibles CG, ein
+  Skalarprodukt mehr), damit ein leicht veränderlicher Vorkonditionierer zulässig ist.
+  Block-Kernel per const generics für 1×1, 3×3, 3×6, 6×3, 6×6; Parallelisierung der
+  Produkte in Stücken nach Blockzeilenzahl (grobe Ebenen mit 500 Blockzeilen beschäftigten
+  sonst nur 3 Threads). Hierarchie wird über Faktorisierungen gleichen Musters
+  (Newton-Iterationen) behalten (`Amg::refresh`: Diagonale, λ_max und die f32-Kopie der
+  feinsten Ebene folgen den neuen Werten, Prolongatoren und grobe Operatoren bleiben),
+  solange ein Lösen nicht mehr als das 1,5-Fache der Iterationen des ersten Lösens nach
+  dem Aufbau braucht (`PLXS_AMG_REBUILD=1` baut immer neu). Kontaktmodell Lasche,
+  14 Newton-Iterationen: Aufbau 10,9 s → 2,7 s, gesamt 44 s → 32,5 s (direkt: 73 s).
+- Dritte Runde, direkter Solver (`plxs-linalg::ordering`): die Nested Dissection probiert
+  je Teilgraph alle drei Achsen und fünf Schnittlagen (30–70 % des Gewichts) und nimmt den
+  kleinsten Separator; der Separator ist eine minimale Knotenüberdeckung der Kanten
+  zwischen den Seiten (König über ein maximales Matching, Kuhn) statt des kleineren Randes
+  und wird danach gierig verfeinert (Separatorknoten auf eine Seite schieben, wenn weniger
+  Knoten der anderen Seite nachrücken müssen); Blätter 60 statt 240 Freiheitsgrade.
+  Quentins Halter: Faktor 18,8 GB → 5,2 GB (PaStiX/Scotch ≈ 3,1 GB), passt damit in den
+  Speicher, Faktorisierung 12 s auf 4 Threads, Gesamtlauf 28 s (iterativ 19 s); Hex-Block
+  173k: 239 → 233 Mio. Nichtnullen. Die Ordnung kostet jetzt ~5 s auf dem Halter.
+- Offen: p-Multigrid (erste Ebene = Eckknoten) für quadratische Netze; die automatische
+  Wahl bleibt speicherbasiert, obwohl das Multigrid auf großen Modellen inzwischen oft
+  schneller als die Faktorisierung ist (Halter: direkt 28 s, iterativ 19 s); Blätter der
+  Dissection per Minimum Degree statt Cuthill-McKee und ein mehrstufiger Partitionierer
+  (Scotch-artig) wären die nächsten Schritte zum Füllgrad von PaStiX.

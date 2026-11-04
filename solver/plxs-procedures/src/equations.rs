@@ -17,7 +17,7 @@
 
 use plxs_core::step::{EquationSolver, SolverMode};
 use plxs_core::{Error, Progress, ProgressEvent, Result};
-use plxs_linalg::{LdltSolver, LinearSolver, PcgSolver, SparseMatrix, is_out_of_memory};
+use plxs_linalg::{LdltSolver, LinearSolver, PcgSolver, SparseMatrix, Unknowns, is_out_of_memory};
 
 /// The automatic choice considers the iterative solver from this many equations on;
 /// smaller systems always fit and the direct solver is faster on them.
@@ -81,24 +81,25 @@ impl Equations {
     }
 
     /// Analyzes (when `analyze`, i.e. the pattern may have changed) and factorizes `k`, or
-    /// builds the preconditioner; `coordinates` are the positions of the unknowns, for the
-    /// ordering of the direct solver.
+    /// builds the preconditioner; `unknowns` tells what the unknowns are (nodes and
+    /// positions), for the ordering of the direct solver and the multigrid of the
+    /// iterative one.
     pub fn prepare(
         &mut self,
         direct: &mut LdltSolver,
         k: &SparseMatrix,
-        coordinates: impl FnOnce() -> Vec<[f64; 3]>,
+        unknowns: impl FnOnce() -> Unknowns,
         analyze: bool,
         progress: &mut dyn Progress,
     ) -> Result<()> {
-        let mut coordinates = Some(coordinates);
+        let unknowns = unknowns();
         let mut analyze = analyze;
         if self.iterative.is_none() {
-            let iterative = self.choose(direct, k, &mut coordinates, progress)?;
+            let iterative = self.choose(direct, k, &unknowns, progress)?;
             self.iterative = Some(iterative);
         }
         if self.is_iterative() {
-            match self.prepare_iterative(k, progress) {
+            match self.prepare_iterative(k, &unknowns, progress) {
                 Ok(()) => return Ok(()),
                 Err(error) if self.may_fall_back(&error) => {
                     progress.event(ProgressEvent::Warning(format!(
@@ -114,9 +115,7 @@ impl Equations {
         let started = std::time::Instant::now();
         let direct_result = (|| {
             if analyze {
-                if let Some(coordinates) = coordinates.take() {
-                    direct.set_coordinates(Some(coordinates()));
-                }
+                direct.set_coordinates(Some(unknowns.coordinates.clone()));
                 direct.analyze(k.pattern())?;
                 progress.event(ProgressEvent::Info(format!(
                     "factor: {} nonzeros, ordered in {:.2} s",
@@ -140,7 +139,7 @@ impl Equations {
                     message(&error)
                 )));
                 self.switch(true);
-                self.prepare_iterative(k, progress)
+                self.prepare_iterative(k, &unknowns, progress)
             }
             Err(error) if is_out_of_memory(&error) && self.mode == SolverMode::Direct => {
                 Err(with_message(error, |m| {
@@ -215,34 +214,31 @@ impl Equations {
         &mut self,
         direct: &mut LdltSolver,
         k: &SparseMatrix,
-        coordinates: &mut Option<impl FnOnce() -> Vec<[f64; 3]>>,
+        unknowns: &Unknowns,
         progress: &mut dyn Progress,
     ) -> Result<bool> {
         if k.dimension() < self.automatic_from {
             return Ok(false);
         }
-        if let Some(coordinates) = coordinates.take() {
-            direct.set_coordinates(Some(coordinates()));
-        }
+        direct.set_coordinates(Some(unknowns.coordinates.clone()));
         factor_exceeds_memory(direct, k, self.available, progress)
     }
 
-    fn prepare_iterative(&mut self, k: &SparseMatrix, progress: &mut dyn Progress) -> Result<()> {
+    fn prepare_iterative(
+        &mut self,
+        k: &SparseMatrix,
+        unknowns: &Unknowns,
+        progress: &mut dyn Progress,
+    ) -> Result<()> {
         let started = std::time::Instant::now();
         let pcg = self.pcg.get_or_insert_with(PcgSolver::new);
-        // Skipped for the pattern analyzed last.
+        pcg.set_unknowns(Some(unknowns.clone()));
+        // Skipped for the pattern (and unknowns) analyzed last.
         pcg.analyze(k.pattern())?;
         pcg.factorize(k)?;
-        let shift = pcg.shift();
-        let kind = if shift.is_infinite() {
-            "diagonal (incomplete Cholesky broke down)".to_owned()
-        } else if shift > 0.0 {
-            format!("incomplete Cholesky, diagonal shifted by {shift:.0e}")
-        } else {
-            "incomplete Cholesky".to_owned()
-        };
         progress.event(ProgressEvent::Info(format!(
-            "iterative solver: preconditioner {kind}, {} nonzeros, built in {:.2} s",
+            "iterative solver: preconditioner {}, {} nonzeros, built in {:.2} s",
+            pcg.preconditioner(),
             pcg.preconditioner_nonzeros().unwrap_or(0),
             started.elapsed().as_secs_f64()
         )));
@@ -374,8 +370,12 @@ mod tests {
         k
     }
 
-    fn coordinates(n: usize) -> impl FnOnce() -> Vec<[f64; 3]> {
-        move || (0..n).map(|i| [i as f64, 0.0, 0.0]).collect()
+    fn coordinates(n: usize) -> impl FnOnce() -> Unknowns {
+        move || {
+            let free: Vec<u32> = (0..n as u32).collect();
+            let coordinates: Vec<[f64; 3]> = (0..n).map(|i| [i as f64, 0.0, 0.0]).collect();
+            Unknowns::from_free(&free, 1, &coordinates)
+        }
     }
 
     fn residual(k: &SparseMatrix, x: &[f64], b: &[f64]) -> f64 {

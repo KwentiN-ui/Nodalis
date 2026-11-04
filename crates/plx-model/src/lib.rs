@@ -879,7 +879,7 @@ pub enum LinearSolverChoice {
     Automatic,
     /// A sparse direct factorization (LDLᵀ): any system, memory for the factor.
     Direct,
-    /// Conjugate gradients with an incomplete Cholesky preconditioner: symmetric positive
+    /// Conjugate gradients with an algebraic multigrid preconditioner: symmetric positive
     /// definite systems only (static, also nonlinear and with contact, dynamic and heat
     /// transfer steps), far less memory.
     Iterative,
