@@ -85,10 +85,26 @@ all = { level = "warn", priority = -1 }
 [profile.dev.package."*"]
 opt-level = 2
 
-# Schnelles Profil für die CI: Abhängigkeiten unoptimiert, ohne Debug-Infos.
+# The numerics of the solver run optimized in debug builds too: unoptimized, the solver
+# fixtures and the tests that solve take many times longer (a buckling fixture with the
+# iterative solver ran for over half an hour in the CI instead of seconds).
+[profile.dev.package.plxs-linalg]
+opt-level = 2
+[profile.dev.package.plxs-elements]
+opt-level = 2
+[profile.dev.package.plxs-materials]
+opt-level = 2
+[profile.dev.package.plxs-assembly]
+opt-level = 2
+[profile.dev.package.plxs-contact]
+opt-level = 2
+[profile.dev.package.plxs-constraints]
+opt-level = 2
+[profile.dev.package.plxs-procedures]
+opt-level = 2
+
+# Profil für die CI: wie dev (Abhängigkeiten und Solver-Numerik optimiert, im Cache), ohne
+# Debug-Infos.
 [profile.ci]
 inherits = "dev"
 debug = false
-
-[profile.ci.package."*"]
-opt-level = 0
