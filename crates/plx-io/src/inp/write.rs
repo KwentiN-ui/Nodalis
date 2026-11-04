@@ -536,7 +536,8 @@ fn lower_model_named(
     let mut materials = materials(model);
     let (mut sections, profile_comments, section_owners) = sections(&mut sets, model)?;
     let mut generated = constraints::Generated::default();
-    let (mut constraints, mut constraint_owners) = constraints(&mut sets, model, &mut generated)?;
+    let (mut constraints, mut constraint_owners) =
+        constraints(&mut sets, model, &mut generated, lowering)?;
     let pre_tension_equations = pre_tension_sections(&mut sets, model, &cuts, &mut generated);
     let node_tie_equations = node_ties(&mut sets, model, &lines)?;
     constraints::springs(&mut sets, model, &mut generated)?;
@@ -1796,6 +1797,7 @@ fn constraints(
     sets: &mut Sets,
     model: &FeModel,
     generated: &mut constraints::Generated,
+    lowering: &mut Option<usize>,
 ) -> Result<(Vec<ConstraintItem>, Vec<Option<ModelItem>>), WriteError> {
     let mut items = Vec::new();
     // The item each of `items` came from, where the solver can name it (a rigid body).
@@ -1851,8 +1853,8 @@ fn constraints(
     // of the region; the point exists only in the analysis. Its reference node takes the
     // translations, its rotation node the rotations as displacements, both in the directions
     // of the displacement's coordinate system. Nodes that boundary conditions hold directly
-    // stay out of the coupling: the solver refuses them there.
-    let mut excluded = None;
+    // in a step the point acts in stay out of the coupling; supports of other steps do not
+    // count, the solver takes the equations around them there.
     for (s, step) in model.steps.iter().enumerate().filter(|(_, s)| s.active) {
         for (i, bc) in step.boundary_conditions.iter().enumerate() {
             let BoundaryKind::Displacement(remote) = &bc.kind else {
@@ -1870,9 +1872,14 @@ fn constraints(
                 (sets.remote_names.entry(bc.name.clone())).or_insert((nodes, behavior));
                 continue;
             }
-            let excluded = excluded.get_or_insert_with(|| model.directly_held_nodes(sets.mesh));
+            // An error is about the boundary condition of this step, whatever the others of
+            // the same name.
+            *lowering = Some(s);
+            let steps = model.point_steps(sets.mesh, &bc.region, remote);
+            let excluded = model.directly_held_nodes_in(sets.mesh, |s| steps.contains(&s));
+            let held = model.held_translations_in(sets.mesh, |s| steps.contains(&s));
             let point =
-                (remote.resolve(model, sets.mesh, &bc.region, excluded)).map_err(|reason| {
+                (remote.resolve(model, sets.mesh, &bc.region, &excluded)).map_err(|reason| {
                     WriteError::InvalidBoundary {
                         item: bc.name.clone(),
                         reason,
@@ -1892,6 +1899,7 @@ fn constraints(
                     .push((set.clone(), vec![reference, rotation]));
                 sets.transforms.push((set, Transform::Rectangular(x, y)));
             }
+            let all_steps = sets.dofs.replace_held(held);
             match behavior {
                 RemoteBehavior::Rigid => {
                     let whole = remote.pinball.is_none()
@@ -1902,7 +1910,7 @@ fn constraints(
                         Region::Nodes(point.nodes.clone())
                     };
                     owners.resize(items.len(), None);
-                    rigid_body(
+                    let written = rigid_body(
                         &mut items,
                         sets,
                         &bc.name,
@@ -1910,7 +1918,9 @@ fn constraints(
                         point.position,
                         point.axes,
                         [reference, rotation],
-                    )?;
+                    );
+                    sets.dofs.replace_held(all_steps);
+                    written?;
                     owners.resize(items.len(), Some(ModelItem::BoundaryCondition(s, i)));
                 }
                 RemoteBehavior::Deformable => {
@@ -1925,10 +1935,12 @@ fn constraints(
                             items.push(ConstraintItem::Equation(equation(&terms)));
                         }
                     }
+                    sets.dofs.replace_held(all_steps);
                 }
             }
         }
     }
+    *lowering = None;
     for t in model.ties.iter().filter(|t| t.active) {
         items.push(tie(sets, t)?);
     }

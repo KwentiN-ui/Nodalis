@@ -1519,7 +1519,6 @@ impl FeModel {
             }
         }
         let mut points: Vec<(&Region, &crate::Displacement)> = Vec::new();
-        let mut excluded = None;
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
             for (i, bc) in step.boundary_conditions.iter().enumerate() {
                 let BoundaryKind::Displacement(remote) = &bc.kind else {
@@ -1533,8 +1532,8 @@ impl FeModel {
                     continue;
                 }
                 points.push((&bc.region, remote));
-                let excluded = excluded.get_or_insert_with(|| self.directly_held_nodes(mesh));
-                if let Ok(point) = remote.resolve(self, mesh, &bc.region, excluded) {
+                let excluded = self.point_excluded_nodes(mesh, &bc.region, remote);
+                if let Ok(point) = remote.resolve(self, mesh, &bc.region, &excluded) {
                     let nodes = point.nodes.into_iter().collect();
                     bodies.push((ModelItem::BoundaryCondition(s, i), &bc.name, nodes));
                 }
@@ -2529,7 +2528,6 @@ impl FeModel {
         // A displacement on a point holds its region like a rigid body with a boundary
         // condition on its point.
         let step = &self.steps[s];
-        let mut excluded = None;
         for (i, bc) in step.boundary_conditions.iter().enumerate() {
             let BoundaryKind::Displacement(remote) = &bc.kind else {
                 continue;
@@ -2540,8 +2538,8 @@ impl FeModel {
             {
                 continue;
             }
-            let excluded = excluded.get_or_insert_with(|| self.directly_held_nodes(mesh));
-            let Ok(point) = remote.resolve(self, mesh, &bc.region, excluded) else {
+            let excluded = self.point_excluded_nodes(mesh, &bc.region, remote);
+            let Ok(point) = remote.resolve(self, mesh, &bc.region, &excluded) else {
                 continue;
             };
             let axes = (point.axes).unwrap_or([axis(0), axis(1), axis(2)]);

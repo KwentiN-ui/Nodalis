@@ -165,12 +165,58 @@ impl FeModel {
         })
     }
 
-    /// The nodes that boundary conditions hold directly in a step, mechanical degrees of
-    /// freedom only. A point leaves them out of its coupling: the solver refuses a degree of
-    /// freedom that an equation depends on and a boundary condition holds.
-    pub fn directly_held_nodes(&self, mesh: &FeMesh) -> BTreeSet<NodeId> {
-        let mut held = BTreeSet::new();
+    /// The active steps in which the point of a displacement with `region` acts: those with
+    /// an active displacement on a point of the same region and coupling. Displacements of
+    /// several steps share that point.
+    pub fn point_steps(
+        &self,
+        mesh: &FeMesh,
+        region: &Region,
+        displacement: &Displacement,
+    ) -> BTreeSet<usize> {
+        let mut steps = BTreeSet::new();
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
+            let acts = (step.boundary_conditions.iter().enumerate()).any(|(i, bc)| {
+                bc.active
+                    && step.kind.supports_boundary(&bc.kind)
+                    && bc.region == *region
+                    && matches!(&bc.kind, BoundaryKind::Displacement(d) if d.same_point(displacement))
+                    && matches!(self.formulation(mesh, s, i), Some(Formulation::Point(_)))
+            });
+            if acts {
+                steps.insert(s);
+            }
+        }
+        steps
+    }
+
+    /// The nodes a point of a displacement with `region` leaves out of its coupling: those
+    /// that boundary conditions hold directly in a step in which the point acts, where the
+    /// equations of the point and the boundary conditions would bind the same degree of
+    /// freedom. Supports of the other steps do not count: there the point is not held and
+    /// the solver takes its equations around the held nodes.
+    pub fn point_excluded_nodes(
+        &self,
+        mesh: &FeMesh,
+        region: &Region,
+        displacement: &Displacement,
+    ) -> BTreeSet<NodeId> {
+        let steps = self.point_steps(mesh, region, displacement);
+        self.directly_held_nodes_in(mesh, |s| steps.contains(&s))
+    }
+
+    /// The nodes that boundary conditions hold directly in the active steps `steps` takes,
+    /// mechanical degrees of freedom only. A point leaves them out of its coupling: an
+    /// equation may not depend on a degree of freedom a boundary condition holds.
+    pub fn directly_held_nodes_in(
+        &self,
+        mesh: &FeMesh,
+        steps: impl Fn(usize) -> bool,
+    ) -> BTreeSet<NodeId> {
+        let mut held = BTreeSet::new();
+        for (s, step) in
+            (self.steps.iter().enumerate()).filter(|(s, step)| step.active && steps(*s))
+        {
             for (i, bc) in step.boundary_conditions.iter().enumerate() {
                 if !bc.active
                     || !step.kind.supports_boundary(&bc.kind)
@@ -201,9 +247,20 @@ impl FeModel {
     /// A displacement in a coordinate system of its own and a symmetry plane that is no
     /// coordinate plane hold their directions in local axes, which counts as all three.
     pub fn held_translations(&self, mesh: &FeMesh) -> BTreeMap<NodeId, [bool; 3]> {
+        self.held_translations_in(mesh, |_| true)
+    }
+
+    /// [`Self::held_translations`] in the active steps `steps` takes.
+    pub fn held_translations_in(
+        &self,
+        mesh: &FeMesh,
+        steps: impl Fn(usize) -> bool,
+    ) -> BTreeMap<NodeId, [bool; 3]> {
         let space = self.properties.space;
         let mut held: BTreeMap<NodeId, [bool; 3]> = BTreeMap::new();
-        for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
+        for (s, step) in
+            (self.steps.iter().enumerate()).filter(|(s, step)| step.active && steps(*s))
+        {
             for (i, bc) in step.boundary_conditions.iter().enumerate() {
                 if !bc.active
                     || !step.kind.supports_boundary(&bc.kind)

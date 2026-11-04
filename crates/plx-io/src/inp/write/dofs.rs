@@ -65,6 +65,17 @@ impl Dofs {
         held || self.dependent.get(&node).is_some_and(|d| d[k])
     }
 
+    /// Puts the held translations `held` in place of the present ones and returns those.
+    /// The point of a displacement binds around what is held in the steps it acts in only
+    /// (the solver takes its equations around nodes held in the others); the writer puts
+    /// those of all steps back after it. What is claimed meanwhile stays claimed.
+    pub fn replace_held(
+        &mut self,
+        held: BTreeMap<NodeId, [bool; 3]>,
+    ) -> BTreeMap<NodeId, [bool; 3]> {
+        std::mem::replace(&mut self.held, held)
+    }
+
     fn mark(&mut self, node: NodeId, dof: u8) {
         if (1..=3).contains(&dof) {
             self.dependent.entry(node).or_default()[usize::from(dof) - 1] = true;
