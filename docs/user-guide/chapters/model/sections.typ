@@ -153,7 +153,6 @@ In the Results workspace CalculiX hands the beams back as the solids it expanded
 lines, coloured by the shown result. Such a profile is moved with its nodes, not turned by
 their rotations.
 
-Turn the profiles off with #menu("View", "Beam Profiles") or in the #link(<settings>)[settings]
-under #ui("Graphics") to see the lines only. Picking still selects the lines.
+Turn the profiles off with #menu("View", "Beam Profiles") to see the lines only. Picking still selects the lines.
 
 #limitation[Line elements can only be used in 3D models.]
