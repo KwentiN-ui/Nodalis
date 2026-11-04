@@ -165,11 +165,35 @@ pub fn run_corpus(
     work: &Path,
     filter: impl Fn(&Fixture) -> bool,
 ) -> Vec<Report> {
-    fixtures
-        .iter()
-        .filter(|f| filter(f))
-        .map(|f| run_fixture(solver, f, &work.join(&f.meta.area).join(&f.meta.name)))
-        .collect()
+    let selected: Vec<&Fixture> = fixtures.iter().filter(|f| filter(f)).collect();
+    // Each run of the solver takes one thread (`OMP_NUM_THREADS=1`), so the fixtures run side
+    // by side, as many as there are cores; the reports keep the order of the fixtures.
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(selected.len().max(1));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut reports: Vec<Option<Report>> = vec![None; selected.len()];
+    let done: Vec<Vec<(usize, Report)>> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(f) = selected.get(i) else { break };
+                        let dir = work.join(&f.meta.area).join(&f.meta.name);
+                        done.push((i, run_fixture(solver, f, &dir)));
+                    }
+                    done
+                })
+            })
+            .collect();
+        workers.into_iter().map(|w| w.join().unwrap()).collect()
+    });
+    for (i, report) in done.into_iter().flatten() {
+        reports[i] = Some(report);
+    }
+    reports.into_iter().map(Option::unwrap).collect()
 }
 
 /// A text table of the reports.

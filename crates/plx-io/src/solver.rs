@@ -105,7 +105,6 @@ mod tests {
     fn results_from_memory_match_the_result_files() {
         let dir = std::env::temp_dir().join(format!("plx-io-solver-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut compared = 0;
         let areas = [
             "static",
             "structural",
@@ -121,97 +120,127 @@ mod tests {
             "cyclic",
             "sensitivity",
         ];
-        for input in areas.iter().flat_map(|a| fixtures(a)) {
-            let Some((solved, frd)) = solve(&input, &dir) else {
-                continue;
-            };
-            let what = input.display();
-            let file = read_frd(&frd).unwrap();
-            let memory = import(&solved);
-            assert_eq!(memory.mesh.node_ids(), file.mesh.node_ids(), "{what}");
-            for (a, b) in memory.mesh.elements().iter().zip(file.mesh.elements()) {
-                assert_eq!(
-                    (a.id, &a.type_name, &a.nodes),
-                    (b.id, &b.type_name, &b.nodes)
-                );
-            }
-            assert_eq!(memory.mesh.parts, file.mesh.parts, "{what}");
-            assert_eq!(memory.materials, file.materials, "{what}");
-            for (a, b) in memory
-                .mesh
-                .node_ids()
-                .iter()
-                .map(|&id| (memory.mesh.node(id).unwrap(), file.mesh.node(id).unwrap()))
-            {
-                for k in 0..3 {
-                    assert!((a[k] - b[k]).abs() <= 1e-5 * a[k].abs().max(1e-3), "{what}");
-                }
-            }
-            assert_eq!(memory.increments.len(), file.increments.len(), "{what}");
-            for (a, b) in memory.increments.iter().zip(&file.increments) {
-                let head = |i: &plx_results::Increment| (i.step, i.increment, i.kind);
-                assert_eq!(head(a), head(b), "{what}");
-                assert!(
-                    (a.value - b.value).abs() <= 1e-6 * b.value.abs().max(1.0),
-                    "{what}"
-                );
-                let names = |i: &plx_results::Increment| -> Vec<(String, Vec<String>)> {
-                    (i.fields.iter())
-                        .map(|f| {
-                            let c = f.components.iter().map(|c| c.name.clone()).collect();
-                            (f.name.clone(), c)
-                        })
-                        .collect()
-                };
-                assert_eq!(names(a), names(b), "{what}");
-                for (fa, fb) in a.fields.iter().zip(&b.fields) {
-                    assert_eq!(fa.rank, fb.rank, "{what}");
-                    let field_scale = (fb.components.iter().filter(|c| !c.derived))
-                        .filter_map(|c| c.range())
-                        .fold(0.0f32, |m, (l, h)| m.max(l.abs()).max(h.abs()));
-                    for (ca, cb) in fa.components.iter().zip(&fb.components) {
-                        // Values the file rounds to zero below its smallest exponent; derived
-                        // values such as principal strains take the file's rounding further.
-                        let scale = if cb.derived {
-                            field_scale
-                        } else {
-                            cb.range().map_or(0.0, |(l, h)| l.abs().max(h.abs()))
-                        };
-                        let tolerance = if cb.derived { 1e-4 } else { 1e-5 };
-                        assert_eq!(ca.derived, cb.derived, "{what}");
-                        // The signed largest principal value takes the sign of whichever of
-                        // two opposite principal values of (nearly) equal size the rounding
-                        // makes larger.
-                        let signed = ca.name.starts_with("SGN_");
-                        for (&va, &vb) in ca.values.iter().zip(&cb.values) {
-                            let (va, vb) = if signed {
-                                (va.abs(), vb.abs())
-                            } else {
-                                (va, vb)
+        // The fixtures are solved side by side (each solve takes one thread), as many as
+        // there are cores; a directory per area keeps fixtures of the same name apart.
+        let base = &dir;
+        let inputs: Vec<(PathBuf, PathBuf)> = (areas.iter())
+            .flat_map(|&a| fixtures(a).into_iter().map(move |f| (f, base.join(a))))
+            .collect();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let compared: usize = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut compared = 0;
+                        loop {
+                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some((input, dir)) = inputs.get(i) else {
+                                break;
                             };
-                            assert!(
-                                close(va, vb) || (va - vb).abs() <= tolerance * scale,
-                                "{what} {} {}: {va} vs {vb}",
-                                fa.name,
-                                ca.name
-                            );
+                            std::fs::create_dir_all(dir).unwrap();
+                            compared += usize::from(compare(input, dir));
                         }
+                        compared
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).sum()
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(compared > 50, "only {compared} fixtures compared");
+    }
+
+    /// Solves `input` into `dir` and compares the results from memory with the files;
+    /// `false` if the solver does not compute it.
+    fn compare(input: &Path, dir: &Path) -> bool {
+        let Some((solved, frd)) = solve(input, dir) else {
+            return false;
+        };
+        let what = input.display();
+        let file = read_frd(&frd).unwrap();
+        let memory = import(&solved);
+        assert_eq!(memory.mesh.node_ids(), file.mesh.node_ids(), "{what}");
+        for (a, b) in memory.mesh.elements().iter().zip(file.mesh.elements()) {
+            assert_eq!(
+                (a.id, &a.type_name, &a.nodes),
+                (b.id, &b.type_name, &b.nodes)
+            );
+        }
+        assert_eq!(memory.mesh.parts, file.mesh.parts, "{what}");
+        assert_eq!(memory.materials, file.materials, "{what}");
+        for (a, b) in memory
+            .mesh
+            .node_ids()
+            .iter()
+            .map(|&id| (memory.mesh.node(id).unwrap(), file.mesh.node(id).unwrap()))
+        {
+            for k in 0..3 {
+                assert!((a[k] - b[k]).abs() <= 1e-5 * a[k].abs().max(1e-3), "{what}");
+            }
+        }
+        assert_eq!(memory.increments.len(), file.increments.len(), "{what}");
+        for (a, b) in memory.increments.iter().zip(&file.increments) {
+            let head = |i: &plx_results::Increment| (i.step, i.increment, i.kind);
+            assert_eq!(head(a), head(b), "{what}");
+            assert!(
+                (a.value - b.value).abs() <= 1e-6 * b.value.abs().max(1.0),
+                "{what}"
+            );
+            let names = |i: &plx_results::Increment| -> Vec<(String, Vec<String>)> {
+                (i.fields.iter())
+                    .map(|f| {
+                        let c = f.components.iter().map(|c| c.name.clone()).collect();
+                        (f.name.clone(), c)
+                    })
+                    .collect()
+            };
+            assert_eq!(names(a), names(b), "{what}");
+            for (fa, fb) in a.fields.iter().zip(&b.fields) {
+                assert_eq!(fa.rank, fb.rank, "{what}");
+                let field_scale = (fb.components.iter().filter(|c| !c.derived))
+                    .filter_map(|c| c.range())
+                    .fold(0.0f32, |m, (l, h)| m.max(l.abs()).max(h.abs()));
+                for (ca, cb) in fa.components.iter().zip(&fb.components) {
+                    // Values the file rounds to zero below its smallest exponent; derived
+                    // values such as principal strains take the file's rounding further.
+                    let scale = if cb.derived {
+                        field_scale
+                    } else {
+                        cb.range().map_or(0.0, |(l, h)| l.abs().max(h.abs()))
+                    };
+                    let tolerance = if cb.derived { 1e-4 } else { 1e-5 };
+                    assert_eq!(ca.derived, cb.derived, "{what}");
+                    // The signed largest principal value takes the sign of whichever of
+                    // two opposite principal values of (nearly) equal size the rounding
+                    // makes larger.
+                    let signed = ca.name.starts_with("SGN_");
+                    for (&va, &vb) in ca.values.iter().zip(&cb.values) {
+                        let (va, vb) = if signed {
+                            (va.abs(), vb.abs())
+                        } else {
+                            (va, vb)
+                        };
+                        assert!(
+                            close(va, vb) || (va - vb).abs() <= tolerance * scale,
+                            "{what} {} {}: {va} vs {vb}",
+                            fa.name,
+                            ca.name
+                        );
                     }
                 }
             }
-            let dat = frd.with_extension("dat");
-            let from_file = crate::dat::read_dat(&dat).ok();
-            let input_text = std::fs::read_to_string(&input).ok();
-            let from_memory = history(&solved, input_text.as_deref());
-            assert_eq!(
-                from_memory.as_ref().map(|d| d.sets.len()),
-                from_file.as_ref().map(|d| d.sets.len()),
-                "{what}"
-            );
-            compared += 1;
         }
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(compared > 50, "only {compared} fixtures compared");
+        let dat = frd.with_extension("dat");
+        let from_file = crate::dat::read_dat(&dat).ok();
+        let input_text = std::fs::read_to_string(input).ok();
+        let from_memory = history(&solved, input_text.as_deref());
+        assert_eq!(
+            from_memory.as_ref().map(|d| d.sets.len()),
+            from_file.as_ref().map(|d| d.sets.len()),
+            "{what}"
+        );
+        true
     }
 
     #[test]

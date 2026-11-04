@@ -12,9 +12,11 @@ on:
     paths-ignore: ["**.md", "docs/**", "LICENSE"]
   workflow_dispatch:
 
+# Ein neuer Push bricht den laufenden Lauf eines Pull Requests ab; auf master laufen die Läufe
+# zu Ende, denn nur ein fertiger Lauf speichert den Cargo-Cache, den die Pull Requests nutzen.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
