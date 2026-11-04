@@ -11,8 +11,8 @@ use crate::Region;
 
 /// Nodes tied to each other, nodalis's node tie: the ends of beams or trusses meeting at a
 /// point, which have nodes of their own since parts share no nodes. Every node of the region
-/// moves with the first. Node ties are listed with the contact pairs, as the contact search
-/// finds them.
+/// moves with the first. Node ties are listed with the contact pairs; a contact detection
+/// finds them at the line ends.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NodeTie {
     pub name: String,
@@ -22,6 +22,12 @@ pub struct NodeTie {
     /// Ties the rotations too, a rigid joint between beams; a hinge otherwise. Nodes
     /// without rotations (trusses, solids) are tied in their translations only either way.
     pub rotations: bool,
+    /// The contact detection that found the tie at line ends; `None` for one made by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_by: Option<String>,
+    /// Changed by the user after its detection: detecting again keeps it as it is.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub edited: bool,
 }
 
 impl NodeTie {
@@ -31,6 +37,8 @@ impl NodeTie {
             active: true,
             region: Region::Nodes(Vec::new()),
             rotations: true,
+            detected_by: None,
+            edited: false,
         }
     }
 }

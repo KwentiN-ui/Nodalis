@@ -206,9 +206,13 @@ pub fn detect(
                 face_edges: display.face_edges(),
                 part_dimensions: &dimensions,
             };
-            model
-                .fe
-                .detect_contacts_on_geometry(index, &geometry, &visible)
+            let mut report = (model.fe).detect_contacts_on_geometry(index, &geometry, &visible)?;
+            // Line ends are tied by their nodes, which only the mesh has.
+            let visible: Vec<bool> = model.parts.iter().map(|p| p.visible).collect();
+            let mut fe = std::mem::take(&mut model.fe);
+            fe.detect_line_ends(index, &model.mesh, &visible, &mut report);
+            model.fe = fe;
+            Some(report)
         }
         None => {
             let visible: Vec<bool> = model.parts.iter().map(|p| p.visible).collect();
@@ -334,6 +338,9 @@ pub fn detection_form(
                 .on_hover_text("Top and bottom of shells and membranes.");
             ui.checkbox(&mut filter.shell_edge, "Shell edge")
                 .on_hover_text("Free edges of shells and membranes.");
+            ui.checkbox(&mut filter.line_end, "Line end").on_hover_text(
+                "Ends of beams and trusses of different parts at one point, tied as node ties.",
+            );
         });
         ui.end_row();
     }
@@ -413,7 +420,7 @@ pub fn validate_detection(detection: &ContactDetection) -> Result<(), String> {
         return Err("The tolerance must be positive.".into());
     }
     let filter = detection.filter;
-    if !(filter.solid || filter.shell || filter.shell_edge) {
+    if !(filter.solid || filter.shell || filter.shell_edge || filter.line_end) {
         return Err("Choose at least one kind of surface to search.".into());
     }
     if let ContactBehavior::Frictional { mu } = detection.behavior

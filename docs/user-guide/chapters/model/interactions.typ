@@ -174,7 +174,9 @@ touch and adds a contact region for every pair it finds, listed under the detect
     detection saw touching.],
   [Angle], [Largest angle between the surfaces facing each other (default 35°).],
   [Surfaces], [What is searched in 3D: outer faces of #ui("Solid") parts, the top and bottom of
-    #ui("Shell") and membrane parts, and their free edges (#ui("Shell edge")).],
+    #ui("Shell") and membrane parts, and their free edges (#ui("Shell edge")). #ui("Line end")
+    finds ends of beams and trusses of different parts at one point and ties them with a node
+    tie (@node-ties).],
   [Group by], [#ui("Parts") (default): one region per pair of touching parts. #ui("Faces"): one
     per pair of touching faces. #ui("Graph"): touching faces sharing nodes are merged, so that
     every node is on the slave side of one region only.],
@@ -547,12 +549,21 @@ CalculiX ties the edge faces of membranes to nothing (the solver stops with a si
 matrix), so Nodalis writes the slave side of a tie on membrane edges as a node surface of the
 edge's nodes; a membrane has no rotations that would need more.
 
-=== Node ties
+=== Node ties <node-ties>
 
-#ui("Create Node Tie ...") in the context menu of #ui("Contact Pairs") makes all nodes of a region
-move together. It connects the ends of beams and trusses of different parts. With
-#ui("Rotations: rigid") the connection also transmits moments; without it, beams are connected
-by a hinge.
+#menu("Connections", "Node Tie") makes all nodes of a region move together. It connects the
+ends of beams and trusses of different parts. With #ui("Rotations: rigid") the connection also
+transmits moments; without it, beams are connected by a hinge.
+
+A contact detection with #ui("Line end") (@contact-detection) makes the node ties itself: one
+rigid node tie for every point where ends of different line parts meet within its tolerance,
+named after the parts, e.g. #ui("Node Tie - BEAM-1, BEAM-2"), and listed under
+#ui("Contact Pairs"). Like the regions, they are replaced when detecting again, except those you
+changed since, and go with the detection when it is deleted. On a model from CAD geometry the
+line ends are found on the mesh, so mesh the line parts first.
+
+#screenshot("node-ties-detected.png", [The node ties a detection found at the corners of a
+  frame of four beams; the selected one shows its corner in red])
 
 === Many pairs at once
 

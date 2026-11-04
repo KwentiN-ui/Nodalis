@@ -79,7 +79,10 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
     hash.add_debug(surface_interactions);
     hash.add_debug(contact_pairs);
     hash.add_debug(ties);
-    hash.add_debug(node_ties);
+    // Who found a node tie and whether it was changed since is no input of the solver.
+    for tie in node_ties {
+        hash.add_debug(&(&tie.name, tie.active, &tie.region, tie.rotations));
+    }
     if !contact_regions.is_empty() {
         // Who found a region and whether it was changed since is no input of the solver.
         let regions: Vec<_> = (contact_regions.iter())
