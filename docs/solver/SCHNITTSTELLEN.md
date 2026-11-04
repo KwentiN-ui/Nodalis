@@ -1397,3 +1397,27 @@ Was T15 gebaut hat:
 - Offen: p-Multigrid (erste Ebene = Eckknoten) für quadratische Netze; Blätter der
   Dissection per Minimum Degree statt Cuthill-McKee und ein mehrstufiger Partitionierer
   (Scotch-artig) wären die nächsten Schritte zum Füllgrad von PaStiX.
+
+## Stand nach dem V-Zyklus auf der Grafikkarte
+
+- `plxs-linalg::gpu` (Feature `gpu`, an in `plxs-cli` per Default und in `plx-app`): der
+  AMG-V-Zyklus als wgpu-Compute-Shader (WGSL, f32; `gpu_product.wgsl`, `gpu_vector.wgsl`).
+  Die Hierarchie wird pro `Amg::build` einmal hochgeladen, pro Anwendung geht das Residuum
+  hoch und die Korrektur zurück; CG und das Produkt mit der feinen Matrix bleiben f64 auf
+  der CPU. Die gröbste Ebene (höchstens 4096 Unbekannte) wird als dichte Inverse
+  angewandt, damit der Zyklus ohne Rundreise in der Mitte in einem Command Buffer läuft.
+- Speicherformat auf der Karte: Sliced ELLPACK aus Blöcken (32 Blockzeilen je Slice, in
+  Fenstern von 256 Blockzeilen nach Länge sortiert), ein Thread je skalarer Zeile, damit
+  benachbarte Threads benachbarten Speicher lesen. `Amg::refresh` schreibt die neuen
+  Werte der feinen Ebene, die Diagonale und die Chebyshev-Koeffizienten neu.
+- Auswahl (`AmgOptions::gpu`, `PLXS_GPU=off|on`): automatisch nur `DiscreteGpu` und ab
+  100 000 Gleichungen; `on` nimmt jeden Adapter (lavapipe im Container). Jeder Fehler beim
+  Hochladen oder im Zyklus (auch ein Panic in wgpu) fällt auf die CPU zurück; der Grund
+  steht in der Vorkonditionierer-Zeile des Monitors.
+- Hochladen in Stücken von 16 MB und ohne Speicherbudget-Schwelle: wgpu stagt einen ganzen
+  Puffer auf einmal und prüfte das Budget gegen den Staging-Heap (256 MB ohne Resizable
+  BAR), daran scheiterte die feine Matrix des Halters.
+- Messung (Quentin, RTX 4070, 16 Threads, C3D10-Halter 591k): Vorkonditionierer
+  11,4 → 1,5 s, Lösen 15,9 → 5,8 s, Iterationen 217 / 214, Hochladen 0,35 s. Jetzt
+  dominiert das f64-Produkt auf der CPU (3,7 s). Nächster Hebel: CG mit Produkt ganz auf
+  der Karte (braucht `SHADER_F64` oder ein f32/f64-Doppelwort-Produkt).
