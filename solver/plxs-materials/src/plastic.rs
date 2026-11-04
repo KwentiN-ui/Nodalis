@@ -31,6 +31,11 @@ pub(crate) const PLASTIC: usize = 1;
 pub(crate) const BACK: usize = 7;
 pub(crate) const CREEP_RATE: usize = 13;
 
+/// Relative distance to the yield surface below which a trial state counts as on the
+/// surface and elastic (far above the round-off of the return mapping, far below any real
+/// plastic strain increment).
+const YIELD_TOLERANCE: f64 = 1e-9;
+
 /// A hardening curve σ(ε̄ᵖ) at one temperature: piecewise linear, constant beyond its ends.
 #[derive(Clone, Debug, PartialEq)]
 struct Curve {
@@ -339,7 +344,7 @@ impl MaterialLaw for J2Plastic {
         for (k, v) in elastic.iter_mut().enumerate() {
             *v -= state[PLASTIC + k];
         }
-        let (stress, plastic_increment, tangent) = self.kernel(&elastic, state, input);
+        let (stress, plastic_increment, tangent) = self.kernel(&elastic, state, input, true);
         for (k, d) in plastic_increment.iter().enumerate() {
             state[PLASTIC + k] += d;
         }
@@ -351,12 +356,15 @@ impl J2Plastic {
     /// The return mapping for an elastic trial strain (tensor components): the stress, the
     /// plastic strain increment (tensor components) and the consistent tangent on
     /// engineering strains. Updates the equivalent plastic strain, the back stress and the
-    /// creep rate in `state`; the plastic strain slots are the caller's.
+    /// creep rate in `state`; the plastic strain slots are the caller's. Without
+    /// `allow_flow` the response is the elastic one (the elastic branch of a point on the
+    /// yield surface, for one-sided tangents).
     pub(crate) fn kernel(
         &self,
         elastic: &[f64; 6],
         state: &mut [f64],
         input: &MaterialInput,
+        allow_flow: bool,
     ) -> ([f64; 6], [f64; 6], [[f64; 6]; 6]) {
         let mu = self.elastic.shear_modulus();
         let bulk = self.elastic.bulk_modulus();
@@ -373,7 +381,13 @@ impl J2Plastic {
         let yields = self.isotropic.is_some() || (self.creep.is_some() && input.creep_active);
         let f_trial = q_trial - self.yield_stress(peeq);
         let hydrostatic = bulk * trace;
-        if !yields || f_trial <= 0.0 || xi_norm <= 0.0 {
+        // A point that sits on the yield surface without a strain increment (the converged
+        // state at the start of an increment, where the return mapping left it within
+        // round-off) is elastic: whether the next increment loads or unloads it is not
+        // known yet, and the elastoplastic tangent would make an unloading increment's
+        // first Newton step overshoot by the ratio of the elastic to the hardening modulus.
+        let on_surface = YIELD_TOLERANCE * self.yield_stress(peeq).max(0.0);
+        if !yields || !allow_flow || f_trial <= on_surface || xi_norm <= 0.0 {
             let mut stress = s_trial;
             for v in stress.iter_mut().take(3) {
                 *v += hydrostatic;
@@ -637,6 +651,35 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// The converged state at the start of an increment sits on the yield surface: its
+    /// tangent is the elastic one, so that an unloading increment starts with the right
+    /// stiffness (regression: unloading a yielded body diverged in its first increment).
+    #[test]
+    fn a_converged_plastic_point_starts_the_next_increment_elastically() {
+        for hardening in [Hardening::Isotropic, Hardening::Kinematic] {
+            let law = law(&steel(hardening, false));
+            let input = static_input([0.004, -0.0012, -0.0012, 0.0, 0.0, 0.0]);
+            let mut state = vec![0.0; STATE_SIZE];
+            let loaded = law.stress(&input, &mut state);
+            assert!(state[PEEQ] > 0.0, "the test strain must yield");
+            // The next increment's first evaluation: same strain, committed state.
+            let mut next = state.clone();
+            let again = law.stress(&input, &mut next);
+            assert_eq!(next[PEEQ], state[PEEQ], "{hardening:?}: no further flow");
+            for i in 0..6 {
+                assert!((again.stress[i] - loaded.stress[i]).abs() < 1e-9 * 235.0);
+            }
+            assert_eq!(again.tangent, law.elastic_matrix(), "{hardening:?}");
+            // Unloading from there stays elastic.
+            let mut unload = input;
+            unload.strain[0] -= 0.0005;
+            let mut after = state.clone();
+            let out = law.stress(&unload, &mut after);
+            assert_eq!(after[PEEQ], state[PEEQ]);
+            assert_eq!(out.tangent, law.elastic_matrix());
         }
     }
 }

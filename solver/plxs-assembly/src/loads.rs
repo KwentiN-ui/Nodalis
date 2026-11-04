@@ -9,6 +9,40 @@ use rayon::prelude::*;
 use crate::ElementTable;
 use crate::dofs::amplitude_factor;
 
+/// Adds the part of the loads of the previous step that has not been ramped away yet at
+/// step time `time`: with the default ramp CalculiX moves every load linearly from its value
+/// at the end of the previous step to the value the step defines, so a load that a step
+/// lowers or removes (`OP=NEW`) goes down gradually instead of at once. `f` holds the loads
+/// of the step at `time` (ramped from zero by [`load_vector`]); `previous` is the load vector
+/// at the end of the previous step. Steps with `AMPLITUDE=STEP` apply their loads at once.
+///
+/// The ramp works on the whole vector: a new load with its own amplitude on a DOF the
+/// previous step loaded does not replace the carried value there but is added to its
+/// decaying part (CalculiX replaces it).
+pub fn add_carried_loads(
+    f: &mut [f64],
+    previous: Option<&[f64]>,
+    step: &Step,
+    time: f64,
+    period: f64,
+) {
+    let Some(previous) = previous.filter(|p| p.len() == f.len()) else {
+        return;
+    };
+    let remaining = match step.default_amplitude {
+        plxs_core::step::DefaultAmplitude::Ramp if period > 0.0 => {
+            1.0 - (time / period).clamp(0.0, 1.0)
+        }
+        _ => 0.0,
+    };
+    if remaining == 0.0 {
+        return;
+    }
+    for (f, p) in f.iter_mut().zip(previous) {
+        *f += remaining * p;
+    }
+}
+
 /// The load vector at step time `time` (total time `total`) of a step with period `period`.
 /// Returns the vector and warnings (loads on DOFs the nodes do not have).
 pub fn load_vector(
