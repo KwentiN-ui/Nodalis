@@ -357,7 +357,7 @@ impl ProjectApp {
             Cmd::Minimap => self.show_minimap = !self.show_minimap,
             Cmd::UpdateProject => self.update_all(),
             Cmd::StopUpdate => self.stop_update(),
-            Cmd::ProjectMonitor => self.toggle_monitor(),
+            Cmd::ProjectMonitor => self.toggle_monitor(ctx),
             Cmd::Settings => self.settings_window = Some(SettingsWindow::new(&self.settings)),
             Cmd::SolverSettings => {
                 let page = crate::settings::Page::Solver;

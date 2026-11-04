@@ -67,8 +67,8 @@ of the run once more. #ui("Solve Again") does not take steps over: it computes e
 
 === Monitor <monitor>
 
-The monitor is the #ui("Analysis") tab of the output pane below the 3D view; it comes to the
-front when a run starts, so the model and its results stay in view while the solver runs.
+The monitor is the #ui("Analysis") tab of the output pane below the 3D view (@output-pane); it
+opens when a run starts, so the model and its results stay in view while the solver runs.
 Its top row has #ui("Kill") to stop the solver, #ui("Results") to open the results once the run is
 finished, the #ui("Filter") field and the status with the running time and the current step,
 increment and iteration; below it is the output of the solver. The #ui("Output") tab goes back to
@@ -177,7 +177,7 @@ file and keeps its results.
 
 Nodalis checks the model continuously while you work. Items with a problem get a warning sign in
 the tree; items with an error and their containers are shown in red. Click the warning sign to see
-what is wrong and how to fix it. The #ui("Problems") tab below the 3D view lists all of them
+what is wrong and how to fix it. The #ui("Problems") tab of the output pane lists all of them
 (@problems).
 
 #screenshot("model-check.png", [Model check: parts without a section])

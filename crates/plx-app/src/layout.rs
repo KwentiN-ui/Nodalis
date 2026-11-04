@@ -32,8 +32,6 @@ pub struct Fit {
     pub fold_tree: bool,
     /// The ribbon shows only its tabs.
     pub fold_ribbon: bool,
-    /// The output pane shows only its tabs.
-    pub fold_output: bool,
 }
 
 pub fn fit(size: Vec2) -> Fit {
@@ -44,7 +42,6 @@ pub fn fit(size: Vec2) -> Fit {
         icons_only: narrow,
         fold_tree: narrow,
         fold_ribbon: low,
-        fold_output: narrow || low,
     }
 }
 
@@ -109,25 +106,16 @@ pub fn fold_tree(ctx: &egui::Context, folded: bool) {
     set_folded(ctx, "tree", current(ctx).fold_tree, folded);
 }
 
-/// Whether the output pane of the window `ctx` draws in shows only its tabs.
+/// Whether the output pane of the window `ctx` draws in is hidden. It is, until one of its
+/// tabs in the status bar is clicked, a run starts or a problem is asked for; whatever the
+/// size of the window.
 pub fn output_folded(ctx: &egui::Context) -> bool {
-    folded(ctx, "output", current(ctx).fold_output)
+    folded(ctx, "output", true)
 }
 
-/// The user folds the output pane to its tabs or unfolds it. A double-click on its tabs
-/// folds it, but not right after its first click unfolded it.
+/// The user hides the output pane or shows it.
 pub fn fold_output(ctx: &egui::Context, folded: bool) {
-    let id = fold_id(ctx, "output unfolded at");
-    let now = ctx.input(|i| i.time);
-    if folded {
-        let since = ctx.data(|d| d.get_temp::<f64>(id)).map(|t| now - t);
-        if since.is_some_and(|s| s < 0.6) {
-            return;
-        }
-    } else {
-        ctx.data_mut(|d| d.insert_temp(id, now));
-    }
-    set_folded(ctx, "output", current(ctx).fold_output, folded);
+    set_folded(ctx, "output", true, folded);
 }
 
 #[cfg(test)]
@@ -141,10 +129,10 @@ mod tests {
         let middle = fit(vec2(1100.0, 900.0));
         assert!(middle.overlay && !middle.icons_only && !middle.fold_tree);
         let narrow = fit(vec2(800.0, 900.0));
-        assert!(narrow.overlay && narrow.icons_only && narrow.fold_tree && narrow.fold_output);
+        assert!(narrow.overlay && narrow.icons_only && narrow.fold_tree);
         assert!(!narrow.fold_ribbon);
         let low = fit(vec2(1600.0, 650.0));
-        assert!(low.fold_ribbon && low.fold_output && !low.overlay);
+        assert!(low.fold_ribbon && !low.overlay);
     }
 
     #[test]
