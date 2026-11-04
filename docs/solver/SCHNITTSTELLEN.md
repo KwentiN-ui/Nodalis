@@ -1359,7 +1359,26 @@ Was T15 gebaut hat:
   Größe, C3D8/C3D20R/C3D4/C3D10), Eingaben in `/mnt/project-files/nodalis/benchmark/`.
   Messknöpfe: `PLXS_PCG_TRACE=1` (Zeit in Produkt/Vorkonditionierer), `PLXS_AMG_TRACE=1`
   (Phasen des Aufbaus), `PLXS_AMG_STRENGTH/DEGREE/COARSE/LEVELS/MAX_AGG`.
-- Offen: p-Multigrid (erste Ebene = Eckknoten) für quadratische Netze; Wiederverwendung
-  der Aggregate über Newton-Iterationen; f32-Kopie der feinsten Ebene für den Glätter; die
-  automatische Wahl bleibt speicherbasiert, obwohl das Multigrid auf großen Modellen
-  inzwischen oft schneller als die Faktorisierung ist.
+- Zweite Runde (gleicher Thread): die ganze Hierarchie liegt in einfacher Genauigkeit
+  (`Bsr<f32>`, auch eine Kopie der feinsten Ebene; nur die gröbste Ebene wird in f64
+  faktorisiert, das CG außen bleibt f64). Halbiert den Speicherverkehr des V-Zyklus und
+  den Speicher des Vorkonditionierers (Halter: 1,8 → 0,9 × Matrix), kostet aber
+  Iterationen, weil das CG mit einem gerundeten Vorkonditionierer seine Richtungshistorie
+  nicht mehr voll nutzt (Hex 30 → 39, C3D10-Halter 200 → 220, dünne C3D20R-Platte
+  65 → 115); netto trotzdem schneller (Halter 23 → 14,6 s, C3D20R-Block 2,9 → 1,8 s).
+  Versucht und verworfen: nur die feine Ebene oder nur die groben Ebenen in f32, Residuen
+  der feinen Ebene in f64, Umschalten auf f64 unter 1e-7 — jede f32-Komponente kostet
+  dieselben Iterationen. `beta` im CG in der Polak-Ribière-Form (flexibles CG, ein
+  Skalarprodukt mehr), damit ein leicht veränderlicher Vorkonditionierer zulässig ist.
+  Block-Kernel per const generics für 1×1, 3×3, 3×6, 6×3, 6×6; Parallelisierung der
+  Produkte in Stücken nach Blockzeilenzahl (grobe Ebenen mit 500 Blockzeilen beschäftigten
+  sonst nur 3 Threads). Hierarchie wird über Faktorisierungen gleichen Musters
+  (Newton-Iterationen) behalten (`Amg::refresh`: Diagonale, λ_max und die f32-Kopie der
+  feinsten Ebene folgen den neuen Werten, Prolongatoren und grobe Operatoren bleiben),
+  solange ein Lösen nicht mehr als das 1,5-Fache der Iterationen des ersten Lösens nach
+  dem Aufbau braucht (`PLXS_AMG_REBUILD=1` baut immer neu). Kontaktmodell Lasche,
+  14 Newton-Iterationen: Aufbau 10,9 s → 2,7 s, gesamt 44 s → 32,5 s (direkt: 73 s).
+- Offen: p-Multigrid (erste Ebene = Eckknoten) für quadratische Netze; die automatische
+  Wahl bleibt speicherbasiert, obwohl das Multigrid auf großen Modellen inzwischen oft
+  schneller als die Faktorisierung ist; ND-Ordnung des direkten Solvers füllt auf
+  Tet-Netzen ~6× mehr als Scotch (PaStiX).

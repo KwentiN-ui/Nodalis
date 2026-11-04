@@ -5,15 +5,57 @@
 //! instead of scalars. Block dimensions are chosen at run time (`3 × 3` for a mechanical
 //! model, `1 × 1` for a scalar field, `3 × 6` for the prolongator to the rigid body modes).
 //!
-//! Products with a vector run over the block rows in parallel.
+//! Products with a vector run over the block rows in parallel. The values are `f64` while
+//! a matrix is built and `f32` where only its products matter (the multigrid hierarchy,
+//! whose traffic halves that way).
+
+use std::ops::{Add, AddAssign, Mul, SubAssign};
 
 use rayon::prelude::*;
 
 /// Matrices with fewer stored values than this are multiplied by one thread.
 const PARALLEL_FROM: usize = 1 << 15;
 
+/// The value type of a matrix: `f64` or `f32`.
+pub trait Scalar:
+    Copy
+    + Default
+    + Send
+    + Sync
+    + Add<Output = Self>
+    + Mul<Output = Self>
+    + AddAssign
+    + SubAssign
+    + 'static
+{
+    fn from_f64(v: f64) -> Self;
+    fn to_f64(self) -> f64;
+}
+
+impl Scalar for f64 {
+    #[inline]
+    fn from_f64(v: f64) -> Self {
+        v
+    }
+    #[inline]
+    fn to_f64(self) -> f64 {
+        self
+    }
+}
+
+impl Scalar for f32 {
+    #[inline]
+    fn from_f64(v: f64) -> Self {
+        v as f32
+    }
+    #[inline]
+    fn to_f64(self) -> f64 {
+        self as f64
+    }
+}
+
 #[derive(Clone, Debug, Default)]
-pub struct Bsr {
+pub struct Bsr<T = f64> {
     /// Number of block rows and block columns.
     pub brows: usize,
     pub bcols: usize,
@@ -23,10 +65,10 @@ pub struct Bsr {
     pub ptr: Vec<usize>,
     pub col: Vec<u32>,
     /// `br · bc` values per block, row major.
-    pub val: Vec<f64>,
+    pub val: Vec<T>,
 }
 
-impl Bsr {
+impl<T: Scalar> Bsr<T> {
     /// Number of rows (unknowns).
     pub fn rows(&self) -> usize {
         self.brows * self.br
@@ -46,7 +88,7 @@ impl Bsr {
     }
 
     /// The block columns of block row `i` and their values.
-    pub fn block_row(&self, i: usize) -> (&[u32], &[f64]) {
+    pub fn block_row(&self, i: usize) -> (&[u32], &[T]) {
         let (s, e) = (self.ptr[i], self.ptr[i + 1]);
         let size = self.br * self.bc;
         (&self.col[s..e], &self.val[s * size..e * size])
@@ -54,84 +96,150 @@ impl Bsr {
 
     /// `y = A x` (`sign = 1`) or `y = y₀ − A x` with `y₀` given in `y` (`sign = -1`,
     /// `accumulate`).
-    fn product(&self, x: &[f64], y: &mut [f64], accumulate: bool) {
+    fn product(&self, x: &[T], y: &mut [T], accumulate: bool) {
         debug_assert_eq!(x.len(), self.cols());
         debug_assert_eq!(y.len(), self.rows());
-        let (br, bc) = (self.br, self.bc);
-        let size = br * bc;
-        let block_row = |(i, y): (usize, &mut [f64])| {
-            let (s, e) = (self.ptr[i], self.ptr[i + 1]);
-            if !accumulate {
-                y.iter_mut().for_each(|v| *v = 0.0);
-            }
-            match (br, bc) {
-                (3, 3) => {
-                    let (mut s0, mut s1, mut s2) = (0.0, 0.0, 0.0);
-                    for k in s..e {
-                        let c = 3 * self.col[k] as usize;
-                        let b = &self.val[9 * k..9 * k + 9];
-                        let (x0, x1, x2) = (x[c], x[c + 1], x[c + 2]);
-                        s0 += b[0] * x0 + b[1] * x1 + b[2] * x2;
-                        s1 += b[3] * x0 + b[4] * x1 + b[5] * x2;
-                        s2 += b[6] * x0 + b[7] * x1 + b[8] * x2;
-                    }
-                    if accumulate {
-                        y[0] -= s0;
-                        y[1] -= s1;
-                        y[2] -= s2;
-                    } else {
-                        y[0] = s0;
-                        y[1] = s1;
-                        y[2] = s2;
-                    }
-                }
-                (1, 1) => {
-                    let mut sum = 0.0;
-                    for k in s..e {
-                        sum += self.val[k] * x[self.col[k] as usize];
-                    }
-                    if accumulate {
-                        y[0] -= sum;
-                    } else {
-                        y[0] = sum;
-                    }
-                }
-                _ => {
-                    let sign = if accumulate { -1.0 } else { 1.0 };
-                    for k in s..e {
-                        let c = bc * self.col[k] as usize;
-                        let b = &self.val[size * k..size * (k + 1)];
-                        let xc = &x[c..c + bc];
-                        for (r, y) in y.iter_mut().enumerate() {
-                            let row = &b[r * bc..(r + 1) * bc];
-                            let dot: f64 = row.iter().zip(xc).map(|(a, x)| a * x).sum();
-                            *y += sign * dot;
-                        }
-                    }
-                }
-            }
-        };
-        if self.nnz() < PARALLEL_FROM {
-            y.chunks_exact_mut(br).enumerate().for_each(block_row);
-        } else {
-            y.par_chunks_exact_mut(br)
-                .enumerate()
-                .with_min_len(64)
-                .for_each(block_row);
+        match (self.br, self.bc) {
+            (1, 1) => self.product_fixed::<1, 1>(x, y, accumulate),
+            (3, 3) => self.product_3x3(x, y, accumulate),
+            (3, 6) => self.product_fixed::<3, 6>(x, y, accumulate),
+            (6, 3) => self.product_fixed::<6, 3>(x, y, accumulate),
+            (6, 6) => self.product_fixed::<6, 6>(x, y, accumulate),
+            _ => self.product_generic(x, y, accumulate),
         }
     }
 
+    /// Runs `block_row` over all block rows, in parallel when the matrix is large enough,
+    /// in chunks that keep every thread busy even when there are few block rows.
+    fn for_block_rows<F>(&self, y: &mut [T], block_row: F)
+    where
+        F: Fn(usize, &mut [T]) + Sync,
+    {
+        let br = self.br;
+        if self.nnz() < PARALLEL_FROM {
+            y.chunks_exact_mut(br)
+                .enumerate()
+                .for_each(|(i, y)| block_row(i, y));
+        } else {
+            let tasks = 16 * rayon::current_num_threads();
+            let min_len = (self.brows / tasks).clamp(1, 64);
+            y.par_chunks_exact_mut(br)
+                .enumerate()
+                .with_min_len(min_len)
+                .for_each(|(i, y)| block_row(i, y));
+        }
+    }
+
+    fn product_3x3(&self, x: &[T], y: &mut [T], accumulate: bool) {
+        self.for_block_rows(y, |i, y| {
+            let (s, e) = (self.ptr[i], self.ptr[i + 1]);
+            let (mut s0, mut s1, mut s2) = (T::default(), T::default(), T::default());
+            for k in s..e {
+                let c = 3 * self.col[k] as usize;
+                let b = &self.val[9 * k..9 * k + 9];
+                let (x0, x1, x2) = (x[c], x[c + 1], x[c + 2]);
+                s0 += b[0] * x0 + b[1] * x1 + b[2] * x2;
+                s1 += b[3] * x0 + b[4] * x1 + b[5] * x2;
+                s2 += b[6] * x0 + b[7] * x1 + b[8] * x2;
+            }
+            if accumulate {
+                y[0] -= s0;
+                y[1] -= s1;
+                y[2] -= s2;
+            } else {
+                y[0] = s0;
+                y[1] = s1;
+                y[2] = s2;
+            }
+        });
+    }
+
+    fn product_fixed<const BR: usize, const BC: usize>(
+        &self,
+        x: &[T],
+        y: &mut [T],
+        accumulate: bool,
+    ) {
+        self.for_block_rows(y, |i, y| {
+            let (s, e) = (self.ptr[i], self.ptr[i + 1]);
+            let mut sum = [T::default(); BR];
+            for k in s..e {
+                let c = BC * self.col[k] as usize;
+                let b = &self.val[BR * BC * k..BR * BC * (k + 1)];
+                let xc: &[T; BC] = x[c..c + BC].try_into().expect("a block column");
+                for r in 0..BR {
+                    let row = &b[r * BC..(r + 1) * BC];
+                    let mut dot = T::default();
+                    for j in 0..BC {
+                        dot += row[j] * xc[j];
+                    }
+                    sum[r] += dot;
+                }
+            }
+            if accumulate {
+                for r in 0..BR {
+                    y[r] -= sum[r];
+                }
+            } else {
+                y[..BR].copy_from_slice(&sum);
+            }
+        });
+    }
+
+    fn product_generic(&self, x: &[T], y: &mut [T], accumulate: bool) {
+        let (br, bc) = (self.br, self.bc);
+        let size = br * bc;
+        self.for_block_rows(y, |i, y| {
+            let (s, e) = (self.ptr[i], self.ptr[i + 1]);
+            if !accumulate {
+                y.iter_mut().for_each(|v| *v = T::default());
+            }
+            for k in s..e {
+                let c = bc * self.col[k] as usize;
+                let b = &self.val[size * k..size * (k + 1)];
+                let xc = &x[c..c + bc];
+                for (r, y) in y.iter_mut().enumerate() {
+                    let row = &b[r * bc..(r + 1) * bc];
+                    let mut dot = T::default();
+                    for (a, x) in row.iter().zip(xc) {
+                        dot += *a * *x;
+                    }
+                    if accumulate {
+                        *y -= dot;
+                    } else {
+                        *y += dot;
+                    }
+                }
+            }
+        });
+    }
+
     /// `y = A x`.
-    pub fn multiply(&self, x: &[f64], y: &mut [f64]) {
+    pub fn multiply(&self, x: &[T], y: &mut [T]) {
         self.product(x, y, false);
     }
 
     /// `y = b − A x`.
-    pub fn residual(&self, b: &[f64], x: &[f64], y: &mut [f64]) {
+    pub fn residual(&self, b: &[T], x: &[T], y: &mut [T]) {
         y.copy_from_slice(b);
         self.product(x, y, true);
     }
 
+    /// The same matrix with the values in another precision.
+    pub fn converted<U: Scalar>(&self) -> Bsr<U> {
+        Bsr {
+            brows: self.brows,
+            bcols: self.bcols,
+            br: self.br,
+            bc: self.bc,
+            ptr: self.ptr.clone(),
+            col: self.col.clone(),
+            val: self.val.iter().map(|&v| U::from_f64(v.to_f64())).collect(),
+        }
+    }
+}
+
+impl Bsr<f64> {
     /// The diagonal (zero where there is no diagonal entry); square blocks only.
     pub fn diagonal(&self) -> Vec<f64> {
         debug_assert_eq!(self.br, self.bc);

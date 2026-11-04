@@ -17,6 +17,8 @@
 //! parallel on the current rayon pool; the triangular solves of IC(0) are sequential (each
 //! row needs the ones before it). `PLXS_PRECONDITIONER=ic0|amg` chooses for measurements.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use rayon::prelude::*;
 
 use plxs_core::{Error, Result};
@@ -28,6 +30,10 @@ use crate::{Pattern, SparseMatrix};
 
 /// The iteration stops when `|r| <= TOLERANCE |b|` (Euclidean norms).
 pub const TOLERANCE: f64 = 1e-12;
+/// `PLXS_AMG_REBUILD=1` rebuilds the hierarchy at every factorization (measurements).
+fn reuse_disabled() -> bool {
+    std::env::var("PLXS_AMG_REBUILD").is_ok()
+}
 
 /// Vectors shorter than this are handled by one thread.
 const PARALLEL_FROM: usize = 8192;
@@ -91,6 +97,13 @@ pub struct PcgSolver {
     shift: f64,
     factorized: bool,
     max_iterations: Option<usize>,
+    /// Iterations of the first solve after the hierarchy was built, and of the last
+    /// solve (0: none yet); a factorization keeps the hierarchy while the count stays
+    /// reasonable.
+    iterations_after_build: AtomicUsize,
+    last_iterations: AtomicUsize,
+    /// Whether the last factorization kept the hierarchy of the one before.
+    reused: bool,
 }
 
 impl Default for PcgSolver {
@@ -109,6 +122,9 @@ impl Default for PcgSolver {
             shift: 0.0,
             factorized: false,
             max_iterations: None,
+            iterations_after_build: AtomicUsize::new(0),
+            last_iterations: AtomicUsize::new(0),
+            reused: false,
         }
     }
 }
@@ -142,10 +158,13 @@ impl PcgSolver {
                 let sizes = amg.sizes();
                 let levels: Vec<String> = sizes.iter().map(|n| n.to_string()).collect();
                 format!(
-                    "algebraic multigrid, {} levels ({}), {:.2} x the matrix",
+                    "algebraic multigrid in single precision, {} levels ({}), \
+                     {:.2} x the matrix{}",
                     amg.levels(),
                     levels.join(" > "),
-                    amg.nonzeros() as f64 / self.full.nnz().max(1) as f64
+                    // Memory: single precision values against the double precision matrix.
+                    amg.nonzeros() as f64 / (2 * self.full.nnz().max(1)) as f64,
+                    if self.reused { ", kept" } else { "" }
                 )
             }
             None if self.shift.is_infinite() => {
@@ -254,6 +273,11 @@ impl PcgSolver {
             residual = norm(&r) / b_norm;
             if residual <= TOLERANCE {
                 self.unpad(x, rhs);
+                self.last_iterations.store(iteration, Ordering::Relaxed);
+                if self.iterations_after_build.load(Ordering::Relaxed) == 0 {
+                    self.iterations_after_build
+                        .store(iteration, Ordering::Relaxed);
+                }
                 if trace {
                     eprintln!(
                         "pcg: {iteration} iterations, product {t_product:.2} s, \
@@ -273,7 +297,12 @@ impl PcgSolver {
                 lap(&mut t_precondition);
             }
             let rz_new = dot(&r, &z);
-            let beta = rz_new / rz;
+            // Polak-Ribière form of beta (flexible conjugate gradients),
+            // `z_new · (r_new - r_old) / (z_old · r_old)` with `r_new - r_old = -alpha q`:
+            // one more dot product, and the directions stay conjugate when the
+            // preconditioner is not exactly the same operator in every iteration (its
+            // single precision rounding). Equal to `rz_new / rz` for a fixed operator.
+            let beta = -alpha * dot(&z, &q) / rz;
             rz = rz_new;
             // p = z + beta p
             zip_mut(&mut p, &z, |p, z| *p = z + beta * *p);
@@ -292,7 +321,7 @@ impl PcgSolver {
     /// `z = M⁻¹ r` (padded vectors).
     fn precondition(&self, r: &[f64], z: &mut [f64]) -> Result<()> {
         match &self.amg {
-            Some(amg) => amg.apply(&self.full, r, z),
+            Some(amg) => amg.apply(r, z),
             None => {
                 // The incomplete factor lives in the original numbering.
                 let mut r_u = vec![0.0; self.slot_of.len()];
@@ -617,6 +646,8 @@ impl LinearSolver for PcgSolver {
         self.pattern = Some(std::sync::Arc::new(pattern.clone()));
         self.analyzed_unknowns = self.unknowns.clone();
         self.amg = None;
+        self.reused = false;
+        self.iterations_after_build.store(0, Ordering::Relaxed);
         self.factorized = false;
         Ok(())
     }
@@ -652,7 +683,23 @@ impl LinearSolver for PcgSolver {
                 }
             });
         if self.choice == Preconditioner::Multigrid {
+            // The hierarchy of the previous factorization (same pattern) serves on while
+            // the solves with it do not take many more iterations than the first one.
+            let after_build = self.iterations_after_build.load(Ordering::Relaxed);
+            let last = self.last_iterations.load(Ordering::Relaxed);
+            if let Some(amg) = self
+                .amg
+                .as_mut()
+                .filter(|_| after_build > 0 && last * 2 <= after_build * 3 && !reuse_disabled())
+            {
+                amg.refresh(&self.full);
+                self.reused = true;
+                self.factorized = true;
+                return Ok(());
+            }
             self.amg = None;
+            self.reused = false;
+            self.iterations_after_build.store(0, Ordering::Relaxed);
             let unknowns = self.padded_unknowns();
             match Amg::build(&self.full, unknowns.as_ref(), AmgOptions::default()) {
                 Ok(amg) => {
@@ -837,6 +884,45 @@ mod tests {
             for (x, e) in x.iter().zip(&expected) {
                 assert!((x - e).abs() <= 1e-7 * scale, "n = {n}: {x} vs {e}");
             }
+        }
+    }
+
+    #[test]
+    fn the_hierarchy_is_kept_over_factorizations_with_the_same_pattern() {
+        // Newton iterations: the values change a little, the hierarchy serves on.
+        let n = 20_000;
+        let a = chain(n);
+        let mut pcg = PcgSolver::new();
+        pcg.analyze(a.pattern()).unwrap();
+        pcg.factorize(&a).unwrap();
+        assert!(
+            !pcg.preconditioner().contains("kept"),
+            "{}",
+            pcg.preconditioner()
+        );
+        let mut x = vec![1.0; n];
+        pcg.solve_counted(&mut x).unwrap();
+        let mut b = SparseMatrix::zeros(a.pattern().clone());
+        for (v, w) in b.values_mut().iter_mut().zip(a.values()) {
+            *v = 1.1 * w;
+        }
+        pcg.factorize(&b).unwrap();
+        assert!(
+            pcg.preconditioner().contains("kept"),
+            "{}",
+            pcg.preconditioner()
+        );
+        let mut direct = LdltSolver::new(1);
+        direct.analyze(b.pattern()).unwrap();
+        direct.factorize(&b).unwrap();
+        let mut expected = vec![1.0; n];
+        direct.solve(&mut expected).unwrap();
+        let mut x = vec![1.0; n];
+        let stats = pcg.solve_counted(&mut x).unwrap();
+        assert!(stats.relative_residual <= TOLERANCE, "{stats:?}");
+        let scale = expected.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        for (x, e) in x.iter().zip(&expected) {
+            assert!((x - e).abs() <= 1e-7 * scale, "{x} vs {e}");
         }
     }
 

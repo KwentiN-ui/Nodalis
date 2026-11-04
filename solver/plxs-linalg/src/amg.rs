@@ -10,7 +10,11 @@
 //! polynomial smoother (symmetric, so that the preconditioner is symmetric positive
 //! definite and conjugate gradients apply) per iteration. Every matrix of the hierarchy
 //! is stored in blocks ([`Bsr`]): `3 × 3` per node pair on the finest level, `6 × 6` per
-//! aggregate pair above it, `3 × 6` for the prolongator between them.
+//! aggregate pair above it, `3 × 6` for the prolongator between them. The hierarchy is
+//! built in double precision and kept in single precision (the finest operator included),
+//! which halves the memory traffic of a cycle; conjugate gradients outside stay in double
+//! precision, the preconditioner only has to be a fixed symmetric positive definite
+//! operator.
 //!
 //! Sources: Vaněk, Mandel, Brezina, "Algebraic multigrid by smoothed aggregation for
 //! second and fourth order elliptic problems", Computing 56 (1996); the aggregation phases
@@ -26,7 +30,7 @@ use rayon::prelude::*;
 
 use plxs_core::{Error, Result};
 
-use crate::bsr::{BlockAccumulator, Bsr};
+use crate::bsr::{BlockAccumulator, Bsr, Scalar};
 use crate::solver::LinearSolver;
 use crate::{LdltSolver, Pattern, SparseMatrix};
 
@@ -102,44 +106,49 @@ struct Nullspace {
 }
 
 struct Level {
-    /// The operator of this level; `None` on the finest level, whose matrix the caller
-    /// passes to [`Amg::apply`].
-    a: Option<Bsr>,
-    inv_diag: Vec<f64>,
+    /// The operator of this level; `None` on the finest level, whose copy is [`Amg::fine`].
+    a: Option<Bsr<f32>>,
+    inv_diag: Vec<f32>,
     /// Largest eigenvalue of `D⁻¹ A` (estimated, with a margin).
     lambda_max: f64,
     /// Prolongation from the next coarser level and its transpose; `None` on the coarsest.
-    p: Option<Bsr>,
-    pt: Option<Bsr>,
+    p: Option<Bsr<f32>>,
+    pt: Option<Bsr<f32>>,
 }
 
 struct Work {
-    x: Vec<f64>,
-    b: Vec<f64>,
-    r: Vec<f64>,
-    d: Vec<f64>,
-    t: Vec<f64>,
+    x: Vec<f32>,
+    b: Vec<f32>,
+    r: Vec<f32>,
+    d: Vec<f32>,
+    t: Vec<f32>,
+    /// Right-hand side and solution of the coarsest level in double precision.
+    coarse: Vec<f64>,
 }
 
 impl Work {
-    fn new(n: usize) -> Self {
+    fn new(n: usize, coarsest: bool) -> Self {
         Self {
             x: vec![0.0; n],
             b: vec![0.0; n],
             r: vec![0.0; n],
             d: vec![0.0; n],
             t: vec![0.0; n],
+            coarse: vec![0.0; if coarsest { n } else { 0 }],
         }
     }
 }
 
 /// The multigrid hierarchy of one matrix.
 pub struct Amg {
+    /// The finest operator in single precision.
+    fine: Bsr<f32>,
     levels: Vec<Level>,
     coarse: LdltSolver,
     work: Mutex<Vec<Work>>,
     options: AmgOptions,
-    /// Values of all operators and prolongators of the hierarchy.
+    /// Single precision values of all operators and prolongators of the hierarchy, the
+    /// copy of the finest operator included.
     nonzeros: usize,
 }
 
@@ -177,6 +186,7 @@ impl Amg {
                 .iter()
                 .map(|&d| if d > 0.0 { 1.0 / d } else { 1.0 })
                 .collect();
+            let inv_diag_32: Vec<f32> = inv_diag.iter().map(|&d| d as f32).collect();
             let lambda = largest_eigenvalue(a_l, &inv_diag);
             lap("eigenvalue", n_l);
             let coarsest = n_l <= options.coarse_size || levels.len() + 1 >= options.max_levels;
@@ -212,8 +222,8 @@ impl Amg {
             match coarser {
                 None => {
                     levels.push(Level {
-                        a: current.take(),
-                        inv_diag,
+                        a: current.as_ref().map(Bsr::converted),
+                        inv_diag: inv_diag_32,
                         lambda_max: lambda,
                         p: None,
                         pt: None,
@@ -222,11 +232,11 @@ impl Amg {
                 }
                 Some((p, pt, a_c, ns_c)) => {
                     levels.push(Level {
-                        a: current.take(),
-                        inv_diag,
+                        a: current.as_ref().map(Bsr::converted),
+                        inv_diag: inv_diag_32,
                         lambda_max: lambda,
-                        p: Some(p),
-                        pt: Some(pt),
+                        p: Some(p.converted()),
+                        pt: Some(pt.converted()),
                     });
                     current = Some(a_c);
                     nullspace = ns_c;
@@ -236,7 +246,7 @@ impl Amg {
         // The coarsest system is factorized; when the coarsening stalled on a big level
         // (every connection weak, a pathological matrix) that would cost the memory of
         // the direct solver, so the caller takes another preconditioner.
-        let coarsest = levels.last().unwrap().a.as_ref().unwrap_or(a);
+        let coarsest = current.as_ref().unwrap_or(a);
         if coarsest.rows() > options.coarse_size * 20 {
             return Err(Error::Numerical {
                 step: 0,
@@ -266,12 +276,16 @@ impl Amg {
                 message: "multigrid: the matrix is not positive definite".to_owned(),
             });
         }
+        let last = levels.len() - 1;
         let work = levels
             .iter()
             .enumerate()
-            .map(|(l, level)| Work::new(if l == 0 { n } else { level.inv_diag.len() }))
+            .map(|(l, level)| Work::new(level.inv_diag.len(), l == last))
             .collect();
+        let fine = a.converted();
+        lap("single precision copy", n);
         Ok(Amg {
+            fine,
             levels,
             coarse,
             work: Mutex::new(work),
@@ -284,6 +298,24 @@ impl Amg {
         self.levels.len()
     }
 
+    /// Adapts the hierarchy to new values of the finest operator `a` (same pattern) without
+    /// rebuilding it: the smoother of the finest level (its single precision copy, the
+    /// inverse diagonal and the eigenvalue estimate) follows the new values, the
+    /// prolongators and the coarse operators stay those of the matrix the hierarchy was
+    /// built on. Meant for the Newton iterations of a step, whose matrices change
+    /// little; the caller watches the iteration counts and rebuilds when they grow.
+    pub fn refresh(&mut self, a: &Bsr) {
+        let level = &mut self.levels[0];
+        let inv_diag: Vec<f64> = a
+            .diagonal()
+            .iter()
+            .map(|&d| if d > 0.0 { 1.0 / d } else { 1.0 })
+            .collect();
+        level.lambda_max = largest_eigenvalue(a, &inv_diag);
+        level.inv_diag = inv_diag.iter().map(|&d| d as f32).collect();
+        convert(&a.val, &mut self.fine.val);
+    }
+
     pub fn nonzeros(&self) -> usize {
         self.nonzeros
     }
@@ -293,94 +325,142 @@ impl Amg {
         self.levels.iter().map(|l| l.inv_diag.len()).collect()
     }
 
-    /// `z ≈ A⁻¹ r` by one V-cycle; `a` is the finest operator the hierarchy was built on.
-    pub fn apply(&self, a: &Bsr, r: &[f64], z: &mut [f64]) -> Result<()> {
+    /// `z ≈ A⁻¹ r` by one V-cycle, in single precision: the preconditioner only has to
+    /// be a fixed symmetric positive definite operator, and the conjugate gradients
+    /// outside stay in double precision. The rounding costs about a tenth more iterations
+    /// (the iteration no longer keeps its full history of directions), the halved memory
+    /// traffic of the cycle outweighs that.
+    pub fn apply(&self, r: &[f64], z: &mut [f64]) -> Result<()> {
         let mut work = self.work.lock().unwrap_or_else(|e| e.into_inner());
-        work[0].b.copy_from_slice(r);
-        self.cycle(0, a, &mut work)?;
-        z.copy_from_slice(&work[0].x);
+        if self.levels.len() == 1 {
+            // The whole system is factorized: solve it in double precision.
+            z.copy_from_slice(r);
+            return self.coarse.solve(z);
+        }
+        convert(r, &mut work[0].b);
+        self.cycle(0, &mut work)?;
+        convert(&work[0].x, z);
         Ok(())
     }
 
-    fn cycle(&self, l: usize, a0: &Bsr, work: &mut [Work]) -> Result<()> {
+    fn cycle(&self, l: usize, work: &mut [Work]) -> Result<()> {
         let level = &self.levels[l];
-        let a = level.a.as_ref().unwrap_or(a0);
+        let a = level.a.as_ref().unwrap_or(&self.fine);
         let (this, rest) = work.split_first_mut().expect("a work space per level");
         let (Some(p), Some(pt)) = (&level.p, &level.pt) else {
-            this.x.copy_from_slice(&this.b);
-            return self.coarse.solve(&mut this.x);
+            convert(&this.b, &mut this.coarse);
+            self.coarse.solve(&mut this.coarse)?;
+            convert(&this.coarse, &mut this.x);
+            return Ok(());
         };
-        self.smooth(level, a, this, true);
+        smooth(
+            level.lambda_max,
+            self.options.degree,
+            a,
+            &level.inv_diag,
+            this,
+            true,
+        );
         a.residual(&this.b, &this.x, &mut this.r);
         let next = &mut rest[0];
         pt.multiply(&this.r, &mut next.b);
-        self.cycle(l + 1, a0, rest)?;
+        self.cycle(l + 1, rest)?;
         p.multiply(&rest[0].x, &mut this.t);
         add(&mut this.x, &this.t);
-        self.smooth(level, a, this, false);
+        smooth(
+            level.lambda_max,
+            self.options.degree,
+            a,
+            &level.inv_diag,
+            this,
+            false,
+        );
         Ok(())
     }
+}
 
-    /// Chebyshev smoothing of `A x = b` on the upper part of the spectrum of `D⁻¹ A`.
-    fn smooth(&self, level: &Level, a: &Bsr, w: &mut Work, x_is_zero: bool) {
-        let lambda_max = level.lambda_max;
-        let lambda_min = lambda_max / 30.0;
-        let theta = 0.5 * (lambda_max + lambda_min);
-        let delta = 0.5 * (lambda_max - lambda_min);
-        let sigma = theta / delta;
-        let mut rho_old = 1.0 / sigma;
-        let inv_diag = &level.inv_diag;
-        if x_is_zero {
-            w.r.copy_from_slice(&w.b);
-            scaled(&mut w.d, inv_diag, &w.r, 1.0 / theta);
-            w.x.copy_from_slice(&w.d);
-        } else {
-            a.residual(&w.b, &w.x, &mut w.r);
-            scaled(&mut w.d, inv_diag, &w.r, 1.0 / theta);
-            add(&mut w.x, &w.d);
-        }
-        for _ in 1..self.options.degree {
-            let rho_new = 1.0 / (2.0 * sigma - rho_old);
-            a.multiply(&w.d, &mut w.t);
-            sub(&mut w.r, &w.t);
-            let (c1, c2) = (rho_new * rho_old, 2.0 * rho_new / delta);
-            // d = c1 d + c2 D⁻¹ r; x += d
-            update(&mut w.d, &w.r, inv_diag, c1, c2);
-            add(&mut w.x, &w.d);
-            rho_old = rho_new;
-        }
+/// Chebyshev smoothing of `A x = b` on the upper part of the spectrum of `D⁻¹ A`,
+/// `degree` products.
+fn smooth(
+    lambda_max: f64,
+    degree: usize,
+    a: &Bsr<f32>,
+    inv_diag: &[f32],
+    w: &mut Work,
+    x_is_zero: bool,
+) {
+    let lambda_min = lambda_max / 30.0;
+    let theta = 0.5 * (lambda_max + lambda_min);
+    let delta = 0.5 * (lambda_max - lambda_min);
+    let sigma = theta / delta;
+    let mut rho_old = 1.0 / sigma;
+    if x_is_zero {
+        w.r.copy_from_slice(&w.b);
+        scaled(&mut w.d, inv_diag, &w.r, (1.0 / theta) as f32);
+        w.x.copy_from_slice(&w.d);
+    } else {
+        a.residual(&w.b, &w.x, &mut w.r);
+        scaled(&mut w.d, inv_diag, &w.r, (1.0 / theta) as f32);
+        add(&mut w.x, &w.d);
+    }
+    for _ in 1..degree {
+        let rho_new = 1.0 / (2.0 * sigma - rho_old);
+        a.multiply(&w.d, &mut w.t);
+        sub(&mut w.r, &w.t);
+        let (c1, c2) = ((rho_new * rho_old) as f32, (2.0 * rho_new / delta) as f32);
+        // d = c1 d + c2 D⁻¹ r; x += d
+        update(&mut w.d, &w.r, inv_diag, c1, c2);
+        add(&mut w.x, &w.d);
+        rho_old = rho_new;
     }
 }
 
 const PARALLEL_FROM: usize = 8192;
 
-fn add(y: &mut [f64], x: &[f64]) {
+/// `y = x` in the precision of `y`.
+fn convert<S: Scalar, T: Scalar>(x: &[S], y: &mut [T]) {
     if y.len() < PARALLEL_FROM {
-        y.iter_mut().zip(x).for_each(|(y, x)| *y += x);
+        y.iter_mut()
+            .zip(x)
+            .for_each(|(y, x)| *y = T::from_f64(x.to_f64()));
     } else {
         y.par_chunks_mut(4096)
             .zip(x.par_chunks(4096))
-            .for_each(|(y, x)| y.iter_mut().zip(x).for_each(|(y, x)| *y += x));
+            .for_each(|(y, x)| {
+                y.iter_mut()
+                    .zip(x)
+                    .for_each(|(y, x)| *y = T::from_f64(x.to_f64()))
+            });
     }
 }
 
-fn sub(y: &mut [f64], x: &[f64]) {
+fn add<T: Scalar>(y: &mut [T], x: &[T]) {
     if y.len() < PARALLEL_FROM {
-        y.iter_mut().zip(x).for_each(|(y, x)| *y -= x);
+        y.iter_mut().zip(x).for_each(|(y, x)| *y += *x);
     } else {
         y.par_chunks_mut(4096)
             .zip(x.par_chunks(4096))
-            .for_each(|(y, x)| y.iter_mut().zip(x).for_each(|(y, x)| *y -= x));
+            .for_each(|(y, x)| y.iter_mut().zip(x).for_each(|(y, x)| *y += *x));
+    }
+}
+
+fn sub<T: Scalar>(y: &mut [T], x: &[T]) {
+    if y.len() < PARALLEL_FROM {
+        y.iter_mut().zip(x).for_each(|(y, x)| *y -= *x);
+    } else {
+        y.par_chunks_mut(4096)
+            .zip(x.par_chunks(4096))
+            .for_each(|(y, x)| y.iter_mut().zip(x).for_each(|(y, x)| *y -= *x));
     }
 }
 
 /// `d = c · diag ∘ r`.
-fn scaled(d: &mut [f64], diag: &[f64], r: &[f64], c: f64) {
+fn scaled<T: Scalar>(d: &mut [T], diag: &[T], r: &[T], c: T) {
     if d.len() < PARALLEL_FROM {
         d.iter_mut()
             .zip(diag)
             .zip(r)
-            .for_each(|((d, di), r)| *d = c * di * r);
+            .for_each(|((d, di), r)| *d = c * *di * *r);
     } else {
         d.par_chunks_mut(4096)
             .zip(diag.par_chunks(4096))
@@ -389,18 +469,18 @@ fn scaled(d: &mut [f64], diag: &[f64], r: &[f64], c: f64) {
                 d.iter_mut()
                     .zip(diag)
                     .zip(r)
-                    .for_each(|((d, di), r)| *d = c * di * r)
+                    .for_each(|((d, di), r)| *d = c * *di * *r)
             });
     }
 }
 
 /// `d = c1 d + c2 diag ∘ r`.
-fn update(d: &mut [f64], r: &[f64], diag: &[f64], c1: f64, c2: f64) {
+fn update<T: Scalar>(d: &mut [T], r: &[T], diag: &[T], c1: T, c2: T) {
     if d.len() < PARALLEL_FROM {
         d.iter_mut()
             .zip(diag)
             .zip(r)
-            .for_each(|((d, di), r)| *d = c1 * *d + c2 * di * r);
+            .for_each(|((d, di), r)| *d = c1 * *d + c2 * *di * *r);
     } else {
         d.par_chunks_mut(4096)
             .zip(diag.par_chunks(4096))
@@ -409,7 +489,7 @@ fn update(d: &mut [f64], r: &[f64], diag: &[f64], c1: f64, c2: f64) {
                 d.iter_mut()
                     .zip(diag)
                     .zip(r)
-                    .for_each(|((d, di), r)| *d = c1 * *d + c2 * di * r)
+                    .for_each(|((d, di), r)| *d = c1 * *d + c2 * *di * *r)
             });
     }
 }
