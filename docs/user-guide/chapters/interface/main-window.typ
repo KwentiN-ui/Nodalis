@@ -88,8 +88,7 @@ opens in the Geometry workspace, opening a result file switches to Results.
 
 / Containers: #ui("Expand All"), #ui("Collapse All"). Some containers have more entries:
   #ui("Material Library ...") on #ui("Materials"), #ui("Default Mesh Parameters ...") and
-  #ui("Mesh All Parts") on #ui("Mesh Setup"), #ui("Search Contact Pairs ...") on
-  #ui("Constraints") and #ui("Contact Pairs"). Containers create no items: that is the job
+  #ui("Mesh All Parts") on #ui("Mesh Setup"). Containers create no items: that is the job
   of the ribbon (@ribbon). A container that cannot
   take items explains why in a tooltip, for example "A frequency step has no loads."
 / Items: #ui("Edit ..."), #ui("Activate")/#ui("Deactivate"), #ui("Swap Master/Slave") (ties,

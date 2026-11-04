@@ -356,8 +356,6 @@ pub struct TreeResponse {
     pub transform_part: Option<usize>,
     /// Merge the selected mesh parts into one.
     pub merge_parts: bool,
-    /// Open PrePoMax's Search Contact Pairs.
-    pub search_contacts: bool,
     /// Open the table of all contact regions.
     pub contact_worksheet: bool,
     /// Run this contact detection again.
@@ -1210,7 +1208,6 @@ impl Tree<'_> {
                         self.response.generate_mesh = true;
                     }
                 }
-                // PrePoMax offers the search on constraints and contact pairs.
                 let members: Vec<TreeItem> = (self.symbols.keys())
                     .filter(|member| shows_symbol_of(&item, member))
                     .cloned()
@@ -1222,12 +1219,6 @@ impl Tree<'_> {
                             (self.response.symbol_visibility)
                                 .extend(members.iter().map(|m| (m.clone(), visible)));
                         }
-                    }
-                }
-                if matches!(item, TreeItem::Group("Constraints" | "Contact Pairs")) {
-                    ui.separator();
-                    if ui.button("Search Contact Pairs …").clicked() {
-                        self.response.search_contacts = true;
                     }
                 }
                 if creates.is_some() {

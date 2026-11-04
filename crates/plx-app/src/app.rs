@@ -10,7 +10,6 @@ use plx_results::hot_spot::{HotSpot, HotSpotPath};
 use crate::analysis::{Analysis, MonitorEvent, RunView};
 use crate::animation::{AnimationKind, ColorLimits, Playback};
 use crate::animation_export::{self, Format};
-use crate::contact_search::{ContactSearchDialog, SearchResult};
 use crate::exploded::{ExplodedDialog, ExplodedResult};
 use crate::features::{FeatureDialog, FeatureKind, FeatureResult};
 use crate::field_output_dialog::{DialogAction, FieldOutputDialog};
@@ -182,8 +181,6 @@ struct Workbench {
     analysis_tab_before: bool,
     /// `problems_tab` in the last frame: a folded output pane opens when it turns on.
     problems_tab_before: bool,
-    /// Open search for contact pairs.
-    contact_search: Option<ContactSearchDialog>,
     /// The table of all contact regions is open.
     contact_worksheet: bool,
     /// Open mesh tool: transform parts, merge nodes or renumber.
@@ -342,7 +339,6 @@ impl AnalysisWindow {
                 checklist_visible: false,
                 analysis_tab_before: false,
                 problems_tab_before: false,
-                contact_search: None,
                 contact_worksheet: false,
                 mesh_tool: None,
                 query: None,
@@ -1523,7 +1519,6 @@ impl AnalysisWindow {
         self.workbench.confirm_delete_window(&ctx);
         self.workbench.confirm_remove_results(&ctx);
         self.workbench.toast(&ctx);
-        self.workbench.contact_search_window(&ctx);
         self.workbench.contact_worksheet_window(&ctx);
         self.workbench.mesh_tool_window(&ctx);
         self.workbench.query_window(&ctx);
@@ -2458,9 +2453,6 @@ impl Workbench {
         }
         if let Some(index) = response.detect {
             self.detect_contacts(index);
-        }
-        if response.search_contacts {
-            self.open_contact_search();
         }
         if response.contact_worksheet {
             self.contact_worksheet = true;
@@ -4623,15 +4615,6 @@ impl Workbench {
         self.history_table = Some(table);
     }
 
-    /// PrePoMax's Search Contact Pairs; it replaces an open item dialog.
-    fn open_contact_search(&mut self) {
-        if let Some(model) = self.setup_model() {
-            self.contact_search = Some(ContactSearchDialog::new(&model.fe));
-            self.editor = None;
-            self.set_tree_view(TreeView::FeModel);
-        }
-    }
-
     /// Runs the contact detection `index` on the parts of the model and reports what it
     /// found.
     /// Runs the contact detection `index`: on the CAD geometry when every part comes from
@@ -4669,47 +4652,6 @@ impl Workbench {
         let results = self.results.get(self.current_result);
         crate::connections::worksheet(ctx, &mut open, model, results, &mut self.tree);
         self.contact_worksheet = open;
-    }
-
-    fn contact_search_window(&mut self, ctx: &egui::Context) {
-        let (Some(dialog), Some(model)) = (&mut self.contact_search, &mut self.model) else {
-            return;
-        };
-        match dialog.show(ctx, model) {
-            SearchResult::Open => {}
-            SearchResult::Ok(ties, pairs, joints) => {
-                let mut created = format!(
-                    "Contact search: {} ties and {} contact pairs created",
-                    ties.len(),
-                    pairs.len()
-                );
-                if !joints.is_empty() {
-                    created.push_str(&format!(", {} Node Ties", joints.len()));
-                }
-                // The first new item shows in the tree, even in a collapsed branch.
-                let first = if !pairs.is_empty() {
-                    Some(TreeItem::ContactPair(model.fe.contact_pairs.len()))
-                } else if !ties.is_empty() {
-                    Some(TreeItem::Tie(model.fe.ties.len()))
-                } else {
-                    (!joints.is_empty()).then_some(TreeItem::NodeTie(model.fe.node_ties.len()))
-                };
-                if let Some(item) = first {
-                    self.tree.selected = Some((TreeView::FeModel, item));
-                    self.tree.reveal = true;
-                }
-                model.fe.ties.extend(ties);
-                model.fe.contact_pairs.extend(pairs);
-                model.fe.node_ties.extend(joints);
-                self.output.push(created);
-                self.contact_search = None;
-                self.highlighted = None;
-            }
-            SearchResult::Cancel => {
-                self.contact_search = None;
-                self.highlighted = None;
-            }
-        }
     }
 
     /// Deleting, for the context menu and the Delete key alike: in the FE model at once with
@@ -5233,7 +5175,6 @@ impl Workbench {
             || self.mesh_setup.is_some()
             || self.mesh_item_editor.is_some()
             || self.confirm_delete.is_some()
-            || self.contact_search.is_some()
             || self.mesh_tool.is_some()
             || self.material_library.is_some()
             || self.feature_dialog.is_some();
@@ -5396,25 +5337,12 @@ impl Workbench {
             return;
         };
         let feature = self.feature_dialog.as_ref().filter(|d| d.results.is_none());
-        if (self.section_dialog.is_some() || feature.is_some())
-            && let Some(dialog) = &mut self.contact_search
-        {
-            // Shows its pairs again once the other dialog has closed.
-            dialog.forget_highlight();
-        }
         let highlight = if let Some(dialog) = &self.section_dialog {
             self.highlighted = None;
             dialog.highlight()
         } else if let Some(dialog) = feature {
             self.highlighted = None;
             dialog.highlight(model)
-        } else if let Some(dialog) = &mut self.contact_search {
-            self.highlighted = None;
-            // Built anew only when the selected pairs change, as for the tree selection.
-            match dialog.changed_highlight(model) {
-                Some(highlight) => highlight,
-                None => return,
-            }
         } else if let Some(editor) = &self.editor {
             self.highlighted = None;
             editor.highlight(model)

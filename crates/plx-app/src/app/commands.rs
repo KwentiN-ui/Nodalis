@@ -192,7 +192,6 @@ impl AnalysisWindow {
             | Cmd::CoordinateSystem
             | Cmd::Plane
             | Cmd::DetectContacts
-            | Cmd::SearchContactPairs
             | Cmd::ContactRegion
             | Cmd::Bolt
             | Cmd::Constraint
@@ -378,7 +377,6 @@ impl AnalysisWindow {
             Cmd::CoordinateSystem => w.create(NewItem::Feature(FeatureKind::CoordinateSystem)),
             Cmd::Plane => w.create(NewItem::Feature(FeatureKind::Plane)),
             Cmd::DetectContacts => w.create(NewItem::ContactDetection),
-            Cmd::SearchContactPairs => w.open_contact_search(),
             Cmd::ContactRegion => w.create(NewItem::ContactRegion),
             Cmd::Bolt => w.create(NewItem::Bolt),
             Cmd::Constraint => w.create(NewItem::Constraint),

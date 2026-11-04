@@ -524,8 +524,7 @@ the shell (S3 and up). For a contact on a shell edge use #ui("Surface to surface
   (node-to-face, face-to-face penalty, face-to-face mortar and massless contact) for the exact
   formulations and limits.]
 
-Hover over a method in the list to see a short description. The Search Contact Pairs window shows
-the same texts.
+Hover over a method in the list to see a short description.
 
 === Ties <ties>
 
@@ -545,6 +544,10 @@ the same texts.
     @cyclic-symmetry.],
 )
 
+CalculiX ties the edge faces of membranes to nothing (the solver stops with a singular stiffness
+matrix), so Nodalis writes the slave side of a tie on membrane edges as a node surface of the
+edge's nodes; a membrane has no rotations that would need more.
+
 === Node ties
 
 #ui("Create Node Tie ...") in the context menu of #ui("Contact Pairs") makes all nodes of a region
@@ -552,48 +555,11 @@ move together. It connects the ends of beams and trusses of different parts. Wit
 #ui("Rotations: rigid") the connection also transmits moments; without it, beams are connected
 by a hinge.
 
-=== Searching contact pairs
+=== Many pairs at once
 
-#menu("Connections", "Search Pairs") finds surfaces of different parts that touch and
-creates ties or contact pairs for them. It is the manual counterpart of the contact detection
-(@contact-detection): what it creates is not found again when the model changes.
-
-#screenshot("contact-search.png", [Search Contact Pairs])
-
-#fields(
-  [Distance], [Surfaces closer than this count as touching (default 0.01 mm). For a tie it also
-    becomes the position tolerance, for a contact the adjust distance.],
-  [Angle], [Largest angle between the surface normals (default 35°).],
-  [Group by], [#ui("None"): one pair per touching surface pair. #ui("Parts") (default): one pair
-    per pair of parts. #ui("Graph"): merges surfaces so that each node is slave only once.],
-  [Geometry Filter], [Which geometry is searched: in 3D the faces of #ui("Solid") parts, the top
-    and bottom of #ui("Shell") and membrane parts, and their free edges (#ui("Shell edge")); in
-    2D the element edges. #ui("Line end") finds beam and truss ends at the same point;
-    #ui("Ignore hidden parts") leaves out hidden parts.],
-  [Type], [#ui("Tie") or #ui("Contact"), for contacts with #ui("Surface Interaction") and
-    #ui("Method"): node to surface, surface to surface or mortar.],
-  [Adjust mesh], [Writes the pairs with adjust.],
-)
-
-#ui("Search") fills the table; its #ui("Geometry") column tells what touches, e.g.
-#ui("Solid-Shell edge") where the edge of a shell or membrane stands on a solid. Each row can be edited and switched off with its check box; select
-several rows to edit them together. The context menu of a row has #ui("Swap Master/Slave") and
-#ui("Merge by Master/Slave"). Nodalis chooses the coarser mesh as master, then the stiffer
-material, then the larger surface; an edge of a shell is always the slave of a face. A shell
-touches with the side facing the other part: CalculiX ties its top (S2) or bottom (S1). #ui("Create 3 Pairs"), named after the number of checked pairs, creates them, all under
-#ui("Contact Pairs"); line ends become node ties. Surfaces that are whole CAD faces or edges are stored by geometry and
-survive remeshing.
-
-#screenshot("contact-search-shell-edge.png", [A tie found by the search between the bottom of a
-  block (master, red) and the top edge of a shell standing under it (slave, violet)])
-
-The search can make hundreds of pairs. To delete, deactivate or swap many of them at once, select
+To delete, deactivate or swap many contact pairs or ties at once, select
 them in the tree with #key("Shift")+click (a range) and #key("Ctrl")+click (one more or one less)
 and use the context menu of one of them (@model-tree).
 
 #screenshot("contact-pairs-selected.png", [Four of five ties selected and deactivated together;
   the context menu acts on all of them])
-
-CalculiX ties the edge faces of membranes to nothing (the solver stops with a singular stiffness
-matrix), so Nodalis writes the slave side of a tie on membrane edges as a node surface of the
-edge's nodes; a membrane has no rotations that would need more.

@@ -166,7 +166,6 @@ pub enum Cmd {
     CoordinateSystem,
     Plane,
     DetectContacts,
-    SearchContactPairs,
     ContactRegion,
     Bolt,
     Constraint,
@@ -1137,16 +1136,6 @@ fn build() -> Vec<Command> {
         Tree(TreeIcon::Contacts),
         "",
         "Finds the faces of parts that touch and makes contact regions.",
-    ));
-    add(command(
-        C::SearchContactPairs,
-        "Search\nPairs",
-        f,
-        t,
-        "Detect",
-        Tree(TreeIcon::ContactPair),
-        "",
-        "PrePoMax's search for contact pairs.",
     ));
     add(command(
         C::ContactRegion,
