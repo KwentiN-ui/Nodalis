@@ -1,6 +1,6 @@
-//! The "Search Contact Pairs": finds surfaces of different parts that lie on each other
-//! and decides which side is master and which slave, following `CaeMesh.ContactSearch` and
-//! `ContactGraph`.
+//! The search behind the contact detection: finds surfaces of different parts that lie on each
+//! other and decides which side is master and which slave, following
+//! `CaeMesh.ContactSearch` and `ContactGraph`.
 //!
 //! Surfaces are the smooth patches of the part skins, which stand for the CAD faces the way
 //! geometry surfaces do: of solids their outer side, of shells and membranes the
@@ -130,12 +130,7 @@ impl MasterSlaveItem {
         name
     }
 
-    pub fn swap(&mut self) {
-        std::mem::swap(&mut self.master_name, &mut self.slave_name);
-        std::mem::swap(&mut self.master, &mut self.slave);
-    }
-
-    /// What touches, as in the table, e.g. "Shell edge-Solid": the kind of the
+    /// What touches, e.g. "Shell edge-Solid": the kind of the
     /// master's and of the slave's first surface.
     pub fn geometry(&self) -> String {
         let kind = |side: &BTreeSet<SurfaceId>| side.first().map_or("", |id| id.1.label());

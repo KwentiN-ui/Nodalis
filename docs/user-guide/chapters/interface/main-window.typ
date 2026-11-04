@@ -88,7 +88,7 @@ opens in the Geometry workspace, opening a result file switches to Results.
 
 / Containers: #ui("Expand All"), #ui("Collapse All"), and #ui("Show All")/#ui("Hide All")
   where their items have symbols. Containers create no items and open no tools such as the
-  material library or the contact search: that is the job of the ribbon (@ribbon). An
+  material library: that is the job of the ribbon (@ribbon). An
   empty container is not shown; it appears with its first item. A container that cannot
   take items explains why in a tooltip, for example "A frequency step has no loads."
 / Items: #ui("Edit ..."), #ui("Activate")/#ui("Deactivate"), #ui("Swap Master/Slave") (ties,

@@ -1153,7 +1153,7 @@ impl Tree<'_> {
         if creates.is_some() || editable {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                // Tools such as the material library or the contact search are on the
+                // Tools such as the material library are on the
                 // ribbon only; the menu holds what acts on this item. A separator only
                 // goes below something.
                 let top = ui.cursor().top();

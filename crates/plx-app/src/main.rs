@@ -15,7 +15,6 @@ mod color_scale_dialog;
 mod command;
 mod connections;
 mod constraint_dialog;
-mod contact_search;
 mod contacts;
 mod cross_section;
 mod dialog;
@@ -160,7 +159,6 @@ mod tests {
             ("analysis.rs", include_str!("analysis.rs")),
             ("animation.rs", include_str!("animation.rs")),
             ("app.rs", include_str!("app.rs")),
-            ("contact_search.rs", include_str!("contact_search.rs")),
             ("contacts.rs", include_str!("contacts.rs")),
             (
                 "field_output_dialog.rs",

@@ -177,11 +177,9 @@ Besides the properties panel, Nodalis has three kinds of windows, each with the 
   What they set shows at once; there is no OK. #ui("Close") at the bottom right keeps it.
   Where something stays shown after closing, #ui("Off") at the bottom left turns it off.
   The tile of a tool window on the ribbon is pressed while it is open.
-/ Work windows: the contact worksheet, the search for contact pairs, the material library,
+/ Work windows: the contact worksheet, the material library,
   the history output table, plots, the Campbell diagram, the parameter study and the model
-  check. They can be resized and have #ui("Close") at the bottom right. Where the window makes
-  something, the button names it, for example #ui("Create 12 Pairs"), with #ui("Cancel")
-  next to it.
+  check. They can be resized and have #ui("Close") at the bottom right.
 / Confirmations: only for what Undo cannot take back, such as deleting parts of the geometry,
   removing the results of an analysis or dropping the changes to the material library. The
   question is the title, below it what follows; the button that does it is red.

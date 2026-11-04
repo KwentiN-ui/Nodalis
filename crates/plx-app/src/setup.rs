@@ -3297,8 +3297,7 @@ impl Editor {
                     egui::Label::new(
                         egui::RichText::new(
                             "All nodes of the region follow the first one. Connects the ends \
-                             of beams or trusses of different parts; the contact search \
-                             finds them. Rigid also couples the rotations, otherwise the \
+                             of beams or trusses of different parts. Rigid also couples the rotations, otherwise the \
                              connection is a hinge; trusses have no rotations.",
                         )
                         .weak(),
