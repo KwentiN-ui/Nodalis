@@ -40,8 +40,8 @@ pub enum ColorLimits {
     AllFrames,
 }
 
-pub const DEFAULT_FRAMES: u32 = 15;
-pub const DEFAULT_FPS: f32 = 15.0;
+pub const DEFAULT_FRAMES: u32 = 60;
+pub const DEFAULT_FPS: f32 = 30.0;
 
 pub struct Animation {
     pub kind: AnimationKind,
