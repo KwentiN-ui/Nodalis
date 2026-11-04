@@ -1387,8 +1387,13 @@ Was T15 gebaut hat:
   Quentins Halter: Faktor 18,8 GB → 5,2 GB (PaStiX/Scotch ≈ 3,1 GB), passt damit in den
   Speicher, Faktorisierung 12 s auf 4 Threads, Gesamtlauf 28 s (iterativ 19 s); Hex-Block
   173k: 239 → 233 Mio. Nichtnullen. Die Ordnung kostet jetzt ~5 s auf dem Halter.
-- Offen: p-Multigrid (erste Ebene = Eckknoten) für quadratische Netze; die automatische
-  Wahl bleibt speicherbasiert, obwohl das Multigrid auf großen Modellen inzwischen oft
-  schneller als die Faktorisierung ist (Halter: direkt 28 s, iterativ 19 s); Blätter der
+- Automatische Wahl (Folge-PR, Quentin 2026-11-04): ab 50 000 Gleichungen iterativ, wenn
+  die Unbekannten nur Verschiebungen (oder Temperaturen) sind, also Volumenmodelle in
+  statischen, nichtlinearen und Wärmeschritten; der direkte Solver bleibt Rückfall (nach
+  spätestens 2000 Iterationen, `AUTOMATIC_MAX_ITERATIONS`). Modelle mit Rotationen
+  (Schalen, Balken), Eigenwertiteration und implizite Dynamik
+  (`Equations::preferring_direct`, eine Faktorisierung für viele Systeme) sowie kleine
+  Modelle bleiben bei der Speicherregel.
+- Offen: p-Multigrid (erste Ebene = Eckknoten) für quadratische Netze; Blätter der
   Dissection per Minimum Degree statt Cuthill-McKee und ein mehrstufiger Partitionierer
   (Scotch-artig) wären die nächsten Schritte zum Füllgrad von PaStiX.

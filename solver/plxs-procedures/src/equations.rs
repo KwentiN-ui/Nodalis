@@ -7,13 +7,18 @@
 //! resolved by GMRES around it), `*VISCO`, implicit `*DYNAMIC` steps and heat transfer. The
 //! eigenvalue procedures solve directly.
 //!
-//! The automatic choice (no `SOLVER=`) is direct while the factor fits into the memory: for
-//! a system of at least [`AUTOMATIC_FROM`] equations the symbolic analysis tells the size of
-//! the factor before its memory is taken, and beyond [`MEMORY_SHARE`] of the available
-//! memory the step solves iteratively. Each choice falls back to the other once when it
-//! fails: a factor that does not fit after all goes iterative, an iteration that breaks
-//! down or does not converge (an indefinite tangent near a limit point, a mechanism held
-//! only by contact) goes direct.
+//! The automatic choice (no `SOLVER=`) solves iteratively from [`AUTOMATIC_FROM`] equations
+//! on when the unknowns are translations or a scalar field only (a solid or heat transfer
+//! model, where the multigrid converges in a few dozen iterations and beats the
+//! factorization by far); models with rotations (shells, beams), procedures that solve
+//! many systems with one factorization (the eigenvalue iteration, implicit dynamics) and
+//! small models stay direct while the factor fits into the memory: for a system of at least
+//! [`AUTOMATIC_FROM`] equations the symbolic analysis tells the size of the factor before
+//! its memory is taken, and beyond [`MEMORY_SHARE`] of the available memory the step solves
+//! iteratively. Each choice falls back to the other once when it fails: a factor that does
+//! not fit after all goes iterative, an iteration that breaks down or does not converge
+//! within [`AUTOMATIC_MAX_ITERATIONS`] (an indefinite tangent near a limit point, a
+//! mechanism held only by contact, a badly conditioned model) goes direct.
 
 use plxs_core::step::{EquationSolver, SolverMode};
 use plxs_core::{Error, Progress, ProgressEvent, Result};
@@ -22,6 +27,10 @@ use plxs_linalg::{LdltSolver, LinearSolver, PcgSolver, SparseMatrix, Unknowns, i
 /// The automatic choice considers the iterative solver from this many equations on;
 /// smaller systems always fit and the direct solver is faster on them.
 pub const AUTOMATIC_FROM: usize = 50_000;
+
+/// The automatic choice gives the iterative solver this many iterations before it hands
+/// the system to the direct solver (a solid model converges in well under a hundred).
+pub const AUTOMATIC_MAX_ITERATIONS: usize = 2000;
 
 /// The automatic choice solves iteratively when the factor (with a quarter more for the
 /// work space of the factorization) would take more than this share of the available
@@ -48,6 +57,9 @@ pub struct Equations {
     available: Option<u64>,
     /// [`AUTOMATIC_FROM`], lowered by tests.
     automatic_from: usize,
+    /// Automatic: direct while the factor fits, even for a solid model (a procedure that
+    /// solves many systems with one factorization).
+    prefer_direct: bool,
 }
 
 impl Equations {
@@ -65,7 +77,16 @@ impl Equations {
             fell_back: false,
             available: None,
             automatic_from: AUTOMATIC_FROM,
+            prefer_direct: false,
         }
+    }
+
+    /// The automatic choice stays direct while the factor fits into the memory, whatever
+    /// the model: for a procedure that solves many systems with one factorization (the
+    /// eigenvalue iteration, implicit dynamics), where the factorization pays off.
+    pub fn preferring_direct(mut self) -> Self {
+        self.prefer_direct = true;
+        self
     }
 
     /// Whether the systems are solved iteratively (in automatic mode: the choice so far,
@@ -217,8 +238,19 @@ impl Equations {
         unknowns: &Unknowns,
         progress: &mut dyn Progress,
     ) -> Result<bool> {
-        if k.dimension() < self.automatic_from {
+        let n = k.dimension();
+        if n < self.automatic_from {
             return Ok(false);
+        }
+        // Translations or a scalar field only: the multigrid converges fast, and the
+        // direct solver stands by.
+        let solid = !unknowns.component.is_empty() && unknowns.component.iter().all(|&c| c < 3);
+        if solid && !self.prefer_direct {
+            progress.event(ProgressEvent::Info(format!(
+                "automatic equation solver: {n} equations of translations only; solving \
+                 iteratively (the direct solver takes over if the iteration fails)"
+            )));
+            return Ok(true);
         }
         direct.set_coordinates(Some(unknowns.coordinates.clone()));
         factor_exceeds_memory(direct, k, self.available, progress)
@@ -232,6 +264,9 @@ impl Equations {
     ) -> Result<()> {
         let started = std::time::Instant::now();
         let pcg = self.pcg.get_or_insert_with(PcgSolver::new);
+        if self.mode == SolverMode::Automatic {
+            pcg.set_max_iterations(AUTOMATIC_MAX_ITERATIONS);
+        }
         pcg.set_unknowns(Some(unknowns.clone()));
         // Skipped for the pattern (and unknowns) analyzed last.
         pcg.analyze(k.pattern())?;
@@ -407,16 +442,54 @@ mod tests {
     }
 
     #[test]
-    fn automatic_is_direct_while_the_factor_fits() {
+    fn automatic_is_iterative_for_large_systems_of_translations() {
         let k = chain(200, 1.0);
         let mut equations = Equations::new(EquationSolver::Default);
         equations.set_automatic_limits(10, 1 << 30);
-        solve(&mut equations, &k);
-        assert!(!equations.is_iterative());
+        let x = solve(&mut equations, &k);
+        assert!(equations.is_iterative());
+        let mut direct = Equations::new(EquationSolver::Pastix);
+        let reference = solve(&mut direct, &k);
+        for (a, b) in x.iter().zip(&reference) {
+            assert!((a - b).abs() <= 1e-8 * b.abs().max(1.0));
+        }
         // Small systems do not even estimate.
         let mut equations = Equations::new(EquationSolver::Default);
         equations.set_automatic_limits(1000, 0);
         solve(&mut equations, &k);
+        assert!(!equations.is_iterative());
+    }
+
+    #[test]
+    fn automatic_is_direct_while_the_factor_fits_when_direct_is_preferred() {
+        let k = chain(200, 1.0);
+        let mut equations = Equations::new(EquationSolver::Default).preferring_direct();
+        equations.set_automatic_limits(10, 1 << 30);
+        solve(&mut equations, &k);
+        assert!(!equations.is_iterative());
+        // Unless the factor does not fit.
+        let mut equations = Equations::new(EquationSolver::Default).preferring_direct();
+        equations.set_automatic_limits(10, 100);
+        solve(&mut equations, &k);
+        assert!(equations.is_iterative());
+    }
+
+    #[test]
+    fn automatic_is_direct_for_unknowns_with_rotations() {
+        // Six unknowns per node (shells, beams): the memory decides, and it fits.
+        let n = 198;
+        let k = chain(n, 1.0);
+        let mut equations = Equations::new(EquationSolver::Default);
+        equations.set_automatic_limits(10, 1 << 30);
+        let mut direct = LdltSolver::new(1);
+        let unknowns = || {
+            let free: Vec<u32> = (0..n as u32).collect();
+            let coordinates: Vec<[f64; 3]> = (0..n / 6).map(|i| [i as f64, 0.0, 0.0]).collect();
+            Unknowns::from_free(&free, 6, &coordinates)
+        };
+        equations
+            .prepare(&mut direct, &k, unknowns, true, &mut NoProgress)
+            .unwrap();
         assert!(!equations.is_iterative());
     }
 
