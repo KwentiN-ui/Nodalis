@@ -109,8 +109,8 @@ gradients around it, including the product with the matrix, run in double precis
 card as well when it supports that (otherwise they stay on the processor), so the results
 are the same as without the card. The card has many times the
 memory bandwidth of the processor, which is what limits the cycle: on a 591 000 equation
-model of quadratic tetrahedra the preconditioner time drops from 11.4 s to 1.5 s on an
-RTX 4070, and the whole solve from 15.9 s to 5.8 s. Integrated graphics share the memory
+model of quadratic tetrahedra the solve drops from 15.9 s to 1.4 s on an RTX 4070 (the
+setup of the multigrid, about 3 s, stays on the processor). Integrated graphics share the memory
 of the processor and gain nothing, so they are not used. The monitor line of the
 preconditioner ends with "conjugate gradients and V-cycle on the graphics card" (or only
 "V-cycle on the graphics card", with the reason) and its name. If a card was found

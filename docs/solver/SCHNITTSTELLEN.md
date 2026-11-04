@@ -1434,5 +1434,8 @@ Was T15 gebaut hat:
 - Die CPU liest nur alle 4 Iterationen (`BATCH`) 16 Skalare zurück; nach dem Abbruch
   setzen die Kernel alpha = beta = 0, die übrigen Iterationen eines Blocks ändern x nicht.
   Iterationszahl und Residuum sind dieselben wie auf der CPU (lavapipe: identisch).
+- Messung (Quentin, RTX 4070, C3D10-Halter 591k): Lösen 15,9 s (CPU) → 5,8 s (nur
+  V-Zyklus auf der Karte) → 1,4 s (ganzes CG), 214 Iterationen. Jetzt dominiert der Aufbau
+  der Hierarchie auf der CPU (3 s).
 - Ohne f64, bei zu großer f64-Matrix (Bindungsgrenze, lavapipe 128 MB) oder bei einem
   Fehler bleibt das CG auf der CPU; der Grund steht in der Vorkonditionierer-Zeile.
