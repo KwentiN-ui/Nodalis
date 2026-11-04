@@ -172,7 +172,10 @@ impl PcgSolver {
         self.iterations_after_build.store(0, Ordering::Relaxed);
         self.built_diagonal = self.full.diagonal();
         let unknowns = self.padded_unknowns();
-        let amg = Amg::build(&self.full, unknowns.as_ref(), AmgOptions::default())?;
+        #[allow(unused_mut)]
+        let mut amg = Amg::build(&self.full, unknowns.as_ref(), AmgOptions::default())?;
+        #[cfg(feature = "gpu")]
+        amg.attach_operator(&self.full);
         self.amg = Some(amg);
         self.factorized = true;
         Ok(())
@@ -267,6 +270,43 @@ impl PcgSolver {
             let after_build = self.iterations_after_build.load(Ordering::Relaxed);
             max_iterations = max_iterations.min((3 * after_build).max(100));
         }
+        let trace = std::env::var("PLXS_PCG_TRACE").is_ok();
+        let cancel = plxs_core::CancelToken::current();
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = self.amg.as_ref().and_then(Amg::gpu_cycle) {
+            let started = std::time::Instant::now();
+            let mut x = vec![0.0; n];
+            let cancelled = || {
+                cancel
+                    .as_ref()
+                    .is_some_and(plxs_core::CancelToken::is_cancelled)
+            };
+            match gpu.solve(&b, &mut x, TOLERANCE, max_iterations, &cancelled) {
+                Ok(Err(error)) => return Err(error),
+                Ok(Ok(crate::gpu::CgOutcome::Converged {
+                    iterations,
+                    residual,
+                })) => {
+                    if trace {
+                        eprintln!(
+                            "pcg: {iterations} iterations on the graphics card, {:.2} s",
+                            started.elapsed().as_secs_f64()
+                        );
+                    }
+                    return Ok(self.converged(&x, rhs, iterations, residual));
+                }
+                Ok(Ok(crate::gpu::CgOutcome::Indefinite)) => return Err(indefinite()),
+                Ok(Ok(crate::gpu::CgOutcome::NotConverged { residual })) => {
+                    return Err(not_converged(max_iterations, residual, self.reused));
+                }
+                Err(e) => {
+                    // The card failed: the processor solves, from here on.
+                    if let Some(amg) = self.amg.as_ref() {
+                        amg.note_gpu_failure(format!("failed: {e}"));
+                    }
+                }
+            }
+        }
         let mut x_padded = vec![0.0; n];
         let x = &mut x_padded;
         let mut r = b;
@@ -276,7 +316,6 @@ impl PcgSolver {
         let mut q = vec![0.0; n];
         let mut rz = dot(&r, &z);
         let mut residual = 1.0;
-        let trace = std::env::var("PLXS_PCG_TRACE").is_ok();
         let (mut t_product, mut t_precondition, mut t_vectors) = (0.0, 0.0, 0.0);
         let clock = std::time::Instant::now();
         let mut last = 0.0;
@@ -285,7 +324,6 @@ impl PcgSolver {
             *t += now - last;
             last = now;
         };
-        let cancel = plxs_core::CancelToken::current();
         for iteration in 1..=max_iterations {
             // Every iteration: on large systems one takes a good part of a second.
             if cancel
@@ -303,32 +341,20 @@ impl PcgSolver {
             }
             let pq = dot(&p, &q);
             if pq <= 0.0 || !pq.is_finite() {
-                return Err(numerical(
-                    "the matrix is not positive definite, which the iterative solver needs; \
-                     choose the direct equation solver",
-                ));
+                return Err(indefinite());
             }
             let alpha = rz / pq;
             axpy(alpha, &p, x);
             axpy(-alpha, &q, &mut r);
             residual = norm(&r) / b_norm;
             if residual <= TOLERANCE {
-                self.unpad(x, rhs);
-                self.last_iterations.store(iteration, Ordering::Relaxed);
-                if self.iterations_after_build.load(Ordering::Relaxed) == 0 {
-                    self.iterations_after_build
-                        .store(iteration, Ordering::Relaxed);
-                }
                 if trace {
                     eprintln!(
                         "pcg: {iteration} iterations, product {t_product:.2} s, \
                          preconditioner {t_precondition:.2} s, vectors {t_vectors:.2} s"
                     );
                 }
-                return Ok(PcgStats {
-                    iterations: iteration,
-                    relative_residual: residual,
-                });
+                return Ok(self.converged(x, rhs, iteration, residual));
             }
             if trace {
                 lap(&mut t_vectors);
@@ -348,15 +374,21 @@ impl PcgSolver {
             // p = z + beta p
             zip_mut(&mut p, &z, |p, z| *p = z + beta * *p);
         }
-        Err(numerical(format!(
-            "the iterative solver did not converge in {max_iterations} iterations \
-             (relative residual {residual:.3e}){}",
-            if self.reused {
-                " with the kept preconditioner"
-            } else {
-                "; choose the direct equation solver"
-            }
-        )))
+        Err(not_converged(max_iterations, residual, self.reused))
+    }
+
+    /// The solution `x` (padded) into `rhs`, and the bookkeeping of a converged solve.
+    fn converged(&self, x: &[f64], rhs: &mut [f64], iterations: usize, residual: f64) -> PcgStats {
+        self.unpad(x, rhs);
+        self.last_iterations.store(iterations, Ordering::Relaxed);
+        if self.iterations_after_build.load(Ordering::Relaxed) == 0 {
+            self.iterations_after_build
+                .store(iterations, Ordering::Relaxed);
+        }
+        PcgStats {
+            iterations,
+            relative_residual: residual,
+        }
     }
 
     /// `y = A x` with the whole matrix in rows, rows in parallel.
@@ -747,6 +779,8 @@ impl LinearSolver for PcgSolver {
             let keep = after_build > 0 && last * 2 <= after_build * 3 && !reuse_disabled();
             if let Some(amg) = self.amg.as_mut().filter(|_| keep && similar()) {
                 amg.refresh(&self.full);
+                #[cfg(feature = "gpu")]
+                amg.attach_operator(&self.full);
                 self.reused = true;
                 self.factorized = true;
                 return Ok(());
@@ -848,6 +882,25 @@ fn reverse_cuthill_mckee(adjacency: &[Vec<u32>]) -> Vec<u32> {
         new[old as usize] = position as u32;
     }
     new
+}
+
+fn indefinite() -> Error {
+    numerical(
+        "the matrix is not positive definite, which the iterative solver needs; \
+         choose the direct equation solver",
+    )
+}
+
+fn not_converged(max_iterations: usize, residual: f64, reused: bool) -> Error {
+    numerical(format!(
+        "the iterative solver did not converge in {max_iterations} iterations \
+         (relative residual {residual:.3e}){}",
+        if reused {
+            " with the kept preconditioner"
+        } else {
+            "; choose the direct equation solver"
+        }
+    ))
 }
 
 fn numerical(message: impl Into<String>) -> Error {

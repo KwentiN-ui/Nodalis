@@ -1427,3 +1427,21 @@ Was T15 gebaut hat:
   11,4 → 1,5 s, Lösen 15,9 → 5,8 s, Iterationen 217 / 214, Hochladen 0,35 s. Jetzt
   dominiert das f64-Produkt auf der CPU (3,7 s). Nächster Hebel: CG mit Produkt ganz auf
   der Karte (braucht `SHADER_F64` oder ein f32/f64-Doppelwort-Produkt).
+
+## Stand nach dem CG auf der Grafikkarte
+
+- Mit `SHADER_F64` (NVIDIA/AMD unter Vulkan und DX12, lavapipe; nicht Metal) läuft das
+  ganze flexible CG auf der Karte: f64-Kopie der feinen Matrix im selben Sliced-Layout wie
+  die f32-Kopie (`GpuCycle::attach`, nach jedem Aufbau und jedem `refresh`), Vektoren
+  b, x, r, z, p, q in f64, Skalarprodukte in zwei Stufen (256 Teilsummen je Produkt,
+  aufsummiert im Ein-Thread-Kernel `gpu_cg_scalar.wgsl`, der auch alpha, beta,
+  Abbruch und Indefinitheit führt). Der V-Zyklus wird inline aufgenommen
+  (r → f32 → Zyklus → f64 → z), also keine Übertragung pro Iteration.
+- Die CPU liest nur alle 4 Iterationen (`BATCH`) 16 Skalare zurück; nach dem Abbruch
+  setzen die Kernel alpha = beta = 0, die übrigen Iterationen eines Blocks ändern x nicht.
+  Iterationszahl und Residuum sind dieselben wie auf der CPU (lavapipe: identisch).
+- Messung (Quentin, RTX 4070, C3D10-Halter 591k): Lösen 15,9 s (CPU) → 5,8 s (nur
+  V-Zyklus auf der Karte) → 1,4 s (ganzes CG), 214 Iterationen. Jetzt dominiert der Aufbau
+  der Hierarchie auf der CPU (3 s).
+- Ohne f64, bei zu großer f64-Matrix (Bindungsgrenze, lavapipe 128 MB) oder bei einem
+  Fehler bleibt das CG auf der CPU; der Grund steht in der Vorkonditionierer-Zeile.
