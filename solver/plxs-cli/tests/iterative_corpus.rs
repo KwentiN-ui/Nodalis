@@ -72,7 +72,12 @@ fn fixtures_are_unchanged_with_the_iterative_solver() {
     let root: PathBuf =
         std::env::temp_dir().join(format!("plxs-iterative-corpus-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
+    // `PLXS_CORPUS_AREA=dynamic` runs one area alone while working on the solver.
+    let only = std::env::var("PLXS_CORPUS_AREA").ok();
     for area in AREAS {
+        if only.as_deref().is_some_and(|only| only != area) {
+            continue;
+        }
         copy_area(
             &fixtures_root().join(area),
             &root.join("fixtures").join(area),
@@ -94,7 +99,7 @@ fn fixtures_are_unchanged_with_the_iterative_solver() {
     let _ = std::fs::remove_dir_all(&root);
     assert!(!reports.is_empty());
     assert!(
-        iterated > 10,
+        iterated > 10 || only.is_some(),
         "only {iterated} runs used the iterative solver"
     );
     for report in &reports {
