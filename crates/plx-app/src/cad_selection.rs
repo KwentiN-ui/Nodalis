@@ -169,6 +169,11 @@ pub fn pick(model: &Model, hit: &Hit, target: Target, precision: f32) -> Option<
     }
 }
 
+/// The CAD face an element face lies on.
+pub fn face_of(model: &Model, face: (ElementId, u8)) -> Option<i32> {
+    model.cad_index().face(&model.mesh, face)
+}
+
 /// The CAD vertex nearest to a click, whatever its distance: of the edge for a line part,
 /// else of the edges bounding the face under the click. `None` where they have none.
 pub fn nearest_corner(model: &Model, hit: &Hit) -> Option<i32> {
@@ -433,6 +438,19 @@ mod tests {
         };
         let point: Vec<NodeId> = point.into_iter().collect();
         assert_eq!(coords(&model.mesh, &point), [[0.0, 0.0, 10.0]]);
+
+        // The surface angle mode picks CAD faces too, not the nodes it grows over; the end
+        // face meets its neighbours at right angles, so it is the only one.
+        let hit = model
+            .pick(model.to_render([-50.0, 2.0, 7.0]), Vec3::X)
+            .unwrap();
+        let mut by_angle = Picker::default();
+        by_angle.select_by = crate::selection::SelectBy::GeometrySurfaceAngle;
+        let items = by_angle.pick(&model, &hit, Target::Nodes, 0.1);
+        assert!(
+            matches!(&items, crate::selection::Items::Geometry(e) if e.len() == 1 && matches!(e.first(), Some(CadEntity::Face(_)))),
+            "{items:?}"
+        );
 
         // Mixed with picked nodes the geometry turns into nodes; undo goes back to it.
         let mut draft = RegionDraft::from_region(&fixed, NODE_SOURCES, Target::Nodes, &model.mesh);

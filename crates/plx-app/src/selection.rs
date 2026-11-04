@@ -570,6 +570,19 @@ impl Picker {
         }
         let face = hit.face;
         let angle = self.angle.to_radians();
+        // The surface angle mode on a mesh generated from geometry selects whole CAD faces,
+        // like the geometry mode, instead of the nodes or element faces it grew over.
+        if self.select_by == SelectBy::GeometrySurfaceAngle && model.has_cad() {
+            let entities: BTreeSet<CadEntity> = picker
+                .faces_by_angle(face, angle)
+                .into_iter()
+                .filter_map(|f| crate::cad_selection::face_of(model, picker.face_id(f)))
+                .map(CadEntity::Face)
+                .collect();
+            if !entities.is_empty() {
+                return Items::Geometry(entities);
+            }
+        }
         let faces: Vec<usize> = match self.select_by {
             SelectBy::Geometry => {
                 if target == Target::Surfaces
