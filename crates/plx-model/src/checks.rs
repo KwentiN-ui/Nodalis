@@ -161,11 +161,39 @@ pub enum Problem {
     WheelOffSurface,
     /// Found in the solver output only.
     NoConvergence,
+    /// The increments did not converge while the contact status kept changing. Found in
+    /// the solver output only.
+    ContactNoConvergence,
+    /// The temperatures of a heat transfer step did not converge. Found in the solver
+    /// output only.
+    HeatNoConvergence,
+    /// The step needs more increments than its maximum. Found in the solver output only.
+    IncrementLimit,
+    /// The stiffness matrix is not positive definite where it has to be. Found in the
+    /// solver output only.
+    NotPositiveDefinite,
+    /// The solver ran out of memory. Found in the solver output only.
+    OutOfMemory,
+    /// The iterative equation solver did not converge. Found in the solver output only.
+    IterativeSolverFailed,
+    /// The eigenvalue iteration failed. Found in the solver output only.
+    EigenvaluesNotFound,
+    /// An undamped mode excited at its eigenfrequency. Found in the solver output only.
+    UndampedResonance,
+    /// The solver rejected a value or a combination of the analysis. Found in the solver
+    /// output only.
+    SolverInput,
+    /// The solver does not compute a feature of the analysis. Found in the solver output
+    /// only.
+    SolverUnsupported,
+    /// The solver could not write or read its files. Found in the solver output only.
+    SolverFiles,
     /// Found in the solver output only.
     MpcAndSpc,
     /// Found in the solver output only.
     RotationIn2d,
-    /// Any other `*ERROR` of the solver output.
+    /// A failure inside the solver, or an `*ERROR` of the output of another solver run that
+    /// Nodalis cannot classify.
     SolverError,
     /// An item the analysis cannot be set up with: the lowering of the model into the
     /// solver's input stopped at it (an empty region, a missing amplitude).
@@ -272,9 +300,20 @@ impl Problem {
             Problem::ContactOutputIgnored => "No contact values to print",
             Problem::WheelOffSurface => "Wheel off the surface",
             Problem::NoConvergence => "No convergence",
+            Problem::ContactNoConvergence => "Contact does not converge",
+            Problem::HeatNoConvergence => "Temperatures do not converge",
+            Problem::IncrementLimit => "More increments needed than allowed",
+            Problem::NotPositiveDefinite => "Stiffness not positive definite",
+            Problem::OutOfMemory => "Not enough memory",
+            Problem::IterativeSolverFailed => "Iterative equation solver failed",
+            Problem::EigenvaluesNotFound => "Eigenvalues not found",
+            Problem::UndampedResonance => "Undamped resonance",
+            Problem::SolverInput => "Value rejected by the solver",
+            Problem::SolverUnsupported => "Not supported by the solver",
+            Problem::SolverFiles => "Solver files not written",
             Problem::MpcAndSpc => "Degree of freedom bound twice",
             Problem::RotationIn2d => "Rotation in a 2D model",
-            Problem::SolverError => "Solver error",
+            Problem::SolverError => "Internal solver error",
             Problem::NotLowered => "Analysis not set up",
         }
     }
@@ -617,11 +656,82 @@ impl Problem {
                  pairs whirl pairs do not split, and modes go missing from the results."
             }
             Problem::NoConvergence => {
-                "The Newton iteration did not converge; the solver kept reducing the \
-                 increment and gave up (too many cutbacks or an increment smaller than \
-                 the minimum). The cause is usually contacts, poorly supported \
-                 parts or too large loads in a nonlinear analysis. An even smaller \
-                 minimum increment rarely helps."
+                "The Newton iteration of a nonlinear step did not converge; the solver \
+                 reduced the increment and gave up (too many cutbacks, an increment \
+                 smaller than the minimum, or a fixed increment). A residual force that \
+                 grows means the structure cannot carry the load as it is: the load \
+                 exceeds its strength (plastic collapse) or its buckling load, it snaps \
+                 through, or a material law is unstable. A correction that is not finite \
+                 means that a part moves without resistance. An even smaller minimum \
+                 increment rarely helps."
+            }
+            Problem::ContactNoConvergence => {
+                "The Newton iteration did not converge while the contact status was \
+                 still changing: points opened and closed again between the iterations \
+                 (chattering) until the iterations or the cutbacks ran out. Typical \
+                 causes are a part held only by contact and pushed by a force, contact \
+                 surfaces with initial gaps or overclosures, a very stiff contact, coarse \
+                 or very different meshes on the two sides, and surfaces that slide off \
+                 each other's edges."
+            }
+            Problem::HeatNoConvergence => {
+                "The temperatures of a heat transfer step did not converge. Radiation, \
+                 film coefficients or conductivities that depend strongly on the \
+                 temperature, and heat conducted across contact (gap conductance) make \
+                 the step nonlinear; a too large increment or a temperature change above \
+                 the allowed maximum makes the solver cut back until the \
+                 increment falls below the minimum."
+            }
+            Problem::IncrementLimit => {
+                "The step needed more increments than its maximum number allows. The \
+                 increments become small when the analysis converges slowly (contact, \
+                 plasticity, large deformations) or when the maximum increment is \
+                 small."
+            }
+            Problem::NotPositiveDefinite => {
+                "The stiffness matrix has a negative or zero direction where the solver \
+                 needs a positive one: the iterative equation solver and its multigrid \
+                 work only for stable structures, and a buckling step needs a stable \
+                 reference state. The structure is unstable under its load (buckled, \
+                 snapped through, a material softening), or springs with a negative \
+                 stiffness or a part held too weakly make it so."
+            }
+            Problem::OutOfMemory => {
+                "The factor of the stiffness matrix (or another part of the solution) does \
+                 not fit into the memory. The direct solver's factor grows much faster \
+                 than the number of nodes, above all for quadratic tetrahedra and for \
+                 many contact or tie couplings."
+            }
+            Problem::IterativeSolverFailed => {
+                "The iterative equation solver (conjugate gradients with a multigrid \
+                 preconditioner) did not reach its tolerance. It needs a well conditioned \
+                 system: very stiff contacts or springs beside soft parts, shells and \
+                 beams, very distorted elements or nearly incompressible materials slow \
+                 it down."
+            }
+            Problem::EigenvaluesNotFound => {
+                "The eigenvalue iteration of a frequency or buckling step did not \
+                 converge or found no eigenvalues: the stiffness is singular at the \
+                 shift (a free structure), many eigenvalues lie very close together, or \
+                 the number of requested modes is very large."
+            }
+            Problem::UndampedResonance => {
+                "A steady state dynamics step excites a mode exactly at its \
+                 eigenfrequency without any damping: the response would be infinite."
+            }
+            Problem::SolverInput => {
+                "The solver checked the analysis before computing and rejected a value or \
+                 a combination of an item, which the checks of Nodalis did not catch. \
+                 The message names the item and what is wrong with it."
+            }
+            Problem::SolverUnsupported => {
+                "The model is complete, but the Nodalis solver does not compute this \
+                 feature or this combination of features (yet). The message names it."
+            }
+            Problem::SolverFiles => {
+                "The solver could not write or read a file of the analysis (results, \
+                 restart or stored modes): the disk is full, the folder is not writable, \
+                 or a file it needs is missing or from another model."
             }
             Problem::MpcAndSpc => {
                 "A degree of freedom is both fixed by a boundary condition and bound as \
@@ -643,8 +753,9 @@ impl Problem {
                  CONSTANTS). Without them it aborts."
             }
             Problem::SolverError => {
-                "The solver aborted with an error message that Nodalis does not know. \
-                 The exact text is shown in the Monitor."
+                "The solver failed inside, not because of the model, or another solver's \
+                 output reports an error Nodalis cannot classify. The exact text is \
+                 shown in the Monitor."
             }
             Problem::NotLowered => {
                 "The analysis cannot be set up with this item: the solver's input cannot \
@@ -903,10 +1014,73 @@ impl Problem {
                  of a contact pair with tied surface behavior."
             }
             Problem::NoConvergence => {
-                "Check the contacts (stiffness of the Surface Interaction, Adjust, \
-                 position of the surfaces), support the parts sufficiently, spread the \
-                 load over several increments (incrementation Automatic with a smaller \
-                 initial increment) and refine the mesh at the contact surfaces."
+                "Check that the load does not exceed what the structure can carry (a \
+                 Buckle step gives the buckling load, the yield stress the plastic \
+                 limit). Spread the load over more increments (Incrementation Automatic \
+                 with a smaller initial and minimum increment), turn on Nonlinear \
+                 geometry for large displacements, check the plastic or hyperelastic \
+                 material data, and support parts that are held only loosely."
+            }
+            Problem::ContactNoConvergence => {
+                "Prescribe a small displacement instead of the force in a first step, so \
+                 that the parts touch before the force acts; close initial gaps with \
+                 Adjust in the contact; lower the stiffness of the Surface Interaction \
+                 (a smaller slope of the Linear law, or Exponential); refine the mesh at \
+                 the contact and make the finer or more curved surface the slave; keep \
+                 Weak springs on (Connections > Connection Settings); start with a \
+                 smaller initial increment."
+            }
+            Problem::HeatNoConvergence => {
+                "Use a smaller initial and minimum increment, raise Max. temperature \
+                 change of a transient step, check the units of \
+                 radiation (emissivity, Physical Constants) and of temperature-dependent \
+                 material data, and for heat across contact check the gap conductance."
+            }
+            Problem::IncrementLimit => {
+                "Raise Max. increments in the step (Incrementation Automatic or Direct). \
+                 If the increments are small without need, also raise the initial and \
+                 the maximum increment."
+            }
+            Problem::NotPositiveDefinite => {
+                "Choose the Direct equation solver in the step, which also solves \
+                 indefinite systems. Check that the load stays below the buckling load \
+                 and that no spring has a negative stiffness; for a Buckle step, use a \
+                 reference load that the structure carries."
+            }
+            Problem::OutOfMemory => {
+                "Choose the Iterative or Automatic equation solver in the step, which \
+                 needs far less memory; or coarsen the mesh away from the regions of \
+                 interest, use linear instead of quadratic elements where they suffice, \
+                 and close other programs."
+            }
+            Problem::IterativeSolverFailed => {
+                "Choose the Direct equation solver in the step. If the model is too large \
+                 for it, improve the mesh quality and avoid very stiff springs and \
+                 contacts beside soft parts."
+            }
+            Problem::EigenvaluesNotFound => {
+                "Check that the structure is supported (or that a free structure is \
+                 meant, then rigid body modes at zero frequency are expected), request \
+                 fewer eigenfrequencies or give a lower and upper frequency bound, and choose the Direct equation \
+                 solver in the step."
+            }
+            Problem::UndampedResonance => {
+                "Add damping to the step (modal or Rayleigh damping) or move the \
+                 frequency range away from the eigenfrequency named in the message."
+            }
+            Problem::SolverInput => {
+                "Open the item the message names (when the solver names one, it carries \
+                 this warning in the tree too) and correct the value."
+            }
+            Problem::SolverUnsupported => {
+                "Remove, deactivate or replace the feature the message names: another \
+                 element type in the mesh setup, another step type or option, or the \
+                 connection as a tie instead of contact."
+            }
+            Problem::SolverFiles => {
+                "Free disk space or choose a writable Work directory in the settings, \
+                 and solve the analysis that provides restart data or stored modes \
+                 again."
             }
             Problem::MpcAndSpc => {
                 "Look up the node of the message in the input file and leave it out of \
@@ -919,8 +1093,9 @@ impl Problem {
                  under Physical Constants; Defaults fills them in for the unit system."
             }
             Problem::SolverError => {
-                "Read the message in the Monitor; \"Check Model\" in the context menu of \
-                 the analysis often helps."
+                "Read the message in the Monitor. If it comes from the Nodalis solver, \
+                 please report it with the project file: it is a bug, not a problem of \
+                 the model."
             }
             Problem::NotLowered => "Correct the item as the message says.",
         }

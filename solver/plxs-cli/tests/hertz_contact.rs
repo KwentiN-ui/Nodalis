@@ -19,7 +19,7 @@ fn plxs() -> PathBuf {
 }
 
 /// Ball of radius 5 mm (its lower 3 mm, 2 mm wide) on a 4 mm x 2 mm plate, CAX4, SI units.
-fn model() -> String {
+fn model(initial: &str) -> String {
     let radius = 5e-3;
     let (bx, by) = (16, 12);
     let (px, py) = (32, 8);
@@ -108,18 +108,23 @@ fn model() -> String {
 *SOLID SECTION, ELSET=BALL, MATERIAL=STEEL\n*SOLID SECTION, ELSET=PLATE, MATERIAL=STEEL\n\
 *SURFACE INTERACTION, NAME=SMOOTH\n*SURFACE BEHAVIOR, PRESSURE-OVERCLOSURE=LINEAR\n1e16, 3e6\n\
 *CONTACT PAIR, INTERACTION=SMOOTH, TYPE=SURFACE TO SURFACE\nSLAVE, MASTER\n\
-*STEP, INC=100\n*STATIC\n*BOUNDARY\nFIX, 1, 2, 0\n*CLOAD\nTOP, 2, -20\n\
+*STEP, INC=100\n*STATIC\n",
+    );
+    s.push_str(initial);
+    s.push_str(
+        "*BOUNDARY\nFIX, 1, 2, 0\n*CLOAD\nTOP, 2, -20\n\
 *NODE PRINT, NSET=FIX, TOTALS=ONLY\nRF\n*END STEP\n",
     );
     s
 }
 
-#[test]
-fn a_ball_held_by_weak_springs_is_pressed_onto_a_plate() {
-    let dir = std::env::temp_dir().join(format!("plxs-hertz-{}", std::process::id()));
+/// Runs the model with the `*STATIC` data line `initial` and returns the `.sta` rows and the
+/// total reaction of the plate in y at the end.
+fn run(job: &str, initial: &str) -> (Vec<Vec<f64>>, f64) {
+    let dir = std::env::temp_dir().join(format!("plxs-hertz-{job}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("hertz.inp"), model()).unwrap();
+    std::fs::write(dir.join("hertz.inp"), model(initial)).unwrap();
     let output = Command::new(plxs())
         .arg("hertz")
         .arg("--threads")
@@ -139,19 +144,49 @@ fn a_ball_held_by_weak_springs_is_pressed_onto_a_plate() {
         })
         .filter(|r| r.len() == 7)
         .collect();
-    assert_eq!(rows.len(), 1, "one increment expected:\n{sta}");
-    assert_eq!(rows[0][2], 1.0, "the increment was cut back:\n{sta}");
-    assert!(rows[0][3] <= 10.0, "too many iterations:\n{sta}");
-    // The plate carries the load of the 17 top nodes.
+    // The total of the last increment.
     let dat = std::fs::read_to_string(dir.join("hertz.dat")).unwrap();
     let fy: f64 = dat
         .lines()
-        .skip_while(|l| !l.contains("total force"))
-        .skip(1)
-        .find(|l| !l.trim().is_empty())
+        .rev()
+        .take_while(|l| !l.contains("total force"))
+        .filter(|l| !l.trim().is_empty())
+        .last()
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|v| v.parse().ok())
         .unwrap_or_else(|| panic!("no total reaction:\n{dat}"));
-    assert!((fy - 17.0 * 20.0).abs() < 1e-2 * 340.0, "reaction {fy}");
     let _ = std::fs::remove_dir_all(&dir);
+    (rows, fy)
+}
+
+#[test]
+fn a_ball_held_by_weak_springs_is_pressed_onto_a_plate() {
+    let (rows, fy) = run("full", "");
+    assert_eq!(rows.len(), 1, "one increment expected: {rows:?}");
+    assert_eq!(rows[0][2], 1.0, "the increment was cut back: {rows:?}");
+    assert!(rows[0][3] <= 10.0, "too many iterations: {rows:?}");
+    // The plate carries the load of the 17 top nodes.
+    assert!((fy - 17.0 * 20.0).abs() < 1e-2 * 340.0, "reaction {fy}");
+}
+
+/// A small first increment: the shortened correction stops where the contact carries the
+/// small load, not at the overclosure limit, which would close far too many points.
+#[test]
+fn a_ball_pressed_onto_a_plate_in_small_increments() {
+    let (rows, fy) = run("small", "0.01, 1\n");
+    assert_eq!(
+        rows[0][2], 1.0,
+        "the first increment was cut back: {rows:?}"
+    );
+    assert!(rows.iter().all(|r| r[2] == 1.0), "cut back: {rows:?}");
+    assert!(
+        rows.iter().all(|r| r[3] <= 6.0),
+        "too many iterations: {rows:?}"
+    );
+    assert_eq!(
+        rows.last().unwrap()[5],
+        1.0,
+        "the step did not finish: {rows:?}"
+    );
+    assert!((fy - 17.0 * 20.0).abs() < 1e-2 * 340.0, "reaction {fy}");
 }

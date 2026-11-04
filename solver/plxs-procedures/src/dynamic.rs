@@ -394,6 +394,7 @@ impl DynamicProcedure {
                 return Err(Error::Numerical {
                     step: ctx.step_number,
                     increment,
+                    failure: plxs_core::Failure::IncrementLimit,
                     message: format!(
                         "*ERROR: increment {increment} exceeds the maximum number of increments ({}) of *STEP, INC=",
                         ctx_max_increments(step)
@@ -678,9 +679,12 @@ fn ctx_max_increments(step: &Step) -> u32 {
 
 fn numerical(e: Error, step: u32, increment: u32, equations: &Equations) -> Error {
     match e {
-        Error::Numerical { message, .. } => Error::Numerical {
+        Error::Numerical {
+            failure, message, ..
+        } => Error::Numerical {
             step,
             increment,
+            failure,
             message: if equations.hints_constraints() {
                 format!("{message}; the model is probably not sufficiently constrained")
             } else {

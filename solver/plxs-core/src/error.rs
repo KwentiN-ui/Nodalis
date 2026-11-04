@@ -45,11 +45,13 @@ pub enum Error {
     /// The model is complete but the solver cannot compute it yet or at all.
     #[error("*ERROR: {0}")]
     Unsupported(String),
-    /// A procedure did not converge or a matrix is singular.
+    /// A procedure did not converge or a matrix is singular. `failure` says which, so that
+    /// Nodalis can explain it without reading the message.
     #[error("*ERROR: {message} (step {step}, increment {increment})")]
     Numerical {
         step: u32,
         increment: u32,
+        failure: Failure,
         message: String,
     },
     /// A file of the job could not be read or written.
@@ -69,6 +71,76 @@ pub enum Error {
     },
 }
 
+/// What went wrong in an [`Error::Numerical`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Failure {
+    /// The increments of a nonlinear step (or of a heat transfer step) did not converge.
+    NoConvergence(Convergence),
+    /// The step needs more increments than `INC` of `*STEP` allows.
+    IncrementLimit,
+    /// The stiffness (or conductivity) matrix is singular: something moves freely.
+    Singular,
+    /// The matrix is not positive definite where it has to be: for the iterative equation
+    /// solver, the multigrid, the reference state of a buckling step.
+    NotPositiveDefinite,
+    /// The factor or another part of the solution does not fit into the memory.
+    OutOfMemory,
+    /// The iterative equation solver did not converge.
+    IterativeSolver,
+    /// The eigenvalue iteration did not converge or found no eigenvalues.
+    Eigenvalues,
+    /// An undamped mode is excited at its eigenfrequency (steady state dynamics).
+    Resonance,
+    /// A misuse inside the solver (a bug, not a property of the model).
+    Internal,
+}
+
+/// How the increments of a step failed to converge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Convergence {
+    /// Why the last attempt was given up.
+    pub cause: Divergence,
+    /// Why no further attempt was made.
+    pub stop: Stop,
+    /// Contact springs exist in the model.
+    pub contact: bool,
+    /// The contact status (closed, open, sticking, sliding) still changed in the last
+    /// iteration of the last attempt.
+    pub contact_changing: bool,
+}
+
+/// Why an attempt at an increment was given up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Divergence {
+    /// The residual force grew in two consecutive iterations.
+    ResidualGrows,
+    /// The iteration limit was reached.
+    IterationLimit,
+    /// The convergence rate predicts more iterations than allowed.
+    TooSlow,
+    /// The solution correction is not finite.
+    NotFinite,
+    /// The creep strain changed more than `CETOL` in the increment.
+    CreepTolerance,
+    /// The temperatures of a heat transfer step did not converge.
+    Temperatures,
+    /// The contact of a heat transfer step with contact did not settle.
+    ThermalContact,
+    /// The equations of an iteration could not be solved (see the message).
+    Equations,
+}
+
+/// Why no smaller increment was tried.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Stop {
+    /// More cutbacks in one increment than allowed.
+    Cutbacks,
+    /// The increment would fall below the minimum.
+    MinimumIncrement,
+    /// The increment size is fixed (`DIRECT`).
+    FixedIncrement,
+}
+
 /// Where in the input an error was found.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Location {
@@ -83,6 +155,58 @@ impl Error {
             keyword: keyword.into(),
             message: message.into(),
             location: None,
+        }
+    }
+
+    /// A numerical error outside of a step and increment ([`Error::in_increment`] places it).
+    pub fn numerical(failure: Failure, message: impl Into<String>) -> Self {
+        Error::Numerical {
+            step: 0,
+            increment: 0,
+            failure,
+            message: message.into(),
+        }
+    }
+
+    /// A numerical error placed in the step and increment it happened in; other errors as
+    /// they are.
+    pub fn in_increment(self, step: u32, increment: u32) -> Self {
+        match self {
+            Error::Numerical {
+                failure, message, ..
+            } => Error::Numerical {
+                step,
+                increment,
+                failure,
+                message,
+            },
+            other => other,
+        }
+    }
+
+    /// The message of a numerical error changed by `f`; other errors as they are.
+    pub fn map_message(self, f: impl FnOnce(String) -> String) -> Self {
+        match self {
+            Error::Numerical {
+                step,
+                increment,
+                failure,
+                message,
+            } => Error::Numerical {
+                step,
+                increment,
+                failure,
+                message: f(message),
+            },
+            other => other,
+        }
+    }
+
+    /// The kind of a numerical error.
+    pub fn failure(&self) -> Option<Failure> {
+        match self.plain() {
+            Error::Numerical { failure, .. } => Some(*failure),
+            _ => None,
         }
     }
 

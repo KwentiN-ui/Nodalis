@@ -288,6 +288,7 @@ impl Amg {
             return Err(Error::Numerical {
                 step: 0,
                 increment: 0,
+                failure: plxs_core::Failure::IterativeSolver,
                 message: format!(
                     "multigrid: the coarsening stalled at {} unknowns",
                     coarsest.rows()
@@ -302,6 +303,7 @@ impl Amg {
         factorized.map_err(|e| Error::Numerical {
             step: 0,
             increment: 0,
+            failure: plxs_core::Failure::NotPositiveDefinite,
             message: format!("multigrid: the coarsest system is not positive definite ({e})"),
         })?;
         // The Galerkin product of a positive definite matrix is positive definite; a
@@ -310,6 +312,7 @@ impl Amg {
             return Err(Error::Numerical {
                 step: 0,
                 increment: 0,
+                failure: plxs_core::Failure::NotPositiveDefinite,
                 message: "multigrid: the matrix is not positive definite".to_owned(),
             });
         }

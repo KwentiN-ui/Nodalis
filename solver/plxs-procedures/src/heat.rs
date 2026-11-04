@@ -38,7 +38,9 @@ use plxs_core::progress::NoProgress;
 use plxs_core::results::{IncrementKind, ResultField, ResultsIncrement};
 use plxs_core::state::{IntegrationPointField, NodalField};
 use plxs_core::step::{DefaultAmplitude, HeatTransfer, Procedure as ProcedureKind};
-use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Step};
+use plxs_core::{
+    Convergence, Divergence, Error, Failure, Model, Progress, ProgressEvent, Result, Step, Stop,
+};
 use std::sync::Arc;
 
 use plxs_contact::ThermalLink;
@@ -229,6 +231,7 @@ impl<'h> HeatRun<'h> {
                 return Err(Error::Numerical {
                     step: ctx.step_number,
                     increment,
+                    failure: Failure::IncrementLimit,
                     message: format!(
                         "the step needs more than INC={} increments",
                         step.max_increments
@@ -304,6 +307,7 @@ impl<'h> HeatRun<'h> {
                             Some(limit) if self.transient && !self.direct && change > limit => {
                                 Some((
                                     size * 0.85 * limit / change,
+                                    None,
                                     format!(
                                         "largest temperature change {change:.4e} exceeds DELTMX={limit}"
                                     ),
@@ -312,12 +316,12 @@ impl<'h> HeatRun<'h> {
                             _ => break (inc, size),
                         }
                     }
-                    Err(Error::Numerical { message, .. }) if !self.direct => {
-                        Some((size * CUTBACK, message))
-                    }
+                    Err(Error::Numerical {
+                        failure, message, ..
+                    }) if !self.direct => Some((size * CUTBACK, Some(failure), message)),
                     Err(e) => return Err(e),
                 };
-                let (smaller, reason) = reject.unwrap();
+                let (smaller, failure, reason) = reject.unwrap();
                 progress.event(ProgressEvent::Cutback {
                     step: ctx.step_number,
                     increment,
@@ -325,9 +329,25 @@ impl<'h> HeatRun<'h> {
                     reason: reason.clone(),
                 });
                 if smaller < self.minimum {
+                    // A failure of the equations stays what it is; one of the iteration
+                    // (or the temperature change) is no convergence of the step.
+                    let failure = match failure {
+                        Some(Failure::NoConvergence(c)) => Failure::NoConvergence(Convergence {
+                            stop: Stop::MinimumIncrement,
+                            ..c
+                        }),
+                        Some(other) => other,
+                        None => Failure::NoConvergence(Convergence {
+                            cause: Divergence::Temperatures,
+                            stop: Stop::MinimumIncrement,
+                            contact: self.contact,
+                            contact_changing: false,
+                        }),
+                    };
                     return Err(Error::Numerical {
                         step: ctx.step_number,
                         increment,
+                        failure,
                         message: format!(
                             "{reason}; the increment size {smaller:.4e} would fall below the minimum {:.4e}",
                             self.minimum
@@ -513,6 +533,16 @@ impl<'h> HeatRun<'h> {
                 return Err(Error::Numerical {
                     step: ctx.step_number,
                     increment,
+                    failure: Failure::NoConvergence(Convergence {
+                        cause: if correction.is_finite() {
+                            Divergence::Temperatures
+                        } else {
+                            Divergence::NotFinite
+                        },
+                        stop: Stop::FixedIncrement,
+                        contact: self.contact,
+                        contact_changing: false,
+                    }),
                     message: format!(
                         "no convergence of the temperatures after {iteration} iterations (largest correction {correction:.4e})"
                     ),
@@ -596,9 +626,12 @@ impl<'h> HeatRun<'h> {
                 self.mechanical_equations
                     .prepare(&mut ctx.solver, &k_free, coordinates, true, &mut NoProgress)
                     .map_err(|e| match e {
-                        Error::Numerical { message, .. } => Error::Numerical {
+                        Error::Numerical {
+                            failure, message, ..
+                        } => Error::Numerical {
                             step: ctx.step_number,
                             increment,
+                            failure,
                             message: if iterative {
                                 message
                             } else {
@@ -798,9 +831,12 @@ impl<'h> HeatRun<'h> {
             self.mechanical_equations
                 .prepare(&mut ctx.solver, &a_free, coordinates, true, &mut NoProgress)
                 .map_err(|e| match e {
-                    Error::Numerical { message, .. } => Error::Numerical {
+                    Error::Numerical {
+                        failure, message, ..
+                    } => Error::Numerical {
                         step: ctx.step_number,
                         increment,
+                        failure,
                         message: if iterative {
                             message
                         } else {
@@ -827,6 +863,16 @@ impl<'h> HeatRun<'h> {
                 return Err(Error::Numerical {
                     step: ctx.step_number,
                     increment,
+                    failure: Failure::NoConvergence(Convergence {
+                        cause: if correction.is_finite() {
+                            Divergence::ThermalContact
+                        } else {
+                            Divergence::NotFinite
+                        },
+                        stop: Stop::FixedIncrement,
+                        contact: true,
+                        contact_changing: !settled,
+                    }),
                     message: format!(
                         "no convergence of the contact after {iteration} iterations (largest correction {correction:.4e})"
                     ),

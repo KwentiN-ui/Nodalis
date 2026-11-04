@@ -242,6 +242,12 @@ E L in total, spread over all nodes of the part, E its Young's modulus and L its
 geometric mean of its extents). The springs are not shown in the tree, and the model check no
 longer reports these parts. They count for contact pairs you define by hand too.
 
+Such a part, pushed by a force, has nothing but the weak springs to hold it in the first
+iteration, before its contact closes: a ball on a plate touches in one point only. The Nodalis
+solver therefore stops that first move where the contact carries the load, instead of letting
+the part move far into the other one, and the contact zone grows to its size in a few
+iterations.
+
 The springs carry about a millionth of the load once the contacts are closed, and the force
 it takes to close an initial gap g, of the order 10#super[-6] E g L. Two things to keep in mind:
 
