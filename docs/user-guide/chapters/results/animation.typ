@@ -11,8 +11,8 @@ The animation button among the result controls of the ribbon opens the animation
     swings between −1 and +1. #ui("Step increments") plays the increments of the step,
     #ui("Steps") the last increment of every step of the same kind, e.g. the positions of a
     moving load (@moving-load).],
-  [Frames], [Number of frames of a scale factor animation (default 15).],
-  [Frames per second], [Playback speed (default 15).],
+  [Frames], [Number of frames of a scale factor animation (default 60).],
+  [Frames per second], [Playback speed (default 30).],
   [Playback], [#ui("Once"), #ui("Loop") or #ui("Swing") (forth and back, default).],
   [Color scale], [#ui("Current frame") adapts the legend to every frame, #ui("All frames") keeps
     one range for the whole animation.],
