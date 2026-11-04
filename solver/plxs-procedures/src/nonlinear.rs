@@ -862,7 +862,25 @@ impl NonlinearStatic {
                 plxs_linalg::gmres(&apply, &precondition, &residual, 1e-10, 60, 300)?.0
             };
             ctx.profile.add(Phase::Solve, started);
-            let du = set.expand(&dv, &vec![0.0; total_dofs]);
+            let mut du = set.expand(&dv, &vec![0.0; total_dofs]);
+            // A correction that drives contact points deep into the master (a body held
+            // only by weak springs until it touches) is shortened; see
+            // `ContactModel::step_limit`.
+            if !ctx.contact.is_empty() {
+                let full: Vec<f64> = if pending_g {
+                    du.iter().zip(&delta_g).map(|(a, b)| a + b).collect()
+                } else {
+                    du.clone()
+                };
+                let factor = ctx
+                    .contact
+                    .step_limit(&ctx.model.nodes.coordinates, &u, &full);
+                if factor < 1.0 {
+                    for d in &mut du {
+                        *d *= factor;
+                    }
+                }
+            }
             previous_correction = last_correction;
             last_correction = du.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
             if !last_correction.is_finite() {
