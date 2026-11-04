@@ -7320,6 +7320,12 @@ impl ProjectApp {
         if new.graphics.theme != self.settings.graphics.theme {
             crate::style::set_theme(ctx, new.graphics.theme);
         }
+        // The View tab owns these toggles; the window's copy may be older than a click there.
+        let mut new = new;
+        let live = &self.settings.graphics;
+        new.graphics.shell_thickness = live.shell_thickness;
+        new.graphics.beam_profiles = live.beam_profiles;
+        new.graphics.show_linked = live.show_linked;
         self.settings = new;
         self.share_settings();
     }

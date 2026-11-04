@@ -632,7 +632,11 @@ impl AnalysisWindow {
     }
 
     pub fn set_settings(&mut self, settings: &Settings) {
-        self.workbench.settings = settings.clone();
+        if self.workbench.settings != *settings {
+            self.workbench.settings = settings.clone();
+            // The overlay (global axes, labels, status block) is built from the settings.
+            self.workbench.update_contour();
+        }
     }
 
     /// What the window asked of the project window since the last call.
@@ -6184,6 +6188,12 @@ impl Workbench {
                 return;
             }
         };
+        // The View tab owns these toggles; the window's copy may be older than a click there.
+        let mut new = new;
+        let live = &self.settings.graphics;
+        new.graphics.shell_thickness = live.shell_thickness;
+        new.graphics.beam_profiles = live.beam_profiles;
+        new.graphics.show_linked = live.show_linked;
         if new.gmsh != self.settings.gmsh && !plx_mesher::set_library_path(new.gmsh.library()) {
             self.output
                 .push("The changed Gmsh library is loaded after a restart".into());
