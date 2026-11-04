@@ -38,6 +38,13 @@ pub trait LinearSolver {
 /// with more than 2³¹ entries, which `faer` refuses for `u32` (`IndexOverflow`).
 pub(crate) type FactorIndex = u64;
 
+/// `PLXS_LDLT_TRACE=1`: the time since `clock` of each phase of the analysis.
+pub(crate) fn trace(clock: &std::time::Instant, what: &str) {
+    if std::env::var("PLXS_LDLT_TRACE").is_ok() {
+        eprintln!("ldlt: {what} after {:.2} s", clock.elapsed().as_secs_f64());
+    }
+}
+
 /// Systems of at least this many equations are ordered by nested dissection.
 const DISSECTION_FROM: usize = 3000;
 
@@ -192,6 +199,11 @@ impl LdltSolver {
         self.factorized = false;
     }
 
+    /// Whether the solver holds a factor (`solve` works).
+    pub fn is_factorized(&self) -> bool {
+        self.factorized
+    }
+
     /// The pattern with the factor's index type.
     fn widen(pattern: &Pattern) -> (Vec<FactorIndex>, Vec<FactorIndex>) {
         let wide = |v: &[u32]| v.iter().map(|&i| i as FactorIndex).collect();
@@ -235,6 +247,7 @@ impl LdltSolver {
             }
             return Ok(());
         }
+        let clock = std::time::Instant::now();
         let wide = Self::widen(pattern);
         let matrix = Self::symbolic_matrix(pattern.dimension(), &wide);
         // Nested dissection for large systems (it fills three-dimensional meshes far less
@@ -248,6 +261,7 @@ impl LdltSolver {
         };
         let dissection =
             dissect.then(|| crate::ordering::nested_dissection(pattern, coordinates.as_deref()));
+        trace(&clock, "ordering");
         let inverse = dissection.as_deref().map(crate::ordering::inverse);
         let wide_perm =
             |p: Vec<u32>| -> Vec<FactorIndex> { p.into_iter().map(|i| i as FactorIndex).collect() };
@@ -269,6 +283,7 @@ impl LdltSolver {
             },
         )
         .map_err(|e| numerical(format!("symbolic factorization failed: {e:?}")))?;
+        trace(&clock, "symbolic factorization");
         self.values = Vec::new();
         self.allocated = false;
         self.workspace.clear();
@@ -279,6 +294,7 @@ impl LdltSolver {
             }
             SymbolicCholeskyRaw::Simplicial(_) => None,
         };
+        trace(&clock, "supernodal tree");
         self.symbolic = Some(symbolic);
         self.wide = wide;
         self.analyzed = Some(pattern.clone());
