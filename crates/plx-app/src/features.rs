@@ -430,50 +430,50 @@ impl FeatureDialog {
         let mut open = true;
         let is_path = matches!(self.draft, Draft::Path(_));
         let is_plane_result = matches!(self.draft, Draft::ResultPlane(_));
-        let window = egui::Window::new(self.title())
+        let title = self.title();
+        let builder = egui::Window::new(title.clone())
             .id(crate::ids::window(ctx, "feature dialog"))
-            .open(&mut open)
             .collapsible(false)
             .resizable(is_path)
             .pivot(egui::Align2::LEFT_TOP)
-            .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0))
-            .show(ctx, |ui| {
-                // The plot takes the height the window is resized to beyond its other rows.
-                let plot_height = match self.rows_height {
-                    Some(rows) => (ui.max_rect().height() - rows).max(MIN_PLOT_HEIGHT),
-                    None => PLOT_HEIGHT,
-                };
-                egui::Grid::new("feature form")
-                    .num_columns(2)
-                    .spacing([12.0, 4.0])
-                    .show(ui, |ui| self.form(ui, model));
-                if is_path {
-                    ui.separator();
-                    self.path_results(ui, model, plot_height);
-                }
-                if is_plane_result {
-                    ui.separator();
-                    self.plane_results(ui, model, cut);
-                }
-                if let Some(error) = &self.error {
-                    ui.colored_label(crate::style::error(), error);
-                }
+            .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0));
+        let window = crate::dock::show(ctx, builder, title, &mut open, |ui| {
+            // The plot takes the height the window is resized to beyond its other rows.
+            let plot_height = match self.rows_height {
+                Some(rows) => (ui.max_rect().height() - rows).max(MIN_PLOT_HEIGHT),
+                None => PLOT_HEIGHT,
+            };
+            egui::Grid::new("feature form")
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| self.form(ui, model));
+            if is_path {
                 ui.separator();
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Cancel").clicked() {
-                        result = FeatureResult::Cancel;
+                self.path_results(ui, model, plot_height);
+            }
+            if is_plane_result {
+                ui.separator();
+                self.plane_results(ui, model, cut);
+            }
+            if let Some(error) = &self.error {
+                ui.colored_label(crate::style::error(), error);
+            }
+            ui.separator();
+            crate::dock::footer(ui, |ui| {
+                if ui.button("Cancel").clicked() {
+                    result = FeatureResult::Cancel;
+                }
+                if ui.button("OK").clicked() {
+                    self.error = self.validate(model).err();
+                    if self.error.is_none() {
+                        result = FeatureResult::Ok;
                     }
-                    if ui.button("OK").clicked() {
-                        self.error = self.validate(model).err();
-                        if self.error.is_none() {
-                            result = FeatureResult::Ok;
-                        }
-                    }
-                });
-                // Only a drawn plot tells the height of the rest.
-                self.rows_height =
-                    (is_path && self.plotted).then(|| ui.min_rect().height() - plot_height);
+                }
             });
+            // Only a drawn plot tells the height of the rest.
+            self.rows_height =
+                (is_path && self.plotted).then(|| ui.min_rect().height() - plot_height);
+        });
         if let Some(window) = &window
             && self.picking.is_none()
             && self.selects_region()

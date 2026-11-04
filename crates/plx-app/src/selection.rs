@@ -377,12 +377,15 @@ impl Picker {
             .and_then(|s| s.size)
             .map_or(350.0, |s| s.x);
         let screen = ctx.content_rect();
-        let pos = egui::pos2(
-            (anchor.right() + 8.0)
-                .min(screen.right() - width)
-                .max(screen.left()),
-            anchor.top(),
-        );
+        // Right of the dialog, or left of it where the screen ends: beside the properties
+        // panel, over the 3D view.
+        let right = anchor.right() + 8.0;
+        let x = if right + width > screen.right() {
+            anchor.left() - 8.0 - width
+        } else {
+            right
+        };
+        let pos = egui::pos2(x.max(screen.left()), anchor.top());
         egui::Window::new("Selection")
             .id(id)
             .constrain(false)

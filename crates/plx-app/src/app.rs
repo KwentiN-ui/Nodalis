@@ -41,7 +41,7 @@ use crate::sound::{self, ModeSound};
 use crate::symbols;
 use crate::transformation_dialog::{TransformationAction, TransformationDialog};
 use crate::tree::{self, TreeItem, TreeResponse, TreeState, TreeView};
-use crate::viewport::{Axis, BoxSelect, Click, ViewCommand, Viewport};
+use crate::viewport::{BoxSelect, Click, ViewCommand, Viewport};
 use plx_render::RenderMesh;
 
 mod commands;
@@ -67,7 +67,7 @@ pub enum Request {
     /// Open this project file instead of the open project.
     OpenProject(PathBuf),
     /// Solve the analyses this one takes results or states from and that have none or old
-    /// ones, then this one: Solve, or Solve Again with `true`, which runs CalculiX even if
+    /// ones, then this one: Solve, or Solve Again with `true`, which runs the solver even if
     /// the results are up to date.
     SolveChain(bool),
     /// Stop the solve of this analysis.
@@ -140,7 +140,7 @@ struct Workbench {
     /// still to open; they must not switch to the Results tab then.
     pinned_view: Option<TreeView>,
     output: Vec<String>,
-    /// The output pane shows the Analysis tab, with the output of the last CalculiX run,
+    /// The output pane shows the Analysis tab, with the output of the last solver run,
     /// instead of the messages.
     analysis_tab: bool,
     view_command: Option<ViewCommand>,
@@ -156,9 +156,32 @@ struct Workbench {
     frame_cache: std::collections::HashMap<usize, Vec<RenderMesh>>,
     /// Open dialog creating or editing an item of the FE model.
     editor: Option<Editor>,
-    /// Item asked to be deleted, waiting for the user's confirmation.
+    /// The step new boundary conditions, loads, outputs and defined fields go into, by name;
+    /// `None` or a name no longer there means the last step.
+    active_step: Option<String>,
+    /// The selection the active step last followed, so that it follows only a new one.
+    step_selection: Option<TreeItem>,
+    /// The open editors of the properties panel, the newest last; only one stays open.
+    docked: Vec<crate::dock::Docked>,
     /// Items to delete once the user agrees: several parts, or one item.
     confirm_delete: Option<(TreeView, Vec<TreeItem>)>,
+    /// Remove Results waits for the user's confirmation.
+    confirm_remove_results: bool,
+    /// The toast shown over the 3D view, such as "Deleted Force-1" with Undo.
+    toast: Option<crate::toast::Toast>,
+    /// The output pane shows the Problems tab.
+    problems_tab: bool,
+    /// The properties panel shows the checklist while no item is edited.
+    checklist_shown: bool,
+    /// The checklist lying over the 3D view of a narrow window waits until it is asked for.
+    checklist_fold: crate::layout::Fold,
+    /// Whether the checklist was shown in the last frame, for its ribbon tile.
+    checklist_visible: bool,
+    /// Whether the Analysis tab was asked for in the last frame, to notice when a solve
+    /// brings it to the front.
+    analysis_tab_before: bool,
+    /// `problems_tab` in the last frame: a folded output pane opens when it turns on.
+    problems_tab_before: bool,
     /// Open search for contact pairs.
     contact_search: Option<ContactSearchDialog>,
     /// The table of all contact regions is open.
@@ -307,7 +330,18 @@ impl AnalysisWindow {
                 frame_changed: false,
                 frame_cache: Default::default(),
                 editor: None,
+                active_step: None,
+                step_selection: None,
+                docked: Vec::new(),
                 confirm_delete: None,
+                confirm_remove_results: false,
+                toast: None,
+                problems_tab: false,
+                checklist_shown: true,
+                checklist_fold: Default::default(),
+                checklist_visible: false,
+                analysis_tab_before: false,
+                problems_tab_before: false,
                 contact_search: None,
                 contact_worksheet: false,
                 mesh_tool: None,
@@ -773,7 +807,7 @@ impl AnalysisWindow {
         });
     }
 
-    /// Opens the results of the analysis, written by CalculiX or restored from the project.
+    /// Opens the results of the analysis, written by the solver or restored from the project.
     fn open_results(&mut self, path: PathBuf, ctx: &egui::Context) {
         let (sender, ctx) = (self.load_events.0.clone(), ctx.clone());
         let units = self.workbench.import_units();
@@ -804,207 +838,58 @@ impl AnalysisWindow {
         }
     }
 
-    /// The menus of the analysis in the app bar. In the project window, Close Analysis gives
-    /// the analysis back to the project instead of closing a window.
+    /// The menus of the analysis in the app bar: File, Edit and Help; the ribbon holds the
+    /// rest. In the project window, Close Analysis gives the analysis back to the project
+    /// instead of closing a window.
     pub fn menus(&mut self, ui: &mut egui::Ui, embedded: bool) {
-        {
-            ui.menu_button("File", |ui| {
-                let import = egui::Button::new("Import …");
-                if ui.add_enabled(self.loading.is_none(), import).clicked() {
-                    self.import(ui.ctx());
+        ui.menu_button("File", |ui| {
+            let save = egui::Button::new("Save Project").shortcut_text("Ctrl+S");
+            if ui.add(save).clicked() {
+                self.workbench.requests.push(Request::Save(false));
+            }
+            let save_as = egui::Button::new("Save Project As …").shortcut_text("Ctrl+Shift+S");
+            if ui.add(save_as).clicked() {
+                self.workbench.requests.push(Request::Save(true));
+            }
+            let without = egui::Button::new("Save Project Without Results …");
+            if ui
+                .add(without)
+                .on_hover_text(
+                    "Saves a copy of the project with only the meshes and the model \
+                     definitions, without the results its analyses keep. The open \
+                     project keeps them.",
+                )
+                .clicked()
+            {
+                self.workbench.requests.push(Request::SaveWithoutResults);
+            }
+            ui.separator();
+            ui.menu_button("Export", |ui| self.workbench.export_menu(ui));
+            ui.separator();
+            let tip = "Closes the analysis; it stays in the project.";
+            if ui.button("Close Analysis").on_hover_text(tip).clicked() {
+                if embedded {
+                    self.workbench.requests.push(Request::Close);
+                } else {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
-                let setup = self.workbench.setup_model().is_some();
-                let save = egui::Button::new("Save Project").shortcut_text("Ctrl+S");
-                if ui.add(save).clicked() {
-                    self.workbench.requests.push(Request::Save(false));
-                }
-                let save_as = egui::Button::new("Save Project As …").shortcut_text("Ctrl+Shift+S");
-                if ui.add(save_as).clicked() {
-                    self.workbench.requests.push(Request::Save(true));
-                }
-                let without = egui::Button::new("Save Project Without Results …");
-                if ui
-                    .add(without)
-                    .on_hover_text(
-                        "Saves a copy of the project with only the meshes and the model \
-                         definitions, without the results its analyses keep. The open \
-                         project keeps them.",
-                    )
-                    .clicked()
-                {
-                    self.workbench.requests.push(Request::SaveWithoutResults);
-                }
-                ui.separator();
-                let export = egui::Button::new("Export CalculiX Input File …");
-                if ui.add_enabled(setup, export).clicked() {
-                    self.workbench.export_inp();
-                }
-                let deformed = self.workbench.shown_results_view().is_some();
-                let export = egui::Button::new("Export Deformed Mesh (.inp) …");
-                let tip = "Writes the mesh of the current results, deformed by the current \
-                           deformation scale factor, as an input file with only the mesh.";
-                if ui
-                    .add_enabled(deformed, export)
-                    .on_hover_text(tip)
-                    .clicked()
-                {
-                    self.workbench.export_deformed_mesh();
-                }
-                let export = egui::Button::new("Export CalculiX Results (.frd) …");
-                let tip = "Writes the current results as CalculiX's result files: the .frd \
-                           file and, with history output, the .dat file beside it, for \
-                           CalculiX GraphiX, PrePoMax and other programs that read them.";
-                if ui
-                    .add_enabled(deformed, export)
-                    .on_hover_text(tip)
-                    .on_disabled_hover_text("No results are open.")
-                    .clicked()
-                {
-                    self.workbench.export_calculix_results();
-                }
-                let tip = "Writes the current results for ParaView and other VTK programs, \
-                           one increment or a time series of several.";
-                for (label, format) in [
-                    ("Export VTU …", plx_io::vtk::VtkFormat::Xml),
-                    ("Export VTK …", plx_io::vtk::VtkFormat::Legacy),
-                ] {
-                    if ui
-                        .add_enabled(deformed, egui::Button::new(label))
-                        .on_hover_text(tip)
-                        .on_disabled_hover_text("No results are open.")
-                        .clicked()
-                    {
-                        self.workbench.open_vtk_export(format);
-                    }
-                }
-                ui.separator();
-                let tip = "Closes the analysis; it stays in the project.";
-                if ui.button("Close Analysis").on_hover_text(tip).clicked() {
-                    if embedded {
-                        self.workbench.requests.push(Request::Close);
-                    } else {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                }
-            });
-            ui.menu_button("Edit", |ui| self.workbench.edit_menu(ui));
-            // The classic menus, until the ribbon has taken them over.
-            ui.menu_button("More", |ui| {
-                ui.menu_button("View", |ui| {
-                    if ui.button("Zoom to Fit").clicked() {
-                        self.workbench.view_command = Some(ViewCommand::Fit);
-                    }
-                    for (view, label) in STANDARD_VIEWS {
-                        if ui.button(label).clicked() {
-                            self.workbench.view_command = Some(ViewCommand::View(view));
-                        }
-                    }
-                    if ui.button("Vertical View").clicked() {
-                        self.workbench.view_command = Some(ViewCommand::Vertical);
-                    }
-                    ui.menu_button("View Normal to Axis", |ui| {
-                        for axis in Axis::ALL {
-                            if ui.button(axis.label()).clicked() {
-                                self.workbench.view_command = Some(ViewCommand::AxisView(axis));
-                            }
-                        }
-                    });
-                    ui.menu_button("Isometric, Axis Up", |ui| {
-                        for axis in Axis::ALL {
-                            if ui.button(axis.label()).clicked() {
-                                self.workbench.view_command =
-                                    Some(ViewCommand::IsometricAxis(axis));
-                            }
-                        }
-                    });
-                    ui.separator();
-                    ui.checkbox(
-                        &mut self.workbench.viewport.options.mesh_edges,
-                        "Mesh Edges",
-                    );
-                    ui.checkbox(
-                        &mut self.workbench.settings.graphics.shell_thickness,
-                        "Shell Thickness",
-                    )
-                    .on_hover_text(settings::SHELL_THICKNESS_TIP);
-                    ui.checkbox(
-                        &mut self.workbench.settings.graphics.beam_profiles,
-                        "Beam Profiles",
-                    )
-                    .on_hover_text(settings::BEAM_PROFILES_TIP);
-                    ui.checkbox(
-                        &mut self.workbench.settings.graphics.show_linked,
-                        settings::SHOW_LINKED_LABEL,
-                    )
-                    .on_hover_text(settings::SHOW_LINKED_TIP);
-                    ui.separator();
-                    let has_model = self.workbench.shown().is_some();
-                    if ui
-                        .add_enabled(has_model, egui::Button::new("Section View …"))
-                        .clicked()
-                    {
-                        self.workbench.open_section_dialog();
-                    }
-                    let active = self.workbench.section.is_some();
-                    if ui
-                        .add_enabled(active, egui::Button::new("Section View Off"))
-                        .clicked()
-                    {
-                        self.workbench.section = None;
-                        self.workbench.section_dialog = None;
-                    }
-                    ui.separator();
-                    if ui
-                        .add_enabled(has_model, egui::Button::new("Exploded View …"))
-                        .clicked()
-                    {
-                        self.workbench.open_exploded_dialog();
-                    }
-                    let exploded = self.workbench.exploded_applied();
-                    if ui
-                        .add_enabled(exploded, egui::Button::new("Exploded View Off"))
-                        .clicked()
-                    {
-                        self.workbench.toggle_exploded();
-                    }
-                });
-                ui.menu_button("Geometry", |ui| {
-                    let import = egui::Button::new("Import …");
-                    if ui.add_enabled(self.loading.is_none(), import).clicked() {
-                        self.import(ui.ctx());
-                    }
-                });
-                ui.menu_button("Mesh", |ui| self.workbench.mesh_menu(ui));
-                ui.menu_button("Model", |ui| self.workbench.model_menu(ui));
-                ui.menu_button("Interaction", |ui| self.workbench.interaction_menu(ui));
-                ui.menu_button("Analysis", |ui| self.workbench.analysis_menu(ui));
-                ui.menu_button("Results", |ui| self.workbench.results_menu(ui));
-                ui.menu_button("Tools", |ui| {
-                    if ui.button("Query …").clicked() {
-                        self.workbench.open_query();
-                    }
-                    let annotated = self.workbench.has_annotations();
-                    if ui
-                        .add_enabled(annotated, egui::Button::new("Remove Annotations"))
-                        .clicked()
-                    {
-                        self.workbench.annotations(AnnotationCommand::DeleteAll);
-                    }
-                    ui.separator();
-                    if ui.button("Settings …").clicked() {
-                        self.workbench.settings_window =
-                            Some(SettingsWindow::new(&self.workbench.settings));
-                    }
-                });
-            });
-            ui.menu_button("Help", |ui| {
-                let tip = "Opens the user guide in the web browser";
-                if ui.button("User Guide").on_hover_text(tip).clicked() {
-                    let line = crate::help::open_user_guide();
-                    self.workbench.output.push(line);
-                }
-            });
-        }
+            }
+        });
+        ui.menu_button("Edit", |ui| {
+            self.workbench.edit_menu(ui);
+            ui.separator();
+            if ui.button("Settings …").clicked() {
+                self.workbench.settings_window =
+                    Some(SettingsWindow::new(&self.workbench.settings));
+            }
+        });
+        ui.menu_button("Help", |ui| {
+            let tip = "Opens the user guide in the web browser";
+            if ui.button("User Guide").on_hover_text(tip).clicked() {
+                let line = crate::help::open_user_guide();
+                self.workbench.output.push(line);
+            }
+        });
     }
 
     /// The status bar; returns whether the meshing was cancelled there.
@@ -1119,10 +1004,6 @@ pub fn is_results_file(path: &std::path::Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("frd"))
         || plx_results::solver::is_solver_results(path)
 }
-
-/// Tooltip of Solve, in the tool bar and the Analysis menu.
-const SOLVE_TIP: &str = "Solve (F5): meshes the parts whose mesh is out of date, runs the solver \
-     if the results are missing or out of date, and keeps the new results.";
 
 /// Moves the parts of a model between two scales of an exploded view: through the levels of a
 /// sequential disassembly one after the other, else in one animation.
@@ -1306,6 +1187,9 @@ const IMPORT_FILTER: (&str, &[&str]) = (
     ],
 );
 
+/// The height of the output pane folded to its tabs.
+pub const OUTPUT_TABS: f32 = 26.0;
+
 /// File dialog filter of the CAD formats Gmsh imports.
 const GEOMETRY_FILTER: (&str, &[&str]) = (
     "Geometry (*.step, *.stp, *.iges, *.igs, *.brep)",
@@ -1313,16 +1197,6 @@ const GEOMETRY_FILTER: (&str, &[&str]) = (
         "step", "STEP", "stp", "STP", "iges", "IGES", "igs", "IGS", "brep", "BREP",
     ],
 );
-
-const STANDARD_VIEWS: [(StandardView, &str); 7] = [
-    (StandardView::Front, "Front View"),
-    (StandardView::Back, "Back View"),
-    (StandardView::Top, "Top View"),
-    (StandardView::Bottom, "Bottom View"),
-    (StandardView::Left, "Left View"),
-    (StandardView::Right, "Right View"),
-    (StandardView::Isometric, "Isometric View"),
-];
 
 impl AnalysisWindow {
     /// Shows the analysis in a window of its own: its app bar without the Project segment,
@@ -1382,6 +1256,35 @@ impl AnalysisWindow {
             }
         }
         self.workspace_ui(ui);
+    }
+
+    /// The properties panel: the editor that is open, or else the checklist.
+    fn properties_panel(&mut self, ui: &mut egui::Ui, workspace: crate::command::Workspace) {
+        let ctx = ui.ctx().clone();
+        let overlay = crate::layout::current(&ctx).overlay;
+        let folded = self.workbench.checklist_fold.folded(overlay);
+        self.workbench.checklist_visible = self.workbench.checklist_shown && !folded;
+        if self.workbench.one_docked() {
+            crate::dock::panel(ui, None);
+        } else if self.workbench.checklist_visible {
+            let steps = self.checklist();
+            let problems = self.workbench.problems().len();
+            let mut clicked = None;
+            let mut draw = |ui: &mut egui::Ui| {
+                clicked = crate::checklist::show(ui, &steps, problems);
+            };
+            if crate::dock::panel(ui, Some(("Checklist", &mut draw))) {
+                self.workbench.checklist_shown = false;
+            }
+            match clicked {
+                Some(crate::checklist::Clicked::Run(cmd)) => {
+                    self.ribbon.reveal(workspace, cmd);
+                    self.run_command(&ctx, cmd);
+                }
+                Some(crate::checklist::Clicked::Problems) => self.workbench.problems_tab = true,
+                None => {}
+            }
+        }
     }
 
     /// Shows the analysis inside the project window, below the project's app bar.
@@ -1500,31 +1403,53 @@ impl AnalysisWindow {
         let pane = egui::Frame::new()
             .fill(crate::style::window())
             .stroke(egui::Stroke::new(1.0, crate::style::border()));
-        egui::Panel::left("tree")
-            .resizable(true)
-            .default_size(280.0)
-            .size_range(160.0..=700.0)
-            .frame(egui::Frame::new().fill(crate::style::control()))
-            .show(ui, |ui| {
-                // The tree of the workspace; the segments of the app bar switch it.
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(6.0);
-                    ui.strong(workspace.title());
+        // Below the narrow width the tree folds away behind a button of the app bar.
+        if !crate::layout::tree_folded(&ctx) {
+            egui::Panel::left("tree")
+                .resizable(true)
+                .default_size(280.0)
+                .size_range(160.0..=700.0)
+                .frame(egui::Frame::new().fill(crate::style::control()))
+                .show(ui, |ui| {
+                    // The tree of the workspace; the segments of the app bar switch it.
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(6.0);
+                        ui.strong(workspace.title());
+                    });
+                    ui.add_space(2.0);
+                    pane.inner_margin(4).show(ui, |ui| {
+                        ui.set_min_size(ui.available_size());
+                        let view = self.workbench.tree_view;
+                        self.workbench.model_tree(ui, view);
+                    });
                 });
-                ui.add_space(2.0);
-                pane.inner_margin(4).show(ui, |ui| {
-                    ui.set_min_size(ui.available_size());
-                    let view = self.workbench.tree_view;
-                    self.workbench.model_tree(ui, view);
-                });
-            });
-        egui::Panel::bottom("output")
-            .resizable(true)
-            .default_size(170.0)
-            .size_range(70.0..=600.0)
-            .frame(egui::Frame::new().fill(crate::style::control()))
-            .show(ui, |ui| self.workbench.output(ui, pane));
+        }
+        self.workbench.follow_selected_step();
+        // The properties panel takes its room before the output pane; lying over the 3D view
+        // in a narrow window, it ends above the output pane.
+        let overlay = crate::layout::current(&ctx).overlay;
+        if !overlay {
+            self.properties_panel(ui, workspace);
+        }
+        // In a small window the output pane shows only its tabs until one is clicked.
+        if crate::layout::output_folded(&ctx) {
+            egui::Panel::bottom("output folded")
+                .resizable(false)
+                .exact_size(OUTPUT_TABS)
+                .frame(egui::Frame::new().fill(crate::style::control()))
+                .show(ui, |ui| self.workbench.output(ui, pane, true));
+        } else {
+            egui::Panel::bottom("output")
+                .resizable(true)
+                .default_size(170.0)
+                .size_range(70.0..=600.0)
+                .frame(egui::Frame::new().fill(crate::style::control()))
+                .show(ui, |ui| self.workbench.output(ui, pane, false));
+        }
+        if overlay {
+            self.properties_panel(ui, workspace);
+        }
         egui::CentralPanel::no_frame().show(ui, |ui| {
             self.workbench.viewport.selecting = self.workbench.picking()
                 || self.workbench.section_picks()
@@ -1573,6 +1498,20 @@ impl AnalysisWindow {
             }
         });
         let view = self.workbench.viewport.rect;
+        // The floating bar, at the bottom of what the properties panel leaves of the view;
+        // not in a screenshot.
+        if self.workbench.shown().is_some() && !self.workbench.screenshot.capturing(&ctx) {
+            let mut free = view;
+            if let Some(panel) = crate::dock::over_view(&ctx) {
+                free.max.x = free.max.x.min(panel.left());
+            }
+            let bar = crate::ribbon::VIEW_BAR;
+            let host = &mut commands::RibbonHost(self);
+            if let Some(cmd) = crate::ribbon::floating_bar(&ctx, "view", free, bar, host) {
+                self.ribbon.reveal(workspace, cmd);
+                self.run_command(&ctx, cmd);
+            }
+        }
         let workbench = &mut self.workbench;
         workbench
             .screenshot
@@ -1582,6 +1521,8 @@ impl AnalysisWindow {
         self.workbench.update_motion_preview(&ctx);
         self.workbench.update_cyclic_preview();
         self.workbench.confirm_delete_window(&ctx);
+        self.workbench.confirm_remove_results(&ctx);
+        self.workbench.toast(&ctx);
         self.workbench.contact_search_window(&ctx);
         self.workbench.contact_worksheet_window(&ctx);
         self.workbench.mesh_tool_window(&ctx);
@@ -2037,17 +1978,58 @@ impl Workbench {
     }
 
     /// The pane below the 3D view: the messages, and in the Analysis tab the output of
-    /// CalculiX, so the results stay in view while it runs.
-    fn output(&mut self, ui: &mut egui::Ui, pane: egui::Frame) {
-        let (clicked, selected_tab) =
-            crate::style::tabs(ui, &["Output", "Analysis"], usize::from(self.analysis_tab));
+    /// the solver, so the results stay in view while it runs.
+    fn output(&mut self, ui: &mut egui::Ui, pane: egui::Frame, folded: bool) {
+        let ctx = ui.ctx().clone();
+        // The Analysis tab, brought to the front by a solve, covers the problems.
+        if self.analysis_tab && !self.analysis_tab_before {
+            self.problems_tab = false;
+            crate::layout::fold_output(&ctx, false);
+        }
+        if self.problems_tab && !self.problems_tab_before {
+            crate::layout::fold_output(&ctx, false);
+        }
+        self.problems_tab_before = self.problems_tab;
+        let problems = self.problems();
+        let problems_title = format!("Problems ({})", problems.len());
+        let selected = if self.problems_tab {
+            0
+        } else if self.analysis_tab {
+            1
+        } else {
+            2
+        };
+        let titles = [problems_title.as_str(), "Analysis", "Output"];
+        let top = ui.cursor().top();
+        let (clicked, selected_tab) = crate::style::tabs(ui, &titles, selected);
+        let row = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
         if let Some(index) = clicked {
+            self.problems_tab = index == 0;
             self.analysis_tab = index == 1;
+            if folded {
+                crate::layout::fold_output(&ctx, false);
+            }
+        }
+        self.analysis_tab_before = self.analysis_tab;
+        let double = ui.input(|i| {
+            i.pointer
+                .button_double_clicked(egui::PointerButton::Primary)
+                && i.pointer.interact_pos().is_some_and(|p| row.contains(p))
+        });
+        if double && !folded {
+            crate::layout::fold_output(&ctx, true);
+        }
+        if folded {
+            crate::style::open_tab(ui, selected_tab);
+            return;
         }
         let mut event = MonitorEvent::None;
+        let mut picked = None;
         pane.inner_margin(4).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
-            if !self.analysis_tab {
+            if self.problems_tab {
+                picked = problems_list(ui, &problems);
+            } else if !self.analysis_tab {
                 crate::virtual_table::lines(
                     ui,
                     egui::ScrollArea::both()
@@ -2066,10 +2048,41 @@ impl Workbench {
             }
         });
         crate::style::open_tab(ui, selected_tab);
+        if let Some((finding, open)) = picked {
+            self.pick_problem(ui.ctx(), &finding, open);
+        }
         match event {
             MonitorEvent::OpenResults => self.open_bound_results(),
             MonitorEvent::Stop => self.stop(),
             MonitorEvent::None => {}
+        }
+    }
+
+    /// The problems of the FE model: what the model check finds and what the solver found
+    /// in the last run.
+    fn problems(&self) -> Vec<plx_model::Finding> {
+        let mut findings = (self.model.as_ref()).map_or_else(Vec::new, Model::findings);
+        findings.extend(self.solver_findings.iter().cloned());
+        // Errors first.
+        findings.sort_by_key(|f| f.severity() != plx_model::Severity::Error);
+        findings
+    }
+
+    /// A problem was clicked: its item is selected in the FE Model tree; a double-click
+    /// opens it in the properties panel.
+    fn pick_problem(&mut self, ctx: &egui::Context, finding: &plx_model::Finding, open: bool) {
+        let (item, _) = tree::tree_items(finding.item);
+        if !matches!(item, TreeItem::Model) {
+            self.set_tree_view(TreeView::FeModel);
+            self.tree.selected = Some((TreeView::FeModel, item.clone()));
+            self.tree.reveal = true;
+        }
+        if open {
+            let response = TreeResponse {
+                open: Some(item),
+                ..Default::default()
+            };
+            self.tree_response(ctx, TreeView::FeModel, response);
         }
     }
 
@@ -2105,6 +2118,7 @@ impl Workbench {
         if view == TreeView::FeModel {
             self.update_acting();
         }
+        self.tree.active_step = self.active_step();
         let shown = match view {
             TreeView::Results => self.results.get_mut(self.current_result),
             TreeView::Geometry => self.geometry.as_mut(),
@@ -2519,10 +2533,7 @@ impl Workbench {
                             );
                         }
                     });
-                ui.separator();
-                ui.vertical_centered(|ui| {
-                    close = ui.button("Close").clicked();
-                });
+                close = crate::dialog::work_footer(ui, None) == crate::dialog::Work::Close;
             });
         if !open || close {
             self.findings_window = None;
@@ -2759,6 +2770,133 @@ impl Workbench {
         self.model.as_ref()
     }
 
+    /// The index of the active step: the one picked in the ribbon or last selected in the
+    /// tree, else the last step.
+    pub(crate) fn active_step(&self) -> Option<usize> {
+        let steps = &self.setup_model()?.fe.steps;
+        (self.active_step.as_ref())
+            .and_then(|name| steps.iter().position(|s| &s.name == name))
+            .or_else(|| steps.len().checked_sub(1))
+    }
+
+    /// Makes step `index` the active one.
+    pub(crate) fn set_active_step(&mut self, index: usize) {
+        let name = (self.setup_model())
+            .and_then(|m| m.fe.steps.get(index))
+            .map(|s| s.name.clone());
+        if name.is_some() {
+            self.active_step = name;
+        }
+    }
+
+    /// The combo box of the active step on the Steps tab of the ribbon.
+    pub(crate) fn active_step_combo(&mut self, ui: &mut egui::Ui) {
+        let active = self.active_step();
+        let steps: Vec<String> = (self.setup_model())
+            .map(|m| m.fe.steps.iter().map(|s| s.name.clone()).collect())
+            .unwrap_or_default();
+        let text = active
+            .and_then(|i| steps.get(i))
+            .map_or("No step", String::as_str)
+            .to_owned();
+        let mut picked = None;
+        let mut new_step = false;
+        ui.vertical(|ui| {
+            ui.add_space(6.0);
+            ui.weak("New items go into");
+            ui.add_enabled_ui(self.setup_model().is_some(), |ui| {
+                egui::ComboBox::from_id_salt("active step")
+                    .selected_text(text)
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        for (i, name) in steps.iter().enumerate() {
+                            if ui.selectable_label(active == Some(i), name).clicked() {
+                                picked = Some(i);
+                            }
+                        }
+                        ui.separator();
+                        new_step = ui.selectable_label(false, "New Step …").clicked();
+                    })
+                    .response
+                    .on_hover_text(
+                        "The active step: new boundary conditions, loads, outputs and \
+                         defined fields go into it, and the 3D view shows its symbols.",
+                    );
+            });
+        });
+        if let Some(i) = picked {
+            self.set_active_step(i);
+            // The symbols follow the active step, not a selection in another one.
+            if (self.tree.selected.as_ref())
+                .is_some_and(|(_, item)| step_of(item).is_some_and(|s| s != i))
+            {
+                self.tree.selected = None;
+            }
+        }
+        if new_step {
+            self.create(NewItem::Step);
+        }
+    }
+
+    /// The editors of the properties panel that are open.
+    fn docked_open(&self) -> Vec<crate::dock::Docked> {
+        use crate::dock::Docked;
+        let mut open = Vec::new();
+        for (is_open, docked) in [
+            (self.dialog.is_some(), Docked::Properties),
+            (self.editor.is_some(), Docked::Item),
+            (self.mesh_item_editor.is_some(), Docked::MeshItem),
+            (self.feature_dialog.is_some(), Docked::Feature),
+            (self.field_output_dialog.is_some(), Docked::FieldOutput),
+            (self.history_dialog.is_some(), Docked::HistoryOutput),
+            (self.hot_spot_dialog.is_some(), Docked::HotSpot),
+            (self.model_dialog.is_some(), Docked::ModelProperties),
+        ] {
+            if is_open {
+                open.push(docked);
+            }
+        }
+        open
+    }
+
+    /// Keeps one editor open in the properties panel, the one opened last; returns whether
+    /// one is open.
+    fn one_docked(&mut self) -> bool {
+        use crate::dock::Docked;
+        let open = self.docked_open();
+        for closed in crate::dock::one_open(&mut self.docked, &open) {
+            match closed {
+                Docked::Properties => self.dialog = None,
+                Docked::Item => {
+                    self.editor = None;
+                    self.highlighted = None;
+                }
+                Docked::MeshItem => self.mesh_item_editor = None,
+                Docked::Feature => self.feature_dialog = None,
+                Docked::FieldOutput => self.field_output_dialog = None,
+                Docked::HistoryOutput => self.history_dialog = None,
+                Docked::HotSpot => self.hot_spot_dialog = None,
+                Docked::ModelProperties => self.model_dialog = None,
+            }
+        }
+        !self.docked.is_empty()
+    }
+
+    /// A newly selected step, or item of a step, in the tree makes that step active.
+    fn follow_selected_step(&mut self) {
+        let selected = match &self.tree.selected {
+            Some((TreeView::FeModel, item)) => Some(item.clone()),
+            _ => None,
+        };
+        if selected == self.step_selection {
+            return;
+        }
+        if let Some(step) = selected.as_ref().and_then(step_of) {
+            self.set_active_step(step);
+        }
+        self.step_selection = selected;
+    }
+
     /// What the 3D view shows: the current results on the Results tab, else the FE model.
     fn shown(&self) -> Option<&Model> {
         match self.tree_view {
@@ -2840,26 +2978,6 @@ impl Workbench {
             }
         }
         self.results_changed = true;
-    }
-
-    /// The Results menu.
-    fn results_menu(&mut self, ui: &mut egui::Ui) {
-        let any = !self.results.is_empty();
-        let shown = self.tree_view == TreeView::Results
-            && (self.results.get(self.current_result)).is_some_and(|m| m.results.is_some());
-        if ui
-            .add_enabled(shown, egui::Button::new("Color Scale …"))
-            .clicked()
-        {
-            self.open_color_scale();
-        }
-        ui.separator();
-        if ui
-            .add_enabled(any, egui::Button::new("Create Hot Spot …"))
-            .clicked()
-        {
-            self.create(NewItem::ResultHotSpot);
-        }
     }
 
     /// The results row of the tool bar: the controls of the shown result.
@@ -3025,44 +3143,6 @@ impl Workbench {
                 None => Editor::create(kind, &model.fe),
             };
             self.set_tree_view(TreeView::FeModel);
-        }
-    }
-
-    /// The Mesh menu: the mesh setup and mesh generation for the geometry.
-    fn mesh_menu(&mut self, ui: &mut egui::Ui) {
-        let has_geometry = self.model.as_ref().is_some_and(|m| m.geometry.is_some());
-        let has_mesh = (self.model.as_ref()).is_some_and(|m| m.mesh.element_count() > 0);
-        if !has_geometry && !has_mesh {
-            ui.label("Import a geometry first");
-            return;
-        }
-        if has_geometry {
-            if ui.button("Create Mesh Setup Item …").clicked() {
-                self.create(NewItem::MeshSetupItem);
-            }
-            if ui.button("Default Mesh Parameters …").clicked() {
-                self.open_mesh_setup();
-            }
-            ui.separator();
-            let mesh = egui::Button::new("Mesh All Parts");
-            if ui.add_enabled(self.meshing.is_none(), mesh).clicked() {
-                self.generate_mesh(ui.ctx(), None);
-            }
-            let cancel = egui::Button::new("Cancel Meshing");
-            if ui.add_enabled(self.meshing.is_some(), cancel).clicked() {
-                self.cancel_meshing();
-            }
-        }
-        if has_mesh {
-            if has_geometry {
-                ui.separator();
-            }
-            if ui.button("Merge coincident nodes ...").clicked() {
-                self.open_mesh_tool(MeshTool::MergeNodes);
-            }
-            if ui.button("Renumber nodes and elements ...").clicked() {
-                self.open_mesh_tool(MeshTool::Renumber);
-            }
         }
     }
 
@@ -3310,126 +3390,6 @@ impl Workbench {
         }
     }
 
-    /// The Model menu: create items of the FE model.
-    /// The Interaction menu: constraints, contacts and the search for contact pairs.
-    fn interaction_menu(&mut self, ui: &mut egui::Ui) {
-        if self.setup_model().is_none() {
-            ui.label("Open an .inp file first");
-            return;
-        }
-        let mut kind = None;
-        if ui.button("Detect Contacts …").clicked() {
-            kind = Some(NewItem::ContactDetection);
-        }
-        if ui.button("Create Contact Region …").clicked() {
-            kind = Some(NewItem::ContactRegion);
-        }
-        if ui.button("Create Bolt …").clicked() {
-            kind = Some(NewItem::Bolt);
-        }
-        if ui.button("Contact Worksheet …").clicked() {
-            self.contact_worksheet = true;
-        }
-        if ui.button("Connection Settings …").clicked()
-            && let Some(model) = self.setup_model()
-        {
-            self.editor = Editor::edit(&TreeItem::Group("Contacts"), &model.fe, &model.mesh);
-        }
-        ui.separator();
-        if ui.button("Create Constraint …").clicked() {
-            kind = Some(NewItem::Constraint);
-        }
-        ui.menu_button("Advanced", |ui| {
-            for (item, label) in [
-                (NewItem::SurfaceInteraction, "Create Surface Interaction …"),
-                (NewItem::ContactPair, "Create Contact Pair …"),
-                (NewItem::Tie, "Create Tie …"),
-            ] {
-                if ui.button(label).clicked() {
-                    kind = Some(item);
-                }
-            }
-            ui.separator();
-            if ui.button("Search Contact Pairs …").clicked() {
-                self.open_contact_search();
-            }
-        });
-        if let Some(kind) = kind {
-            self.create(kind);
-        }
-    }
-
-    fn model_menu(&mut self, ui: &mut egui::Ui) {
-        if self.setup_model().is_none() {
-            ui.label("Create or open a model first");
-            return;
-        }
-        if ui.button("Model Properties …").clicked() {
-            self.edit_model_properties();
-        }
-        ui.separator();
-        let Some(model) = self.setup_model() else {
-            return;
-        };
-        let last_step = model.fe.steps.len().checked_sub(1);
-        let takes_loads = model
-            .fe
-            .steps
-            .last()
-            .is_some_and(|s| s.kind.supports_loads());
-        let takes_defined_fields = model
-            .fe
-            .steps
-            .last()
-            .is_some_and(|s| s.kind.supports_defined_fields());
-        let mut kind = None;
-        for (item, label, enabled) in [
-            (NewItem::Material, "Create Material …", true),
-            (NewItem::CrossSection, "Create Cross-Section …", true),
-            (NewItem::Section, "Create Section …", true),
-            (
-                NewItem::InitialCondition,
-                "Create Initial Condition …",
-                true,
-            ),
-            (NewItem::Amplitude, "Create Amplitude …", true),
-            (NewItem::Distribution, "Create Distribution …", true),
-            (NewItem::Step, "Create Step …", true),
-            (
-                NewItem::BoundaryCondition(last_step.unwrap_or(0)),
-                "Create Boundary Condition …",
-                last_step.is_some(),
-            ),
-            (
-                NewItem::Load(last_step.unwrap_or(0)),
-                "Create Load …",
-                takes_loads,
-            ),
-            (
-                NewItem::FieldOutput(last_step.unwrap_or(0)),
-                "Create Field Output …",
-                last_step.is_some(),
-            ),
-            (
-                NewItem::HistoryOutput(last_step.unwrap_or(0)),
-                "Create History Output …",
-                last_step.is_some(),
-            ),
-            (
-                NewItem::DefinedField(last_step.unwrap_or(0)),
-                "Create Defined Field …",
-                takes_defined_fields,
-            ),
-        ] {
-            if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-                kind = Some(item);
-            }
-        }
-        if let Some(kind) = kind {
-            self.create(kind);
-        }
-    }
-
     /// The Material Library Editor, from the context menu of Materials.
     fn open_material_library(&mut self) {
         if let Some(model) = self.setup_model() {
@@ -3461,73 +3421,26 @@ impl Workbench {
         }
     }
 
-    fn analysis_menu(&mut self, ui: &mut egui::Ui) {
-        let running = self.running();
-        let can_start = self.setup_model().is_some() && !running && self.meshing.is_none();
-        let solve = egui::Button::new("Solve").shortcut_text("F5");
-        if ui
-            .add_enabled(can_start, solve)
-            .on_hover_text(SOLVE_TIP)
-            .clicked()
-        {
-            self.solve();
+    /// Asks before Remove Results, which Undo cannot take back.
+    fn confirm_remove_results(&mut self, ctx: &egui::Context) {
+        if !self.confirm_remove_results {
+            return;
         }
-        if ui
-            .add_enabled(can_start, egui::Button::new("Solve Again"))
-            .on_hover_text("Runs the solver even if the results are up to date.")
-            .clicked()
-        {
-            self.requests.push(Request::SolveChain(true));
-        }
-        if ui
-            .add_enabled(can_start, egui::Button::new("Check Model"))
-            .clicked()
-        {
-            self.check_model();
-        }
-        if ui.add_enabled(running, egui::Button::new("Stop")).clicked() {
-            self.stop();
-        }
-        if ui.button("Monitor").clicked() {
-            self.analysis_tab = true;
-        }
-        let kept = (self.model.as_ref()).is_some_and(|m| m.bound_results.is_some());
-        if ui
-            .add_enabled(!running && kept, egui::Button::new("Open Results"))
-            .clicked()
-        {
-            self.open_bound_results();
-        }
-        if ui
-            .add_enabled(!running && kept, egui::Button::new("Remove Results"))
-            .on_hover_text(
-                "Drops the results the analysis keeps; saving the project leaves them out.",
-            )
-            .clicked()
-        {
-            self.remove_results();
-        }
-        ui.separator();
-        if ui.button("Solver Settings …").clicked() {
-            let window = SettingsWindow::with_page(&self.settings, settings::Page::Solver);
-            self.settings_window = Some(window);
-        }
-        ui.separator();
-        let rotor = self
-            .setup_model()
-            .is_some_and(|m| crate::campbell::applies(&m.fe));
-        if ui
-            .add_enabled(rotor, egui::Button::new("Campbell diagram ..."))
-            .on_hover_text(
-                "Opens the Campbell block of the analysis in the project, which sweeps it over \
-                 the speed and keeps the diagram; makes the block first if there is none.",
-            )
-            .on_disabled_hover_text(
-                "Needs an active Centrifugal load and a Complex Frequency step.",
-            )
-            .clicked()
-        {
-            self.requests.push(Request::Campbell);
+        let question = "Remove the results of the analysis?";
+        let consequence = "Saving the project leaves them out; solve again to get them back.";
+        match crate::dialog::confirm(
+            ctx,
+            "confirm remove results",
+            question,
+            consequence,
+            "Remove",
+        ) {
+            Some(true) => {
+                self.confirm_remove_results = false;
+                self.remove_results();
+            }
+            Some(false) => self.confirm_remove_results = false,
+            None => {}
         }
     }
 
@@ -3883,6 +3796,9 @@ impl Workbench {
                     analysis.note(
                         "The warning symbol on the analysis in the tree explains the cause.".into(),
                     );
+                    // Errors bring the problems to the front.
+                    self.problems_tab = true;
+                    self.analysis_tab_before = self.analysis_tab;
                 }
             }
             // Warnings that point to wrong results, after any run.
@@ -4798,12 +4714,12 @@ impl Workbench {
         }
     }
 
-    /// The question before deleting, for the context menu and the Delete key alike.
+    /// Deleting, for the context menu and the Delete key alike: in the FE model at once with
+    /// a toast offering Undo, elsewhere after a confirmation, since Undo does not reach there.
     fn confirm_delete_window(&mut self, ctx: &egui::Context) {
         let Some((view, items)) = self.confirm_delete.clone() else {
             return;
         };
-        let mut answer = None;
         // The parts are named in the question.
         let parts: Vec<String> = (items.iter())
             .filter_map(|item| match item {
@@ -4814,31 +4730,38 @@ impl Workbench {
             })
             .collect();
         let question = match parts.as_slice() {
-            [] if items.len() > 1 => format!("Delete the {} selected items?", items.len()),
-            [] => "Delete the selected item?".into(),
-            [name] => format!("Delete the selected part?\n{name}"),
-            names => format!("Delete the selected parts?\n{}", names.join(", ")),
+            [] if items.len() > 1 => format!("Delete {} items?", items.len()),
+            [] => "Delete the item?".into(),
+            [name] => format!("Delete {name}?"),
+            names => format!("Delete {} parts?", names.len()),
         };
-        egui::Modal::new(crate::ids::window(ctx, "confirm delete")).show(ctx, |ui| {
-            ui.label(question);
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                if ui.button("OK").clicked() {
-                    answer = Some(true);
-                }
-                if ui.button("Cancel").clicked() {
-                    answer = Some(false);
-                }
-            });
-        });
-        // Enter confirms and Escape cancels, as with the default buttons of a message box.
-        ctx.input(|i| {
-            if i.key_pressed(egui::Key::Enter) {
-                answer = Some(true);
-            } else if i.key_pressed(egui::Key::Escape) {
-                answer = Some(false);
+        let consequence = match parts.as_slice() {
+            [] | [_] => "Undo cannot bring it back here.".to_owned(),
+            names => format!("{}. Undo cannot bring them back here.", names.join(", ")),
+        };
+        // In the FE model Undo brings a deleted item back, so it goes at once and a toast
+        // offers Undo. Elsewhere there is no Undo, so the user is asked first.
+        let undoable = view == TreeView::FeModel;
+        let toast = undoable.then(|| {
+            let names: Vec<String> = match parts.as_slice() {
+                [] => (items.iter())
+                    .filter_map(|item| self.item_name(item))
+                    .collect(),
+                names => names.to_vec(),
+            };
+            match names.as_slice() {
+                [name] if items.len() == 1 => format!("Deleted {name}"),
+                _ => format!("Deleted {} items", items.len()),
             }
         });
+        let answer = if undoable {
+            Some(true)
+        } else {
+            crate::dialog::confirm(ctx, "confirm delete", &question, &consequence, "Delete")
+        };
+        if let (Some(true), Some(text)) = (answer, toast) {
+            self.toast = Some(crate::toast::Toast::new(text, true));
+        }
         match answer {
             Some(true) => {
                 self.confirm_delete = None;
@@ -4868,6 +4791,28 @@ impl Workbench {
             }
             Some(false) => self.confirm_delete = None,
             None => {}
+        }
+    }
+
+    /// The name of an item of the FE model, as its dialog shows it.
+    fn item_name(&self, item: &TreeItem) -> Option<String> {
+        let model = self.model.as_ref()?;
+        let editor = Editor::edit(item, &model.fe, &model.mesh)?;
+        Some(editor.name())
+    }
+
+    /// Shows the toast, if there is one, over the bottom of the 3D view.
+    fn toast(&mut self, ctx: &egui::Context) {
+        let Some(toast) = &mut self.toast else {
+            return;
+        };
+        match crate::toast::show(ctx, toast, self.viewport.rect) {
+            crate::toast::Event::None => {}
+            crate::toast::Event::Gone => self.toast = None,
+            crate::toast::Event::Undo => {
+                self.toast = None;
+                self.undo();
+            }
         }
     }
 
@@ -5202,6 +5147,54 @@ impl Workbench {
     }
 
     /// The Edit menu.
+    /// The exports of the File menu.
+    fn export_menu(&mut self, ui: &mut egui::Ui) {
+        let setup = self.setup_model().is_some();
+        let export = egui::Button::new("CalculiX Input File …");
+        if ui.add_enabled(setup, export).clicked() {
+            self.export_inp();
+        }
+        let deformed = self.shown_results_view().is_some();
+        let export = egui::Button::new("Deformed Mesh (.inp) …");
+        let tip = "Writes the mesh of the current results, deformed by the current \
+                   deformation scale factor, as an input file with only the mesh.";
+        if ui
+            .add_enabled(deformed, export)
+            .on_hover_text(tip)
+            .on_disabled_hover_text("No results are open.")
+            .clicked()
+        {
+            self.export_deformed_mesh();
+        }
+        let export = egui::Button::new("CalculiX Results (.frd) …");
+        let tip = "Writes the current results as CalculiX's result files: the .frd \
+                   file and, with history output, the .dat file beside it, for \
+                   CalculiX GraphiX, PrePoMax and other programs that read them.";
+        if ui
+            .add_enabled(deformed, export)
+            .on_hover_text(tip)
+            .on_disabled_hover_text("No results are open.")
+            .clicked()
+        {
+            self.export_calculix_results();
+        }
+        let tip = "Writes the current results for ParaView and other VTK programs, \
+                   one increment or a time series of several.";
+        for (label, format) in [
+            ("VTU …", plx_io::vtk::VtkFormat::Xml),
+            ("VTK …", plx_io::vtk::VtkFormat::Legacy),
+        ] {
+            if ui
+                .add_enabled(deformed, egui::Button::new(label))
+                .on_hover_text(tip)
+                .on_disabled_hover_text("No results are open.")
+                .clicked()
+            {
+                self.open_vtk_export(format);
+            }
+        }
+    }
+
     fn edit_menu(&mut self, ui: &mut egui::Ui) {
         let blocked = self.undo_blocked();
         let history = self.model.as_ref().map(|m| &m.history);
@@ -5308,6 +5301,10 @@ impl Workbench {
             EditorResult::Ok => {
                 if let Some(editor) = self.editor.take() {
                     let created = editor.new_interaction_item(&model.fe);
+                    // A new step becomes the active one.
+                    if let Some(step) = editor.new_step() {
+                        self.active_step = Some(step);
+                    }
                     let detection = editor.detection(&model.fe);
                     let sets = model.fe.mesh_sets.clone();
                     if let Some((kind, name)) = editor.replaced_set() {
@@ -5552,19 +5549,9 @@ impl Workbench {
             }
         }
         items.extend(self.editor.as_ref().and_then(Editor::constraint_item));
-        let step_of = |item: &TreeItem| match *item {
-            TreeItem::Step(s)
-            | TreeItem::StepGroup(s, _)
-            | TreeItem::BoundaryCondition(s, _)
-            | TreeItem::Load(s, _)
-            | TreeItem::FieldOutput(s, _)
-            | TreeItem::HistoryOutput(s, _)
-            | TreeItem::DefinedField(s, _) => Some(s),
-            _ => None,
-        };
         let index = (edited.as_ref().map(|(s, ..)| *s))
             .or_else(|| selected.and_then(step_of))
-            .or_else(|| model.fe.steps.len().checked_sub(1));
+            .or_else(|| self.active_step());
         let Some((index, step)) = index.and_then(|i| Some((i, model.fe.steps.get(i)?))) else {
             return items;
         };
@@ -5779,7 +5766,6 @@ impl Workbench {
                 return;
             }
             SectionResult::Ok => self.section = Some(dialog.draft),
-            SectionResult::Cancel => self.section = dialog.before,
             SectionResult::Disable => self.section = None,
         }
         self.viewport.preview = Default::default();
@@ -6232,39 +6218,39 @@ impl Workbench {
             TreeView::Geometry => self.geometry.as_ref(),
             TreeView::FeModel => self.model.as_ref(),
         };
-        egui::Window::new(properties::title(shown, &item))
+        let title = properties::title(shown, &item);
+        let builder = egui::Window::new(title.clone())
             .id(crate::ids::window(ctx, "properties window"))
-            .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
-            .show(ctx, |ui| {
-                let (name, error) = &mut self.part_name;
-                let name = part.map(|_| name);
-                // Element types are chosen for the FE model, not for results.
-                let types = (part.is_some() && self.tree_view == TreeView::FeModel)
-                    .then_some(())
-                    .zip(shown)
-                    .map(|((), model)| properties::ElementTypes {
-                        types: &mut self.part_types,
-                        space: model.fe.properties.space,
-                    });
-                properties::show(ui, shown, &item, name, types);
-                if let Some(error) = error.as_ref().filter(|_| part.is_some()) {
-                    ui.add_space(4.0);
-                    ui.colored_label(crate::style::error(), error);
-                }
-                ui.add_space(8.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if part.is_some() {
-                        close = ui.button("Cancel").clicked();
-                        accept = ui.button("OK").clicked();
-                    } else {
-                        close = ui.button("Close").clicked();
-                    }
+            .default_pos(ctx.content_rect().center());
+        crate::dock::show(ctx, builder, title, &mut open, |ui| {
+            let (name, error) = &mut self.part_name;
+            let name = part.map(|_| name);
+            // Element types are chosen for the FE model, not for results.
+            let types = (part.is_some() && self.tree_view == TreeView::FeModel)
+                .then_some(())
+                .zip(shown)
+                .map(|((), model)| properties::ElementTypes {
+                    types: &mut self.part_types,
+                    space: model.fe.properties.space,
                 });
+            properties::show(ui, shown, &item, name, types);
+            if let Some(error) = error.as_ref().filter(|_| part.is_some()) {
+                ui.add_space(4.0);
+                ui.colored_label(crate::style::error(), error);
+            }
+            ui.add_space(8.0);
+            crate::dock::footer(ui, |ui| {
+                if part.is_some() {
+                    close = ui.button("Cancel").clicked();
+                    accept = ui.button("OK").clicked();
+                } else {
+                    close = ui.button("Close").clicked();
+                }
             });
+        });
         accept |= part.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Enter));
         if let (true, Some(index)) = (accept, part) {
             let name = self.part_name.0.clone();
@@ -7112,7 +7098,7 @@ fn start_animation_export(
         && let Err(err) = animation_export::ffmpeg_version(&ffmpeg)
     {
         output.push(format!(
-            "{err}. Exporting {} needs FFmpeg: install it or set its path under Tools > \
+            "{err}. Exporting {} needs FFmpeg: install it or set its path under Edit > \
              Settings > Post-processing; GIF works without it.",
             format.extension().to_uppercase()
         ));
@@ -7282,6 +7268,9 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
                     }
                 }
             });
+            if crate::dialog::tool_footer(ui, None) == crate::dialog::Tool::Close {
+                event = WindowEvent::Close;
+            }
         });
     if let Some(kind) = restart {
         view.start_animation(kind);
@@ -7291,6 +7280,75 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
         event = WindowEvent::Close;
     }
     event
+}
+
+/// The list of problems in the Problems tab: errors and warnings with what they are about.
+/// Returns the problem clicked, and whether it was double-clicked.
+fn problems_list(
+    ui: &mut egui::Ui,
+    problems: &[plx_model::Finding],
+) -> Option<(plx_model::Finding, bool)> {
+    if problems.is_empty() {
+        ui.weak("No problems found: the model check has nothing to report.");
+        return None;
+    }
+    let mut picked = None;
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for finding in problems {
+                let (kind, color) = match finding.severity() {
+                    plx_model::Severity::Error => ("Error", crate::style::error()),
+                    plx_model::Severity::Warning => ("Warning", crate::style::warning()),
+                };
+                let row = ui
+                    .horizontal(|ui| {
+                        ui.colored_label(color, egui::RichText::new(kind).strong());
+                        ui.label(egui::RichText::new(finding.problem.title()).strong());
+                        ui.weak(&finding.detail);
+                    })
+                    .response;
+                let row = ui
+                    .interact(row.rect, row.id.with("problem"), egui::Sense::click())
+                    .on_hover_text(format!(
+                        "{}\n\nRemedy: {}\n\nClick to select it in the tree, \
+                         double-click to open it.",
+                        finding.problem.explanation(),
+                        finding.problem.fix()
+                    ));
+                if row.hovered() {
+                    ui.painter().rect_filled(
+                        row.rect,
+                        2.0,
+                        ui.visuals()
+                            .widgets
+                            .hovered
+                            .weak_bg_fill
+                            .gamma_multiply(0.3),
+                    );
+                }
+                if row.double_clicked() {
+                    picked = Some((finding.clone(), true));
+                } else if row.clicked() {
+                    picked = Some((finding.clone(), false));
+                }
+            }
+        });
+    picked
+}
+
+/// The step an item of the FE model tree belongs to.
+fn step_of(item: &TreeItem) -> Option<usize> {
+    match *item {
+        TreeItem::Step(s)
+        | TreeItem::StepGroup(s, _)
+        | TreeItem::BoundaryCondition(s, _)
+        | TreeItem::Load(s, _)
+        | TreeItem::FieldOutput(s, _)
+        | TreeItem::HistoryOutput(s, _)
+        | TreeItem::DefinedField(s, _) => Some(s),
+        _ => None,
+    }
 }
 
 /// Prefixes an output message with the local time, `HH:MM:SS`.

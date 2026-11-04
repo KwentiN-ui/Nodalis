@@ -30,7 +30,7 @@ Only Visco steps let the material creep; a Static step treats it as elastic (and
 
 === Visco step
 
-Create it with #menu("Model", "Create Step ...") and the type #ui("Visco (creep)"). It has the
+Create it with #menu("Steps", "Step") and the type #ui("Visco (creep)"). It has the
 settings of a static step (@steps); the #ui("Time period") is the creep time, 1000 s by
 default. The loads of the step are held over that time. Typically a Static step applies the
 loads first and the Visco step keeps them, so the creep starts from the loaded state.

@@ -1076,9 +1076,11 @@ pub fn worksheet(
     let mut change = None;
     let mu_id = egui::Id::new("contact worksheet mu");
     let mut mu: f64 = ctx.data(|d| d.get_temp(mu_id)).unwrap_or(0.15);
+    let mut close = false;
     egui::Window::new("Contact Worksheet")
         .id(crate::ids::window(ctx, "contact worksheet"))
         .open(open)
+        .collapsible(false)
         .default_width(900.0)
         .default_height(360.0)
         .resizable(true)
@@ -1132,8 +1134,12 @@ pub fn worksheet(
                 });
             });
             ui.separator();
+            // A work window: Close at the bottom right, below the table.
+            close = crate::dialog::close_bar(ui, "contact worksheet");
             if rows.is_empty() {
-                ui.weak("No contact regions. Create one in the Interaction menu.");
+                ui.weak(
+                    "No contact regions. Create one with Contact Region on the Connections tab.",
+                );
                 return;
             }
             egui::ScrollArea::both()
@@ -1259,6 +1265,9 @@ pub fn worksheet(
                         });
                 });
         });
+    if close {
+        *open = false;
+    }
     ctx.data_mut(|d| d.insert_temp(mu_id, mu));
     let Some(change) = change else {
         return;

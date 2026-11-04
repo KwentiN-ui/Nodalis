@@ -4,7 +4,7 @@
 
 == Importing geometry <geometry-import>
 
-#menu("Geometry", "Import ...") or the ribbon tile #ui("Import Geometry") reads STEP
+#menu("Geometry", "Import Geometry") or the ribbon tile #ui("Import Geometry") reads STEP
 (`.step`, `.stp`), IGES (`.iges`, `.igs`) and BREP (`.brep`) files. Several files can be
 selected at once. Gmsh with OpenCASCADE reads the files, so Gmsh must be available
 (@settings).
@@ -30,7 +30,7 @@ selected at once. Gmsh with OpenCASCADE reads the files, so Gmsh must be availab
 === Importing a mesh <mesh-import>
 
 The same dialog also takes input files (`.inp`). Their mesh is added to the model as *mesh
-parts*, for example a mesh written by #menu("File", "Export Deformed Mesh (.inp) ...")
+parts*, for example a mesh written by #menu("File", "Export", "Deformed Mesh (.inp) ...")
 (@export-deformed) to use a buckling mode as imperfection. Select the files in the file dialog
 (the filter #ui("Input file") shows only those) and the parts appear in the FE Model workspace.
 

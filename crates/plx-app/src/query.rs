@@ -1,4 +1,4 @@
-//! The Query tool (Tools > Query): clicks in the 3D view write what was hit to the
+//! The Query tool (Query on the View and Evaluate tabs): clicks in the 3D view write what was hit to the
 //! output pane, as aligned lines, and leave an annotation in the view.
 //! Nodes, elements, edges, surfaces and parts are queried with one click, edges and
 //! surfaces picked as the geometry based selection picks them; distances, angles and
@@ -221,19 +221,20 @@ impl QueryWindow {
                     ),
                 };
                 ui.weak(hint);
-                ui.add_space(8.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Close").clicked() {
-                        action = QueryAction::Close;
-                    }
+                let any = model.is_some_and(|m| !m.query_annotations.is_empty())
+                    || !self.picked.is_empty();
+                let mut remove = false;
+                let footer = crate::dialog::tool_footer_with(ui, None, |ui| {
                     let clear = egui::Button::new("Remove Annotations");
-                    let any = model.is_some_and(|m| !m.query_annotations.is_empty())
-                        || !self.picked.is_empty();
-                    if ui.add_enabled(any, clear).clicked() {
-                        self.picked.clear();
-                        action = QueryAction::RemoveAll;
-                    }
+                    remove = ui.add_enabled(any, clear).clicked();
                 });
+                if remove {
+                    self.picked.clear();
+                    action = QueryAction::RemoveAll;
+                }
+                if footer == crate::dialog::Tool::Close {
+                    action = QueryAction::Close;
+                }
             });
         if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             action = QueryAction::Close;

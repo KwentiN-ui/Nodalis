@@ -48,7 +48,7 @@ settings of the window:
 GIF needs nothing else; its frame times are counted in hundredths of a second, so above 50 frames
 per second it plays slower. MP4 and MKV are written by #link("https://ffmpeg.org")[FFmpeg], which
 has to be installed: Nodalis looks for `ffmpeg` on the `PATH`, or uses the executable set under
-#menu("Tools", "Settings …") > #ui("Post-processing") > #ui("FFmpeg executable"). The video is
+#menu("Edit", "Settings ...") > #ui("Post-processing") > #ui("FFmpeg executable"). The video is
 H.264 (or FFmpeg's default codec if it lacks H.264); its width and height are rounded down to even
 numbers. The output pane reports the saved file or what went wrong.
 

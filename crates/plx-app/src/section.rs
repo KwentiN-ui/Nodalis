@@ -211,8 +211,6 @@ pub enum SectionResult {
     Open,
     /// Keep the section view as it is now.
     Ok,
-    /// Restore the section view from before the dialog.
-    Cancel,
     /// Turn the section view off.
     Disable,
 }
@@ -220,8 +218,6 @@ pub enum SectionResult {
 /// The section view dialog, extended by principal planes and the manipulator.
 pub struct SectionDialog {
     pub draft: SectionView,
-    /// The section view before the dialog opened, restored on cancel.
-    pub before: Option<SectionView>,
     picking: Option<Picking>,
     picker: Picker,
     /// Nodes of the picked first point of a normal, shown highlighted.
@@ -244,7 +240,6 @@ impl SectionDialog {
             .unwrap_or_else(|| SectionView::facing(view_direction, center));
         Self {
             draft,
-            before: current,
             picking: None,
             picker: Picker::default(),
             marked: BTreeSet::new(),
@@ -371,18 +366,12 @@ impl SectionDialog {
             .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0))
             .show(ctx, |ui| {
                 self.form(ui, model);
-                ui.separator();
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Cancel").clicked() {
-                        result = SectionResult::Cancel;
-                    }
-                    if ui.button("Deactivate").clicked() {
-                        result = SectionResult::Disable;
-                    }
-                    if ui.button("OK").clicked() {
-                        result = SectionResult::Ok;
-                    }
-                });
+                // A tool window: the section shows as it is edited; Close keeps it.
+                match crate::dialog::tool_footer(ui, Some(true)) {
+                    crate::dialog::Tool::Off => result = SectionResult::Disable,
+                    crate::dialog::Tool::Close => result = SectionResult::Ok,
+                    crate::dialog::Tool::None => {}
+                }
             });
         if let Some(window) = window
             && self.picking.is_some()
@@ -396,7 +385,7 @@ impl SectionDialog {
             }
         }
         if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            result = SectionResult::Cancel;
+            result = SectionResult::Ok;
         }
         result
     }

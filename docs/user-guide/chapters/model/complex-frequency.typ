@@ -4,7 +4,7 @@
 
 A #ui("Complex Frequency (rotating, Coriolis)") step computes the eigenfrequencies of a rotating
 structure with its Coriolis forces (`*COMPLEX FREQUENCY`), for example the whirl modes of a
-shaft. Create it with #menu("Model", "Create Step ...") and choose the type in the dialog.
+shaft. Create it with #menu("Steps", "Step") and choose the type in the dialog.
 
 #screenshot("complex-frequency-step.png", [Complex Frequency step])
 
@@ -32,7 +32,7 @@ The complex frequency step takes the boundary conditions of the step before it a
 model check (@model-check) reports a missing stored frequency step as an error ("No stored
 eigenmodes") and a Coriolis step without a centrifugal load as a warning ("No rotation").
 
-Join bonded parts of a rotor with a Tie constraint (#menu("Interaction", "Advanced", "Create Tie ...")), not
+Join bonded parts of a rotor with a Tie constraint (#menu("Connections", "Tie")), not
 with a contact pair with tied surface behavior. CalculiX leaves contact pairs out of a frequency
 step without perturbation, so the parts they hold float; and even with perturbation the Coriolis
 coupling of the complex frequency step misses the contact, so whirl pairs do not split and modes

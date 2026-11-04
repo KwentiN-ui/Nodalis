@@ -1168,6 +1168,9 @@ pub struct Editor {
     linked: Vec<(u32, String)>,
     /// The CAD geometry a contact detection searches before the parts are meshed.
     detection_scope: Option<connections::DetectionScope>,
+    /// The step an edited boundary condition or load was in; the dialog can move it to
+    /// another step.
+    from_step: Option<usize>,
 }
 
 pub enum EditorResult {
@@ -1971,6 +1974,7 @@ impl Editor {
             expose: None,
             linked: Vec::new(),
             detection_scope: None,
+            from_step: None,
         })
     }
 
@@ -1993,6 +1997,7 @@ impl Editor {
             expose: None,
             linked: Vec::new(),
             detection_scope: None,
+            from_step: None,
         }
     }
 
@@ -2030,6 +2035,7 @@ impl Editor {
             expose: None,
             linked: Vec::new(),
             detection_scope: None,
+            from_step: None,
         })
     }
 
@@ -2165,6 +2171,10 @@ impl Editor {
             }
             _ => return None,
         };
+        let from_step = match &draft {
+            Draft::BoundaryCondition(s, ..) | Draft::Load(s, ..) => Some(*s),
+            _ => None,
+        };
         Some(Self {
             draft,
             index: Some(index),
@@ -2175,7 +2185,24 @@ impl Editor {
             expose: None,
             linked: Vec::new(),
             detection_scope: None,
+            from_step,
         })
+    }
+
+    /// The name of the item, as the title shows it.
+    pub fn name(&self) -> String {
+        let title = self.title();
+        title
+            .split_once(": ")
+            .map_or(title.clone(), |(_, name)| name.to_owned())
+    }
+
+    /// The name of the step this dialog creates, if it creates one.
+    pub fn new_step(&self) -> Option<String> {
+        match &self.draft {
+            Draft::Step(step, _) if self.index.is_none() => Some(step.name.clone()),
+            _ => None,
+        }
     }
 
     pub fn title(&self) -> String {
@@ -2453,9 +2480,9 @@ impl Editor {
     pub fn show(&mut self, ctx: &egui::Context, model: &Model) -> EditorResult {
         let mut result = EditorResult::Open;
         let mut open = true;
-        let mut window = egui::Window::new(self.title())
+        let title = self.title();
+        let mut window = egui::Window::new(title.clone())
             .id(crate::ids::window(ctx, "item editor"))
-            .open(&mut open)
             .collapsible(false)
             .resizable(false);
         if matches!(self.draft, Draft::Constraint(_)) {
@@ -2467,37 +2494,37 @@ impl Editor {
         }
         let window = window
             .pivot(egui::Align2::LEFT_TOP)
-            .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0))
-            .show(ctx, |ui| {
-                if let Draft::SurfaceInteraction(interaction, view) = &mut self.draft {
-                    contacts::interaction_dialog(ui, interaction, view, model.fe.properties.units);
-                } else if let Draft::Amplitude(amplitude, view) = &mut self.draft {
-                    let units = model.fe.properties.units;
-                    amplitude_dialog::amplitude_form(ui, amplitude, view, units);
-                } else {
-                    egui::Grid::new("item form")
-                        .num_columns(2)
-                        .spacing([12.0, 6.0])
-                        .show(ui, |ui| self.exposing_form(ui, model));
+            .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0));
+        let window = crate::dock::show(ctx, window, title, &mut open, |ui| {
+            if let Draft::SurfaceInteraction(interaction, view) = &mut self.draft {
+                contacts::interaction_dialog(ui, interaction, view, model.fe.properties.units);
+            } else if let Draft::Amplitude(amplitude, view) = &mut self.draft {
+                let units = model.fe.properties.units;
+                amplitude_dialog::amplitude_form(ui, amplitude, view, units);
+            } else {
+                egui::Grid::new("item form")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| self.exposing_form(ui, model));
+            }
+            if let Some(error) = &self.error {
+                ui.colored_label(crate::style::error(), error);
+            }
+            ui.separator();
+            crate::dock::footer(ui, |ui| {
+                if ui.button("Cancel").clicked() {
+                    result = EditorResult::Cancel;
                 }
-                if let Some(error) = &self.error {
-                    ui.colored_label(crate::style::error(), error);
+                if ui.button("OK").clicked() {
+                    let error =
+                        (self.validate(&model.fe).err()).or_else(|| self.validate_set(model).err());
+                    self.error = error.or_else(|| self.validate_sectors(model).err());
+                    if self.error.is_none() {
+                        result = EditorResult::Ok;
+                    }
                 }
-                ui.separator();
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Cancel").clicked() {
-                        result = EditorResult::Cancel;
-                    }
-                    if ui.button("OK").clicked() {
-                        let error = (self.validate(&model.fe).err())
-                            .or_else(|| self.validate_set(model).err());
-                        self.error = error.or_else(|| self.validate_sectors(model).err());
-                        if self.error.is_none() {
-                            result = EditorResult::Ok;
-                        }
-                    }
-                });
             });
+        });
         if let Some(window) = window
             && let Some(region) = draft_region_mut(&mut self.draft)
         {
@@ -2641,6 +2668,7 @@ impl Editor {
                 }
             }
             Draft::BoundaryCondition(step, bc, region) => {
+                step_row(ui, step, &model.fe, |_| true);
                 name_row(ui, &mut bc.name);
                 ui.label("Type");
                 let step_kind = model.fe.steps.get(*step).map(|s| &s.kind);
@@ -2775,6 +2803,7 @@ impl Editor {
                 region.ui(ui, model);
             }
             Draft::Load(step, load, region) => {
+                step_row(ui, step, &model.fe, |s| s.kind.supports_loads());
                 name_row(ui, &mut load.name);
                 ui.label("Type");
                 let step_kind = model.fe.steps.get(*step).map(|s| &s.kind);
@@ -3365,7 +3394,13 @@ impl Editor {
             // Against the mesh's sets, see validate_set.
             Draft::MeshSet(..) => Vec::new(),
         };
-        if let Some(index) = self.index.filter(|&i| i < siblings.len()) {
+        let moved = match &self.draft {
+            Draft::BoundaryCondition(s, ..) | Draft::Load(s, ..) => {
+                self.from_step.is_some_and(|from| from != *s)
+            }
+            _ => false,
+        };
+        if let Some(index) = self.index.filter(|&i| i < siblings.len() && !moved) {
             siblings.remove(index);
         }
         siblings
@@ -3663,7 +3698,27 @@ impl Editor {
                 None => items.push(item),
             }
         }
+        /// Takes an item out of the step it was in when the dialog moved it to `to`; the
+        /// item is then added to `to` as a new one. Returns its index there and the item
+        /// taken out.
+        fn move_out<T>(
+            fe: &mut FeModel,
+            from: Option<usize>,
+            to: usize,
+            index: Option<usize>,
+            list: impl Fn(&mut Step) -> &mut Vec<T>,
+        ) -> (Option<usize>, Option<T>) {
+            match (from, index) {
+                (Some(from), Some(i)) if from != to => {
+                    let items = fe.steps.get_mut(from).map(list);
+                    let taken = items.filter(|l| i < l.len()).map(|l| l.remove(i));
+                    (None, taken)
+                }
+                _ => (index, None),
+            }
+        }
         let index = self.index;
+        let from_step = self.from_step;
         match self.draft {
             Draft::Material(material) => {
                 // Sections follow a renamed material.
@@ -3716,6 +3771,12 @@ impl Editor {
                 if !bc.kind.takes_amplitude() {
                     bc.amplitude = None;
                 }
+                let (index, moved) = move_out(fe, from_step, s, index, |step| {
+                    &mut step.boundary_conditions
+                });
+                if let Some(moved) = moved {
+                    bc.active = moved.active;
+                }
                 let list = &mut fe.steps[s].boundary_conditions;
                 let mut renamed = None;
                 if let Some(existing) = index.and_then(|i| list.get(i)) {
@@ -3734,6 +3795,10 @@ impl Editor {
                 load.region = region.region();
                 if load.kind.factor_amplitude_label().is_none() {
                     load.factor_amplitude = None;
+                }
+                let (index, moved) = move_out(fe, from_step, s, index, |step| &mut step.loads);
+                if let Some(moved) = moved {
+                    load.active = moved.active;
                 }
                 let list = &mut fe.steps[s].loads;
                 if let Some(existing) = index.and_then(|i| list.get(i)) {
@@ -4560,6 +4625,24 @@ fn rename_default(name: &mut String, from: &str, to: &str, taken: &[&str]) {
     {
         *name = next_name(to, taken.iter().copied());
     }
+}
+
+/// The step a boundary condition or load belongs to; picking another moves it there. Only
+/// the steps `takes` accepts are offered.
+fn step_row(ui: &mut Ui, step: &mut usize, fe: &FeModel, takes: impl Fn(&Step) -> bool) {
+    ui.label("Step");
+    let current = fe.steps.get(*step).map_or("", |s| s.name.as_str());
+    egui::ComboBox::from_id_salt("item step")
+        .selected_text(current)
+        .width(200.0)
+        .show_ui(ui, |ui| {
+            for (i, s) in fe.steps.iter().enumerate() {
+                if takes(s) || i == *step {
+                    ui.selectable_value(step, i, &s.name);
+                }
+            }
+        });
+    ui.end_row();
 }
 
 pub(crate) fn name_row(ui: &mut Ui, name: &mut String) {
@@ -5940,6 +6023,30 @@ mod tests {
     }
 
     #[test]
+    fn the_step_row_moves_a_load_to_another_step() {
+        let mut fe = FeModel::default();
+        for name in ["Step-1", "Step-2"] {
+            fe.steps.push(Step::new_static(name));
+        }
+        let mut editor = Editor::create(NewItem::Load(0), &fe).unwrap();
+        if let Draft::Load(_, _, region) = &mut editor.draft {
+            region.nodes.push(Operation::Replace, BTreeSet::from([1]));
+        }
+        editor.apply(&mut fe);
+        fe.steps[0].loads[0].active = false;
+        let item = TreeItem::Load(0, 0);
+        let mut editor = Editor::edit(&item, &fe, &FeMesh::default()).unwrap();
+        if let Draft::Load(step, ..) = &mut editor.draft {
+            *step = 1;
+        }
+        editor.apply(&mut fe);
+        assert!(fe.steps[0].loads.is_empty());
+        let moved = &fe.steps[1].loads[0];
+        assert_eq!(moved.name, "Force-1");
+        assert!(!moved.active, "it keeps being switched off");
+    }
+
+    #[test]
     fn beam_sections_follow_a_renamed_cross_section() {
         let mut fe = FeModel::default();
         Editor::create(NewItem::CrossSection, &fe)
@@ -6320,6 +6427,7 @@ mod tests {
             expose: None,
             linked: Vec::new(),
             detection_scope: None,
+            from_step: None,
         }
         .apply(&mut fe);
         assert_eq!(fe.steps[0].loads[0].factor_amplitude, None);

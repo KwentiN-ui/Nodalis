@@ -85,7 +85,7 @@ The FE Model tree of the target shows only what is set up in that analysis: link
 hidden by default, so that the tree lists the inputs that matter for it. Categories stay in the
 tree, also when everything in them is linked, so that items of the analysis itself can be added;
 a linked mesh or step leaves just its category row with the link sign. Tick #ui("Show linked
-items") above the tree, in the #ui("View") menu or in the settings (#ui("Graphics")) to list
+items") above the tree, #ui("Show Linked") on the #ui("View") tab or the settings (#ui("Graphics")) to list
 them; the choice is stored in the settings. Hidden items are still part of the model: dialogs
 offer the linked sets, materials and so on as before, and the solver gets them.
 

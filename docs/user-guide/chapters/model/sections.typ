@@ -5,7 +5,7 @@
 A section assigns a material to elements. Every element needs a section, otherwise the model check
 reports "Elements without material". Likewise an element may be in only one section: if the same
 part (or overlapping element sets) appears in two sections, the model check reports
-"Part in more than one section" on the later section. Create sections with #menu("Model", "Create Section ...").
+"Part in more than one section" on the later section. Create sections with #menu("Material", "Section").
 
 #screenshot("section.png", [Section dialog])
 
@@ -32,8 +32,7 @@ check reports "Truss structure is a mechanism".]
 
 The profile of a beam is a cross-section of its own, kept under #ui("Sections") >
 #ui("Cross-Sections") in the FE Model tree, so that several beam sections share one definition.
-Double-click #ui("Cross-Sections"), right-click it and choose #ui("Create ..."), or use
-#menu("Model", "Create Cross-Section ...").
+Create one with #ui("Cross-Section") on the #ui("Material") tab of the ribbon.
 
 #fields(
   [Profile], [#ui("Rectangular") (thicknesses a and b in the 1- and 2-direction),

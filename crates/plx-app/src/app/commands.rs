@@ -73,12 +73,27 @@ impl AnalysisWindow {
     }
 
     /// The pill was clicked: the solver's problems, else the monitor.
+    /// The checklist of the workspace shown, for the properties panel.
+    pub fn checklist(&self) -> Vec<crate::checklist::Step> {
+        let w = &self.workbench;
+        match w.tree_view {
+            TreeView::Geometry => crate::checklist::geometry(w.geometry.as_ref(), w.model.as_ref()),
+            TreeView::FeModel => crate::checklist::fe_model(w.model.as_ref()),
+            TreeView::Results => crate::checklist::results(
+                !w.results.is_empty()
+                    || w.model.as_ref().is_some_and(|m| m.bound_results.is_some()),
+            ),
+        }
+    }
+
     pub fn pill_clicked(&mut self) {
+        // With problems the Problems tab, else the monitor of the solver.
         let workbench = &mut self.workbench;
         if workbench.solver_findings.is_empty() {
             workbench.analysis_tab = true;
+            workbench.problems_tab = false;
         } else {
-            workbench.findings_window = Some(workbench.solver_findings.clone());
+            workbench.problems_tab = true;
         }
     }
 
@@ -136,7 +151,7 @@ impl AnalysisWindow {
         let has_setup = setup.is_some();
         let has_geometry = w.model.as_ref().is_some_and(|m| m.geometry.is_some());
         let has_mesh = setup.is_some_and(|m| m.mesh.element_count() > 0);
-        let last_step = setup.and_then(|m| m.fe.steps.last());
+        let last_step = (w.active_step()).and_then(|i| setup?.fe.steps.get(i));
         let parts = self.selected_parts();
         let shown = w.shown().is_some();
         let results_open = w.shown_results_view().is_some();
@@ -184,6 +199,7 @@ impl AnalysisWindow {
             | Cmd::SurfaceInteraction
             | Cmd::ContactPair
             | Cmd::Tie
+            | Cmd::NodeTie
             | Cmd::ContactWorksheet
             | Cmd::ConnectionSettings
             | Cmd::Step
@@ -218,10 +234,12 @@ impl AnalysisWindow {
             | Cmd::ShellThickness
             | Cmd::BeamProfiles
             | Cmd::ShowLinked
+            | Cmd::Checklist
             | Cmd::Screenshot
             | Cmd::ScreenshotClipboard
             | Cmd::ScreenshotFile
             | Cmd::Settings
+            | Cmd::SolverSettings
             | Cmd::UserGuide
             | Cmd::SaveProject
             | Cmd::SaveProjectAs
@@ -241,9 +259,11 @@ impl AnalysisWindow {
             Cmd::ShellThickness => graphics.shell_thickness,
             Cmd::BeamProfiles => graphics.beam_profiles,
             Cmd::ShowLinked => graphics.show_linked,
+            Cmd::Checklist => w.checklist_visible,
             Cmd::SectionView => w.section.is_some() || w.section_dialog.is_some(),
             Cmd::ExplodedView => w.exploded_applied() || w.exploded_dialog.is_some(),
             Cmd::Query => w.query.is_some(),
+            Cmd::ColorScale => w.color_scale_dialog.is_some(),
             Cmd::Monitor => w.analysis_tab,
             Cmd::ContactWorksheet => w.contact_worksheet,
             _ => false,
@@ -258,9 +278,7 @@ impl AnalysisWindow {
         let parts = self.selected_parts();
         let view = self.workbench.tree_view;
         let w = &mut self.workbench;
-        let last_step = (w.setup_model())
-            .and_then(|m| m.fe.steps.len().checked_sub(1))
-            .unwrap_or(0);
+        let last_step = w.active_step().unwrap_or(0);
         match cmd {
             Cmd::Import | Cmd::ImportMesh => self.import(ctx),
             Cmd::DefaultMeshParameters => w.open_mesh_setup(),
@@ -367,6 +385,7 @@ impl AnalysisWindow {
             Cmd::SurfaceInteraction => w.create(NewItem::SurfaceInteraction),
             Cmd::ContactPair => w.create(NewItem::ContactPair),
             Cmd::Tie => w.create(NewItem::Tie),
+            Cmd::NodeTie => w.create(NewItem::NodeTie),
             Cmd::ContactWorksheet => w.contact_worksheet = true,
             Cmd::ConnectionSettings => {
                 if let Some(model) = w.setup_model() {
@@ -383,7 +402,7 @@ impl AnalysisWindow {
             Cmd::FieldOutput => w.create(NewItem::FieldOutput(last_step)),
             Cmd::HistoryOutput => w.create(NewItem::HistoryOutput(last_step)),
             Cmd::OpenResults => w.open_bound_results(),
-            Cmd::RemoveResults => w.remove_results(),
+            Cmd::RemoveResults => w.confirm_remove_results = true,
             Cmd::ColorScale => w.open_color_scale(),
             Cmd::ExportVtu => w.open_vtk_export(plx_io::vtk::VtkFormat::Xml),
             Cmd::ExportVtk => w.open_vtk_export(plx_io::vtk::VtkFormat::Legacy),
@@ -410,6 +429,12 @@ impl AnalysisWindow {
                 let graphics = &mut w.settings.graphics;
                 graphics.beam_profiles = !graphics.beam_profiles;
             }
+            Cmd::Checklist => {
+                // A narrow window hides the checklist until it is asked for.
+                let overlay = crate::layout::current(ctx).overlay;
+                w.checklist_shown = !w.checklist_visible;
+                w.checklist_fold.set(overlay, false);
+            }
             Cmd::ShowLinked => {
                 let graphics = &mut w.settings.graphics;
                 graphics.show_linked = !graphics.show_linked;
@@ -424,6 +449,12 @@ impl AnalysisWindow {
             Cmd::ScreenshotClipboard => w.screenshot.request(screenshot::Target::Clipboard),
             Cmd::ScreenshotFile => w.screenshot.request(screenshot::Target::File),
             Cmd::Settings => self.open_settings(),
+            Cmd::SolverSettings => {
+                let workbench = &mut self.workbench;
+                let page = crate::settings::Page::Solver;
+                workbench.settings_window =
+                    Some(SettingsWindow::with_page(&workbench.settings, page));
+            }
             Cmd::UserGuide => self.open_user_guide(),
             Cmd::SaveProject => w.requests.push(Request::Save(false)),
             Cmd::SaveProjectAs => w.requests.push(Request::Save(true)),
@@ -446,8 +477,10 @@ impl crate::ribbon::Host for RibbonHost<'_> {
     }
 
     fn custom(&mut self, ui: &mut egui::Ui, cmd: Cmd) {
-        if cmd == Cmd::ResultsDisplay {
-            self.0.workbench.results_tool_bar(ui);
+        match cmd {
+            Cmd::ResultsDisplay => self.0.workbench.results_tool_bar(ui),
+            Cmd::ActiveStep => self.0.workbench.active_step_combo(ui),
+            _ => {}
         }
     }
 }

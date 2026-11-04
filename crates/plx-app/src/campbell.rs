@@ -1053,6 +1053,7 @@ impl CampbellWindow {
     ) -> bool {
         self.poll();
         let mut open = true;
+        let mut close = false;
         let running = self.is_running();
         egui::Window::new(format!("Campbell diagram: {title}"))
             .id(crate::ids::window(ctx, ("campbell", id)))
@@ -1067,7 +1068,7 @@ impl CampbellWindow {
                 self.setup_row(ui, running);
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(can_start && !running, egui::Button::new("Start sweep"))
+                        .add_enabled(can_start && !running, egui::Button::new("Start Sweep"))
                         .on_hover_text("Starts a new sweep; the speeds of the last one go.")
                         .clicked()
                         && let Err(error) = start(self, false)
@@ -1123,7 +1124,7 @@ impl CampbellWindow {
                         ));
                     }
                     if ui
-                        .add_enabled(!self.points.is_empty(), egui::Button::new("Copy table"))
+                        .add_enabled(!self.points.is_empty(), egui::Button::new("Copy Table"))
                         .on_hover_text("Copies the sweep with tabs, for a spreadsheet.")
                         .clicked()
                     {
@@ -1131,8 +1132,8 @@ impl CampbellWindow {
                             .copy_text(table_text(&self.points, &self.shown_orders(), '\t'));
                     }
                     for (label, format) in [
-                        ("Export CSV ...", table_export::Format::Csv),
-                        ("Export JSON ...", table_export::Format::Json),
+                        ("Export CSV …", table_export::Format::Csv),
+                        ("Export JSON …", table_export::Format::Json),
                     ] {
                         let button = egui::Button::new(label);
                         if ui.add_enabled(!self.points.is_empty(), button).clicked() {
@@ -1141,6 +1142,7 @@ impl CampbellWindow {
                     }
                 });
                 ui.separator();
+                close = crate::dialog::close_bar(ui, "campbell");
                 if self.points.len() >= 2 {
                     self.diagram_and_table(ui);
                 } else if self.swept && !running {
@@ -1179,7 +1181,7 @@ impl CampbellWindow {
         if running {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
-        open
+        open && !close
     }
 
     fn setup_row(&mut self, ui: &mut Ui, running: bool) {

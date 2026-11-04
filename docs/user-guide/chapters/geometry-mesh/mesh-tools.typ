@@ -35,7 +35,7 @@ use #ui("Merge coincident nodes") afterwards where the parts touch.
 
 === Merge coincident nodes
 
-#menu("Mesh", "Merge coincident nodes ...") joins nodes of all parts that lie within the
+#menu("Mesh", "Merge Nodes") joins nodes of all parts that lie within the
 #ui("Tolerance") (default 0.1 mm) of each other into one node, the one with the lowest number.
 This connects parts that were meshed separately but share their boundary nodes exactly, for
 example halves of an imported mesh. The output pane reports how many nodes were merged.
@@ -47,6 +47,6 @@ exactly; connect them with ties or contacts (@constraints) instead.]
 
 === Renumber nodes and elements
 
-#menu("Mesh", "Renumber nodes and elements ...") numbers all nodes and elements from the
+#menu("Mesh", "Renumber") numbers all nodes and elements from the
 #ui("First node number") and #ui("First element number") on (default 1), in their current
 order, without gaps. Sets, surfaces and the regions of the model follow the new numbers.

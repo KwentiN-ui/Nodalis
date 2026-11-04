@@ -2,7 +2,7 @@
 
 == Materials <materials>
 
-#menu("Model", "Create Material ...") creates a material. Each property is switched on with its
+#menu("Material", "Material") creates a material. Each property is switched on with its
 check box. A new material starts with #ui("Elasticity") switched on.
 
 #screenshot("material.png", [Material dialog])

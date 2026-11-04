@@ -3,7 +3,7 @@
 == Amplitudes <amplitudes>
 
 An amplitude describes how a load or a prescribed value changes with time. Create it with
-#menu("Model", "Create Amplitude ...") and choose it in the #ui("Amplitude") field of a boundary
+#menu("Steps", "Amplitude") and choose it in the #ui("Amplitude") field of a boundary
 condition or load.
 
 #screenshot("amplitude.png", [Amplitude with its curve])

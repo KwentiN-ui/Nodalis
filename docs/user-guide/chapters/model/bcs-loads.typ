@@ -2,8 +2,9 @@
 
 == Boundary conditions <boundary-conditions>
 
-Boundary conditions belong to a step. Create them with #ui("Create ...") on #ui("BCs") of a step,
-or with #menu("Model", "Create Boundary Condition ...") for the last step. The dialog lists only
+Boundary conditions belong to a step. Create them with #ui("Boundary Condition") on the
+#ui("Steps") tab of the ribbon; they go into the active step (@active-step). The #ui("Step")
+row at the top of the dialog moves a boundary condition to another step. The dialog lists only
 the types the step accepts. In the 3D view, supports are drawn as cones (translations) and
 plates (rotations).
 
@@ -139,8 +140,8 @@ the model size; the dialog shows the current time of the amplitude and this scal
 
 == Loads <loads>
 
-Loads are created like boundary conditions, with #ui("Create ...") on #ui("Loads") of a step or
-#menu("Model", "Create Load ..."). A frequency step takes no loads.
+Loads are created like boundary conditions, with #ui("Load") on the #ui("Steps") tab, into the active
+step. A frequency step takes no loads.
 
 #screenshot("selection.png", [Force on the end face of a plate])
 

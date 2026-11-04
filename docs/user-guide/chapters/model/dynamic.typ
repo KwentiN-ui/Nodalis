@@ -4,7 +4,7 @@
 
 A #ui("Dynamic (time integration)") step computes the motion of the model over time
 (`*DYNAMIC`): the response to a suddenly applied load, an impact or an initial velocity
-(@initial-conditions). Create it with #menu("Model", "Create Step ...") and choose the type in
+(@initial-conditions). Create it with #menu("Steps", "Step") and choose the type in
 the dialog.
 
 #screenshot("dynamic-step.png", [Dynamic step])

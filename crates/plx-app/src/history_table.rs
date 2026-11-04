@@ -292,6 +292,7 @@ impl HistoryTable {
         };
         let mut action = TableAction::None;
         let mut open = true;
+        let mut close = false;
         let title = format!(
             "History Output: {}.{}.{}",
             table.set.name, table.field, table.component.name
@@ -334,6 +335,7 @@ impl HistoryTable {
                     ui.colored_label(crate::style::error(), message);
                 }
                 ui.separator();
+                close = crate::dialog::close_bar(ui, "history table");
                 if let Some(plot) = self.grid(ui, &table, sets, kind) {
                     action = plot;
                 }
@@ -361,7 +363,7 @@ impl HistoryTable {
                 ctx.copy_text(self.text(sets, kind));
             }
         }
-        if !open {
+        if !open || close {
             return TableAction::Close;
         }
         action

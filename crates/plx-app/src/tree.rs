@@ -128,6 +128,8 @@ pub fn item_of(fe: &FeModel, item: &plx_model::ItemRef) -> Option<TreeItem> {
 #[derive(Default)]
 pub struct TreeState {
     pub selected: Option<(TreeView, TreeItem)>,
+    /// The step new items go into, marked "(active)" when there are several.
+    pub active_step: Option<usize>,
     /// The last click on a row: its item and the frame time, for `Tree::double_click`.
     last_click: Option<(TreeView, TreeItem, f64)>,
     /// Expand (true) or collapse an item with all its descendants in the next frame.
@@ -330,7 +332,7 @@ pub struct TreeResponse {
     pub component: Option<(usize, usize)>,
     /// An item was double-clicked: show its properties.
     pub open: Option<TreeItem>,
-    /// Create a new item from a container's context menu or by double-clicking it.
+    /// Create a new item, such as a contact output from the menu of a contact.
     pub create: Option<NewItem>,
     /// Delete an item, by its context menu or the Delete key; the app asks first.
     pub delete: Option<TreeItem>,
@@ -488,7 +490,7 @@ fn warning_sign(ui: &mut Ui) -> Response {
 }
 
 /// Tree item of an item of the FE model and the containers it is shown in, innermost first.
-fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
+pub(crate) fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
     let step = |s: usize, group: &'static str| {
         vec![
             TreeItem::StepGroup(s, group),
@@ -878,7 +880,7 @@ pub fn part_menu(
     if ui.button("Properties …").clicked() {
         response.open = Some(TreeItem::Part(index));
     }
-    if view == TreeView::FeModel && ui.button("Transform ...").clicked() {
+    if view == TreeView::FeModel && ui.button("Transform …").clicked() {
         response.transform_part = Some(index);
     }
     if view == TreeView::FeModel
@@ -1146,12 +1148,10 @@ impl Tree<'_> {
             });
         }
         if double {
-            match creates {
-                // Nodalis creates an item when its container is double-clicked.
-                Some(kind) => self.response.create = Some(kind),
-                None if has_properties(&item) => self.response.open = Some(item.clone()),
-                // Other containers only open or close, see `branch`.
-                None => {}
+            // Items are created from the ribbon; containers only open or close, see
+            // `branch`.
+            if has_properties(&item) {
+                self.response.open = Some(item.clone());
             }
         }
         let editable = is_fe_item(&item)
@@ -1170,19 +1170,8 @@ impl Tree<'_> {
         if creates.is_some() || editable || connections {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                if connections {
-                    if ui.button("Detect Contacts …").clicked() {
-                        self.response.create = Some(NewItem::ContactDetection);
-                    }
-                    if ui.button("Create Contact Region …").clicked() {
-                        self.response.create = Some(NewItem::ContactRegion);
-                    }
-                    if ui.button("Create Bolt …").clicked() {
-                        self.response.create = Some(NewItem::Bolt);
-                    }
-                    if ui.button("Connection Settings …").clicked() {
-                        self.response.open = Some(item.clone());
-                    }
+                if connections && ui.button("Connection Settings …").clicked() {
+                    self.response.open = Some(item.clone());
                 }
                 if connections || item == TreeItem::Group(CONTACT_REGIONS) {
                     if ui.button("Contact Worksheet …").clicked() {
@@ -1205,11 +1194,6 @@ impl Tree<'_> {
                     }
                     ui.separator();
                 }
-                if let Some(kind) = creates
-                    && ui.button("Create …").clicked()
-                {
-                    self.response.create = Some(kind);
-                }
                 if item == TreeItem::Group("Materials") {
                     ui.separator();
                     if ui.button("Material Library …").clicked() {
@@ -1223,16 +1207,6 @@ impl Tree<'_> {
                     }
                     if ui.button("Mesh All Parts").clicked() {
                         self.response.generate_mesh = true;
-                    }
-                }
-                // Ties and node ties live with the contact pairs; the search creates most
-                // of them.
-                if item == TreeItem::Group("Contact Pairs") {
-                    if ui.button("Create Tie …").clicked() {
-                        self.response.create = Some(NewItem::Tie);
-                    }
-                    if ui.button("Create Node Tie …").clicked() {
-                        self.response.create = Some(NewItem::NodeTie);
                     }
                 }
                 // Nodalis offers the search on constraints and contact pairs.
@@ -1546,7 +1520,7 @@ impl Tree<'_> {
             // descendants are collapsed as well.
             state.set_open(open);
         }
-        let toggles = creates(&item).is_none() && !has_properties(&item);
+        let toggles = !has_properties(&item);
         let icon = self.icon(&item, state.is_open());
         let (row, header, _) = self.row(ui, Some(&mut state), None, icon, item, text);
         let doubled = self.doubled;
@@ -2094,7 +2068,13 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                         "A thermal step solves for the temperatures and takes no defined field.",
                     );
                 }
-                tree.branch(ui, TreeItem::Step(s), &step.name, true, |tree, ui| {
+                let active = tree.state.active_step == Some(s) && fe.steps.len() > 1;
+                let label = if active {
+                    format!("{} (active)", step.name)
+                } else {
+                    step.name.clone()
+                };
+                tree.branch(ui, TreeItem::Step(s), &label, true, |tree, ui| {
                     let outputs = (step.field_outputs.iter().enumerate())
                         .map(|(i, f)| (TreeItem::FieldOutput(s, i), f.name.as_str()))
                         .collect();

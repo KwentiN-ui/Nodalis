@@ -20,7 +20,7 @@ both.
 
 === Creating an analysis <new-analysis>
 
-#menu("Project", "New Analysis ..."), a double-click or right-click on the background of the
+#menu("Project", "New Analysis"), a double-click or right-click on the background of the
 schematic or #ui("Analysis") in the block search (@block-search) open #ui("Model Properties") for the new analysis
 (@model-properties). Choose its *model space* (3D, plane stress, plane strain or axisymmetric)
 and its *unit system* there.
@@ -28,7 +28,7 @@ and its *unit system* there.
 #screenshot("new-analysis-dialog.png", [Model Properties for a new analysis])
 
 #note[The model space and the unit system of an analysis are fixed once it is created. In the
-  analysis window, #menu("Model", "Model Properties ...") shows them, but they cannot be
+  analysis window, #menu("Material", "Model Properties") shows them, but they cannot be
   changed; create a new analysis instead. Analyses of one project may use different unit systems,
   because all values are stored in SI units and only shown in the units of their analysis
   (@unit-systems).]
@@ -118,11 +118,13 @@ the state of another analysis (@data-links).
 - *Drag* a block by its header to move it. Drag the background to select the blocks in a
   rectangle, and click it to clear the selection. Drag with the middle mouse button to pan,
   scroll to pan up and down, and scroll with #key("Ctrl") held to zoom, from a tenth of the
-  true size up to four times it. #menu("Project", "Show All Blocks") (#key("Home")) fits all
+  true size up to four times it. #menu("Arrange", "Show All") (#key("Home")) fits all
   blocks into the view.
 - The *minimap* in the lower right corner shows all blocks and frames in small, with the part
   in view outlined; click or drag in it to move the view there.
-  #menu("Project", "Show Minimap") shows or hides it.
+  #menu("Arrange", "Minimap") shows or hides it.
+- The *floating bar* at the bottom of the schematic holds #ui("Show All"), #ui("Minimap"),
+  #ui("Compact View"), #ui("Frame") and #ui("Duplicate"), the same as on the #ui("Arrange") tab.
 
 #screenshot("schematic-minimap.png", [The minimap: the frames and blocks of the project in
   small, the outline is the part in view])
@@ -151,14 +153,15 @@ the state of another analysis (@data-links).
   [Rename ... (#key("F2"))], [Gives the analysis a new name. Names are unique within a project.],
   [Duplicate (#key("Shift+D"))], [Adds a copy of the analysis, named "Copy of ...". A copy
     of a block in a frame goes into the same frame.],
-  [Delete ... (#key("X"))], [Removes the analysis from the project after asking. An open window closes.
+  [Delete (#key("X"))], [Removes the analysis from the project at once; the note at the
+    bottom of the schematic offers #ui("Undo"). An open window closes.
     Links to and from it are removed; analyses that took items from it keep their copies.],
 )
 
 ==== Adding blocks by search <block-search>
 
 Like the add menu of Blender, a double-click or right-click into empty space of the schematic shows every kind
-of block Nodalis can add, grouped as in the #menu("Project") menu. Just start typing: the search
+of block Nodalis can add, grouped as on the tabs of the ribbon. Just start typing: the search
 field has the focus and finds blocks by fuzzy matching, so letters in order are enough
 (#ui("rct") finds #ui("Rectangle")). It also knows other words for a block, such as
 #ui("hexahedra") for #ui("Box") or #ui("library") for #ui("Materials"). Search results show
@@ -185,7 +188,7 @@ Large schematics stay readable with three things borrowed from Blender's node ed
   the label to rename the frame, and right-click the frame for its #ui("Color") or to
   #ui("Remove Frame"), which leaves its blocks where they are. A double-click into the frame
   below its label searches the blocks to add, as on the empty background.
-- A *note* is a block with a text and no pins (#menu("Project", "Add Note"), or "note" in
+- A *note* is a block with a text and no pins (#menu("Annotate", "Note"), or "note" in
   the block search). Click its text to write; it is kept once you click elsewhere, and
   #key("Ctrl+Z") undoes the whole edit.
 - A *compact* block shows only its header and the rows a wire ends at, so the wires stay
@@ -206,11 +209,12 @@ work as in Blender. They act on the selected blocks, or on the block under the p
 none is selected. Drag a rectangle on the background to select the blocks in it, or click a
 block with #key("Shift") held; with #key("Shift") a rectangle adds to the selection, and
 #key("Ctrl") and a click removes a block from it. A click on the background clears it. The
-#menu("Edit") menu lists them for the selected blocks.
+#ui("Arrange") and #ui("Annotate") tabs of the ribbon offer them for the selected blocks.
 
 #fields(
   [#key("Shift+A")], [Searches the blocks to add at the pointer (@block-search).],
-  [#key("X"), #key("Delete")], [Deletes the blocks after asking; #key("Enter") agrees.],
+  [#key("X"), #key("Delete")], [Deletes the blocks at once; #ui("Undo") in the note at the
+    bottom, or #key("Ctrl+Z"), brings them back.],
   [#key("Shift+D")], [Duplicates the blocks.],
   [#key("H")], [Shows the blocks compact, or in full if they all are compact.],
   [#key("Ctrl+J")], [Puts the blocks in a new frame.],
@@ -221,38 +225,45 @@ block with #key("Shift") held; with #key("Shift") a rectangle adds to the select
 
 === Menus and ribbon of the project window
 
-#screenshot("project-menu-f5.png", [Project menu; #key("F5") starts Update Project])
+#screenshot("project-file-menu.png", [The #ui("File") menu of the Project workspace])
 
-Most of these commands are also on the ribbon of the Project workspace (@ribbon).
+The menus of the Project workspace hold only what concerns the whole project; the blocks are
+placed and worked on with the ribbon (@ribbon) and the keys above.
 
 #fields(
-  [File > New Project], [Closes the project and starts a new, empty one. Add analyses with #ui("New Analysis").],
+  [File > New Project], [Closes the project and starts a new one with #ui("Analysis-1").],
   [File > Open ... (#key("Ctrl+O"))], [Opens a project. Its analyses open when you
     double-click them.],
   [File > Save (#key("Ctrl+S"))], [Saves the project with all analyses, also those whose
     windows are open (@files).],
   [File > Save As ... (#key("Ctrl+Shift+S"))], [Saves the project under a new name.],
   [File > Save Without Results ...], [Saves a copy without the results the analyses keep.],
-  [Project > New Analysis ...], [Adds an analysis after asking for its model space and unit
-    system (@new-analysis).],
-  [Project > Add Materials], [Adds a block of materials that analyses link to
-    (@materials-block).],
-  [Project > Add Mesh], [Adds a block that meshes a box or a rectangle for analyses to link
-    (@mesh-block).],
-  [Project > Add Note], [Adds a note, a text without pins (@frames-notes).],
-  [Edit > Duplicate, Delete, Compact View, Frame Blocks, Remove from Frame], [Work on the
-    selected blocks, as their keys do (@schematic-keys).],
-  [Project > Show All Blocks (#key("Home"))], [Fits all blocks of the schematic into the
-    view.],
-  [Project > Show Minimap], [Shows or hides the minimap of the schematic.],
-  [Project > Update Project (#key("F5"))], [Solves every analysis that is not up to date
-    (@update-project). #key("F5") in an analysis window solves only that analysis.],
-  [Project > Solution Monitor], [Shows the #ui("Analyses") tab of the output pane, with the
-    analyses being solved and the output of the solver (@solution-monitor).],
-  [Tools > Settings ...], [The settings (@settings); they apply to all windows.],
+  [Edit > Undo, Redo], [Undo and redo in the schematic (@undo).],
+  [Edit > Settings ...], [The settings (@settings); they apply to all windows.],
   [Help], [#ui("User Guide") opens this guide, #ui("Check for Updates ...") looks
     for a new version.],
 )
+
+The ribbon tabs of the Project workspace:
+
+#fields(
+  [Project], [File commands, #ui("New Analysis") (@new-analysis), and #ui("Open"),
+    #ui("Open in New Window"), #ui("Solve"), #ui("Duplicate"), #ui("Delete") and
+    #ui("Rename") for the selected block.],
+  [Sources], [Materials (@materials-block), cross-sections, box, rectangle and refined
+    meshes (@mesh-block), CAD operations and files.],
+  [Parameters], [Parameters, Math and Switch blocks.],
+  [Evaluate], [Measure, parameter study, Campbell and mesh export blocks.],
+  [Annotate], [Notes and frames (@frames-notes).],
+  [Arrange], [#ui("Duplicate"), #ui("Delete") and #ui("Compact View") for the selected
+    blocks, as their keys do (@schematic-keys); #ui("Show All") (#key("Home")) fits all
+    blocks into the view, #ui("Minimap") shows or hides the minimap.],
+)
+
+#key("F5") or #ui("Update Project") solves every analysis that is not up to date
+(@update-project); #key("F5") in an analysis solves only that analysis. #ui("Monitor") shows
+the #ui("Analyses") tab of the output pane, with the analyses being solved and the output of
+the solver (@solution-monitor).
 
 #ui("Update Project"), #ui("Stop") (stops the update and kills the running analyses) and
 #ui("Monitor") stay on the right edge of the ribbon on every tab of the Project workspace.
@@ -264,7 +275,7 @@ solving cannot be closed.
 
 === Update Project <update-project>
 
-#menu("Project", "Update Project") solves every analysis whose mesh or solution is out of
+#ui("Update Project") solves every analysis whose mesh or solution is out of
 date or missing, like #ui("Update Project") in Ansys Workbench. Analyses without a mesh,
 geometry or step are skipped and listed in the output pane. Mesh blocks whose mesh is out of date make it anew
 first (@mesh-block).
@@ -310,7 +321,7 @@ with #ui("<block> updated").
 The project window has its own monitor, like the monitor of an analysis window (@monitor) but
 for all analyses of the project. It is the #ui("Analyses") tab of the output pane below the
 schematic and comes to the front when an update or #ui("Solve") on a block starts;
-#menu("Project", "Solution Monitor") or #ui("Monitor") on the ribbon switches between it
+#ui("Monitor") or #ui("Monitor") on the ribbon switches between it
 and the #ui("Output") tab.
 
 #screenshot("solution-monitor.png", [Solution monitor after Update Project solved three

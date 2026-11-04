@@ -5,7 +5,7 @@
 Nodalis meshes each geometry part separately with Gmsh. Parts do not share nodes; connect them
 with ties, contacts or node ties (@constraints).
 
-- #menu("Mesh", "Mesh All Parts") meshes every part.
+- #menu("Geometry", "Mesh All Parts") meshes every part.
 - #ui("Create Mesh") in the context menu of a part meshes only this part. Its old mesh is
   replaced; the other parts keep their node and element numbers.
 
@@ -16,7 +16,7 @@ switches to the FE Model workspace.
 
 Gmsh runs in a separate process, so a meshing that takes too long, for example because the
 element size is too small, can be cancelled at any time. While it runs, the status bar shows
-#ui("Meshing ...") with a #ui("Cancel") button; #menu("Mesh", "Cancel Meshing") and the
+#ui("Meshing ...") with a #ui("Cancel") button; #menu("Geometry", "Cancel") and the
 #ui("Stop") tile of the ribbon do the same. The mesher stops at once and the parts keep
 the mesh they had before. During #ui("Update Project") the #ui("Stop") buttons of the
 Solution Monitor and #ui("Stop") in the Project workspace cancel a meshing in the same way.
@@ -81,12 +81,12 @@ where the problem is. The marking disappears with the next meshing.
 == Mesh setup <mesh-setup>
 
 The mesh is controlled by the #ui("Mesh Setup") items in the Geometry workspace. Create them
-with #menu("Mesh", "Create Mesh Setup Item ...") or #ui("Create ...") on the #ui("Mesh Setup")
-container.
+with #ui("Local Mesh Size"), #ui("Extrude Mesh") or #ui("Tetra. Gmsh") on the #ui("Geometry")
+tab of the ribbon.
 
 === Default mesh parameters
 
-#menu("Mesh", "Default Mesh Parameters ...") sets the parameters for every part that is not
+#menu("Geometry", "Default Parameters") sets the parameters for every part that is not
 covered by a #ui("Meshing Parameters") item. #ui("Mesh All Parts") in this dialog applies the
 values and meshes at once.
 
@@ -204,6 +204,6 @@ of revolution, a plain ring for example, is meshed as an extrusion.
 
 == Using an existing mesh
 
-A CalculiX mesh can be imported with #menu("Geometry", "Import ...") (@mesh-import). Its node sets, element
+A CalculiX mesh can be imported with #menu("Geometry", "Import Geometry") (@mesh-import). Its node sets, element
 sets and surfaces appear under #ui("Mesh") in the #ui("FE Model") tree and can be used as
 regions. Such a mesh has no geometry, so regions are picked on the mesh.

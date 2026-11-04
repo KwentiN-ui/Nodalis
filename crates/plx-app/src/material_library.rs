@@ -315,11 +315,11 @@ impl MaterialLibraryEditor {
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.preview, "Preview material properties");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Cancel").clicked() {
-                            result = self.cancel();
-                        }
                         if ui.button("OK").clicked() {
                             result = self.accept();
+                        }
+                        if ui.button("Cancel").clicked() {
+                            result = self.cancel();
                         }
                     });
                 });
@@ -344,24 +344,19 @@ impl MaterialLibraryEditor {
             });
         }
         if self.confirm_close {
-            egui::Modal::new(crate::ids::window(ctx, "material library close")).show(ctx, |ui| {
-                ui.label("Save changes to the material library before closing?");
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Yes").clicked() {
-                        self.confirm_close = false;
-                        if self.save_library() {
-                            result = LibraryResult::Cancel;
-                        }
-                    }
-                    if ui.button("No").clicked() {
-                        result = LibraryResult::Cancel;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        self.confirm_close = false;
-                    }
-                });
-            });
+            let question = "Discard the changes to the material library?";
+            let consequence = "OK in the library window saves them.";
+            match crate::dialog::confirm(
+                ctx,
+                "material library close",
+                question,
+                consequence,
+                "Discard",
+            ) {
+                Some(true) => result = LibraryResult::Cancel,
+                Some(false) => self.confirm_close = false,
+                None => {}
+            }
         }
         result
     }
