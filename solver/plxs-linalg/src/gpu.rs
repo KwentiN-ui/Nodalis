@@ -90,12 +90,8 @@ fn describe(info: &wgpu::AdapterInfo) -> String {
 fn open(any: bool) -> Result<Context, String> {
     let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
     descriptor.backends = wgpu::Backends::PRIMARY;
-    // Refuse allocations beyond the card's memory budget (where the driver reports it)
-    // instead of spilling into the system memory over the bus.
-    descriptor.memory_budget_thresholds = wgpu::MemoryBudgetThresholds {
-        for_resource_creation: Some(90),
-        for_device_loss: None,
-    };
+    // No memory budget threshold: wgpu would apply it to the staging memory of uploads
+    // too, which on cards without resizable BAR is a heap of 256 MB.
     let instance = wgpu::Instance::new(descriptor);
     let adapters = block_on(instance.enumerate_adapters(wgpu::Backends::PRIMARY));
     let rank = |t: wgpu::DeviceType| match t {
@@ -465,7 +461,12 @@ impl GpuCycle {
         if trace {
             eprintln!("gpu: device {:.3} s", clock.elapsed().as_secs_f64());
         }
-        match Self::upload(ctx, levels, coarsest, degree) {
+        // A driver or wgpu failure must not take the solver down: the processor serves.
+        let uploaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Self::upload(ctx, levels, coarsest, degree)
+        }))
+        .unwrap_or_else(|_| Err("the upload panicked".to_owned()));
+        match uploaded {
             Ok(cycle) => Placement::Gpu(Box::new(cycle)),
             Err(reason) => Placement::Cpu(Some(format!("{}: {reason}", ctx.name))),
         }
@@ -504,22 +505,17 @@ impl GpuCycle {
                 ));
             }
             // Bindings must not be empty.
-            let padded;
-            let contents = if bytes.is_empty() {
-                padded = [0u8; 4];
-                &padded[..]
-            } else {
-                bytes
-            };
-            Ok(
-                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(label),
-                    contents,
-                    usage: wgpu::BufferUsages::STORAGE
-                        | wgpu::BufferUsages::COPY_DST
-                        | wgpu::BufferUsages::COPY_SRC,
-                }),
-            )
+            let size = (bytes.len() as u64).max(4);
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            write(ctx, &buffer, bytes);
+            Ok(buffer)
         };
         // Zero-initialized by wgpu.
         let vector = |label: &str, n: usize| -> Result<wgpu::Buffer, String> {
@@ -770,7 +766,8 @@ impl GpuCycle {
         if self.failed.load(Ordering::Relaxed) {
             return Err("failed before".to_owned());
         }
-        let result = self.run(r, z);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run(r, z)))
+            .unwrap_or_else(|_| Err("the cycle panicked".to_owned()));
         if result.is_err() {
             self.failed.store(true, Ordering::Relaxed);
         }
@@ -836,9 +833,9 @@ impl GpuCycle {
     /// eigenvalue estimate; see `Amg::refresh`.
     pub(crate) fn refresh(&mut self, fine: &Bsr<f32>, inv_diag: &[f32], lambda_max: f64) {
         let queue = &self.ctx.queue;
-        queue.write_buffer(
+        write(
+            self.ctx,
             &self.fine_val,
-            0,
             bytemuck::cast_slice(&self.fine.values_of(fine)),
         );
         queue.write_buffer(&self.fine_diag, 0, bytemuck::cast_slice(inv_diag));
@@ -858,6 +855,24 @@ fn coefficients(lambdas: &[f64], degree: usize, level: usize, c: Coefficient) ->
         Coefficient::None => (0.0, 0.0),
         Coefficient::First => (chebyshev(lambdas[level], degree).0, 0.0),
         Coefficient::Step(j) => chebyshev(lambdas[level], degree).1[j - 1],
+    }
+}
+
+/// Writes `bytes` to the start of `buffer` in pieces, each staged and submitted on its
+/// own, so that the staging memory stays small (a single write would stage the whole
+/// buffer at once, and the staging heap of a card can be much smaller than its memory).
+fn write(ctx: &Context, buffer: &wgpu::Buffer, bytes: &[u8]) {
+    const PIECE: usize = 16 << 20;
+    for (i, piece) in bytes.chunks(PIECE).enumerate() {
+        ctx.queue.write_buffer(buffer, (i * PIECE) as u64, piece);
+        if (i + 1) % 4 == 0 {
+            ctx.queue.submit([]);
+            let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+    }
+    if bytes.len() > PIECE {
+        ctx.queue.submit([]);
+        let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
     }
 }
 
