@@ -73,6 +73,11 @@ pub trait Host {
     }
     /// Draws a tile of its own, such as the active step combo.
     fn custom(&mut self, _ui: &mut Ui, _cmd: Cmd) {}
+    /// The name a tile shows instead of its own, such as "Mode" for the increments of a
+    /// frequency step.
+    fn title(&self, _cmd: Cmd) -> Option<&'static str> {
+        None
+    }
     /// The value a panel tile shows under its name, such as "Automatic".
     fn value(&self, _cmd: Cmd) -> Option<String> {
         None
@@ -421,7 +426,9 @@ fn tile_label(c: &Command) -> String {
 /// The label of a tile with the value a panel tile shows on its second line.
 fn label_with_value(c: &Command, host: &dyn Host) -> String {
     match host.value(c.cmd) {
-        Some(value) if c.tile == Tile::Panel => format!("{}\n{value}", c.label),
+        Some(value) if c.tile == Tile::Panel => {
+            format!("{}\n{value}", host.title(c.cmd).unwrap_or(c.label))
+        }
         _ => tile_label(c),
     }
 }

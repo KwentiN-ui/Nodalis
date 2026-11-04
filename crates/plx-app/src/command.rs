@@ -197,7 +197,9 @@ pub enum Cmd {
     Representation,
     ColorLevels,
     Transformations,
-    /// The step and increment shown.
+    /// The step of the results shown.
+    ResultStep,
+    /// The increment, mode or position shown within the step.
     Increment,
     FirstIncrement,
     PreviousIncrement,
@@ -361,6 +363,8 @@ const PROJECT: &[Workspace] = &[Workspace::Project];
 const GEOMETRY: &[Workspace] = &[Workspace::Geometry];
 const FE_MODEL: &[Workspace] = &[Workspace::FeModel];
 const RESULTS: &[Workspace] = &[Workspace::Results];
+/// The ribbon group of the step, the increment and the animation of the results.
+const STEP_GROUP: &str = "Step and Increment";
 const SOLVING: &[Workspace] = &[Workspace::Geometry, Workspace::FeModel];
 const VIEWING: &[Workspace] = &[Workspace::Geometry, Workspace::FeModel, Workspace::Results];
 const ALL: &[Workspace] = &[
@@ -1833,51 +1837,77 @@ fn build() -> Vec<Command> {
     ));
     add(tile(
         command(
-            C::Increment,
-            "Step, Increment",
+            C::ResultStep,
+            "Step",
             r,
             t,
-            "Increment",
-            Tool(Icon::Increments),
-            "",
-            "The step and increment shown.",
+            STEP_GROUP,
+            Tool(Icon::Steps),
+            "Ctrl+PgUp/PgDn",
+            "The step shown, at its last increment.",
         ),
         Tile::Panel,
     ));
-    for (cmd, label, icon, tip) in [
+    add(tile(
+        command(
+            C::Increment,
+            "Increment",
+            r,
+            t,
+            STEP_GROUP,
+            Tool(Icon::Increments),
+            "",
+            "The increment, mode or position shown within the step.",
+        ),
+        Tile::Panel,
+    ));
+    for (cmd, label, icon, shortcut, tip) in [
         (
             C::FirstIncrement,
             "First",
             Icon::First,
-            "Shows the first increment.",
+            "Home",
+            "Shows the first increment of the step.",
         ),
         (
             C::PreviousIncrement,
             "Previous",
             Icon::Previous,
-            "Shows the increment before.",
+            "Left",
+            "Shows the increment before, at the start of a step the end of the step before.",
         ),
         (
             C::NextIncrement,
             "Next",
             Icon::Next,
-            "Shows the next increment.",
+            "Right",
+            "Shows the next increment, at the end of a step the start of the next one.",
         ),
         (
             C::LastIncrement,
             "Last",
             Icon::Last,
-            "Shows the last increment.",
+            "End",
+            "Shows the last increment of the step.",
         ),
     ] {
-        add(command(cmd, label, r, t, "Increment", Tool(icon), "", tip));
+        add(command(
+            cmd,
+            label,
+            r,
+            t,
+            STEP_GROUP,
+            Tool(icon),
+            shortcut,
+            tip,
+        ));
     }
     add(command(
         C::Animate,
         "Animate",
         r,
         t,
-        "Increment",
+        STEP_GROUP,
         Tool(Icon::Animate),
         "",
         "Animates the deformation, the increments or the steps; the animation window sets \
@@ -1888,7 +1918,7 @@ fn build() -> Vec<Command> {
         "Sound",
         r,
         t,
-        "Increment",
+        STEP_GROUP,
         Tool(Icon::Sound),
         "",
         "Plays the mode shapes of a frequency step as sound.",
