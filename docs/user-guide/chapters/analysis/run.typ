@@ -300,7 +300,7 @@ linked in the schematic (@results-links):
   no results yet. Nodalis copies the global results next to the input file and writes
   `*SUBMODEL` and `*BOUNDARY, SUBMODEL`.
 
-In the Results workspace of the submodel, #ui("Show Global Contours") in the result controls,
+In the Results workspace of the submodel, #ui("Global Contours") on the #ui("Display") tab,
 next to #ui("Show Undeformed"), draws the edges of the global model around the results, read from
 the global results the submodel took: at the global increment the submodel follows and deformed by
 the same scale. They show where the submodel sits in the global model and how the two deform; the

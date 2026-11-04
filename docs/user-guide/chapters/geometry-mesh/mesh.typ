@@ -116,7 +116,9 @@ values and meshes at once.
 === Mesh setup items
 
 / Meshing Parameters: the fields above for selected parts. If several items name the same part,
-  the last one counts.
+  the last one counts. Create it with #ui("Mesh Parameters") in the #ui("Mesh Setup") group of
+  the #ui("Geometry") ribbon, next to #ui("Default Parameters"), which sets the defaults of all
+  parts.
 / Local Mesh Size: an element size on selected CAD faces and edges. Click them in the 3D view;
   #key("Shift") adds, #key("Ctrl") removes. The #ui("Selection") window next to the dialog
   (@selection-window) offers the geometry based modes: #ui("Faces and edges") takes the face
@@ -129,6 +131,9 @@ values and meshes at once.
   Frontal-Delaunay (default), Delaunay, MeshAdapt or Automatic. #ui("Volume algorithm"):
   Delaunay (default), Frontal or HXT.
 / Extrude Mesh: hexahedra and wedges for parts that are extrusions of a face (@extrude-mesh).
+
+#screenshot("mesh-parameters-item.png", [The #ui("Mesh Parameters") tile in the Geometry ribbon and the
+  dialog that creates a Meshing Parameters item for picked parts])
 
 #screenshot("mesh-setup-item.png", [Creating a mesh setup item])
 

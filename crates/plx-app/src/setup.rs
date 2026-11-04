@@ -5370,7 +5370,10 @@ fn modal_dynamics_form(ui: &mut Ui, settings: &mut ModalDynamicsStep, units: Uni
     ui.add(numeric::drag_value(&mut settings.max_increments).range(1..=1_000_000));
     ui.end_row();
     ui.label("");
-    ui.weak("Needs a Frequency step with stored modes before it; loads need an amplitude.");
+    ui.weak(
+        "Needs a Frequency step with stored modes before it. Loads without an amplitude \
+         act at once and stay constant.",
+    );
     ui.end_row();
     modal_damping_rows(ui, &mut settings.damping, units);
 }

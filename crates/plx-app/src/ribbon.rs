@@ -71,8 +71,14 @@ pub trait Host {
     fn checked(&self, _cmd: Cmd) -> bool {
         false
     }
-    /// Draws a tile of its own, such as the controls of the shown results.
+    /// Draws a tile of its own, such as the active step combo.
     fn custom(&mut self, _ui: &mut Ui, _cmd: Cmd) {}
+    /// The value a panel tile shows under its name, such as "Automatic".
+    fn value(&self, _cmd: Cmd) -> Option<String> {
+        None
+    }
+    /// Fills the panel a panel tile opens.
+    fn panel(&mut self, _ui: &mut Ui, _cmd: Cmd) {}
     /// A line shown after the groups, such as how to place a block.
     fn hint(&self, _tab: &str) -> Option<&'static str> {
         None
@@ -117,7 +123,7 @@ pub fn show(
         .filter(|c| {
             matches!(
                 c.tile,
-                Tile::Button | Tile::Split | Tile::Menu | Tile::Custom
+                Tile::Button | Tile::Split | Tile::Menu | Tile::Panel | Tile::Custom
             )
         })
         .collect();
@@ -361,6 +367,12 @@ fn menu_entry(ui: &mut Ui, c: &Command, host: &mut dyn Host) -> Option<Cmd> {
         .clicked()
     };
     match c.tile {
+        Tile::Panel => {
+            let enabled = host.enabled(c.cmd);
+            ui.add_enabled_ui(enabled, |ui| {
+                ui.menu_button(c.name(), |ui| host.panel(ui, c.cmd));
+            });
+        }
         Tile::Menu | Tile::Split => {
             ui.menu_button(c.name(), |ui| {
                 if c.tile == Tile::Split && button(ui, c, host) {
@@ -406,9 +418,38 @@ fn tile_label(c: &Command) -> String {
     c.label.to_string()
 }
 
+/// The label of a tile with the value a panel tile shows on its second line.
+fn label_with_value(c: &Command, host: &dyn Host) -> String {
+    match host.value(c.cmd) {
+        Some(value) if c.tile == Tile::Panel => format!("{}\n{value}", c.label),
+        _ => tile_label(c),
+    }
+}
+
+/// The width of a tile with `label`, at least that of a plain tile.
+fn label_width(ui: &Ui, c: &Command, label: &str) -> f32 {
+    let font = FontId::proportional(11.5);
+    let lines = label.lines().count();
+    (label.lines().enumerate())
+        .map(|(i, l)| {
+            let width = ui
+                .ctx()
+                .fonts_mut(|f| f.layout_no_wrap(l.into(), font.clone(), Color32::WHITE))
+                .size()
+                .x;
+            if i + 1 == lines {
+                width + arrow_room(c)
+            } else {
+                width
+            }
+        })
+        .fold(TILE.x - 8.0, f32::max)
+        + 8.0
+}
+
 /// The room the arrow of a menu tile takes after its last label line.
 fn arrow_room(c: &Command) -> f32 {
-    if matches!(c.tile, Tile::Menu | Tile::Split) {
+    if matches!(c.tile, Tile::Menu | Tile::Split | Tile::Panel) {
         12.0
     } else {
         0.0
@@ -428,23 +469,14 @@ fn tile_width(ui: &Ui, c: &Command, compact: bool) -> f32 {
     if compact {
         return COMPACT.x;
     }
-    let font = FontId::proportional(11.5);
-    let lines = tile_label(c).lines().count();
-    (tile_label(c).lines().enumerate())
-        .map(|(i, l)| {
-            let width = ui
-                .ctx()
-                .fonts_mut(|f| f.layout_no_wrap(l.into(), font.clone(), Color32::WHITE))
-                .size()
-                .x;
-            if i + 1 == lines {
-                width + arrow_room(c)
-            } else {
-                width
-            }
-        })
-        .fold(TILE.x - 8.0, f32::max)
-        + 8.0
+    if c.tile == Tile::Panel {
+        // Its label holds a value of the workspace: the width it took last frame.
+        let id = custom_width_id(c.cmd);
+        if let Some(width) = ui.data(|d| d.get_temp::<f32>(id)) {
+            return width;
+        }
+    }
+    label_width(ui, c, &tile_label(c))
 }
 
 /// One group: its tiles side by side and its title below them.
@@ -502,8 +534,14 @@ fn tile(ui: &mut Ui, c: &Command, host: &mut dyn Host, compact: bool) -> Option<
     if compact {
         return compact_tile(ui, c, host, enabled, checked);
     }
-    let label = tile_label(c);
-    let width = tile_width(ui, c, false);
+    let label = label_with_value(c, host);
+    let width = if c.tile == Tile::Panel {
+        let width = label_width(ui, c, &label);
+        ui.data_mut(|d| d.insert_temp(custom_width_id(c.cmd), width));
+        width
+    } else {
+        tile_width(ui, c, false)
+    };
     let sense = if enabled {
         Sense::click()
     } else {
@@ -591,6 +629,7 @@ fn tile(ui: &mut Ui, c: &Command, host: &mut dyn Host, compact: bool) -> Option<
             }
         }
         Tile::Menu => run = menu(&response, c.cmd, host),
+        Tile::Panel => panel(&response, c.cmd, host),
         _ => {
             if response.clicked() {
                 run = Some(c.cmd);
@@ -633,7 +672,7 @@ fn compact_tile(
         }
         let icon = Rect::from_center_size(rect.center(), Vec2::splat(ICON));
         paint_icon(painter, c.icon, icon, enabled);
-        if matches!(c.tile, Tile::Menu | Tile::Split) {
+        if matches!(c.tile, Tile::Menu | Tile::Split | Tile::Panel) {
             let color = if enabled {
                 ui.visuals().text_color()
             } else {
@@ -642,9 +681,16 @@ fn compact_tile(
             down_arrow(painter, rect.right_bottom() + vec2(-5.0, -5.0), color);
         }
     }
-    let tip = command::tooltip(c);
+    let mut tip = command::tooltip(c);
+    if let Some(value) = host.value(c.cmd).filter(|_| c.tile == Tile::Panel) {
+        tip = format!("{}: {value}\n{tip}", c.name());
+    }
     let response = response.on_hover_text(&tip).on_disabled_hover_text(tip);
     match c.tile {
+        Tile::Panel => {
+            panel(&response, c.cmd, host);
+            None
+        }
         Tile::Menu | Tile::Split => {
             let mut run = None;
             egui::Popup::menu(&response).show(|ui| {
@@ -736,6 +782,16 @@ pub fn floating_bar(
 }
 
 /// The menu of a menu or split tile: the commands registered in it.
+/// The panel of a panel tile, below it; it stays open while its fields are used.
+fn panel(response: &egui::Response, cmd: Cmd, host: &mut dyn Host) {
+    egui::Popup::menu(response)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_min_width(180.0);
+            host.panel(ui, cmd);
+        });
+}
+
 fn menu(response: &egui::Response, parent: Cmd, host: &mut dyn Host) -> Option<Cmd> {
     let mut run = None;
     egui::Popup::menu(response).show(|ui| {

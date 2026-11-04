@@ -38,33 +38,38 @@ material of its own, and they carry no results of their own.
 
 == Result controls <results-toolbar>
 
-#screenshot("results-display-tab.png", [The #ui("Display") tab: view tools on the left, result controls in two rows on the right])
+#screenshot("results-display-tab.png", [The #ui("Display") tab: the view tools, then the groups
+  #ui("Deformation"), #ui("Contours") and #ui("Increment"); a narrow window folds a group into a
+  menu])
+
+The result controls are tiles on the #ui("Display") tab of the Results workspace, in three
+groups. A tile with an arrow shows its current value under its name and opens a panel to change
+it; the other tiles act at once and show pressed while their option is on.
 
 #fields(
-  [Result], [The displayed result file.],
   [Deformation], [#ui("Undeformed"), #ui("True scale"), #ui("Automatic") with factors from
-    0.25 to 5, or #ui("User defined"). Results open in #ui("Automatic"); static and dynamic
+    0.25 to 5, or #ui("User defined"), with the #ui("Factor") below them; it is typed for
+    #ui("User defined"). Results open in #ui("Automatic"); static and dynamic
     steps of a model with contact open in #ui("True scale"), so touching parts do not appear to
     penetrate each other, while mode shapes keep #ui("Automatic"). Contact is recognised by a
     contact pair in the input file next to the results (same name, as CalculiX leaves it) or
     contact results in the file. Until you pick a deformation yourself, it follows the shown
     step.],
-  [Factor], [The deformation scale factor; editable for #ui("User defined").],
   [Show Undeformed], [Draws the undeformed outline behind the deformed shape.],
-  [Color levels], [Number of colour bands (2 to 24). The #ui("...") button next to it opens the
-    colour scale (@color-scale).],
-  [Display], [#ui("Contour"), #ui("Arrows") (@arrows) or #ui("LIC") streaks (@lic). The next
-    box picks the field whose directions they follow: #ui("Shown field") or any vector or tensor
-    field of the increment, so that, for example, the principal stresses run over the
-    displacement contours. For a tensor field such as `STRESS` the box after it picks the
-    principal direction: #ui("Max"), #ui("Mid"), #ui("Min") or #ui("Abs Max"). Boxes that do
-    not apply stay greyed out; #ui("...") holds the options of the arrows or streaks.],
+  [Global Contours], [For a submodel: the edges of the global model around the results.],
+  [Display], [#ui("Contour"), #ui("Arrows") (@arrows) or #ui("LIC") streaks (@lic). Below them,
+    #ui("Directions of") picks the field whose directions they follow: #ui("Shown field") or any
+    vector or tensor field of the increment, so that, for example, the principal stresses run
+    over the displacement contours. For a tensor field such as `STRESS`, #ui("Principal
+    direction") picks #ui("Max"), #ui("Mid"), #ui("Min") or #ui("Abs Max"). The options of the
+    arrows or streaks follow; what does not apply stays greyed out.],
+  [Levels], [Number of colour bands (2 to 24).],
+  [Color Scale], [The spectrum and limits of the colours (@color-scale).],
   [Transformations], [Symmetries and patterns (@transformations).],
-  [Step, Increment], [The displayed increment, with buttons for the first, previous, next and
-    last increment.],
-  [Animation], [Opens the animation window (@animation).],
-  [Sound of the mode shapes], [Opens the sound window for modes of a frequency step
-    (@sound).],
+  [Step, Increment], [The displayed increment, picked from the list of all of them.],
+  [First, Previous, Next, Last], [Show another increment.],
+  [Animate], [Opens the animation window (@animation).],
+  [Sound], [Opens the sound window for modes of a frequency step (@sound).],
 )
 
 == Contour plot, legend and labels
@@ -77,7 +82,7 @@ Which of them appear is set under #menu("Edit", "Settings ...", "Post-processing
 
 == Arrows <arrows>
 
-#ui("Display") > #ui("Arrows") in the result controls draws arrows along the directions of the
+#ui("Display") > #ui("Arrows") on the #ui("Display") tab draws arrows along the directions of the
 shown field, or of the field picked next to it, over the surface: a vector field such as `DISP`, `FORC` or `FLUX` gives its own
 direction, a tensor field such as `STRESS` or `TOSTRAIN` the principal direction picked next to
 it. The arrows take the colours of the shown component and its legend, so `STRESS` with
@@ -156,7 +161,7 @@ results of a project (@bind-result).
 == Color scale <color-scale>
 
 Each result file has its own colour scale. Double-click the legend, choose #ui("Color Scale ...")
-in its context menu, or click #ui("...") next to #ui("Color levels") in the result controls. Changes show at once and stay when #ui("Close") closes the
+in its context menu, or click #ui("Color Scale") on the #ui("Display") tab. Changes show at once and stay when #ui("Close") closes the
 window; #ui("Defaults") returns to the rainbow with automatic limits.
 
 #screenshot("color-scale-dialog.png", [Color Scale dialog with manual limits: values above 40 MPa
@@ -167,7 +172,7 @@ and below 5 MPa are grey])
     Cividis, Viridis, Plasma, Black body, Inferno, Kindlmann or Grayscale.],
   [Brightness], [Lightens the colours towards white, from 0 to 1 (default 0.2).],
   [Reverse colors], [Puts the maximum colour at the minimum and vice versa.],
-  [Number of colors], [The colour bands, the same as #ui("Color levels") in the result controls.],
+  [Number of colors], [The colour bands, the same as #ui("Levels") on the #ui("Display") tab.],
   [Min/max limit type], [#ui("Automatic") spans the smallest to the largest shown value (over
     all frames of an animation if it is set so). #ui("Manual") uses #ui("Minimum") and
     #ui("Maximum"); the values are kept exactly as typed. The minimum must be smaller than the
