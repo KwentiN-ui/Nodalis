@@ -34,7 +34,9 @@
 //! refinement 690 million, leaves of 60 instead of 240 DOFs 650 million (5.2 GB, factorized
 //! in 12 s on 4 threads); PaStiX with Scotch 387 million.
 //!
-//! Disconnected subgraphs are ordered component by component without a separator. Nothing of
+//! Disconnected subgraphs are ordered component by component without a separator. The
+//! dissection keeps its pending subgraphs in a work list instead of recursing: a graph that
+//! falls apart into many thousands of pieces overflowed the stack of a solver thread. Nothing of
 //! CalculiX was consulted; PaStiX/Scotch are only the measuring stick.
 
 use std::collections::HashMap;
@@ -228,6 +230,19 @@ struct Dissection<'a> {
     generation: u32,
     level: Vec<u32>,
     side: Vec<Side>,
+    /// Search stamp of the vertices a breadth-first search reached: a vertex is visited in
+    /// the current search when its stamp equals `search`. Saves clearing a flag per vertex
+    /// of the whole graph for every subgraph.
+    seen: Vec<u32>,
+    search: u32,
+}
+
+/// Work left for [`Dissection::order`], done last in, first out.
+enum Task {
+    /// Order this subgraph.
+    Order(Vec<u32>),
+    /// Append these vertices (a separator, after both of its sides).
+    Emit(Vec<u32>),
 }
 
 impl<'a> Dissection<'a> {
@@ -239,6 +254,8 @@ impl<'a> Dissection<'a> {
             generation: 0,
             level: vec![0; graph.len()],
             side: vec![Side::Out; graph.len()],
+            seen: vec![0; graph.len()],
+            search: 0,
         }
     }
 
@@ -457,7 +474,7 @@ impl<'a> Dissection<'a> {
 
     /// Orders a subgraph split into the sides `a` and `b` with the given `separator`
     /// (vertices of either side): both sides without it recursively, the separator last.
-    fn order_split(&mut self, a: Vec<u32>, b: Vec<u32>, separator: Vec<u32>, out: &mut Vec<u32>) {
+    fn order_split(&mut self, a: Vec<u32>, b: Vec<u32>, separator: Vec<u32>, work: &mut Vec<Task>) {
         for &v in &separator {
             self.side[v as usize] = Side::A;
         }
@@ -470,10 +487,11 @@ impl<'a> Dissection<'a> {
         for &v in &separator {
             self.side[v as usize] = Side::Out;
         }
-        // The generation changes in the recursion; the separator needs no further searches.
-        self.order(rest_a, out);
-        self.order(rest_b, out);
-        out.extend(separator);
+        // The generation changes in the later tasks; the separator needs no further
+        // searches. Last in, first out: side A, then side B, then the separator.
+        work.push(Task::Emit(separator));
+        work.push(Task::Order(rest_b));
+        work.push(Task::Order(rest_a));
     }
 
     /// Marks `vertices` as the current subgraph.
@@ -488,11 +506,25 @@ impl<'a> Dissection<'a> {
         self.stamp[v as usize] == self.generation
     }
 
-    /// Breadth-first search from `root` inside the current subgraph; returns the vertices in
-    /// the order reached and fills `level` with their distance from the root.
-    fn bfs(&mut self, root: u32, visited: &mut [bool]) -> Vec<u32> {
+    /// Starts a new breadth-first search: no vertex counts as visited.
+    fn new_search(&mut self) {
+        self.search = self.search.wrapping_add(1);
+        if self.search == 0 {
+            self.seen.iter_mut().for_each(|s| *s = 0);
+            self.search = 1;
+        }
+    }
+
+    fn visited(&self, v: u32) -> bool {
+        self.seen[v as usize] == self.search
+    }
+
+    /// Breadth-first search from `root` inside the current subgraph, skipping the vertices
+    /// already visited in the current search (see [`Self::new_search`]); returns the vertices
+    /// in the order reached and fills `level` with their distance from the root.
+    fn bfs(&mut self, root: u32) -> Vec<u32> {
         let mut order = vec![root];
-        visited[root as usize] = true;
+        self.seen[root as usize] = self.search;
         self.level[root as usize] = 0;
         let mut head = 0;
         while head < order.len() {
@@ -500,8 +532,8 @@ impl<'a> Dissection<'a> {
             head += 1;
             let next = self.level[v as usize] + 1;
             for &u in self.graph.neighbors(v) {
-                if self.selected(u) && !visited[u as usize] {
-                    visited[u as usize] = true;
+                if self.selected(u) && !self.visited(u) {
+                    self.seen[u as usize] = self.search;
                     self.level[u as usize] = next;
                     order.push(u);
                 }
@@ -510,8 +542,22 @@ impl<'a> Dissection<'a> {
         order
     }
 
-    /// Orders the subgraph `vertices` into `out`.
+    /// Orders the subgraph `vertices` into `out`. Without recursion: a mesh can fall apart
+    /// into many thousands of pieces (and the dissection tree can be deep), which overflowed
+    /// the stack of a solver thread.
     fn order(&mut self, vertices: Vec<u32>, out: &mut Vec<u32>) {
+        let mut work = vec![Task::Order(vertices)];
+        while let Some(task) = work.pop() {
+            match task {
+                Task::Order(vertices) => self.order_one(vertices, out, &mut work),
+                Task::Emit(vertices) => out.extend(vertices),
+            }
+        }
+    }
+
+    /// Orders the subgraph `vertices`: a leaf straight into `out`, else splits it and leaves
+    /// the parts as tasks in `work`.
+    fn order_one(&mut self, vertices: Vec<u32>, out: &mut Vec<u32>, work: &mut Vec<Task>) {
         if vertices.is_empty() {
             return;
         }
@@ -520,7 +566,7 @@ impl<'a> Dissection<'a> {
             .map(|&v| self.graph.weight[v as usize] as usize)
             .sum();
         self.select(&vertices);
-        let mut visited = vec![false; self.graph.len()];
+        self.new_search();
         // Level structure from a pseudo-peripheral vertex: the farthest vertex of a search
         // from the farthest vertex of a first search.
         let start = vertices
@@ -528,21 +574,24 @@ impl<'a> Dissection<'a> {
             .copied()
             .min_by_key(|&v| self.graph.neighbors(v).len())
             .unwrap();
-        let first = self.bfs(start, &mut visited);
+        let first = self.bfs(start);
         if first.len() < vertices.len() {
-            // Disconnected: the reached component and the rest, no separator between them.
-            let rest: Vec<u32> = (vertices.iter().copied())
-                .filter(|&v| !visited[v as usize])
-                .collect();
-            self.order(first, out);
-            self.order(rest, out);
+            // Disconnected: every component on its own, no separator between them. All
+            // components in one pass, so that many small pieces cost linear time.
+            let mut components = vec![first];
+            for &v in &vertices {
+                if !self.visited(v) {
+                    components.push(self.bfs(v));
+                }
+            }
+            work.extend(components.into_iter().rev().map(Task::Order));
             return;
         }
         if weight <= LEAF_WEIGHT || vertices.len() <= 2 {
             // Cuthill-McKee order from the far end of the first search.
             let far = *first.last().unwrap();
-            visited.iter_mut().for_each(|v| *v = false);
-            let order = self.bfs(far, &mut visited);
+            self.new_search();
+            let order = self.bfs(far);
             out.extend(order);
             return;
         }
@@ -575,12 +624,12 @@ impl<'a> Dissection<'a> {
         }) = best
         {
             self.refine(&mut a, &mut b, &mut separator);
-            self.order_split(a, b, separator, out);
+            self.order_split(a, b, separator, work);
             return;
         }
         let far = *first.last().unwrap();
-        visited.iter_mut().for_each(|v| *v = false);
-        let structure = self.bfs(far, &mut visited);
+        self.new_search();
+        let structure = self.bfs(far);
         let depth = self.level[*structure.last().unwrap() as usize] as usize + 1;
         if depth < 3 {
             // Nothing to cut: the subgraph is one or two levels deep (a clique-like set).
@@ -631,7 +680,7 @@ impl<'a> Dissection<'a> {
         let (mut a, mut b) = (a, b);
         let (mut separator, _) = self.separator(&a, &b);
         self.refine(&mut a, &mut b, &mut separator);
-        self.order_split(a, b, separator, out);
+        self.order_split(a, b, separator, work);
     }
 
     /// Weights of the vertices of level `cut` with a neighbor in level `cut + 1`, and of the
@@ -861,6 +910,28 @@ mod tests {
             let node = chunk[0] / 3;
             assert!(chunk.iter().all(|&d| d / 3 == node), "{chunk:?}");
         }
+    }
+
+    /// A frequency step of a 220k-node model crashed a solver thread: the dissection
+    /// recursed once per piece of a graph that fell apart into many pieces and overflowed the
+    /// 2 MB stack of the thread (and cleared a flag per vertex of the whole graph per piece).
+    #[test]
+    fn many_pieces_neither_overflow_the_stack_nor_take_quadratic_time() {
+        let n = 300_000usize;
+        let blocks: Vec<Vec<u32>> = (0..n / 3)
+            .map(|i| vec![(3 * i) as u32, (3 * i + 1) as u32])
+            .collect();
+        let pattern = Pattern::from_blocks(n, blocks.iter().map(Vec::as_slice));
+        let start = std::time::Instant::now();
+        let perm = std::thread::Builder::new()
+            .stack_size(256 << 10)
+            .spawn(move || nested_dissection(&pattern, None))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(is_permutation(&perm));
+        assert_eq!(perm.len(), n);
+        assert!(start.elapsed().as_secs() < 20, "took {:?}", start.elapsed());
     }
 
     #[test]
