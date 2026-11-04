@@ -10652,7 +10652,8 @@ impl SnarlViewer<u64> for Viewer {
         }
     }
 
-    /// A grid of dots behind the blocks, like the background of a node editor.
+    /// A grid of dots behind the blocks, like the background of a node editor. Zoomed out,
+    /// the dots thin out and keep their size on the screen; see [`dot_grid`].
     fn draw_background(
         &mut self,
         _background: Option<&egui_snarl::ui::BackgroundPattern>,
@@ -10662,13 +10663,14 @@ impl SnarlViewer<u64> for Viewer {
         painter: &egui::Painter,
         snarl: &Snarl<u64>,
     ) {
+        let (spacing, radius) = dot_grid(self.to_global.scaling);
         let color = crate::style::schematic_dot();
-        let first = |v: f32| (v / DOT_SPACING).floor() as i32;
-        let last = |v: f32| (v / DOT_SPACING).ceil() as i32;
+        let first = |v: f32| (v / spacing).floor() as i32;
+        let last = |v: f32| (v / spacing).ceil() as i32;
         for i in first(viewport.left())..=last(viewport.right()) {
             for j in first(viewport.top())..=last(viewport.bottom()) {
-                let center = egui::pos2(i as f32 * DOT_SPACING, j as f32 * DOT_SPACING);
-                painter.circle_filled(center, 1.0, color);
+                let center = egui::pos2(i as f32 * spacing, j as f32 * spacing);
+                painter.circle_filled(center, radius, color);
             }
         }
         self.frames(painter, snarl);
@@ -11283,8 +11285,26 @@ fn edit_entries(ui: &mut egui::Ui, id: u64, targets: &[u64], actions: &mut Vec<A
     entry(ui, "Delete", "X", Action::DeleteAll(targets.to_vec()));
 }
 
-/// Spacing of the dots of the schematic's background.
+/// Spacing of the dots of the schematic's background, at true size.
 const DOT_SPACING: f32 = 24.0;
+
+/// The least gap of the background dots on the screen, in points.
+const MIN_DOT_GAP: f32 = 16.0;
+
+/// Spacing and radius of the background dots in the schematic at a zoom of `scale`.
+///
+/// Zoomed out, every second row and column of dots goes, as often as it takes to keep them
+/// `MIN_DOT_GAP` apart on the screen, and the dots keep their size on the screen. At a fixed
+/// spacing a schematic zoomed out to a tenth drew a hundred times as many dots, over 100 000
+/// in each frame, which made panning and dragging stutter.
+fn dot_grid(scale: f32) -> (f32, f32) {
+    let scale = scale.max(MIN_SCALE);
+    let mut spacing = DOT_SPACING;
+    while spacing * scale < MIN_DOT_GAP {
+        spacing *= 2.0;
+    }
+    (spacing, 1.0 / scale.min(1.0))
+}
 
 /// The zoom of the schematic: from a tenth of its true size to four times it; Show All
 /// magnifies no more than to its true size.
@@ -11424,6 +11444,26 @@ fn timestamped(message: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Zoomed out, the background has about as many dots as at true size, not a hundred
+    /// times as many, and they stay as large on the screen.
+    #[test]
+    fn background_dots_thin_out_when_zoomed_out() {
+        use super::{DOT_SPACING, MAX_SCALE, MIN_DOT_GAP, MIN_SCALE, dot_grid};
+        assert_eq!(dot_grid(1.0), (DOT_SPACING, 1.0));
+        let mut scale = MIN_SCALE;
+        while scale <= MAX_SCALE {
+            let (spacing, radius) = dot_grid(scale);
+            let gap = spacing * scale;
+            assert!(gap >= MIN_DOT_GAP, "{scale}: {gap}");
+            assert!(
+                gap < 2.0 * MIN_DOT_GAP || spacing == DOT_SPACING,
+                "{scale}: {gap}"
+            );
+            assert!(radius * scale >= 1.0 - 1e-4, "{scale}: {radius}");
+            scale *= 1.1;
+        }
+    }
+
     #[test]
     fn feedback_wires_go_below_only_the_blocks_in_their_way() {
         use super::feedback_level;
