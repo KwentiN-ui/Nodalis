@@ -5439,10 +5439,14 @@ impl ProjectApp {
             selected: self.selected.clone(),
         };
         let snarl_id = egui::Id::new(("project schematic", self.graph_generation));
+        // Text on the blocks is not selectable: a drag on it moves the block.
+        let selectable = ui.style().interaction.selectable_labels;
+        ui.style_mut().interaction.selectable_labels = false;
         let response = SnarlWidget::new()
             .id(snarl_id)
             .style(schematic_style())
             .show(&mut self.graph, &mut viewer, ui);
+        ui.style_mut().interaction.selectable_labels = selectable;
         // Blocks not drawn this frame keep their last size.
         self.block_sizes = std::mem::take(&mut viewer.sizes);
         self.block_sizes.extend(viewer.drawn.drain());

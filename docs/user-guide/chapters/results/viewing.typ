@@ -53,11 +53,12 @@ material of its own, and they carry no results of their own.
   [Show Undeformed], [Draws the undeformed outline behind the deformed shape.],
   [Color levels], [Number of colour bands (2 to 24). The #ui("...") button next to it opens the
     colour scale (@color-scale).],
-  [Display], [#ui("Contour"), #ui("Arrows") (@arrows) or #ui("LIC") streaks (@lic) along the
-    directions of the shown field. For a tensor field such as `STRESS` the box next to it picks
-    the principal direction: #ui("Max"), #ui("Mid"), #ui("Min") or #ui("Abs Max");
-    #ui("...") holds the options
-    of the arrows or streaks.],
+  [Display], [#ui("Contour"), #ui("Arrows") (@arrows) or #ui("LIC") streaks (@lic). The next
+    box picks the field whose directions they follow: #ui("Shown field") or any vector or tensor
+    field of the increment, so that, for example, the principal stresses run over the
+    displacement contours. For a tensor field such as `STRESS` the box after it picks the
+    principal direction: #ui("Max"), #ui("Mid"), #ui("Min") or #ui("Abs Max"). Boxes that do
+    not apply stay greyed out; #ui("...") holds the options of the arrows or streaks.],
   [Transformations], [Symmetries and patterns (@transformations).],
   [Step, Increment], [The displayed increment, with buttons for the first, previous, next and
     last increment.],
@@ -77,7 +78,7 @@ Which of them appear is set under #menu("Edit", "Settings ...", "Post-processing
 == Arrows <arrows>
 
 #ui("Display") > #ui("Arrows") in the result controls draws arrows along the directions of the
-shown field over the surface: a vector field such as `DISP`, `FORC` or `FLUX` gives its own
+shown field, or of the field picked next to it, over the surface: a vector field such as `DISP`, `FORC` or `FLUX` gives its own
 direction, a tensor field such as `STRESS` or `TOSTRAIN` the principal direction picked next to
 it. The arrows take the colours of the shown component and its legend, so `STRESS` with
 #ui("PRINCIPAL_MAX") and the #ui("Max") direction shows how the load runs through the part, its

@@ -58,6 +58,14 @@ pub enum Icon {
     Solve,
     /// A window with lines of text: the solver monitor.
     Monitor,
+    /// A face meshed with an even grid: the default mesh parameters.
+    MeshDefaults,
+    /// A coarse grid with one corner meshed finer: a local mesh size.
+    LocalMeshSize,
+    /// A face mesh swept upward into layers of hexahedra: the extruded mesh.
+    ExtrudeMesh,
+    /// A tetrahedron with its hidden edge dashed: the tetrahedral mesher.
+    TetMesh,
 }
 
 /// Flat toolbar button in the Windows style: frame only while hovered or checked.
@@ -491,6 +499,128 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
                 Stroke::new(1.0, OUTLINE),
                 egui::StrokeKind::Middle,
             ));
+        }
+        Icon::MeshDefaults => {
+            let face = Rect::from_min_max(p(2.5, 2.5), p(13.5, 13.5));
+            shapes.push(Shape::rect_filled(face, 0.0, FACE));
+            for i in 1..4 {
+                let t = 2.5 + 11.0 * i as f32 / 4.0;
+                line(shapes, &[p(t, 2.5), p(t, 13.5)], 1.0, ACCENT);
+                line(shapes, &[p(2.5, t), p(13.5, t)], 1.0, ACCENT);
+            }
+            shapes.push(Shape::rect_stroke(
+                face,
+                0.0,
+                Stroke::new(1.0, OUTLINE),
+                egui::StrokeKind::Middle,
+            ));
+        }
+        Icon::LocalMeshSize => {
+            let face = Rect::from_min_max(p(2.5, 2.5), p(13.5, 13.5));
+            shapes.push(Shape::rect_filled(face, 0.0, FACE));
+            // The finer corner at the top right.
+            shapes.push(Shape::rect_filled(
+                Rect::from_min_max(p(8.0, 2.5), p(13.5, 8.0)),
+                0.0,
+                Color32::from_rgb(200, 222, 245),
+            ));
+            line(shapes, &[p(8.0, 2.5), p(8.0, 13.5)], 1.0, OUTLINE);
+            line(shapes, &[p(2.5, 8.0), p(13.5, 8.0)], 1.0, OUTLINE);
+            for t in [5.25, 10.75] {
+                line(shapes, &[p(t, 2.5), p(t, 8.0)], 1.0, ACCENT);
+                line(shapes, &[p(8.0, t), p(13.5, t)], 1.0, ACCENT);
+            }
+            for t in [9.375, 12.125] {
+                line(shapes, &[p(t, 2.5), p(t, 8.0)], 1.0, ACCENT);
+            }
+            for t in [3.875, 6.625] {
+                line(shapes, &[p(8.0, t), p(13.5, t)], 1.0, ACCENT);
+            }
+            shapes.push(Shape::rect_stroke(
+                face,
+                0.0,
+                Stroke::new(1.0, OUTLINE),
+                egui::StrokeKind::Middle,
+            ));
+        }
+        Icon::ExtrudeMesh => {
+            // Three layers of a prism over a slanted face, the face in the accent colour.
+            let (dx, dy) = (4.0, -3.0);
+            let base = [p(1.5, 11.0), p(9.0, 11.0), p(9.0 + dx, 11.0 + dy)];
+            let at = |q: Pos2, h: f32| q + vec2(0.0, -h);
+            let height = 7.5;
+            // The visible side faces.
+            polygon(
+                shapes,
+                vec![base[0], base[1], at(base[1], height), at(base[0], height)],
+                FACE,
+                Color32::TRANSPARENT,
+            );
+            polygon(
+                shapes,
+                vec![base[1], base[2], at(base[2], height), at(base[1], height)],
+                Color32::from_rgb(205, 205, 205),
+                Color32::TRANSPARENT,
+            );
+            // The top: the face mesh that is swept.
+            let top = [
+                at(base[0], height),
+                at(base[1], height),
+                at(base[2], height),
+            ];
+            let fourth = top[0] + vec2(dx, dy);
+            polygon(
+                shapes,
+                vec![top[0], top[1], top[2], fourth],
+                ACCENT,
+                Color32::TRANSPARENT,
+            );
+            let mid = |a: Pos2, b: Pos2| a + (b - a) * 0.5;
+            line(
+                shapes,
+                &[mid(top[0], top[1]), mid(fourth, top[2])],
+                1.0,
+                Color32::WHITE,
+            );
+            line(
+                shapes,
+                &[mid(top[0], fourth), mid(top[1], top[2])],
+                1.0,
+                Color32::WHITE,
+            );
+            // The layers.
+            for h in [height / 3.0, 2.0 * height / 3.0] {
+                line(
+                    shapes,
+                    &[at(base[0], h), at(base[1], h), at(base[2], h)],
+                    1.0,
+                    OUTLINE,
+                );
+            }
+            // The outline.
+            line(
+                shapes,
+                &[
+                    top[0], base[0], base[1], base[2], top[2], fourth, top[0], top[1], top[2],
+                ],
+                1.0,
+                OUTLINE,
+            );
+            line(shapes, &[base[1], top[1]], 1.0, OUTLINE);
+        }
+        Icon::TetMesh => {
+            let (a, b, c, d) = (p(1.5, 13.0), p(10.5, 14.5), p(14.5, 9.0), p(7.0, 1.5));
+            polygon(shapes, vec![a, b, d], FACE, Color32::TRANSPARENT);
+            polygon(shapes, vec![b, c, d], ACCENT, Color32::TRANSPARENT);
+            // The hidden edge at the back, dashed.
+            shapes.extend(Shape::dashed_line(
+                &[a, c],
+                Stroke::new(1.0, OUTLINE),
+                1.5,
+                1.5,
+            ));
+            line(shapes, &[a, b, c, d, a], 1.0, OUTLINE);
+            line(shapes, &[b, d], 1.0, OUTLINE);
         }
         Icon::RemoveAnnotations => {
             // A query label: framed text with the arrow to its point.

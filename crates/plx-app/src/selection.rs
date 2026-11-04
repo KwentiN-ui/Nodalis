@@ -369,9 +369,9 @@ impl Picker {
             _ => None,
         };
         let mut action = None;
-        // egui's own constraint uses a default size before the first layout and pins the
-        // window there; keep it on screen with its real size instead. It follows the dialog,
-        // so it is not movable: egui keeps a movable window where it first was.
+        // It first opens beside the dialog; after that it stays where the user dragged it.
+        // egui's own constraint uses a default size before the first layout, so the first
+        // place is worked out with the real size where it is known.
         let id = crate::ids::window(ctx, "selection window");
         let width = egui::AreaState::load(ctx, id)
             .and_then(|s| s.size)
@@ -388,12 +388,12 @@ impl Picker {
         let pos = egui::pos2(x.max(screen.left()), anchor.top());
         egui::Window::new("Selection")
             .id(id)
-            .constrain(false)
-            .movable(false)
+            .constrain(true)
+            .movable(true)
             .collapsible(false)
             .resizable(false)
             .title_bar(true)
-            .current_pos(pos)
+            .default_pos(pos)
             .show(ctx, |ui| {
                 ui.horizontal_top(|ui| {
                     ui.group(|ui| {
