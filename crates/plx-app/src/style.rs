@@ -1,7 +1,7 @@
-//! Look of the application: a light theme after PrePoMax's classic Windows controls and a
+//! Look of the application: a light theme after the classic Windows controls and a
 //! dark one after Windows' dark mode, picked in the settings.
 //!
-//! PrePoMax uses Segoe UI, which may not be redistributed. Noto Sans (SIL Open Font License,
+//! Segoe UI, the classic Windows face, may not be redistributed. Noto Sans (SIL Open Font License,
 //! `assets/fonts/OFL.txt`) is a free face of the same humanist style; the bundled file is
 //! subset to Latin, Greek and common symbols.
 
@@ -43,7 +43,7 @@ impl ThemeChoice {
     }
 }
 
-/// The colours of one theme. The light one follows PrePoMax's classic Windows controls, the
+/// The colours of one theme. The light one follows the classic Windows controls, the
 /// dark one Windows' dark mode.
 struct Palette {
     /// Windows "Control" colour: panels, menu and tool bars.
@@ -90,7 +90,7 @@ const LIGHT: Palette = Palette {
     error: Color32::from_rgb(200, 0, 0),
     warning: Color32::from_rgb(170, 110, 0),
     ok: Color32::from_rgb(0, 128, 0),
-    // PrePoMax's background gradient: Gainsboro at the top, WhiteSmoke at the bottom.
+    // The background gradient: Gainsboro at the top, WhiteSmoke at the bottom.
     viewport: [
         Color32::from_rgb(220, 220, 220),
         Color32::from_rgb(245, 245, 245),
@@ -342,7 +342,7 @@ pub fn apply(ctx: &egui::Context) {
         .insert(0, "Noto Sans".into());
     ctx.set_fonts(fonts);
 
-    // egui falls back to dark when the system does not tell; PrePoMax's look is light.
+    // egui falls back to dark when the system does not tell; the default look is light.
     ctx.options_mut(|o| o.fallback_theme = Theme::Light);
     ctx.set_visuals_of(Theme::Light, visuals(Visuals::light(), &LIGHT));
     ctx.set_visuals_of(Theme::Dark, visuals(Visuals::dark(), &DARK));

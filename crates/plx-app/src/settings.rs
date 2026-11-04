@@ -1,4 +1,4 @@
-//! User settings, grouped like PrePoMax's settings dialog and stored by eframe in the user's
+//! User settings, grouped as the settings dialog and stored by eframe in the user's
 //! data directory (Linux `~/.local/share/nodalis`, Windows `%APPDATA%\nodalis\data`).
 
 use crate::numeric;
@@ -23,15 +23,13 @@ pub struct Settings {
     pub format: u32,
 }
 
-/// Label and tooltip of [`Graphics::shell_thickness`], in the settings and the View menu.
-pub const SHELL_THICKNESS_LABEL: &str = "Shell thickness";
+/// Label and tooltip of [`Graphics::shell_thickness`], on the View tab.
 pub const SHELL_THICKNESS_TIP: &str = "Draws shell and membrane elements of the FE model and the results as solids of their section's thickness, placed by its offset.";
 
-/// Label and tooltip of [`Graphics::beam_profiles`], in the settings and the View menu.
-pub const BEAM_PROFILES_LABEL: &str = "Beam profiles";
+/// Label and tooltip of [`Graphics::beam_profiles`], on the View tab.
 pub const BEAM_PROFILES_TIP: &str = "Draws beam elements as their profile swept along the line, turned by the section's orientation and placed by its offsets, and trusses as round bars of their area, in the FE model and the results.";
 
-/// Label and tooltip of [`Graphics::show_linked`], in the settings, the View menu and the tree.
+/// Label and tooltip of [`Graphics::show_linked`], on the View tab and above the tree.
 pub const SHOW_LINKED_LABEL: &str = "Show linked items";
 pub const SHOW_LINKED_TIP: &str = "Lists the items of the FE Model tree that this analysis takes from another one. They stay in the model; hidden, the tree shows only what is set up here.";
 
@@ -100,9 +98,9 @@ impl Default for Graphics {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PostProcessing {
-    /// Label at the node with the largest value (PrePoMax: on).
+    /// Label at the node with the largest value (default: on).
     pub max_label: bool,
-    /// Label at the node with the smallest value (PrePoMax: off).
+    /// Label at the node with the smallest value (default: off).
     pub min_label: bool,
     /// Information block with file, step and deformation.
     pub status_block: bool,
@@ -236,7 +234,7 @@ pub fn clean_path(text: &str) -> &str {
         .map_or(text, str::trim)
 }
 
-/// PrePoMax's default work directory: a `Temp` folder next to the program. Where that is
+/// The default work directory: a `Temp` folder next to the program. Where that is
 /// not writable, e.g. for a binary installed to `/usr/bin`, a `nodalis` folder in the
 /// system's temporary directory.
 pub fn default_work_dir() -> std::path::PathBuf {
@@ -439,12 +437,7 @@ impl SettingsWindow {
                     "Coordinate triad in the corner (view direction)",
                 );
                 ui.checkbox(&mut g.scale_bar, "Scale bar");
-                ui.checkbox(&mut g.shell_thickness, SHELL_THICKNESS_LABEL)
-                    .on_hover_text(SHELL_THICKNESS_TIP);
-                ui.checkbox(&mut g.beam_profiles, BEAM_PROFILES_LABEL)
-                    .on_hover_text(BEAM_PROFILES_TIP);
-                ui.checkbox(&mut g.show_linked, SHOW_LINKED_LABEL)
-                    .on_hover_text(SHOW_LINKED_TIP);
+                ui.weak("Shell thickness, beam profiles and linked items are set on the View tab.");
             }
             Page::PostProcessing => {
                 let p = &mut self.draft.post;

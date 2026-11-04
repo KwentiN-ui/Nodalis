@@ -51,6 +51,5 @@ Results with `OUTPUT=2D` hold the shells as surfaces; the Results workspace then
 thickened like the FE model, with thickness and offset from the input file CalculiX ran, and
 the value of each node across the whole thickness.
 
-Turn the display off and on with #menu("View", "Shell Thickness") or in the
-#link(<settings>)[settings] under #ui("Graphics"); the setting applies to both workspaces.
+Turn the display off and on with #menu("View", "Shell Thickness"); the setting applies to both workspaces.
 Picking still selects the elements on the mesh.

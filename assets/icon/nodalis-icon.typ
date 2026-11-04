@@ -1,5 +1,5 @@
 // Nodalis program icon: the letter N as a finite element mesh, coloured with a contour
-// result like a PrePoMax/CalculiX plot. Nodalis = lat. "knot-like": FE nodes and the
+// result like an FE contour plot. Nodalis = lat. "knot-like": FE nodes and the
 // node graph of the project window.
 //
 // The N is one conforming structured mesh of three patches (left bar, diagonal, right
@@ -32,7 +32,7 @@
 #let mono-line = rgb("#c9ced6")
 #let light-face = rgb("#dfe3e8")
 #let light-line = rgb("#3a4350")
-// Contour colours like a CalculiX/PrePoMax result legend, blue (low) to red (high).
+// Contour colours like an FE result legend, blue (low) to red (high).
 #let legend = (
   rgb("#2a3fe0"), rgb("#1e7ff0"), rgb("#18b8e8"), rgb("#1fd6b0"), rgb("#4ad94a"),
   rgb("#b4e02c"), rgb("#f5dc1e"), rgb("#ffa21c"), rgb("#f8601a"), rgb("#e0201e"),

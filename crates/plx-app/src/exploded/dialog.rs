@@ -1,4 +1,4 @@
-//! PrePoMax's exploded view dialog: the method and its parameters, the direction, the
+//! The exploded view dialog: the method and its parameters, the direction, the
 //! magnification and a scroll bar between the assembled and the exploded state. Every change
 //! is previewed in the 3D view at once.
 
@@ -26,7 +26,7 @@ pub enum ExplodedResult {
 /// What the user changed in this frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Change {
-    /// A parameter; the preview animates towards it like in PrePoMax.
+    /// A parameter; the preview animates towards it.
     Parameter,
     /// The scroll bar is dragged; the preview follows it directly.
     Position,
@@ -222,7 +222,7 @@ impl ExplodedDialog {
             });
         self.draft.clamp();
         let parameter_changed = self.draft != before;
-        // PrePoMax's scroll bar from the assembled to the exploded state.
+        // The scroll bar from the assembled to the exploded state.
         ui.add_space(6.0);
         let mut position = self.draft.scale_factor;
         let dragged = ui

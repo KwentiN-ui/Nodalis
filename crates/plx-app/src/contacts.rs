@@ -1,4 +1,4 @@
-//! The forms of PrePoMax's interaction dialogs: tie constraints, surface interactions and
+//! The forms of the interaction dialogs: tie constraints, surface interactions and
 //! contact pairs. Clicks in the 3D view fill the master or the slave surface, whichever
 //! field's "..." button is pressed; in 2D models the surfaces are element edges. The master
 //! shows in the primary, the slave in the secondary highlight colour.
@@ -158,7 +158,7 @@ pub fn tie_form(
         ui,
         "Position tolerance",
         "Slave nodes farther than this from the master surface are not tied. Untick to \
-         let CalculiX choose a tolerance from the mesh.",
+         let the solver choose a tolerance from the mesh.",
         &mut tie.position_tolerance,
         UnitSystem::MmTonSC.stored(0.05, Quantity::Length),
         length,
@@ -178,7 +178,7 @@ pub fn tie_form(
     }
 }
 
-/// PrePoMax's cyclic symmetry tie: the axis about which the sector repeats.
+/// The cyclic symmetry tie: the axis about which the sector repeats.
 fn cyclic_symmetry_rows(ui: &mut Ui, model: &Model, cyclic: &mut Option<CyclicSymmetry>) {
     ui.label("");
     let mut on = cyclic.is_some();
@@ -243,7 +243,7 @@ fn sector_rows(
         return;
     };
     ui.label("Results show");
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.radio_value(&mut cyclic.display, SectorDisplay::Single, "Single sector")
             .on_hover_text("Only the modelled sector (NGRAPH=1).");
         ui.radio_value(&mut cyclic.display, SectorDisplay::All, "All sectors")
@@ -312,7 +312,7 @@ pub fn contact_pair_form(
     ui.label("Surface Interaction");
     egui::ComboBox::from_id_salt("contact interaction")
         .selected_text(pair.interaction.as_str())
-        .width(200.0)
+        .width(crate::dock::fit_width(ui, 200.0))
         .show_ui(ui, |ui| {
             for interaction in &model.fe.surface_interactions {
                 let name = interaction.name.clone();
@@ -323,7 +323,7 @@ pub fn contact_pair_form(
     ui.label("Method");
     egui::ComboBox::from_id_salt("contact method")
         .selected_text(pair.method.name())
-        .width(200.0)
+        .width(crate::dock::fit_width(ui, 200.0))
         .show_ui(ui, |ui| {
             for method in ContactMethod::ALL {
                 ui.selectable_value(&mut pair.method, method, method.name())
@@ -380,7 +380,7 @@ pub fn validate_contact_pair(pair: &ContactPair, fe: &FeModel) -> Result<(), Str
     Ok(())
 }
 
-/// A row's title and description, shown below the property grid like in PrePoMax.
+/// A row's title and description, shown below the property grid.
 type Description = (&'static str, &'static str);
 
 /// What the surface interaction dialog shows: the model selected in each list and the
@@ -403,7 +403,7 @@ impl InteractionView {
     }
 }
 
-/// PrePoMax's "Create surface interaction" dialog: the name, the lists of available and
+/// The "Create surface interaction" dialog: the name, the lists of available and
 /// selected interaction models, the properties of the selected model and their description.
 pub fn interaction_dialog(
     ui: &mut Ui,
@@ -416,6 +416,7 @@ pub fn interaction_dialog(
     group(ui, "Data", |ui| {
         let mut focus = None;
         egui::Grid::new("interaction data")
+            .max_col_width(crate::dock::column_limit(ui))
             .num_columns(2)
             .min_col_width(110.0)
             .show(ui, |ui| {
@@ -467,7 +468,7 @@ pub fn interaction_dialog(
             }
         }
     });
-    // CalculiX aborts on a tied contact without friction, so choosing Tied brings it along.
+    // The solver aborts on a tied contact without friction, so choosing Tied brings it along.
     if !was_tied && interaction.add_friction_if_tied() {
         view.focus = Some(TIED_FRICTION);
         view.available = None;
@@ -487,7 +488,7 @@ pub fn interaction_dialog(
 /// Why a tied surface behavior comes with friction, shown when the friction is added.
 const TIED_FRICTION: Description = (
     "Friction added for Tied",
-    "CalculiX needs Friction with a Tied surface behavior: its stick slope is the stiffness of \
+    "The solver needs Friction with a Tied surface behavior: its stick slope is the stiffness of \
      the tie along the surfaces, the friction coefficient is irrelevant. Tied works only with \
      the method Surface to surface.",
 );
@@ -599,7 +600,7 @@ fn field_size(ui: &Ui) -> egui::Vec2 {
     egui::vec2(120.0, ui.spacing().interact_size.y)
 }
 
-/// Category header like PrePoMax's property grid.
+/// Category header of the property grid.
 fn category(ui: &mut Ui, title: &str) {
     let header = egui::Frame::new()
         .fill(crate::style::control())
@@ -651,7 +652,7 @@ impl Rows<'_> {
         });
     }
 
-    /// A value CalculiX may leave out; the checkbox writes it.
+    /// A value the solver may leave out; the checkbox writes it.
     fn optional(
         &mut self,
         ui: &mut Ui,
@@ -696,7 +697,7 @@ impl Rows<'_> {
                         let same =
                             std::mem::discriminant(&kind) == std::mem::discriminant(behavior);
                         if ui.selectable_label(same, kind.keyword()).clicked() && !same {
-                            // Switching the kind starts with its default values, as in PrePoMax.
+                            // Switching the kind starts with its default values.
                             *behavior = kind;
                         }
                     }
@@ -781,7 +782,7 @@ impl Rows<'_> {
     fn gap_conductance(&mut self, ui: &mut Ui, conductance: &mut GapConductance) {
         let text = "Constant conductance or table over pressure and temperature.";
         self.row(ui, ("Kind", text), |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let constant = matches!(conductance, GapConductance::Constant(_));
                 let mut response = ui.radio(constant, "Constant");
                 if response.clicked() && !constant {
@@ -892,7 +893,7 @@ pub fn validate_interaction(interaction: &SurfaceInteraction) -> Result<(), Stri
     }
     if interaction.is_tied() && !interaction.has_friction() {
         return Err(
-            "A Tied surface behavior needs Friction: CalculiX takes the stiffness of \
+            "A Tied surface behavior needs Friction: the solver takes the stiffness of \
                     the tie along the surfaces from its stick slope."
                 .into(),
         );

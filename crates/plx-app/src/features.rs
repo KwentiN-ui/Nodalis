@@ -1,4 +1,4 @@
-//! Dialogs of PrePoMax's features, reference points, coordinate systems and planes, and of
+//! Dialogs of the features, reference points, coordinate systems and planes, and of
 //! results on them: result paths with the values of the shown result along a straight line
 //! through the model, as a plot and a table, and plane results with the values where a plane
 //! cuts the model.
@@ -6,8 +6,8 @@
 //! Points are typed in, in global coordinates or in a coordinate system, or picked in the 3D
 //! view: one node is itself the point, an edge or a face gives its centre, e.g. that of a
 //! hole. Reference points can also be the centre of gravity or of the bounding box of a
-//! selection of faces, as in PrePoMax; they follow the selection when the mesh changes. The FE model and every results file have
-//! their own features, as in PrePoMax.
+//! selection of faces; they follow the selection when the mesh changes. The FE model and every results file have
+//! their own features.
 
 use std::collections::BTreeSet;
 
@@ -444,6 +444,7 @@ impl FeatureDialog {
                 None => PLOT_HEIGHT,
             };
             egui::Grid::new("feature form")
+                .max_col_width(crate::dock::column_limit(ui))
                 .num_columns(2)
                 .spacing([12.0, 4.0])
                 .show(ui, |ui| self.form(ui, model));
@@ -512,7 +513,7 @@ impl FeatureDialog {
             Draft::CoordinateSystem(system) => {
                 name_row(ui, &mut system.name);
                 ui.label("Type");
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     for kind in CoordinateSystemKind::ALL {
                         ui.radio_value(&mut system.kind, kind, kind.label());
                     }
@@ -579,7 +580,7 @@ impl FeatureDialog {
                 } else {
                     egui::ComboBox::from_id_salt("result plane")
                         .selected_text(result.plane.as_str())
-                        .width(200.0)
+                        .width(crate::dock::fit_width(ui, 200.0))
                         .show_ui(ui, |ui| {
                             for plane in &fe.planes {
                                 ui.selectable_value(
@@ -1069,7 +1070,7 @@ fn plane_rows(
     };
     ui.label("Type");
     let mut chosen = kind;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.radio_value(&mut chosen, 0, "Coordinate system");
         ui.radio_value(&mut chosen, 1, "Three points");
         ui.radio_value(&mut chosen, 2, "Point and normal");
@@ -1109,7 +1110,7 @@ fn plane_rows(
             ui.label("Coordinate system");
             egui::ComboBox::from_id_salt("plane system")
                 .selected_text(system.as_str())
-                .width(200.0)
+                .width(crate::dock::fit_width(ui, 200.0))
                 .show_ui(ui, |ui| {
                     let names = std::iter::once(GLOBAL)
                         .chain(fe.coordinate_systems.iter().map(|c| c.name.as_str()));
@@ -1190,7 +1191,7 @@ pub fn path_line(model: &Model, path: &ResultPath) -> Option<([Vec3; 2], String)
     ))
 }
 
-/// How a reference point is created, PrePoMax's "Create by", with its rows.
+/// How a reference point is created, the "Create by", with its rows.
 fn reference_point_rows(
     ui: &mut Ui,
     point: &mut ReferencePoint,
@@ -1213,7 +1214,7 @@ fn reference_point_rows(
     ui.label("Create by");
     egui::ComboBox::from_id_salt("point create by")
         .selected_text(labels[kind])
-        .width(200.0)
+        .width(crate::dock::fit_width(ui, 200.0))
         .show_ui(ui, |ui| {
             for (k, label) in labels.into_iter().enumerate() {
                 ui.selectable_value(&mut chosen, k, label);
@@ -1247,7 +1248,7 @@ fn reference_point_rows(
     ui.label("Coordinate system");
     egui::ComboBox::from_id_salt("point system")
         .selected_text(chosen_system.as_str())
-        .width(200.0)
+        .width(crate::dock::fit_width(ui, 200.0))
         .show_ui(ui, |ui| {
             let names = std::iter::once(GLOBAL)
                 .chain(fe.coordinate_systems.iter().map(|c| c.name.as_str()));
@@ -1384,7 +1385,7 @@ fn point_ref_rows(
     };
     egui::ComboBox::from_id_salt(("point source", label))
         .selected_text(shown)
-        .width(200.0)
+        .width(crate::dock::fit_width(ui, 200.0))
         .show_ui(ui, |ui| {
             let coordinates = matches!(point, PointRef::Coordinates(_));
             if ui.selectable_label(coordinates, "Coordinates").clicked() && !coordinates {

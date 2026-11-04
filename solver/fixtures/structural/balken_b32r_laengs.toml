@@ -1,0 +1,8 @@
+name = "balken_b32r_laengs"
+area = "structural"
+class = "A"
+stage = "M2"
+features = ["*HEADING", "*NODE", "*ELEMENT", "B32R", "*NSET", "*ELSET", "*MATERIAL", "*ELASTIC", "*BEAM SECTION", "*STEP", "*STATIC", "*BOUNDARY", "*CLOAD", "*DLOAD", "*NODE FILE", "*EL FILE", "*END STEP"]
+source = "testdata"
+reference = "plxs 0.2.0"
+note = "Axially loaded cantilever: checks the Poisson contraction at the clamped B32 end (matched ccx 2.21 to 1e-6 when frozen)."

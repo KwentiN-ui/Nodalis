@@ -1,4 +1,4 @@
-//! PrePoMax's Extrude Mesh: a part that is a straight extrusion of some of its faces is
+//! Extrude Mesh: a part that is a straight extrusion of some of its faces is
 //! meshed on those faces with Gmsh, mostly with quadrilaterals, and the face mesh is swept
 //! through the part in layers. Quadrilaterals become hexahedra, triangles wedges.
 //!

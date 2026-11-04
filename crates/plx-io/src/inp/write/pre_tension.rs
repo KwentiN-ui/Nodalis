@@ -1,8 +1,8 @@
 //! Bolt pre-tension written as a cut through the mesh with `*Equation`s, instead of CalculiX's
-//! `*PRE-TENSION SECTION`. CalculiX separates only the elements that have a face in the
+//! `*PRE-TENSION SECTION`. The solver separates only the elements that have a face in the
 //! section; a tetrahedron that touches the cut with just an edge or a corner keeps both sides
-//! together, and most of the preload goes into it (PrePoMax users add a thin layer of wedge
-//! elements at the cut for this). Here every element on the side of the selected faces gets
+//! together, and most of the preload goes into it (a thin layer of wedge
+//! elements at the cut is the usual workaround). Here every element on the side of the selected faces gets
 //! copies of the cut nodes, and the equations of CalculiX's section tie the copies to the
 //! originals: the gap normal to the cut is the first degree of freedom of the pre-tension
 //! node, the tangential motion is shared.

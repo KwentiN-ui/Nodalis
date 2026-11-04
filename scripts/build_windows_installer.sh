@@ -59,7 +59,7 @@ makensis -V2 -DVERSION="$version" -DSTAGE="$root/$stage" -DOUTFILE="$root/$insta
     installer/windows/nodalis.nsi
 echo "Installer: $installer ($(du -h "$installer" | cut -f1))"
 
-# The portable ZIP, like PrePoMax's: the same files in one folder, unpacked anywhere and started
+# The portable ZIP: the same files in one folder, unpacked anywhere and started
 # without administrator rights or installation. portable.txt makes nodalis keep its settings
 # in a Settings folder beside it (crates/plx-app/src/portable.rs).
 portable="$out/nodalis-$version-windows-portable.zip"

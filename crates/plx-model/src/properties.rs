@@ -3,14 +3,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::UnitSystem;
 
-/// What the model is about as a whole, PrePoMax's model properties: the model space, the
+/// What the model is about as a whole: the model space, the
 /// unit system, the physical constants and whether the model is a submodel.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelProperties {
     pub space: ModelSpace,
     pub units: UnitSystem,
-    /// PrePoMax's model type: a general model or a submodel driven by the results of a
+    /// The model type: a general model or a submodel driven by the results of a
     /// global model.
     pub kind: ModelKind,
     /// Results file (`.frd`) of the global model a submodel reads its boundary displacements
@@ -18,7 +18,7 @@ pub struct ModelProperties {
     /// [`ModelKind::Submodel`].
     pub global_results: Option<std::path::PathBuf>,
     /// Absolute zero on the model's temperature scale (`*PHYSICAL CONSTANTS`); radiation
-    /// needs it. `None` leaves it undefined, as in PrePoMax.
+    /// needs it. `None` leaves it undefined.
     pub absolute_zero: Option<f64>,
     /// Stefan-Boltzmann constant in the model's units; radiation needs it.
     pub stefan_boltzmann: Option<f64>,
@@ -35,7 +35,7 @@ pub struct ModelProperties {
 }
 
 impl ModelProperties {
-    /// The global results file of a submodel; `None` for a general model, as in PrePoMax.
+    /// The global results file of a submodel; `None` for a general model.
     pub fn submodel_input(&self) -> Option<&std::path::Path> {
         (self.kind == ModelKind::Submodel)
             .then_some(self.global_results.as_deref())
@@ -58,7 +58,7 @@ impl ModelProperties {
     }
 }
 
-/// PrePoMax's model type.
+/// The model type.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelKind {
     #[default]
@@ -80,10 +80,10 @@ impl ModelKind {
     }
 }
 
-/// Whether the model is a solid in space or a cross-section in the x-y plane, PrePoMax's
-/// model space.
+/// Whether the model is a solid in space or a cross-section in the x-y plane:
+/// the model space.
 ///
-/// As in PrePoMax and CalculiX, 2D models lie in the x-y plane; an axisymmetric model
+/// As in CalculiX, 2D models lie in the x-y plane; an axisymmetric model
 /// revolves about the y axis, with x as the radius.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelSpace {
@@ -176,8 +176,8 @@ impl ModelSpace {
         }
     }
 
-    /// The CalculiX type of a surface element in this model space, as PrePoMax switches the
-    /// element types when the model space changes: plane elements of a 2D model take its
+    /// The CalculiX type of a surface element in this model space; the
+    /// element types switch when the model space changes: plane elements of a 2D model take its
     /// prefix (CPS6 becomes CAX6), and shells of a 3D model; reduced integration is kept.
     /// Other elements keep their type.
     pub fn element_type(self, type_name: &str, shape: ElementShape) -> String {
@@ -213,14 +213,14 @@ impl ModelSpace {
 impl ModelSpace {
     /// Makes a mesh generated from the geometry fit the model space: gives its elements the
     /// model's types and, in 2D models, numbers them counter-clockwise seen from +z, as
-    /// CalculiX needs. Fails if the mesh does not fit: 2D models take faces in the x-y
+    /// the solver needs. Fails if the mesh does not fit: 2D models take faces in the x-y
     /// plane only, axisymmetric ones on the side x >= 0 of the axis; 3D models take solids,
     /// shells and lines.
     pub fn prepare_generated_mesh(self, mesh: &mut FeMesh) -> Result<(), String> {
         use plx_mesh::ElementFamily;
         let family = |f| mesh.elements().iter().any(|e| e.shape.family() == f);
         if !self.is_2d() {
-            // Faces of a 3D model are shells, thickened by a shell section as in PrePoMax.
+            // Faces of a 3D model are shells, thickened by a shell section.
             self.convert_mesh(mesh);
             return Ok(());
         }

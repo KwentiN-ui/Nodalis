@@ -1,11 +1,11 @@
-//! How CalculiX names and numbers what results hold, mapped to Nodalis's (PrePoMax's)
+//! How CalculiX names and numbers what results hold, mapped to Nodalis's
 //! names: shared by the `.frd` reader and the results of the built-in solver, so that both
 //! give the same fields, components and elements.
 
 use plx_mesh::ElementShape;
 
 /// The component name Nodalis shows for a component name of the `.frd` file: `D1` becomes
-/// `U1`, `SXX` becomes `S11` and so on, as in PrePoMax.
+/// `U1`, `SXX` becomes `S11` and so on.
 pub fn rename_component(name: &str) -> &str {
     match name {
         "D1" => "U1",

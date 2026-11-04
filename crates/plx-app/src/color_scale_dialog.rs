@@ -1,4 +1,4 @@
-//! The Color Scale dialog of a results file, PrePoMax's legend settings: colour spectrum,
+//! The Color Scale dialog of a results file: colour spectrum,
 //! number of colours and automatic or manual limits with colours for the values beyond them.
 
 use egui::{Color32, Rect, Sense, Stroke, StrokeKind, vec2};
@@ -112,7 +112,7 @@ impl ColorScaleDialog {
                     .spacing([12.0, 4.0])
                     .show(ui, |ui| {
                         ui.label("Min/max limit type");
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             let automatic = ui.radio_value(&mut manual, false, "Automatic");
                             let user = ui.radio_value(&mut manual, true, "Manual");
                             if automatic.changed() || user.changed() {
@@ -159,7 +159,7 @@ impl ColorScaleDialog {
                 let footer = crate::dialog::tool_footer_with(ui, None, |ui| {
                     defaults = ui
                         .button("Defaults")
-                        .on_hover_text("PrePoMax's rainbow with automatic limits")
+                        .on_hover_text("Rainbow with automatic limits")
                         .clicked();
                 });
                 if defaults {

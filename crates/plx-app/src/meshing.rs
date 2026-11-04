@@ -1,4 +1,4 @@
-//! Meshing the CAD geometry with Gmsh: PrePoMax's mesh setup with its items, the default
+//! Meshing the CAD geometry with Gmsh: the mesh setup with its items, the default
 //! meshing parameters and the mesh generation part by part on a worker thread.
 
 use std::collections::BTreeSet;
@@ -157,7 +157,7 @@ impl MeshSetupWindow {
     }
 }
 
-/// The item types of PrePoMax's "Create Mesh Setup Item" that nodalis supports.
+/// The item types of "Create Mesh Setup Item" that Nodalis supports.
 const TYPES: [&str; 4] = [
     "Meshing Parameters",
     "Local Mesh Size",
@@ -234,7 +234,7 @@ fn layer_type(layers: &ExtrudeLayers) -> usize {
     }
 }
 
-/// Numbers separated by semicolons or spaces, as PrePoMax writes layer sizes.
+/// Numbers separated by semicolons or spaces, the way layer sizes are written.
 fn list_text<T: ToString>(values: &[T]) -> String {
     values
         .iter()
@@ -256,7 +256,7 @@ const ALGORITHMS_3D: [(Algorithm3d, &str); 3] = [
     (Algorithm3d::Hxt, "HXT"),
 ];
 
-/// PrePoMax's dialog to create or edit a mesh setup item. Parts, and the faces and edges of
+/// The dialog to create or edit a mesh setup item. Parts, and the faces and edges of
 /// a local mesh size, are clicked on the geometry.
 pub struct MeshItemEditor {
     draft: MeshSetupItem,
@@ -399,7 +399,7 @@ impl MeshItemEditor {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             ui.strong("Type");
             let current = type_index(&self.draft.kind);
-            // PrePoMax's list of item types; an edited item keeps its type.
+            // The list of item types; an edited item keeps its type.
             egui::Frame::group(ui.style())
                 .fill(crate::style::window())
                 .show(ui, |ui| {
@@ -424,6 +424,7 @@ impl MeshItemEditor {
             ui.separator();
             ui.strong("Properties");
             egui::Grid::new("mesh item form")
+                .max_col_width(crate::dock::column_limit(ui))
                 .num_columns(2)
                 .spacing([12.0, 6.0])
                 .show(ui, |ui| self.form(ui, view));
@@ -622,7 +623,7 @@ impl MeshItemEditor {
                     } else {
                         "Automatic"
                     })
-                    .width(160.0)
+                    .width(crate::dock::fit_width(ui, 160.0))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut selected, false, "Automatic");
                         ui.selectable_value(&mut selected, true, "Selected faces");
@@ -681,7 +682,7 @@ impl MeshItemEditor {
                 let mut kind = layer_type(&extrude.layers);
                 egui::ComboBox::from_id_salt("extrude layers")
                     .selected_text(LAYER_TYPES[kind])
-                    .width(160.0)
+                    .width(crate::dock::fit_width(ui, 160.0))
                     .show_ui(ui, |ui| {
                         for (index, label) in LAYER_TYPES.into_iter().enumerate() {
                             ui.selectable_value(&mut kind, index, label);
@@ -885,7 +886,7 @@ fn algorithm_combo<T: Copy + PartialEq>(
         .map_or("", |(_, l)| *l);
     egui::ComboBox::from_id_salt(id)
         .selected_text(label)
-        .width(160.0)
+        .width(crate::dock::fit_width(ui, 160.0))
         .show_ui(ui, |ui| {
             for &(choice, label) in choices {
                 ui.selectable_value(value, choice, label);
@@ -1383,7 +1384,7 @@ mod tests {
         assert_eq!(extrude.parts, vec!["SOLID-1".to_string()]);
         assert!(!editor.highlight(&view).faces.is_empty());
 
-        // Multi-layered sizes are typed as PrePoMax writes them.
+        // Multi-layered sizes are typed as a list.
         if let MeshSetupKind::ExtrudeMesh(extrude) = &mut editor.draft.kind {
             extrude.layers = ExtrudeLayers::MultiLayered {
                 sizes: Vec::new(),

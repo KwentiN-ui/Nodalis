@@ -1,4 +1,4 @@
-//! PrePoMax's "Create Field Output" dialog of the Results tree: a type list, the properties
+//! The "Create Field Output" dialog of the Results tree: a type list, the properties
 //! of the chosen type with a description below, and for limits a table of limit values.
 
 use egui::{RichText, Ui};
@@ -11,7 +11,7 @@ use crate::numeric;
 use crate::results::ResultsView;
 use crate::tree_rows::{frame, tree_row};
 
-/// The types of the list, PrePoMax's first in its order, with the prefix of their default
+/// The types of the list, in order, with the prefix of their default
 /// names.
 const TYPES: [(&str, &str); 6] = [
     ("Limit", "Limit"),
@@ -116,7 +116,7 @@ pub struct FieldOutputDialog {
     /// Index of the edited output; `None` creates a new one.
     pub edit: Option<usize>,
     kind: usize,
-    /// One draft per type, as PrePoMax keeps the values of each type while switching.
+    /// One draft per type, so the values of each type are kept while switching.
     drafts: [FieldOutput; 6],
     /// Limit values per part, per element set and for all elements.
     part_limits: Vec<(String, f64)>,
@@ -213,7 +213,7 @@ impl FieldOutputDialog {
                 .map(|o| o.name.clone())
                 .filter(|n| Some(n) != own.as_ref()),
         );
-        // PrePoMax proposes STRESS.MISES, else the first component there is.
+        // Nodalis proposes STRESS.MISES, else the first component there is.
         let (field, component) = fields
             .iter()
             .find(|(f, c)| f == "STRESS" && c.iter().any(|c| c == "MISES"))
@@ -453,7 +453,7 @@ impl FieldOutputDialog {
         action
     }
 
-    /// PrePoMax's help box below the property grid: what the focused row means.
+    /// The help box below the property grid: what the focused row means.
     fn description(&self, ui: &mut Ui) {
         if self.unavailable().is_some() {
             return;
@@ -491,7 +491,7 @@ impl FieldOutputDialog {
             ui.label(reason);
             return;
         }
-        // Category header like PrePoMax's property grid.
+        // Category header of the property grid.
         let header = egui::Frame::new()
             .fill(crate::style::control())
             .inner_margin(egui::Margin::symmetric(4, 1));
@@ -505,6 +505,7 @@ impl FieldOutputDialog {
         let focus = &mut self.focus;
         let draft = &mut self.drafts[self.kind];
         egui::Grid::new("field output properties")
+            .max_col_width(crate::dock::column_limit(ui))
             .num_columns(2)
             .striped(true)
             .min_col_width(130.0)
@@ -525,7 +526,7 @@ impl FieldOutputDialog {
                         prop_row(ui, focus, Row::Basis, |ui| {
                             let response = egui::ComboBox::from_id_salt("limit basis")
                                 .selected_text(basis_label(*basis))
-                                .width(180.0)
+                                .width(crate::dock::fit_width(ui, 180.0))
                                 .show_ui(ui, |ui| {
                                     for choice in LimitBasis::ALL {
                                         ui.selectable_value(basis, choice, basis_label(choice));
@@ -554,7 +555,7 @@ impl FieldOutputDialog {
                         prop_row(ui, focus, Row::Field, |ui| {
                             let response = egui::ComboBox::from_id_salt("transform field")
                                 .selected_text(field.as_str())
-                                .width(180.0)
+                                .width(crate::dock::fit_width(ui, 180.0))
                                 .show_ui(ui, |ui| {
                                     for (name, _) in fields {
                                         ui.selectable_value(field, name.clone(), name);
@@ -565,7 +566,7 @@ impl FieldOutputDialog {
                         prop_row(ui, focus, Row::CoordinateSystem, |ui| {
                             let response = egui::ComboBox::from_id_salt("transform system")
                                 .selected_text(coordinate_system.as_str())
-                                .width(180.0)
+                                .width(crate::dock::fit_width(ui, 180.0))
                                 .show_ui(ui, |ui| {
                                     for name in systems {
                                         ui.selectable_value(coordinate_system, name.clone(), name);
@@ -579,7 +580,7 @@ impl FieldOutputDialog {
                         prop_row(ui, focus, Row::Field, |ui| {
                             let response = egui::ComboBox::from_id_salt("principal field")
                                 .selected_text(field.as_str())
-                                .width(180.0)
+                                .width(crate::dock::fit_width(ui, 180.0))
                                 .show_ui(ui, |ui| {
                                     for name in tensors {
                                         ui.selectable_value(field, name.clone(), name);
@@ -590,7 +591,7 @@ impl FieldOutputDialog {
                         prop_row(ui, focus, Row::Principal, |ui| {
                             let response = egui::ComboBox::from_id_salt("principal value")
                                 .selected_text(which.label())
-                                .width(180.0)
+                                .width(crate::dock::fit_width(ui, 180.0))
                                 .show_ui(ui, |ui| {
                                     for choice in Principal::ALL {
                                         ui.selectable_value(which, choice, choice.label());
@@ -689,7 +690,7 @@ fn source_rows(
         let mut changed = false;
         let response = egui::ComboBox::from_id_salt("field output field")
             .selected_text(field.as_str())
-            .width(180.0)
+            .width(crate::dock::fit_width(ui, 180.0))
             .show_ui(ui, |ui| {
                 for (name, _) in fields {
                     changed |= ui.selectable_value(field, name.clone(), name).changed();
@@ -710,7 +711,7 @@ fn source_rows(
             .map_or(&[][..], |(_, c)| c.as_slice());
         let response = egui::ComboBox::from_id_salt("field output component")
             .selected_text(component.as_str())
-            .width(180.0)
+            .width(crate::dock::fit_width(ui, 180.0))
             .show_ui(ui, |ui| {
                 for name in components {
                     ui.selectable_value(component, name.clone(), name);

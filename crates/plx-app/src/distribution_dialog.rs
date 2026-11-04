@@ -30,7 +30,7 @@ pub fn distribution_rows(
     let length = units.unit(Quantity::Length);
     ui.label("Type");
     let by_equation = matches!(distribution.kind, DistributionKind::Equation(_));
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if ui.radio(by_equation, "Equation").clicked() && !by_equation {
             distribution.kind = DistributionKind::Equation("=1".into());
         }
@@ -106,7 +106,7 @@ pub fn distribution_rows(
             ui.label("Interpolation");
             egui::ComboBox::from_id_salt("distribution interpolation")
                 .selected_text(interpolation.label())
-                .width(200.0)
+                .width(crate::dock::fit_width(ui, 200.0))
                 .show_ui(ui, |ui| {
                     for option in Interpolation::ALL {
                         ui.selectable_value(interpolation, option, option.label());
@@ -181,7 +181,7 @@ pub fn distribution_row(ui: &mut Ui, id: &str, reference: &mut Option<String>, f
     let text = reference.clone().unwrap_or_else(|| UNIFORM.into());
     egui::ComboBox::from_id_salt(id)
         .selected_text(text)
-        .width(200.0)
+        .width(crate::dock::fit_width(ui, 200.0))
         .show_ui(ui, |ui| {
             ui.selectable_value(reference, None, UNIFORM);
             for distribution in &fe.distributions {

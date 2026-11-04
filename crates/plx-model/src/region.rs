@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// Where a section, boundary condition or load applies.
 ///
-/// Selections made in the GUI are stored as they were picked; the sets CalculiX needs are
+/// Selections made in the GUI are stored as they were picked; the sets the solver needs are
 /// derived from them when writing the input file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Region {
@@ -25,7 +25,7 @@ pub enum Region {
     /// A surface of the input file.
     Surface(String),
     /// Faces, edges and vertices of the CAD geometry the mesh was generated from, picked
-    /// as in PrePoMax. They are found on the mesh again after remeshing.
+    /// on the geometry. They are found on the mesh again after remeshing.
     Geometry(Vec<CadEntity>),
     /// A reference point by name, for boundary conditions and loads on a rigid body: the
     /// body's reference node, which exists only in the input file, so the region has no

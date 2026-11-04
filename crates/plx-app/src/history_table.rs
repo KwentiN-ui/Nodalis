@@ -1,7 +1,7 @@
-//! Table of one history output component, like PrePoMax's history output view: a row per
+//! Table of one history output component: a row per
 //! increment, a column per node, element or face.
 //!
-//! As in PrePoMax's data grid, columns are selected by their header (Ctrl adds one, Shift
+//! Columns are selected by their header (Ctrl adds one, Shift
 //! a range) and cells by dragging; Ctrl+P or the context menu's Plot draws the selection,
 //! the first selected column over the x axis and every other one as a curve.
 
@@ -433,7 +433,7 @@ impl HistoryTable {
                 if response.secondary_clicked()
                     && let Some(p) = response.interact_pointer_pos()
                 {
-                    // As in PrePoMax, a right click on a cell outside the selection selects it.
+                    // A right click on a cell outside the selection selects it.
                     let (column, row) = cell_at(p);
                     let inside = match row {
                         Some(r) => self.selection.contains(column, r),

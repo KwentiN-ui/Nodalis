@@ -203,6 +203,7 @@ impl HotSpotDialog {
                 None => PLOT_HEIGHT,
             };
             egui::Grid::new("hot spot form")
+                .max_col_width(crate::dock::column_limit(ui))
                 .num_columns(2)
                 .spacing([12.0, 6.0])
                 .show(ui, |ui| {

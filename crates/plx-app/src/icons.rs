@@ -46,7 +46,7 @@ pub enum Icon {
     SectionView,
     /// Three blocks of a stack pulled apart, for the exploded view.
     ExplodedView,
-    /// A shape and its mirror image at a dashed plane: PrePoMax's result transformations.
+    /// A shape and its mirror image at a dashed plane: the result transformations.
     Transformation,
     /// Cross of a remove button.
     Remove,
@@ -616,7 +616,7 @@ fn section_cube(shapes: &mut Vec<Shape>, r: Rect) {
     }
 }
 
-/// A base plate with two blocks lifted off it along a blue arrow, PrePoMax's exploded view.
+/// A base plate with two blocks lifted off it along a blue arrow.
 fn exploded_blocks(shapes: &mut Vec<Shape>, r: Rect) {
     let c = r.center();
     let s = 5.0;

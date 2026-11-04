@@ -20,7 +20,7 @@ both.
 
 === Creating an analysis <new-analysis>
 
-#menu("Project", "New Analysis"), a double-click or right-click on the background of the
+#menu("File", "New Analysis"), a double-click or right-click on the background of the
 schematic or #ui("Analysis") in the block search (@block-search) open #ui("Model Properties") for the new analysis
 (@model-properties). Choose its *model space* (3D, plane stress, plane strain or axisymmetric)
 and its *unit system* there.

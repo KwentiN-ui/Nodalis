@@ -1,4 +1,4 @@
-//! Element types the user chose for the parts of the mesh, PrePoMax's element types of a mesh
+//! Element types the user chose for the parts of the mesh, per
 //! part: another CalculiX formulation of the same shape, such as `C3D8R` instead of `C3D8`.
 
 use plx_mesh::{ElementFamily, ElementShape, FeMesh};
@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{FeModel, ModelSpace};
 
-/// The element type the user chose for the elements of one shape in a part. Like PrePoMax,
-/// which keeps it on the geometry part, it is kept by the part's name, so a part meshed anew
+/// The element type the user chose for the elements of one shape in a part. It is kept by the part's name, so a part meshed anew
 /// gets it again.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartElementType {
@@ -24,8 +23,8 @@ impl PartElementType {
     }
 }
 
-/// The CalculiX types an element of the shape can have in the model space, as PrePoMax offers
-/// them: the same nodes in another formulation. Line elements get their type from their beam
+/// The CalculiX types an element of the shape can have in the model space:
+/// the same nodes in another formulation. Line elements get their type from their beam
 /// or truss section and have none to choose from. Linear surface elements of a 3D model can
 /// be shells or membranes; a 2D model has no membranes. CalculiX 2.23 computes quadratic
 /// membranes wrongly (M3D8 is 1.7 times too soft in a tension test, M3D8R has hourglass
@@ -62,7 +61,7 @@ impl FeModel {
     }
 
     /// Chooses the element type of the elements of its shape in the part; false for a name
-    /// CalculiX has no shape for.
+    /// the solver has no shape for.
     pub fn set_element_type(&mut self, part: &str, type_name: &str) -> bool {
         let type_name = type_name.trim().to_ascii_uppercase();
         let Some(shape) = ElementShape::from_type_name(&type_name) else {

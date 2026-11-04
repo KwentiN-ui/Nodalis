@@ -60,7 +60,7 @@ impl PrincipalPlane {
 pub enum PlaneDefinition {
     /// A principal plane at a coordinate, e.g. XY at z = `offset`.
     Principal { plane: PrincipalPlane, offset: f64 },
-    /// Any plane through a point, as in PrePoMax. The normal need not be a unit vector.
+    /// Any plane through a point. The normal need not be a unit vector.
     PointNormal { point: DVec3, normal: DVec3 },
     /// A plane of the model's features, shifted along its normal; it follows the feature
     /// when that changes.
@@ -74,20 +74,20 @@ pub enum PlaneDefinition {
 }
 
 /// A section view: the plane in model coordinates and how the cut faces look. The side the
-/// normal points to stays visible, as in PrePoMax.
+/// normal points to stays visible.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SectionView {
     pub definition: PlaneDefinition,
     /// Keeps the other side of a principal plane; a plane through a point is turned by
     /// reversing its normal instead.
     pub flipped: bool,
-    /// PrePoMax's "lighten section colors".
+    /// The "lighten section colors".
     pub lighten: bool,
 }
 
 impl SectionView {
-    /// A principal plane through the centre of the model, facing away from the viewer like
-    /// PrePoMax's default section: the half towards the camera is cut off.
+    /// A principal plane through the centre of the model, facing away from the viewer, the
+    /// default section: the half towards the camera is cut off.
     pub fn facing(view_direction: DVec3, center: DVec3) -> Self {
         let axis = (0..3)
             .max_by(|&a, &b| view_direction[a].abs().total_cmp(&view_direction[b].abs()))
@@ -215,7 +215,7 @@ pub enum SectionResult {
     Disable,
 }
 
-/// PrePoMax's section view dialog, extended by principal planes and the manipulator.
+/// The section view dialog, extended by principal planes and the manipulator.
 pub struct SectionDialog {
     pub draft: SectionView,
     picking: Option<Picking>,
@@ -324,7 +324,7 @@ impl SectionDialog {
             Some(Picking::Normal(Some(first))) => {
                 let direction = picked - first;
                 if direction.length() > 1e-12 * self.half_diagonal.length() {
-                    // As in PrePoMax the plane goes through the first point, the normal
+                    // The plane goes through the first point, the normal
                     // points from it to the second.
                     self.draft.set_point_normal(first, direction);
                     self.picking = None;
@@ -402,7 +402,7 @@ impl SectionDialog {
             PlaneDefinition::Feature { .. } => 1,
             PlaneDefinition::PointNormal { .. } => 2,
         };
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Plane:");
             if ui.radio(kind == 0, "Base plane").clicked() && kind != 0 {
                 let visible = self.draft.normal();
@@ -530,7 +530,7 @@ impl SectionDialog {
                 }
             });
         ui.add_space(4.0);
-        // PrePoMax's position scroll bar: the plane between both ends of the model.
+        // The position scroll bar: the plane between both ends of the model.
         let normal = self.draft.normal();
         let reach = (self.half_diagonal.dot(normal.abs()) * 1.05).max(1e-9);
         let current = normal.dot(self.draft.anchor(self.center) - self.center);

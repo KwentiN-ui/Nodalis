@@ -1,4 +1,4 @@
-//! The portable Windows ZIP, like PrePoMax's: a `portable.txt` next to the program makes
+//! The portable Windows ZIP: a `portable.txt` next to the program makes
 //! nodalis keep its settings and material library in a `Settings` folder beside it instead
 //! of the user's data directory, so the whole folder can be copied, run from a USB stick or
 //! deleted without leaving anything behind.

@@ -1,4 +1,4 @@
-//! The model tree in PrePoMax's three views Geometry, FE Model and Results, with PrePoMax's
+//! The model tree in the three views Geometry, FE Model and Results, with their
 //! node names. Nodes for features nodalis does not support yet are shown as empty
 //! placeholders, so that the structure is already the familiar one.
 
@@ -136,7 +136,7 @@ pub struct TreeState {
     expand: Option<(TreeView, TreeItem, bool)>,
     /// The selection was made in the 3D view: open its branches and scroll it into view.
     pub reveal: bool,
-    /// Parts selected along with the selected part, by Ctrl or Shift click, as in PrePoMax;
+    /// Parts selected along with the selected part, by Ctrl or Shift click;
     /// they count only while a part of the same view is selected.
     more_parts: BTreeSet<usize>,
     /// Where the range of a Shift click starts: the part last clicked without Shift.
@@ -344,20 +344,12 @@ pub struct TreeResponse {
     pub swap_master_slave: Option<TreeItem>,
     /// Hide (`false`) or show the symbols of constraints, boundary conditions or loads.
     pub symbol_visibility: Vec<(TreeItem, bool)>,
-    /// Open the material library.
-    pub material_library: bool,
-    /// Open the default meshing parameters of the geometry.
-    pub mesh_defaults: bool,
-    /// Mesh all parts of the geometry.
-    pub generate_mesh: bool,
     /// Mesh one part of the geometry, by index.
     pub mesh_part: Option<usize>,
     /// Transform a mesh part (translate, rotate, mirror, scale), by index.
     pub transform_part: Option<usize>,
     /// Merge the selected mesh parts into one.
     pub merge_parts: bool,
-    /// Open the table of all contact regions.
-    pub contact_worksheet: bool,
     /// Run this contact detection again.
     pub detect: Option<usize>,
     /// The warning sign of an item was clicked: explain its findings.
@@ -428,15 +420,14 @@ pub(crate) fn row_label(
     response
 }
 
-/// Text colour of invalid items and of the containers holding them, Windows' red as in
-/// PrePoMax.
+/// Text colour of invalid items and of the containers holding them, Windows' red.
 const INVALID: Color32 = Color32::from_rgb(255, 0, 0);
 
-/// Text colour of deactivated items, PrePoMax's gray.
+/// Text colour of deactivated items.
 const INACTIVE: Color32 = Color32::from_rgb(128, 128, 128);
 
-/// Items that can be deactivated, as far as nodalis has them; PrePoMax also deactivates
-/// materials and surface interactions.
+/// Items that can be deactivated, as far as Nodalis has them.
+/// Materials and surface interactions cannot be deactivated yet.
 fn can_deactivate(item: &TreeItem) -> bool {
     matches!(
         item,
@@ -456,7 +447,7 @@ fn can_deactivate(item: &TreeItem) -> bool {
     )
 }
 
-/// Warning sign next to an item with findings, PrePoMax's warning icon; a click explains them.
+/// Warning sign next to an item with findings; a click explains them.
 /// The mark of an item another analysis owns: two chain links.
 fn link_sign(ui: &mut Ui) -> Response {
     ui.add_space(3.0);
@@ -565,7 +556,7 @@ pub(crate) fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
             containers.remove(0);
             (TreeItem::StepGroup(s, "BCs"), containers)
         }
-        // The analysis has no item; what CalculiX reported shows on the model.
+        // The analysis has no item; what the solver reported shows on the model.
         ModelItem::Analysis => (TreeItem::Model, vec![]),
         ModelItem::InitialCondition(i) => (
             TreeItem::InitialCondition(i),
@@ -656,7 +647,7 @@ pub fn set_name(item: &TreeItem) -> Option<&str> {
     }
 }
 
-/// Whether double-clicking opens a dialog. As in PrePoMax, containers such as "Mesh" or
+/// Whether double-clicking opens a dialog. Containers such as "Mesh" or
 /// "Parts" have none: they create their kind of item or open and close.
 fn has_properties(item: &TreeItem) -> bool {
     !matches!(
@@ -711,7 +702,7 @@ fn is_fe_item(item: &TreeItem) -> bool {
     )
 }
 
-/// "Name (n)" when there are entries, as PrePoMax labels its containers.
+/// "Name (n)" when there are entries, the label of a container.
 fn counted(name: &str, count: usize) -> String {
     if count > 0 {
         format!("{name} ({count})")
@@ -723,7 +714,7 @@ fn counted(name: &str, count: usize) -> String {
 /// Colour of the dotted lines that connect the nodes, as in the Windows tree view.
 const LINE: Color32 = Color32::from_rgb(160, 160, 160);
 
-/// Height of the connector line below the top of a row's icon: PrePoMax's dotted images
+/// Height of the connector line below the top of a row's icon: the dotted images
 /// have their line in pixel row 9.
 const LINE_OFFSET: f32 = 9.0;
 
@@ -831,7 +822,7 @@ fn shows_symbol_of(group: &TreeItem, item: &TreeItem) -> bool {
     }
 }
 
-/// Icon of a part after its element types, as PrePoMax tells solid, shell and beam parts apart.
+/// Icon of a part after its element types, telling solid, shell and beam parts apart.
 fn part_icon(part: &PartInfo) -> TreeIcon {
     if !part.visible {
         return TreeIcon::Hidden;
@@ -858,7 +849,7 @@ fn part_icon(part: &PartInfo) -> TreeIcon {
 }
 
 /// Context menu of a part, the same in the tree and in the 3D view. A part of the geometry
-/// is meshed from here, as in PrePoMax. On one of several selected parts, hiding and
+/// is meshed from here. On one of several selected parts, hiding and
 /// deleting take them all.
 pub fn part_menu(
     ui: &mut Ui,
@@ -898,7 +889,7 @@ pub fn part_menu(
         }
     }
     if view == TreeView::Results {
-        // PrePoMax: a part without colour contours is grey and not part of the legend range.
+        // A part without colour contours is grey and not part of the legend range.
         let label = if contours {
             "Color Contours Off"
         } else {
@@ -938,14 +929,14 @@ struct Tree<'a> {
     /// Inside an item being expanded or collapsed: the state all branches take.
     forced_open: Option<bool>,
     /// Problems found by the model checks, by item: shown with a warning sign, and red when
-    /// CalculiX would abort.
+    /// the solver would abort.
     findings: HashMap<TreeItem, Vec<Finding>>,
     /// Containers holding items with errors, shown red so that they are found when collapsed.
     holds_invalid: HashSet<TreeItem>,
     /// Containers that cannot take items, with the reason, such as the loads of a frequency
     /// step.
     closed: HashMap<TreeItem, &'static str>,
-    /// Deactivated items, shown gray with PrePoMax's no-entry sign.
+    /// Deactivated items, shown gray with the no-entry sign.
     inactive: HashSet<TreeItem>,
     /// Items with a master and a slave, whose menu offers to swap them.
     master_slave: HashSet<TreeItem>,
@@ -954,7 +945,7 @@ struct Tree<'a> {
     /// The contact regions bolts replace, with the bolt.
     replaced: std::collections::BTreeMap<usize, usize>,
     /// Constraints, boundary conditions and loads with a symbol in the 3D view, and whether
-    /// it is shown; hidden ones get PrePoMax's hide icon.
+    /// it is shown; hidden ones get the hide icon.
     symbols: HashMap<TreeItem, bool>,
     /// Number of steps, to disable "Move Down" on the last one.
     step_count: usize,
@@ -1091,7 +1082,7 @@ impl Tree<'_> {
             }
             response = response.on_hover_text(hover);
         }
-        // Like PrePoMax, a right click selects the item its context menu belongs to; on a
+        // A right click selects the item its context menu belongs to; on a
         // part of several selected ones it keeps them, so that the menu deletes them all.
         let double = self.double_click(ui, &item, &response);
         self.doubled = double;
@@ -1132,12 +1123,6 @@ impl Tree<'_> {
         if item == TreeItem::Group("Parts") && !self.part_indices.is_empty() {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                if self.view == TreeView::Geometry {
-                    if ui.button("Mesh All Parts").clicked() {
-                        self.response.generate_mesh = true;
-                    }
-                    ui.separator();
-                }
                 for (label, visible) in [("Show All", true), ("Hide All", false)] {
                     if ui.button(label).clicked() {
                         (self.response.visibility)
@@ -1165,55 +1150,35 @@ impl Tree<'_> {
             );
         // The menu of one of several selected items acts on all of them.
         let several = self.is_selected(&item) && self.state.selected_items(self.view).len() > 1;
-        let connections = item == TreeItem::Group("Contacts");
-        if creates.is_some() || editable || connections {
+        if creates.is_some() || editable {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                if connections && ui.button("Connection Settings …").clicked() {
-                    self.response.open = Some(item.clone());
-                }
-                if connections || item == TreeItem::Group(CONTACT_REGIONS) {
-                    if ui.button("Contact Worksheet …").clicked() {
-                        self.response.contact_worksheet = true;
-                    }
-                    if creates.is_some() {
+                // Tools such as the material library are on the
+                // ribbon only; the menu holds what acts on this item. A separator only
+                // goes below something.
+                let top = ui.cursor().top();
+                let separator = |ui: &mut Ui| {
+                    if ui.cursor().top() > top + 1.0 {
                         ui.separator();
                     }
-                }
-                if let TreeItem::ContactDetection(d) = item {
-                    if ui
+                };
+                if let TreeItem::ContactDetection(d) = item
+                    && ui
                         .button("Detect Again")
                         .on_hover_text(
                             "Searches again and replaces the regions found before, except \
                              those you changed since.",
                         )
                         .clicked()
-                    {
-                        self.response.detect = Some(d);
-                    }
-                    ui.separator();
-                }
-                if item == TreeItem::Group("Materials") {
-                    ui.separator();
-                    if ui.button("Material Library …").clicked() {
-                        self.response.material_library = true;
-                    }
-                }
-                if item == TreeItem::Group("Mesh Setup") {
-                    ui.separator();
-                    if ui.button("Default Mesh Parameters …").clicked() {
-                        self.response.mesh_defaults = true;
-                    }
-                    if ui.button("Mesh All Parts").clicked() {
-                        self.response.generate_mesh = true;
-                    }
+                {
+                    self.response.detect = Some(d);
                 }
                 let members: Vec<TreeItem> = (self.symbols.keys())
                     .filter(|member| shows_symbol_of(&item, member))
                     .cloned()
                     .collect();
                 if !members.is_empty() {
-                    ui.separator();
+                    separator(ui);
                     for (label, visible) in [("Show All", true), ("Hide All", false)] {
                         if ui.button(label).clicked() {
                             (self.response.symbol_visibility)
@@ -1222,7 +1187,7 @@ impl Tree<'_> {
                     }
                 }
                 if creates.is_some() {
-                    ui.separator();
+                    separator(ui);
                     if ui.button("Expand All").clicked() {
                         self.state.expand = Some((self.view, item.clone(), true));
                     }
@@ -1231,6 +1196,7 @@ impl Tree<'_> {
                     }
                 }
                 if editable {
+                    separator(ui);
                     if ui.button("Edit …").clicked() {
                         self.response.open = Some(item.clone());
                     }
@@ -1243,7 +1209,7 @@ impl Tree<'_> {
                         }
                     }
                     if can_deactivate(&item) {
-                        ui.separator();
+                        separator(ui);
                         let label = match (inactive, several) {
                             (true, false) => "Activate",
                             (false, false) => "Deactivate",
@@ -1253,7 +1219,7 @@ impl Tree<'_> {
                         if ui.button(label).clicked() {
                             self.response.toggle_active = Some(item.clone());
                         }
-                        ui.separator();
+                        separator(ui);
                     }
                     if let TreeItem::Step(s) = item {
                         if ui
@@ -1268,7 +1234,7 @@ impl Tree<'_> {
                         {
                             self.response.move_step = Some((s, false));
                         }
-                        ui.separator();
+                        separator(ui);
                     }
                     let contact = match item {
                         TreeItem::ContactRegion(i) => Some(ContactItem::Region(i)),
@@ -1290,7 +1256,7 @@ impl Tree<'_> {
                              .frd file; a step that writes them already opens its output.",
                             NewItem::ContactFieldOutput,
                         );
-                        ui.separator();
+                        separator(ui);
                     }
                     if self.master_slave.contains(&item) {
                         let label = match (several, &item) {
@@ -1302,7 +1268,7 @@ impl Tree<'_> {
                         if ui.button(label).clicked() {
                             self.response.swap_master_slave = Some(item.clone());
                         }
-                        ui.separator();
+                        separator(ui);
                     }
                     let label = if several { "Delete Selected" } else { "Delete" };
                     if deletable(self.view, &item) && ui.button(label).clicked() {
@@ -1314,7 +1280,7 @@ impl Tree<'_> {
         response
     }
 
-    /// PrePoMax's image of a node; containers without an own image get the dotted line.
+    /// The image of a node; containers without an own image get the dotted line.
     fn icon(&self, item: &TreeItem, open: bool) -> TreeIcon {
         if self.inactive.contains(item) {
             return TreeIcon::Inactive;
@@ -1415,7 +1381,7 @@ impl Tree<'_> {
                 ui.add_space(2.0);
                 changed
             });
-            // As in PrePoMax, clicking the sign of a deactivated item activates it.
+            // Clicking the sign of a deactivated item activates it.
             let inactive = self.inactive.contains(&item);
             let sense = if inactive {
                 egui::Sense::click()
@@ -1677,8 +1643,8 @@ impl Tree<'_> {
 
     fn container(&mut self, ui: &mut Ui, name: &'static str, mut items: Vec<(TreeItem, &str)>) {
         items.retain(|(item, _)| !self.hidden(item));
+        // An empty category is left out: items are created on the ribbon, not in the tree.
         if items.is_empty() {
-            self.leaf(ui, TreeItem::Group(name), name);
             return;
         }
         let text = counted(name, items.len());
@@ -1718,7 +1684,6 @@ impl Tree<'_> {
         items.retain(|(item, _)| !self.hidden(item));
         let group = TreeItem::StepGroup(step, name);
         if items.is_empty() {
-            self.leaf(ui, group, name);
             return;
         }
         let text = counted(name, items.len());
@@ -1731,11 +1696,14 @@ impl Tree<'_> {
         });
     }
 
-    /// PrePoMax's features: reference points and coordinate systems, and planes.
+    /// The features: reference points and coordinate systems, and planes.
     fn features(&mut self, ui: &mut Ui, fe: &FeModel) {
         let open = !fe.reference_points.is_empty()
             || !fe.coordinate_systems.is_empty()
             || !fe.planes.is_empty();
+        if !open {
+            return;
+        }
         self.branch(
             ui,
             TreeItem::Group("Features"),
@@ -1760,7 +1728,7 @@ impl Tree<'_> {
 }
 
 /// `mesh_items` names the items of the geometry's mesh setup, for the Geometry tree;
-/// `solver_findings` are the problems CalculiX reported in the last run.
+/// `solver_findings` are the problems the solver reported in the last run.
 pub fn show(
     ui: &mut Ui,
     view: TreeView,
@@ -1796,7 +1764,7 @@ pub fn show(
         .show(ui, |ui| {
             // The dotted connectors replace egui's indent line.
             ui.visuals_mut().indent_has_left_vline = false;
-            // The root nodes are connected too, as with PrePoMax's root lines.
+            // The root nodes are connected too, as with the root lines.
             let lines = ui.painter().add(Shape::Noop);
             match view {
                 TreeView::Geometry => {
@@ -1827,7 +1795,7 @@ pub fn show(
     }
     tree.state.reveal = false;
     tree.state.reveal_acting = false;
-    // Like PrePoMax, the space bar switches the selected item on or off; here only while the
+    // The space bar switches the selected item on or off; here only while the
     // pointer is over the tree, so that typing elsewhere never does.
     if let Some((selected_view, item)) = &tree.state.selected
         && *selected_view == view
@@ -1838,7 +1806,7 @@ pub fn show(
     {
         tree.response.toggle_active = Some(item.clone());
     }
-    // Like PrePoMax, the Delete key deletes the selected item, after the same question as the
+    // The Delete key deletes the selected item, after the same question as the
     // context menu. The selection may come from the 3D view, so the pointer can be anywhere.
     if let Some((selected_view, item)) = &tree.state.selected
         && *selected_view == view
@@ -1852,7 +1820,7 @@ pub fn show(
 }
 
 fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[Finding]) {
-    // A results file has no FE model, as in PrePoMax; its mesh lives in the Results tree.
+    // A results file has no FE model; its mesh lives in the Results tree.
     let model = model.filter(|m| !m.is_results());
     if let Some(model) = &model {
         let fe = &model.fe;
@@ -1896,14 +1864,16 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             .collect();
         // The cross-sections first, as the beam sections pick from them.
         let text = counted("Sections", sections.len());
-        tree.branch(ui, TreeItem::Group("Sections"), text, true, |tree, ui| {
-            tree.container(ui, CROSS_SECTIONS, cross_sections);
-            tree.siblings = sections.iter().map(|(item, _)| item.clone()).collect();
-            for (item, label) in sections {
-                tree.leaf(ui, item, label);
-            }
-            tree.siblings.clear();
-        });
+        if !sections.is_empty() || !cross_sections.is_empty() {
+            tree.branch(ui, TreeItem::Group("Sections"), text, true, |tree, ui| {
+                tree.container(ui, CROSS_SECTIONS, cross_sections);
+                tree.siblings = sections.iter().map(|(item, _)| item.clone()).collect();
+                for (item, label) in sections {
+                    tree.leaf(ui, item, label);
+                }
+                tree.siblings.clear();
+            });
+        }
         for (i, constraint) in fe.constraints.iter().enumerate() {
             if !constraint.active() {
                 tree.inactive.insert(TreeItem::Constraint(i));
@@ -1963,28 +1933,32 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             )
             .collect();
         // The group keeps its name "Contacts", which links of the project schematic use.
-        tree.branch(ui, contacts, "Connections", open, |tree, ui| {
-            for (d, detection) in fe.contact_detections.iter().enumerate() {
+        if open {
+            tree.branch(ui, contacts, "Connections", open, |tree, ui| {
+                for (d, detection) in fe.contact_detections.iter().enumerate() {
+                    let regions = (0..fe.contact_regions.len())
+                        .filter(|r| tree.detected.get(r) == Some(&d))
+                        .map(|r| (TreeItem::ContactRegion(r), region_names[r].as_str()))
+                        .collect();
+                    tree.detection(ui, d, &detection.name, regions);
+                }
                 let regions = (0..fe.contact_regions.len())
-                    .filter(|r| tree.detected.get(r) == Some(&d))
+                    .filter(|r| !tree.detected.contains_key(r))
                     .map(|r| (TreeItem::ContactRegion(r), region_names[r].as_str()))
                     .collect();
-                tree.detection(ui, d, &detection.name, regions);
-            }
-            let regions = (0..fe.contact_regions.len())
-                .filter(|r| !tree.detected.contains_key(r))
-                .map(|r| (TreeItem::ContactRegion(r), region_names[r].as_str()))
-                .collect();
-            tree.container(ui, CONTACT_REGIONS, regions);
-            let bolts = (fe.bolts.iter().enumerate())
-                .map(|(i, b)| (TreeItem::Bolt(i), b.name.as_str()))
-                .collect();
-            tree.container(ui, BOLTS, bolts);
-            let group = TreeItem::Group(ADVANCED_CONTACTS);
-            tree.branch(ui, group, ADVANCED_CONTACTS, advanced, |tree, ui| {
-                tree.advanced_contacts(ui, &fe);
+                tree.container(ui, CONTACT_REGIONS, regions);
+                let bolts = (fe.bolts.iter().enumerate())
+                    .map(|(i, b)| (TreeItem::Bolt(i), b.name.as_str()))
+                    .collect();
+                tree.container(ui, BOLTS, bolts);
+                let group = TreeItem::Group(ADVANCED_CONTACTS);
+                if advanced {
+                    tree.branch(ui, group, ADVANCED_CONTACTS, advanced, |tree, ui| {
+                        tree.advanced_contacts(ui, &fe);
+                    });
+                }
             });
-        });
+        }
         let distributions = (fe.distributions.iter().enumerate())
             .map(|(i, d)| (TreeItem::Distribution(i), d.name.as_str()))
             .collect();
@@ -2015,7 +1989,6 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             .filter(|s| !tree.hidden(&TreeItem::Step(*s)))
             .count();
         if shown == 0 {
-            tree.leaf(ui, steps, "Steps");
             return;
         }
         let text = counted("Steps", shown);
@@ -2178,7 +2151,7 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                         } else {
                             TreeItem::Field(f)
                         };
-                        // PrePoMax opens the first two fields.
+                        // Nodalis opens the first two fields.
                         tree.branch(ui, item, name, f < 2, |tree, ui| {
                             for (c, component) in components.into_iter().enumerate() {
                                 let item = TreeItem::Component(f, c);
@@ -2215,16 +2188,16 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                     }
                 });
             }
-            // Not in PrePoMax: hot spot stresses, defined on the results.
+            // Hot spot stresses, defined on the results.
             let hot_spots = hot_spots.iter().enumerate();
             let items = hot_spots.map(|(i, name)| (TreeItem::HotSpot(i), name.as_str()));
             tree.container(ui, HOT_SPOTS, items.collect());
-            // Not in PrePoMax: results along straight lines through the model.
+            // Results along straight lines through the model.
             let paths = (fe.result_paths.iter().enumerate())
                 .map(|(i, p)| (TreeItem::ResultPath(i), p.name.as_str()))
                 .collect();
             tree.container(ui, PATHS, paths);
-            // Not in PrePoMax either: the values where a plane cuts the model, shown alone
+            // The values where a plane cuts the model, shown alone
             // while checked.
             let group = TreeItem::Group(PLANE_RESULTS);
             if fe.result_planes.is_empty() {

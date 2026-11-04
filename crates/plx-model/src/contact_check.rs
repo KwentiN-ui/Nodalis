@@ -2,7 +2,7 @@
 //! region lies to its master side in the mesh as it is, whether it touches (closed), is
 //! near or far apart (open), and how large the gaps and overlaps are. It tells a bonded
 //! region that ties nothing, or a frictional one that starts open and lets a part fly
-//! away, before CalculiX runs.
+//! away, before the solver runs.
 
 use std::collections::HashMap;
 

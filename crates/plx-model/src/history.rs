@@ -1,5 +1,5 @@
-//! History outputs of a step, PrePoMax's nodal, element and contact history outputs: values
-//! CalculiX prints into the `.dat` file at every increment (`*NODE PRINT`, `*EL PRINT`,
+//! History outputs of a step, the nodal, element and contact history outputs: values
+//! the solver prints into the `.dat` file at every increment (`*NODE PRINT`, `*EL PRINT`,
 //! `*CONTACT PRINT`). The model keeps what the user picked; the sets and keywords are made
 //! when the input file is written.
 
@@ -14,7 +14,7 @@ pub struct HistoryOutput {
     #[serde(default = "crate::active")]
     pub active: bool,
     pub kind: HistoryKind,
-    /// CalculiX's variable names, such as `U` or `RF`, in PrePoMax's order.
+    /// CalculiX's variable names, such as `U` or `RF`, in a fixed order.
     pub variables: Vec<String>,
     pub totals: Totals,
 }
@@ -55,8 +55,7 @@ impl Totals {
 }
 
 impl HistoryKind {
-    /// Variables the kind can print, in PrePoMax's order (`NodalHistoryVariable`,
-    /// `ElementHistoryVariable`, `ContactHistoryVariable`).
+    /// Variables the kind can print, in a fixed order.
     pub fn choices(&self) -> &'static [&'static str] {
         match self {
             HistoryKind::Node { .. } => &["RF", "U", "V", "NT", "RFL"],
@@ -67,7 +66,7 @@ impl HistoryKind {
         }
     }
 
-    /// The tree's and the dialog's name of the kind, as in PrePoMax.
+    /// The tree's and the dialog's name of the kind.
     pub fn label(&self) -> &'static str {
         match self {
             HistoryKind::Node { .. } => "Node Output",
@@ -76,7 +75,7 @@ impl HistoryKind {
         }
     }
 
-    /// Prefix of default names, PrePoMax's `NH_Output`, `EH_Output` and `CH_Output`.
+    /// Prefix of default names, the `NH_Output`, `EH_Output` and `CH_Output`.
     pub fn prefix(&self) -> &'static str {
         match self {
             HistoryKind::Node { .. } => "NH_Output",
@@ -101,7 +100,7 @@ impl HistoryKind {
 }
 
 impl HistoryOutput {
-    /// PrePoMax's default nodal history output: reaction forces and displacements.
+    /// The default nodal history output: reaction forces and displacements.
     pub fn node(name: impl Into<String>, region: Region) -> Self {
         Self {
             name: name.into(),
@@ -112,7 +111,7 @@ impl HistoryOutput {
         }
     }
 
-    /// PrePoMax's default element history output: stresses and strains.
+    /// The default element history output: stresses and strains.
     pub fn element(name: impl Into<String>, region: Region) -> Self {
         Self {
             name: name.into(),
@@ -123,7 +122,7 @@ impl HistoryOutput {
         }
     }
 
-    /// PrePoMax's default contact history output: contact displacements and stresses.
+    /// The default contact history output: contact displacements and stresses.
     pub fn contact(name: impl Into<String>, pair: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -134,7 +133,7 @@ impl HistoryOutput {
         }
     }
 
-    /// Sorts the variables into PrePoMax's order and drops those the kind cannot print.
+    /// Sorts the variables into their fixed order and drops those the kind cannot print.
     pub fn normalize_variables(&mut self) {
         let choices = self.kind.choices();
         self.variables.retain(|v| choices.contains(&v.as_str()));
@@ -149,7 +148,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn variables_keep_prepomax_order() {
+    fn variables_keep_their_order() {
         let mut output = HistoryOutput::node("NH_Output-1", Region::Nodes(vec![1]));
         output.variables = vec!["U".into(), "XX".into(), "RF".into(), "U".into()];
         output.normalize_variables();
