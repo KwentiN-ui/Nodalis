@@ -15,7 +15,7 @@ use crate::profile::Phase;
 use plxs_assembly::discrete::{DiscreteElement, DiscreteKind};
 use plxs_assembly::{
     NonlinearInput, Spc, add_membrane_pressures, assemble_nonlinear, load_vector,
-    membrane_pressures, rotate_concentrated_loads,
+    loads::add_carried_loads, membrane_pressures, rotate_concentrated_loads,
 };
 use plxs_constraints::ConstraintSet;
 use plxs_core::step::{DefaultAmplitude, Incrementation, Procedure as ProcedureKind};
@@ -274,6 +274,8 @@ impl Procedure for NonlinearStatic {
         let mut increment = 0u32;
         let mut previous_fast = false;
         let mut warned = false;
+        let carried = ctx.state.loads.clone();
+        let mut applied: Vec<f64> = Vec::new();
         while time < period * (1.0 - 1e-12) {
             if ctx.cancel.is_cancelled() {
                 return Ok(StepOutcome::Cancelled);
@@ -306,6 +308,20 @@ impl Procedure for NonlinearStatic {
                 });
                 let (mut f_ext, warnings) =
                     load_vector(ctx.model, ctx.table, step, step_time, total, period)?;
+                rotate_concentrated_loads(
+                    ctx.model,
+                    constraints,
+                    &ctx.table.dofs,
+                    step,
+                    step_time,
+                    total,
+                    period,
+                    &mut f_ext,
+                );
+                // Loads move from their values at the end of the previous step to the ones
+                // of this step (an unloading step must not drop them at once).
+                add_carried_loads(&mut f_ext, carried.as_deref(), step, step_time, period);
+                applied.clone_from(&f_ext);
                 // Under NLGEOM pressures on membranes follow the deformed surface (as in
                 // CalculiX, see `plxs_elements::membrane`): the reference forces leave the
                 // load vector and the assembly adds the current ones.
@@ -321,16 +337,6 @@ impl Procedure for NonlinearStatic {
                         *f -= r;
                     }
                 }
-                rotate_concentrated_loads(
-                    ctx.model,
-                    constraints,
-                    &ctx.table.dofs,
-                    step,
-                    step_time,
-                    total,
-                    period,
-                    &mut f_ext,
-                );
                 if !warned {
                     warned = true;
                     for warning in warnings {
@@ -457,6 +463,7 @@ impl Procedure for NonlinearStatic {
             ctx.state.stresses = output.stresses;
             ctx.state.strains = output.strains;
             ctx.state.material = output.material;
+            ctx.state.loads = Some(applied.clone());
             ctx.state.total_time = total;
             let last = time >= period * (1.0 - 1e-12);
             let started = Instant::now();

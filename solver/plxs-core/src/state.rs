@@ -91,6 +91,12 @@ pub struct State {
     /// which CalculiX carries over into the `ENER` of the next dynamic step.
     #[serde(default)]
     pub energy: Option<IntegrationPointField>,
+    /// The mechanical load vector acting at the end of the last static step (concentrated
+    /// and distributed loads, in the DOF layout of the model, without thermal loads): a
+    /// following static step with the default ramp starts its loads from these values,
+    /// as CalculiX does. `None` after steps that do not keep it (dynamics, heat transfer).
+    #[serde(default)]
+    pub loads: Option<Vec<f64>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

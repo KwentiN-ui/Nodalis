@@ -573,6 +573,7 @@ impl DynamicProcedure {
             }
         }
         ctx.state.energy = Some(energy);
+        ctx.state.loads = None;
         ctx.state.stresses = stresses;
         ctx.state.strains = strains;
         ctx.state.total_time = start_total + period;

@@ -407,6 +407,7 @@ impl Procedure for ModalDynamicsProcedure {
         ctx.state.stresses = stresses;
         ctx.state.strains = strains;
         ctx.state.total_time = start_total + period;
+        ctx.state.loads = None;
         ctx.state.steps_done = ctx.step_number;
         Ok(StepOutcome::Converged)
     }
