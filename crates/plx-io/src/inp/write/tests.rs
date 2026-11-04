@@ -4570,6 +4570,67 @@ fn tied_chains(n: u32, quadratic: bool, kind: SectionKind, load: LoadKind) -> (F
 }
 
 #[test]
+fn a_detection_ties_meeting_line_ends_and_keeps_node_ties_the_user_changed() {
+    let mesh = two_chains(2, false);
+    let mut model = line_model(
+        &mesh,
+        rect_beam(BeamOrientation::Automatic),
+        LoadKind::force([0.0, -100.0, 0.0]),
+    );
+    model
+        .contact_detections
+        .push(plx_model::ContactDetection::new("Contacts"));
+    let skins: Vec<_> = (mesh.parts.iter())
+        .map(|p| plx_mesh::extract_part_skin(&mesh, p, 30.0))
+        .collect();
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!((report.added, report.node_ties), (0, 1));
+    // Without faces, Auto is 0.5 % of the diagonal of the lines, 100 long.
+    assert!(
+        (report.tolerance - 0.5).abs() < 1e-9,
+        "{}",
+        report.tolerance
+    );
+    assert!(
+        report
+            .summary("Contacts")
+            .contains("1 node tie at line ends")
+    );
+    let tie = &model.node_ties[0];
+    assert_eq!(tie.name, "Node Tie - BEAM, BEAM2");
+    assert_eq!(tie.region, Region::Nodes(vec![3, 101]));
+    assert!(tie.rotations);
+    assert_eq!(tie.detected_by.as_deref(), Some("Contacts"));
+    // Detecting again replaces it.
+    model.detect_contacts(0, &mesh, &skins, &[true, true]);
+    assert_eq!(model.node_ties.len(), 1);
+    // A node tie changed by the user stays, and none is added for its parts.
+    model.node_ties[0].rotations = false;
+    model.node_ties[0].edited = true;
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!(report.node_ties, 1);
+    assert_eq!(model.node_ties.len(), 1);
+    assert!(!model.node_ties[0].rotations);
+    // Without line ends the detection's unchanged node ties go.
+    model.node_ties[0].edited = false;
+    model.contact_detections[0].filter.line_end = false;
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!(report.node_ties, 0);
+    assert!(model.node_ties.is_empty());
+    // A node tie made by hand is left alone.
+    model.node_ties.push(NodeTie::new("Node_Tie-1"));
+    model.contact_detections[0].filter.line_end = true;
+    model.detect_contacts(0, &mesh, &skins, &[true, true]);
+    assert_eq!(model.node_ties.len(), 2);
+}
+
+#[test]
 fn node_ties_merge_the_nodes_or_hinge_beams_with_equations() {
     let (mesh, mut model) = tied_chains(
         2,

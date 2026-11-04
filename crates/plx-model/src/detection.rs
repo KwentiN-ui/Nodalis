@@ -1,8 +1,9 @@
 //! Contact detection, Ansys' connection groups: a search for touching surfaces with its
 //! parameters kept in the model, so that it can run again after the geometry or the mesh
 //! changed. Each pair of touching surfaces found becomes a [`ContactRegion`] of the
-//! detection's type. Detecting again replaces the regions found before, except those the
-//! user changed since.
+//! detection's type, and ends of beams and trusses of different parts that meet become a
+//! [`NodeTie`]. Detecting again replaces the regions and node ties found before, except
+//! those the user changed since.
 //!
 //! A detection runs on the display of the CAD geometry when the model has one, Ansys'
 //! detection on the geometry: the regions take the whole CAD faces that touch, so they exist
@@ -13,13 +14,13 @@ use std::collections::{BTreeSet, HashSet};
 use std::collections::BTreeMap;
 
 use plx_mesh::{
-    CadEntity, FeMesh, GeometryFilter, GroupBy, PartSkin, SearchParameters, SurfaceId, SurfaceKind,
-    display_cad_map, find_contact_pairs, surface_faces,
+    CadEntity, FeMesh, GeometryFilter, GroupBy, LineJoint, PartSkin, SearchParameters, SurfaceId,
+    SurfaceKind, display_cad_map, find_contact_pairs, find_line_joints, surface_faces,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::connection::parts_of;
-use crate::{ContactBehavior, ContactRegion, FeModel, Region};
+use crate::{ContactBehavior, ContactRegion, FeModel, NodeTie, Region};
 
 /// The parts of the two sides of a region, the smaller set first.
 type PartPair = (BTreeSet<usize>, BTreeSet<usize>);
@@ -91,6 +92,9 @@ pub struct DetectionFilter {
     pub shell: bool,
     /// Free edges of shells and membranes.
     pub shell_edge: bool,
+    /// Ends of beams and trusses of different parts at one point, tied as node ties.
+    #[serde(default = "crate::active")]
+    pub line_end: bool,
 }
 
 impl Default for DetectionFilter {
@@ -99,6 +103,7 @@ impl Default for DetectionFilter {
             solid: true,
             shell: true,
             shell_edge: true,
+            line_end: true,
         }
     }
 }
@@ -140,6 +145,8 @@ pub struct DetectionReport {
     pub kept: Vec<String>,
     /// Regions the user changed that the detection no longer finds.
     pub lost: Vec<String>,
+    /// Node ties found at line ends, those the user changed and kept included.
+    pub node_ties: usize,
 }
 
 impl DetectionReport {
@@ -154,6 +161,13 @@ impl DetectionReport {
                 "s"
             }
         );
+        if self.node_ties > 0 {
+            text += &format!(
+                ", {} node tie{} at line ends",
+                self.node_ties,
+                if self.node_ties == 1 { "" } else { "s" }
+            );
+        }
         if !self.kept.is_empty() {
             text += &format!(", {} changed by you kept", self.kept.len());
         }
@@ -203,13 +217,28 @@ fn tolerance_of(mesh: &FeMesh, skins: &[PartSkin], searched: &[bool], by_element
         }
     }
     if edges == 0 {
-        return 0.0;
+        // Only beams and trusses: 0.5 % of the diagonal of their nodes, for the line ends.
+        let searched = (mesh.parts.iter().zip(searched)).filter(|(_, s)| **s);
+        for element in searched.flat_map(|(p, _)| &p.elements) {
+            let Some(element) = mesh.element(*element) else {
+                continue;
+            };
+            for p in element.nodes.iter().filter_map(|&n| mesh.node(n)) {
+                for d in 0..3 {
+                    min[d] = min[d].min(p[d]);
+                    max[d] = max[d].max(p[d]);
+                }
+            }
+        }
+        if min[0] > max[0] {
+            return 0.0;
+        }
     }
     let diagonal = (0..3)
         .map(|d| (max[d] - min[d]).powi(2))
         .sum::<f64>()
         .sqrt();
-    if by_elements {
+    if by_elements && edges > 0 {
         (0.005 * diagonal).max(0.5 * length / edges as f64)
     } else {
         0.005 * diagonal
@@ -270,15 +299,7 @@ impl FeModel {
         display: Option<&[u8]>,
     ) -> Option<DetectionReport> {
         let detection = self.contact_detections.get(index)?.clone();
-        let searched: Vec<bool> = (mesh.parts.iter().enumerate())
-            .map(|(i, part)| {
-                if detection.parts.is_empty() {
-                    visible.get(i).copied().unwrap_or(true)
-                } else {
-                    detection.parts.contains(&part.name)
-                }
-            })
-            .collect();
+        let searched = searched_parts(&detection, mesh, visible);
         let tolerance = (detection.tolerance)
             .unwrap_or_else(|| tolerance_of(mesh, skins, &searched, display.is_none()));
         let young_of = self.young_of_elements(mesh);
@@ -407,6 +428,103 @@ impl FeModel {
                 report.lost.push(name);
             }
         }
+        // The display of the geometry has no nodes of the mesh to tie; the caller ties the
+        // line ends of the mesh, see [`Self::detect_line_ends`].
+        if display.is_none() {
+            self.detect_line_ends(index, mesh, visible, &mut report);
+        }
         Some(report)
+    }
+
+    /// The node ties of the detection `index`: ends of beams and trusses of different parts
+    /// within the report's tolerance of each other are tied, rigidly. They replace the node
+    /// ties the detection found before, except those the user changed since, and are counted
+    /// in `report`. With the detection's line ends switched off, its node ties are removed.
+    pub fn detect_line_ends(
+        &mut self,
+        index: usize,
+        mesh: &FeMesh,
+        visible: &[bool],
+        report: &mut DetectionReport,
+    ) {
+        let Some(detection) = self.contact_detections.get(index).cloned() else {
+            return;
+        };
+        let ours = |t: &NodeTie| t.detected_by.as_deref() == Some(detection.name.as_str());
+        self.node_ties.retain(|t| !ours(t) || t.edited);
+        if !detection.filter.line_end {
+            return;
+        }
+        let edited: Vec<BTreeSet<usize>> = (self.node_ties.iter().filter(|t| ours(t)))
+            .map(|t| node_parts(&t.region, mesh))
+            .collect();
+        report.node_ties += edited.len();
+        let searched = searched_parts(&detection, mesh, visible);
+        for joint in find_line_joints(mesh, &searched, report.tolerance) {
+            if edited.contains(&joint.parts) {
+                continue;
+            }
+            let parts: Vec<&str> = (joint.parts.iter())
+                .filter_map(|&p| mesh.parts.get(p))
+                .map(|p| p.name.as_str())
+                .collect();
+            let name = format!("Node Tie - {}", parts.join(", "));
+            let taken = self.node_ties.iter().map(|t| t.name.as_str());
+            let name = if taken.clone().any(|t| t.eq_ignore_ascii_case(&name)) {
+                crate::next_name(&name, taken)
+            } else {
+                name
+            };
+            self.node_ties.push(NodeTie {
+                region: joint_region(mesh, &joint),
+                detected_by: Some(detection.name.clone()),
+                ..NodeTie::new(name)
+            });
+            report.node_ties += 1;
+        }
+    }
+}
+
+/// Which parts of `mesh` the detection searches: the parts it names, or the visible ones.
+fn searched_parts(detection: &ContactDetection, mesh: &FeMesh, visible: &[bool]) -> Vec<bool> {
+    (mesh.parts.iter().enumerate())
+        .map(|(i, part)| {
+            if detection.parts.is_empty() {
+                visible.get(i).copied().unwrap_or(true)
+            } else {
+                detection.parts.contains(&part.name)
+            }
+        })
+        .collect()
+}
+
+/// The parts with elements on the nodes of `region`, to recognise a node tie by.
+fn node_parts(region: &Region, mesh: &FeMesh) -> BTreeSet<usize> {
+    let nodes: BTreeSet<_> = region.nodes(mesh).into_iter().collect();
+    (mesh.parts.iter().enumerate())
+        .filter(|(_, p)| {
+            (p.elements.iter().filter_map(|&e| mesh.element(e)))
+                .any(|e| e.nodes.iter().any(|n| nodes.contains(n)))
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The nodes of a line joint as a region: the CAD vertices they lie on, if those have no
+/// other nodes, so that the tie survives remeshing; else the nodes themselves.
+fn joint_region(mesh: &FeMesh, joint: &LineJoint) -> Region {
+    let vertices: BTreeSet<CadEntity> = (mesh.cad.nodes.iter())
+        .filter(|(entity, nodes)| {
+            matches!(entity, CadEntity::Vertex(_)) && nodes.iter().any(|n| joint.nodes.contains(n))
+        })
+        .map(|(&entity, _)| entity)
+        .collect();
+    let covered: BTreeSet<_> = (vertices.iter())
+        .flat_map(|v| mesh.cad.nodes[v].iter().copied())
+        .collect();
+    if !vertices.is_empty() && covered == joint.nodes.iter().copied().collect() {
+        Region::Geometry(vertices.into_iter().collect())
+    } else {
+        Region::Nodes(joint.nodes.clone())
     }
 }

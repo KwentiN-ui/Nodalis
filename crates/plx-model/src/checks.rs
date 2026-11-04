@@ -4709,10 +4709,8 @@ mod tests {
         model.steps[0].loads[0].region = Region::Nodes(vec![3]);
         if tied {
             model.node_ties.push(crate::NodeTie {
-                name: "Node_Tie-1".into(),
-                active: true,
                 region: Region::Nodes(vec![3, 9]),
-                rotations: true,
+                ..crate::NodeTie::new("Node_Tie-1")
             });
         }
         (mesh, model)

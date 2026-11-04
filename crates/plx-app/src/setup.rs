@@ -3297,7 +3297,8 @@ impl Editor {
                     egui::Label::new(
                         egui::RichText::new(
                             "All nodes of the region follow the first one. Connects the ends \
-                             of beams or trusses of different parts. Rigid also couples the rotations, otherwise the \
+                             of beams or trusses of different parts; Detect Contacts finds \
+                             them. Rigid also couples the rotations, otherwise the \
                              connection is a hinge; trusses have no rotations.",
                         )
                         .weak(),
@@ -3855,6 +3856,11 @@ impl Editor {
                             region.detected_by = Some(detection.name.clone());
                         }
                     }
+                    for tie in &mut fe.node_ties {
+                        if tie.detected_by.as_deref() == Some(old.as_str()) {
+                            tie.detected_by = Some(detection.name.clone());
+                        }
+                    }
                 }
                 put(&mut fe.contact_detections, index, detection);
             }
@@ -3880,6 +3886,8 @@ impl Editor {
                 tie.region = region.region();
                 if let Some(existing) = index.and_then(|i| fe.node_ties.get(i)) {
                     tie.active = existing.active;
+                    // A detected node tie the user changed is kept when detecting again.
+                    tie.edited |= tie.detected_by.is_some() && tie != *existing;
                 }
                 put(&mut fe.node_ties, index, tie);
             }
@@ -4046,6 +4054,13 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
                 }
                 r.detected_by = None;
                 std::mem::take(&mut r.edited)
+            });
+            fe.node_ties.retain_mut(|t| {
+                if t.detected_by.as_deref() != Some(name.as_str()) {
+                    return true;
+                }
+                t.detected_by = None;
+                std::mem::take(&mut t.edited)
             });
             true
         }
