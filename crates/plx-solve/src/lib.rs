@@ -137,6 +137,48 @@ pub struct Prepared {
     pub text: String,
     /// What the lowering noticed but did not stop for, shown as the solver's warnings.
     pub warnings: Vec<String>,
+    /// The steps of the FE model the analysis' steps come from, kept with the results.
+    pub steps: Vec<plx_results::steps::StepRecord>,
+}
+
+/// Collects from the progress of a run how its increments went.
+#[derive(Default)]
+struct Convergence {
+    increments: Vec<plx_results::steps::IncrementRecord>,
+    /// The step running.
+    step: Option<u32>,
+    /// A step that finished without converging.
+    unconverged: Option<u32>,
+}
+
+impl Convergence {
+    fn event(&mut self, event: &ProgressEvent) {
+        match *event {
+            ProgressEvent::Step { step } => self.step = Some(step),
+            ProgressEvent::IncrementDone {
+                step,
+                increment,
+                attempt,
+                iterations,
+                total_time,
+                step_time,
+                ..
+            } => self.increments.push(plx_results::steps::IncrementRecord {
+                step,
+                increment,
+                attempts: attempt.max(1),
+                iterations,
+                step_time,
+                total_time,
+            }),
+            ProgressEvent::StepDone {
+                step,
+                converged: false,
+            } => self.unconverged = self.unconverged.or(Some(step)),
+            ProgressEvent::StepDone { .. } => self.step = None,
+            _ => {}
+        }
+    }
 }
 
 /// What a run computes: an input text the solver reads, or an analysis given directly.
@@ -371,6 +413,10 @@ impl Run {
             ..plxs_session::JobOptions::new(work_dir, name)
         };
         let lines = Arc::clone(&output);
+        let records = match &job {
+            Job::Analysis(prepared) => prepared.steps.clone(),
+            Job::Text(_) => Vec::new(),
+        };
         let solved = Arc::new(Mutex::new(None));
         let keep_results = Arc::clone(&solved);
         let results_file = work_dir.join(format!("{name}.{}", plx_results::solver::EXTENSION));
@@ -380,7 +426,10 @@ impl Run {
             .name(format!("plxs {name}"))
             .spawn(move || {
                 let say = |line: String| lines.lock().unwrap_or_else(|e| e.into_inner()).push(line);
+                // How the increments went, kept with the results.
+                let mut track = Convergence::default();
                 let mut progress = |event: ProgressEvent| {
+                    track.event(&event);
                     for line in plxs_session::format_event(&event) {
                         say(line);
                     }
@@ -426,7 +475,11 @@ impl Run {
                 // discarded (nobody waits for them, and a new run of the same name may
                 // already be writing its own file).
                 if let Some((model, results)) = kept.filter(|_| !options.cancel.is_cancelled()) {
-                    let results = SolverResults::new(&model, results, VERSION);
+                    let mut results = SolverResults::new(&model, results, VERSION);
+                    results.steps = records;
+                    let failed = !matches!(run, Ok(Ok(plxs_session::JobOutcome::Finished)));
+                    results.unconverged_step = track.step.filter(|_| failed).or(track.unconverged);
+                    results.convergence = track.increments;
                     match results.write(&results_file) {
                         Ok(()) => {
                             *keep_results.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -839,6 +892,7 @@ S
             analysis,
             text: text.to_owned(),
             warnings: vec!["a lowering warning".into()],
+            steps: Vec::new(),
         }
     }
 

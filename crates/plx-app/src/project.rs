@@ -6538,6 +6538,13 @@ impl ProjectApp {
         for link in self.links.iter().filter(|l| l.target == target) {
             let source = self.name_of(link.source);
             incoming.paths.extend(links::filled_paths(link, &source));
+            if links::is_state(link) {
+                (incoming.continuation.inherited_steps).extend(
+                    link.inherited
+                        .iter()
+                        .map(|step| (step.clone(), source.clone())),
+                );
+            }
         }
         let fe = |id: u64| {
             (self.nodes.iter().find(|n| n.id == id))

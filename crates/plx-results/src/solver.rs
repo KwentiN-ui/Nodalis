@@ -23,7 +23,7 @@ pub const EXTENSION: &str = "ndlr";
 
 /// The first bytes of a `.ndlr` file; the last two count the format, which is not converted:
 /// results of another format are solved again.
-const MAGIC: &[u8; 8] = b"PLXRES\x00\x01";
+const MAGIC: &[u8; 8] = b"PLXRES\x00\x02";
 
 /// What a run of the built-in solver computed, as Nodalis keeps it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -35,6 +35,12 @@ pub struct SolverResults {
     pub results: Results,
     /// The version of the solver that computed them.
     pub version: String,
+    /// The steps of the FE model the solver's steps were lowered from.
+    pub steps: Vec<crate::steps::StepRecord>,
+    /// How the solver got through the increments it finished.
+    pub convergence: Vec<crate::steps::IncrementRecord>,
+    /// The solver step the run stopped in without converging.
+    pub unconverged_step: Option<u32>,
 }
 
 /// Why a `.ndlr` file could not be read.
@@ -66,6 +72,7 @@ impl SolverResults {
             model: kept,
             results,
             version: version.to_owned(),
+            ..Self::default()
         }
     }
 

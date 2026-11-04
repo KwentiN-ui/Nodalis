@@ -506,6 +506,8 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     // The history output of results of the built-in solver, which come without a `.dat`
     // file; `None` for CalculiX's results, which read theirs from the file.
     let mut solver_history = None;
+    // The steps of the FE model the built-in solver recorded with its results.
+    let mut step_records = None;
     let solver_results = plx_results::solver::is_solver_results(path);
     let (mesh, warnings, skipped_keywords, included_files, increments) =
         if extension("frd") || solver_results {
@@ -519,6 +521,11 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
             } = if solver_results {
                 // Taken from memory as the solver left them, without a `.frd` file to parse.
                 let solved = plx_results::SolverResults::read(path).map_err(|e| e.to_string())?;
+                step_records = Some((
+                    solved.steps.clone(),
+                    solved.convergence.clone(),
+                    solved.unconverged_step,
+                ));
                 let input = companion_input(path).and_then(|p| std::fs::read_to_string(p).ok());
                 solver_history = Some(plx_io::solver::history(&solved, input.as_deref()));
                 plx_io::solver::import(&solved)
@@ -585,6 +592,9 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
         }
         view.date = date;
         view.time = time;
+        if let Some((records, convergence, unconverged)) = &step_records {
+            view.set_step_records(records, convergence, *unconverged);
+        }
         view
     });
     // History outputs CalculiX printed next to the results, or
