@@ -32,6 +32,9 @@ impl Workbench {
             Cmd::PreviousIncrement => current > 0,
             Cmd::NextIncrement => current < last,
             Cmd::LastIncrement => current < last_in_step,
+            Cmd::AnimateScaleFactor | Cmd::AnimateStep => !view.increments.is_empty(),
+            Cmd::AnimateAllSteps => view.steps.steps.len() > 1,
+            Cmd::AnimatePositions => view.current_step().is_some_and(|s| s.has_positions()),
             // Only modes of a frequency step have a sound.
             Cmd::ModeSound => {
                 view.sound.is_some()
@@ -47,6 +50,7 @@ impl Workbench {
         let Some(view) = self.shown_results_view() else {
             return false;
         };
+        let playing = |kind| view.animation.as_ref().is_some_and(|a| a.kind == kind);
         match cmd {
             Cmd::ShowUndeformed => view.show_undeformed,
             Cmd::GlobalContours => view.show_global_contours,
@@ -54,6 +58,10 @@ impl Workbench {
                 !view.transformations.is_empty() || self.transformation_dialog.is_some()
             }
             Cmd::Animate => view.animation.is_some(),
+            Cmd::AnimateScaleFactor => playing(AnimationKind::ScaleFactor),
+            Cmd::AnimateStep => playing(AnimationKind::Step),
+            Cmd::AnimateAllSteps => playing(AnimationKind::AllSteps),
+            Cmd::AnimatePositions => playing(AnimationKind::Positions),
             Cmd::ModeSound => view.sound.is_some(),
             _ => false,
         }
@@ -91,6 +99,10 @@ impl Workbench {
                     view.start_animation(AnimationKind::ScaleFactor);
                 }
             }
+            Cmd::AnimateScaleFactor => view.start_animation(AnimationKind::ScaleFactor),
+            Cmd::AnimateStep => view.start_animation(AnimationKind::Step),
+            Cmd::AnimateAllSteps => view.start_animation(AnimationKind::AllSteps),
+            Cmd::AnimatePositions => view.start_animation(AnimationKind::Positions),
             Cmd::ModeSound => {
                 view.sound = match view.sound {
                     Some(_) => None,

@@ -208,6 +208,10 @@ pub enum Cmd {
     NextIncrement,
     LastIncrement,
     Animate,
+    AnimateScaleFactor,
+    AnimateStep,
+    AnimateAllSteps,
+    AnimatePositions,
     ModeSound,
     OpenResults,
     RemoveResults,
@@ -1915,17 +1919,47 @@ fn build() -> Vec<Command> {
             tip,
         ));
     }
-    add(command(
-        C::Animate,
-        "Animate",
-        r,
-        t,
-        STEP_GROUP,
-        Tool(Icon::Animate),
-        "",
-        "Animates the deformation, the increments or the steps; the animation window sets \
-         how.",
+    add(tile(
+        command(
+            C::Animate,
+            "Animate",
+            r,
+            t,
+            STEP_GROUP,
+            Tool(Icon::Animate),
+            "",
+            "Animates the deformation; the menu below plays the increments of the step, of all \
+             steps or the positions of a moving load instead.",
+        ),
+        Tile::Split,
     ));
+    for (cmd, name, tip) in [
+        (
+            C::AnimateScaleFactor,
+            "Scale Factor",
+            "Scales the shown result from zero to its full size.",
+        ),
+        (
+            C::AnimateStep,
+            "Step",
+            "Plays the increments of the shown step one after another.",
+        ),
+        (
+            C::AnimateAllSteps,
+            "All Steps",
+            "Plays the increments of all steps one after another, as the timeline shows them.",
+        ),
+        (
+            C::AnimatePositions,
+            "Positions",
+            "Plays the positions of the moving load of the shown step.",
+        ),
+    ] {
+        add(tile(
+            command(cmd, name, r, t, STEP_GROUP, TileIcon::None, "", tip),
+            Tile::In(C::Animate),
+        ));
+    }
     add(command(
         C::ModeSound,
         "Sound",

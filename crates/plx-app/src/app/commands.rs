@@ -225,6 +225,10 @@ impl AnalysisWindow {
             | Cmd::NextIncrement
             | Cmd::LastIncrement
             | Cmd::Animate
+            | Cmd::AnimateScaleFactor
+            | Cmd::AnimateStep
+            | Cmd::AnimateAllSteps
+            | Cmd::AnimatePositions
             | Cmd::ModeSound => w.results_command_enabled(cmd),
             Cmd::ExportVtu | Cmd::ExportVtk | Cmd::ExportFrd | Cmd::ExportDeformedMesh => {
                 results_open
@@ -285,6 +289,10 @@ impl AnalysisWindow {
             | Cmd::GlobalContours
             | Cmd::Transformations
             | Cmd::Animate
+            | Cmd::AnimateScaleFactor
+            | Cmd::AnimateStep
+            | Cmd::AnimateAllSteps
+            | Cmd::AnimatePositions
             | Cmd::ModeSound => w.results_command_checked(cmd),
             Cmd::Monitor => w.analysis_tab,
             Cmd::ContactWorksheet => w.contact_worksheet,
@@ -434,6 +442,10 @@ impl AnalysisWindow {
             | Cmd::NextIncrement
             | Cmd::LastIncrement
             | Cmd::Animate
+            | Cmd::AnimateScaleFactor
+            | Cmd::AnimateStep
+            | Cmd::AnimateAllSteps
+            | Cmd::AnimatePositions
             | Cmd::ModeSound => w.run_results_command(cmd),
             Cmd::ExportVtu => w.open_vtk_export(plx_io::vtk::VtkFormat::Xml),
             Cmd::ExportVtk => w.open_vtk_export(plx_io::vtk::VtkFormat::Legacy),

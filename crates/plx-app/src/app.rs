@@ -6754,6 +6754,10 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
     let mut event = WindowEvent::None;
     let mut open = true;
     let mut restart = None;
+    // The step the animation started in.
+    let positions = (view.animation.as_ref())
+        .and_then(|a| view.steps.step_of(a.start_increment))
+        .is_some_and(|s| s.has_positions());
     egui::Window::new("Animation")
         .id(crate::ids::window(ctx, "animation"))
         .open(&mut open)
@@ -6771,12 +6775,20 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
                 .show(ui, |ui| {
                     ui.label("Type");
                     ui.horizontal(|ui| {
-                        for (kind, label) in [
-                            (AnimationKind::ScaleFactor, "Scale factor"),
-                            (AnimationKind::Increments, "Step increments"),
-                            (AnimationKind::Steps, "Steps"),
+                        for kind in [
+                            AnimationKind::ScaleFactor,
+                            AnimationKind::Step,
+                            AnimationKind::AllSteps,
+                            AnimationKind::Positions,
                         ] {
-                            if ui.radio(animation.kind == kind, label).clicked()
+                            // Only a moving load has positions.
+                            if kind == AnimationKind::Positions
+                                && animation.kind != kind
+                                && !positions
+                            {
+                                continue;
+                            }
+                            if ui.radio(animation.kind == kind, kind.label()).clicked()
                                 && animation.kind != kind
                             {
                                 restart = Some(kind);

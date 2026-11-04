@@ -1,6 +1,6 @@
 //! Result animation: either the deformation of one increment grows from zero to
-//! its full scale, or the increments of a step play one after another, or the steps (their last
-//! increments) do. A mode shape of a
+//! its full scale, or the increments of a step, of all steps or the positions of a moving load
+//! play one after another. A mode shape of a
 //! frequency or buckling step swings from -1 to 1 instead, so both halves of the oscillation show.
 
 /// What the frames of an animation show.
@@ -9,16 +9,35 @@ pub enum AnimationKind {
     /// The shown result scaled from 0 to 1 over the frames, from -1 to 1 for a mode shape
     /// (label "Scale factor").
     ScaleFactor,
-    /// Each frame is one increment of the shown step (label "Time increments").
-    Increments,
-    /// Each frame is the last increment of one step, e.g. one position of a moving load.
-    Steps,
+    /// Each frame is one increment of the shown step (label "Step").
+    Step,
+    /// Each frame is one increment of all the steps, as the timeline shows them, of the kind
+    /// of the shown step: timed steps one after another, or the modes of the modal steps.
+    AllSteps,
+    /// Each frame is one position of the moving load of the shown step, its last increment
+    /// there.
+    Positions,
+}
+
+impl AnimationKind {
+    /// The name in the animation window and the menu of Animate.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ScaleFactor => "Scale factor",
+            Self::Step => "Step",
+            Self::AllSteps => "All steps",
+            Self::Positions => "Positions",
+        }
+    }
 }
 
 impl AnimationKind {
     /// Whether the frames are increments of the results rather than a scaled one.
     pub fn plays_increments(self) -> bool {
-        matches!(self, AnimationKind::Increments | AnimationKind::Steps)
+        matches!(
+            self,
+            AnimationKind::Step | AnimationKind::AllSteps | AnimationKind::Positions
+        )
     }
 }
 
@@ -111,7 +130,9 @@ impl Animation {
     pub fn frame_count(&self) -> usize {
         match self.kind {
             AnimationKind::ScaleFactor => self.frames.max(2) as usize,
-            AnimationKind::Increments | AnimationKind::Steps => self.increments.len().max(1),
+            AnimationKind::Step | AnimationKind::AllSteps | AnimationKind::Positions => {
+                self.increments.len().max(1)
+            }
         }
     }
 
@@ -134,7 +155,7 @@ impl Animation {
                     t
                 }
             }
-            AnimationKind::Increments | AnimationKind::Steps => 1.0,
+            AnimationKind::Step | AnimationKind::AllSteps | AnimationKind::Positions => 1.0,
         }
     }
 
@@ -142,7 +163,7 @@ impl Animation {
     pub fn increment(&self) -> Option<usize> {
         match self.kind {
             AnimationKind::ScaleFactor => None,
-            AnimationKind::Increments | AnimationKind::Steps => {
+            AnimationKind::Step | AnimationKind::AllSteps | AnimationKind::Positions => {
                 self.increments.get(self.frame).copied()
             }
         }
@@ -282,7 +303,7 @@ mod tests {
 
     #[test]
     fn increment_animation_starts_at_the_shown_increment() {
-        let animation = Animation::new(AnimationKind::Increments, vec![3, 4, 5], 4, false);
+        let animation = Animation::new(AnimationKind::Step, vec![3, 4, 5], 4, false);
         assert_eq!(animation.frame, 1);
         assert_eq!(animation.increment(), Some(4));
         assert_eq!(animation.amplitude(), 1.0);
