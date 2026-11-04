@@ -23,8 +23,8 @@ check (@model-check) reports a missing one as "No stored eigenmodes". Create the
     time period fits.],
 )
 
-Loads of a modal dynamics step need an #ui("Amplitude") (@amplitudes); a stepped amplitude
-applies the load at once. Only loads and the boundary conditions of the frequency step act;
+A load of a modal dynamics step without an #ui("Amplitude") (@amplitudes) acts at once and stays
+constant; give it an amplitude for a load that changes over time. Only loads and the boundary conditions of the frequency step act;
 CalculiX cannot change supports in a modal step.
 
 === Steady State Dynamics
