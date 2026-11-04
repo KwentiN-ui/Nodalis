@@ -390,6 +390,10 @@ impl BackgroundSolve {
         let Some(model) = &self.model else {
             return;
         };
+        // Solve Again computes every step, also those that did not change.
+        if self.force {
+            crate::analysis::forget_steps(&self.work_dir, &self.name);
+        }
         let started = Analysis::start(
             &self.solver,
             model,

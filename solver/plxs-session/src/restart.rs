@@ -24,10 +24,10 @@ const RESTART_MAGIC: &[u8; 8] = b"PLXSROUT";
 const FORMAT: u32 = 1;
 
 /// FNV-1a, 64 bit: stable across Rust versions and processes, unlike `DefaultHasher`.
-struct Fnv(u64);
+pub(crate) struct Fnv(u64);
 
 impl Fnv {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Fnv(0xcbf2_9ce4_8422_2325)
     }
 }
@@ -82,13 +82,17 @@ fn format_error(what: &str, message: impl std::fmt::Display) -> Error {
     Error::Unsupported(format!("{what}: {message}"))
 }
 
-fn encode<T: Serialize>(magic: &[u8; 8], value: &T) -> Result<Vec<u8>> {
+pub(crate) fn encode<T: Serialize>(magic: &[u8; 8], value: &T) -> Result<Vec<u8>> {
     let mut out = magic.to_vec();
     out.extend(FORMAT.to_le_bytes());
     postcard::to_extend(value, out).map_err(|e| format_error("restart data", e))
 }
 
-fn decode<T: for<'de> Deserialize<'de>>(magic: &[u8; 8], what: &str, bytes: &[u8]) -> Result<T> {
+pub(crate) fn decode<T: for<'de> Deserialize<'de>>(
+    magic: &[u8; 8],
+    what: &str,
+    bytes: &[u8],
+) -> Result<T> {
     let Some(rest) = bytes.strip_prefix(magic.as_slice()) else {
         return Err(format_error(what, "not a plxs file"));
     };

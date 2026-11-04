@@ -9,6 +9,7 @@
 //! `threads` threads (the command line). No global state, so several sessions can run in
 //! one process.
 
+pub mod cache;
 pub mod check;
 pub mod job;
 pub mod restart;
@@ -24,6 +25,7 @@ use plxs_linalg::{LdltSolver, Pattern};
 use plxs_output::{CvgRow, StaRow};
 use plxs_procedures::{ProcedureContext, run_step};
 
+pub use cache::StepCache;
 pub use check::{Check, check_analysis, check_input, format_diagnostic};
 pub use job::{
     JobOptions, JobOutcome, KeptResults, format_event, run_analysis_keeping, run_input_file,

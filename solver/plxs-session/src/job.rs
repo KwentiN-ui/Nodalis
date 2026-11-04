@@ -9,7 +9,8 @@ use plxs_core::{Analysis, CancelToken, Error, Model, Progress, ProgressEvent, Re
 
 use plxs_core::state::Snapshot;
 
-use crate::restart::RestartFile;
+use crate::cache::StepCache;
+use crate::restart::{self, RestartFile};
 use crate::{Session, SessionOptions, StepOutcome};
 
 /// The version of the solver, written into the result files.
@@ -33,6 +34,9 @@ pub struct JobOptions {
     /// Reports the time per phase at the end of the job, as `Info` events.
     pub profile: bool,
     pub cancel: CancelToken,
+    /// Keeps the state and results after each step, and takes over the steps a run before
+    /// computed already ([`crate::cache`]); `None`: every step is computed.
+    pub step_cache: Option<StepCache>,
 }
 
 impl JobOptions {
@@ -48,6 +52,7 @@ impl JobOptions {
             frd_format: plxs_output::FrdFormat::Ascii,
             profile: false,
             cancel: CancelToken::new(),
+            step_cache: None,
         }
     }
 
@@ -211,6 +216,15 @@ fn run_continuing(
             snapshots: Vec::new(),
         });
     let source_steps = restart_file.as_ref().map(|_| analysis.steps.clone());
+    // The step cache: the keys of the steps as given, and the steps of an earlier run with
+    // the same keys. A `*RESTART, READ` run continues from its own state.
+    let cache = options.step_cache.as_ref().filter(|_| snapshot.is_none());
+    let keys = cache.map(|c| c.keys(&analysis, &options.work_dir));
+    let mut cached = None;
+    if let (Some(cache), Some(keys)) = (cache, &keys) {
+        cache.keep_only(keys);
+        cached = cache.take(keys);
+    }
     // Shells, membranes and beams are computed as the solids CalculiX expands them to.
     let expansion = plxs_elements::expand::expand(analysis)?;
     let analysis = expansion.analysis;
@@ -221,10 +235,35 @@ fn run_continuing(
         work_dir: options.work_dir.clone(),
         cancel: options.cancel.clone(),
     };
-    let mut session = match snapshot {
-        None => Session::new(analysis.model, session_options)?,
-        Some(snapshot) => Session::resume(analysis.model, snapshot, session_options)?,
+    let steps = analysis.steps.len();
+    let (mut session, first) = match (snapshot, cached) {
+        (Some(snapshot), _) => (
+            Session::resume(analysis.model, snapshot, session_options)?,
+            first,
+        ),
+        // A state that does not fit the model (it does, the key says so) is not used.
+        (None, Some(cached))
+            if restart::model_fingerprint(&analysis.model) == cached.snapshot.model_fingerprint =>
+        {
+            let taken = cached.steps;
+            let mut session = Session::resume(analysis.model, cached.snapshot, session_options)?;
+            session.results = cached.results;
+            progress.event(ProgressEvent::Info(if taken == steps {
+                "no step changed since the last run: the results are taken over".to_string()
+            } else {
+                format!(
+                    "steps 1 to {taken} did not change since the last run: their results are \
+                     taken over, the run continues with step {}",
+                    taken + 1
+                )
+            }));
+            (session, taken)
+        }
+        (None, _) => (Session::new(analysis.model, session_options)?, 0),
     };
+    // Only when the expansion kept the steps as they were (it always does).
+    let keys = keys.filter(|k| k.len() == steps);
+    let mut keeping = cache.is_some();
     let output = |ext: &str| options.output(ext);
     let mut write = |session: &Session| -> Result<()> {
         let (model, results) = output_map.apply(session.model(), session.results());
@@ -269,7 +308,19 @@ fn run_continuing(
             return Ok(JobOutcome::Cancelled);
         }
         match session.run_step(step, progress)? {
-            StepOutcome::Converged | StepOutcome::Partial { .. } => {}
+            StepOutcome::Converged => {
+                if let (true, Some(cache), Some(keys)) = (keeping, cache, &keys) {
+                    cache.keep(
+                        keys[index],
+                        session.state().steps_done,
+                        &session.snapshot(),
+                        session.results(),
+                    );
+                }
+            }
+            // The steps after a step that did not finish are not kept: the cache holds a
+            // start of the step chain.
+            StepOutcome::Partial { .. } => keeping = false,
             StepOutcome::Diverged { increment, message } => {
                 write(&session)?;
                 return Err(Error::Numerical {
