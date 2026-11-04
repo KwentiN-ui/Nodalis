@@ -267,12 +267,11 @@ impl HotSpotDialog {
             }
         };
         let increment = (model.results.as_ref())
-            .and_then(|view| view.current_increment())
-            .map(crate::results::ResultsView::increment_label)
+            .map(crate::results::ResultsView::shown_label)
             .unwrap_or_default();
         ui.horizontal(|ui| {
             ui.strong(plot.component.short());
-            ui.label(format!("Increment {increment}"));
+            ui.label(increment);
         });
         let mut summary = format!(
             "S_hs = {} at node {}",

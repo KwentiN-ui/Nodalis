@@ -39,8 +39,8 @@ material of its own, and they carry no results of their own.
 == Result controls <results-toolbar>
 
 #screenshot("results-display-tab.png", [The #ui("Display") tab: the view tools, then the groups
-  #ui("Deformation"), #ui("Contours") and #ui("Increment"); a narrow window folds a group into a
-  menu])
+  #ui("Deformation"), #ui("Contours") and #ui("Step and Increment"); a narrow window folds a group
+  into a menu])
 
 The result controls are tiles on the #ui("Display") tab of the Results workspace, in three
 groups. A tile with an arrow shows its current value under its name and opens a panel to change
@@ -66,17 +66,38 @@ it; the other tiles act at once and show pressed while their option is on.
   [Levels], [Number of colour bands (2 to 24).],
   [Color Scale], [The spectrum and limits of the colours (@color-scale).],
   [Transformations], [Symmetries and patterns (@transformations).],
-  [Step, Increment], [The displayed increment, picked from the list of all of them.],
-  [First, Previous, Next, Last], [Show another increment.],
+  [Step], [The step shown, by its number and the name it has in the FE model. The list gives
+    each step with its kind, the number of increments or modes and the time it covers; picking
+    one shows its last increment, the state at its end. Steps that were taken over from another
+    analysis (@state-links) say where they come from, a step the solver did not finish says
+    #ui("not converged"). Ctrl+Page Up and Ctrl+Page Down show the step before and after.],
+  [Increment], [What is shown within the step, "12 of 20". The tile is named after the step:
+    #ui("Increment") for static, thermal and dynamic steps, #ui("Mode") for frequency and buckle
+    steps, #ui("Frequency") for a steady state dynamics step and #ui("Position") for a step with a
+    moving load. Its list holds only the entries of the shown step, with the step time and total
+    time, the frequency or the buckling factor, and the attempts of increments the solver had
+    to cut back.],
+  [First, Previous, Next, Last], [#ui("First") and #ui("Last") go to the start and end of the
+    step; #ui("Previous") and #ui("Next") go on into the step before or after. The arrow keys,
+    Home and End do the same.],
   [Animate], [Opens the animation window (@animation).],
   [Sound], [Opens the sound window for modes of a frequency step (@sound).],
 )
 
+#screenshot("results-step-list.png", [The #ui("Step") list: each step of the FE model with its kind,
+  its increments and the time it covers])
+
+#screenshot("results-increment-list.png", [The #ui("Increment") list of a static step with the step
+  time and total time of each increment])
+
 == Contour plot, legend and labels
 
 The legend shows the field, the unit and the range in nine colour bands from blue (minimum) to red
-(maximum) by default. The info block in the upper right shows file, date, step, increment or mode
-with its frequency or buckling factor, and the deformation scale factor. Labels mark the node with
+(maximum) by default. The info block in the upper right shows file and date, the step with its
+number, name and kind (`Step 2 of 3: Operating load (Static, NLGEOM)`), the increment with its step
+time and total time, or the mode with its frequency or buckling factor, and the deformation scale
+factor. Results of other programs, which do not know the steps of the FE model, name their steps
+by number (`Step 1`). Labels mark the node with
 the maximum (and optionally the minimum) value. Legend, info block and labels can be dragged.
 Which of them appear is set under #menu("Edit", "Settings ...", "Post-processing").
 
@@ -204,4 +225,5 @@ their colour.
 
 #screenshot("color-contours-off.png", [The left part without colour contours])
 
-Increment 0 of a buckle step is the reference state; the modes follow as increments 1, 2, ...
+Increment 0 of a buckle step is the reference state (#ui("Reference") on the #ui("Mode") tile);
+the modes follow as modes 1, 2, ...

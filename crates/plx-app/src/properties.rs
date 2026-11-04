@@ -274,10 +274,11 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
                 "Field",
                 format!("{}: {}", inc.fields[*f].name, component.name),
             ));
-            rows.push((
-                "Step, increment",
-                format!("{}, {}", inc.step, inc.increment),
-            ));
+            if let Some(step) = view.current_step_index() {
+                rows.push(("Step", view.step_title(step)));
+            }
+            let noun = view.current_step().map_or("Increment", |s| s.entry_noun());
+            rows.push((noun, view.entry_label(view.increment)));
             let extreme = |pick_max: bool| {
                 component
                     .values

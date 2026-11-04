@@ -1352,6 +1352,7 @@ impl AnalysisWindow {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
             self.workbench.requests.push(Request::Save(false));
         }
+        self.workbench.results_keys(&ctx);
         // A focused text field undoes its own typing.
         if !ctx.egui_wants_keyboard_input() {
             // Ctrl+Z matches with Shift held too, so Redo is checked first.

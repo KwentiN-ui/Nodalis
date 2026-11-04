@@ -625,12 +625,107 @@ impl ResultsView {
         self.recompute_history(mesh)
     }
 
-    /// Entry of the increment list, "step, increment" as in the results toolbar.
-    pub fn increment_label(increment: &Increment) -> String {
-        match increment.nodal_diameter {
-            Some(nd) => format!("{}, {} (ND {nd})", increment.step, increment.increment),
-            None => format!("{}, {}", increment.step, increment.increment),
+    /// The step of the shown increment.
+    pub fn current_step(&self) -> Option<&plx_results::steps::ResultStep> {
+        self.steps.step_of(self.increment)
+    }
+
+    /// Index of the step of the shown increment in [`ResultsView::steps`].
+    pub fn current_step_index(&self) -> Option<usize> {
+        self.steps.place(self.increment).map(|p| p.step)
+    }
+
+    /// Shows the step `step` at its last increment, the state at its end.
+    pub fn switch_step(&mut self, step: usize) {
+        if let Some(index) = self.steps.entry_increment(step) {
+            self.switch_increment(index);
         }
+    }
+
+    /// The steps before and after the shown one that have results, for Ctrl+Page Up and
+    /// Ctrl+Page Down.
+    pub fn neighbour_step(&self, forward: bool) -> Option<usize> {
+        let current = self.current_step_index()?;
+        let has = |s: &usize| !self.steps.steps[*s].increments.is_empty();
+        if forward {
+            (current + 1..self.steps.steps.len()).find(has)
+        } else {
+            (0..current).rev().find(has)
+        }
+    }
+
+    /// A step as the Step tile and list name it: its number and name.
+    pub fn step_title(&self, step: usize) -> String {
+        self.steps
+            .steps
+            .get(step)
+            .map_or_else(String::new, |s| format!("{} {}", step + 1, s.name))
+    }
+
+    /// The number of the increment `index` within its step: the increment or mode number
+    /// of the solver, or the position of a moving load; `None` for the reference state of a
+    /// buckle step.
+    pub fn entry_number(&self, index: usize) -> Option<u32> {
+        let inc = self.increments.get(index)?;
+        let step = self.steps.step_of(index)?;
+        if step.has_positions() {
+            let position = step.solver_steps.iter().position(|&s| s == inc.step)?;
+            return Some(position as u32 + 1);
+        }
+        (inc.kind != AnalysisKind::Buckling || inc.increment > 0).then_some(inc.increment)
+    }
+
+    /// The last number of the entries of the step `step`, see [`ResultsView::entry_number`].
+    pub fn entry_count(&self, step: usize) -> Option<u32> {
+        let step_data = self.steps.steps.get(step)?;
+        if step_data.has_positions() {
+            return Some(step_data.solver_steps.len() as u32);
+        }
+        let last = *step_data.increments.last()?;
+        self.increments.get(last).map(|i| i.increment)
+    }
+
+    /// The shown increment in its step, "12 of 20", or "Reference" for the reference state
+    /// of a buckle step.
+    pub fn entry_value(&self) -> Option<String> {
+        let step = self.current_step_index()?;
+        Some(match self.entry_number(self.increment) {
+            Some(number) => format!("{number} of {}", self.entry_count(step)?),
+            None => "Reference".into(),
+        })
+    }
+
+    /// The entry `index` named with its kind, "Mode 2" or "Reference state".
+    pub fn entry_label(&self, index: usize) -> String {
+        let noun = self
+            .steps
+            .step_of(index)
+            .map_or("Increment", |s| s.entry_noun());
+        let nd = (self.increments.get(index))
+            .and_then(|i| i.nodal_diameter)
+            .map_or_else(String::new, |nd| format!(" (ND {nd})"));
+        match self.entry_number(index) {
+            Some(number) => format!("{noun} {number}{nd}"),
+            None => "Reference state".into(),
+        }
+    }
+
+    /// The shown increment with its step, for the headers of plots and tables:
+    /// "Operating load, increment 12".
+    pub fn shown_label(&self) -> String {
+        let step = self
+            .current_step()
+            .map_or_else(String::new, |s| s.name.clone());
+        let entry = self.entry_label(self.increment).to_lowercase();
+        format!("{step}, {entry}")
+    }
+
+    /// A time with the unit of the results.
+    fn time_text(&self, value: f64) -> String {
+        let unit = self.units.unit(plx_model::Quantity::Time);
+        format!("{} {unit}", format_value(value as f32))
+            .trim()
+            .to_owned()
     }
 
     /// The information block in the top right corner of the 3D view.
@@ -640,57 +735,73 @@ impl ResultsView {
             self.date.as_deref().unwrap_or("-"),
             self.time.as_deref().unwrap_or("-")
         )];
+        if let (Some(index), Some(step)) = (self.current_step_index(), self.current_step()) {
+            let mut line = format!(
+                "Step {} of {}: {} ({})",
+                index + 1,
+                self.steps.steps.len(),
+                step.name,
+                step.description()
+            );
+            if let Some(source) = &step.inherited_from {
+                line.push_str(&format!(", from {source}"));
+            }
+            if !step.converged {
+                line.push_str(", not converged");
+            }
+            lines.push(line);
+        }
+        let count = (self.current_step_index())
+            .and_then(|s| self.entry_count(s))
+            .map_or_else(String::new, |n| format!(" of {n}"));
+        let entry = format!("{}{count}", self.entry_label(self.increment));
         // A single swinging mode keeps the usual mode line.
         let superposed = self.superposition.as_ref().filter(|s| s.modes.len() > 1);
-        if let (Some(inc), Some(superposition)) = (self.current_increment(), superposed) {
+        let category = self.current_step().map(|s| s.category);
+        if let Some(superposition) = superposed {
             let modes: Vec<String> = superposition.modes.iter().map(u32::to_string).collect();
-            lines.push(format!(
-                "Step: #{}   Superposition of modes: {}",
-                inc.step,
-                modes.join(", ")
-            ));
+            lines.push(format!("Superposition of modes: {}", modes.join(", ")));
         } else if let Some(inc) = self.current_increment() {
             let value = format_value(inc.value as f32);
+            let hertz = self.units.unit(plx_model::Quantity::Frequency);
+            let place = self.steps.place(self.increment);
             lines.push(match inc.kind {
-                AnalysisKind::Frequency => match inc.nodal_diameter {
-                    Some(nd) => format!(
-                        "Step: #{}   Mode: #{}   Nodal diameter: {nd}   Frequency: {value}",
-                        inc.step, inc.increment
-                    ),
-                    None => format!(
-                        "Step: #{}   Mode: #{}   Frequency: {value}",
-                        inc.step, inc.increment
-                    ),
-                },
+                AnalysisKind::Frequency => format!("{entry}   Frequency: {value} {hertz}"),
                 AnalysisKind::ComplexFrequency => {
                     let phase = match self.whirl() {
                         Some((phase, _)) => format!("   Phase: {:.0} deg", phase.to_degrees()),
                         None => String::new(),
                     };
-                    format!(
-                        "Step: #{}   Mode: #{}   Complex frequency (real part): {value}{phase}",
-                        inc.step, inc.increment
-                    )
+                    format!("{entry}   Complex frequency (real part): {value} {hertz}{phase}")
                 }
                 AnalysisKind::Buckling if inc.increment == 0 => {
+                    "Reference state of the buckling loads".to_owned()
+                }
+                AnalysisKind::Buckling => format!("{entry}   Buckling factor: {value}"),
+                AnalysisKind::Sensitivity if inc.value != 0.0 => {
                     format!(
-                        "Step: #{}   Reference state of the buckling loads",
-                        inc.step
+                        "Sensitivity   Mode {}   Frequency: {value} {hertz}",
+                        inc.increment
                     )
                 }
-                AnalysisKind::Buckling => format!(
-                    "Step: #{}   Mode: #{}   Buckling factor: {value}",
-                    inc.step, inc.increment
-                ),
-                AnalysisKind::Sensitivity if inc.value != 0.0 => format!(
-                    "Step: #{}   Sensitivity   Mode: #{}   Frequency: {value}",
-                    inc.step, inc.increment
-                ),
-                AnalysisKind::Sensitivity => format!("Step: #{}   Sensitivity", inc.step),
-                _ => format!(
-                    "Step: #{}   Increment: #{}   Analysis time: {value}",
-                    inc.step, inc.increment
-                ),
+                AnalysisKind::Sensitivity => "Sensitivity".to_owned(),
+                _ if category == Some(plx_results::steps::StepCategory::SteadyStateDynamics) => {
+                    format!("{entry}   Frequency: {value} {hertz}")
+                }
+                _ => {
+                    let mut line = entry.clone();
+                    let step = self.current_step();
+                    if let Some(time) = place.and_then(|p| p.step_time) {
+                        line.push_str(&format!("   Step time: {}", self.time_text(time)));
+                        if let Some(period) = step.and_then(|s| s.time_period) {
+                            line.push_str(&format!(" of {}", self.time_text(period)));
+                        }
+                    }
+                    if let Some(total) = place.and_then(|p| p.total_time) {
+                        line.push_str(&format!("   Total time: {}", self.time_text(total)));
+                    }
+                    line
+                }
             });
         }
         lines.push(format!(
@@ -1584,6 +1695,55 @@ mod tests {
         assert_eq!(field_unit("TOSTRAIN", "EXX", units), None);
     }
 
+    /// The Step and Increment tiles: each increment in its step, named after the step's
+    /// kind, and the steps before and after.
+    #[test]
+    fn increments_are_shown_within_their_steps() {
+        use plx_results::steps::{StepCategory, StepRecord};
+        let still = [[0.0; 3]];
+        let mut view = ResultsView::new(
+            vec![
+                increment(1, 1, AnalysisKind::Static, &still),
+                increment(1, 2, AnalysisKind::Static, &still),
+                increment(2, 1, AnalysisKind::Frequency, &still),
+                increment(2, 2, AnalysisKind::Frequency, &still),
+                increment(2, 3, AnalysisKind::Frequency, &still),
+            ],
+            None,
+        );
+        let record = |name: &str, category, steps: &[u32]| StepRecord {
+            name: name.into(),
+            category,
+            nlgeom: false,
+            perturbation: false,
+            time_period: None,
+            solver_steps: steps.to_vec(),
+            inherited_from: None,
+        };
+        view.set_step_records(
+            &[
+                record("Preload", StepCategory::Static, &[1]),
+                record("Modes", StepCategory::Frequency, &[2]),
+            ],
+            &[],
+            None,
+        );
+        view.select_increment(3);
+        assert_eq!(view.step_title(1), "2 Modes");
+        assert_eq!(view.entry_value().as_deref(), Some("2 of 3"));
+        assert_eq!(view.entry_label(3), "Mode 2");
+        assert_eq!(view.shown_label(), "Modes, mode 2");
+        assert_eq!(view.neighbour_step(true), None);
+        assert_eq!(view.neighbour_step(false), Some(0));
+        // A step opens at its last increment.
+        view.switch_step(0);
+        assert_eq!(view.increment, 1);
+        assert_eq!(view.entry_value().as_deref(), Some("2 of 2"));
+        let lines = view.status_lines("r.ndlr");
+        assert_eq!(lines[1], "Step 1 of 2: Preload (Static)");
+        assert!(lines[2].starts_with("Increment 2 of 2"), "{lines:?}");
+    }
+
     #[test]
     fn opens_last_increment_but_first_mode() {
         let still = [[0.0; 3]];
@@ -1616,8 +1776,9 @@ mod tests {
         );
         assert_eq!(buckling.increment, 1);
         let lines = buckling.status_lines("beulen.frd");
+        assert_eq!(lines[1], "Step 1 of 1: Step 1 (Buckle)");
         assert!(
-            lines[1].contains("Mode: #1   Buckling factor: 1"),
+            lines[2].contains("Mode 1 of 2   Buckling factor: 1"),
             "{lines:?}"
         );
     }

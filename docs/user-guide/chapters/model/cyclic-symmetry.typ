@@ -53,7 +53,7 @@ symmetry tie in a 2D model and nodal diameters beyond $N\/2$.
 === Results
 
 The modes are numbered on through the step, first those of nodal diameter 0, then 1 and so on.
-The #ui("Step, Increment") list shows the nodal diameter of every mode (`1, 7 (ND 2)`), as does
+The #ui("Mode") list shows the nodal diameter of every mode (`7 (ND 2)`), as does
 the information block of the 3D view. Each mode of a nodal diameter above 0 has a twin of the
 same frequency, turned by a quarter wave; the solver writes the real part (`DISP`, `STRESS`) and
 the imaginary part (`DISPI`, `STRESSI`) of the complex mode. The eigenvalue table under
