@@ -801,6 +801,27 @@ impl Lanczos {
                     ),
                 });
             }
+            if std::env::var("PLXS_LANCZOS_TRACE").is_ok() {
+                let (thetas, _, residuals) = self.ritz();
+                let order = Self::order(&thetas, &preference);
+                let shown: Vec<String> = order
+                    .iter()
+                    .take(6)
+                    .map(|&i| format!("{:.6e} ({:.1e})", thetas[i], residuals[i] / thetas[i].abs()))
+                    .collect();
+                let extremes = (
+                    thetas.iter().cloned().fold(f64::INFINITY, f64::min),
+                    thetas.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+                );
+                eprintln!(
+                    "lanczos: restart {} after {} steps: {} | range {:.3e}..{:.3e}",
+                    self.restarts,
+                    self.steps,
+                    shown.join(", "),
+                    extremes.0,
+                    extremes.1
+                );
+            }
             // Thick restart: keep the wanted Ritz vectors plus a buffer, leaving room for
             // new vectors.
             let keep = (wanted + wanted / 2 + 4)
