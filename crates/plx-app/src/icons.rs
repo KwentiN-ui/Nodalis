@@ -66,6 +66,20 @@ pub enum Icon {
     ExtrudeMesh,
     /// A tetrahedron with its hidden edge dashed: the tetrahedral mesher.
     TetMesh,
+    /// A bent beam over its straight outline: the deformation of the results.
+    Deformation,
+    /// The dashed straight outline behind a bent beam: show the undeformed shape.
+    Undeformed,
+    /// A thin outline around a small coloured block: the global model of a submodel.
+    GlobalContours,
+    /// A face in colour bands: contours, arrows or streaks.
+    Contours,
+    /// A legend: a column of colour bands.
+    Levels,
+    /// A spectrum with its two limit marks: the colour scale.
+    ColorScale,
+    /// Three frames one behind the other: the increments of the results.
+    Increments,
 }
 
 /// Flat toolbar button in the Windows style: frame only while hovered or checked.
@@ -622,6 +636,125 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
             line(shapes, &[a, b, c, d, a], 1.0, OUTLINE);
             line(shapes, &[b, d], 1.0, OUTLINE);
         }
+        Icon::Deformation | Icon::Undeformed => {
+            // The straight outline, dashed for Undeformed, and the beam bent down.
+            let straight = [
+                p(1.5, 4.5),
+                p(14.5, 4.5),
+                p(14.5, 8.0),
+                p(1.5, 8.0),
+                p(1.5, 4.5),
+            ];
+            if icon == Icon::Undeformed {
+                for pair in straight.windows(2) {
+                    shapes.extend(Shape::dashed_line(
+                        pair,
+                        Stroke::new(1.0, OUTLINE),
+                        1.5,
+                        1.5,
+                    ));
+                }
+            }
+            let bend = |x: f32| 0.035 * (x - 1.5) * (x - 1.5);
+            let xs: Vec<f32> = (0..=8).map(|i| 1.5 + 13.0 * i as f32 / 8.0).collect();
+            let top: Vec<Pos2> = xs.iter().map(|&x| p(x, 4.5 + bend(x))).collect();
+            let bottom: Vec<Pos2> = xs.iter().rev().map(|&x| p(x, 8.0 + bend(x))).collect();
+            let fill = if icon == Icon::Undeformed {
+                FACE
+            } else {
+                ACCENT
+            };
+            for i in 0..xs.len() - 1 {
+                let j = xs.len() - 1 - i;
+                polygon(
+                    shapes,
+                    vec![top[i], top[i + 1], bottom[j - 1], bottom[j]],
+                    fill,
+                    fill,
+                );
+            }
+            let mut outline = top.clone();
+            outline.extend(bottom);
+            outline.push(top[0]);
+            line(shapes, &outline, 1.0, OUTLINE);
+            if icon == Icon::Deformation {
+                // The arrow of the displacement at the free end.
+                let red = Color32::from_rgb(210, 60, 40);
+                line(shapes, &[p(12.5, 1.0), p(12.5, 6.0)], 1.2, red);
+                polygon(
+                    shapes,
+                    vec![p(12.5, 8.0), p(10.8, 5.5), p(14.2, 5.5)],
+                    red,
+                    red,
+                );
+            }
+        }
+        Icon::GlobalContours => {
+            let outer = Rect::from_min_max(p(1.5, 1.5), p(14.5, 14.5));
+            shapes.extend(Shape::dashed_line(
+                &[
+                    outer.left_top(),
+                    outer.right_top(),
+                    outer.right_bottom(),
+                    outer.left_bottom(),
+                    outer.left_top(),
+                ],
+                Stroke::new(1.0, OUTLINE),
+                2.0,
+                1.5,
+            ));
+            bands(shapes, Rect::from_min_max(p(5.0, 5.0), p(11.0, 11.0)), true);
+        }
+        Icon::Contours => bands(shapes, Rect::from_min_max(p(1.5, 2.5), p(14.5, 13.5)), true),
+        Icon::Levels => {
+            bands(shapes, Rect::from_min_max(p(2.5, 1.5), p(7.5, 14.5)), false);
+            for i in 0..5 {
+                let y = 2.5 + 2.75 * i as f32;
+                line(shapes, &[p(9.0, y), p(13.5, y)], 1.0, OUTLINE);
+            }
+        }
+        Icon::ColorScale => {
+            let bar = Rect::from_min_max(p(1.5, 4.5), p(14.5, 10.5));
+            let colors = spectrum();
+            let n = colors.len();
+            for (i, color) in colors.into_iter().enumerate() {
+                let x0 = bar.left() + bar.width() * i as f32 / n as f32;
+                let x1 = bar.left() + bar.width() * (i + 1) as f32 / n as f32;
+                shapes.push(Shape::rect_filled(
+                    Rect::from_min_max(pos2(x0, bar.top()), pos2(x1, bar.bottom())),
+                    0.0,
+                    color,
+                ));
+            }
+            shapes.push(Shape::rect_stroke(
+                bar,
+                0.0,
+                Stroke::new(1.0, OUTLINE),
+                egui::StrokeKind::Middle,
+            ));
+            // The two limits, as marks below the bar.
+            for x in [4.0, 12.0] {
+                polygon(
+                    shapes,
+                    vec![p(x, 11.0), p(x + 2.0, 14.5), p(x - 2.0, 14.5)],
+                    OUTLINE,
+                    OUTLINE,
+                );
+            }
+        }
+        Icon::Increments => {
+            for (i, fill) in [FACE, FACE, ACCENT].into_iter().enumerate() {
+                let o = 3.0 * i as f32;
+                let frame = Rect::from_min_max(p(1.5 + o, 1.5 + o), p(9.5 + o, 8.5 + o));
+                shapes.push(Shape::rect_filled(frame, 0.0, fill));
+                shapes.push(Shape::rect_stroke(
+                    frame,
+                    0.0,
+                    Stroke::new(1.0, OUTLINE),
+                    egui::StrokeKind::Middle,
+                ));
+            }
+        }
         Icon::RemoveAnnotations => {
             // A query label: framed text with the arrow to its point.
             line(shapes, &[p(3.0, 9.5), p(1.0, 14.5)], 1.0, OUTLINE);
@@ -671,6 +804,49 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
             }
         }
     }
+}
+
+/// The colours of a contour from low to high.
+fn spectrum() -> Vec<Color32> {
+    [
+        (40, 60, 230),
+        (40, 160, 240),
+        (40, 210, 160),
+        (120, 220, 40),
+        (240, 220, 40),
+        (245, 140, 30),
+        (225, 45, 35),
+    ]
+    .into_iter()
+    .map(|(r, g, b)| Color32::from_rgb(r, g, b))
+    .collect()
+}
+
+/// `rect` in colour bands, side by side when `across`, else from the bottom up.
+fn bands(shapes: &mut Vec<Shape>, rect: Rect, across: bool) {
+    let colors = spectrum();
+    let n = colors.len() as f32;
+    for (i, color) in colors.into_iter().enumerate() {
+        let (a, b) = (i as f32 / n, (i + 1) as f32 / n);
+        let band = if across {
+            Rect::from_min_max(
+                pos2(rect.left() + rect.width() * a, rect.top()),
+                pos2(rect.left() + rect.width() * b, rect.bottom()),
+            )
+        } else {
+            Rect::from_min_max(
+                pos2(rect.left(), rect.bottom() - rect.height() * b),
+                pos2(rect.right(), rect.bottom() - rect.height() * a),
+            )
+        };
+        shapes.push(Shape::rect_filled(band, 0.0, color));
+    }
+    shapes.push(Shape::rect_stroke(
+        rect,
+        0.0,
+        Stroke::new(1.0, OUTLINE),
+        egui::StrokeKind::Middle,
+    ));
 }
 
 /// The pipette of the query: a glass tube with blue liquid, a dark rubber bulb, its tip at

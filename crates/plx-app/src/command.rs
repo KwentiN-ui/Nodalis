@@ -187,8 +187,23 @@ pub enum Cmd {
     /// The combo box of the step new items go into.
     ActiveStep,
     // Results workspace.
-    /// The controls of the shown results: deformation, contours, increment, animation.
-    ResultsDisplay,
+    /// The deformation of the shown results and its factor.
+    Deformation,
+    ShowUndeformed,
+    /// The edges of the global model around the results of a submodel.
+    GlobalContours,
+    /// Contours, arrows or streaks, with the field and principal direction they follow.
+    Representation,
+    ColorLevels,
+    Transformations,
+    /// The step and increment shown.
+    Increment,
+    FirstIncrement,
+    PreviousIncrement,
+    NextIncrement,
+    LastIncrement,
+    Animate,
+    ModeSound,
     OpenResults,
     RemoveResults,
     ExportVtu,
@@ -244,7 +259,10 @@ pub enum Tile {
     Menu,
     /// An entry of the menu of this command; not a tile of its own.
     In(Cmd),
-    /// Drawn by the workspace itself, such as the result controls.
+    /// A tile whose label shows a value of the workspace, such as the deformation, and
+    /// which opens a panel the workspace fills to change it.
+    Panel,
+    /// Drawn by the workspace itself, such as the active step combo.
     Custom,
     /// Only in the command search.
     Hidden,
@@ -1717,34 +1735,152 @@ fn build() -> Vec<Command> {
         Tile::In(C::Screenshot),
     ));
 
-    // The controls of the shown results, on the Display tab of the Results workspace
-    // after the view commands.
+    // The display of the shown results, on the Display tab of the Results workspace after
+    // the view commands.
+    let (r, t) = (RESULTS, "Display");
     add(tile(
         command(
-            C::ResultsDisplay,
-            "",
+            C::Deformation,
+            "Deformation",
             r,
-            "Display",
-            "Results",
-            TileIcon::None,
+            t,
+            "Deformation",
+            Tool(Icon::Deformation),
             "",
-            "",
+            "How much the shape is deformed: undeformed, true scale, an automatic or your own \
+             factor.",
         ),
-        Tile::Custom,
+        Tile::Panel,
     ));
-    // Only in the search.
+    add(command(
+        C::ShowUndeformed,
+        "Show\nUndeformed",
+        r,
+        t,
+        "Deformation",
+        Tool(Icon::Undeformed),
+        "",
+        "Draws the undeformed outline behind the deformed shape.",
+    ));
+    add(command(
+        C::GlobalContours,
+        "Global\nContours",
+        r,
+        t,
+        "Deformation",
+        Tool(Icon::GlobalContours),
+        "",
+        "Draws the edges of the global model the submodel reads, deformed by the same scale, \
+         around the results.",
+    ));
     add(tile(
         command(
-            C::ColorScale,
-            "Color Scale",
-            r,
+            C::Representation,
             "Display",
-            "Results",
-            Shape(Glyph::Settings),
+            r,
+            t,
+            "Contours",
+            Tool(Icon::Contours),
             "",
-            "The colours and levels of the contours; also the button beside Color levels.",
+            "Contours, or arrows or LIC streaks along the directions of a vector or tensor \
+             field.",
         ),
-        Tile::Hidden,
+        Tile::Panel,
+    ));
+    add(tile(
+        command(
+            C::ColorLevels,
+            "Levels",
+            r,
+            t,
+            "Contours",
+            Tool(Icon::Levels),
+            "",
+            "The number of colour bands of the contours.",
+        ),
+        Tile::Panel,
+    ));
+    add(command(
+        C::ColorScale,
+        "Color\nScale",
+        r,
+        t,
+        "Contours",
+        Tool(Icon::ColorScale),
+        "",
+        "The spectrum and the limits of the contours.",
+    ));
+    add(command(
+        C::Transformations,
+        "Transfor-\nmations",
+        r,
+        t,
+        "Contours",
+        Tool(Icon::Transformation),
+        "",
+        "Symmetries and patterns: the results copied around the model.",
+    ));
+    add(tile(
+        command(
+            C::Increment,
+            "Step, Increment",
+            r,
+            t,
+            "Increment",
+            Tool(Icon::Increments),
+            "",
+            "The step and increment shown.",
+        ),
+        Tile::Panel,
+    ));
+    for (cmd, label, icon, tip) in [
+        (
+            C::FirstIncrement,
+            "First",
+            Icon::First,
+            "Shows the first increment.",
+        ),
+        (
+            C::PreviousIncrement,
+            "Previous",
+            Icon::Previous,
+            "Shows the increment before.",
+        ),
+        (
+            C::NextIncrement,
+            "Next",
+            Icon::Next,
+            "Shows the next increment.",
+        ),
+        (
+            C::LastIncrement,
+            "Last",
+            Icon::Last,
+            "Shows the last increment.",
+        ),
+    ] {
+        add(command(cmd, label, r, t, "Increment", Tool(icon), "", tip));
+    }
+    add(command(
+        C::Animate,
+        "Animate",
+        r,
+        t,
+        "Increment",
+        Tool(Icon::Animate),
+        "",
+        "Animates the deformation, the increments or the steps; the animation window sets \
+         how.",
+    ));
+    add(command(
+        C::ModeSound,
+        "Sound",
+        r,
+        t,
+        "Increment",
+        Tool(Icon::Sound),
+        "",
+        "Plays the mode shapes of a frequency step as sound.",
     ));
     add(tile(
         command(
@@ -1839,7 +1975,7 @@ pub fn search_entries(workspaces: &[Workspace]) -> Vec<SearchEntry> {
     let mut seen = Vec::new();
     let mut entries = Vec::new();
     for c in registry() {
-        if matches!(c.tile, Tile::Custom | Tile::Menu) || seen.contains(&c.cmd) {
+        if matches!(c.tile, Tile::Custom | Tile::Menu | Tile::Panel) || seen.contains(&c.cmd) {
             continue;
         }
         let Some(&workspace) = c.workspaces.iter().find(|w| workspaces.contains(w)) else {
