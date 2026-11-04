@@ -3445,6 +3445,7 @@ dependencies = [
  "plx-results",
  "plx-solve",
  "plxs-core",
+ "plxs-linalg",
  "plxs-session",
  "png",
  "rfd",
@@ -3572,6 +3573,7 @@ dependencies = [
  "plxs-core",
  "plxs-elements",
  "plxs-input",
+ "plxs-linalg",
  "plxs-output",
  "plxs-session",
  "plxs-verify",
@@ -3624,9 +3626,12 @@ dependencies = [
 name = "plxs-linalg"
 version = "0.2.1"
 dependencies = [
+ "bytemuck",
  "faer",
  "plxs-core",
+ "pollster 1.0.1",
  "rayon",
+ "wgpu",
  "windows-sys 0.61.2",
 ]
 
