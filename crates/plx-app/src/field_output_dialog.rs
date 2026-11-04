@@ -384,69 +384,69 @@ impl FieldOutputDialog {
     pub fn show(&mut self, ctx: &egui::Context) -> DialogAction<FieldOutput> {
         let mut action = DialogAction::Open;
         let mut open = true;
-        egui::Window::new(self.title())
+        let title = self.title();
+        let builder = egui::Window::new(title)
             .id(crate::ids::window(ctx, "field output dialog"))
-            .open(&mut open)
             .collapsible(false)
             .resizable(false)
             // Anchored at the top, so that a longer description or an error never moves it.
-            .default_pos(ctx.content_rect().center() - egui::vec2(175.0, 290.0))
-            .show(ctx, |ui| {
-                ui.set_width(340.0);
-                ui.label("Type");
-                frame().show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.set_min_height(76.0);
-                    for (index, (label, _)) in TYPES.iter().enumerate() {
-                        let selected = self.kind == index;
-                        let row = ui.add_enabled_ui(self.edit.is_none() || selected, |ui| {
-                            tree_row(ui, 0, None, selected, RichText::new(*label))
-                        });
-                        if row.inner.clicked() && !selected {
-                            self.kind = index;
-                            self.tab = Tab::Properties;
-                            self.focus = Row::Name;
-                            self.error = None;
-                        }
-                    }
-                });
-                ui.add_space(6.0);
-                self.tabs(ui);
-                frame().show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.set_min_height(220.0);
-                    match self.tab {
-                        Tab::Properties => self.properties(ui),
-                        Tab::LimitValues => self.limit_values(ui),
-                    }
-                });
-                ui.add_space(4.0);
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.set_height(76.0);
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        self.description(ui);
+            .default_pos(ctx.content_rect().center() - egui::vec2(175.0, 290.0));
+        crate::dock::show(ctx, builder, title, &mut open, |ui| {
+            ui.set_width(340.0);
+            ui.label("Type");
+            frame().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_min_height(76.0);
+                for (index, (label, _)) in TYPES.iter().enumerate() {
+                    let selected = self.kind == index;
+                    let row = ui.add_enabled_ui(self.edit.is_none() || selected, |ui| {
+                        tree_row(ui, 0, None, selected, RichText::new(*label))
                     });
-                });
-                if let Some(error) = &self.error {
-                    ui.colored_label(crate::style::error(), error);
+                    if row.inner.clicked() && !selected {
+                        self.kind = index;
+                        self.tab = Tab::Properties;
+                        self.focus = Row::Name;
+                        self.error = None;
+                    }
                 }
-                ui.add_space(4.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Cancel").clicked() {
-                        action = DialogAction::Cancel;
-                    }
-                    let ok = ui.button("OK").clicked();
-                    let next = self.edit.is_none() && ui.button("OK - New").clicked();
-                    if ok || next {
-                        match self.output() {
-                            Ok(output) => action = DialogAction::Ok { output, next },
-                            Err(error) => self.error = Some(error),
-                        }
-                    }
+            });
+            ui.add_space(6.0);
+            self.tabs(ui);
+            frame().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_min_height(220.0);
+                match self.tab {
+                    Tab::Properties => self.properties(ui),
+                    Tab::LimitValues => self.limit_values(ui),
+                }
+            });
+            ui.add_space(4.0);
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_height(76.0);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    self.description(ui);
                 });
             });
+            if let Some(error) = &self.error {
+                ui.colored_label(crate::style::error(), error);
+            }
+            ui.add_space(4.0);
+            crate::dock::footer(ui, |ui| {
+                if ui.button("Cancel").clicked() {
+                    action = DialogAction::Cancel;
+                }
+                let ok = ui.button("OK").clicked();
+                let next = self.edit.is_none() && ui.button("OK - New").clicked();
+                if ok || next {
+                    match self.output() {
+                        Ok(output) => action = DialogAction::Ok { output, next },
+                        Err(error) => self.error = Some(error),
+                    }
+                }
+            });
+        });
         if !open {
             action = DialogAction::Cancel;
         }

@@ -7,7 +7,7 @@ out, like the parameter set of Ansys Workbench. Its table has a column for each 
 varies (its inputs, P1, P2 ...) and for each number it reads back (its outputs, O1, O2 ...);
 each row is a *design point*, a set of input values with the outputs they gave.
 
-Add one with #menu("Project", "Add Parameter Study"), then link its columns:
+Add one with #menu("Evaluate", "Parameter Study"), then link its columns:
 
 + Drag the pin of its #ui("Inputs") row to a number the study varies: a parameter exposed by
   an analysis (@exposed-parameters), a number of a mesh block, the #ui("Factor") of a Refine

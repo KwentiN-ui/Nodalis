@@ -2,7 +2,7 @@
 
 == Exporting results to ParaView <export-vtk>
 
-#menu("File", "Export VTU ...") and #menu("File", "Export VTK ...") write the current results
+#menu("File", "Export", "VTU ...") and #menu("File", "Export", "VTK ...") write the current results
 for ParaView and other programs built on VTK. Both are enabled when results are open; they
 export the result selected in the #ui("Results") workspace.
 

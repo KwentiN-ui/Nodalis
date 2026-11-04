@@ -70,7 +70,7 @@ pub struct Graphics {
     pub theme: crate::style::ThemeChoice,
     /// Axis triad at the global origin of the model.
     pub global_axes: bool,
-    /// Axis triad in the bottom right corner showing the view direction.
+    /// Axis triad in the top right corner showing the view direction.
     pub view_triad: bool,
     pub scale_bar: bool,
     /// Shell and membrane elements of the FE model drawn as the solid of their section's

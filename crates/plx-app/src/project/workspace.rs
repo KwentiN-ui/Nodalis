@@ -226,9 +226,10 @@ impl ProjectApp {
             node_picker::Outcome::Picked(i) => {
                 self.search = None;
                 let (workspace, cmd) = (entries[i].workspace, entries[i].cmd);
-                if workspace == Workspace::Project || matches!(cmd, Cmd::Settings | Cmd::UserGuide)
+                if workspace == Workspace::Project
+                    || matches!(cmd, Cmd::Settings | Cmd::SolverSettings | Cmd::UserGuide)
                 {
-                    if !matches!(cmd, Cmd::Settings | Cmd::UserGuide) {
+                    if !matches!(cmd, Cmd::Settings | Cmd::SolverSettings | Cmd::UserGuide) {
                         self.in_project = true;
                     }
                     self.ribbon.reveal(Workspace::Project, cmd);
@@ -298,6 +299,7 @@ impl ProjectApp {
             | Cmd::ShowAll
             | Cmd::Minimap
             | Cmd::Settings
+            | Cmd::SolverSettings
             | Cmd::UserGuide => true,
             Cmd::CheckForUpdates => !self.updater.busy(),
             _ => false,
@@ -353,6 +355,10 @@ impl ProjectApp {
             Cmd::StopUpdate => self.stop_update(),
             Cmd::ProjectMonitor => self.toggle_monitor(),
             Cmd::Settings => self.settings_window = Some(SettingsWindow::new(&self.settings)),
+            Cmd::SolverSettings => {
+                let page = crate::settings::Page::Solver;
+                self.settings_window = Some(SettingsWindow::with_page(&self.settings, page));
+            }
             Cmd::UserGuide => {
                 let line = crate::help::open_user_guide();
                 self.output.push(line);
@@ -446,7 +452,7 @@ impl ProjectApp {
 }
 
 /// The ribbon of the Project workspace asks the project about its commands.
-struct ProjectHost<'a>(&'a mut ProjectApp);
+pub(super) struct ProjectHost<'a>(pub(super) &'a mut ProjectApp);
 
 impl ribbon::Host for ProjectHost<'_> {
     fn enabled(&self, cmd: Cmd) -> bool {

@@ -2,7 +2,7 @@
 
 == Initial conditions <initial-conditions>
 
-#menu("Model", "Create Initial Condition ...") sets a state of the model before the first step.
+#menu("Steps", "Initial Condition") sets a state of the model before the first step.
 The region can be a selection, parts, a node set or a surface.
 
 #fields(

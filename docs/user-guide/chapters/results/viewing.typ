@@ -5,7 +5,7 @@
 == Opening results
 
 The Results workspace shows the results of its analysis: they open when a run is finished,
-with #ui("Results") in the monitor, with #menu("Analysis", "Open Results") and when an analysis
+with #ui("Results") in the monitor, with #menu("Results", "Open Results") and when an analysis
 with kept results is opened (@bind-result). The `.dat` file of the run is read as well. Result
 files from elsewhere are not opened.
 
@@ -72,7 +72,7 @@ The legend shows the field, the unit and the range in nine colour bands from blu
 (maximum) by default. The info block in the upper right shows file, date, step, increment or mode
 with its frequency or buckling factor, and the deformation scale factor. Labels mark the node with
 the maximum (and optionally the minimum) value. Legend, info block and labels can be dragged.
-Which of them appear is set under #menu("Tools", "Settings ...", "Post-processing").
+Which of them appear is set under #menu("Edit", "Settings ...", "Post-processing").
 
 == Arrows <arrows>
 
@@ -154,10 +154,10 @@ results of a project (@bind-result).
 
 == Color scale <color-scale>
 
-Each result file has its own colour scale. Double-click the legend, choose #ui("Color Scale...")
+Each result file has its own colour scale. Double-click the legend, choose #ui("Color Scale ...")
 in its context menu, click #ui("...") next to #ui("Color levels") in the result controls, or use
-#menu("Results", "Color Scale ..."). Changes show at once; #ui("Cancel") restores the scale the
-dialog was opened with and #ui("Defaults") returns to the rainbow with automatic limits.
+#menu("Results", "Color Scale"). Changes show at once and stay when #ui("Close") closes the
+window; #ui("Defaults") returns to the rainbow with automatic limits.
 
 #screenshot("color-scale-dialog.png", [Color Scale dialog with manual limits: values above 40 MPa
 and below 5 MPa are grey])

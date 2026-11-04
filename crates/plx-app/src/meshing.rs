@@ -388,71 +388,71 @@ impl MeshItemEditor {
         if let Some(view) = view {
             self.update_face_parts(view);
         }
-        let window = egui::Window::new(self.title())
+        let title = self.title();
+        let builder = egui::Window::new(title.clone())
             .id(crate::ids::window(ctx, "mesh item editor"))
-            .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .pivot(egui::Align2::LEFT_TOP)
-            .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0))
-            .show(ctx, |ui| {
-                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                ui.strong("Type");
-                let current = type_index(&self.draft.kind);
-                // PrePoMax's list of item types; an edited item keeps its type.
-                egui::Frame::group(ui.style())
-                    .fill(crate::style::window())
-                    .show(ui, |ui| {
-                        ui.set_min_width(360.0);
-                        ui.add_enabled_ui(self.index.is_none(), |ui| {
-                            for (index, label) in TYPES.into_iter().enumerate() {
-                                if ui.selectable_label(index == current, label).clicked()
-                                    && index != current
-                                {
-                                    self.draft.kind = new_kind(index, geometry);
-                                    self.draft.name = next_name(
-                                        self.draft.kind.type_name(),
-                                        self.others.iter().map(String::as_str),
-                                    );
-                                    self.picks.clear();
-                                    self.source_faces = false;
-                                    self.sync_parts();
-                                }
+            .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0));
+        let window = crate::dock::show(ctx, builder, title, &mut open, |ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            ui.strong("Type");
+            let current = type_index(&self.draft.kind);
+            // PrePoMax's list of item types; an edited item keeps its type.
+            egui::Frame::group(ui.style())
+                .fill(crate::style::window())
+                .show(ui, |ui| {
+                    ui.set_min_width(360.0);
+                    ui.add_enabled_ui(self.index.is_none(), |ui| {
+                        for (index, label) in TYPES.into_iter().enumerate() {
+                            if ui.selectable_label(index == current, label).clicked()
+                                && index != current
+                            {
+                                self.draft.kind = new_kind(index, geometry);
+                                self.draft.name = next_name(
+                                    self.draft.kind.type_name(),
+                                    self.others.iter().map(String::as_str),
+                                );
+                                self.picks.clear();
+                                self.source_faces = false;
+                                self.sync_parts();
                             }
-                        });
+                        }
                     });
-                ui.separator();
-                ui.strong("Properties");
-                egui::Grid::new("mesh item form")
-                    .num_columns(2)
-                    .spacing([12.0, 6.0])
-                    .show(ui, |ui| self.form(ui, view));
-                if let Some(error) = &self.error {
-                    ui.colored_label(crate::style::error(), error);
-                }
-                ui.separator();
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Cancel").clicked() {
-                        result = MeshItemResult::Cancel;
-                    }
-                    if ui.button("OK").clicked() {
-                        match self.finish() {
-                            Ok(item) => result = MeshItemResult::Ok(self.index, item),
-                            Err(error) => self.error = Some(error),
-                        }
-                    }
-                    if ui
-                        .button("OK & Remesh")
-                        .on_hover_text("Apply the item and mesh the parts it applies to again")
-                        .clicked()
-                    {
-                        match self.finish() {
-                            Ok(item) => result = MeshItemResult::OkRemesh(self.index, item),
-                            Err(error) => self.error = Some(error),
-                        }
-                    }
                 });
+            ui.separator();
+            ui.strong("Properties");
+            egui::Grid::new("mesh item form")
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| self.form(ui, view));
+            if let Some(error) = &self.error {
+                ui.colored_label(crate::style::error(), error);
+            }
+            ui.separator();
+            crate::dock::footer(ui, |ui| {
+                if ui.button("Cancel").clicked() {
+                    result = MeshItemResult::Cancel;
+                }
+                if ui.button("OK").clicked() {
+                    match self.finish() {
+                        Ok(item) => result = MeshItemResult::Ok(self.index, item),
+                        Err(error) => self.error = Some(error),
+                    }
+                }
+                if ui
+                    .button("OK & Remesh")
+                    .on_hover_text("Apply the item and mesh the parts it applies to again")
+                    .clicked()
+                {
+                    match self.finish() {
+                        Ok(item) => result = MeshItemResult::OkRemesh(self.index, item),
+                        Err(error) => self.error = Some(error),
+                    }
+                }
             });
+        });
         if let (Some(window), Some(view)) = (window, view) {
             let anchor = window.response.rect;
             if self.has_parts() {

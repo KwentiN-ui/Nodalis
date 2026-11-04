@@ -1825,6 +1825,8 @@ pub struct ProjectApp {
     rename: Option<(u64, String)>,
     /// Blocks to delete once the user agrees.
     confirm_delete: Vec<u64>,
+    /// The toast over the schematic, such as "Deleted Beam" with Undo.
+    toast: Option<crate::toast::Toast>,
     /// The frames around groups of blocks.
     frames: Vec<file::Frame>,
     /// The blocks shown compact.
@@ -1974,6 +1976,7 @@ impl ProjectApp {
             graph_generation: 0,
             rename: None,
             confirm_delete: Vec::new(),
+            toast: None,
             frames: Vec::new(),
             compact: BTreeSet::new(),
             block_sizes: HashMap::new(),
@@ -5235,62 +5238,6 @@ impl ProjectApp {
                     self.redo(&ctx);
                 }
                 ui.separator();
-                // On the blocks selected with Shift+click or a Shift+drag rectangle.
-                let selected = self.selected.clone();
-                let any = !selected.is_empty();
-                let items = [
-                    (
-                        "Duplicate",
-                        "Shift+D",
-                        Action::DuplicateAll(selected.clone()),
-                    ),
-                    ("Delete …", "X", Action::DeleteAll(selected.clone())),
-                    ("Compact View", "H", Action::Compact(selected.clone())),
-                    ("Frame Blocks", "Ctrl+J", Action::Frame(selected.clone())),
-                    ("Remove from Frame", "Alt+P", Action::Unframe(selected)),
-                ];
-                for (text, key, action) in items {
-                    let button = egui::Button::new(text).shortcut_text(key);
-                    if ui
-                        .add_enabled(any, button)
-                        .on_disabled_hover_text(
-                            "Select blocks with Shift+click or a Shift+drag rectangle; the keys \
-                             also work on the block under the mouse pointer.",
-                        )
-                        .clicked()
-                    {
-                        self.act(&ctx, action);
-                    }
-                }
-            });
-            ui.menu_button("Project", |ui| {
-                if let Some(action) = add_block_menu(ui, self.free_position()) {
-                    let ctx = ui.ctx().clone();
-                    self.act(&ctx, action);
-                }
-                ui.separator();
-                let show_all = egui::Button::new("Show All Blocks").shortcut_text("Home");
-                if ui.add(show_all).clicked() {
-                    self.show_all = true;
-                }
-                ui.checkbox(&mut self.show_minimap, "Show Minimap")
-                    .on_hover_text(
-                        "All blocks in small in the lower right corner of the schematic",
-                    );
-                ui.separator();
-                let update = egui::Button::new("Update Project").shortcut_text("F5");
-                if ui.add(update).on_hover_text(UPDATE_TIP).clicked() && !self.busy() {
-                    self.update_all();
-                }
-                if ui
-                    .button("Solution Monitor")
-                    .on_hover_text(MONITOR_TIP)
-                    .clicked()
-                {
-                    self.toggle_monitor();
-                }
-            });
-            ui.menu_button("Tools", |ui| {
                 if ui.button("Settings …").clicked() {
                     self.settings_window = Some(SettingsWindow::new(&self.settings));
                 }
@@ -7290,102 +7237,24 @@ impl ProjectApp {
         }
     }
 
-    fn confirm_delete_window(&mut self, ctx: &egui::Context) {
+    /// Deletes the blocks asked to be deleted, without asking: Undo brings them back, which
+    /// the toast over the schematic offers (decisions 3 and 16 of the GUI concept).
+    fn confirm_delete_window(&mut self, _ctx: &egui::Context) {
         self.confirm_delete
             .retain(|id| self.nodes.iter().any(|n| n.id == *id));
-        let blocks: Vec<(String, Kind)> = (self.confirm_delete.iter())
+        let names: Vec<String> = (self.confirm_delete.iter())
             .filter_map(|id| self.nodes.iter().find(|n| n.id == *id))
-            .map(|n| (n.name.clone(), n.kind()))
+            .map(|n| n.name.clone())
             .collect();
-        let Some((name, kind)) = blocks.first().cloned() else {
-            return;
+        let text = match names.as_slice() {
+            [] => return,
+            [name] => format!("Deleted {name}"),
+            _ => format!("Deleted {} blocks", names.len()),
         };
-        let what = match kind {
-            Kind::Analysis => "with its model and results",
-            Kind::Materials => "with its materials",
-            Kind::CrossSections => "with its cross-sections",
-            Kind::Mesh | Kind::RefineMesh => "with its mesh",
-            Kind::CadOperation => "with the geometry it made",
-            Kind::Parameters => "with its parameters",
-            Kind::Measure => "with its value",
-            Kind::Study => "with its design points",
-            Kind::MeshExport => "(the file it wrote stays)",
-            Kind::File => "(the file it reads stays)",
-            Kind::Campbell => "with its diagram",
-            Kind::Note => "with its text",
-            Kind::Math | Kind::Switch => "with its numbers",
-        };
-        let users = (self.links.iter())
-            .filter(|l| self.confirm_delete.contains(&l.source))
-            .filter(|l| !self.confirm_delete.contains(&l.target))
-            .map(|l| l.target)
-            .collect::<BTreeSet<_>>()
-            .len();
-        let title = match blocks.len() {
-            1 => format!("Delete {}", title_case(kind.noun())),
-            _ => "Delete Blocks".into(),
-        };
-        let mut answer = None;
-        egui::Window::new(title)
-            .id(crate::ids::window(ctx, "confirm block delete"))
-            .collapsible(false)
-            .resizable(false)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
-            .show(ctx, |ui| {
-                if let [_] = blocks[..] {
-                    ui.label(format!("Delete {name} {what} from the project?"));
-                } else {
-                    ui.label(format!(
-                        "Delete these {} blocks from the project?",
-                        blocks.len()
-                    ));
-                    for (name, _) in &blocks {
-                        ui.label(format!("  {name}"));
-                    }
-                }
-                match (users, blocks.len()) {
-                    (0, _) => {}
-                    (1, 1) => {
-                        ui.label("1 block links to it; it keeps its copies.");
-                    }
-                    (_, 1) => {
-                        ui.label(format!(
-                            "{users} blocks link to it; they keep their copies."
-                        ));
-                    }
-                    _ => {
-                        ui.label(format!(
-                            "{users} blocks link to them; they keep their copies."
-                        ));
-                    }
-                }
-                ui.horizontal(|ui| {
-                    if ui.button("Delete").clicked() {
-                        answer = Some(true);
-                    }
-                    if ui.button("Cancel").clicked() {
-                        answer = Some(false);
-                    }
-                });
-            });
-        // As in Blender, Enter agrees and Escape does not.
-        if ctx.memory(|m| m.focused().is_none()) {
-            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
-                answer = Some(true);
-            } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-                answer = Some(false);
-            }
-        }
-        match answer {
-            Some(true) => {
-                self.checkpoint(&[]);
-                for id in std::mem::take(&mut self.confirm_delete) {
-                    self.delete(id);
-                }
-            }
-            Some(false) => self.confirm_delete.clear(),
-            None => {}
+        self.toast = Some(crate::toast::Toast::new(text, true));
+        self.checkpoint(&[]);
+        for id in std::mem::take(&mut self.confirm_delete) {
+            self.delete(id);
         }
     }
 
@@ -7746,17 +7615,44 @@ impl ProjectApp {
         let pane = egui::Frame::new()
             .fill(crate::style::window())
             .stroke(egui::Stroke::new(1.0, crate::style::border()));
-        egui::Panel::bottom("project output")
-            .resizable(true)
-            .default_size(170.0)
-            .size_range(70.0..=500.0)
+        // In a small window the output pane shows only its tabs until one is clicked.
+        let folded = crate::layout::output_folded(&ctx);
+        let panel = if folded {
+            egui::Panel::bottom("project output folded")
+                .resizable(false)
+                .exact_size(crate::app::OUTPUT_TABS)
+        } else {
+            egui::Panel::bottom("project output")
+                .resizable(true)
+                .default_size(170.0)
+                .size_range(70.0..=500.0)
+        };
+        panel
             .frame(egui::Frame::new().fill(crate::style::control()))
             .show(ui, |ui| {
                 let titles = ["Output", "Analyses"];
                 let selected = usize::from(self.monitor.shown);
+                let top = ui.cursor().top();
                 let (clicked, tab) = crate::style::tabs(ui, &titles, selected);
+                let row =
+                    egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
                 if let Some(index) = clicked {
                     self.monitor.shown = index == 1;
+                    if folded {
+                        crate::layout::fold_output(&ctx, false);
+                    }
+                }
+                let double = ui.input(|i| {
+                    i.pointer
+                        .button_double_clicked(egui::PointerButton::Primary)
+                        && i.pointer.interact_pos().is_some_and(|p| row.contains(p))
+                });
+                if double && !folded {
+                    crate::layout::fold_output(&ctx, true);
+                }
+                if folded {
+                    crate::style::open_tab(ui, tab);
+                    return;
                 }
                 pane.inner_margin(4).show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
@@ -7775,11 +7671,28 @@ impl ProjectApp {
                 });
                 crate::style::open_tab(ui, tab);
             });
-        let actions = egui::CentralPanel::no_frame()
-            .show(ui, |ui| self.schematic(ui))
-            .inner;
-        for action in actions {
+        let central = egui::CentralPanel::no_frame().show(ui, |ui| self.schematic(ui));
+        for action in central.inner {
             self.act(&ctx, action);
+        }
+        if let Some(cmd) = crate::ribbon::floating_bar(
+            &ctx,
+            "schematic",
+            central.response.rect,
+            crate::ribbon::SCHEMATIC_BAR,
+            &mut workspace::ProjectHost(self),
+        ) {
+            self.run_command(&ctx, cmd);
+        }
+        if let Some(toast) = &mut self.toast {
+            match crate::toast::show(&ctx, toast, central.response.rect) {
+                crate::toast::Event::None => {}
+                crate::toast::Event::Gone => self.toast = None,
+                crate::toast::Event::Undo => {
+                    self.toast = None;
+                    self.undo(&ctx);
+                }
+            }
         }
     }
 }
@@ -9687,27 +9600,6 @@ impl BlockKind {
         }
     }
 
-    /// The text of its menu item.
-    fn menu_label(&self) -> &'static str {
-        match self {
-            Self::Analysis => "New Analysis …",
-            Self::Materials => "Add Materials",
-            Self::CrossSections => "Add Cross-Sections",
-            Self::Mesh(primitive) => primitive.label(),
-            Self::RefineMesh => "Refine Mesh",
-            Self::CadOperation => "Add CAD Operation",
-            Self::Parameters => "Parameters",
-            Self::Math => "Math",
-            Self::Switch => "Switch",
-            Self::Measure => "Add Measure",
-            Self::Study => "Add Parameter Study",
-            Self::MeshExport => "Add Mesh Export",
-            Self::Campbell => "Add Campbell",
-            Self::File => "Add File …",
-            Self::Note => "Add Note",
-        }
-    }
-
     /// Adds its block at the position.
     fn action(&self, pos: egui::Pos2) -> Action {
         match self {
@@ -9728,39 +9620,6 @@ impl BlockKind {
             Self::Note => Action::AddNote(pos),
         }
     }
-}
-
-/// Menu items adding a block at the position: one per kind, the kinds of a group with more
-/// than one in a submenu.
-fn add_block_menu(ui: &mut egui::Ui, pos: egui::Pos2) -> Option<Action> {
-    let kinds = block_kinds();
-    let mut chosen = None;
-    let mut done: Vec<&str> = Vec::new();
-    for kind in &kinds {
-        let category = kind.entry().category;
-        if done.contains(&category) {
-            continue;
-        }
-        done.push(category);
-        let group: Vec<&BlockKind> = (kinds.iter())
-            .filter(|k| k.entry().category == category)
-            .collect();
-        let mut item = |ui: &mut egui::Ui, kind: &BlockKind, text: &str| {
-            if ui.button(text).on_hover_text(kind.entry().tip).clicked() {
-                chosen = Some(kind.action(pos));
-            }
-        };
-        if let [kind] = group[..] {
-            item(ui, kind, kind.menu_label());
-        } else {
-            ui.menu_button(format!("Add {category}"), |ui| {
-                for kind in group {
-                    item(ui, kind, kind.menu_label());
-                }
-            });
-        }
-    }
-    chosen
 }
 
 fn mesh_tip(primitive: &MeshPrimitive) -> &'static str {
@@ -11395,7 +11254,7 @@ fn edit_entries(ui: &mut egui::Ui, id: u64, targets: &[u64], actions: &mut Vec<A
         "Shift+D",
         Action::DuplicateAll(targets.to_vec()),
     );
-    entry(ui, "Delete …", "X", Action::DeleteAll(targets.to_vec()));
+    entry(ui, "Delete", "X", Action::DeleteAll(targets.to_vec()));
 }
 
 /// Spacing of the dots of the schematic's background.
@@ -11474,16 +11333,10 @@ const CROSS_SECTIONS_TIP: &str = "Adds a block of beam cross-sections kept in th
      analyses link them one by one or all at once, and their dimensions can be exposed as \
      parameters, so that a parameter study varies the profile of every analysis that links it.";
 
-/// Tooltip of Update Project.
+/// Tooltip of Undo.
 const UNDO_TIP: &str = "Undoes the last change of the project: blocks added, deleted, renamed or \
                         moved, links, and what the blocks hold. Changes inside an analysis are \
                         undone in its window.";
-const UPDATE_TIP: &str = "Update Project (F5): solves every analysis that is not up to date, \
-     one after the other, and keeps the new results.";
-
-const MONITOR_TIP: &str = "Solution Monitor: the analyses being solved, with the output of \
-     CalculiX, in the Analyses tab below the schematic";
-
 /// The project window's solution monitor: which analysis' output it shows, and the text
 /// the output is filtered by.
 #[derive(Default)]

@@ -24,12 +24,14 @@ Move a type from #ui("Available") to #ui("Active") and set its properties:
   through two points.
 
 Several transformations are applied one after the other. Vector and tensor results are mirrored
-or rotated with the copies, and legend and labels include them. #ui("Clear") removes all
-transformations.
+or rotated with the copies, and legend and labels include them. #ui("Apply") shows the
+transformations, #ui("Close") applies them and closes the window, and #ui("Off") shows the
+results without transformations again.
 
 == Derived field outputs <derived-fields>
 
-#ui("Create ...") on #ui("Field Outputs") computes new fields from the results.
+#ui("Derived Field") on the #ui("Evaluate") tab of the Results workspace computes new fields
+from the results.
 
 #screenshot("field-output.png", [Create Field Output])
 
@@ -77,7 +79,7 @@ like displacements.
 
 #ui("History Outputs") in the Results workspace lists the history outputs from the `.dat` file
 (for example the eigenfrequencies of a frequency step) and the ones you create with
-#ui("Create ..."):
+#ui("History Output") on the #ui("Evaluate") tab:
 
 / From Field Output: values of a field at selected nodes, one row per increment.
 / From History Output by Equation: a formula of other history outputs.
@@ -100,7 +102,7 @@ grid and legend, for reports in good print quality.
 
 #ui("Show in View") in the plot window puts the plot into the 3D view as an annotation, like a
 path plot (see @paths): it stays after the window is closed and appears in screenshots. Drag the box
-to move it and its bottom right corner to resize it. #ui("Edit...") in its context menu, or a
+to move it and its bottom right corner to resize it. #ui("Edit ...") in its context menu, or a
 double-click, opens #ui("Edit Annotation") for the title, the axis labels and a fixed value range;
 #ui("Delete"), or #ui("Remove from View") in the plot window, removes it. The plot keeps the values
 it was made from; with results kept with the project (@bind-result) it is saved with them.
@@ -110,7 +112,7 @@ it was made from; with results kept with the project (@bind-result) it is saved 
 
 == Paths <paths>
 
-#ui("Create ...") on #ui("Paths") shows the displayed component along a straight line.
+#ui("Path") on the #ui("Evaluate") tab shows the displayed component along a straight line.
 
 #screenshot("path.png", [Stress along a path through the hole])
 
@@ -142,7 +144,7 @@ the other side of the path. #ui("Show in Box") puts it back into its box.
 
 #screenshot("path-plot-flipped.png", [The plot dragged across the path: negative height, other side])
 
-#ui("Edit...") in the context menu, or a double-click on the plot, opens #ui("Edit Annotation").
+#ui("Edit ...") in the context menu, or a double-click on the plot, opens #ui("Edit Annotation").
 Changes show at once; #ui("Cancel") restores the plot.
 
 #screenshot("path-plot-edit.png", [Editing a path plot])
@@ -160,7 +162,7 @@ Changes show at once; #ui("Cancel") restores the plot.
 
 == Plane results
 
-#ui("Create ...") on #ui("Plane Results") evaluates the displayed component on a plane defined
+#ui("Plane Result") on the #ui("Evaluate") tab evaluates the displayed component on a plane defined
 under #ui("Features"): minimum and maximum with their position, the area-weighted mean, and the
 cut area. With its check box ticked, the 3D view shows only the cut, and the legend uses the
 values on it. #ui("Save as CSV...") and #ui("Save as JSON...") save the cut points with their
@@ -170,7 +172,7 @@ values.
 
 Hot spot stresses evaluate welded joints as recommended by the IIW: the stress at the weld toe is
 extrapolated from read-out points on the plate surface. Double-click #ui("Hot Spot Stresses") in
-the Results tree, or use #menu("Results", "Create Hot Spot ..."), and pick the weld toe.
+the Results tree, or use #menu("Evaluate", "Hot Spot"), and pick the weld toe.
 
 #screenshot("hot-spot.png", [Create Hot Spot with the stress along the path, the read-out points
   and the extrapolation to the weld toe])
@@ -201,7 +203,7 @@ an array.
 
 #ui("Show in View") puts the plot into the 3D view as an annotation that stays after the dialog is
 closed and follows the displayed increment, like the plot of a path (@paths): drag it to move it,
-drag its corner to resize it. Its context menu offers #ui("Edit..."), #ui("Show on Path"), which
+drag its corner to resize it. Its context menu offers #ui("Edit ..."), #ui("Show on Path"), which
 draws the curve, the read-out points and the extrapolation onto the path in the model, and
 #ui("Delete").
 
@@ -271,7 +273,7 @@ table or a plot.
 
 == Query <query>
 
-#menu("Tools", "Query ...") or the #ui("Query") tile of the ribbon (the pipette) reads values from the model by clicking: #ui("Vertex/Node"),
+#ui("Query") on the #ui("View") or #ui("Evaluate") tab or the #ui("Query") tile of the ribbon (the pipette) reads values from the model by clicking: #ui("Vertex/Node"),
 #ui("Facet/Element"), #ui("Edge") (length), #ui("Surface") (area), #ui("Part"), #ui("Assembly"), #ui("Bounding box size"), #ui("Distance")
 (two nodes), #ui("Angle") (three nodes) and #ui("Circle") (centre and radius through three
 nodes). The values appear in the output pane and as labels in the 3D view. On results, node
@@ -280,7 +282,7 @@ component.
 
 The labels stay in the view when the query window is closed and can be dragged
 aside. A right click on a label offers #ui("Delete") for this label and #ui("Delete All
-Annotations"); #ui("Remove Annotations") in the query window, in the #ui("Tools") menu and on the
+Annotations"); #ui("Remove Annotations") in the query window and on the
 ribbon deletes all of them. Each model keeps its own labels: the geometry, the FE model and every
 result file. Meshing again removes those of the FE model, since they refer to node and element
 ids.

@@ -17,6 +17,10 @@ use crate::style::{border, control, highlight, hover_fill, pressed_fill, window}
 /// Height of the app bar.
 pub const APP_BAR: f32 = 30.0;
 const TILE: Vec2 = vec2(58.0, 62.0);
+/// A tile of a narrow window: the icon only.
+const COMPACT: Vec2 = vec2(32.0, 32.0);
+/// The room a separator between two groups takes.
+const SEPARATOR: f32 = 13.0;
 const ICON: f32 = 22.0;
 
 /// What the ribbon keeps between frames: the tab of each workspace and whether it is
@@ -24,7 +28,8 @@ const ICON: f32 = 22.0;
 #[derive(Default)]
 pub struct RibbonState {
     tabs: HashMap<Workspace, &'static str>,
-    pub collapsed: bool,
+    /// Folded to its tab row: below the height the layout needs, or by the user.
+    fold: crate::layout::Fold,
 }
 
 impl RibbonState {
@@ -72,6 +77,9 @@ pub fn show(
 ) -> Option<Cmd> {
     let mut run = None;
     let tab = state.tab(workspace);
+    let fit = crate::layout::current(ui.ctx());
+    let folded = state.fold.folded(fit.fold_ribbon);
+    let compact = fit.icons_only;
     // The tab row.
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
@@ -87,11 +95,11 @@ pub fn show(
                 state.set_tab(workspace, title);
             }
             if response.double_clicked() {
-                state.collapsed = !state.collapsed;
+                state.fold.set(fit.fold_ribbon, !folded);
             }
         }
     });
-    if state.collapsed {
+    if folded {
         return None;
     }
     let commands: Vec<&Command> = (command::registry().iter())
@@ -116,13 +124,17 @@ pub fn show(
     let response = frame
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            let height = TILE.y + 16.0;
+            let height = if compact {
+                COMPACT.y + 4.0
+            } else {
+                TILE.y + 16.0
+            };
             let full = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), height));
             ui.allocate_rect(full, Sense::hover());
             let pinned_width = if pinned.is_empty() {
                 0.0
             } else {
-                group_width(ui, &pinned) + 14.0
+                group_width(ui, &pinned, compact) + 14.0
             };
             let left =
                 Rect::from_min_max(full.min, pos2(full.right() - pinned_width, full.bottom()));
@@ -132,7 +144,7 @@ pub fn show(
                     .layout(egui::Layout::left_to_right(egui::Align::Min)),
             );
             left_ui.set_clip_rect(left.intersect(ui.clip_rect()));
-            if let Some(cmd) = groups(&mut left_ui, &row, tab, host) {
+            if let Some(cmd) = groups(&mut left_ui, &row, tab, host, compact) {
                 run = Some(cmd);
             }
             if !pinned.is_empty() {
@@ -146,7 +158,7 @@ pub fn show(
                         .max_rect(right)
                         .layout(egui::Layout::left_to_right(egui::Align::Min)),
                 );
-                if let Some(cmd) = group(&mut right_ui, &pinned, host) {
+                if let Some(cmd) = group(&mut right_ui, &pinned, host, compact) {
                     run = Some(cmd);
                 }
             }
@@ -154,34 +166,67 @@ pub fn show(
         .response;
     response.context_menu(|ui| {
         if ui.button("Fold Ribbon").clicked() {
-            state.collapsed = true;
+            state.fold.set(fit.fold_ribbon, true);
         }
     });
     run
 }
 
-/// The groups of a tab, left to right, in a strip that scrolls when the window is narrow.
-fn groups(ui: &mut Ui, row: &[&Command], tab: &str, host: &mut dyn Host) -> Option<Cmd> {
+/// The groups of a tab, left to right. When they do not fit, groups fold into a menu
+/// each, from the right; what still does not fit scrolls.
+fn groups(
+    ui: &mut Ui,
+    row: &[&Command],
+    tab: &str,
+    host: &mut dyn Host,
+    compact: bool,
+) -> Option<Cmd> {
     let mut run = None;
+    let mut spans = Vec::new();
+    let mut start = 0;
+    while start < row.len() {
+        let name = row[start].group;
+        let end =
+            (row[start..].iter().position(|c| c.group != name)).map_or(row.len(), |n| start + n);
+        spans.push((start, end));
+        start = end;
+    }
+    let widths: Vec<(f32, Option<f32>)> = (spans.iter())
+        .map(|&(start, end)| {
+            let tiles = &row[start..end];
+            // Tiles the workspace draws itself cannot go into a menu.
+            let foldable = !tiles.iter().any(|c| c.tile == Tile::Custom);
+            let full = group_width(ui, tiles, compact);
+            (
+                full,
+                foldable.then(|| folded_width(ui, tiles[0].group, compact)),
+            )
+        })
+        .collect();
+    let folded = fold_groups(&widths, ui.max_rect().width());
     egui::ScrollArea::horizontal()
         .id_salt(("ribbon groups", tab))
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let mut start = 0;
-                while start < row.len() {
-                    let name = row[start].group;
-                    let end = (row[start..].iter().position(|c| c.group != name))
-                        .map_or(row.len(), |n| start + n);
-                    if start > 0 {
+                for (i, &(start, end)) in spans.iter().enumerate() {
+                    if i > 0 {
                         ui.add(egui::Separator::default().vertical().spacing(6.0));
                     }
-                    if let Some(cmd) = group(ui, &row[start..end], host) {
+                    let tiles = &row[start..end];
+                    let clicked = if folded[i] {
+                        folded_group(ui, tiles, host, compact)
+                    } else {
+                        group(ui, tiles, host, compact)
+                    };
+                    if let Some(cmd) = clicked {
                         run = Some(cmd);
                     }
-                    start = end;
                 }
-                if let Some(hint) = host.hint(tab) {
+                if let Some(hint) = host.hint(tab)
+                    && !compact
+                    && !folded.contains(&true)
+                {
                     ui.add_space(12.0);
                     ui.add(egui::Label::new(egui::RichText::new(hint).weak()).wrap());
                 }
@@ -190,9 +235,157 @@ fn groups(ui: &mut Ui, row: &[&Command], tab: &str, host: &mut dyn Host) -> Opti
     run
 }
 
+/// Which groups fold into a menu so that the row fits `available`: from the right, those
+/// that can. `widths` are the width of each group and, if it can fold, its folded width.
+fn fold_groups(widths: &[(f32, Option<f32>)], available: f32) -> Vec<bool> {
+    let mut folded = vec![false; widths.len()];
+    let total = |folded: &[bool]| {
+        let tiles: f32 = (widths.iter().zip(folded))
+            .map(|(&(full, small), &f)| if f { small.unwrap_or(full) } else { full })
+            .sum();
+        tiles + SEPARATOR * widths.len().saturating_sub(1) as f32
+    };
+    for i in (0..widths.len()).rev() {
+        if total(&folded) <= available {
+            break;
+        }
+        folded[i] = widths[i].1.is_some();
+    }
+    folded
+}
+
+/// The width of a group folded into one menu tile named after it.
+fn folded_width(ui: &Ui, title: &str, compact: bool) -> f32 {
+    if compact {
+        return COMPACT.x + 10.0;
+    }
+    let width = ui
+        .ctx()
+        .fonts_mut(|f| f.layout_no_wrap(title.into(), FontId::proportional(11.5), Color32::WHITE))
+        .size()
+        .x;
+    (width + 12.0).max(TILE.x - 8.0) + 8.0
+}
+
+/// A group folded into one tile: the icon of its first command and its title; a click shows
+/// its commands in a menu.
+fn folded_group(
+    ui: &mut Ui,
+    tiles: &[&Command],
+    host: &mut dyn Host,
+    compact: bool,
+) -> Option<Cmd> {
+    let mut run = None;
+    let title = tiles.first().map_or("", |c| c.group);
+    let icon = tiles.first().map_or(TileIcon::None, |c| c.icon);
+    let size = if compact {
+        vec2(folded_width(ui, title, true), COMPACT.y)
+    } else {
+        vec2(folded_width(ui, title, false), TILE.y)
+    };
+    ui.vertical(|ui| {
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+        if ui.is_rect_visible(rect) {
+            let painter = ui.painter();
+            if response.hovered() {
+                painter.rect(
+                    rect.shrink(1.0),
+                    3.0,
+                    hover_fill(),
+                    Stroke::new(1.0, highlight()),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            let color = ui.visuals().text_color();
+            let (icon_center, arrow) = if compact {
+                (
+                    pos2(rect.center().x - 4.0, rect.center().y),
+                    pos2(rect.right() - 6.0, rect.center().y + 1.0),
+                )
+            } else {
+                let text = painter.text(
+                    pos2(rect.center().x - 6.0, rect.top() + 39.0),
+                    Align2::CENTER_CENTER,
+                    title,
+                    FontId::proportional(11.5),
+                    color,
+                );
+                (
+                    pos2(rect.center().x, rect.top() + 17.0),
+                    pos2(text.right() + 6.0, text.center().y + 1.0),
+                )
+            };
+            paint_icon(
+                painter,
+                icon,
+                Rect::from_center_size(icon_center, Vec2::splat(ICON)),
+                true,
+            );
+            down_arrow(painter, arrow, color);
+        }
+        let response = response.on_hover_text(format!("{title}: its commands in a menu"));
+        egui::Popup::menu(&response).show(|ui| {
+            for c in tiles {
+                if let Some(cmd) = menu_entry(ui, c, host) {
+                    run = Some(cmd);
+                }
+            }
+        });
+        if !compact {
+            // The room of the group titles below the others.
+            ui.allocate_space(vec2(size.x, 15.0));
+        }
+    });
+    run
+}
+
+/// One command in a menu: a submenu with its own entries for a menu or split tile.
+fn menu_entry(ui: &mut Ui, c: &Command, host: &mut dyn Host) -> Option<Cmd> {
+    let mut run = None;
+    let button = |ui: &mut Ui, c: &Command, host: &dyn Host| {
+        let button = egui::Button::new(c.name()).shortcut_text(c.shortcut);
+        (ui.add_enabled(host.enabled(c.cmd), button)
+            .on_hover_text(c.tip))
+        .clicked()
+    };
+    match c.tile {
+        Tile::Menu | Tile::Split => {
+            ui.menu_button(c.name(), |ui| {
+                if c.tile == Tile::Split && button(ui, c, host) {
+                    run = Some(c.cmd);
+                }
+                for sub in (command::registry().iter()).filter(|s| s.tile == Tile::In(c.cmd)) {
+                    if button(ui, sub, host) {
+                        run = Some(sub.cmd);
+                    }
+                }
+            });
+        }
+        _ => {
+            if button(ui, c, host) {
+                run = Some(c.cmd);
+            }
+        }
+    }
+    run
+}
+
+/// The small arrow that marks a menu, pointing down, centred at `at`.
+fn down_arrow(painter: &egui::Painter, at: Pos2, color: Color32) {
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            at + vec2(-3.5, -2.0),
+            at + vec2(3.5, -2.0),
+            at + vec2(0.0, 2.5),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+}
+
 /// The width the tiles of a group take.
-fn group_width(ui: &Ui, tiles: &[&Command]) -> f32 {
-    let widths: f32 = tiles.iter().map(|c| tile_width(ui, c)).sum();
+fn group_width(ui: &Ui, tiles: &[&Command], compact: bool) -> f32 {
+    let widths: f32 = tiles.iter().map(|c| tile_width(ui, c, compact)).sum();
     widths + (tiles.len().saturating_sub(1)) as f32
 }
 
@@ -210,7 +403,10 @@ fn arrow_room(c: &Command) -> f32 {
     }
 }
 
-fn tile_width(ui: &Ui, c: &Command) -> f32 {
+fn tile_width(ui: &Ui, c: &Command, compact: bool) -> f32 {
+    if compact && c.tile != Tile::Custom {
+        return COMPACT.x;
+    }
     let font = FontId::proportional(11.5);
     let lines = tile_label(c).lines().count();
     (tile_label(c).lines().enumerate())
@@ -231,21 +427,25 @@ fn tile_width(ui: &Ui, c: &Command) -> f32 {
 }
 
 /// One group: its tiles side by side and its title below them.
-fn group(ui: &mut Ui, tiles: &[&Command], host: &mut dyn Host) -> Option<Cmd> {
+fn group(ui: &mut Ui, tiles: &[&Command], host: &mut dyn Host, compact: bool) -> Option<Cmd> {
     let mut run = None;
     let title = tiles.first().map_or("", |c| c.group);
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing = vec2(1.0, 0.0);
         let row = ui
             .horizontal(|ui| {
-                ui.set_height(TILE.y);
+                ui.set_height(if compact { COMPACT.y } else { TILE.y });
                 for c in tiles {
-                    if let Some(cmd) = tile(ui, c, host) {
+                    if let Some(cmd) = tile(ui, c, host, compact) {
                         run = Some(cmd);
                     }
                 }
             })
             .response;
+        if compact {
+            // Icons only: the group titles go too.
+            return;
+        }
         let rect = Rect::from_min_size(
             pos2(row.rect.left(), row.rect.bottom() + 1.0),
             vec2(row.rect.width().max(30.0), 14.0),
@@ -263,7 +463,7 @@ fn group(ui: &mut Ui, tiles: &[&Command], host: &mut dyn Host) -> Option<Cmd> {
 }
 
 /// A tile: the icon over a label of up to two lines. Returns the command to run.
-fn tile(ui: &mut Ui, c: &Command, host: &mut dyn Host) -> Option<Cmd> {
+fn tile(ui: &mut Ui, c: &Command, host: &mut dyn Host, compact: bool) -> Option<Cmd> {
     if c.tile == Tile::Custom {
         ui.vertical(|ui| {
             ui.set_height(TILE.y);
@@ -275,8 +475,11 @@ fn tile(ui: &mut Ui, c: &Command, host: &mut dyn Host) -> Option<Cmd> {
     let enabled = host.enabled(c.cmd) && ui.is_enabled();
     let checked = host.checked(c.cmd);
     let font = FontId::proportional(11.5);
+    if compact {
+        return compact_tile(ui, c, host, enabled, checked);
+    }
     let label = tile_label(c);
-    let width = tile_width(ui, c);
+    let width = tile_width(ui, c, false);
     let sense = if enabled {
         Sense::click()
     } else {
@@ -370,6 +573,141 @@ fn tile(ui: &mut Ui, c: &Command, host: &mut dyn Host) -> Option<Cmd> {
             }
         }
     }
+    run
+}
+
+/// A tile of a narrow window: its icon, the name in the tooltip. A split tile then opens
+/// its menu, with its own command first.
+fn compact_tile(
+    ui: &mut Ui,
+    c: &Command,
+    host: &mut dyn Host,
+    enabled: bool,
+    checked: bool,
+) -> Option<Cmd> {
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(COMPACT, sense);
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if checked || (enabled && response.hovered()) {
+            let fill = if checked {
+                pressed_fill()
+            } else {
+                hover_fill()
+            };
+            painter.rect(
+                rect.shrink(1.0),
+                3.0,
+                fill,
+                Stroke::new(1.0, highlight()),
+                egui::StrokeKind::Inside,
+            );
+        }
+        let icon = Rect::from_center_size(rect.center(), Vec2::splat(ICON));
+        paint_icon(painter, c.icon, icon, enabled);
+        if matches!(c.tile, Tile::Menu | Tile::Split) {
+            let color = if enabled {
+                ui.visuals().text_color()
+            } else {
+                ui.visuals().weak_text_color()
+            };
+            down_arrow(painter, rect.right_bottom() + vec2(-5.0, -5.0), color);
+        }
+    }
+    let tip = command::tooltip(c);
+    let response = response.on_hover_text(&tip).on_disabled_hover_text(tip);
+    match c.tile {
+        Tile::Menu | Tile::Split => {
+            let mut run = None;
+            egui::Popup::menu(&response).show(|ui| {
+                if c.tile == Tile::Split {
+                    let button = egui::Button::new(c.name()).shortcut_text(c.shortcut);
+                    if ui.add_enabled(host.enabled(c.cmd), button).clicked() {
+                        run = Some(c.cmd);
+                    }
+                }
+                for sub in (command::registry().iter()).filter(|s| s.tile == Tile::In(c.cmd)) {
+                    let button = egui::Button::new(sub.name()).shortcut_text(sub.shortcut);
+                    if ui
+                        .add_enabled(host.enabled(sub.cmd), button)
+                        .on_hover_text(sub.tip)
+                        .clicked()
+                    {
+                        run = Some(sub.cmd);
+                    }
+                }
+            });
+            run
+        }
+        _ => response.clicked().then_some(c.cmd),
+    }
+}
+
+/// The commands of the floating bar at the bottom of the 3D view.
+pub const VIEW_BAR: &[Cmd] = &[
+    Cmd::ZoomToFit,
+    Cmd::StandardViews,
+    Cmd::VerticalView,
+    Cmd::EdgesOnly,
+    Cmd::MeshEdges,
+    Cmd::SectionView,
+    Cmd::ExplodedView,
+    Cmd::Screenshot,
+];
+
+/// The commands of the floating bar at the bottom of the schematic.
+pub const SCHEMATIC_BAR: &[Cmd] = &[
+    Cmd::ShowAll,
+    Cmd::Minimap,
+    Cmd::Compact,
+    Cmd::FrameBlocks,
+    Cmd::Duplicate,
+];
+
+/// A small bar of icon tiles floating at the bottom centre of `view`, for the commands one
+/// needs there most often; the same tiles as on the ribbon. Returns the command clicked.
+pub fn floating_bar(
+    ctx: &egui::Context,
+    id: &str,
+    view: Rect,
+    cmds: &[Cmd],
+    host: &mut dyn Host,
+) -> Option<Cmd> {
+    let mut run = None;
+    egui::Area::new(crate::ids::window(ctx, ("floating bar", id)))
+        .pivot(Align2::CENTER_BOTTOM)
+        .fixed_pos(pos2(view.center().x, view.bottom() - 10.0))
+        .order(egui::Order::Middle)
+        .constrain_to(view)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(window())
+                .stroke(Stroke::new(1.0, border()))
+                .corner_radius(5.0)
+                .shadow(egui::Shadow {
+                    offset: [0, 2],
+                    blur: 8,
+                    spread: 0,
+                    color: Color32::from_black_alpha(70),
+                })
+                .inner_margin(egui::Margin::same(4))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 1.0;
+                        for c in cmds.iter().filter_map(|&cmd| command::find(cmd)) {
+                            let enabled = host.enabled(c.cmd);
+                            let checked = host.checked(c.cmd);
+                            if let Some(cmd) = compact_tile(ui, c, host, enabled, checked) {
+                                run = Some(cmd);
+                            }
+                        }
+                    });
+                });
+        });
     run
 }
 
@@ -522,6 +860,13 @@ pub fn paint_glyph(painter: &egui::Painter, glyph: Glyph, area: Rect, color: Col
             painter.circle_stroke(p(8.0, 8.0), 2.0 * s, stroke);
             line(&[p(2.5, 14.0), p(13.5, 2.0)], accent);
         }
+        Glyph::Tree => {
+            rect(1.5, 2.5, 14.5, 13.5, stroke);
+            line(&[p(6.0, 2.5), p(6.0, 13.5)], stroke);
+            for y in [5.5, 8.0, 10.5] {
+                line(&[p(2.8, y), p(4.7, y)], accent);
+            }
+        }
         Glyph::Worksheet => {
             rect(1.5, 2.5, 14.5, 13.5, stroke);
             for y in [6.0, 9.5] {
@@ -635,6 +980,28 @@ pub fn app_bar(ui: &mut Ui, bar: &Bar, menus: &mut dyn FnMut(&mut Ui)) -> Vec<Ba
             FontId::proportional(17.0),
             crate::style::adapt(Color32::from_rgb(70, 140, 215)),
         );
+        if bar.workspace != Workspace::Project && crate::layout::current(ui.ctx()).fold_tree {
+            let shown = !crate::layout::tree_folded(ui.ctx());
+            let tip = if shown {
+                "Hide the tree"
+            } else {
+                "Show the tree"
+            };
+            let response = small(ui, Glyph::Tree, tip, true);
+            if shown {
+                ui.painter()
+                    .rect_filled(response.rect.shrink(1.0), 3.0, hover_fill());
+                paint_glyph(
+                    ui.painter(),
+                    Glyph::Tree,
+                    Rect::from_center_size(response.rect.center(), Vec2::splat(16.0)),
+                    crate::style::text(),
+                );
+            }
+            if response.clicked() {
+                crate::layout::fold_tree(ui.ctx(), shown);
+            }
+        }
         let analysis_enabled = bar.active.is_some() || !bar.project;
         if bar.project {
             if segment(
@@ -795,6 +1162,10 @@ fn small(ui: &mut Ui, glyph: Glyph, tip: &str, enabled: bool) -> egui::Response 
 
 /// The box that opens the command search.
 fn search_box(ui: &mut Ui) -> egui::Response {
+    if crate::layout::current(ui.ctx()).overlay {
+        // A narrow window: the magnifier only.
+        return small(ui, Glyph::Search, "Search commands (Ctrl+K)", true);
+    }
     let (rect, response) = ui.allocate_exact_size(vec2(190.0, 22.0), Sense::click());
     let fill = if response.hovered() {
         hover_fill()
@@ -854,4 +1225,21 @@ fn pill(ui: &mut Ui, state: CellState, text: &str) -> egui::Response {
         ui.visuals().text_color(),
     );
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn groups_fold_from_the_right_until_the_row_fits() {
+        let widths = [(100.0, Some(40.0)), (100.0, None), (100.0, Some(40.0))];
+        let all = 300.0 + 2.0 * SEPARATOR;
+        assert_eq!(fold_groups(&widths, all), [false, false, false]);
+        assert_eq!(fold_groups(&widths, all - 10.0), [false, false, true]);
+        // The middle group cannot fold, so the first one goes next.
+        assert_eq!(fold_groups(&widths, all - 61.0), [true, false, true]);
+        // Even with every group folded that can, the row stays as small as it gets.
+        assert_eq!(fold_groups(&widths, 10.0), [true, false, true]);
+    }
 }

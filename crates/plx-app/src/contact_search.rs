@@ -58,7 +58,7 @@ struct Row {
     adjust: bool,
     distance: f64,
     selected: bool,
-    /// The pair is created on OK.
+    /// The pair is created by the verb of the window.
     checked: bool,
 }
 
@@ -314,20 +314,20 @@ impl ContactSearchDialog {
                 if let Some(error) = &self.error {
                     ui.colored_label(crate::style::error(), error);
                 }
-                ui.separator();
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Cancel").clicked() {
-                        result = SearchResult::Cancel;
-                    }
-                    if ui.button("OK").clicked() {
-                        match self.create(model) {
-                            Ok((ties, pairs, joints)) => {
-                                result = SearchResult::Ok(ties, pairs, joints)
-                            }
-                            Err(error) => self.error = Some(error),
-                        }
-                    }
-                });
+                // A work window: Cancel and the verb, which names what it makes.
+                let count = self.rows.iter().filter(|r| r.checked).count();
+                let verb = match count {
+                    1 => "Create 1 Pair".to_owned(),
+                    n => format!("Create {n} Pairs"),
+                };
+                match crate::dialog::work_footer(ui, Some((&verb, count > 0))) {
+                    crate::dialog::Work::Verb => match self.create(model) {
+                        Ok((ties, pairs, joints)) => result = SearchResult::Ok(ties, pairs, joints),
+                        Err(error) => self.error = Some(error),
+                    },
+                    crate::dialog::Work::Close => result = SearchResult::Cancel,
+                    crate::dialog::Work::None => {}
+                }
             });
         if !open {
             result = SearchResult::Cancel;

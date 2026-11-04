@@ -39,19 +39,19 @@ This has two consequences you will notice:
   click near its end the CAD point there, so node ties and supports at line ends survive a
   remesh as well.
 - The `.inp` file contains sets you never named. You can inspect it at any time by exporting it
-  (#menu("File", "Export CalculiX Input File ...")).
+  (#menu("File", "Export", "CalculiX Input File ...")).
 
 The project, including geometry, mesh and model, is saved as a Nodalis project file (`.ndl`).
 
 == Requirements
 
 - *No external solver* is needed: the solver is part of Nodalis, so analyses run right after
-  installation. #menu("Tools", "Settings ...", "Solver") sets its threads and work directory;
+  installation. #menu("Edit", "Settings ...", "Solver") sets its threads and work directory;
   #ui("Test solver") checks it (@settings).
 - *Gmsh* is needed to import and mesh CAD geometry. The Windows installer and the Linux AppImage
   include it. Without
   Gmsh Nodalis still starts; only geometry import and meshing are unavailable. Its library path
-  can be set under #menu("Tools", "Settings ...", "Gmsh").
+  can be set under #menu("Edit", "Settings ...", "Gmsh").
 - On Linux, Nodalis needs a Vulkan or OpenGL driver and `libxkbcommon`, which most desktop
   installations provide. A Gmsh library installed separately additionally needs `libGLU` and
   `libXft`; the AppImage brings them along.
@@ -92,7 +92,7 @@ unpacked folder, the note at the bottom])
 == Updates <updates>
 
 Nodalis asks GitHub for the latest release when it starts. If a newer version exists, a green
-symbol with a download arrow appears at the right of the menu bar, next to the version number.
+symbol with a download arrow appears at the right of the app bar, next to the version number.
 Nothing else happens: ignore it if you do not want to update. A click on the symbol, or
 #menu("Help", "Check for Updates ..."), opens the update window with the release notes
 (_What's Changed_, one line per change with a link to it on GitHub):
@@ -114,7 +114,7 @@ Nothing else happens: ignore it if you do not want to update. A click on the sym
 The Linux AppImage does not check at startup, since an AppImage manager such as Gear Lever or
 AppImageLauncher updates it; #menu("Help", "Check for Updates ...") still shows what is new. The
 check at startup runs in the background and stays silent when there is nothing new or no
-internet connection. It can be turned off under #menu("Tools", "Settings ...", "Updates")
+internet connection. It can be turned off under #menu("Edit", "Settings ...", "Updates")
 (@settings). A proxy is taken from the `HTTPS_PROXY` variable or, on Windows, from a proxy server
 entered in the Internet Options (automatic configuration scripts are not read). The connection is
 checked with the certificates of the system, so a company proxy that inspects HTTPS works too.

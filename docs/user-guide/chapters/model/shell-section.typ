@@ -4,7 +4,7 @@
 
 A #ui("Shell") section gives surface elements of a 3D model a thickness, so that a thin plate
 or a sheet-metal part can be computed with shell elements (`S3`, `S4`, `S6`, `S8`) instead of
-solids. Create it with #menu("Model", "Create Section ...") and choose #ui("Shell").
+solids. Create it with #menu("Material", "Section") and choose #ui("Shell").
 
 #screenshot("shell-section.png", [Shell section])
 

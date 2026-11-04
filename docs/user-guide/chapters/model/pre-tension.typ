@@ -3,8 +3,7 @@
 == Bolt pre-tension <pre-tension>
 
 A #ui("Pre-tension (bolt preload)") load tightens a bolt: it pulls the two sides of a cut through
-the shank together with a force, or shortens the bolt by a given length. Create it with #ui("Create ...") on #ui("Loads") of a step or
-#menu("Model", "Create Load ...").
+the shank together with a force, or shortens the bolt by a given length. Create it with #ui("Load") on the #ui("Steps") tab.
 
 #screenshot("pre-tension-load.png", [Pre-tension load on the cut through a bolt shank])
 
@@ -38,7 +37,7 @@ is no previous length to keep then, and the bolt carries no preload.
 #note[CalculiX's `*PRE-TENSION SECTION` separates only the elements with a
 face on the cut. In a tetrahedral mesh, elements that touch the cut with just an edge or a
 corner then hold both sides together and take most of the preload, which is why a thin layer of wedge elements is often
-added at the cut (#menu("Model", "Tools", "Boundary Layer")).
+added at the cut (in PrePoMax #menu("Model", "Tools", "Boundary Layer")).
 Nodalis needs no such layer: its own cut separates all of them.]
 
 #note[A bolt split into two parts in the CAD geometry has two meshes that do not share nodes at

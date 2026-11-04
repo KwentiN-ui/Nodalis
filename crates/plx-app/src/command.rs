@@ -173,6 +173,7 @@ pub enum Cmd {
     SurfaceInteraction,
     ContactPair,
     Tie,
+    NodeTie,
     ContactWorksheet,
     ConnectionSettings,
     Step,
@@ -184,6 +185,8 @@ pub enum Cmd {
     Distribution,
     FieldOutput,
     HistoryOutput,
+    /// The combo box of the step new items go into.
+    ActiveStep,
     // Results workspace.
     /// The controls of the shown results: deformation, contours, increment, animation.
     ResultsDisplay,
@@ -219,8 +222,12 @@ pub enum Cmd {
     ScreenshotClipboard,
     ScreenshotFile,
     ExportInp,
+    /// Shows the checklist in the properties panel again.
+    Checklist,
     // Everywhere.
     Settings,
+    /// The Solver page of the settings.
+    SolverSettings,
     UserGuide,
     CheckForUpdates,
 }
@@ -276,6 +283,8 @@ pub enum Glyph {
     Search,
     Analysis,
     Save,
+    /// The button of the app bar that shows the folded tree.
+    Tree,
 }
 
 pub struct Command {
@@ -349,7 +358,6 @@ pub fn registry() -> &'static [Command] {
 }
 
 /// The command `cmd` as registered.
-#[cfg(test)]
 pub fn find(cmd: Cmd) -> Option<&'static Command> {
     registry().iter().find(|c| c.cmd == cmd)
 }
@@ -1201,6 +1209,16 @@ fn build() -> Vec<Command> {
         "Surfaces glued to each other.",
     ));
     add(command(
+        C::NodeTie,
+        "Node\nTie",
+        f,
+        t,
+        "Advanced",
+        Tree(TreeIcon::ContactPair),
+        "",
+        "Nodes tied to the nearest nodes of other parts.",
+    ));
+    add(command(
         C::ContactWorksheet,
         "Contact\nWorksheet",
         f,
@@ -1221,6 +1239,19 @@ fn build() -> Vec<Command> {
         "Settings of all contacts.",
     ));
     let t = "Steps";
+    add(tile(
+        command(
+            C::ActiveStep,
+            "",
+            f,
+            t,
+            "Active Step",
+            TileIcon::None,
+            "",
+            "",
+        ),
+        Tile::Custom,
+    ));
     add(command(
         C::Step,
         "Step",
@@ -1620,6 +1651,16 @@ fn build() -> Vec<Command> {
         crate::settings::SHOW_LINKED_TIP,
     ));
     add(command(
+        C::Checklist,
+        "Check-\nlist",
+        v,
+        t,
+        "Show",
+        Shape(Glyph::Check),
+        "",
+        "Shows the checklist in the properties panel while nothing is edited.",
+    ));
+    add(command(
         C::SectionView,
         "Section\nView",
         v,
@@ -1723,6 +1764,19 @@ fn build() -> Vec<Command> {
             TileIcon::None,
             "",
             "The settings of Nodalis.",
+        ),
+        Tile::Hidden,
+    ));
+    add(tile(
+        command(
+            C::SolverSettings,
+            "Solver Settings",
+            ALL,
+            "",
+            "Edit",
+            TileIcon::None,
+            "",
+            "The settings of the solver: threads, work folder and parallel runs.",
         ),
         Tile::Hidden,
     ));
