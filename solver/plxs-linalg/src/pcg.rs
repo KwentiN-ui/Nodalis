@@ -165,7 +165,10 @@ impl PcgSolver {
                     // Memory: single precision values against the double precision matrix.
                     amg.nonzeros() as f64 / (2 * self.full.nnz().max(1)) as f64,
                     if self.reused { ", kept" } else { "" }
-                )
+                ) + &amg
+                    .placement()
+                    .map(|p| format!(", {p}"))
+                    .unwrap_or_default()
             }
             None if self.shift.is_infinite() => {
                 "diagonal (incomplete Cholesky broke down)".to_owned()
