@@ -13,6 +13,8 @@
 //! `faer`'s dense kernels; the matrix layout is the textbook compressed-column format. No
 //! CalculiX code was consulted.
 
+pub mod amg;
+pub mod bsr;
 pub mod dense;
 pub mod eigen;
 pub mod gmres;
@@ -23,6 +25,7 @@ pub mod pcg;
 pub mod solver;
 pub mod supernodal;
 
+pub use amg::{Amg, AmgOptions, Unknowns};
 pub use gmres::gmres;
 pub use memory::available_memory;
 

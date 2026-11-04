@@ -58,10 +58,13 @@ solved:
   [Direct], [A sparse direct factorization (LDLᵀ). It solves every system, including
     tangents near buckling and parts held only by contact, but needs memory for the factor,
     which grows quickly with the model: about 2.4 GB for a solid block of 170 000 equations.],
-  [Iterative], [Conjugate gradients with an incomplete Cholesky preconditioner. It needs a
-    fraction of the memory (about 35 times less on that block) and is often faster on large
-    solid models. It solves linear and nonlinear static steps (also with plasticity, large
-    deformations, gaps and contact; sliding friction adds a few GMRES iterations around it),
+  [Iterative], [Conjugate gradients with an algebraic multigrid preconditioner (smoothed
+    aggregation on the rigid body modes of the nodes). It needs a fraction of the memory
+    (about 20 times less on that block) and is usually faster than the direct solver on large
+    solid models, also on thin ones and on quadratic tetrahedra: the number of iterations
+    hardly grows with the model. It solves linear and nonlinear static steps (also with
+    plasticity, large deformations, gaps and contact; sliding friction adds a few GMRES
+    iterations around it),
     visco, implicit and explicit dynamic and heat transfer steps, and the eigenvalue
     iteration of frequency and buckle steps (see below). It only solves positive
     definite systems: the model must be held against every rigid body motion, and a tangent
@@ -87,8 +90,11 @@ nothing for #ui("Automatic"), `SOLVER=PASTIX` for #ui("Direct") and `SOLVER=ITER
 CHOLESKY` for #ui("Iterative").
 
 The monitor shows how a solve went: for the direct solver the size of the factor and the
-times of ordering, factorization and solution; for the iterative one the size of the
-preconditioner, the number of iterations and the remaining relative residual (below 1e-12).
+times of ordering, factorization and solution; for the iterative one the levels of the
+multigrid hierarchy with their sizes, its memory relative to the matrix, the number of
+iterations and the remaining relative residual (below 1e-12). The results of both solvers
+agree to that accuracy. In a nonlinear step the hierarchy is rebuilt for every Newton
+iteration, which costs about as much as a few iterations of the solve.
 
 === Static
 

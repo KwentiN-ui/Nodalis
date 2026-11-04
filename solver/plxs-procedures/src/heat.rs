@@ -43,6 +43,7 @@ use std::sync::Arc;
 
 use plxs_contact::ThermalLink;
 use plxs_core::contact::GapConductance;
+use plxs_linalg::Unknowns;
 use plxs_linalg::{LdltSolver, Pattern, SparseMatrix};
 use plxs_output::StaRow;
 
@@ -542,7 +543,7 @@ impl<'h> HeatRun<'h> {
             return Ok(());
         }
         let reduced = a.restrict(free);
-        let coordinates = || free.iter().map(|&n| self.coordinates[n as usize]).collect();
+        let coordinates = || Unknowns::from_free(free, 1, &self.coordinates);
         self.equations.prepare(
             &mut self.solver,
             &reduced,
@@ -589,11 +590,8 @@ impl<'h> HeatRun<'h> {
             let reduction = Reduction::new(total_dofs, spc);
             if self.mechanical_spc.as_ref() != Some(&reduction.spc.dofs) {
                 let k_free = k.restrict(&reduction.free);
-                let coordinates = || {
-                    (reduction.free.iter())
-                        .map(|&dof| model.nodes.coordinates[dof as usize / 3])
-                        .collect()
-                };
+                let coordinates =
+                    || Unknowns::from_free(&reduction.free, 3, &model.nodes.coordinates);
                 let iterative = self.mechanical_equations.is_iterative();
                 self.mechanical_equations
                     .prepare(&mut ctx.solver, &k_free, coordinates, true, &mut NoProgress)
@@ -795,11 +793,7 @@ impl<'h> HeatRun<'h> {
                 .collect();
             let mut rhs = reduction.reduce_vector(&residual);
             let a_free = a.restrict(&reduction.free);
-            let coordinates = || {
-                (reduction.free.iter())
-                    .map(|&dof| coords[dof as usize / 3])
-                    .collect()
-            };
+            let coordinates = || Unknowns::from_free(&reduction.free, 3, coords);
             self.mechanical_equations
                 .prepare(&mut ctx.solver, &a_free, coordinates, true, &mut NoProgress)
                 .map_err(|e| match e {
