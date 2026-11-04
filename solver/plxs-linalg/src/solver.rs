@@ -417,6 +417,32 @@ impl LinearSolver for LdltSolver {
             .ok_or_else(|| numerical("solve before factorize"))?;
         let n = symbolic.nrows();
         assert_eq!(rhs.len(), n, "right-hand side of the wrong size");
+        // The tree-parallel substitutions (`PLXS_SOLVE=faer` takes faer's own).
+        if let (SymbolicCholeskyRaw::Supernodal(raw), Some(tree), true) = (
+            symbolic.raw(),
+            &self.tree,
+            self.par.degree() > 1 && std::env::var("PLXS_SOLVE").as_deref() != Ok("faer"),
+        ) {
+            let mut x = match symbolic.perm() {
+                Some(perm) => perm
+                    .arrays()
+                    .0
+                    .iter()
+                    .map(|&old| rhs[old as usize])
+                    .collect(),
+                None => rhs.to_vec(),
+            };
+            supernodal::solve(raw, tree, &self.values, &mut x, self.par.degree());
+            match symbolic.perm() {
+                Some(perm) => {
+                    for (&old, &value) in perm.arrays().0.iter().zip(&x) {
+                        rhs[old as usize] = value;
+                    }
+                }
+                None => rhs.copy_from_slice(&x),
+            }
+            return Ok(());
+        }
         let factor = faer::sparse::linalg::cholesky::LdltRef::new(symbolic, &self.values);
         let scratch = symbolic.solve_in_place_scratch::<f64>(1, self.par);
         let mut buffer =
