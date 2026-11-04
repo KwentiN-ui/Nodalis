@@ -3624,16 +3624,22 @@ impl Workbench {
         ))
     }
 
-    /// The state of the cells as last found, found again when the analysis changed.
+    /// The state of the cells as last found, found again when the analysis, what it takes
+    /// from the project or whether the project solves it changed: all that
+    /// [`Self::status`] depends on.
     fn cached_status(&mut self) -> Option<crate::status::AnalysisStatus> {
-        let revision = self.revision()?;
+        let mut hash = plx_mesh::Fnv::new();
+        hash.add(&self.revision()?.to_le_bytes());
+        hash.add_debug(&self.upstream);
+        hash.add_debug(&(self.project_run.as_ref()).is_some_and(|r| r.active));
+        let key = hash.finish();
         if let Some((seen, status)) = &self.status
-            && *seen == revision
+            && *seen == key
         {
             return Some(status.clone());
         }
         let status = self.status()?;
-        self.status = Some((revision, status.clone()));
+        self.status = Some((key, status.clone()));
         Some(status)
     }
 

@@ -75,6 +75,33 @@ pub struct AmgOptions {
     /// At most this many nodes found an aggregate together; the strongest neighbours of
     /// the root first, the rest joins later.
     pub max_aggregate: usize,
+    /// Whether the cycle may run on the graphics card (`PLXS_GPU`, feature `gpu`).
+    pub gpu: GpuMode,
+}
+
+/// Where the multigrid cycle runs (`PLXS_GPU=off|on`, automatic otherwise).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuMode {
+    /// Always on the processor.
+    Off,
+    /// On a discrete graphics card for large systems, see [`crate::gpu`].
+    Automatic,
+    /// On the graphics card whenever there is one, of any kind (software renderers
+    /// included) and for systems of any size: tests and measurements.
+    On,
+}
+
+impl GpuMode {
+    pub fn from_environment() -> Self {
+        match std::env::var("PLXS_GPU")
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref()
+        {
+            Ok("off") | Ok("0") | Ok("no") | Ok("false") => Self::Off,
+            Ok("on") | Ok("1") | Ok("yes") | Ok("true") => Self::On,
+            _ => Self::Automatic,
+        }
+    }
 }
 
 impl Default for AmgOptions {
@@ -94,6 +121,7 @@ impl Default for AmgOptions {
             coarse_size: env("PLXS_AMG_COARSE", 1500),
             max_levels: env("PLXS_AMG_LEVELS", 12),
             max_aggregate: env("PLXS_AMG_MAX_AGG", 27),
+            gpu: GpuMode::from_environment(),
         }
     }
 }
@@ -150,6 +178,11 @@ pub struct Amg {
     /// Single precision values of all operators and prolongators of the hierarchy, the
     /// copy of the finest operator included.
     nonzeros: usize,
+    /// The cycle on the graphics card, when it runs there.
+    #[cfg(feature = "gpu")]
+    gpu: Option<Box<crate::gpu::GpuCycle>>,
+    /// Why the cycle runs on the processor although the card was considered (or failed).
+    cpu_reason: Mutex<Option<String>>,
 }
 
 impl Amg {
@@ -284,6 +317,27 @@ impl Amg {
             .collect();
         let fine = a.converted();
         lap("single precision copy", n);
+        #[cfg(feature = "gpu")]
+        let (gpu, cpu_reason) = {
+            let views: Vec<crate::gpu::LevelView<'_>> = levels
+                .iter()
+                .map(|level| crate::gpu::LevelView {
+                    a: level.a.as_ref().unwrap_or(&fine),
+                    inv_diag: &level.inv_diag,
+                    lambda_max: level.lambda_max,
+                    p: level.p.as_ref(),
+                    pt: level.pt.as_ref(),
+                })
+                .collect();
+            let placed = crate::gpu::GpuCycle::place(&views, coarsest, options.degree, options.gpu);
+            lap("upload to the graphics card", n);
+            match placed {
+                crate::gpu::Placement::Gpu(cycle) => (Some(cycle), None),
+                crate::gpu::Placement::Cpu(reason) => (None, reason),
+            }
+        };
+        #[cfg(not(feature = "gpu"))]
+        let cpu_reason = None;
         Ok(Amg {
             fine,
             levels,
@@ -291,6 +345,9 @@ impl Amg {
             work: Mutex::new(work),
             options,
             nonzeros,
+            #[cfg(feature = "gpu")]
+            gpu,
+            cpu_reason: Mutex::new(cpu_reason),
         })
     }
 
@@ -314,6 +371,28 @@ impl Amg {
         level.lambda_max = largest_eigenvalue(a, &inv_diag);
         level.inv_diag = inv_diag.iter().map(|&d| d as f32).collect();
         convert(&a.val, &mut self.fine.val);
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            let level = &self.levels[0];
+            gpu.refresh(&self.fine, &level.inv_diag, level.lambda_max);
+        }
+    }
+
+    /// Where the cycle runs, for the monitor: the graphics card's name, or why the
+    /// processor serves although the card was considered; `None` when it was not.
+    pub fn placement(&self) -> Option<String> {
+        let reason = self.cpu_reason.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(reason) = reason.as_ref() {
+            return Some(format!("V-cycle on the processor ({reason})"));
+        }
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = self.gpu.as_ref() {
+            return Some(format!(
+                "V-cycle on the graphics card {}",
+                gpu.device_name()
+            ));
+        }
+        None
     }
 
     pub fn nonzeros(&self) -> usize {
@@ -336,6 +415,19 @@ impl Amg {
             // The whole system is factorized: solve it in double precision.
             z.copy_from_slice(r);
             return self.coarse.solve(z);
+        }
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = self.gpu.as_ref() {
+            match gpu.apply(r, z) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    // Once failed, the processor serves from here on.
+                    let mut reason = self.cpu_reason.lock().unwrap_or_else(|e| e.into_inner());
+                    reason.get_or_insert_with(|| {
+                        format!("the graphics card {} failed: {e}", gpu.device_name())
+                    });
+                }
+            }
         }
         convert(r, &mut work[0].b);
         self.cycle(0, &mut work)?;

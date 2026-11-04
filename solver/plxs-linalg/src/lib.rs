@@ -18,6 +18,8 @@ pub mod bsr;
 pub mod dense;
 pub mod eigen;
 pub mod gmres;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod memory;
 pub mod ordering;
 pub mod pattern;
@@ -25,7 +27,7 @@ pub mod pcg;
 pub mod solver;
 pub mod supernodal;
 
-pub use amg::{Amg, AmgOptions, Unknowns};
+pub use amg::{Amg, AmgOptions, GpuMode, Unknowns};
 pub use gmres::gmres;
 pub use memory::available_memory;
 

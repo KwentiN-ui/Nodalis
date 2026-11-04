@@ -183,6 +183,8 @@ impl StaticLinear {
                 period,
                 &mut f,
             );
+            // What a following static step ramps its loads from (without the thermal part).
+            let applied = f.clone();
             let t = temperatures
                 .is_active()
                 .then(|| temperatures.at(ctx.model, step, time, total, period));
@@ -314,6 +316,7 @@ impl StaticLinear {
             ctx.state.displacements.values.extend_from_slice(&u);
             ctx.state.stresses = stresses.clone();
             ctx.state.strains = strains.clone();
+            ctx.state.loads = Some(applied);
 
             if writes_increment(step, increment, count) {
                 write_increment(

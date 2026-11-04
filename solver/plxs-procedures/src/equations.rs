@@ -180,9 +180,19 @@ impl Equations {
     ) -> Result<()> {
         let started = std::time::Instant::now();
         if self.is_iterative() {
-            let b = self.kept.is_some().then(|| rhs.to_vec());
-            let pcg = self.pcg.as_ref().expect("prepared");
-            match pcg.solve_counted(rhs) {
+            let pcg = self.pcg.as_mut().expect("prepared");
+            // The right-hand side, for a second attempt (the solve works in place).
+            let b = (self.kept.is_some() || pcg.is_reused()).then(|| rhs.to_vec());
+            let mut result = pcg.solve_counted(rhs);
+            if result.is_err() && pcg.is_reused() {
+                // The hierarchy kept from the previous factorization does not fit this
+                // matrix after all: build it anew and try once more.
+                rhs.copy_from_slice(b.as_ref().expect("kept for the second attempt"));
+                pcg.rebuild_preconditioner()?;
+                result = pcg.solve_counted(rhs);
+            }
+            let b = b.filter(|_| self.kept.is_some());
+            match result {
                 Ok(stats) => {
                     progress.event(ProgressEvent::Info(format!(
                         "iterative solver: {} iterations, relative residual {:.1e}, {:.2} s",

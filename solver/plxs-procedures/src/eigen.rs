@@ -235,12 +235,17 @@ pub(crate) fn lanczos_modes(
     count: usize,
     lower: Option<f64>,
     solver: EquationSolver,
+    coordinates: Vec<[f64; 3]>,
     progress: &mut dyn Progress,
 ) -> Result<plxs_linalg::EigenPairs> {
     let lower_shift = lower
         .filter(|f| *f > 0.0)
         .map(|f| (2.0 * std::f64::consts::PI * f).powi(2));
     let mut lanczos = ShiftInvertLanczos::new(ctx.threads, lanczos_options(None));
+    // The positions of the unknowns make the nested dissection of the direct solver
+    // geometric. Without them it bisects along level structures, which on a 600k-equation
+    // mesh took minutes instead of seconds and filled more.
+    lanczos.direct_mut().set_coordinates(Some(coordinates));
     let started = std::time::Instant::now();
     let mut shifts = vec![lower_shift.unwrap_or(0.0)];
     if lower_shift.is_none() {
@@ -411,6 +416,7 @@ impl Procedure for FrequencyProcedure {
             count,
             parameters.lower,
             parameters.solver,
+            Unknowns::from_free(&reduction.free, 3, &ctx.model.nodes.coordinates).coordinates,
             progress,
         )?;
 
@@ -653,6 +659,16 @@ impl Procedure for BuckleProcedure {
         let started = std::time::Instant::now();
         let mut lanczos =
             ShiftInvertLanczos::new(ctx.threads, lanczos_options(parameters.accuracy));
+        // The reference solution analyzed the same pattern with the node positions: the
+        // Lanczos solver takes that solver over, with its ordering and the memory of its
+        // factor, instead of ordering again and holding a second factor.
+        let regularization = ctx.solver.regularization();
+        std::mem::swap(lanczos.direct_mut(), &mut ctx.solver);
+        lanczos.direct_mut().set_regularization(1e-12);
+        // Taken by a fresh analysis only (the reference solution solved iteratively).
+        lanczos.direct_mut().set_coordinates(Some(
+            Unknowns::from_free(&reduction.free, 3, &ctx.model.nodes.coordinates).coordinates,
+        ));
         let pairs = with_eigen_solver(
             &mut lanczos,
             parameters.solver,
@@ -660,7 +676,12 @@ impl Procedure for BuckleProcedure {
             true,
             progress,
             |lanczos, _| lanczos.buckling(&k_free, &k_sigma_free, count),
-        )?;
+        );
+        std::mem::swap(lanczos.direct_mut(), &mut ctx.solver);
+        ctx.solver.set_regularization(regularization);
+        // It holds the factor of a shifted matrix now, not of the stiffness.
+        ctx.solver.discard_factor();
+        let pairs = pairs?;
         let iterative = lanczos.is_iterative();
         progress.event(ProgressEvent::Info(format!(
             "{} buckling factors in {:.2} s ({} Lanczos steps, residual {:.1e}{})",
