@@ -245,14 +245,28 @@ impl Run {
     /// Writes `<work_dir>/<name>.inp` and starts the solver on it, on the shared [`pool`]
     /// of `threads` threads (0: all cores).
     pub fn start(threads: u32, work_dir: &Path, name: &str, input: &str) -> std::io::Result<Self> {
-        Self::spawn(threads, work_dir, name, Job::Text(input.to_owned()), false)
+        Self::spawn(
+            threads,
+            work_dir,
+            name,
+            Job::Text(input.to_owned()),
+            false,
+            false,
+        )
     }
 
     /// Writes `<work_dir>/<name>.inp` and starts the model check of it: the whole input
     /// including its steps (free motions per step) without computing results, see
     /// [`Run::diagnostics`].
     pub fn check(threads: u32, work_dir: &Path, name: &str, input: &str) -> std::io::Result<Self> {
-        Self::spawn(threads, work_dir, name, Job::Text(input.to_owned()), true)
+        Self::spawn(
+            threads,
+            work_dir,
+            name,
+            Job::Text(input.to_owned()),
+            true,
+            false,
+        )
     }
 
     /// Starts the solver on an analysis lowered from the model, as [`Run::start`] but
@@ -270,6 +284,26 @@ impl Run {
             name,
             Job::Analysis(Box::new(prepared)),
             false,
+            false,
+        )
+    }
+
+    /// [`Run::start_analysis`] with the step cache `<work_dir>/<name>.steps`: the run keeps
+    /// the state and results after each step, and takes over the steps of the run before
+    /// that did not change ([`plxs_session::cache`]).
+    pub fn start_analysis_reusing(
+        threads: u32,
+        work_dir: &Path,
+        name: &str,
+        prepared: Prepared,
+    ) -> std::io::Result<Self> {
+        Self::spawn(
+            threads,
+            work_dir,
+            name,
+            Job::Analysis(Box::new(prepared)),
+            false,
+            true,
         )
     }
 
@@ -287,6 +321,7 @@ impl Run {
             name,
             Job::Analysis(Box::new(prepared)),
             true,
+            false,
         )
     }
 
@@ -296,6 +331,7 @@ impl Run {
         name: &str,
         mut job: Job,
         check: bool,
+        reuse: bool,
     ) -> std::io::Result<Self> {
         std::fs::create_dir_all(work_dir)?;
         for extension in OLD_FILES {
@@ -307,10 +343,12 @@ impl Run {
         let input_path = work_dir.join(format!("{name}.inp"));
         std::fs::write(&input_path, job.text())?;
         // `<name>.eig` beside the input: the modes of an earlier run, as the reader of an
-        // input file takes them.
+        // input file takes them, when a step needs them. (A run's own frequency step writes
+        // the file too, which is no input of the next run.)
         let eig = input_path.with_extension("eig");
         if let Job::Analysis(prepared) = &mut job
             && prepared.analysis.model.stored_modes_file.is_none()
+            && prepared.analysis.needs_stored_modes()
             && eig.is_file()
         {
             prepared.analysis.model.stored_modes_file = Some(eig);
@@ -326,6 +364,10 @@ impl Run {
             pool: Some(pool(threads)?),
             write_files: false,
             cancel: cancel.clone(),
+            step_cache: reuse.then(|| plxs_session::StepCache {
+                dir: work_dir.join(format!("{name}.steps")),
+                salt: solver_build(),
+            }),
             ..plxs_session::JobOptions::new(work_dir, name)
         };
         let lines = Arc::clone(&output);
@@ -586,6 +628,35 @@ impl Run {
             (Finished::Error, false) => JobStatus::Failed,
         };
     }
+}
+
+/// The solver build, for the step cache: its version and the program file (its size and
+/// time), so that results of another build, which could differ, are not taken over.
+fn solver_build() -> u64 {
+    use std::hash::Hasher;
+    // FNV-1a: the same in every process.
+    struct Fnv(u64);
+    impl Hasher for Fnv {
+        fn finish(&self) -> u64 {
+            self.0
+        }
+        fn write(&mut self, bytes: &[u8]) {
+            for &b in bytes {
+                self.0 = (self.0 ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+    }
+    let mut hash = Fnv(0xcbf2_9ce4_8422_2325);
+    hash.write(VERSION.as_bytes());
+    if let Ok(program) = std::env::current_exe().and_then(std::fs::metadata) {
+        hash.write_u64(program.len());
+        if let Some(since) =
+            (program.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        {
+            hash.write_u128(since.as_nanos());
+        }
+    }
+    hash.finish()
 }
 
 impl Drop for Run {

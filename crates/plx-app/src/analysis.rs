@@ -240,6 +240,12 @@ pub fn stage_global_results(
     Ok(())
 }
 
+/// Drops the steps the runs of the analysis `name` kept in `work_dir`, so that the next run
+/// computes every step (Solve Again).
+pub fn forget_steps(work_dir: &std::path::Path, name: &str) {
+    let _ = std::fs::remove_dir_all(work_dir.join(format!("{}.steps", job_name(name))));
+}
+
 /// The lowered analysis for the solver, with its input text for reference.
 pub fn prepare(lowered: plx_io::inp::Lowered) -> plx_solve::Prepared {
     plx_solve::Prepared {
@@ -370,7 +376,8 @@ impl Analysis {
         let job = if check_model {
             Run::check_analysis(solver.threads, work_dir, &job_name, prepared)
         } else {
-            Run::start_analysis(solver.threads, work_dir, &job_name, prepared)
+            // The steps that did not change since the last run are taken over.
+            Run::start_analysis_reusing(solver.threads, work_dir, &job_name, prepared)
         }
         .map_err(|e| format!("Solver not started: {e}"))?;
         let mut output = vec![format!(

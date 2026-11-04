@@ -135,3 +135,27 @@ pub struct Analysis {
     pub model: Model,
     pub steps: Vec<Step>,
 }
+
+impl Analysis {
+    /// Whether a modal step (modal dynamics, steady state dynamics, complex frequency) uses
+    /// modes that no `*FREQUENCY, STORAGE=YES` step before it computes: the modes of an
+    /// earlier run, [`Model::stored_modes_file`].
+    pub fn needs_stored_modes(&self) -> bool {
+        use crate::step::Procedure;
+        let mut stored = false;
+        for step in &self.steps {
+            match &step.procedure {
+                Procedure::Frequency(f) if f.storage => stored = true,
+                Procedure::ModalDynamics(_)
+                | Procedure::SteadyStateDynamics(_)
+                | Procedure::ComplexFrequency(_)
+                    if !stored =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+}

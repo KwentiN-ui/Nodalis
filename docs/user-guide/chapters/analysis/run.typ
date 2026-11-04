@@ -17,7 +17,8 @@ each other's files.
     Workbench: first it meshes the parts whose mesh is missing or out of date, then it runs
     the solver if the results are missing or out of date, and keeps the new results. If nothing
     changed since the last run, it only says so.],
-  [Solve Again], [Runs the solver even if the results are up to date.],
+  [Solve Again], [Runs the solver even if the results are up to date, and computes every step
+    again (@step-cache).],
   [Check Model], [Lets the solver only read and check the model and its steps, without
     solving it.],
   [Stop], [Stops meshing for a solve, or the running solver. The program does not wait for
@@ -39,6 +40,30 @@ The input file is named after the analysis, for example `Cantilever.inp`. Old re
 the analysis in its folder are deleted before the solver starts. Nodalis refuses to run a model
 without mesh, without step or with all steps deactivated, and it stops if the input file cannot
 be written (for example because a region is empty).
+
+=== Steps that did not change <step-cache>
+
+A new run does not compute again the steps that did not change since the last run. After every
+step the solver keeps the state it reached and the results of the step in the folder
+`<analysis name>.steps` next to the input file. When the analysis is solved again, the solver
+compares each step with what it kept: the first steps that are still the same are taken over,
+and the run continues from the state after the last of them. Add a frequency step after a
+static step that is already solved, for example, and only the frequency step is computed. The
+monitor tells it in a line like "steps 1 to 1 did not change since the last run".
+
+A step counts as unchanged only when everything its results depend on is the same: the mesh,
+the materials, sections, constraints and contact, the step itself and every step before it,
+the files it reads (global results of a submodel, temperatures, stored eigenmodes) and the
+version of Nodalis. So changing the second step computes the second step and those after it,
+while changing a material computes every step. Steps that a stopped or failed run finished are
+kept too, so the next run continues where it stopped. The results are the same as those of a
+run of all steps from the start.
+
+The folder holds the steps of the last run only and takes about as much space as the results
+of the run once more. #ui("Solve Again") does not take steps over: it computes every step.
+
+#screenshot("monitor-steps-taken-over.png", [The monitor after a frequency step was added to a
+  solved static step: step 1 is taken over, only step 2 is computed])
 
 === Monitor <monitor>
 
@@ -84,8 +109,9 @@ elements, missing material data, rigid body motion or missing convergence.
 One analysis can continue another one after a step, through a state link in the project
 schematic (@state-links): it starts from the displacements, stresses and contact state the other
 analysis reached. When it runs, the solver computes the steps of the other analysis up to the
-linked one and then its own steps. Changing a later step of an analysis solves all its steps
-again.
+linked one and then its own steps. Like any run it takes over the steps that did not change
+since its last run (@step-cache), so changing one of its own steps does not compute the steps of
+the other analysis again.
 
 == Results kept with the project <bind-result>
 
