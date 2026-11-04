@@ -1,6 +1,6 @@
 use crate::{Component, Field, FieldRank, TensorKind};
 
-/// Adds the quantities PrePoMax shows besides the raw components, in PrePoMax's order: the
+/// Adds the quantities shown besides the raw components, in this order: the
 /// magnitude `ALL` of vector fields first; for tensor fields the equivalent value(s) first and
 /// the principal values last. Which ones follows from the field's rank.
 pub fn add_derived_components(field: &mut Field) {

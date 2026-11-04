@@ -1,4 +1,4 @@
-//! Result animation as in PrePoMax: either the deformation of one increment grows from zero to
+//! Result animation: either the deformation of one increment grows from zero to
 //! its full scale, or the increments of a step play one after another, or the steps (their last
 //! increments) do. A mode shape of a
 //! frequency or buckling step swings from -1 to 1 instead, so both halves of the oscillation show.
@@ -7,9 +7,9 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AnimationKind {
     /// The shown result scaled from 0 to 1 over the frames, from -1 to 1 for a mode shape
-    /// (PrePoMax: "Scale factor").
+    /// (label "Scale factor").
     ScaleFactor,
-    /// Each frame is one increment of the shown step (PrePoMax: "Time increments").
+    /// Each frame is one increment of the shown step (label "Time increments").
     Increments,
     /// Each frame is the last increment of one step, e.g. one position of a moving load.
     Steps,
@@ -127,7 +127,7 @@ impl Animation {
             AnimationKind::ScaleFactor => {
                 let t = self.progress();
                 if self.modal {
-                    // PrePoMax's modal ratios: a sine from -1 to 1, slow at the turning points
+                    // The modal ratios: a sine from -1 to 1, slow at the turning points
                     // like the oscillation itself.
                     ((2.0 * t - 1.0) * std::f32::consts::FRAC_PI_2).sin()
                 } else {

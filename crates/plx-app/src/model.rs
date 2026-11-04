@@ -37,11 +37,11 @@ pub fn is_project_file(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case(PROJECT_EXTENSION))
 }
 
-/// Colour of selected faces and nodes, PrePoMax's highlight red.
+/// Colour of selected faces and nodes.
 pub const HIGHLIGHT_COLOR: [f32; 3] = [1.0, 0.0, 0.0];
 
 /// Colour of the second region of an item, such as the slave surface of a contact pair:
-/// PrePoMax's secondary highlight colour, violet.
+/// The secondary highlight colour, violet.
 pub const SECONDARY_HIGHLIGHT_COLOR: [f32; 3] = [238.0 / 255.0, 130.0 / 255.0, 238.0 / 255.0];
 
 /// Summary of one part, computed once on load so the GUI never iterates large meshes.
@@ -54,7 +54,7 @@ pub struct PartInfo {
     /// Bounding box relative to [`Model::origin`].
     pub bounds: Option<(Vec3, Vec3)>,
     pub visible: bool,
-    /// Whether the part takes part in the colour scale of results (PrePoMax: colour
+    /// Whether the part takes part in the colour scale of results (colour
     /// contours on); a part without them is plain grey and leaves the legend range alone.
     pub contours: bool,
     /// Dimension of the CAD shape of a geometry part: 3 solid, 2 face, 1 edge.
@@ -74,7 +74,7 @@ pub struct Model {
     pub load_time: Duration,
     /// Results read from an `.frd` file, with what the user currently looks at. A model
     /// with results is a results file: it lives in the Results workspace and has no FE model
-    /// to set up, as in PrePoMax.
+    /// to set up.
     pub results: Option<ResultsView>,
     /// The analysis set up on this mesh.
     pub fe: FeModel,
@@ -283,7 +283,7 @@ struct CadDisplay {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Highlight {
     pub parts: HashSet<usize>,
-    /// Parts drawn with a red outline only, as PrePoMax shows a selected part.
+    /// Parts drawn with a red outline only, as a selected part is shown.
     pub outlines: HashSet<usize>,
     /// Element faces as (element, CalculiX face number).
     pub faces: HashSet<(ElementId, u8)>,
@@ -381,7 +381,7 @@ fn companion_input(results: &Path) -> Option<PathBuf> {
 
 /// Groups the elements of results into the parts of the input file they were computed from,
 /// with the part names as the input writes them, and drops the springs and gaps the
-/// constraints were written as: CalculiX makes each gap section a material of its own, which
+/// constraints were written as: the solver makes each gap section a material of its own, which
 /// would show as a part per gap. Returns whether the input defines contact.
 fn adopt_input_parts(
     mesh: &mut FeMesh,
@@ -412,7 +412,7 @@ fn adopt_input_parts(
     }
 }
 
-/// Adds the user elements U1 of general beam sections, which CalculiX leaves out of the
+/// Adds the user elements U1 of general beam sections, which the solver leaves out of the
 /// results, from the input it ran: their nodes are there, so they are drawn as lines. Their
 /// stresses and strains are section forces, not stresses, so the nodes that belong to them
 /// only show none.
@@ -578,7 +578,7 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     model.included_files = included_files;
     model.results = increments.map(|(increments, date, time)| {
         let mut view = ResultsView::new(increments, model.mesh.bounds());
-        // CalculiX writes contact into the results only on request; the input it ran tells.
+        // The solver writes contact into the results only on request; the input it ran tells.
         if let Some(contact) = contact {
             view.contact |= contact;
             view.follow_default_deformation();
@@ -587,7 +587,7 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
         view.time = time;
         view
     });
-    // History outputs CalculiX printed next to the results, as PrePoMax reads them, or
+    // History outputs CalculiX printed next to the results, or
     // those of the built-in solver.
     if let Some(view) = &mut model.results {
         let dat = ["dat", "DAT"]
@@ -1576,7 +1576,7 @@ impl Model {
 
     /// The beam and truss sections whose elements can be drawn as their profile swept along
     /// the line, see [`Model::thick_lines`]. Results hold beams as lines only where the
-    /// input asked for `OUTPUT=2D`, as it does with shells; else CalculiX expanded them.
+    /// input asked for `OUTPUT=2D`, as it does with shells; else the solver expanded them.
     /// A beam section comes with the profile of its cross-section.
     pub fn line_sections(
         &self,
@@ -1643,7 +1643,7 @@ impl Model {
                     plx_model::SectionKind::Beam(beam) => profile.as_ref().map(|profile| {
                         let element = &self.mesh.elements()[index];
                         let tangent = plx_model::line_tangent(&self.mesh, element);
-                        // CalculiX refuses a normal along the beam; the model checks say so.
+                        // The solver refuses a normal along the beam; the model checks say so.
                         let normal = (beam.orientation.normal_for(tangent))
                             .or_else(|| BeamOrientation::Automatic.normal_for(tangent))
                             .unwrap_or([0.0, 0.0, 1.0]);
@@ -1977,8 +1977,8 @@ impl Model {
         Ok(())
     }
 
-    /// Gives the elements of the part that have the shape of `type_name` this type, as
-    /// PrePoMax's part properties do; the choice is kept for the part when it is meshed anew.
+    /// Gives the elements of the part that have the shape of `type_name` this type,
+    /// as the part properties do; the choice is kept for the part when it is meshed anew.
     pub fn set_element_type(&mut self, index: usize, type_name: &str) -> Result<(), String> {
         let part = self.parts.get(index).ok_or("The part no longer exists.")?;
         let part = part.name.clone();
@@ -3484,7 +3484,7 @@ S
         assert_eq!(parts(&without_input.mesh), parts(&alone));
     }
 
-    /// CalculiX makes a material of each `*Gap` section; the gaps are not parts of the results.
+    /// The solver makes a material of each `*Gap` section; the gaps are not parts of the results.
     #[test]
     fn results_leave_out_the_gaps_of_their_input() {
         let dir = std::env::temp_dir().join(format!("nodalis-gaps-{}", std::process::id()));

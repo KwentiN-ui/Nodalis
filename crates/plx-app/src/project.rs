@@ -1,6 +1,6 @@
 //! The project window, Ansys Workbench's project schematic: the analyses of the project as
 //! blocks of a node graph, each with the state of its cells. An analysis opens in a window of
-//! its own, the [`AnalysisWindow`], which looks like PrePoMax's main window.
+//! its own, the [`AnalysisWindow`], which looks like the classic main window.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -1571,7 +1571,7 @@ impl Node {
     }
 
     /// Whether the results of `step` that the analysis keeps were made from data that
-    /// changed since. CalculiX solves the steps one after the other, so they depend only on
+    /// changed since. The solver solves the steps one after the other, so they depend only on
     /// the model and the steps up to `step`: steps added or changed after it leave them up to
     /// date, while the analysis itself is out of date.
     fn step_results_out_of_date(&self, step: &str) -> bool {
@@ -4988,7 +4988,7 @@ impl ProjectApp {
         rows
     }
 
-    /// PrePoMax's monitor for the whole project, in the Analyses tab below the schematic:
+    /// The monitor for the whole project, in the Analyses tab below the schematic:
     /// the analyses being solved with their state on the left, the output of the one
     /// picked on the right.
     fn monitor_panel(&mut self, ui: &mut egui::Ui) {
@@ -6501,7 +6501,7 @@ impl ProjectApp {
                     return None;
                 }
                 if usage == links::ResultsUse::Modes {
-                    // CalculiX writes them into the run's own folder, where the next run of
+                    // The solver writes them into the run's own folder, where the next run of
                     // the source overwrites them. The target takes a copy in a folder named
                     // after the solved model, so that new modes make it out of date.
                     let project = crate::analysis::job_name(&self.project_name());
@@ -7960,7 +7960,7 @@ fn block_rows(
         output: false,
         tip: "Drop the results of a step of another analysis here: this analysis then \
                   continues from the state after that step. It takes the model and the steps \
-                  up to it, and CalculiX solves only its own steps."
+                  up to it, and the solver solves only its own steps."
             .into(),
         linked_from: continues,
         collection: false,
@@ -11313,7 +11313,7 @@ fn schematic_style() -> SnarlStyle {
 
 /// Tooltip of Add Materials.
 const ANALYSIS_TIP: &str = "Adds an analysis: a model of its own with geometry, mesh, setup \
-     and steps, solved with CalculiX. Double-click its block to open it in Geometry, FE Model and Results.";
+     and steps, solved with the built-in solver. Double-click its block to open it in Geometry, FE Model and Results.";
 
 const PARAMETERS_TIP: &str = "Adds a block of named numbers: drag the pin of one to a \
                               parameter of another block, such as a length of a mesh block, \

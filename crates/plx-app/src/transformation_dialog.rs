@@ -1,4 +1,4 @@
-//! PrePoMax's "Create Transformation" dialog of the results tool bar: available types on the
+//! The "Create Transformation" dialog of the results tool bar: available types on the
 //! left, the active transformations on the right, the properties of the selected one below.
 
 use std::collections::BTreeSet;
@@ -124,8 +124,8 @@ impl TransformationDialog {
         }
     }
 
-    /// The points of the selected transformation in render coordinates, highlighted like
-    /// PrePoMax does.
+    /// The points of the selected transformation in render coordinates, highlighted.
+    ///
     pub fn points(&self, model: &Model) -> Vec<Vec3> {
         let Some(transformation) = self.selected.and_then(|i| self.active.get(i)) else {
             return Vec::new();
@@ -297,7 +297,7 @@ impl TransformationDialog {
                 }
                 match footer {
                     crate::dialog::Tool::Off => {
-                        // Close then keeps the results as they are, as OK in PrePoMax.
+                        // Close then keeps the results as they are, like OK.
                         self.changed = false;
                         self.error = None;
                         action = TransformationAction::Apply {
@@ -540,7 +540,7 @@ struct Grid<'a> {
 }
 
 impl Grid<'_> {
-    /// Category header like PrePoMax's property grid.
+    /// Category header of the property grid.
     fn category(&self, ui: &mut Ui, title: &str) {
         let header = egui::Frame::new()
             .fill(crate::style::control())

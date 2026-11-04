@@ -1,4 +1,4 @@
-//! Jacobian determinant of elements at their integration points, the check CalculiX makes
+//! Jacobian determinant of elements at their integration points, the check the solver makes
 //! before it computes the stiffness ("nonpositive jacobian determinant in element"). An
 //! element with a determinant of zero or less is inverted or so distorted that its mapping
 //! folds over, for example a quadratic tetrahedron whose midside node was moved past a
@@ -12,7 +12,7 @@ const G: f64 = 0.577_350_269_189_625_8;
 
 impl Element {
     /// Smallest Jacobian determinant at the integration points, or `None` for elements
-    /// CalculiX does not check this way (beams, shells) or with missing nodes. Plane
+    /// the solver does not check this way (beams, shells) or with missing nodes. Plane
     /// elements are checked in the xy plane: CalculiX expects them counterclockwise.
     pub fn min_jacobian(&self, mesh: &FeMesh) -> Option<f64> {
         let dim = if self.shape.is_solid() {

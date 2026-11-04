@@ -292,7 +292,7 @@ impl SnarlState {
         }
 
         let scaling2 = ui_rect.size() / bb.size();
-        // PrePoLix: the first view magnifies no more than to the true size.
+        // Nodalis: the first view magnifies no more than to the true size.
         let scaling = scaling2.min_elem().clamp(min_scale, max_scale.max(min_scale).min(1.0));
 
         let to_global = transform_matching_points(bb.center(), ui_rect.center(), scaling);
@@ -613,7 +613,7 @@ impl SnarlWidget {
     }
 }
 
-/// PrePoLix: selects these nodes in the UI of the `SnarlWidget` with this ID from the next
+/// Nodalis: selects these nodes in the UI of the `SnarlWidget` with this ID from the next
 /// frame on. Only works if [`SnarlWidget::id`] was used.
 pub fn set_selected_nodes(id: Id, ctx: &Context, nodes: &[NodeId]) {
     SelectedNodes(nodes.iter().copied().collect()).save(ctx, id);

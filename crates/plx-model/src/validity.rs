@@ -1,4 +1,4 @@
-//! Items whose references are gone, like PrePoMax's invalid features: a section whose material
+//! Items whose references are gone: a section whose material
 //! was deleted, or a load on a node set the mesh no longer has. Validity is derived from the
 //! model each time, so an item becomes valid again as soon as its reference is back.
 
@@ -31,7 +31,7 @@ pub enum ModelItem {
     Step(usize),
     /// The boundary conditions of a step as a whole.
     BoundaryConditions(usize),
-    /// The analysis, for problems CalculiX reported.
+    /// The analysis, for problems the solver reported.
     Analysis,
     InitialCondition(usize),
     Amplitude(usize),
@@ -438,7 +438,7 @@ impl FeModel {
 impl Section {
     /// Why the section's kind does not fit its elements or its own values, if it does not:
     /// a beam section on solids, a solid section on lines, a pipe on 2-node lines, a normal
-    /// parallel to a beam, or dimensions CalculiX would reject.
+    /// parallel to a beam, or dimensions the solver would reject.
     pub fn kind_problem(&self, fe: &FeModel, mesh: &FeMesh) -> Option<String> {
         let profile = fe.section_profile(&self.kind);
         match &self.kind {

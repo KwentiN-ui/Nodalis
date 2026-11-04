@@ -1,4 +1,4 @@
-//! PrePoMax's "Create Field Output" dialog of the Results tree: a type list, the properties
+//! The "Create Field Output" dialog of the Results tree: a type list, the properties
 //! of the chosen type with a description below, and for limits a table of limit values.
 
 use egui::{RichText, Ui};
@@ -11,7 +11,7 @@ use crate::numeric;
 use crate::results::ResultsView;
 use crate::tree_rows::{frame, tree_row};
 
-/// The types of the list, PrePoMax's first in its order, with the prefix of their default
+/// The types of the list, in order, with the prefix of their default
 /// names.
 const TYPES: [(&str, &str); 6] = [
     ("Limit", "Limit"),
@@ -116,7 +116,7 @@ pub struct FieldOutputDialog {
     /// Index of the edited output; `None` creates a new one.
     pub edit: Option<usize>,
     kind: usize,
-    /// One draft per type, as PrePoMax keeps the values of each type while switching.
+    /// One draft per type, so the values of each type are kept while switching.
     drafts: [FieldOutput; 6],
     /// Limit values per part, per element set and for all elements.
     part_limits: Vec<(String, f64)>,
@@ -213,7 +213,7 @@ impl FieldOutputDialog {
                 .map(|o| o.name.clone())
                 .filter(|n| Some(n) != own.as_ref()),
         );
-        // PrePoMax proposes STRESS.MISES, else the first component there is.
+        // Nodalis proposes STRESS.MISES, else the first component there is.
         let (field, component) = fields
             .iter()
             .find(|(f, c)| f == "STRESS" && c.iter().any(|c| c == "MISES"))
@@ -453,7 +453,7 @@ impl FieldOutputDialog {
         action
     }
 
-    /// PrePoMax's help box below the property grid: what the focused row means.
+    /// The help box below the property grid: what the focused row means.
     fn description(&self, ui: &mut Ui) {
         if self.unavailable().is_some() {
             return;
@@ -491,7 +491,7 @@ impl FieldOutputDialog {
             ui.label(reason);
             return;
         }
-        // Category header like PrePoMax's property grid.
+        // Category header of the property grid.
         let header = egui::Frame::new()
             .fill(crate::style::control())
             .inner_margin(egui::Margin::symmetric(4, 1));

@@ -1,4 +1,4 @@
-//! Exploded view as in PrePoMax: the parts of an assembly are pulled apart, so that faces
+//! Exploded view: the parts of an assembly are pulled apart, so that faces
 //! inside it, such as the bearing faces under a bolt head, can be seen and picked without
 //! hiding anything. Parts that share nodes stay together and move as one.
 //!
@@ -21,7 +21,7 @@ use plx_mesh::{FeMesh, PartSkin};
 
 pub use dialog::{ExplodedDialog, ExplodedResult};
 
-/// How the offsets are computed, PrePoMax's exploded view methods.
+/// How the offsets are computed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method {
     /// Each part moves the way it would be taken off: along the normal of its mating face or
@@ -62,7 +62,7 @@ impl Method {
         }
     }
 
-    /// PrePoMax's upper limit of the magnification.
+    /// The upper limit of the magnification.
     pub fn max_magnification(self) -> f64 {
         match self {
             Self::Disassembly => 10.0,
@@ -126,7 +126,7 @@ impl Direction {
     }
 }
 
-/// PrePoMax's exploded view parameters.
+/// The exploded view parameters.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Parameters {
     pub method: Method,
@@ -164,7 +164,7 @@ impl Parameters {
         self.scale_factor * self.magnification
     }
 
-    /// Keeps the values in PrePoMax's ranges.
+    /// Keeps the values in the ranges.
     pub fn clamp(&mut self) {
         self.scale_factor = self.scale_factor.clamp(0.0, 1.0);
         self.magnification = self
@@ -250,7 +250,7 @@ impl Layout {
     }
 }
 
-/// An axis-aligned bounding box, PrePoMax's `BoundingBox`.
+/// An axis-aligned bounding box.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Aabb {
     pub min: DVec3,
@@ -337,7 +337,7 @@ impl Aabb {
     }
 }
 
-/// Rounds to significant digits, as PrePoMax compares sizes so that numerical noise does not
+/// Rounds to significant digits to compare sizes, so that numerical noise does not
 /// change the order.
 pub(crate) fn round_significant(value: f64, digits: i32) -> f64 {
     if value == 0.0 || !value.is_finite() {
@@ -414,7 +414,7 @@ impl Assembly<'_> {
     }
 
     /// The offsets of all parts at scale 1. The disassembly method falls back to the
-    /// assembly centre when the model gives it nothing to work with, as in PrePoMax.
+    /// assembly centre when the model gives it nothing to work with.
     pub fn layout(&self, parameters: &Parameters) -> Layout {
         let groups = self.connected_parts();
         let group_offsets: Vec<Vec<DVec3>> = match parameters.method {
@@ -450,7 +450,7 @@ impl Assembly<'_> {
             .collect()
     }
 
-    /// PrePoMax's assembly centre method: the largest group stays, every further group, from
+    /// The assembly centre method: the largest group stays, every further group, from
     /// the largest to the smallest, moves away from the centre of what is placed so far in
     /// small steps until its enlarged box clears all placed boxes.
     fn assembly_center(&self, groups: &[Vec<usize>], direction: Direction) -> Vec<Vec<DVec3>> {
@@ -490,7 +490,7 @@ impl Assembly<'_> {
         offsets.into_iter().map(|o| vec![o]).collect()
     }
 
-    /// PrePoMax's centre point method: every group moves away from the point by twice its
+    /// The centre point method: every group moves away from the point by twice its
     /// distance from it.
     fn center_point(
         &self,
@@ -509,15 +509,15 @@ impl Assembly<'_> {
     }
 }
 
-/// PrePoMax's easing of the exploded view animation: slow at both ends.
+/// The easing of the exploded view animation: slow at both ends.
 fn ease(t: f64) -> f64 {
     let t = t.clamp(0.0, 1.0);
     0.5 + 0.5 * (t * 6.0 - 3.0).atan() / 3f64.atan()
 }
 
-/// Duration of an animated change, PrePoMax's 500 ms.
+/// Duration of an animated change.
 pub const ANIMATION_TIME: Duration = Duration::from_millis(500);
-/// Duration of each level of a sequential animation, PrePoMax's 400 ms.
+/// Duration of each level of a sequential animation.
 pub const STEP_TIME: Duration = Duration::from_millis(400);
 
 /// The exploded view of one model: what is applied, the cached layout, the offsets shown now

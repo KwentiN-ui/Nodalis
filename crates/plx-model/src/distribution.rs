@@ -1,4 +1,4 @@
-//! Distributions: factors that vary over the model, PrePoMax's distributions. A pressure, a
+//! Distributions: factors that vary over the model. A pressure, a
 //! prescribed temperature, an initial temperature or a defined temperature refers to one by
 //! name; the input file then holds the item's value times the factor at every element face
 //! or node instead of one value for the whole region.

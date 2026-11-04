@@ -1,9 +1,9 @@
-//! PrePoMax's features: reference points and coordinate systems, and planes. They describe
+//! The features: reference points and coordinate systems, and planes. They describe
 //! places and directions in the model that other items refer to by name, e.g. a plane spanned
 //! by two axes of a coordinate system, results on that plane, or a result path between two
 //! reference points.
 //!
-//! A coordinate system is defined like PrePoMax's and CalculiX's `*ORIENTATION`: by its
+//! A coordinate system is defined like CalculiX's `*ORIENTATION`: by its
 //! origin, a point on its x axis and a point in its xy plane. Cylindrical systems use the same
 //! points; their z axis is the cylinder axis and r, θ, z are the local directions.
 
@@ -22,7 +22,7 @@ pub struct ReferencePoint {
     pub definition: PointDefinition,
 }
 
-/// How a reference point is given, PrePoMax's "Create by".
+/// How a reference point is given.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum PointDefinition {
     /// Global coordinates, the position itself.
@@ -186,7 +186,7 @@ impl CoordinatePlane {
 }
 
 impl CoordinateSystem {
-    /// PrePoMax's default: the global system.
+    /// The default: the global system.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),

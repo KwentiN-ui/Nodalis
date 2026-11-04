@@ -1,5 +1,5 @@
 //! Section view: the scene is clipped at a plane, and where the plane cuts through solid
-//! elements a section face is drawn, element by element, like PrePoMax's section caps.
+//! elements a section face is drawn, element by element, as section caps.
 
 use std::collections::HashMap;
 
@@ -79,7 +79,7 @@ fn corner_count(shape: ElementShape) -> usize {
     }
 }
 
-/// PrePoMax's "lighten section colors": brightness raised and saturation lowered by 75 %.
+/// The "lighten section colors": brightness raised and saturation lowered by 75 %.
 pub fn lighten(color: [f32; 3]) -> [f32; 3] {
     const FACTOR: f32 = 0.75;
     let max = color.iter().copied().fold(0.0, f32::max);

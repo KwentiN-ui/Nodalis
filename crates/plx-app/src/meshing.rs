@@ -1,4 +1,4 @@
-//! Meshing the CAD geometry with Gmsh: PrePoMax's mesh setup with its items, the default
+//! Meshing the CAD geometry with Gmsh: the mesh setup with its items, the default
 //! meshing parameters and the mesh generation part by part on a worker thread.
 
 use std::collections::BTreeSet;
@@ -157,7 +157,7 @@ impl MeshSetupWindow {
     }
 }
 
-/// The item types of PrePoMax's "Create Mesh Setup Item" that nodalis supports.
+/// The item types of "Create Mesh Setup Item" that Nodalis supports.
 const TYPES: [&str; 4] = [
     "Meshing Parameters",
     "Local Mesh Size",
@@ -234,7 +234,7 @@ fn layer_type(layers: &ExtrudeLayers) -> usize {
     }
 }
 
-/// Numbers separated by semicolons or spaces, as PrePoMax writes layer sizes.
+/// Numbers separated by semicolons or spaces, the way layer sizes are written.
 fn list_text<T: ToString>(values: &[T]) -> String {
     values
         .iter()
@@ -256,7 +256,7 @@ const ALGORITHMS_3D: [(Algorithm3d, &str); 3] = [
     (Algorithm3d::Hxt, "HXT"),
 ];
 
-/// PrePoMax's dialog to create or edit a mesh setup item. Parts, and the faces and edges of
+/// The dialog to create or edit a mesh setup item. Parts, and the faces and edges of
 /// a local mesh size, are clicked on the geometry.
 pub struct MeshItemEditor {
     draft: MeshSetupItem,
@@ -399,7 +399,7 @@ impl MeshItemEditor {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             ui.strong("Type");
             let current = type_index(&self.draft.kind);
-            // PrePoMax's list of item types; an edited item keeps its type.
+            // The list of item types; an edited item keeps its type.
             egui::Frame::group(ui.style())
                 .fill(crate::style::window())
                 .show(ui, |ui| {
@@ -1383,7 +1383,7 @@ mod tests {
         assert_eq!(extrude.parts, vec!["SOLID-1".to_string()]);
         assert!(!editor.highlight(&view).faces.is_empty());
 
-        // Multi-layered sizes are typed as PrePoMax writes them.
+        // Multi-layered sizes are typed as a list.
         if let MeshSetupKind::ExtrudeMesh(extrude) = &mut editor.draft.kind {
             extrude.layers = ExtrudeLayers::MultiLayered {
                 sizes: Vec::new(),

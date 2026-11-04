@@ -989,7 +989,7 @@ where
     clamp_scale(&mut to_global, min_scale, max_scale, ui_rect);
 
     let mut snarl_resp = ui.response();
-    // PrePoLix: the middle button pans, the primary one draws the selection rectangle.
+    // Nodalis: the middle button pans, the primary one draws the selection rectangle.
     Scene::new()
         .zoom_range(min_scale..=max_scale)
         .drag_pan_buttons(egui::containers::DragPanButtons::MIDDLE)
@@ -1034,7 +1034,7 @@ where
 
     // Process selection rect.
     let mut rect_selection_ended = None;
-    // PrePoLix: a drag of the primary button on the background draws the rectangle, without
+    // Nodalis: a drag of the primary button on the background draws the rectangle, without
     // a modifier; with Shift it adds to the selection.
     {
         let select_resp = &snarl_resp;
@@ -1045,7 +1045,7 @@ where
             if snarl_state.is_rect_selection() {
                 snarl_state.update_rect_selection(pos);
             } else {
-                // PrePoLix: the rectangle starts where the button went down, not where the
+                // Nodalis: the rectangle starts where the button went down, not where the
                 // drag was recognised.
                 let origin = ui.input(|i| i.pointer.press_origin()).map(|p| from_global * p);
                 snarl_state.start_rect_selection(origin.unwrap_or(pos));
@@ -1246,7 +1246,7 @@ where
         snarl_state.look_at(nodes_bb, ui_rect, min_scale, max_scale);
     }
 
-    // PrePoLix: a click on the background clears the selection.
+    // Nodalis: a click on the background clears the selection.
     if !modifiers.shift && snarl_resp.clicked_by(PointerButton::Primary) {
         snarl_state.deselect_all_nodes();
     }

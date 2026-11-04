@@ -1,4 +1,4 @@
-//! Prescribed displacements and rotations of a selection. CalculiX holds the nodes of the
+//! Prescribed displacements and rotations of a selection. The solver holds the nodes of the
 //! selection directly, or, where the selection should turn although its nodes have no
 //! rotations (faces and edges of solids), a point, by default at the centre of the selection,
 //! that the selection follows as a rigid body or on average (deformable), as Ansys' remote
@@ -166,7 +166,7 @@ impl FeModel {
     }
 
     /// The nodes that boundary conditions hold directly in a step, mechanical degrees of
-    /// freedom only. A point leaves them out of its coupling: CalculiX refuses a degree of
+    /// freedom only. A point leaves them out of its coupling: the solver refuses a degree of
     /// freedom that an equation depends on and a boundary condition holds.
     pub fn directly_held_nodes(&self, mesh: &FeMesh) -> BTreeSet<NodeId> {
         let mut held = BTreeSet::new();
@@ -417,7 +417,7 @@ impl Displacement {
 
 impl RemotePoint {
     /// The `*EQUATION`s of a deformable behavior, each as its terms with the dependent node
-    /// first: a node degree of freedom that no other equation has, so CalculiX needs no
+    /// first: a node degree of freedom that no other equation has, so the solver needs no
     /// cascading.
     pub fn equations(&self, mesh: &FeMesh, space: ModelSpace) -> Vec<Vec<(RemoteDof, f64)>> {
         reduce(self.averaging_rows(mesh, space))
@@ -557,7 +557,7 @@ fn reduce(rows: Vec<Vec<(RemoteDof, f64)>>) -> Vec<Vec<(RemoteDof, f64)>> {
         .collect()
 }
 
-/// The nodes of line (beam, truss), shell and membrane elements, which CalculiX expands into
+/// The nodes of line (beam, truss), shell and membrane elements, which the solver expands into
 /// solid elements. CalculiX 2.23 refuses a `*RIGID BODY` on such a node that is not a knot
 /// ("nodes belonging to beam elements must not be subject to a RIGID MPC"), so a rigid
 /// coupling takes them with [`rigid_rows`] instead.

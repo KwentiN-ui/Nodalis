@@ -1,5 +1,5 @@
 //! Material library: materials sorted into categories, kept outside of any project so that
-//! they can be copied into every model, like PrePoMax's `materials.lib`.
+//! they can be copied into every model.
 
 use serde::{Deserialize, Serialize};
 
@@ -8,7 +8,7 @@ use crate::{Elastic, Expansion, Material, UnitSystem};
 /// Version of the library file format written by this build.
 pub const LIBRARY_FORMAT: u32 = 1;
 
-/// Name of the root category, as in PrePoMax.
+/// Name of the root category.
 pub const ROOT_NAME: &str = "Materials";
 
 /// Default name of a new category.
@@ -23,7 +23,7 @@ pub struct MaterialLibrary {
     pub format: u32,
     /// The units the library's values are in; materials are converted when they are copied
     /// between the library and a model. Libraries saved before this was stored are in
-    /// PrePoMax's default "mm, ton, s, °C".
+    /// the default "mm, ton, s, °C".
     #[serde(default)]
     pub units: UnitSystem,
     /// Version of the built-in materials this library has been updated to; 0 for libraries
@@ -36,7 +36,7 @@ pub struct MaterialLibrary {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Category {
     pub name: String,
-    /// Whether the category is shown expanded; remembered like in PrePoMax.
+    /// Whether the category is shown expanded; remembered.
     #[serde(default)]
     pub expanded: bool,
     pub items: Vec<LibraryNode>,
@@ -253,7 +253,7 @@ fn category_node(name: &str, items: Vec<LibraryNode>) -> LibraryNode {
 
 impl Default for MaterialLibrary {
     /// The library a new installation starts with. Values in the unit system mm, t, s, as
-    /// PrePoMax's default "mm, ton, s, °C".
+    /// the default "mm, ton, s, °C".
     fn default() -> Self {
         let materials = |list: &[Generic]| {
             (list.iter())
@@ -334,7 +334,7 @@ impl MaterialLibrary {
         }
     }
 
-    /// Adds an empty category to the selected category (PrePoMax adds none below a
+    /// Adds an empty category to the selected category (none below a
     /// material) and returns its path.
     pub fn add_category(&mut self, selected: &[usize]) -> Option<LibraryPath> {
         let category = self.category_mut(selected)?;
@@ -349,7 +349,7 @@ impl MaterialLibrary {
     }
 
     /// Copies a material of the model into the selected category, or next to the selected
-    /// material. A taken name gets PrePoMax's suffix `_Model-n`. Returns the new path.
+    /// material. A taken name gets the suffix `_Model-n`. Returns the new path.
     pub fn add_material(&mut self, selected: &[usize], material: &Material) -> Option<LibraryPath> {
         let target = self.target_category(selected)?;
         let category = self.category_mut(&target)?;
@@ -405,7 +405,7 @@ impl MaterialLibrary {
     }
 
     /// Index a material would move to, one place up or down among its siblings. Categories
-    /// keep their place, as in PrePoMax.
+    /// keep their place.
     pub fn move_target(&self, path: &[usize], up: bool) -> Option<usize> {
         self.material(path)?;
         let (&last, parent) = path.split_last()?;
@@ -465,7 +465,7 @@ impl MaterialLibrary {
         }
     }
 
-    /// Path of the first material in tree order, which PrePoMax selects on opening.
+    /// Path of the first material in tree order, selected on opening.
     pub fn first_material(&self) -> Option<LibraryPath> {
         fn find(category: &Category, path: &mut LibraryPath) -> bool {
             for (i, node) in category.items.iter().enumerate() {
@@ -533,7 +533,7 @@ fn free_name(category: &Category, name: &str, separator: &str) -> String {
         .expect("unbounded range")
 }
 
-/// Name for a material copied into the model: PrePoMax appends `_Library-n` when the name
+/// Name for a material copied into the model: `_Library-n` is appended when the name
 /// is taken.
 pub fn name_for_model<'a>(name: &str, existing: impl IntoIterator<Item = &'a str>) -> String {
     let existing: Vec<&str> = existing.into_iter().collect();
@@ -554,7 +554,7 @@ mod tests {
     const S235: [usize; 4] = [0, 0, 0, 0];
 
     #[test]
-    fn default_library_holds_s235_in_prepomax_categories() {
+    fn default_library_holds_s235_in_default_categories() {
         let library = MaterialLibrary::default();
         assert_eq!(library.first_material(), Some(S235.to_vec()));
         let s235 = library.material(&S235).unwrap();

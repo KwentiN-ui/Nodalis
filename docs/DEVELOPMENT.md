@@ -105,7 +105,7 @@ build finds it there too.
 The icon is drawn in Typst: [assets/icon/nodalis-icon.typ](../assets/icon/nodalis-icon.typ) reads a
 hexahedral CalculiX mesh of a spur gear (`assets/icon/part/gear.inp`) together with its CalculiX
 result (`gear.val`), projects the outer faces, shades them and colours them with contour bands like
-a PrePoMax result plot. Variants: `color` (on the raised tile), `light` and `mono` (one colour,
+an FE result plot. Variants: `color` (on the raised tile), `light` and `mono` (one colour,
 transparent background), and a `small` detail level without mesh lines for 16 to 32 px.
 
 ```sh

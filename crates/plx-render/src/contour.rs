@@ -1,4 +1,4 @@
-//! Colour spectra for result contours, following PrePoMax's legend: the control points of
+//! Colour spectra for result contours, following the classic legend: the control points of
 //! each spectrum, lightened by the brightness and interpolated in the colour space VTK uses
 //! for it. The default is a discrete rainbow from blue (minimum) to red (maximum), lightened
 //! by 20 %.
@@ -23,8 +23,7 @@ enum Space {
     Diverging,
 }
 
-/// Interpolation space and control points (position, r, g, b) of a spectrum, as in
-/// PrePoMax's `GetColorTransferFunction`.
+/// Interpolation space and control points (position, r, g, b) of a spectrum.
 fn control_points(spectrum: ColorSpectrum) -> (Space, &'static [[f64; 4]]) {
     match spectrum {
         ColorSpectrum::CoolWarm => (
@@ -222,7 +221,7 @@ pub fn spectrum_color(scale: &ColorScale, t: f64) -> [f32; 3] {
 }
 
 /// sRGB colours of the scale's bands, minimum first: the spectrum sampled evenly from end
-/// to end, as PrePoMax's discrete lookup table.
+/// to end.
 pub fn band_colors(scale: &ColorScale) -> Vec<[f32; 3]> {
     let levels = scale.levels.clamp(2, MAX_LEVELS);
     (0..levels)

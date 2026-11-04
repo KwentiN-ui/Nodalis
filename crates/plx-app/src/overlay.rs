@@ -17,7 +17,7 @@ const MARGIN: f32 = 20.0;
 /// Length of the axes of the corner triad, and its distance from the corner.
 const TRIAD: f32 = 45.0;
 const TRIAD_INSET: f32 = 24.0;
-/// Legend band height; PrePoMax's boxes are a third wider than high.
+/// Legend band height; the boxes are a third wider than high.
 const BAND_HEIGHT: f32 = 18.0;
 const SCALE_BAR_WIDTH: f32 = 400.0;
 /// The room the floating bar in the bottom centre of the view takes, with its margins.
@@ -254,7 +254,7 @@ pub fn draw(
         let Some(response) = draw_marker(ui, rect, point, text, offset, &id, sense) else {
             continue;
         };
-        // PrePoMax's annotation menu; Remove Annotations of its tool bar as well.
+        // The annotation menu; Remove Annotations of its tool bar as well.
         response.context_menu(|ui| {
             if ui.button("Delete").clicked() {
                 clicked.annotation = (overlay.annotation_owners.get(index))
@@ -551,7 +551,7 @@ fn draw_scale_bar(
     let labels: Vec<_> = (0..=SCALE_BAR_FIELDS)
         .map(|i| {
             let value = length * i as f32 / SCALE_BAR_FIELDS as f32;
-            // PrePoMax writes the unit after the last label.
+            // Nodalis writes the unit after the last label.
             let text = match i == SCALE_BAR_FIELDS && !unit.is_empty() {
                 true => format!("{} {unit}", format_value(value)),
                 false => format_value(value),
@@ -787,7 +787,7 @@ fn draw_feature(painter: &Painter, camera: &Camera, rect: Rect, feature: &Featur
     }
 }
 
-/// Axes X, Y, Z as arrows in screen space, drawn back to front; `full` adds PrePoMax's centre
+/// Axes X, Y, Z as arrows in screen space, drawn back to front; `full` adds the centre
 /// sphere and the shorter, faint negative axes.
 fn triad(painter: &Painter, camera: &Camera, center: Pos2, length: f32, full: bool) {
     let axes = [

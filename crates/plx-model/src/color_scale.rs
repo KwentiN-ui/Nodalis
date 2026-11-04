@@ -1,14 +1,14 @@
-//! Settings of the colour scale (legend) of a results file, PrePoMax's legend settings:
+//! Settings of the colour scale (legend) of a results file:
 //! colour spectrum, number of colours and the value range they span.
 
 use serde::{Deserialize, Serialize};
 
-/// Number of colour bands PrePoMax uses by default.
+/// Default number of colour bands.
 pub const DEFAULT_LEVELS: u32 = 9;
 /// Most colour bands of a scale.
 pub const MAX_LEVELS: u32 = 24;
 
-/// Colour spectra of PrePoMax's legend settings.
+/// Colour spectra of the legend settings.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ColorSpectrum {
     CoolWarm,
@@ -77,7 +77,7 @@ pub struct ColorScale {
     pub reverse: bool,
     /// Number of discrete colours, 2 ... [`MAX_LEVELS`].
     pub levels: u32,
-    /// Minimum and maximum the user set; `None` for PrePoMax's automatic limits, the
+    /// Minimum and maximum the user set; `None` for the automatic limits, the
     /// smallest and largest shown value. Values beyond them get the out-of-range colours.
     pub manual: Option<[f64; 2]>,
     /// sRGB colour of the values below the manual minimum.
@@ -91,7 +91,7 @@ pub struct ColorScale {
 }
 
 impl Default for ColorScale {
-    /// PrePoMax's defaults: a discrete rainbow of nine colours lightened by 20 %, light and
+    /// The defaults: a discrete rainbow of nine colours lightened by 20 %, light and
     /// dark grey beyond the limits.
     fn default() -> Self {
         Self {

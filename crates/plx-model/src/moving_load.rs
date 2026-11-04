@@ -1,5 +1,5 @@
 //! A load that travels over a surface, such as a vehicle crossing a bridge or a crane on its
-//! runway beam. CalculiX has no such load; the input file gets one static step per position,
+//! runway beam. The solver has no such load; the input file gets one static step per position,
 //! each with the wheel loads at that position spread over the faces under the wheels.
 
 use std::collections::BTreeMap;

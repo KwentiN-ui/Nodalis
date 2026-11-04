@@ -203,7 +203,7 @@ pub enum TensorKind {
 }
 
 impl FieldRank {
-    /// The rank of a field CalculiX wrote, as PrePoMax judges it: by the field name and the
+    /// The rank of a field CalculiX wrote: by the field name and the
     /// number of raw components.
     pub fn of_calculix(name: &str, raw_components: usize) -> Self {
         match (name, raw_components) {
