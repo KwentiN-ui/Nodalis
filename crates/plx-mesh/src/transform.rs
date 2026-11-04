@@ -1,4 +1,4 @@
-//! Mesh tools of PrePoMax's Mesh menu that change an existing mesh: transforming parts
+//! Mesh tools of the Mesh menu that change an existing mesh: transforming parts
 //! (translate, rotate, mirror, scale), merging coincident nodes and renumbering.
 
 use std::collections::{BTreeMap, BTreeSet};

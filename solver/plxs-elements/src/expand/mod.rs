@@ -827,11 +827,29 @@ impl Expander {
             return;
         }
         let mids: Vec<NodeId> = (4..8).map(|s| g.nodes[s]).collect();
-        for m in mids {
-            for dof in 1..=3u8 {
-                self.equations.push(Equation {
-                    terms: vec![term(m, dof, 1.0), term(node, dof, -1.0)],
-                });
+        // Along the beam each midpoint follows the node; in the section plane opposite
+        // midpoints move symmetrically about it (an affine map of the section: Poisson
+        // contraction and distortion stay free), as ccx 2.21 shows.
+        let (n1, n2) = (normalize(g.axis1), normalize(g.normal));
+        let t = normalize(cross(n1, n2));
+        let along = |d: [f64; 3], nodes: &[(NodeId, f64)]| -> Equation {
+            let mut terms = Vec::new();
+            for &(n, w) in nodes {
+                for (k, &c) in d.iter().enumerate() {
+                    if c.abs() > 1e-12 {
+                        terms.push(term(n, k as u8 + 1, c * w));
+                    }
+                }
+            }
+            Equation { terms }
+        };
+        for &m in &mids {
+            self.equations.push(along(t, &[(m, 1.0), (node, -1.0)]));
+        }
+        for (a, b) in [(mids[0], mids[2]), (mids[1], mids[3])] {
+            for d in [n1, n2] {
+                self.equations
+                    .push(along(d, &[(a, 0.5), (b, 0.5), (node, -1.0)]));
             }
         }
     }

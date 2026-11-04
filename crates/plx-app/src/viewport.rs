@@ -30,7 +30,7 @@ pub struct Viewport {
     pub path_plots: Vec<crate::path_plot::PlotBox>,
     /// A dialog picks in the 3D view: the left button selects and draws selection boxes.
     pub selecting: bool,
-    /// What a click at the resting mouse would select, drawn in PrePoMax's orange.
+    /// What a click at the resting mouse would select, drawn in orange.
     pub preview: Preview,
     /// Where the selection box drag started.
     box_start: Option<Pos2>,
@@ -82,10 +82,10 @@ impl BoxSelect {
     }
 }
 
-/// How long the mouse has to rest before the hover preview is shown, as in PrePoMax.
+/// How long the mouse has to rest before the hover preview is shown.
 const HOVER_DELAY_SECONDS: f64 = 0.2;
 
-/// PrePoMax's colour of the hover preview.
+/// The colour of the hover preview.
 const PREVIEW_COLOR: Color32 = Color32::from_rgb(255, 175, 0);
 
 /// Colour of the marker at the rotation pivot.
@@ -104,7 +104,7 @@ pub struct Click {
     pub ctrl: bool,
 }
 
-/// How close to an edge or point a click has to be to pick it, as in PrePoMax.
+/// How close to an edge or point a click has to be to pick it.
 pub const PICK_PRECISION_PIXELS: f32 = 7.0;
 
 impl Click {
@@ -350,7 +350,7 @@ impl Viewport {
         if !middle_down && !response.dragged_by(PointerButton::Middle) {
             self.pivot = None;
         }
-        // PrePoMax's mouse: the middle button rotates, with Shift it pans and with Ctrl it zooms;
+        // The mouse: the middle button rotates, with Shift it pans and with Ctrl it zooms;
         // the left button picks and draws selection boxes, the right one opens the context menu.
         if response.dragged_by(PointerButton::Middle) {
             if ctrl {
@@ -375,7 +375,7 @@ impl Viewport {
         {
             let scroll = ui.input(|input| input.smooth_scroll_delta.y);
             if scroll != 0.0 {
-                // Ctrl zooms in finer steps, as in PrePoMax.
+                // Ctrl zooms in finer steps.
                 let rate = if ctrl { 0.2 } else { 1.0 } * ZOOM_PER_SCROLL_POINT;
                 let offset = pointer - rect.center();
                 self.camera.zoom_at(
@@ -508,7 +508,7 @@ impl Viewport {
             }
         }
         if let Some((area, crossing)) = dragged_box {
-            // PrePoMax draws a box selecting items inside blue, one selecting crossing items
+            // Nodalis draws a box selecting items inside blue, one selecting crossing items
             // green.
             let (fill, border) = if crossing {
                 (

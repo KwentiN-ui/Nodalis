@@ -1,4 +1,4 @@
-//! PrePoMax's "Model Properties" dialog: the model space, the unit system and the physical
+//! The "Model Properties" dialog: the model space, the unit system and the physical
 //! constants, asked for when an analysis is made. Its model space and unit system stay as
 //! they are then; the rest can be edited later from the model's context.
 
@@ -145,7 +145,7 @@ impl ModelPropertiesDialog {
     }
 }
 
-/// PrePoMax's model type. A submodel takes the results of its global model through a link
+/// The model type. A submodel takes the results of its global model through a link
 /// in the project, not from a file picked here.
 fn model_type(ui: &mut egui::Ui, draft: &mut ModelProperties) {
     ui.horizontal_wrapped(|ui| {
@@ -246,8 +246,8 @@ fn group(ui: &mut egui::Ui, title: &str, contents: impl FnOnce(&mut egui::Ui)) {
         });
 }
 
-/// Absolute zero and the Stefan-Boltzmann constant, which radiation needs; undefined as in
-/// PrePoMax until the user sets them.
+/// Absolute zero and the Stefan-Boltzmann constant, which radiation needs; undefined
+/// until the user sets them.
 fn constants(ui: &mut egui::Ui, draft: &mut ModelProperties) {
     let units = draft.units;
     egui::Grid::new("physical constants")
@@ -288,7 +288,7 @@ fn constants(ui: &mut egui::Ui, draft: &mut ModelProperties) {
     );
 }
 
-/// The units of the system, PrePoMax's base and derived units.
+/// The units of the system.
 fn units_table(ui: &mut egui::Ui, units: UnitSystem) {
     egui::ScrollArea::vertical()
         .max_height(220.0)

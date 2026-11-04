@@ -1,4 +1,4 @@
-//! Undo and redo of what the user changed in the FE model workspace, PrePoMax's
+//! Undo and redo of what the user changed in the FE model workspace:
 //! Edit > Undo and Redo.
 //!
 //! Everything the user sets up ends up in the model's data: the FE model, the meshing

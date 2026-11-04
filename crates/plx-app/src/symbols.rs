@@ -1,15 +1,15 @@
-//! Symbols of boundary conditions and loads drawn over the 3D view, as PrePoMax draws them
+//! Symbols of boundary conditions and loads drawn over the 3D view
 //! for the step chosen to show: arrows for forces at the loaded nodes, pressure arrows
 //! pointing onto the faces, one arrow of the resultant force for a surface traction, and
 //! cones (translations) and plates (rotations) for held degrees of freedom. Heat loads and
 //! temperatures, which have no direction, are balls at the nodes; heat flowing through a
 //! surface is an arrow onto it (into the part) or off it.
 //!
-//! Constraints are yellow as in PrePoMax: a rigid body is a fan of lines from points spread
+//! Constraints are yellow: a rigid body is a fan of lines from points spread
 //! over its region to its reference point, springs are coils in the directions they act in,
 //! and a compression only support is cones pushing onto its surface.
 //!
-//! Symbols keep their size on screen like PrePoMax's glyphs (PrePoMax symbol size 50) and lie
+//! Symbols keep their size on screen (symbol size 50) and lie
 //! on top of the model. They are 3D shapes in pixel units, drawn as the outlines of their
 //! convex parts.
 
@@ -23,24 +23,24 @@ use plx_render::Camera;
 
 use crate::model::Model;
 
-/// Unit length of the support symbols in pixels; PrePoMax's default symbol size 50 draws a
+/// Unit length of the support symbols in pixels; the default symbol size 50 draws a
 /// fixed support about this large.
 const SUPPORT_SIZE: f32 = 20.0;
-/// Arrow length in pixels, longer than PrePoMax's so that the arrows read at a glance.
+/// Arrow length in pixels, long enough that the arrows read at a glance.
 const ARROW_SIZE: f32 = 40.0;
-/// PrePoMax's default colours: loads royal blue, boundary conditions lime, selection red.
+/// The default colours: loads royal blue, boundary conditions lime, selection red.
 const LOAD_COLOR: Color32 = Color32::from_rgb(65, 105, 225);
 const BOUNDARY_COLOR: Color32 = Color32::from_rgb(0, 255, 0);
 const SELECTED_COLOR: Color32 = Color32::from_rgb(255, 0, 0);
-/// PrePoMax's default colour of constraints.
+/// The default colour of constraints.
 const CONSTRAINT_COLOR: Color32 = Color32::from_rgb(255, 255, 0);
 /// Width of the lines of a rigid body in pixels.
 const LINE_WIDTH: f32 = 1.5;
-/// Width of the wire of a spring in pixels: PrePoMax's tube radius 0.03 of the symbol size.
+/// Width of the wire of a spring in pixels: the tube radius 0.03 of the symbol size.
 const SPRING_WIDTH: f32 = 2.0;
-/// A point spring on more nodes is drawn once at their centre, as in PrePoMax.
+/// A point spring on more nodes is drawn once at their centre.
 const POINT_SPRING_NODES: usize = 10;
-/// Splits of the region's extent when spreading arrows, as PrePoMax's spatial sampling.
+/// Splits of the region's extent when spreading arrows.
 const DIVISIONS: f64 = 6.0;
 /// Sides of the polygons standing in for circles.
 const CIRCLE_SEGMENTS: usize = 16;
@@ -66,7 +66,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    /// The kind and region of a constraint's symbol; ties have none, as in PrePoMax.
+    /// The kind and region of a constraint's symbol; ties have none.
     pub fn of_constraint(constraint: &Constraint) -> Option<(Kind, Region)> {
         Some(match constraint {
             Constraint::RigidBody(body) => (
@@ -159,7 +159,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
         };
         match item.kind {
             // Lines from nodes spread over the region to the reference point, half as dense
-            // as the arrows of loads like PrePoMax's.
+            // as the arrows of loads.
             Kind::RigidBody {
                 ref reference_point,
             } => {
@@ -268,7 +268,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     }
                 }
             }
-            // Gravity as an arrow at the centre of the loaded elements, as in PrePoMax.
+            // Gravity as an arrow at the centre of the loaded elements.
             Kind::Load(LoadKind::Gravity(acceleration)) => {
                 if let Some(center) = region_center(model, &item.region, &visible) {
                     add(center, DVec3::from(acceleration), SymbolShape::Arrow);
@@ -426,7 +426,7 @@ fn acting(stiffness: [f64; 3]) -> impl Iterator<Item = DVec3> {
         .map(|i| DVec3::AXES[i])
 }
 
-/// The parts shown; symbols on hidden parts are left out as in PrePoMax.
+/// The parts shown; symbols on hidden parts are left out.
 struct Visible {
     /// Elements of the hidden parts; empty when all parts are shown.
     hidden_elements: HashSet<ElementId>,
@@ -556,7 +556,7 @@ fn region_center(model: &Model, region: &Region, visible: &Visible) -> Option<DV
 
 /// Indices of points spread evenly over their extent: clusters are halved across their
 /// largest extent until none spans more than the whole split into `divisions`, then the
-/// point nearest each cluster's mean stands for it. A simpler take on PrePoMax's spatial
+/// point nearest each cluster's mean stands for it. A simpler take on the spatial
 /// point sampler.
 fn sample(points: &[DVec3], divisions: f64) -> Vec<usize> {
     let span = |indices: &[usize]| {
@@ -660,7 +660,7 @@ pub fn draw(painter: &Painter, rect: Rect, camera: &Camera, symbols: &[Symbol]) 
     }
 }
 
-/// Dark edges, like PrePoMax's symbol edges; they keep red symbols visible on the red
+/// Dark symbol edges; they keep red symbols visible on the red
 /// highlight of the selected region.
 fn edge(color: Color32) -> Color32 {
     Color32::from_rgb(color.r() / 2, color.g() / 2, color.b() / 2)
@@ -674,7 +674,7 @@ struct Solid {
     depth: Vec3,
 }
 
-/// The parts of a shape along a direction, after PrePoMax's VTK glyphs (unit length is the
+/// The parts of a shape along a direction, after VTK glyphs (unit length is the
 /// symbol size): the arrow source with tip length 0.3, tip radius 0.1 and shaft radius 0.03,
 /// shifted 0.05 off the point; the cone of height 1 and radius 0.5; the rod of length 1.3
 /// with a 0.4 thick plate of width 0.9.
@@ -773,8 +773,8 @@ fn solids(shape: SymbolShape, direction: Vec3) -> Vec<Solid> {
     }
 }
 
-/// The wire of a spring along a direction in pixel units relative to its point, after
-/// PrePoMax's spring source: 1 long with straight ends of 0.2 and 4 coils of diameter 0.2,
+/// The wire of a spring along a direction in pixel units relative to its point, with
+/// these proportions: 1 long with straight ends of 0.2 and 4 coils of diameter 0.2,
 /// ending 0.05 before the point.
 fn spring_wire(direction: Vec3) -> Vec<Vec3> {
     // Half turns, and steps per half turn.

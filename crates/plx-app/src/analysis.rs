@@ -1,5 +1,5 @@
 //! Running the analysis: writes the input file, starts the solver (see [`plx_solve::Run`])
-//! and shows PrePoMax's monitor window with the solver output, progress and the button to
+//! and shows the monitor window with the solver output, progress and the button to
 //! open the results.
 
 use std::path::PathBuf;
@@ -179,7 +179,7 @@ impl RunView {
     }
 }
 
-/// The analysis name as the name of its files: CalculiX takes no spaces in them, and the
+/// The analysis name as the name of its files: the solver takes no spaces in them, and the
 /// file system no path separators.
 pub fn job_name(name: &str) -> String {
     let name: String = (name.trim().chars())
@@ -199,7 +199,7 @@ pub fn job_name(name: &str) -> String {
 }
 
 /// Copies the results file of a submodel's global model next to the input file `<name>.inp`
-/// in `dir`, as `<name>-global.frd`, and lets `fe` refer to the copy: CalculiX reads it from
+/// in `dir`, as `<name>-global.frd`, and lets `fe` refer to the copy: the solver reads it from
 /// the directory of the input file and cannot take paths with spaces. Does nothing unless a
 /// submodel boundary condition needs the file.
 pub fn stage_global_results(
@@ -324,7 +324,7 @@ pub fn stage_linked_results(
 
 impl Analysis {
     /// Writes the input file of the analysis `name` into `work_dir` and starts the solver on
-    /// it. With `check_model` the solver only checks the model (PrePoMax's "Check Model").
+    /// it. With `check_model` the solver only checks the model (Check Model).
     /// `continuation` tells which analyses continue from its state, whose sets its input
     /// file holds too.
     pub fn start(
@@ -499,7 +499,7 @@ impl Analysis {
         }
     }
 
-    /// PrePoMax's monitor, in the Analysis tab below the 3D view: status, progress and
+    /// The monitor, in the Analysis tab below the 3D view: status, progress and
     /// filter in one row over the output of the run.
     pub fn monitor(&mut self, ui: &mut egui::Ui) -> MonitorEvent {
         let mut event = MonitorEvent::None;

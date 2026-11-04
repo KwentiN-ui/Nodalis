@@ -1156,7 +1156,7 @@ fn build() -> Vec<Command> {
         "Detect",
         Tree(TreeIcon::ContactPair),
         "",
-        "PrePoMax's search for contact pairs.",
+        "Searches the model for touching surfaces and proposes contact pairs.",
     ));
     add(command(
         C::ContactRegion,

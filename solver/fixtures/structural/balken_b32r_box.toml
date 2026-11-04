@@ -5,4 +5,4 @@ stage = "M2"
 features = ["*HEADING", "*NODE", "*ELEMENT", "B32R", "*NSET", "*ELSET", "*MATERIAL", "*ELASTIC", "*BEAM SECTION", "*STEP", "*STATIC", "*BOUNDARY", "*CLOAD", "*DLOAD", "*NODE FILE", "*EL FILE", "*END STEP"]
 source = "testdata"
 reference = "none"
-known_gap = "BOX: Simpson rule on the wall centerlines is 2e-4 too stiff, the rule of CalculiX is not known"
+known_gap = "BOX: 1.6e-5 off ccx (warping at the clamped end), the section rule of CalculiX is not known exactly"

@@ -1,4 +1,4 @@
-//! History outputs the user derives from the results, PrePoMax's "Create History Output":
+//! History outputs the user derives from the results:
 //! values of field components at nodes over all increments, an equation of other history
 //! outputs, the size of elements or element faces on the deformed mesh, or the values of a
 //! hot spot, optionally beside the position of a moving load.
@@ -14,7 +14,7 @@ use crate::equation::Equation;
 use crate::hot_spot::{HotSpotReport, IncrementValues};
 use crate::{Increment, field_output};
 
-/// Field and component names PrePoMax gives computed history outputs.
+/// Field and component names of computed history outputs.
 pub const EQUATION_FIELD: &str = "EQUATION";
 pub const SIZE_FIELD: &str = "ELEMENT_SIZE";
 pub const VOLUME: &str = "VOLUME";
@@ -277,7 +277,7 @@ fn from_equation(own: &str, equation: &str, sets: &[HistorySet]) -> Result<Histo
             );
         }
     }
-    // PrePoMax keeps the entry names when all components share them, else numbers them.
+    // Nodalis keeps the entry names when all components share them, else numbers them.
     let names: Vec<String> = match sources.first() {
         Some(first)
             if sources.iter().all(|s| {

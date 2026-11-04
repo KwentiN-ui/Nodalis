@@ -305,7 +305,7 @@ impl SideRoles {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContactDefaults {
-    /// Formulation of all contact pairs; CalculiX takes one per input file. `None` derives
+    /// Formulation of all contact pairs; the solver takes one per input file. `None` derives
     /// it.
     pub formulation: Option<ContactMethod>,
     /// Normal stiffness of contacts as a factor on E / h.
@@ -747,7 +747,7 @@ impl FeModel {
     /// The model with its contact regions replaced by the ties, surface interactions and
     /// contact pairs they stand for, added after those defined by hand, and which region each
     /// added item comes from. Bonded regions whose slave sides share nodes become one tie, as
-    /// CalculiX ties a node to one master only. Active regions of no separation stay, with
+    /// the solver ties a node to one master only. Active regions of no separation stay, with
     /// their master and tolerance settled, for the writer to turn into equations.
     pub fn lower_contacts(&self, mesh: &FeMesh) -> (FeModel, Lowered) {
         let mut lowered = self.clone();
@@ -1104,7 +1104,7 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
         }
     } else {
         let tied = bonded_method == Some(BondedMethod::Contact);
-        // Mortar contact is hard without a spring; CalculiX takes no surface behavior there.
+        // Mortar contact is hard without a spring; the solver takes no surface behavior there.
         let factor = if tied {
             TIED_STIFFNESS_FACTOR
         } else {
@@ -1123,7 +1123,7 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
             (false, _) if formulation == ContactMethod::Mortar => SurfaceBehavior::Hard,
             (false, Some(k)) => SurfaceBehavior::Linear {
                 k,
-                // PrePoMax's tension at large clearances, E / 70000.
+                // The tension at large clearances, E / 70000.
                 sigma_inf: young.unwrap_or(0.0) / 70_000.0,
                 c0: None,
             },
@@ -1163,7 +1163,7 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
         if adjust_to_touch {
             why.push("Adjusted to touch at the start".into());
         }
-        // CalculiX takes a clearance for face-to-face penalty contact only.
+        // The solver takes a clearance for face-to-face penalty contact only.
         let clearance = match offset {
             Some(offset) if formulation == ContactMethod::SurfaceToSurface && !tied => Some(offset),
             Some(_) => {

@@ -19,10 +19,10 @@ const EDGE_OFFSET_PX: f32 = 1.5;
 /// Constant part of the surface depth bias, in steps of the depth buffer: covers the rounding
 /// between a line and the triangle it lies on where the face is seen head on.
 const SURFACE_BIAS_CONSTANT: i32 = 2;
-/// Width of [`RenderMesh::wide_edges`] in pixels, as PrePoMax draws a selected part's outline.
+/// Width of [`RenderMesh::wide_edges`] in pixels: the outline of a selected part.
 pub const WIDE_EDGE_PX: f32 = 3.0;
 
-/// PrePoMax's background gradient: Gainsboro at the top, WhiteSmoke at the bottom.
+/// The background gradient: Gainsboro at the top, WhiteSmoke at the bottom.
 pub const BACKGROUND: [[f32; 4]; 2] = [
     [220.0 / 255.0, 220.0 / 255.0, 220.0 / 255.0, 1.0],
     [245.0 / 255.0, 245.0 / 255.0, 245.0 / 255.0, 1.0],

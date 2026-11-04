@@ -1,4 +1,4 @@
-//! PrePoMax's amplitude dialog: name, time span and shifts of a tabular amplitude, its points
+//! The amplitude dialog: name, time span and shifts of a tabular amplitude, its points
 //! as an editable table and the curve they make; and the amplitude choice of the boundary
 //! condition and load dialogs.
 
@@ -98,7 +98,7 @@ pub fn amplitude_form(
     let table_hovered = ui.rect_contains_pointer(table.inner_rect);
     ui.horizontal(|ui| {
         if ui.button("Add Row").clicked() {
-            // Continues the last step in time, as a new row in PrePoMax's table starts empty.
+            // Continues the last step in time, as a new row in the table starts empty.
             let next = match amplitude.points.as_slice() {
                 [.., a, b] => [b[0] + (b[0] - a[0]).max(0.0), b[1]],
                 [b] => [b[0] + 1.0, b[1]],
@@ -204,7 +204,7 @@ fn parse_points(text: &str, units: UnitSystem) -> Vec<[f64; 2]> {
         .collect()
 }
 
-/// The amplitude choice of a boundary condition or load: PrePoMax's "Default" or one of the
+/// The amplitude choice of a boundary condition or load: "Default" or one of the
 /// model's amplitudes.
 pub fn amplitude_row(
     ui: &mut Ui,
@@ -254,7 +254,7 @@ pub fn amplitude_row_with(
     }
 }
 
-/// PrePoMax's name for no amplitude: CalculiX's ramp in static steps, the full value at once
+/// The name for no amplitude: CalculiX's ramp in static steps, the full value at once
 /// in heat transfer steps.
 const DEFAULT: &str = "Default";
 

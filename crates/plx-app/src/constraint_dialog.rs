@@ -1,4 +1,4 @@
-//! The constraint dialog, PrePoMax's "Create Constraint": a list of constraint types above the
+//! The constraint dialog: a list of constraint types above the
 //! properties of the chosen one.
 
 use egui::Ui;
@@ -19,7 +19,7 @@ use crate::setup::{
 /// The fixed width of the dialog's content, so it does not change with the type.
 pub(crate) const WIDTH: f32 = 440.0;
 
-/// PrePoMax's list of constraint types, its point and surface springs merged into one spring
+/// The list of constraint types, its point and surface springs merged into one spring
 /// that also connects two surfaces.
 const TYPES: [(&str, Type); 3] = [
     ("Spring", Type::Spring),
@@ -46,7 +46,7 @@ impl Type {
         }
     }
 
-    /// PrePoMax's default name without the number.
+    /// The default name without the number.
     fn prefix(self) -> &'static str {
         match self {
             Type::Spring => "Spring",
@@ -55,7 +55,7 @@ impl Type {
         }
     }
 
-    /// The constraint with PrePoMax's default values and empty regions.
+    /// The constraint with the default values and empty regions.
     fn create(self, name: String) -> Constraint {
         let faces = || Region::Faces(Vec::new());
         match self {
@@ -523,7 +523,7 @@ fn compression_only_rows(ui: &mut Ui, support: &mut CompressionOnly, units: Unit
             "Gap elements carry compression only; the small tensile force in the open state \
              keeps the model solvable. Stiffness and tensile force are those of the whole \
              surface, spread over its nodes by area. Without a value every gap gets \
-             CalculiX's default, practically rigid."
+             the solver's default, practically rigid."
         },
     );
 }
@@ -534,7 +534,7 @@ fn length_row(ui: &mut Ui, label: &str, value: &mut f64, units: UnitSystem) {
     ui.end_row();
 }
 
-/// A value PrePoMax leaves at its default until the user enters one.
+/// A value left at its default until the user enters one.
 fn optional_row(
     ui: &mut Ui,
     label: &str,

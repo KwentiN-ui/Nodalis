@@ -1,4 +1,4 @@
-//! Dialogs of PrePoMax's features, reference points, coordinate systems and planes, and of
+//! Dialogs of the features, reference points, coordinate systems and planes, and of
 //! results on them: result paths with the values of the shown result along a straight line
 //! through the model, as a plot and a table, and plane results with the values where a plane
 //! cuts the model.
@@ -6,8 +6,8 @@
 //! Points are typed in, in global coordinates or in a coordinate system, or picked in the 3D
 //! view: one node is itself the point, an edge or a face gives its centre, e.g. that of a
 //! hole. Reference points can also be the centre of gravity or of the bounding box of a
-//! selection of faces, as in PrePoMax; they follow the selection when the mesh changes. The FE model and every results file have
-//! their own features, as in PrePoMax.
+//! selection of faces; they follow the selection when the mesh changes. The FE model and every results file have
+//! their own features.
 
 use std::collections::BTreeSet;
 
@@ -1191,7 +1191,7 @@ pub fn path_line(model: &Model, path: &ResultPath) -> Option<([Vec3; 2], String)
     ))
 }
 
-/// How a reference point is created, PrePoMax's "Create by", with its rows.
+/// How a reference point is created, the "Create by", with its rows.
 fn reference_point_rows(
     ui: &mut Ui,
     point: &mut ReferencePoint,

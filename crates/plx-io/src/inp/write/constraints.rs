@@ -1,7 +1,7 @@
-//! Constraints written as CalculiX elements, the way PrePoMax's `CalculixFileWriter` splits
+//! Constraints written as CalculiX elements, the way the `CalculixFileWriter` splits
 //! them: springs to ground become `SPRING1` elements with one `*Spring` section per node
 //! and direction, compression only supports become `GAPUNI` elements to fixed ground nodes.
-//! Springs to a surface, which PrePoMax lacks, become `SPRING2` elements from each node of
+//! Springs to a surface become `SPRING2` elements from each node of
 //! the region to a new node that `*Equation`s tie to the closest point of the master
 //! surface. Contact regions of no separation become one `*Equation` per slave node that
 //! holds it to the closest point of the master normal to the surface.
@@ -29,7 +29,7 @@ pub(super) struct Generated {
     /// Holds the ground nodes of the gap elements in every step: the node set and the
     /// number of translations held.
     pub boundary: Option<(String, usize)>,
-    /// PrePoMax's dummy plastic material that makes CalculiX solve gaps nonlinearly, by
+    /// The dummy plastic material that makes the solver solve gaps nonlinearly, by
     /// its name.
     pub material: Option<String>,
 }
@@ -159,7 +159,7 @@ impl Writer {
         id
     }
 
-    /// Springs of one constraint and one element block with all of them, like PrePoMax's
+    /// Springs of one constraint and one element block with all of them, like
     /// point springs. Each group of springs shares the stiffness, an element set and a
     /// `*Spring` section per direction; it is (name, nodes of each spring, stiffness).
     fn springs(
@@ -377,7 +377,7 @@ impl Writer {
         };
         let name = super::name(&support.name);
         // Gaps of the same direction and properties, such as those of a flat face, share an
-        // element set and a `*Gap` section: CalculiX makes a material of each section.
+        // element set and a `*Gap` section: the solver makes a material of each section.
         type Line = (String, [f64; 3], Option<(f64, f64)>);
         let mut sections: Vec<(Line, Vec<ElementId>)> = Vec::new();
         let mut by_line: BTreeMap<String, usize> = BTreeMap::new();
@@ -385,7 +385,7 @@ impl Writer {
             let (Some(coords), Some(normal)) = (mesh.node(node), normals.get(&node)) else {
                 continue;
             };
-            // Like PrePoMax the gap points the way the support pushes, from the ground node
+            // The gap points the way the support pushes, from the ground node
             // to the surface node, so that it closes when the surface moves towards the
             // ground: into the material from outside, or out of it when flipped.
             let normal = support.push_direction(normalized(*normal));
@@ -471,8 +471,8 @@ fn spring_shares(mesh: &FeMesh, spring: &Spring) -> BTreeMap<NodeId, f64> {
     shares.into_iter().filter(|(_, w)| *w != 0.0).collect()
 }
 
-/// Share of the area of the faces that each node takes and the total area, PrePoMax's
-/// `GetDistributedNodalValuesFromSurface`. Within a face the share follows the equivalent
+/// Share of the area of the faces that each node takes and the total area.
+/// Within a face the share follows the equivalent
 /// nodal forces of a constant pressure: equal parts on linear faces, only midside nodes on
 /// quadratic triangles, and -1/12 per corner and 1/3 per midside node on quadratic
 /// quadrilaterals. With `lumped` quadratic faces share their area as the diagonal of their

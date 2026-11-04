@@ -2,8 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{EntitySignature, TagMap, match_entities};
 
-/// CAD geometry imported from a STEP, IGES or BREP file, the source of the mesh, like the
-/// geometry parts of PrePoMax.
+/// CAD geometry imported from a STEP, IGES or BREP file, the source of the mesh.
 ///
 /// The shapes are kept in OpenCASCADE's BREP format, so that a project still meshes after the
 /// original file moved or changed. Each solid is a part; faces and edges are referred to by
@@ -17,7 +16,7 @@ pub struct Geometry {
     /// Meshing parameters of the parts that no Meshing Parameters item covers.
     #[serde(alias = "mesh_setup")]
     pub meshing: MeshingParameters,
-    /// PrePoMax's mesh setup items.
+    /// The mesh setup items.
     #[serde(default)]
     pub mesh_items: Vec<MeshSetupItem>,
     /// Names of the parts, the solids and then the faces outside them, once a part was
@@ -162,7 +161,7 @@ fn names(parts: &[String], part: &str) -> bool {
     parts.iter().any(|p| p.eq_ignore_ascii_case(part))
 }
 
-/// How a part is meshed with tetrahedra, PrePoMax's meshing parameters.
+/// How a part is meshed with tetrahedra.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MeshingParameters {
@@ -202,7 +201,7 @@ impl Default for MeshingParameters {
 }
 
 impl MeshingParameters {
-    /// PrePoMax's sizes for a new geometry: 5 % and 0.1 % of the bounding box diagonal,
+    /// The sizes for a new geometry: 5 % and 0.1 % of the bounding box diagonal,
     /// rounded to one significant digit.
     pub fn for_diagonal(diagonal: f64) -> Self {
         Self {
@@ -213,7 +212,7 @@ impl MeshingParameters {
     }
 }
 
-/// An item of PrePoMax's mesh setup, refining how parts are meshed.
+/// An item of the mesh setup, refining how parts are meshed.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MeshSetupItem {
     pub name: String,
@@ -244,7 +243,7 @@ pub enum MeshSetupKind {
 }
 
 impl MeshSetupKind {
-    /// PrePoMax's name of the item type, also the prefix of new items' names.
+    /// The name of the item type, also the prefix of new items' names.
     pub fn type_name(&self) -> &'static str {
         match self {
             MeshSetupKind::MeshingParameters { .. } => "Meshing_Parameters",
@@ -266,7 +265,7 @@ impl MeshSetupKind {
     }
 }
 
-/// PrePoMax's Extrude Mesh: the source faces of a part are meshed with Gmsh, mostly with
+/// Extrude Mesh: the source faces of a part are meshed with Gmsh, mostly with
 /// quadrilaterals, and the mesh is swept straight through the part in layers, so that
 /// quadrilaterals become hexahedra (C3D8, C3D20) and triangles wedges (C3D6, C3D15). The
 /// size of the source mesh comes from the part's meshing parameters and local mesh sizes.
@@ -308,7 +307,7 @@ pub enum Recombination {
     BlossomFullQuad,
 }
 
-/// PrePoMax's element size in the extrude direction.
+/// The element size in the extrude direction.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ExtrudeLayers {
     /// Layers as thick as the part's max. element size times the factor.

@@ -1,8 +1,8 @@
 //! FE-Modell: Materialien, Sections, Steps, Randbedingungen, Lasten.
 //!
-//! The model describes an analysis on top of a mesh, the way PrePoMax's FE model does. Regions
+//! The model describes an analysis on top of a mesh. Regions
 //! are what the user picked in the GUI (parts, nodes, element faces) or named sets of the
-//! input file; node and element sets that CalculiX needs for them are derived when the input
+//! input file; node and element sets that the solver needs for them are derived when the input
 //! file is written, so the user never has to define sets by hand.
 
 mod amplitude;
@@ -149,7 +149,7 @@ pub struct FeModel {
     /// Profiles of beams, which beam sections pick by name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cross_sections: Vec<CrossSection>,
-    /// Springs, supports and ties, PrePoMax's Constraints.
+    /// Springs, supports and ties.
     #[serde(default)]
     pub constraints: Vec<Constraint>,
     #[serde(default)]
@@ -186,7 +186,7 @@ pub struct FeModel {
     #[serde(default)]
     pub initial_conditions: Vec<InitialCondition>,
     pub steps: Vec<Step>,
-    /// PrePoMax's features: points and coordinate systems other items refer to by name.
+    /// The features: points and coordinate systems other items refer to by name.
     #[serde(default)]
     pub reference_points: Vec<ReferencePoint>,
     #[serde(default)]
@@ -570,7 +570,7 @@ impl Default for Creep {
 }
 
 impl Creep {
-    /// Why CalculiX would reject the constants.
+    /// Why the solver would reject the constants.
     pub fn problem(&self) -> Option<&'static str> {
         if self.a <= 0.0 {
             Some("The creep constant A must be positive.")
@@ -609,7 +609,7 @@ impl Hardening {
 }
 
 /// One point of the hardening curve: the yield stress at a plastic strain, valid at a
-/// temperature. CalculiX interpolates between the points and keeps the last stress beyond
+/// temperature. The solver interpolates between the points and keeps the last stress beyond
 /// them; rows at different temperatures are interpolated in temperature.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PlasticPoint {
@@ -618,12 +618,11 @@ pub struct PlasticPoint {
     pub temperature: f64,
 }
 
-/// Von Mises plasticity with a tabular hardening curve, like PrePoMax's `Plastic` material
-/// property.
+/// Von Mises plasticity with a tabular hardening curve.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Plastic {
     pub hardening: Hardening,
-    /// Rows in the order CalculiX wants them: by temperature, then by plastic strain,
+    /// Rows in the order the solver wants them: by temperature, then by plastic strain,
     /// the first row of every temperature at plastic strain 0.
     pub points: Vec<PlasticPoint>,
 }
@@ -644,7 +643,7 @@ impl Default for Plastic {
 
 impl Plastic {
     /// The first row of each temperature must start at plastic strain 0 and the plastic
-    /// strain must grow within a temperature; otherwise CalculiX stops with an error or
+    /// strain must grow within a temperature; otherwise the solver stops with an error or
     /// interpolates nonsense. Returns the number of the first offending row.
     pub fn invalid_row(&self) -> Option<usize> {
         if self.points.is_empty() {
@@ -672,7 +671,7 @@ impl Plastic {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Expansion {
     pub coefficient: f64,
-    /// Temperature at which the expansion is zero (`ZERO=`); PrePoMax's default is 20.
+    /// Temperature at which the expansion is zero (`ZERO=`); the default is 20.
     pub zero_temperature: f64,
 }
 
@@ -695,7 +694,7 @@ pub struct Elastic {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Step {
     pub name: String,
-    /// A deactivated step is written to the input file as a comment only, as in PrePoMax.
+    /// A deactivated step is written to the input file as a comment only.
     #[serde(default = "active")]
     pub active: bool,
     pub kind: StepKind,
@@ -705,7 +704,7 @@ pub struct Step {
     /// Values printed into the `.dat` file; steps saved before they existed have none.
     #[serde(default)]
     pub history_outputs: Vec<HistoryOutput>,
-    /// Temperatures prescribed for the step, PrePoMax's defined fields; steps saved before
+    /// Temperatures prescribed for the step; steps saved before
     /// they existed have none.
     #[serde(default)]
     pub defined_fields: Vec<DefinedField>,
@@ -771,7 +770,7 @@ impl StepKind {
         )
     }
 
-    /// Whether the step takes loads. A frequency step has none, as in PrePoMax; preloads
+    /// Whether the step takes loads. A frequency step has none; preloads
     /// come from the previous step with [`FrequencyStep::perturbation`].
     pub fn supports_loads(&self) -> bool {
         !matches!(
@@ -807,8 +806,8 @@ impl StepKind {
     }
 
     /// Whether the step takes defined fields. A thermal step solves for the temperatures
-    /// instead of taking them, as in PrePoMax, and a step that superposes stored eigenmodes
-    /// only takes the loads CalculiX allows there (forces, pressures, base motion).
+    /// instead of taking them, and a step that superposes stored eigenmodes
+    /// only takes the loads the solver allows there (forces, pressures, base motion).
     pub fn supports_defined_fields(&self) -> bool {
         !self.is_thermal() && !self.uses_stored_modes() && !self.keeps_previous_boundaries()
     }
@@ -828,11 +827,11 @@ impl StepKind {
         )
     }
 
-    /// Whether a boundary condition of this kind acts in the step, PrePoMax's
-    /// `IsBoundaryConditionSupported`: temperatures in thermal steps, displacements in
+    /// Whether a boundary condition of this kind acts in the step:
+    /// temperatures in thermal steps, displacements in
     /// mechanical ones.
     pub fn supports_boundary(&self, kind: &BoundaryKind) -> bool {
-        // PrePoMax drives submodels in static steps only.
+        // Nodalis drives submodels in static steps only.
         if self.keeps_previous_boundaries() {
             false
         } else if let BoundaryKind::Submodel { .. } = kind {
@@ -844,7 +843,7 @@ impl StepKind {
         }
     }
 
-    /// Whether a load of this kind acts in the step, PrePoMax's `IsLoadTypeSupported`.
+    /// Whether a load of this kind acts in the step.
     pub fn supports_load(&self, kind: &LoadKind) -> bool {
         // Each position of a moving load is a static step of its own.
         if matches!(kind, LoadKind::Moving(_)) {
@@ -903,7 +902,7 @@ impl LinearSolverChoice {
     }
 
     /// The value of `SOLVER=` in the input file. Automatic leaves the choice to the solver
-    /// (CalculiX takes its default); Direct names PaStiX, which the Nodalis solver reads as
+    /// (the solver takes its default); Direct names PaStiX, which the Nodalis solver reads as
     /// its direct solver; Iterative asks for conjugate gradients with an incomplete
     /// Cholesky preconditioner, which CalculiX and the Nodalis solver both have.
     pub fn keyword(self) -> Option<&'static str> {
@@ -915,7 +914,7 @@ impl LinearSolverChoice {
     }
 }
 
-/// Settings of a `*STATIC` step, with PrePoMax's defaults.
+/// Settings of a `*STATIC` step, with the default values.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StaticStep {
     /// Geometrically nonlinear (`NLGEOM`).
@@ -948,7 +947,7 @@ impl Default for StaticStep {
 }
 
 /// Settings of a `*HEAT TRANSFER` or `*COUPLED TEMPERATURE-DISPLACEMENT` step, with
-/// PrePoMax's defaults; like PrePoMax's `HeatTransferStep` it extends the static step.
+/// the default values; it extends the static step.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HeatTransferStep {
     /// Increments, time period and solver as in a static step. `nlgeom` only applies to a
@@ -972,7 +971,7 @@ impl Default for HeatTransferStep {
     }
 }
 
-/// Settings of a `*FREQUENCY` step, with PrePoMax's defaults.
+/// Settings of a `*FREQUENCY` step, with the default values.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FrequencyStep {
     /// Number of eigenfrequencies to compute.
@@ -998,7 +997,7 @@ pub struct FrequencyStep {
     pub solver: LinearSolverChoice,
 }
 
-/// Settings of a `*DYNAMIC` step, with PrePoMax's defaults; like PrePoMax's `DynamicStep` it
+/// Settings of a `*DYNAMIC` step, with the default values; it
 /// extends the static step by the time integration and the damping.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DynamicStep {
@@ -1009,7 +1008,7 @@ pub struct DynamicStep {
     pub alpha: f64,
     /// Implicit or explicit integration of the structure and the fluid (`EXPLICIT=`).
     pub procedure: DynamicProcedure,
-    /// Rayleigh damping of the whole model, written as `*DAMPING` in the step like PrePoMax
+    /// Rayleigh damping of the whole model, written as `*DAMPING` in the step
     /// does; `None` leaves the model undamped.
     pub damping: Option<RayleighDamping>,
 }
@@ -1052,7 +1051,7 @@ impl DynamicStep {
     }
 }
 
-/// Settings of a `*MODAL DYNAMICS` step, with PrePoMax's defaults: the response over time
+/// Settings of a `*MODAL DYNAMICS` step, with the default values: the response over time
 /// as a superposition of the eigenmodes a previous frequency step stored.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModalDynamicsStep {
@@ -1107,7 +1106,7 @@ impl ModalDynamicsStep {
     }
 }
 
-/// Settings of a `*STEADY STATE DYNAMICS` step, with PrePoMax's defaults: the harmonic
+/// Settings of a `*STEADY STATE DYNAMICS` step, with the default values: the harmonic
 /// response over a frequency range from the stored eigenmodes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SteadyStateDynamicsStep {
@@ -1164,7 +1163,7 @@ impl SteadyStateDynamicsStep {
 }
 
 /// Damping of the modes of a modal dynamics or steady state dynamics step
-/// (`*MODAL DAMPING`), PrePoMax's modal damping.
+/// (`*MODAL DAMPING`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ModalDamping {
     /// One viscous damping ratio (damping over critical damping) for all modes.
@@ -1242,7 +1241,7 @@ impl DynamicProcedure {
         }
     }
 
-    /// Name in the GUI, as PrePoMax labels the procedures.
+    /// Name of the procedure in the GUI.
     pub fn label(self) -> &'static str {
         match self {
             DynamicProcedure::Implicit => "Implicit / Implicit",
@@ -1278,11 +1277,11 @@ impl Default for FrequencyStep {
     }
 }
 
-/// Settings of a `*COMPLEX FREQUENCY` step, with PrePoMax's defaults. CalculiX solves it on
+/// Settings of a `*COMPLEX FREQUENCY` step, with the default values. The solver solves it on
 /// the eigenmodes of the last frequency step with [`FrequencyStep::storage`]; the Coriolis
 /// forces come from the centrifugal load of the static step before that frequency step.
 ///
-/// The step has no perturbation flag of its own: CalculiX stops unless `*STEP, PERTURBATION`
+/// The step has no perturbation flag of its own: the solver stops unless `*STEP, PERTURBATION`
 /// of this step matches the one of the frequency step that stored the modes, so the writer
 /// takes [`FrequencyStep::perturbation`] of that step.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1302,7 +1301,7 @@ impl Default for ComplexFrequencyStep {
     }
 }
 
-/// Settings of a `*BUCKLE` step, with PrePoMax's defaults. The loads of the step are the
+/// Settings of a `*BUCKLE` step, with the default values. The loads of the step are the
 /// reference loads; the buckling factors scale them to the critical loads.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BuckleStep {
@@ -1357,11 +1356,11 @@ impl Default for ViscoStep {
 
 /// Settings of a `*SENSITIVITY` step: the design region whose surface nodes may move
 /// (`*DESIGN VARIABLES, TYPE=COORDINATE`) and the design responses whose derivatives with
-/// respect to these node positions CalculiX computes.
+/// respect to these node positions the solver computes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SensitivityStep {
-    /// Nodes that may move, usually picked faces. CalculiX keeps only surface nodes.
+    /// Nodes that may move, usually picked faces. The solver keeps only surface nodes.
     pub design_region: Region,
     /// Mass of the model (`MASS`).
     pub mass: bool,
@@ -1403,12 +1402,12 @@ impl SensitivityStep {
         responses
     }
 
-    /// Why CalculiX would reject the settings.
+    /// Why the solver would reject the settings.
     pub fn problem(&self) -> Option<String> {
         if self.responses().is_empty() {
             Some("Select at least one design response.".into())
         } else if self.eigenfrequency && (self.mass || self.strain_energy) {
-            Some("CalculiX takes the eigenfrequency only as the single design response.".into())
+            Some("The eigenfrequency can only be the single design response.".into())
         } else if self.filter_radius.is_some_and(|r| r <= 0.0) {
             Some("The filter radius must be positive.".into())
         } else {
@@ -1427,7 +1426,7 @@ impl Step {
         }
     }
 
-    /// A complex frequency step with PrePoMax's default field outputs.
+    /// A complex frequency step with the default field outputs.
     pub fn new_complex_frequency(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -1451,7 +1450,7 @@ impl Step {
         step
     }
 
-    /// A static step with PrePoMax's default field outputs.
+    /// A static step with the default field outputs.
     pub fn new_static(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -1467,7 +1466,7 @@ impl Step {
         }
     }
 
-    /// A frequency step with PrePoMax's default field outputs.
+    /// A frequency step with the default field outputs.
     pub fn new_frequency(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -1483,7 +1482,7 @@ impl Step {
         }
     }
 
-    /// A buckle step with PrePoMax's default field outputs.
+    /// A buckle step with the default field outputs.
     pub fn new_buckle(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -1499,7 +1498,7 @@ impl Step {
         }
     }
 
-    /// A heat transfer step with PrePoMax's default field outputs.
+    /// A heat transfer step with the default field outputs.
     pub fn new_heat_transfer(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -1515,7 +1514,7 @@ impl Step {
         }
     }
 
-    /// A dynamic step with PrePoMax's default field outputs.
+    /// A dynamic step with the default field outputs.
     pub fn new_dynamic(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -1531,7 +1530,7 @@ impl Step {
         }
     }
 
-    /// A modal dynamics step with PrePoMax's default field outputs.
+    /// A modal dynamics step with the default field outputs.
     pub fn new_modal_dynamics(name: impl Into<String>) -> Self {
         Self {
             kind: StepKind::ModalDynamics(ModalDynamicsStep::default()),
@@ -1539,7 +1538,7 @@ impl Step {
         }
     }
 
-    /// A steady state dynamics step with PrePoMax's default field outputs.
+    /// A steady state dynamics step with the default field outputs.
     pub fn new_steady_state_dynamics(name: impl Into<String>) -> Self {
         Self {
             kind: StepKind::SteadyStateDynamics(SteadyStateDynamicsStep::default()),
@@ -1548,7 +1547,7 @@ impl Step {
         }
     }
 
-    /// A coupled temperature-displacement step with PrePoMax's default field outputs.
+    /// A coupled temperature-displacement step with the default field outputs.
     pub fn new_coupled(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -1571,7 +1570,7 @@ pub struct BoundaryCondition {
     /// A deactivated boundary condition is left out of the input file and the 3D view.
     #[serde(default = "active")]
     pub active: bool,
-    /// Hidden ones have no symbol in the 3D view unless selected, as in PrePoMax.
+    /// Hidden ones have no symbol in the 3D view unless selected.
     #[serde(default = "active")]
     pub visible: bool,
     pub region: Region,
@@ -1591,10 +1590,10 @@ pub enum BoundaryKind {
     /// every node or, where the region should turn, at a point it follows (Ansys' remote
     /// displacement); see [`Displacement::formulation`].
     Displacement(Displacement),
-    /// Prescribed temperature (degree of freedom 11), PrePoMax's `TemperatureBC`.
+    /// Prescribed temperature (degree of freedom 11).
     Temperature(f64),
     /// Displacements (U1..U3) taken from the results of the global model of a submodel
-    /// (`*BOUNDARY, SUBMODEL`), PrePoMax's `SubmodelBC`. The results file of the global
+    /// (`*BOUNDARY, SUBMODEL`). The results file of the global
     /// model holds no rotations, so the rotations (the last three) never follow it.
     Submodel {
         /// Step of the global model whose results are read, counted from 1; the results
@@ -1637,7 +1636,7 @@ pub struct Load {
     /// A deactivated load is left out of the input file and the 3D view.
     #[serde(default = "active")]
     pub active: bool,
-    /// Hidden ones have no symbol in the 3D view unless selected, as in PrePoMax.
+    /// Hidden ones have no symbol in the 3D view unless selected.
     #[serde(default = "active")]
     pub visible: bool,
     pub region: Region,
@@ -1665,12 +1664,12 @@ pub enum LoadKind {
     /// Pressure on a surface region; positive pushes into the material.
     Pressure(f64),
     /// Total force on the region, spread over its nodes when the input file is written: on
-    /// faces by area (PrePoMax's surface traction), along edges by length and on nodes in
+    /// faces by area (the surface traction), along edges by length and on nodes in
     /// equal shares; at the reference point of a rigid body it acts as a whole. With
-    /// `each_node` the whole value acts at every node of the region instead (PrePoMax's
-    /// concentrated force).
+    /// `each_node` the whole value acts at every node of the region instead
+    /// (a concentrated force).
     Force { value: [f64; 3], each_node: bool },
-    /// Bolt preload across a cut through the shank (`*PRE-TENSION SECTION`), PrePoMax's
+    /// Bolt preload across a cut through the shank (`*PRE-TENSION SECTION`), the
     /// pre-tension load: the region is the element faces on one side of the cut, the value
     /// the force pulling the two sides together, or the shortening when `by_displacement`.
     /// The shortening counts from the start of the analysis, so 0 loosens the bolt; `lock`
@@ -1681,12 +1680,12 @@ pub enum LoadKind {
         by_displacement: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         lock: bool,
-        /// Direction of the preload; `None` lets CalculiX take the surface normal.
+        /// Direction of the preload; `None` lets the solver take the surface normal.
         direction: Option<[f64; 3]>,
     },
-    /// Heat flow into every node of the region (`*CFLUX`), PrePoMax's concentrated flux.
+    /// Heat flow into every node of the region (`*CFLUX`).
     ConcentratedFlux(f64),
-    /// Heat flow per area into a surface (`*DFLUX`, `S`), PrePoMax's surface flux.
+    /// Heat flow per area into a surface (`*DFLUX`, `S`).
     SurfaceFlux(f64),
     /// Heat generated per volume in the elements of the region (`*DFLUX`, `BF`).
     BodyFlux(f64),
@@ -1696,11 +1695,11 @@ pub enum LoadKind {
     /// physical constants of the model.
     Radiation { sink: f64, emissivity: f64 },
     /// Gravity, as the acceleration vector acting on the elements of the region
-    /// (`*DLOAD`, `GRAV`), PrePoMax's gravity load. Needs the density of the materials.
+    /// (`*DLOAD`, `GRAV`). Needs the density of the materials.
     Gravity([f64; 3]),
     /// Rotation of the elements of the region about an axis through `point` along `axis`
-    /// at `speed` radians per time (`*DLOAD`, `CENTRIF`), PrePoMax's centrifugal load.
-    /// CalculiX takes the square of the speed; the model keeps the speed the user entered.
+    /// at `speed` radians per time (`*DLOAD`, `CENTRIF`).
+    /// The solver takes the square of the speed; the model keeps the speed the user entered.
     Centrifugal {
         point: [f64; 3],
         axis: [f64; 3],
@@ -1750,7 +1749,7 @@ impl LoadKind {
     }
 }
 
-/// A state of the model before the first step, PrePoMax's initial conditions.
+/// A state of the model before the first step.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InitialCondition {
     pub name: String,
@@ -1818,8 +1817,8 @@ impl InitialConditionKind {
     }
 }
 
-/// Temperatures prescribed in a step for the thermal strains of a mechanical analysis,
-/// PrePoMax's defined temperature (`*TEMPERATURE`).
+/// Temperatures prescribed in a step for the thermal strains of a mechanical analysis
+/// (`*TEMPERATURE`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DefinedField {
     pub name: String,
@@ -1845,7 +1844,7 @@ pub enum DefinedFieldKind {
     /// One temperature on the nodes of the region.
     Temperature(f64),
     /// The temperatures of a step of a result file, as a heat transfer analysis on the
-    /// same mesh wrote it (`*TEMPERATURE, FILE=`); the step counts from 1. CalculiX reads
+    /// same mesh wrote it (`*TEMPERATURE, FILE=`); the step counts from 1. The solver reads
     /// the file from the working directory of the analysis, so the file is copied there
     /// when the analysis starts.
     TemperatureFromFile { file: PathBuf, step: u32 },
@@ -1865,7 +1864,7 @@ impl DefinedFieldKind {
 
 impl FeModel {
     /// The result files the active defined fields of the active steps read, each once;
-    /// CalculiX needs them next to the input file.
+    /// The solver needs them next to the input file.
     pub fn result_files(&self) -> Vec<&Path> {
         let mut files: Vec<&Path> = (self.steps.iter().filter(|s| s.active))
             .filter(|s| s.kind.supports_defined_fields())
@@ -1886,7 +1885,7 @@ pub(crate) fn active() -> bool {
     true
 }
 
-/// Next free default name such as "Material-2": PrePoMax numbers new items per kind.
+/// Next free default name such as "Material-2": new items are numbered per kind.
 pub fn next_name<'a>(prefix: &str, existing: impl IntoIterator<Item = &'a str>) -> String {
     let existing: Vec<&str> = existing.into_iter().collect();
     (1..)

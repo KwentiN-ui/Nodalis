@@ -4,7 +4,7 @@
 //!
 //! The mesh only knows the shape of a line element, two or three nodes; which CalculiX type
 //! it becomes (B31, B32, B32R, T3D2) follows from its section when the input file is written.
-//! PrePoMax has no beams, so these follow CalculiX's own keywords.
+//! Beam and truss sections follow CalculiX's own keywords.
 
 use glam::DVec3;
 use plx_mesh::{Element, ElementFamily, ElementShape};
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{BeamProfile, Region};
 
-/// Assigns a material to the elements of a region, PrePoMax's solid section, or a beam or
+/// Assigns a material to the elements of a region, a solid section, or a beam or
 /// truss section of CalculiX.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Section {
@@ -27,7 +27,7 @@ pub struct Section {
     pub kind: SectionKind,
 }
 
-/// PrePoMax's default thickness of 2D sections, one millimetre in SI units, as values are
+/// The default thickness of 2D sections, one millimetre in SI units, as values are
 /// stored.
 pub fn unit_thickness() -> f64 {
     1e-3
@@ -42,7 +42,7 @@ pub enum SectionKind {
     Truss { area: f64 },
     /// Line elements with bending stiffness (`B31`, `B32`, `B32R`).
     Beam(BeamSection),
-    /// Surface elements of a 3D model as shells (`*SHELL SECTION`), PrePoMax's shell
+    /// Surface elements of a 3D model as shells (`*SHELL SECTION`), a shell
     /// section: the thickness and the offset of the reference surface from the mid-surface
     /// as a fraction of the thickness.
     Shell { thickness: f64, offset: f64 },
@@ -70,7 +70,7 @@ impl SectionKind {
         },
     ];
 
-    /// Name of the kind, also the prefix of new sections' names, like PrePoMax's
+    /// Name of the kind, also the prefix of new sections' names, as in
     /// `Solid_Section-1`.
     pub fn prefix(&self) -> &'static str {
         match self {
@@ -112,7 +112,7 @@ impl SectionKind {
                 None
             }
             (SectionKind::Truss { .. }, ElementShape::Line2 | ElementShape::Line3) => Some("T3D2"),
-            // CalculiX has the general profiles for its user element U1 only.
+            // The solver has the general profiles for its user element U1 only.
             (SectionKind::Beam(_), ElementShape::Line2)
                 if profile.is_some_and(|p| !p.is_native()) =>
             {
@@ -171,8 +171,8 @@ impl SectionKind {
                 if matches!(element.shape, ElementShape::Tri6 | ElementShape::Quad8) =>
             {
                 Some(format!(
-                    "Element {} is quadratic; CalculiX computes quadratic membranes \
-                     wrongly, mesh the part with linear elements",
+                    "Element {} is quadratic; quadratic membranes are not \
+                     supported, mesh the part with linear elements",
                     element.id
                 ))
             }
@@ -190,7 +190,7 @@ impl SectionKind {
                     && element.shape != ElementShape::Line2 =>
             {
                 Some(format!(
-                    "Element {} has 3 nodes; {} profiles are general sections of CalculiX's \
+                    "Element {} has 3 nodes; {} profiles are general sections of the \
                      user element U1, which needs lines with 2 nodes",
                     element.id,
                     profile.map_or("", BeamProfile::label)
@@ -212,7 +212,7 @@ impl SectionKind {
 }
 
 /// The membrane a linear shell is written as under a membrane section: `S3` becomes `M3D3`,
-/// `S4` `M3D4` and `S4R` `M3D4R`. Quadratic shells have none; CalculiX gets quadratic
+/// `S4` `M3D4` and `S4R` `M3D4R`. Quadratic shells have none; the solver gets quadratic
 /// membranes wrong.
 pub fn membrane_type(shell_type: &str) -> Option<&'static str> {
     match shell_type.to_ascii_uppercase().as_str() {
@@ -256,7 +256,7 @@ impl Default for BeamSection {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum BeamOrientation {
     /// The global z-axis, or the x-axis for beams along z, chosen per element when the
-    /// input file is written; CalculiX projects it onto the plane normal to the beam.
+    /// input file is written; the solver projects it onto the plane normal to the beam.
     #[default]
     Automatic,
     /// A direction given by the user; must not be parallel to any beam of the section.
@@ -416,7 +416,7 @@ mod tests {
                 .rejects(&element("C3D8", ElementShape::Hex8), None)
                 .is_some()
         );
-        // CalculiX gets quadratic membranes wrong.
+        // The solver gets quadratic membranes wrong.
         assert!(
             membrane
                 .rejects(&element("M3D8", ElementShape::Quad8), None)

@@ -1,4 +1,4 @@
-//! PrePoMax's "Create History Output" dialog of the Results tree: values of a field at
+//! The "Create History Output" dialog of the Results tree: values of a field at
 //! nodes over all increments, an equation of other history outputs, element sizes, or the
 //! values of a hot spot beside the position of a moving load.
 
@@ -14,7 +14,7 @@ use crate::setup::{FACE_SOURCES, NODE_SOURCES, RegionDraft, SOLID_SOURCES};
 use crate::tree_rows::{frame, tree_row};
 use crate::viewport::{BoxSelect, Preview};
 
-/// The types of the list, in PrePoMax's order, with the prefix of their default names.
+/// The types of the list, in order, with the prefix of their default names.
 const TYPES: [(&str, &str); 4] = [
     ("From Field Output", "From_Field"),
     ("From History Output by Equation", "From_Equation"),

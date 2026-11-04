@@ -1,5 +1,5 @@
 # egui-snarl 0.12.0 (https://github.com/zakarumych/egui-snarl, MIT OR Apache-2.0), vendored by
-# PrePoLix for its mouse controls of the schematic: see the "PrePoLix:" comments in src/ui.rs.
+# Nodalis for its mouse controls of the schematic: see the "Nodalis:" comments in src/ui.rs.
 [package]
 name = "egui-snarl"
 version = "0.12.0"

@@ -29,18 +29,18 @@ impl CrossSection {
 /// the section, the 2-direction the beam axis crossed with it.
 ///
 /// Rectangles, circles, pipes and boxes are CalculiX's own beam sections, which it expands
-/// into solids. The others are *general* profiles: CalculiX knows them only as the user
+/// into solids. The others are *general* profiles: the solver knows them only as the user
 /// element `U1` with `SECTION=GENERAL`, a linear beam given by its area and second moments of
 /// area, whose axis runs through the centroid. They lie with the centroid on the nodes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum BeamProfile {
     /// Rectangle with thickness `a` in the 1-direction and `b` in the 2-direction.
     Rect { a: f64, b: f64 },
-    /// Circle; CalculiX takes the diameter, see [`BeamProfile::data_line`].
+    /// Circle; the solver takes the diameter, see [`BeamProfile::data_line`].
     Circ { radius: f64 },
     /// Hollow circle with outer radius and wall thickness (`B32R` only).
     Pipe { radius: f64, thickness: f64 },
-    /// Hollow rectangle `a` by `b` with four wall thicknesses, in the order CalculiX reads
+    /// Hollow rectangle `a` by `b` with four wall thicknesses, in the order the solver reads
     /// them: at +1, +2, -1 and -2 (`B32R` only).
     Box { a: f64, b: f64, t: [f64; 4] },
     /// I-beam of height `h` in the 2-direction with flanges `b` wide, web `tw` and flanges
@@ -256,7 +256,7 @@ impl BeamProfile {
         BeamProfile::Sketch(Sketch { loops: Vec::new() }),
     ];
 
-    /// Whether CalculiX has the profile as a beam section of its own; the others are written
+    /// Whether the solver has the profile as a beam section of its own; the others are written
     /// as general sections of `U1` elements.
     pub fn is_native(&self) -> bool {
         matches!(
@@ -326,7 +326,7 @@ impl BeamProfile {
     }
 
     /// The angle in radians the 1-direction of a general profile is turned by, towards the
-    /// 2-direction, so that its product moment of area vanishes: CalculiX takes no `I12`.
+    /// 2-direction, so that its product moment of area vanishes: the solver takes no `I12`.
     /// 0 for symmetric profiles.
     pub fn principal_turn(&self) -> f64 {
         let p = self.properties();
@@ -366,7 +366,7 @@ impl BeamProfile {
         }
     }
 
-    /// Whether the dimensions make a section CalculiX accepts.
+    /// Whether the dimensions make a section the solver accepts.
     pub fn is_valid(&self) -> bool {
         let positive = |v: f64| v.is_finite() && v > 0.0;
         match *self {

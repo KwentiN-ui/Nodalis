@@ -26,7 +26,7 @@ pub fn evaluate(
 }
 
 /// The value of `kind` in the results of step `step` (CalculiX's numbering, from 1), as
-/// [`evaluate`] gives it, on results in which CalculiX expanded shells and beams: `expanded` gives the
+/// [`evaluate`] gives it, on results in which the solver expanded shells and beams: `expanded` gives the
 /// nodes of the results each of their nodes became (see [`plx_io::frd::expanded_nodes`]). A
 /// region takes the values of all of them, so its extremes are those on the faces of the
 /// shells; a node takes their mean, or their sum for forces.
@@ -689,7 +689,7 @@ mod tests {
         assert!(evaluate(&eigen, step, &frd, None, &sets, UnitSystem::default()).is_err());
     }
 
-    /// On shells CalculiX expanded, a node set takes the stresses on both faces and a node
+    /// On shells the solver expanded, a node set takes the stresses on both faces and a node
     /// the mean displacement through the thickness.
     #[test]
     fn measures_on_expanded_shells_take_the_expanded_nodes() {

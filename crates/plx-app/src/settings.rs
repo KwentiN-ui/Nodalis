@@ -1,4 +1,4 @@
-//! User settings, grouped like PrePoMax's settings dialog and stored by eframe in the user's
+//! User settings, grouped as the settings dialog and stored by eframe in the user's
 //! data directory (Linux `~/.local/share/nodalis`, Windows `%APPDATA%\nodalis\data`).
 
 use crate::numeric;
@@ -100,9 +100,9 @@ impl Default for Graphics {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PostProcessing {
-    /// Label at the node with the largest value (PrePoMax: on).
+    /// Label at the node with the largest value (default: on).
     pub max_label: bool,
-    /// Label at the node with the smallest value (PrePoMax: off).
+    /// Label at the node with the smallest value (default: off).
     pub min_label: bool,
     /// Information block with file, step and deformation.
     pub status_block: bool,
@@ -236,7 +236,7 @@ pub fn clean_path(text: &str) -> &str {
         .map_or(text, str::trim)
 }
 
-/// PrePoMax's default work directory: a `Temp` folder next to the program. Where that is
+/// The default work directory: a `Temp` folder next to the program. Where that is
 /// not writable, e.g. for a binary installed to `/usr/bin`, a `nodalis` folder in the
 /// system's temporary directory.
 pub fn default_work_dir() -> std::path::PathBuf {

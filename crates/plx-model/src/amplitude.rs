@@ -1,4 +1,4 @@
-//! Amplitudes: time curves that scale boundary conditions and loads, PrePoMax's tabular
+//! Amplitudes: time curves that scale boundary conditions and loads, tabular
 //! amplitudes. A boundary condition or load refers to one by name; without one CalculiX
 //! ramps the value linearly over a static step and applies it at once in a heat transfer
 //! step.
@@ -21,7 +21,7 @@ pub struct Amplitude {
 }
 
 impl Amplitude {
-    /// A new amplitude with PrePoMax's single point at zero.
+    /// A new amplitude with the single point at zero.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -54,7 +54,7 @@ impl Amplitude {
         value + self.shift_amplitude
     }
 
-    /// Why CalculiX would reject the points, if it would: it needs at least one point and
+    /// Why the solver would reject the points, if it would: it needs at least one point and
     /// times that do not decrease.
     pub fn points_problem(&self) -> Option<String> {
         if self.points.is_empty() {

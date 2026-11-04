@@ -46,8 +46,8 @@ pub struct PartSkin {
 /// element of the part shares, every surface element, and all line elements.
 ///
 /// Where the mesh was generated from CAD geometry ([`FeMesh::cad`]) the faces of the CAD
-/// geometry are the surface patches and their borders the feature edges, as PrePoMax shows
-/// them: faces split in the CAD program to pick them for loads keep their outline although
+/// geometry are the surface patches and their borders the feature edges:
+/// faces split in the CAD program to pick them for loads keep their outline although
 /// they meet their neighbours without a crease.
 ///
 /// Elements that reference undefined nodes are skipped.
@@ -441,7 +441,7 @@ mod tests {
 
     #[test]
     fn collapsed_wedge_faces_match_tet_neighbours() {
-        // A pyramid written as C3D6 with the apex repeated, like PrePoMax exports, next to a
+        // A pyramid written as C3D6 with the apex repeated, as other programs export it, next to a
         // tet on one of its collapsed quad faces.
         let mut mesh = FeMesh::default();
         let coords = [

@@ -67,7 +67,7 @@ pub enum Request {
     /// Open this project file instead of the open project.
     OpenProject(PathBuf),
     /// Solve the analyses this one takes results or states from and that have none or old
-    /// ones, then this one: Solve, or Solve Again with `true`, which runs CalculiX even if
+    /// ones, then this one: Solve, or Solve Again with `true`, which runs the solver even if
     /// the results are up to date.
     SolveChain(bool),
     /// Stop the solve of this analysis.
@@ -119,8 +119,8 @@ struct Workbench {
     meshing: Option<MeshingJob>,
     /// CAD faces and edges Gmsh named when meshing failed, shown red on the geometry.
     mesh_failure: BTreeSet<plx_mesher::CadEntity>,
-    /// The results workspace: every results file opened in this session, PrePoMax's results
-    /// collection. One of them is shown on the Results tab.
+    /// The results workspace: every results file opened in this session.
+    /// One of them is shown on the Results tab.
     results: Vec<Model>,
     current_result: usize,
     /// Camera of the workspace not shown, so switching tabs keeps each view.
@@ -140,7 +140,7 @@ struct Workbench {
     /// still to open; they must not switch to the Results tab then.
     pinned_view: Option<TreeView>,
     output: Vec<String>,
-    /// The output pane shows the Analysis tab, with the output of the last CalculiX run,
+    /// The output pane shows the Analysis tab, with the output of the last solver run,
     /// instead of the messages.
     analysis_tab: bool,
     view_command: Option<ViewCommand>,
@@ -188,7 +188,7 @@ struct Workbench {
     contact_worksheet: bool,
     /// Open mesh tool: transform parts, merge nodes or renumber.
     mesh_tool: Option<MeshToolDialog>,
-    /// PrePoMax's Query tool, while its window is open.
+    /// The Query tool, while its window is open.
     query: Option<QueryWindow>,
     /// Open material library editor.
     material_library: Option<MaterialLibraryEditor>,
@@ -198,7 +198,7 @@ struct Workbench {
     history_dialog: Option<HistoryOutputDialog>,
     /// Open table of a history output component.
     history_table: Option<HistoryTable>,
-    /// Diagram of a table selection, PrePoMax's diagram view.
+    /// Diagram of a table selection.
     history_plot: Option<crate::xy_plot::XyData>,
     /// The tree selection whose region is highlighted.
     /// `None` until it is computed, so a dialog's highlight is cleared once it closes.
@@ -217,7 +217,7 @@ struct Workbench {
     /// What was defined on the results before the analysis ran again, for its new results
     /// at this path.
     carried_settings: Option<(PathBuf, plx_results::ResultsSettings)>,
-    /// Problems CalculiX reported when the last analysis failed, shown in the tree.
+    /// Problems the solver reported when the last analysis failed, shown in the tree.
     solver_findings: Vec<plx_model::Finding>,
     /// The findings of a tree item whose warning sign was clicked, explained in a window.
     findings_window: Option<Vec<plx_model::Finding>>,
@@ -252,7 +252,7 @@ struct Workbench {
     symbols_shown: Option<(Vec<symbols::Item>, Vec<bool>, u64)>,
     /// Open exploded view dialog with the model it edits.
     exploded_dialog: Option<(ExplodedDialog, ShownModel)>,
-    /// The exploded view last applied, where the next one starts, as in PrePoMax.
+    /// The exploded view last applied, where the next one starts.
     last_exploded: crate::exploded::Parameters,
     /// Open dialog of a feature or of results on one.
     feature_dialog: Option<FeatureDialog>,
@@ -275,7 +275,7 @@ struct Workbench {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ShownModel(TreeView, usize);
 
-/// The window of one analysis of the project: PrePoMax's main window with the geometry, the
+/// The window of one analysis of the project: the main window with the geometry, the
 /// FE model and the results of the analysis.
 pub struct AnalysisWindow {
     workbench: Workbench,
@@ -576,7 +576,7 @@ impl AnalysisWindow {
     }
 
     /// The project's solve is done: the analysis takes the mesh it made and the results it
-    /// kept, which open on the Results tab, and what CalculiX reported.
+    /// kept, which open on the Results tab, and what the solver reported.
     pub fn take_solved(&mut self, solved: crate::solution_monitor::Solved) {
         let workbench = &mut self.workbench;
         workbench.solver_findings = solved.findings;
@@ -745,7 +745,7 @@ impl AnalysisWindow {
         }
     }
 
-    /// PrePoMax's Geometry > Import: one or several STEP, IGES or BREP files, read into
+    /// Geometry > Import: one or several STEP, IGES or BREP files, read into
     /// one geometry, or input files (.inp) whose mesh becomes mesh parts, such as a mesh
     /// written by "Export Deformed Mesh". A model that already has geometry or a mesh keeps
     /// it; the new parts are added.
@@ -807,7 +807,7 @@ impl AnalysisWindow {
         });
     }
 
-    /// Opens the results of the analysis, written by CalculiX or restored from the project.
+    /// Opens the results of the analysis, written by the solver or restored from the project.
     fn open_results(&mut self, path: PathBuf, ctx: &egui::Context) {
         let (sender, ctx) = (self.load_events.0.clone(), ctx.clone());
         let units = self.workbench.import_units();
@@ -896,7 +896,7 @@ impl AnalysisWindow {
     fn status_bar(&self, ui: &mut egui::Ui) -> bool {
         let mut cancel = false;
         ui.horizontal(|ui| {
-            // PrePoMax shows the unit system of the model at the right.
+            // Nodalis shows the unit system of the model at the right.
             if let Some(model) = &self.workbench.model {
                 let properties = &model.fe.properties;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1398,7 +1398,7 @@ impl AnalysisWindow {
         if cancel.inner {
             self.workbench.cancel_meshing();
         }
-        // PrePoMax's fixed layout: tree on the left over the full height, 3D view with the
+        // The fixed layout: tree on the left over the full height, 3D view with the
         // output below it; only the separators move.
         let pane = egui::Frame::new()
             .fill(crate::style::window())
@@ -1978,7 +1978,7 @@ impl Workbench {
     }
 
     /// The pane below the 3D view: the messages, and in the Analysis tab the output of
-    /// CalculiX, so the results stay in view while it runs.
+    /// the solver, so the results stay in view while it runs.
     fn output(&mut self, ui: &mut egui::Ui, pane: egui::Frame, folded: bool) {
         let ctx = ui.ctx().clone();
         // The Analysis tab, brought to the front by a solve, covers the problems.
@@ -2042,7 +2042,9 @@ impl Workbench {
             } else if let Some(analysis) = &mut self.analysis {
                 event = analysis.monitor(ui);
             } else {
-                ui.weak("No analysis run yet: Solve (F5) starts CalculiX; its output shows here.");
+                ui.weak(
+                    "No analysis run yet: Solve (F5) starts the solver; its output shows here.",
+                );
             }
         });
         crate::style::open_tab(ui, selected_tab);
@@ -2463,7 +2465,7 @@ impl Workbench {
     }
 
     /// Explains the findings of the tree item whose warning sign was clicked: what is wrong,
-    /// why CalculiX cannot cope with it and how to fix it.
+    /// why the solver cannot cope with it and how to fix it.
     fn findings_window(&mut self, ctx: &egui::Context) {
         let Some(findings) = &self.findings_window else {
             return;
@@ -2717,7 +2719,7 @@ impl Workbench {
         }
     }
 
-    /// The y axis of an axisymmetric model as PrePoMax shows it, from below to above the
+    /// The y axis of an axisymmetric model, from below to above the
     /// shown model, in render coordinates. Results show it when they are flat like the 2D
     /// model they come from.
     fn axis_line(&self, shown: &Model) -> Option<[glam::Vec3; 2]> {
@@ -2923,7 +2925,7 @@ impl Workbench {
         self.history_table = None;
     }
 
-    /// Switches the tree tab. The Results tab is a workspace of its own, as in PrePoMax: the
+    /// Switches the tree tab. The Results tab is a workspace of its own: the
     /// 3D view swaps between the FE model and the current results, each with its own camera.
     fn set_tree_view(&mut self, view: TreeView) {
         if self.tree_view == view {
@@ -3103,7 +3105,7 @@ impl Workbench {
             return;
         }
         if let Some(model) = self.setup_model() {
-            // CalculiX writes the values of all contacts with one contact field output, so
+            // The solver writes the values of all contacts with one contact field output, so
             // a step that has one opens it.
             let existing = match kind {
                 NewItem::ContactFieldOutput(step) => (model.fe.steps.get(step))
@@ -3178,7 +3180,7 @@ impl Workbench {
         self.query = Some(QueryWindow::default());
     }
 
-    /// Closes the Query window; its annotations stay in the view, as in PrePoMax.
+    /// Closes the Query window; its annotations stay in the view.
     fn close_query(&mut self) {
         self.query = None;
         self.viewport.preview = Default::default();
@@ -3366,7 +3368,7 @@ impl Workbench {
         }
     }
 
-    /// PrePoMax's Material Library Editor, from the context menu of Materials.
+    /// The Material Library Editor, from the context menu of Materials.
     fn open_material_library(&mut self) {
         if let Some(model) = self.setup_model() {
             self.material_library = Some(MaterialLibraryEditor::new(
@@ -3669,7 +3671,7 @@ impl Workbench {
             || (self.analysis.as_ref()).is_some_and(Analysis::is_running)
     }
 
-    /// Check Model: CalculiX checks the input file of the analysis without solving it.
+    /// Check Model: the solver checks the input file of the analysis without solving it.
     fn check_model(&mut self) {
         if self.running() {
             return;
@@ -3845,7 +3847,7 @@ impl Workbench {
                 Ok(()) => self.output.push(format!("{} written", path.display())),
                 Err(error) => self.output.push(format!("{}: {error}", path.display())),
             }
-            // CalculiX reads the result files of defined fields from next to the input file.
+            // The solver reads the result files of defined fields from next to the input file.
             if let Some(dir) = path.parent() {
                 let notes = crate::analysis::copy_result_files(&fe, dir);
                 self.output.extend(notes);
@@ -3853,7 +3855,7 @@ impl Workbench {
         }
     }
 
-    /// PrePoMax's "Export deformed mesh": the mesh of the current results with the shown
+    /// "Export deformed mesh": the mesh of the current results with the shown
     /// displacements times the deformation scale factor, without materials or steps, so
     /// that another model can import it.
     fn export_deformed_mesh(&mut self) {
@@ -4031,7 +4033,7 @@ impl Workbench {
     }
 
     /// A click in the 3D view picks for the open dialog. Without one, a click on a part
-    /// selects it in the tree, as in PrePoMax, and a click into empty space clears the tree
+    /// selects it in the tree, and a click into empty space clears the tree
     /// selection and with it the highlighted region.
     fn click(&mut self, click: Click) {
         if let Some(query) = &mut self.query {
@@ -4431,7 +4433,7 @@ impl Workbench {
                 for warning in warnings {
                     self.output.push(format!("Warning: {warning}"));
                 }
-                // PrePoMax shows a new field output right away.
+                // Nodalis shows a new field output right away.
                 if edit.is_none()
                     && let Some(field) = (view.current_increment())
                         .and_then(|i| i.fields.iter().position(|f| f.name == name))
@@ -4601,7 +4603,7 @@ impl Workbench {
         self.history_table = Some(table);
     }
 
-    /// PrePoMax's Search Contact Pairs; it replaces an open item dialog.
+    /// Search Contact Pairs; it replaces an open item dialog.
     fn open_contact_search(&mut self) {
         if let Some(model) = self.setup_model() {
             self.contact_search = Some(ContactSearchDialog::new(&model.fe));
@@ -4696,7 +4698,7 @@ impl Workbench {
         let Some((view, items)) = self.confirm_delete.clone() else {
             return;
         };
-        // Like PrePoMax, the parts are named in the question.
+        // The parts are named in the question.
         let parts: Vec<String> = (items.iter())
             .filter_map(|item| match item {
                 TreeItem::Part(index) => (self.tree_model(view))
@@ -4865,7 +4867,7 @@ impl Workbench {
         }
     }
 
-    /// PrePoMax's import into a model with geometry or a mesh: the new parts join the
+    /// The import into a model with geometry or a mesh: the new parts join the
     /// geometry. The parts already there keep their names, and the selections on the
     /// geometry and the mesh follow Gmsh's new numbering of the faces, edges and vertices.
     fn geometry_added(
@@ -4941,7 +4943,7 @@ impl Workbench {
         self.view_command = Some(ViewCommand::Fit);
     }
 
-    /// PrePoMax's import of a mesh into a model: the mesh of each input file is added as
+    /// The import of a mesh into a model: the mesh of each input file is added as
     /// parts. The parts already there keep their numbers and names; a part, set or surface
     /// of the new mesh whose name is taken gets a number appended.
     fn meshes_added(&mut self, files: Vec<(PathBuf, Result<Box<plx_io::inp::InpImport>, String>)>) {
@@ -5018,7 +5020,7 @@ impl Workbench {
         }
     }
 
-    /// PrePoMax's Delete of geometry parts: the geometry loses the solids or faces; a mesh
+    /// Deleting geometry parts: the geometry loses the solids or faces; a mesh
     /// already generated from them stays, as parts of the FE model.
     fn delete_geometry_parts(&mut self, indices: &[usize]) {
         let names: Vec<String> = (self.geometry.as_ref())
@@ -5080,7 +5082,7 @@ impl Workbench {
         self.after_parts_changed();
     }
 
-    /// PrePoMax's Delete of mesh parts: their elements go, with the nodes no other part has.
+    /// Deleting mesh parts: their elements go, with the nodes no other part has.
     fn delete_mesh_parts(&mut self, indices: &[usize]) {
         let Some(model) = self.model.as_mut() else {
             return;
@@ -5099,7 +5101,7 @@ impl Workbench {
         self.after_parts_changed();
     }
 
-    /// PrePoMax's Merge of mesh parts: the selected parts become one, named after the
+    /// Merging mesh parts: the selected parts become one, named after the
     /// first; the model's regions on the others follow.
     fn merge_mesh_parts(&mut self, parts: &[usize]) {
         let Some(model) = self.model.as_mut() else {
@@ -5122,7 +5124,7 @@ impl Workbench {
         self.after_parts_changed();
     }
 
-    /// PrePoMax's Edit menu.
+    /// The Edit menu.
     /// The exports of the File menu.
     fn export_menu(&mut self, ui: &mut egui::Ui) {
         let setup = self.setup_model().is_some();
@@ -5463,10 +5465,10 @@ impl Workbench {
     }
 
     /// Draws the symbols of the boundary conditions and loads of one step in the FE model,
-    /// as PrePoMax does for the step chosen to show: the step of the edited or selected
+    /// for the step chosen to show: the step of the edited or selected
     /// item, else the last step. The selected or edited item is drawn in red.
     fn update_symbols(&mut self, ctx: &egui::Context) {
-        // As in PrePoMax, symbols rest while the exploded view is edited or moves.
+        // Symbols rest while the exploded view is edited or moves.
         let exploding = self.exploded_dialog.is_some()
             || (self.model.as_ref()).is_some_and(|m| m.explosion.is_animating());
         let items = if exploding {
@@ -5503,14 +5505,14 @@ impl Workbench {
             Some((TreeView::FeModel, item)) => Some(item),
             _ => None,
         };
-        // Constraints belong to no step: PrePoMax draws them with the symbols of any step.
+        // Constraints belong to no step: they are drawn with the symbols of any step.
         let mut items = Vec::new();
         let edited_constraint = self.editor.as_ref().and_then(|e| e.editing_constraint());
         for (i, constraint) in model.fe.constraints.iter().enumerate() {
             if !constraint.active() || edited_constraint == Some(Some(i)) {
                 continue;
             }
-            // Like PrePoMax, a hidden constraint is still drawn while selected.
+            // A hidden constraint is still drawn while selected.
             let is_selected =
                 edited_constraint.is_none() && selected == Some(&TreeItem::Constraint(i));
             if !constraint.visible() && !is_selected {
@@ -5538,7 +5540,7 @@ impl Workbench {
             })
         };
         let is_selected = |item: TreeItem| edited.is_none() && selected == Some(&item);
-        // Like PrePoMax, deactivated items have no symbols, hidden ones only while selected;
+        // Deactivated items have no symbols, hidden ones only while selected;
         // the edited one is drawn anyway.
         for (i, bc) in step.boundary_conditions.iter().enumerate() {
             let selected = is_selected(TreeItem::BoundaryCondition(index, i));
@@ -5581,7 +5583,7 @@ impl Workbench {
         self.shown().is_some_and(|m| m.explosion.applied.is_some())
     }
 
-    /// PrePoMax's toolbar button: explodes the shown model by the last used parameters at
+    /// The toolbar button: explodes the shown model by the last used parameters at
     /// half the scale, or puts it back together, animated either way.
     fn toggle_exploded(&mut self) {
         if self.exploded_dialog.is_some() {
@@ -6064,7 +6066,7 @@ impl Workbench {
                 section.resolve(&fe);
             }
         }
-        // As in PrePoMax, the section view rests while the exploded view is edited or moves.
+        // The section view rests while the exploded view is edited or moves.
         let exploding = self.exploded_dialog.is_some()
             || self.shown().is_some_and(|m| m.explosion.is_animating());
         // Plane results show the cut alone, in place of the section view.
@@ -6175,7 +6177,7 @@ impl Workbench {
         }
     }
 
-    /// PrePoMax-style properties dialog of the double-clicked tree item.
+    /// Properties dialog of the double-clicked tree item.
     fn properties_window(&mut self, ctx: &egui::Context) {
         let Some(item) = self.dialog.clone() else {
             return;
@@ -6897,7 +6899,7 @@ fn display_controls(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
 /// The width of the labels at the start of both rows of the results controls.
 const LABEL: f32 = 76.0;
 
-/// PrePoMax's results tool bar: deformation, colour bands, transformations and the increment
+/// The results tool bar: deformation, colour bands, transformations and the increment
 /// with its navigation buttons.
 fn results_tool_bar(
     ui: &mut egui::Ui,
@@ -7122,7 +7124,7 @@ fn start_animation_export(
     ))
 }
 
-/// PrePoMax's animation dialog: kind, frames, speed, playback mode, colour limits and the
+/// The animation dialog: kind, frames, speed, playback mode, colour limits and the
 /// player controls.
 /// `exporting` greys out the export button while an exported animation is being written.
 fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool) -> WindowEvent {

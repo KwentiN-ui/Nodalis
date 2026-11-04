@@ -1,7 +1,7 @@
-//! Creating and editing the FE model: PrePoMax's item dialogs for materials, sections, steps,
+//! Creating and editing the FE model: the item dialogs for materials, sections, steps,
 //! boundary conditions, loads and field outputs, and nodalis's hot spot definitions.
 //!
-//! Regions are picked in the 3D view while a dialog is open. As in PrePoMax the user does not
+//! Regions are picked in the 3D view while a dialog is open. The user does not
 //! need node or element sets for this; the input file writer derives them. Sets can still be
 //! defined in the Mesh branch of the tree, by a selection like any region.
 
@@ -339,7 +339,7 @@ impl RegionDraft {
                     let items = picker.pick(model, hit, self.target, precision);
                     self.take(&model.mesh, items, operation);
                 }
-                // PrePoMax clears the selection on a plain click into empty space.
+                // Nodalis clears the selection on a plain click into empty space.
                 None if operation == Operation::Replace => self.clear(),
                 None => {}
             },
@@ -1050,7 +1050,7 @@ pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
         }
         Region::Nodes(_) | Region::NodeSet(_) => {
             highlight.nodes = region.nodes(&model.mesh);
-            // Faces whose corners are all selected show as faces, like PrePoMax does for
+            // Faces whose corners are all selected show as faces, as for
             // picked surfaces.
             let selected: std::collections::HashSet<NodeId> =
                 highlight.nodes.iter().copied().collect();
@@ -1513,7 +1513,7 @@ fn symmetry_rows(ui: &mut egui::Ui, normal: &mut Option<[f64; 3]>, region: &Regi
     ui.end_row();
 }
 
-/// Rows of a submodel boundary condition, PrePoMax's `ViewSubmodelBC`: the displacements
+/// Rows of a submodel boundary condition: the displacements
 /// that follow the global model. Which step of it is read, the link of the global results
 /// says; the global results hold no rotations.
 fn submodel_rows(ui: &mut egui::Ui, step: u32, dofs: &mut [bool; 6], two_d: bool, fe: &FeModel) {
@@ -1824,7 +1824,7 @@ impl Editor {
                 )
             }
             NewItem::Load(step) => {
-                // A frequency step takes no loads, as in PrePoMax.
+                // A frequency step takes no loads.
                 let target = fe.steps.get(step).filter(|s| s.kind.supports_loads())?;
                 let existing = names(&target.loads, |l| &l.name);
                 let (_, name, kind) = load_kinds()
@@ -2594,8 +2594,7 @@ impl Editor {
                 let membrane = matches!(section.kind, SectionKind::Membrane { .. });
                 match &mut section.kind {
                     SectionKind::Solid => {
-                        // Plane stress and plane strain sections have a thickness, as in
-                        // PrePoMax.
+                        // Plane stress and plane strain sections have a thickness.
                         if model.fe.properties.space.has_thickness() {
                             ui.label("Thickness");
                             expose::field(ui, Field::Thickness, |ui| {
@@ -2665,7 +2664,7 @@ impl Editor {
                 if step.kind.design_region().is_some() {
                     region.ui_labeled(ui, model, "Design region", "design region", true);
                     ui.label("");
-                    ui.weak("Surface nodes that may move; CalculiX ignores inner nodes.");
+                    ui.weak("Surface nodes that may move; the solver ignores inner nodes.");
                     ui.end_row();
                 }
             }
@@ -2683,7 +2682,7 @@ impl Editor {
                     .width(crate::dock::fit_width(ui, 200.0))
                     .show_ui(ui, |ui| {
                         for (label, name, kind) in boundary_kinds() {
-                            // Only the kinds the step takes, as PrePoMax lists them.
+                            // Only the kinds the step takes.
                             if step_kind.is_some_and(|s| !s.supports_boundary(&kind)) {
                                 continue;
                             }
@@ -2818,7 +2817,7 @@ impl Editor {
                     .width(crate::dock::fit_width(ui, 200.0))
                     .show_ui(ui, |ui| {
                         for (label, name, kind) in load_kinds() {
-                            // Only the kinds the step takes, as PrePoMax lists them.
+                            // Only the kinds the step takes.
                             if step_kind.is_some_and(|s| !s.supports_load(&kind)) {
                                 continue;
                             }
@@ -3063,7 +3062,7 @@ impl Editor {
                         }
                         ui.label("");
                         ui.weak(
-                            "CalculiX takes the square of the speed; the materials need a density.",
+                            "The solver takes the square of the speed; the materials need a density.",
                         );
                         ui.end_row();
                     }
@@ -4060,7 +4059,7 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
 }
 
 /// Activates a deactivated step, boundary condition or load, or deactivates an active one,
-/// like PrePoMax's Activate and Deactivate; returns false for other items.
+/// with Activate and Deactivate; returns false for other items.
 pub fn toggle_active(fe: &mut FeModel, item: &TreeItem) -> bool {
     active_mut(fe, item).map(|a| *a = !*a).is_some()
 }
@@ -4121,7 +4120,7 @@ pub fn set_visible(fe: &mut FeModel, item: &TreeItem, visible: bool) -> bool {
     shown.map(|v| *v = visible).is_some()
 }
 
-/// Moves step `s` one place up or down, like reordering in PrePoMax's step list; returns the
+/// Moves step `s` one place up or down, like reordering in the step list; returns the
 /// new index. Loads, boundary conditions and outputs belong to their step and move with it.
 pub fn move_step(fe: &mut FeModel, s: usize, up: bool) -> Option<usize> {
     let to = if up { s.checked_sub(1)? } else { s + 1 };
@@ -4133,7 +4132,7 @@ pub fn move_step(fe: &mut FeModel, s: usize, up: bool) -> Option<usize> {
 }
 
 /// Swaps master and slave of a tie, spring connection or contact pair; a swapped name
-/// `<slave>_to_<master>` that is taken gets the next free number, as in PrePoMax.
+/// `<slave>_to_<master>` that is taken gets the next free number.
 pub fn swap_master_slave(fe: &mut FeModel, item: &TreeItem) -> bool {
     match *item {
         TreeItem::Constraint(i) => {
@@ -4351,7 +4350,7 @@ fn history_region(kind: &HistoryKind, fe: &FeModel, mesh: &FeMesh) -> RegionDraf
     }
 }
 
-/// PrePoMax's history output dialog: the kind, the variables, the totals and the region or
+/// The history output dialog: the kind, the variables, the totals and the region or
 /// contact pair.
 fn history_output_form(
     ui: &mut Ui,
@@ -4447,7 +4446,7 @@ fn history_output_form(
             ui.end_row();
             ui.label("");
             ui.weak(
-                "CalculiX writes the values of all contact elements;
+                "The solver writes the values of all contact elements;
                  the pair defines the surfaces of the contact forces CF.",
             );
             ui.end_row();
@@ -4486,13 +4485,13 @@ fn point_hint(region: &Region, fe: &FeModel, mesh: &FeMesh) -> Option<&'static s
              V its angular velocities."
         }
         RemoteBehavior::Deformable => {
-            "U includes the rotations (UR) of the point. CalculiX has no reaction forces or \
+            "U includes the rotations (UR) of the point. The solver has no reaction forces or \
              moments at a deformable point; use the Rigid behavior for them."
         }
     })
 }
 
-/// PrePoMax's field output dialog: the kind, chosen only for a new output, the variables
+/// The field output dialog: the kind, chosen only for a new output, the variables
 /// and the options of `*NODE FILE`, `*EL FILE` and `*CONTACT FILE`.
 fn field_output_form(ui: &mut Ui, output: &mut FieldOutput, taken: &[&str], new: bool) {
     name_row(ui, &mut output.name);
@@ -4835,7 +4834,7 @@ fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
 }
 
 /// The plasticity of the material form: the hardening rule and the hardening curve as an
-/// editable table like PrePoMax's `Plastic` property, rows of yield stress, plastic strain
+/// editable table, rows of yield stress, plastic strain
 /// and temperature.
 fn plastic_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     let mut plastic = material.plastic.is_some();
@@ -4994,8 +4993,8 @@ fn hardening_label(hardening: Hardening) -> &'static str {
     }
 }
 
-/// Solution settings for a new static step: PrePoMax carries those of the last static step
-/// over.
+/// Solution settings for a new static step: those of the last static step
+/// are carried over.
 fn previous_static(fe: &FeModel) -> StaticStep {
     (fe.steps.iter().rev())
         .find_map(|s| match &s.kind {
@@ -5005,8 +5004,8 @@ fn previous_static(fe: &FeModel) -> StaticStep {
         .unwrap_or_default()
 }
 
-/// A new step starts with the boundary conditions and loads of the last step, as in
-/// PrePoMax's `StepCollection.AddStep`: only those the new step takes, so a heat transfer
+/// A new step starts with the boundary conditions and loads of the last step:
+/// only those the new step takes, so a heat transfer
 /// step leaves the supports behind and a static step the temperatures.
 fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
     let Some(last) = fe.steps.last() else {
@@ -5026,7 +5025,7 @@ fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
 }
 
 /// The step kinds of the dialog: label, the kind with its settings and its default field
-/// outputs, in PrePoMax's order.
+/// outputs, in order.
 fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 12] {
     let heat = HeatTransferStep::default();
     [
@@ -5123,7 +5122,7 @@ fn step_kind_label(kind: &StepKind) -> &'static str {
     }
 }
 
-/// The step dialog. The kind is chosen when the step is created, as in PrePoMax's list of
+/// The step dialog. The kind is chosen when the step is created, from the list of
 /// step types; switching it starts with that kind's default field outputs.
 /// `cyclic_sectors` is the number of sectors of a cyclic symmetric model.
 fn step_form(
@@ -5163,7 +5162,7 @@ fn step_form(
         StepKind::Buckle(settings) => buckle_form(ui, settings),
         StepKind::HeatTransfer(settings) => heat_transfer_form(ui, settings, units, false),
         StepKind::CoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, true),
-        // PrePoMax offers no NLGEOM for the uncoupled step.
+        // Nodalis offers no NLGEOM for the uncoupled step.
         StepKind::UncoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, false),
         StepKind::Sensitivity(settings) => sensitivity_form(ui, settings, units),
         StepKind::Visco(settings) => visco_form(ui, settings, units),
@@ -5212,7 +5211,7 @@ fn sensitivity_form(ui: &mut Ui, settings: &mut SensitivityStep, units: UnitSyst
         ui.checkbox(&mut settings.eigenfrequency, "Eigenfrequencies")
             .on_hover_text(
                 "Every eigenfrequency of the previous frequency step (EIGENFREQUENCY). \
-                 CalculiX takes no other response together with it.",
+                 No other response can be taken together with it.",
             );
     });
     ui.end_row();
@@ -5584,8 +5583,8 @@ fn frequency_form(
     ui.end_row();
 }
 
-/// The nodal diameters a cyclic symmetric model is solved for, PrePoMax's minimum and
-/// maximum cyclic symmetry mode; unchecked, CalculiX solves all of them.
+/// The nodal diameters a cyclic symmetric model is solved for, the minimum and
+/// maximum cyclic symmetry mode; unchecked, the solver solves all of them.
 fn nodal_diameter_rows(ui: &mut Ui, range: &mut Option<[u32; 2]>, sectors: u32) {
     let highest = CyclicSymmetry::highest_nodal_diameter(sectors);
     let mut set = range.is_some();
@@ -5609,9 +5608,9 @@ fn nodal_diameter_rows(ui: &mut Ui, range: &mut Option<[u32; 2]>, sectors: u32) 
     ui.end_row();
 }
 
-/// Settings of a complex frequency step, PrePoMax's dialog: the number of modes; the Coriolis
+/// Settings of a complex frequency step: the number of modes; the Coriolis
 /// option is CalculiX's, with a hint at what the step builds on. The perturbation flag is the
-/// one of the Frequency step, since CalculiX requires the same on both steps.
+/// one of the Frequency step, since the solver requires the same on both steps.
 fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep) {
     ui.label("");
     ui.checkbox(
@@ -5642,7 +5641,7 @@ fn validate_frequency_step(settings: &FrequencyStep) -> Result<(), String> {
     Ok(())
 }
 
-/// PrePoMax's buckle step view: perturbation, solver, number of buckling factors and
+/// The buckle step view: perturbation, solver, number of buckling factors and
 /// accuracy.
 fn buckle_form(ui: &mut Ui, settings: &mut BuckleStep) {
     ui.label("");
@@ -6000,7 +5999,7 @@ mod tests {
     }
 
     #[test]
-    fn new_items_get_prepomax_names_and_land_in_their_step() {
+    fn new_items_get_default_names_and_land_in_their_step() {
         let mut fe = FeModel::default();
         for kind in [NewItem::Material, NewItem::Step] {
             Editor::create(kind, &fe).unwrap().apply(&mut fe);
@@ -6093,7 +6092,7 @@ mod tests {
     }
 
     #[test]
-    fn field_outputs_are_created_deactivated_and_deleted_like_in_prepomax() {
+    fn field_outputs_are_created_deactivated_and_deleted() {
         let mut fe = FeModel::default();
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
         let mut editor = Editor::create(NewItem::FieldOutput(0), &fe).unwrap();
@@ -6344,7 +6343,7 @@ mod tests {
         let editor = Editor::edit(&TreeItem::Step(0), &fe, &FeMesh::default()).unwrap();
         editor.apply(&mut fe);
         assert!(!fe.steps[0].active);
-        // A new step takes the items of the last one as they are, like PrePoMax's copies.
+        // A new step takes the items of the last one as they are, as copies.
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
         assert!(fe.steps[1].active);
         assert!(!fe.steps[1].boundary_conditions[0].active);
