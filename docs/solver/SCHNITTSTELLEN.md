@@ -1378,7 +1378,17 @@ Was T15 gebaut hat:
   solange ein Lösen nicht mehr als das 1,5-Fache der Iterationen des ersten Lösens nach
   dem Aufbau braucht (`PLXS_AMG_REBUILD=1` baut immer neu). Kontaktmodell Lasche,
   14 Newton-Iterationen: Aufbau 10,9 s → 2,7 s, gesamt 44 s → 32,5 s (direkt: 73 s).
+- Dritte Runde, direkter Solver (`plxs-linalg::ordering`): die Nested Dissection probiert
+  je Teilgraph alle drei Achsen und fünf Schnittlagen (30–70 % des Gewichts) und nimmt den
+  kleinsten Separator; der Separator ist eine minimale Knotenüberdeckung der Kanten
+  zwischen den Seiten (König über ein maximales Matching, Kuhn) statt des kleineren Randes
+  und wird danach gierig verfeinert (Separatorknoten auf eine Seite schieben, wenn weniger
+  Knoten der anderen Seite nachrücken müssen); Blätter 60 statt 240 Freiheitsgrade.
+  Quentins Halter: Faktor 18,8 GB → 5,2 GB (PaStiX/Scotch ≈ 3,1 GB), passt damit in den
+  Speicher, Faktorisierung 12 s auf 4 Threads, Gesamtlauf 28 s (iterativ 19 s); Hex-Block
+  173k: 239 → 233 Mio. Nichtnullen. Die Ordnung kostet jetzt ~5 s auf dem Halter.
 - Offen: p-Multigrid (erste Ebene = Eckknoten) für quadratische Netze; die automatische
   Wahl bleibt speicherbasiert, obwohl das Multigrid auf großen Modellen inzwischen oft
-  schneller als die Faktorisierung ist; ND-Ordnung des direkten Solvers füllt auf
-  Tet-Netzen ~6× mehr als Scotch (PaStiX).
+  schneller als die Faktorisierung ist (Halter: direkt 28 s, iterativ 19 s); Blätter der
+  Dissection per Minimum Degree statt Cuthill-McKee und ein mehrstufiger Partitionierer
+  (Scotch-artig) wären die nächsten Schritte zum Füllgrad von PaStiX.
