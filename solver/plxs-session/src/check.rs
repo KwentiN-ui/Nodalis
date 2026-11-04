@@ -224,10 +224,13 @@ pub fn check_analysis(
             stiffness = Some(k);
         }
         let k = stiffness.as_ref().unwrap();
-        let found = session
-            .pool
-            .install(|| rank_test(&session, step, &spc.dofs, k));
+        let found = session.pool.install(|| {
+            options
+                .cancel
+                .scope(|| rank_test(&session, step, &spc.dofs, k))
+        });
         match found {
+            Err(plxs_core::Error::Cancelled) => break,
             Ok(test) => {
                 check.equations = check.equations.max(test.equations);
                 progress.event(ProgressEvent::Info(format!(

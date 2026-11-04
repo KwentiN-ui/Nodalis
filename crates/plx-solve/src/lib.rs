@@ -380,8 +380,10 @@ impl Run {
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     job.run(&input_path, &options, &mut progress, &mut kept)
                 }));
-                // The results so far, also of a step that did not converge.
-                if let Some((model, results)) = kept {
+                // The results so far, also of a step that did not converge; a stopped run's are
+                // discarded (nobody waits for them, and a new run of the same name may
+                // already be writing its own file).
+                if let Some((model, results)) = kept.filter(|_| !options.cancel.is_cancelled()) {
                     let results = SolverResults::new(&model, results, VERSION);
                     match results.write(&results_file) {
                         Ok(()) => {
@@ -498,11 +500,15 @@ impl Run {
         self.status
     }
 
-    /// Stops the solver at the next increment and waits for it.
+    /// Stops the solver without waiting for it: the run is killed at once, its thread
+    /// ends on its own as soon as the solver sees the stop (before the next supernode of a
+    /// factorization, Lanczos step or iteration) and what it computed is discarded. The
+    /// caller (the GUI) never blocks on a long factorization.
     pub fn kill(&mut self) {
         if self.status == JobStatus::Running {
             self.cancel.cancel();
-            self.join();
+            // Detached: the thread holds only shared buffers, which outlive the run.
+            self.handle.take();
             self.status = JobStatus::Killed;
         }
     }
@@ -652,6 +658,71 @@ S
         assert_eq!(read, *solved);
         assert!(run.file("inp").is_file());
         assert!(run.file("sta").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cube of `n³` hexahedra fixed at x = 0 and pulled at x = n.
+    fn large_cube(n: usize) -> String {
+        let id = |i: usize, j: usize, k: usize| 1 + i + (n + 1) * (j + (n + 1) * k);
+        let mut s = String::from("*NODE, NSET=NALL\n");
+        for k in 0..=n {
+            for j in 0..=n {
+                for i in 0..=n {
+                    s += &format!("{}, {i}, {j}, {k}\n", id(i, j, k));
+                }
+            }
+        }
+        s += "*ELEMENT, TYPE=C3D8, ELSET=EALL\n";
+        let mut e = 0;
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    e += 1;
+                    let corners = [
+                        id(i, j, k),
+                        id(i + 1, j, k),
+                        id(i + 1, j + 1, k),
+                        id(i, j + 1, k),
+                        id(i, j, k + 1),
+                        id(i + 1, j, k + 1),
+                        id(i + 1, j + 1, k + 1),
+                        id(i, j + 1, k + 1),
+                    ];
+                    let corners: Vec<String> = corners.iter().map(ToString::to_string).collect();
+                    s += &format!("{e}, {}\n", corners.join(", "));
+                }
+            }
+        }
+        let face = |i: usize| {
+            let ids: Vec<String> = (0..=n)
+                .flat_map(|k| (0..=n).map(move |j| id(i, j, k).to_string()))
+                .collect();
+            ids.join(",\n") + "\n"
+        };
+        s += &format!("*NSET, NSET=FIX\n{}*NSET, NSET=PULL\n{}", face(0), face(n));
+        s + &CUBE[CUBE.find("*MATERIAL").expect("material")..]
+    }
+
+    #[test]
+    fn a_stop_does_not_wait_for_the_solver() {
+        let dir = std::env::temp_dir().join(format!("plx-solve-stop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut run = Run::start(2, &dir, "Stop", &large_cube(20)).unwrap();
+        // Until the factorization runs.
+        let started = std::time::Instant::now();
+        while !run.new_output().iter().any(|l| l.contains("factor:")) {
+            assert_eq!(run.poll(), JobStatus::Running);
+            assert!(started.elapsed().as_secs() < 300, "no factorization");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let stopping = std::time::Instant::now();
+        run.kill();
+        let waited = stopping.elapsed();
+        assert!(waited.as_millis() < 50, "the stop waited {waited:?}");
+        assert_eq!(run.poll(), JobStatus::Killed);
+        // What the stopped run computed is discarded.
+        assert!(run.solver_results().is_none());
+        assert!(run.results().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

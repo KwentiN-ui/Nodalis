@@ -55,6 +55,10 @@ pub enum Error {
     /// A file of the job could not be read or written.
     #[error("*ERROR: {path}: {message}")]
     Io { path: String, message: String },
+    /// The caller stopped the run (see [`crate::CancelToken`]) while a long computation was
+    /// under way; the procedures end the step as cancelled.
+    #[error("*INFO: the run was stopped")]
+    Cancelled,
     /// An error about one item of the analysis (a section, a tie, a step), which the
     /// validation names so that Nodalis can point at what the item came from without
     /// reading the message.

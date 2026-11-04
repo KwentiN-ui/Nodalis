@@ -2,6 +2,7 @@
 //! CalculiX's wording (Nodalis's monitor reads that text), Nodalis will consume them
 //! directly in phase 2.
 
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -9,6 +10,11 @@ use serde::{Deserialize, Serialize};
 
 /// Lets the caller stop a run: the procedures look at it between increments and iterations
 /// and end the step with `StepOutcome::Cancelled`. Clones share the flag.
+///
+/// The long loops of the linear algebra (the supernodes of a factorization, the Lanczos
+/// steps of an eigensolution, the iterations of the iterative solver) look at the token
+/// [`CancelToken::current`] of the thread that calls them, set by [`CancelToken::scope`],
+/// and end with [`crate::Error::Cancelled`].
 #[derive(Clone, Debug, Default)]
 pub struct CancelToken(Arc<AtomicBool>);
 
@@ -25,6 +31,35 @@ impl CancelToken {
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Relaxed)
     }
+
+    /// Runs `f` with this token as the [`CancelToken::current`] one of the calling thread;
+    /// the token before is restored afterwards, also when `f` panics.
+    pub fn scope<R>(&self, f: impl FnOnce() -> R) -> R {
+        struct Restore(Option<CancelToken>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                CURRENT.with(|current| *current.borrow_mut() = self.0.take());
+            }
+        }
+        let before = CURRENT.with(|current| current.borrow_mut().replace(self.clone()));
+        let _restore = Restore(before);
+        f()
+    }
+
+    /// The token of the run the calling thread computes, see [`CancelToken::scope`]; `None`
+    /// outside of a run (a computation that cannot be stopped).
+    pub fn current() -> Option<CancelToken> {
+        CURRENT.with(|current| current.borrow().clone())
+    }
+
+    /// Whether the run the calling thread computes has been asked to stop.
+    pub fn current_cancelled() -> bool {
+        CURRENT.with(|current| current.borrow().as_ref().is_some_and(Self::is_cancelled))
+    }
+}
+
+thread_local! {
+    static CURRENT: RefCell<Option<CancelToken>> = const { RefCell::new(None) };
 }
 
 /// Receives the events of a run. Implementations must be cheap: events come per iteration.

@@ -109,7 +109,15 @@ impl PcgSolver {
         let mut q = vec![0.0; n];
         let mut rz = dot(&r, &z);
         let mut residual = 1.0;
+        let cancel = plxs_core::CancelToken::current();
         for iteration in 1..=max_iterations {
+            if iteration % 32 == 0
+                && cancel
+                    .as_ref()
+                    .is_some_and(plxs_core::CancelToken::is_cancelled)
+            {
+                return Err(plxs_core::Error::Cancelled);
+            }
             self.product(&p, &mut q);
             let pq = dot(&p, &q);
             if pq <= 0.0 || !pq.is_finite() {
