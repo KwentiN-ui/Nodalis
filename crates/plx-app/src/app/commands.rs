@@ -240,6 +240,7 @@ impl AnalysisWindow {
             | Cmd::Settings
             | Cmd::SolverSettings
             | Cmd::UserGuide
+            | Cmd::OpenLogFolder
             | Cmd::SaveProject
             | Cmd::SaveProjectAs
             | Cmd::SaveWithoutResults => true,
@@ -454,6 +455,10 @@ impl AnalysisWindow {
                     Some(SettingsWindow::with_page(&workbench.settings, page));
             }
             Cmd::UserGuide => self.open_user_guide(),
+            Cmd::OpenLogFolder => {
+                let line = crate::crash_log::open_log_dir();
+                self.workbench.output.push(line);
+            }
             Cmd::SaveProject => w.requests.push(Request::Save(false)),
             Cmd::SaveProjectAs => w.requests.push(Request::Save(true)),
             Cmd::SaveWithoutResults => w.requests.push(Request::SaveWithoutResults),

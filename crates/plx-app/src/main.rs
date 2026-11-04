@@ -16,6 +16,7 @@ mod command;
 mod connections;
 mod constraint_dialog;
 mod contacts;
+mod crash_log;
 mod cross_section;
 mod dialog;
 mod distribution_dialog;
@@ -89,7 +90,7 @@ fn main() -> eframe::Result {
     if let Some(code) = meshing::worker_main() {
         std::process::exit(code);
     }
-    env_logger::init();
+    crash_log::install();
     if let Ok(program) = std::env::current_exe() {
         meshing::set_worker(program);
     }
@@ -160,6 +161,7 @@ mod tests {
             ("animation.rs", include_str!("animation.rs")),
             ("app.rs", include_str!("app.rs")),
             ("contacts.rs", include_str!("contacts.rs")),
+            ("crash_log.rs", include_str!("crash_log.rs")),
             (
                 "field_output_dialog.rs",
                 include_str!("field_output_dialog.rs"),

@@ -889,6 +889,11 @@ impl AnalysisWindow {
                 let line = crate::help::open_user_guide();
                 self.workbench.output.push(line);
             }
+            let tip = "Opens the folder with the session log and the crash reports";
+            if ui.button("Open Log Folder").on_hover_text(tip).clicked() {
+                let line = crate::crash_log::open_log_dir();
+                self.workbench.output.push(line);
+            }
         });
     }
 

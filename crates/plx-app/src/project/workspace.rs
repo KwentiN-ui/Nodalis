@@ -227,9 +227,15 @@ impl ProjectApp {
                 self.search = None;
                 let (workspace, cmd) = (entries[i].workspace, entries[i].cmd);
                 if workspace == Workspace::Project
-                    || matches!(cmd, Cmd::Settings | Cmd::SolverSettings | Cmd::UserGuide)
+                    || matches!(
+                        cmd,
+                        Cmd::Settings | Cmd::SolverSettings | Cmd::UserGuide | Cmd::OpenLogFolder
+                    )
                 {
-                    if !matches!(cmd, Cmd::Settings | Cmd::SolverSettings | Cmd::UserGuide) {
+                    if !matches!(
+                        cmd,
+                        Cmd::Settings | Cmd::SolverSettings | Cmd::UserGuide | Cmd::OpenLogFolder
+                    ) {
                         self.in_project = true;
                     }
                     self.ribbon.reveal(Workspace::Project, cmd);
@@ -300,7 +306,8 @@ impl ProjectApp {
             | Cmd::Minimap
             | Cmd::Settings
             | Cmd::SolverSettings
-            | Cmd::UserGuide => true,
+            | Cmd::UserGuide
+            | Cmd::OpenLogFolder => true,
             Cmd::CheckForUpdates => !self.updater.busy(),
             _ => false,
         }
@@ -363,6 +370,7 @@ impl ProjectApp {
                 let line = crate::help::open_user_guide();
                 self.output.push(line);
             }
+            Cmd::OpenLogFolder => self.output.push(crate::crash_log::open_log_dir()),
             Cmd::CheckForUpdates => self.updater.check(ctx, true),
             _ => {}
         }

@@ -1945,6 +1945,7 @@ impl ProjectApp {
             .wgpu_render_state
             .clone()
             .ok_or("Nodalis requires the wgpu backend of eframe")?;
+        crate::crash_log::watch_gpu(&render_state.device);
         crate::style::apply(&cc.egui_ctx);
         (cc.egui_ctx).add_plugin(crate::screenshot::ImmediateCapture::new(
             render_state.clone(),
@@ -5248,6 +5249,10 @@ impl ProjectApp {
                     let line = crate::help::open_user_guide();
                     self.output.push(line);
                 }
+                let tip = "Opens the folder with the session log and the crash reports";
+                if ui.button("Open Log Folder").on_hover_text(tip).clicked() {
+                    self.output.push(crate::crash_log::open_log_dir());
+                }
                 let updater = &mut self.updater;
                 if ui
                     .add_enabled(!updater.busy(), egui::Button::new("Check for Updates …"))
@@ -7522,6 +7527,17 @@ impl eframe::App for ProjectApp {
         crate::style::sync(&ctx);
         self.poll_opening();
         self.check_active();
+        if crate::crash_log::take_device_lost() {
+            self.output.push(
+                "The graphics device was lost (driver reset or GPU switched off). \
+                 Save the project and restart Nodalis if the view stays empty."
+                    .into(),
+            );
+            self.toast = Some(crate::toast::Toast::new(
+                "Graphics device lost: save the project and restart Nodalis",
+                false,
+            ));
+        }
         let project = self.in_project;
         let title = format!("{} - Nodalis", self.project_name());
         if title != self.shown_title {

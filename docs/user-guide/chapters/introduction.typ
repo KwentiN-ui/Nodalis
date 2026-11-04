@@ -119,6 +119,29 @@ internet connection. It can be turned off under #menu("Edit", "Settings ...", "U
 entered in the Internet Options (automatic configuration scripts are not read). The connection is
 checked with the certificates of the system, so a company proxy that inspects HTTPS works too.
 
+== Logs and crash reports <crash-logs>
+
+Nodalis writes its warnings and errors to `nodalis.log` in a `logs` folder; the log of the run
+before is kept as `nodalis.previous.log`. If Nodalis crashes, it also writes a
+`crash-<date>_<time>.log` there with the error message, the place in the code, the backtrace and
+the version; under Windows a message box names the file before the program closes. Attach this
+file, together with `nodalis.previous.log`, when you report a crash. The newest 20 reports are
+kept. #menu("Help", "Open Log Folder") opens the folder:
+
+#screenshot("help-open-log-folder.png", [The Help menu with #ui("Open Log Folder")])
+
+#table(
+  columns: 2,
+  [Windows], [`%APPDATA%\nodalis\data\logs`],
+  [Linux], [`~/.local/share/nodalis/logs`],
+  [Portable version], [`Settings\logs` in the unpacked folder (@portable)],
+)
+
+Errors of the graphics driver are logged as well and no longer end the program. If the graphics
+device is lost, for example after a driver reset or when the GPU was switched off while the
+window was in the background, a note asks to save the project and restart Nodalis. Set the
+environment variable `RUST_LOG=info` (or `debug`) for more detailed logs.
+
 == Starting Nodalis
 
 Start Nodalis from the start menu, by double-clicking a `.ndl` file (Windows, if associated),
