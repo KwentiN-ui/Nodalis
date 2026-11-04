@@ -947,6 +947,15 @@ impl Node {
         self.as_analysis()?.status.as_ref()
     }
 
+    /// The state of an analysis' cells as it is now, for what is drawn in every frame:
+    /// found again by an open window only when the analysis changed.
+    fn fresh_status(&mut self) -> Option<AnalysisStatus> {
+        match self.window_mut() {
+            Some(window) => window.status(),
+            None => self.status().cloned(),
+        }
+    }
+
     /// The state of an analysis' cells found now, for decisions: an open window may have
     /// taken what links brought in this frame.
     fn current_status(&self) -> Option<AnalysisStatus> {
