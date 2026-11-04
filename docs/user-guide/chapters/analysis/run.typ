@@ -20,7 +20,9 @@ each other's files.
   [Solve Again], [Runs the solver even if the results are up to date.],
   [Check Model], [Lets the solver only read and check the model and its steps, without
     solving it.],
-  [Stop], [Stops meshing for a solve, or the running solver.],
+  [Stop], [Stops meshing for a solve, or the running solver. The program does not wait for
+    the solver: it stops at once, also in the middle of a long factorization or eigenvalue
+    extraction, and what the stopped run computed is discarded.],
   [Monitor], [Shows the #ui("Analysis") tab of the output pane (@monitor).],
   [Open Results], [On the #ui("File") tab: opens the results the analysis keeps.],
   [Remove], [On the #ui("File") tab: drops the results the analysis keeps, after asking

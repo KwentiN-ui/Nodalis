@@ -196,11 +196,18 @@ impl Session {
         // sees them as they happen.
         let (tx, rx) = std::sync::mpsc::channel::<ProgressEvent>();
         let pool = &self.pool;
+        let cancel = self.options.cancel.clone();
         let (outcome, back) = std::thread::scope(|scope| {
             let handle = scope.spawn(move || {
                 let mut ctx = ctx;
                 let mut sink = ChannelProgress(tx);
-                let outcome = pool.install(|| run_step(&mut ctx, step, &mut sink));
+                // The linear algebra looks at the token itself: a stop ends a long
+                // factorization or eigensolution at once, not after it.
+                let outcome = pool.install(|| cancel.scope(|| run_step(&mut ctx, step, &mut sink)));
+                let outcome = match outcome {
+                    Err(Error::Cancelled) => Ok(StepOutcome::Cancelled),
+                    outcome => outcome,
+                };
                 let back = Carried {
                     stiffness: ctx.stiffness.take(),
                     solver: ctx.solver,

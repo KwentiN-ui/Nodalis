@@ -723,9 +723,16 @@ impl Lanczos {
         options: &LanczosOptions,
     ) -> Result<()> {
         let wanted = (count + self.extra_wanted).min(self.n);
+        let cancel = plxs_core::CancelToken::current();
         loop {
             // Extend the basis.
             while self.k() < self.max_basis {
+                if cancel
+                    .as_ref()
+                    .is_some_and(plxs_core::CancelToken::is_cancelled)
+                {
+                    return Err(Error::Cancelled);
+                }
                 if !self.step(op, b_mul)? {
                     // Invariant subspace: everything in it is exact; more vectors need a
                     // fresh start direction.
