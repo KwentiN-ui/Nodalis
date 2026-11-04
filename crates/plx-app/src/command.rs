@@ -1676,16 +1676,20 @@ fn build() -> Vec<Command> {
         "",
         "Shows the checklist in the properties panel while nothing is edited.",
     ));
-    add(command(
-        C::Timeline,
-        "Time-\nline",
-        r,
-        t,
-        "Show",
-        Tool(Icon::Steps),
-        "",
-        "Shows the steps and their increments as a timeline below the 3D view; click or \
-         drag along it to show another increment.",
+    // In the Step list and the context menu of the timeline, to leave room in the ribbon.
+    add(tile(
+        command(
+            C::Timeline,
+            "Timeline",
+            r,
+            t,
+            "Show",
+            Tool(Icon::Steps),
+            "",
+            "Shows the steps and their increments as a timeline below the 3D view; click or \
+             drag along it to show another increment.",
+        ),
+        Tile::Hidden,
     ));
     add(command(
         C::SectionView,
@@ -1960,15 +1964,18 @@ fn build() -> Vec<Command> {
             Tile::In(C::Animate),
         ));
     }
-    add(command(
-        C::ModeSound,
-        "Sound",
-        r,
-        t,
-        STEP_GROUP,
-        Tool(Icon::Sound),
-        "",
-        "Plays the mode shapes of a frequency step as sound.",
+    add(tile(
+        command(
+            C::ModeSound,
+            "Sound",
+            r,
+            t,
+            STEP_GROUP,
+            Tool(Icon::Sound),
+            "",
+            "Plays the mode shapes of a frequency step as sound.",
+        ),
+        Tile::In(C::Animate),
     ));
     add(tile(
         command(

@@ -80,8 +80,9 @@ it; the other tiles act at once and show pressed while their option is on.
   [First, Previous, Next, Last], [#ui("First") and #ui("Last") go to the start and end of the
     step; #ui("Previous") and #ui("Next") go on into the step before or after. The arrow keys,
     Home and End do the same.],
-  [Animate], [Opens the animation window (@animation).],
-  [Sound], [Opens the sound window for modes of a frequency step (@sound).],
+  [Animate], [Starts or stops the animation and opens its window; the menu below it picks the
+    type of animation and has #ui("Sound") for the modes of a frequency step (@animation,
+    @sound).],
 )
 
 === Timeline <results-timeline>
@@ -99,8 +100,9 @@ An orange triangle under an increment marks a cutback: the solver had to try it 
 smaller increment. Steps taken over from another analysis (@state-links) are grey and striped
 and name that analysis. When the solver stopped in a step, the step is filled only up to its
 last increment, the rest is dashed and a red mark says #ui("not converged"). The
-#ui("Timeline") tile in the #ui("Show") group hides or shows it; results with a single
-increment have none.
+#ui("Timeline") check box at the bottom of the #ui("Step") list shows or hides it, and so does
+#ui("Hide Timeline") in its context menu or #ui("Timeline") in the command search (#key("Ctrl+K"));
+results with a single increment have none.
 
 #screenshot("results-timeline.png", [The timeline of three static steps and a frequency step,
   with the tooltip of an increment])

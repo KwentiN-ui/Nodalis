@@ -143,8 +143,9 @@ fn family_color(family: StepFamily) -> Color32 {
     }
 }
 
-/// Shows the timeline in `ui`; returns the increment clicked or dragged to.
-pub fn show(ui: &mut Ui, view: &ResultsView) -> Option<usize> {
+/// Shows the timeline in `ui`; returns the increment clicked or dragged to. `hide` is set
+/// when its context menu hides it.
+pub fn show(ui: &mut Ui, view: &ResultsView, hide: &mut bool) -> Option<usize> {
     let margin = 10.0;
     let (rect, response) =
         ui.allocate_exact_size(vec2(ui.available_width(), HEIGHT), Sense::click_and_drag());
@@ -327,6 +328,12 @@ pub fn show(ui: &mut Ui, view: &ResultsView) -> Option<usize> {
     let response = response.on_hover_ui_at_pointer(|ui| {
         if let Some(index) = pointed(ui.ctx().pointer_hover_pos()) {
             ui.label(tooltip(view, index));
+        }
+    });
+    response.context_menu(|ui| {
+        if ui.button("Hide Timeline").clicked() {
+            *hide = true;
+            ui.close();
         }
     });
     if response.clicked() || response.dragged() {

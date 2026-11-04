@@ -122,7 +122,14 @@ impl Workbench {
             Cmd::Deformation => view.deformation.label(),
             Cmd::Representation => view.representation().label().into(),
             Cmd::ColorLevels => view.color_scale.levels.to_string(),
-            Cmd::ResultStep => view.step_title(view.current_step_index()?),
+            // A long step name is cut, so the tile keeps its size; the panel has it in full.
+            Cmd::ResultStep => {
+                let title = view.step_title(view.current_step_index()?);
+                match title.char_indices().nth(16) {
+                    Some((end, _)) => format!("{} ...", title[..end].trim_end()),
+                    None => title,
+                }
+            }
             Cmd::Increment => view.entry_value()?,
             _ => return None,
         })
@@ -147,15 +154,19 @@ impl Workbench {
         if !shown {
             return;
         }
+        let mut hide = false;
         let chosen = egui::Panel::bottom("timeline")
             .resizable(false)
             .exact_size(crate::timeline::HEIGHT)
             .frame(egui::Frame::new().fill(crate::style::control()))
             .show(ui, |ui| {
                 self.shown_results_view()
-                    .and_then(|v| crate::timeline::show(ui, v))
+                    .and_then(|v| crate::timeline::show(ui, v, &mut hide))
             })
             .inner;
+        if hide {
+            self.settings.graphics.timeline = false;
+        }
         if let Some(index) = chosen
             && let Some(view) = self.shown_results_mut()
         {
@@ -223,6 +234,11 @@ impl Workbench {
         };
         if changed {
             self.results_changed = true;
+        }
+        if cmd == Cmd::ResultStep {
+            ui.separator();
+            ui.checkbox(&mut self.settings.graphics.timeline, "Timeline")
+                .on_hover_text("Shows the steps as a timeline below the 3D view.");
         }
     }
 }

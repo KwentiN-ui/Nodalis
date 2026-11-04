@@ -379,6 +379,10 @@ impl ResultSteps {
             let start = if start.is_finite() { start } else { clock };
             step.start_time = if timed { start } else { clock };
             let mut reached = step.start_time;
+            // The increments give the total time, or the step time when one of them lies
+            // before the start of the step.
+            let step_times =
+                (step.increments.iter()).any(|&i| before(increments[i].value, step.start_time));
             for (position, &i) in step.increments.iter().enumerate() {
                 let inc = &increments[i];
                 let report = reported(inc);
@@ -386,11 +390,9 @@ impl ResultSteps {
                     (None, None)
                 } else if let Some(c) = report {
                     (Some(c.step_time), Some(c.total_time))
-                } else if inc.kind == AnalysisKind::Dynamic {
-                    // Transient steps give the step time.
+                } else if step_times {
                     (Some(inc.value), Some(step.start_time + inc.value))
                 } else {
-                    // Static steps give the total time.
                     (Some(inc.value - step.start_time), Some(inc.value))
                 };
                 if let Some(total) = total_time {
@@ -424,10 +426,44 @@ impl ResultSteps {
         self.steps.get(self.place(index)?.step)
     }
 
+    /// The step the solver step `solver` belongs to.
+    pub fn of_solver_step(&self, solver: u32) -> Option<usize> {
+        (self.steps.iter()).position(|s| s.solver_steps.contains(&solver))
+    }
+
+    /// Step times and total times of the time `values` of the solver step `solver`. Results
+    /// give either: the built-in solver's history output the step time, its increments and
+    /// CalculiX the total time; values before the start of the step are step times. `None`
+    /// for a step that does not run over time.
+    pub fn times_of(&self, solver: u32, values: &[f64]) -> Option<Vec<(f64, f64)>> {
+        let step = self.steps.get(self.of_solver_step(solver)?)?;
+        if !step.is_timed() {
+            return None;
+        }
+        let start = step.start_time;
+        let step_times = values.iter().any(|&v| before(v, start));
+        Some(
+            (values.iter())
+                .map(|&v| {
+                    if step_times {
+                        (v, start + v)
+                    } else {
+                        (v - start, v)
+                    }
+                })
+                .collect(),
+        )
+    }
+
     /// The increment shown when step `step` is chosen: its last one, the state at its end.
     pub fn entry_increment(&self, step: usize) -> Option<usize> {
         self.steps.get(step)?.increments.last().copied()
     }
+}
+
+/// Whether the time `value` lies before `start`, beyond rounding.
+fn before(value: f64, start: f64) -> bool {
+    value < start - 1e-9 * start.abs().max(1.0)
 }
 
 #[cfg(test)]

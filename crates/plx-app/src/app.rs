@@ -4510,15 +4510,23 @@ impl Workbench {
     }
 
     fn history_table_window(&mut self, ctx: &egui::Context) {
-        if let Some(data) = &self.history_plot {
-            let model = match self.tree_view {
+        if let Some(data) = &mut self.history_plot {
+            let mut model = match self.tree_view {
                 TreeView::Results => self.results.get_mut(self.current_result),
                 _ => None,
             };
             let shown = model
                 .as_ref()
                 .is_some_and(|m| m.path_plots.iter().any(|p| p.is_table(data)));
-            let response = crate::xy_plot::window(ctx, data, shown);
+            // The line of the increment the 3D view shows; a click into the plot shows
+            // another.
+            let view = model.as_deref_mut().and_then(|m| m.results.as_mut());
+            let current = view.as_ref().map(|v| v.increment);
+            let response = crate::xy_plot::window(ctx, data, shown, current);
+            if let (Some(increment), Some(view)) = (response.picked, view) {
+                view.switch_increment(increment);
+                self.results_changed = true;
+            }
             // The annotation belongs to the shown results and stays after the window closes.
             if response.toggle_view
                 && let Some(model) = model
@@ -4577,9 +4585,13 @@ impl Workbench {
         let unit = (view.history_output_index(table.set))
             .and_then(|i| view.history_outputs.get(i))
             .and_then(|o| o.unit());
-        match table.show(ctx, &view.history, kind, unit) {
+        let places = crate::history_table::Places {
+            steps: &view.steps,
+            increments: &view.increments,
+        };
+        match table.show(ctx, &view.history, kind, places, unit) {
             crate::history_table::TableAction::Close => return,
-            crate::history_table::TableAction::Plot(data) => self.history_plot = Some(data),
+            crate::history_table::TableAction::Plot(data) => self.history_plot = Some(*data),
             crate::history_table::TableAction::None => {}
         }
         self.history_table = Some(table);
