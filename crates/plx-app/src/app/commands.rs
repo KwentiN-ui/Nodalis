@@ -159,6 +159,7 @@ impl AnalysisWindow {
         match cmd {
             Cmd::Import | Cmd::ImportMesh => idle,
             Cmd::DefaultMeshParameters
+            | Cmd::MeshParameters
             | Cmd::LocalMeshSize
             | Cmd::ExtrudeMesh
             | Cmd::TetrahedralGmsh => has_geometry,
@@ -282,8 +283,9 @@ impl AnalysisWindow {
         match cmd {
             Cmd::Import | Cmd::ImportMesh => self.import(ctx),
             Cmd::DefaultMeshParameters => w.open_mesh_setup(),
-            Cmd::LocalMeshSize | Cmd::TetrahedralGmsh | Cmd::ExtrudeMesh => {
+            Cmd::MeshParameters | Cmd::LocalMeshSize | Cmd::TetrahedralGmsh | Cmd::ExtrudeMesh => {
                 let index = match cmd {
+                    Cmd::MeshParameters => 0,
                     Cmd::LocalMeshSize => 1,
                     Cmd::TetrahedralGmsh => 2,
                     _ => 3,
