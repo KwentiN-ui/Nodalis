@@ -104,6 +104,8 @@ pub struct PcgSolver {
     last_iterations: AtomicUsize,
     /// Whether the last factorization kept the hierarchy of the one before.
     reused: bool,
+    /// The diagonal of the matrix the hierarchy was built on (padded numbering).
+    built_diagonal: Vec<f64>,
 }
 
 impl Default for PcgSolver {
@@ -125,6 +127,7 @@ impl Default for PcgSolver {
             iterations_after_build: AtomicUsize::new(0),
             last_iterations: AtomicUsize::new(0),
             reused: false,
+            built_diagonal: Vec::new(),
         }
     }
 }
@@ -144,6 +147,38 @@ impl PcgSolver {
     /// constant as nullspace).
     pub fn set_unknowns(&mut self, unknowns: Option<Unknowns>) {
         self.unknowns = unknowns;
+    }
+
+    /// Whether the preconditioner is the hierarchy of an earlier factorization, refreshed
+    /// for the current values (see [`LinearSolver::factorize`]).
+    pub fn is_reused(&self) -> bool {
+        self.reused
+    }
+
+    /// Builds the multigrid hierarchy anew for the current values: after a solve with a
+    /// kept hierarchy that did not converge. Fails like a factorization when no hierarchy
+    /// can be built.
+    pub fn rebuild_preconditioner(&mut self) -> Result<()> {
+        if self.choice != Preconditioner::Multigrid || !self.factorized {
+            return Ok(());
+        }
+        self.build_multigrid()
+    }
+
+    /// The hierarchy of the current values of `full`.
+    fn build_multigrid(&mut self) -> Result<()> {
+        self.amg = None;
+        self.reused = false;
+        self.iterations_after_build.store(0, Ordering::Relaxed);
+        self.built_diagonal = self.full.diagonal();
+        let unknowns = self.padded_unknowns();
+        #[allow(unused_mut)]
+        let mut amg = Amg::build(&self.full, unknowns.as_ref(), AmgOptions::default())?;
+        #[cfg(feature = "gpu")]
+        amg.attach_operator(&self.full);
+        self.amg = Some(amg);
+        self.factorized = true;
+        Ok(())
     }
 
     /// Whether the matrix is stored in `3 × 3` blocks.
@@ -226,9 +261,15 @@ impl PcgSolver {
         if !b_norm.is_finite() {
             return Err(numerical("the right-hand side is not finite"));
         }
-        let max_iterations = self
+        let mut max_iterations = self
             .max_iterations
             .unwrap_or_else(|| n.clamp(1000, 100_000));
+        if self.reused {
+            // A kept hierarchy that no longer fits its matrix shows soon: give up early,
+            // the caller rebuilds it ([`Self::rebuild_preconditioner`]).
+            let after_build = self.iterations_after_build.load(Ordering::Relaxed);
+            max_iterations = max_iterations.min((3 * after_build).max(100));
+        }
         let trace = std::env::var("PLXS_PCG_TRACE").is_ok();
         let cancel = plxs_core::CancelToken::current();
         #[cfg(feature = "gpu")]
@@ -256,7 +297,7 @@ impl PcgSolver {
                 }
                 Ok(Ok(crate::gpu::CgOutcome::Indefinite)) => return Err(indefinite()),
                 Ok(Ok(crate::gpu::CgOutcome::NotConverged { residual })) => {
-                    return Err(not_converged(max_iterations, residual));
+                    return Err(not_converged(max_iterations, residual, self.reused));
                 }
                 Err(e) => {
                     // The card failed: the processor solves, from here on.
@@ -333,7 +374,7 @@ impl PcgSolver {
             // p = z + beta p
             zip_mut(&mut p, &z, |p, z| *p = z + beta * *p);
         }
-        Err(not_converged(max_iterations, residual))
+        Err(not_converged(max_iterations, residual, self.reused))
     }
 
     /// The solution `x` (padded) into `rhs`, and the bookkeeping of a converged solve.
@@ -721,14 +762,22 @@ impl LinearSolver for PcgSolver {
             });
         if self.choice == Preconditioner::Multigrid {
             // The hierarchy of the previous factorization (same pattern) serves on while
-            // the solves with it do not take many more iterations than the first one.
+            // the matrix changed little (the diagonal, in the Euclidean norm; a Newton
+            // iteration moves it a little, another system of the same procedure a lot)
+            // and the solves with it did not take many more iterations than the first one.
             let after_build = self.iterations_after_build.load(Ordering::Relaxed);
             let last = self.last_iterations.load(Ordering::Relaxed);
-            if let Some(amg) = self
-                .amg
-                .as_mut()
-                .filter(|_| after_build > 0 && last * 2 <= after_build * 3 && !reuse_disabled())
-            {
+            let similar = || {
+                let now = self.full.diagonal();
+                let (mut change, mut scale) = (0.0, 0.0);
+                for (n, b) in now.iter().zip(&self.built_diagonal) {
+                    change += (n - b) * (n - b);
+                    scale += b * b;
+                }
+                now.len() == self.built_diagonal.len() && change <= 0.25 * 0.25 * scale
+            };
+            let keep = after_build > 0 && last * 2 <= after_build * 3 && !reuse_disabled();
+            if let Some(amg) = self.amg.as_mut().filter(|_| keep && similar()) {
                 amg.refresh(&self.full);
                 #[cfg(feature = "gpu")]
                 amg.attach_operator(&self.full);
@@ -736,19 +785,8 @@ impl LinearSolver for PcgSolver {
                 self.factorized = true;
                 return Ok(());
             }
-            self.amg = None;
-            self.reused = false;
-            self.iterations_after_build.store(0, Ordering::Relaxed);
-            let unknowns = self.padded_unknowns();
-            match Amg::build(&self.full, unknowns.as_ref(), AmgOptions::default()) {
-                #[allow(unused_mut)]
-                Ok(mut amg) => {
-                    #[cfg(feature = "gpu")]
-                    amg.attach_operator(&self.full);
-                    self.amg = Some(amg);
-                    self.factorized = true;
-                    return Ok(());
-                }
+            match self.build_multigrid() {
+                Ok(()) => return Ok(()),
                 // A hierarchy that cannot be built (coarsening stalled, indefinite coarse
                 // system): the incomplete factorization serves instead.
                 Err(Error::Numerical { .. }) => {}
@@ -853,10 +891,15 @@ fn indefinite() -> Error {
     )
 }
 
-fn not_converged(max_iterations: usize, residual: f64) -> Error {
+fn not_converged(max_iterations: usize, residual: f64, reused: bool) -> Error {
     numerical(format!(
         "the iterative solver did not converge in {max_iterations} iterations \
-         (relative residual {residual:.3e}); choose the direct equation solver"
+         (relative residual {residual:.3e}){}",
+        if reused {
+            " with the kept preconditioner"
+        } else {
+            "; choose the direct equation solver"
+        }
     ))
 }
 
@@ -980,6 +1023,37 @@ mod tests {
         for (x, e) in x.iter().zip(&expected) {
             assert!((x - e).abs() <= 1e-7 * scale, "{x} vs {e}");
         }
+    }
+
+    #[test]
+    fn a_much_changed_matrix_gets_a_new_hierarchy() {
+        // Another system of the same pattern (the diagonal three times as large): the
+        // hierarchy of the first would not fit, it is built anew.
+        let n = 20_000;
+        let a = chain(n);
+        let mut pcg = PcgSolver::new();
+        pcg.analyze(a.pattern()).unwrap();
+        pcg.factorize(&a).unwrap();
+        let mut x = vec![1.0; n];
+        pcg.solve_counted(&mut x).unwrap();
+        let mut b = SparseMatrix::zeros(a.pattern().clone());
+        for (i, (v, w)) in b.values_mut().iter_mut().zip(a.values()).enumerate() {
+            *v = if a.pattern().row_idx()[i] as usize == column_of(a.pattern(), i) {
+                3.0 * w
+            } else {
+                *w
+            };
+        }
+        pcg.factorize(&b).unwrap();
+        assert!(!pcg.is_reused(), "{}", pcg.preconditioner());
+        let mut x = vec![1.0; n];
+        let stats = pcg.solve_counted(&mut x).unwrap();
+        assert!(stats.relative_residual <= TOLERANCE, "{stats:?}");
+    }
+
+    /// The column of the `k`-th stored value of `pattern`.
+    fn column_of(pattern: &Pattern, k: usize) -> usize {
+        pattern.col_ptr().partition_point(|&p| p as usize <= k) - 1
     }
 
     #[test]

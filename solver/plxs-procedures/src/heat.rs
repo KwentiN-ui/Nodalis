@@ -651,6 +651,7 @@ impl<'h> HeatRun<'h> {
             ctx.state.displacements.values.extend_from_slice(&u);
             ctx.state.stresses = stresses.clone();
             ctx.state.strains = strains.clone();
+            ctx.state.loads = None;
             if write {
                 write_increment(
                     ctx, step, increment, time, total, &u, &forces, &stresses, &strains, None,
@@ -861,6 +862,7 @@ impl<'h> HeatRun<'h> {
         ctx.state.displacements.values.extend_from_slice(&u);
         ctx.state.stresses = stresses.clone();
         ctx.state.strains = strains.clone();
+        ctx.state.loads = None;
         if write {
             write_increment(
                 ctx, step, increment, time, total, &u, &forces, &stresses, &strains, None,

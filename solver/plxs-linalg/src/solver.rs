@@ -180,6 +180,18 @@ impl LdltSolver {
         self.regularization = relative;
     }
 
+    /// The relative pivot threshold of [`Self::set_regularization`].
+    pub fn regularization(&self) -> f64 {
+        self.regularization
+    }
+
+    /// Forgets the values of the last factorization (the analysis and the factor's memory
+    /// stay): `solve` refuses until the next `factorize`. For a solver lent to another
+    /// computation that factorized other values.
+    pub fn discard_factor(&mut self) {
+        self.factorized = false;
+    }
+
     /// The pattern with the factor's index type.
     fn widen(pattern: &Pattern) -> (Vec<FactorIndex>, Vec<FactorIndex>) {
         let wide = |v: &[u32]| v.iter().map(|&i| i as FactorIndex).collect();

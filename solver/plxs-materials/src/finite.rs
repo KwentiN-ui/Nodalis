@@ -115,8 +115,15 @@ impl FiniteStrainJ2 {
     }
 
     /// The second Piola-Kirchhoff stress for the Green-Lagrange strain `e` (engineering
-    /// components) from the state at the start of the increment; `state` is updated.
-    fn evaluate(&self, e: &[f64; 6], input: &MaterialInput, state: &mut [f64]) -> [f64; 6] {
+    /// components) from the state at the start of the increment; `state` is updated. Also
+    /// returns whether the point flowed; without `allow_flow` it responds elastically.
+    fn evaluate(
+        &self,
+        e: &[f64; 6],
+        input: &MaterialInput,
+        state: &mut [f64],
+        allow_flow: bool,
+    ) -> ([f64; 6], bool) {
         let c = to_matrix(&[
             1.0 + 2.0 * e[0],
             1.0 + 2.0 * e[1],
@@ -142,7 +149,8 @@ impl FiniteStrainJ2 {
         // Logarithmic elastic trial strain.
         let eps_trial = spectral(&b_trial, |l| 0.5 * l.max(1e-300).ln());
         let eps_trial_v = to_vector(&eps_trial);
-        let (tau, plastic_increment, _) = self.inner.kernel(&eps_trial_v, state, input);
+        let (tau, plastic_increment, _) = self.inner.kernel(&eps_trial_v, state, input, allow_flow);
+        let flowed = plastic_increment.iter().any(|v| *v != 0.0);
         let eps_e: [f64; 6] = std::array::from_fn(|k| eps_trial_v[k] - plastic_increment[k]);
         let b_e = spectral(&to_matrix(&eps_e), |x| (2.0 * x).exp());
         let cp_inv_new = multiply(&multiply(&u_inv, &b_e), &u_inv);
@@ -150,7 +158,10 @@ impl FiniteStrainJ2 {
         for k in 0..6 {
             state[PLASTIC + k] = cp_v[k] - if k < 3 { 1.0 } else { 0.0 };
         }
-        to_vector(&multiply(&multiply(&u_inv, &to_matrix(&tau)), &u_inv))
+        (
+            to_vector(&multiply(&multiply(&u_inv, &to_matrix(&tau)), &u_inv)),
+            flowed,
+        )
     }
 }
 
@@ -171,6 +182,10 @@ impl MaterialLaw for FiniteStrainJ2 {
     #[allow(clippy::needless_range_loop)]
     fn stress(&self, input: &MaterialInput, state: &mut [f64]) -> MaterialOutput {
         let start: Vec<f64> = state.to_vec();
+        let (stress, flowed) = self.evaluate(&input.strain, input, state, true);
+        // A point that does not flow (inside the yield surface, or on it without a strain
+        // increment) gets the tangent of the elastic branch: central differences across the
+        // surface would mix in the plastic branch and soften an unloading increment.
         let mut tangent = [[0.0; 6]; 6];
         let scale = input.strain.iter().fold(1.0_f64, |m, v| m.max(v.abs()));
         let h = 1e-7 * scale;
@@ -181,8 +196,8 @@ impl MaterialLaw for FiniteStrainJ2 {
             minus[j] -= h;
             let mut sp = start.clone();
             let mut sm = start.clone();
-            let s_plus = self.evaluate(&plus, input, &mut sp);
-            let s_minus = self.evaluate(&minus, input, &mut sm);
+            let (s_plus, _) = self.evaluate(&plus, input, &mut sp, flowed);
+            let (s_minus, _) = self.evaluate(&minus, input, &mut sm, flowed);
             for i in 0..6 {
                 tangent[i][j] = (s_plus[i] - s_minus[i]) / (2.0 * h);
             }
@@ -195,7 +210,6 @@ impl MaterialLaw for FiniteStrainJ2 {
                 tangent[j][i] = v;
             }
         }
-        let stress = self.evaluate(&input.strain, input, state);
         let _ = (deviator, BACK);
         MaterialOutput { stress, tangent }
     }
@@ -361,6 +375,42 @@ mod tests {
                     (fd - out.tangent[i][j]).abs() <= 1e-4 * 210_000.0,
                     "d S{i}/d E{j}: tangent {} vs finite difference {fd}",
                     out.tangent[i][j]
+                );
+            }
+        }
+    }
+
+    /// The converged state at the start of an increment sits on the yield surface: its
+    /// tangent is the elastic branch's (the one of a slightly unloaded strain), not a
+    /// central difference across the surface (regression: unloading a yielded body under
+    /// NLGEOM diverged in its first increment).
+    #[test]
+    fn a_converged_plastic_point_starts_the_next_increment_elastically() {
+        use crate::plastic::PEEQ;
+        let law = law();
+        let f: Mat3 = [[1.02, 0.0, 0.0], [0.0, 0.994, 0.0], [0.0, 0.0, 0.994]];
+        let e = green_lagrange(&f);
+        let mut state = vec![0.0; STATE_SIZE];
+        law.stress(&input(e), &mut state);
+        assert!(state[PEEQ] > 0.0, "the test strain must yield");
+        let mut next = state.clone();
+        let at_start = law.stress(&input(e), &mut next);
+        assert!((next[PEEQ] - state[PEEQ]).abs() < 1e-15, "no further flow");
+        let mut unloaded = e;
+        unloaded[0] -= 1e-4;
+        let mut inside = state.clone();
+        let elastic = law.stress(&input(unloaded), &mut inside);
+        assert_eq!(
+            inside[PEEQ], state[PEEQ],
+            "the unloaded strain must be elastic"
+        );
+        for i in 0..6 {
+            for j in 0..6 {
+                assert!(
+                    (at_start.tangent[i][j] - elastic.tangent[i][j]).abs() < 1e-3 * 210_000.0,
+                    "D[{i}][{j}]: {} at the start vs {} elastic",
+                    at_start.tangent[i][j],
+                    elastic.tangent[i][j]
                 );
             }
         }

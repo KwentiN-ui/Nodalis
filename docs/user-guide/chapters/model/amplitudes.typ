@@ -24,5 +24,8 @@ An amplitude that no boundary condition, load or defined field uses has no effec
 
 #screenshot("model-check-amplitude.png", [Warning for an amplitude that nothing refers to])
 
-With #ui("Default") instead of an amplitude, CalculiX ramps the value up linearly over a static
-step and applies it at once in a heat transfer step.
+With #ui("Default") instead of an amplitude, CalculiX ramps the value linearly over a static
+step and applies it at once in a heat transfer step. The ramp starts from the value the load had
+at the end of the previous step: a load that a step keeps stays constant, a load it lowers or
+removes goes down gradually over the step. This matters for nonlinear steps, for example when a
+part that yielded is unloaded.

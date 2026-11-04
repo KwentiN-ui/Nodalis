@@ -1376,7 +1376,13 @@ Was T15 gebaut hat:
   (Newton-Iterationen) behalten (`Amg::refresh`: Diagonale, λ_max und die f32-Kopie der
   feinsten Ebene folgen den neuen Werten, Prolongatoren und grobe Operatoren bleiben),
   solange ein Lösen nicht mehr als das 1,5-Fache der Iterationen des ersten Lösens nach
-  dem Aufbau braucht (`PLXS_AMG_REBUILD=1` baut immer neu). Kontaktmodell Lasche,
+  dem Aufbau braucht und sich die Diagonale um weniger als 25 % (euklidisch) geändert hat
+  (`PLXS_AMG_REBUILD=1` baut immer neu). Gelernt am Fixture dynamik-automatisch: die
+  Dynamik löst erst die Beschleunigungsmatrix, dann `K + cM` mit demselben Muster, die
+  behaltene Hierarchie passte nicht und das CG lief 1800 Iterationen ins Leere. Deshalb
+  zusätzlich: mit behaltener Hierarchie bricht das CG nach dem 3-Fachen der Iterationen
+  des ersten Lösens ab, `Equations::solve` baut neu (`PcgSolver::rebuild_preconditioner`)
+  und wiederholt einmal, erst danach greift der Rückfall auf den direkten Solver. Kontaktmodell Lasche,
   14 Newton-Iterationen: Aufbau 10,9 s → 2,7 s, gesamt 44 s → 32,5 s (direkt: 73 s).
 - Dritte Runde, direkter Solver (`plxs-linalg::ordering`): die Nested Dissection probiert
   je Teilgraph alle drei Achsen und fünf Schnittlagen (30–70 % des Gewichts) und nimmt den
