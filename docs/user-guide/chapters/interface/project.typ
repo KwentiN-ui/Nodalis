@@ -240,8 +240,9 @@ placed and worked on with the ribbon (@ribbon) and the keys above.
   [File > Save Without Results ...], [Saves a copy without the results the analyses keep.],
   [Edit > Undo, Redo], [Undo and redo in the schematic (@undo).],
   [Edit > Settings ...], [The settings (@settings); they apply to all windows.],
-  [Help], [#ui("User Guide") opens this guide, #ui("Check for Updates ...") looks
-    for a new version.],
+  [Help], [#ui("User Guide") opens this guide, #ui("Open Log Folder") the folder with the
+    log and the crash reports (@crash-logs), #ui("Check for Updates ...") looks for a new
+    version.],
 )
 
 The ribbon tabs of the Project workspace:

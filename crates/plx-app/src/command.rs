@@ -228,6 +228,7 @@ pub enum Cmd {
     /// The Solver page of the settings.
     SolverSettings,
     UserGuide,
+    OpenLogFolder,
     CheckForUpdates,
 }
 
@@ -1794,6 +1795,19 @@ fn build() -> Vec<Command> {
             TileIcon::None,
             "",
             "Opens the user guide in the web browser.",
+        ),
+        Tile::Hidden,
+    ));
+    add(tile(
+        command(
+            C::OpenLogFolder,
+            "Open Log Folder",
+            ALL,
+            "",
+            "Help",
+            TileIcon::None,
+            "",
+            "Opens the folder with the session log and the crash reports.",
         ),
         Tile::Hidden,
     ));
