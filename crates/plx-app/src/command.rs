@@ -197,6 +197,8 @@ pub enum Cmd {
     Representation,
     ColorLevels,
     Transformations,
+    /// The timeline of the steps below the 3D view of results.
+    Timeline,
     /// The step of the results shown.
     ResultStep,
     /// The increment, mode or position shown within the step.
@@ -1671,6 +1673,17 @@ fn build() -> Vec<Command> {
         "Shows the checklist in the properties panel while nothing is edited.",
     ));
     add(command(
+        C::Timeline,
+        "Time-\nline",
+        r,
+        t,
+        "Show",
+        Tool(Icon::Steps),
+        "",
+        "Shows the steps and their increments as a timeline below the 3D view; click or \
+         drag along it to show another increment.",
+    ));
+    add(command(
         C::SectionView,
         "Section\nView",
         v,
@@ -1842,7 +1855,7 @@ fn build() -> Vec<Command> {
             r,
             t,
             STEP_GROUP,
-            Tool(Icon::Steps),
+            Tool(Icon::Increments),
             "Ctrl+PgUp/PgDn",
             "The step shown, at its last increment.",
         ),

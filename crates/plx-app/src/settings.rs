@@ -79,6 +79,8 @@ pub struct Graphics {
     /// The FE Model tree lists the items an analysis takes from another one; off, it shows
     /// only its own items.
     pub show_linked: bool,
+    /// The timeline of the steps and increments below the 3D view of results.
+    pub timeline: bool,
 }
 
 impl Default for Graphics {
@@ -91,6 +93,7 @@ impl Default for Graphics {
             shell_thickness: true,
             beam_profiles: true,
             show_linked: false,
+            timeline: true,
         }
     }
 }

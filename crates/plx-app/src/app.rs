@@ -1458,6 +1458,7 @@ impl AnalysisWindow {
             self.properties_panel(ui, workspace);
         }
         egui::CentralPanel::no_frame().show(ui, |ui| {
+            self.workbench.timeline(ui);
             self.workbench.viewport.selecting = self.workbench.picking()
                 || self.workbench.section_picks()
                 || self.workbench.transformation_picks()

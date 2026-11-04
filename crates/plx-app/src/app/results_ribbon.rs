@@ -126,6 +126,32 @@ impl Workbench {
         }
     }
 
+    /// The timeline of the steps below the 3D view, for results with more than one
+    /// increment; it shows the increment clicked or dragged to.
+    pub(super) fn timeline(&mut self, ui: &mut egui::Ui) {
+        let shown = self.settings.graphics.timeline
+            && self.tree_view == TreeView::Results
+            && (self.shown_results_view()).is_some_and(|v| v.increments.len() > 1);
+        if !shown {
+            return;
+        }
+        let chosen = egui::Panel::bottom("timeline")
+            .resizable(false)
+            .exact_size(crate::timeline::HEIGHT)
+            .frame(egui::Frame::new().fill(crate::style::control()))
+            .show(ui, |ui| {
+                self.shown_results_view()
+                    .and_then(|v| crate::timeline::show(ui, v))
+            })
+            .inner;
+        if let Some(index) = chosen
+            && let Some(view) = self.shown_results_mut()
+        {
+            view.switch_increment(index);
+            self.results_changed = true;
+        }
+    }
+
     /// Moves through the increments and steps of the results with the keyboard: arrows
     /// for the increments, Home and End within the step, Ctrl+Page Up and Ctrl+Page Down
     /// for the steps.
