@@ -140,6 +140,8 @@ struct Workbench {
     /// still to open; they must not switch to the Results tab then.
     pinned_view: Option<TreeView>,
     output: Vec<String>,
+    /// What the status bar tells of the output while its tab is not shown.
+    output_news: crate::output_news::OutputNews,
     /// The output pane shows the Analysis tab, with the output of the last solver run,
     /// instead of the messages.
     analysis_tab: bool,
@@ -321,6 +323,7 @@ impl AnalysisWindow {
                 tree_view: TreeView::FeModel,
                 pinned_view: None,
                 output: Vec::new(),
+                output_news: Default::default(),
                 analysis_tab: false,
                 view_command: None,
                 results_changed: false,
@@ -899,9 +902,11 @@ impl AnalysisWindow {
     }
 
     /// The status bar; returns whether the meshing was cancelled there.
-    fn status_bar(&self, ui: &mut egui::Ui) -> bool {
+    fn status_bar(&mut self, ui: &mut egui::Ui) -> bool {
         let mut cancel = false;
         ui.horizontal(|ui| {
+            self.workbench.output_tabs(ui);
+            ui.separator();
             // Nodalis shows the unit system of the model at the right.
             if let Some(model) = &self.workbench.model {
                 let properties = &model.fe.properties;
@@ -1193,9 +1198,6 @@ const IMPORT_FILTER: (&str, &[&str]) = (
     ],
 );
 
-/// The height of the output pane folded to its tabs.
-pub const OUTPUT_TABS: f32 = 26.0;
-
 /// File dialog filter of the CAD formats Gmsh imports.
 const GEOMETRY_FILTER: (&str, &[&str]) = (
     "Geometry (*.step, *.stp, *.iges, *.igs, *.brep)",
@@ -1287,7 +1289,10 @@ impl AnalysisWindow {
                     self.ribbon.reveal(workspace, cmd);
                     self.run_command(&ctx, cmd);
                 }
-                Some(crate::checklist::Clicked::Problems) => self.workbench.problems_tab = true,
+                Some(crate::checklist::Clicked::Problems) => {
+                    self.workbench.problems_tab = true;
+                    self.workbench.problems_tab_before = false;
+                }
                 None => {}
             }
         }
@@ -1438,20 +1443,16 @@ impl AnalysisWindow {
         if !overlay {
             self.properties_panel(ui, workspace);
         }
-        // In a small window the output pane shows only its tabs until one is clicked.
-        if crate::layout::output_folded(&ctx) {
-            egui::Panel::bottom("output folded")
-                .resizable(false)
-                .exact_size(OUTPUT_TABS)
-                .frame(egui::Frame::new().fill(crate::style::control()))
-                .show(ui, |ui| self.workbench.output(ui, pane, true));
-        } else {
+        // The output pane is hidden until one of its tabs in the status bar is clicked, a
+        // run starts or a problem is asked for.
+        self.workbench.reveal_output(&ctx);
+        if !crate::layout::output_folded(&ctx) {
             egui::Panel::bottom("output")
                 .resizable(true)
                 .default_size(170.0)
                 .size_range(70.0..=600.0)
                 .frame(egui::Frame::new().fill(crate::style::control()))
-                .show(ui, |ui| self.workbench.output(ui, pane, false));
+                .show(ui, |ui| self.workbench.output(ui, pane));
         }
         if overlay {
             self.properties_panel(ui, workspace);
@@ -1984,50 +1985,68 @@ impl Workbench {
 
     /// The pane below the 3D view: the messages, and in the Analysis tab the output of
     /// the solver, so the results stay in view while it runs.
-    fn output(&mut self, ui: &mut egui::Ui, pane: egui::Frame, folded: bool) {
-        let ctx = ui.ctx().clone();
+    /// Shows the output pane when a solve brings the Analysis tab to the front or the
+    /// problems are asked for.
+    fn reveal_output(&mut self, ctx: &egui::Context) {
         // The Analysis tab, brought to the front by a solve, covers the problems.
         if self.analysis_tab && !self.analysis_tab_before {
             self.problems_tab = false;
-            crate::layout::fold_output(&ctx, false);
+            crate::layout::fold_output(ctx, false);
         }
         if self.problems_tab && !self.problems_tab_before {
-            crate::layout::fold_output(&ctx, false);
+            crate::layout::fold_output(ctx, false);
         }
         self.problems_tab_before = self.problems_tab;
+        self.analysis_tab_before = self.analysis_tab;
+    }
+
+    /// The tabs of the output pane in the status bar: a click shows the tab in the pane, a
+    /// click on the shown tab hides the pane.
+    fn output_tabs(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         let problems = self.problems();
-        let problems_title = format!("Problems ({})", problems.len());
-        let selected = if self.problems_tab {
+        let errors = (problems.iter()).any(|f| f.severity() == plx_model::Severity::Error);
+        let mut problems_title = egui::RichText::new(format!("Problems ({})", problems.len()));
+        if errors {
+            problems_title = problems_title.color(crate::style::error());
+        }
+        let tab = if self.problems_tab {
             0
         } else if self.analysis_tab {
             1
         } else {
             2
         };
-        let titles = [problems_title.as_str(), "Analysis", "Output"];
-        let top = ui.cursor().top();
-        let (clicked, selected_tab) = crate::style::tabs(ui, &titles, selected);
-        let row = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
+        let shown = (!crate::layout::output_folded(&ctx)).then_some(tab);
+        let (unread, newest) = self
+            .output_news
+            .update(&ctx, &self.output, shown == Some(2));
+        let titles = [
+            problems_title,
+            "Analysis".into(),
+            crate::output_news::OutputNews::title(unread).into(),
+        ];
+        let mut clicked = crate::style::status_tabs(ui, &titles, shown);
+        if let Some(line) = newest
+            && crate::output_news::OutputNews::line(ui, line)
+        {
+            clicked = Some(2);
+        }
         if let Some(index) = clicked {
-            self.problems_tab = index == 0;
-            self.analysis_tab = index == 1;
-            if folded {
+            if shown == Some(index) {
+                crate::layout::fold_output(&ctx, true);
+            } else {
+                self.problems_tab = index == 0;
+                self.analysis_tab = index == 1;
+                self.problems_tab_before = self.problems_tab;
+                self.analysis_tab_before = self.analysis_tab;
                 crate::layout::fold_output(&ctx, false);
             }
         }
-        self.analysis_tab_before = self.analysis_tab;
-        let double = ui.input(|i| {
-            i.pointer
-                .button_double_clicked(egui::PointerButton::Primary)
-                && i.pointer.interact_pos().is_some_and(|p| row.contains(p))
-        });
-        if double && !folded {
-            crate::layout::fold_output(&ctx, true);
-        }
-        if folded {
-            crate::style::open_tab(ui, selected_tab);
-            return;
-        }
+    }
+
+    fn output(&mut self, ui: &mut egui::Ui, pane: egui::Frame) {
+        let problems = self.problems();
         let mut event = MonitorEvent::None;
         let mut picked = None;
         pane.inner_margin(4).show(ui, |ui| {
@@ -2052,7 +2071,6 @@ impl Workbench {
                 );
             }
         });
-        crate::style::open_tab(ui, selected_tab);
         if let Some((finding, open)) = picked {
             self.pick_problem(ui.ctx(), &finding, open);
         }
