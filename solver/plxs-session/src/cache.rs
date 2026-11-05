@@ -27,7 +27,7 @@ use serde::Serialize;
 
 use crate::restart::{self, Fnv};
 
-const RESULTS_MAGIC: &[u8; 8] = b"PLXSSTEP";
+const RESULTS_MAGIC: &[u8; 8] = b"PLXSSTP2";
 
 /// Where the cache of a job is and which solver build it belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,7 +128,7 @@ impl StepCache {
         let mut results = Results::default();
         for &key in &keys[..steps] {
             let bytes = std::fs::read(self.path(key, "results")).ok()?;
-            let step: Results = restart::decode(RESULTS_MAGIC, "step results", &bytes).ok()?;
+            let step: Results = plxs_output::packed::unpack(RESULTS_MAGIC, &bytes).ok()?;
             results.increments.extend(step.increments);
             results.history.extend(step.history);
             results.modes.extend(step.modes);
@@ -168,9 +168,8 @@ impl StepCache {
             std::fs::rename(&partial, &path)
         };
         let _ = std::fs::create_dir_all(&self.dir);
-        let written = restart::encode(RESULTS_MAGIC, &of_step)
+        let written = write("results", plxs_output::packed::pack(RESULTS_MAGIC, of_step))
             .ok()
-            .and_then(|bytes| write("results", bytes).ok())
             .and_then(|()| restart::encode_snapshot(snapshot).ok())
             .and_then(|bytes| write("state", bytes).ok());
         if written.is_none() {

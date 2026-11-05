@@ -1,6 +1,6 @@
 //! Results of the built-in solver `plxs`, taken from memory instead of a `.frd` file
-//! ([`from_solver`]), and kept as a compact binary file (`.ndlr`, postcard) in the work
-//! directory and in projects.
+//! ([`from_solver`]), and kept as a compact binary file (`.ndlr`) in the work directory and
+//! in projects: compressed in chunks after HDF5's layout, see [`plxs_output::packed`].
 //!
 //! [`from_solver`] gives the same mesh, increments, fields and components as reading the
 //! `.frd` file the solver would write (see `plx-io::frd`): the same element types and node
@@ -13,6 +13,7 @@ use std::path::Path;
 use plx_mesh::{Element, FeMesh, Part};
 use plxs_core::results::IncrementKind;
 use plxs_core::{Model, Results};
+use plxs_output::packed::{self, Array, Packable};
 use serde::{Deserialize, Serialize};
 
 use crate::names::{element_kind, rename_component, reorder_nodes};
@@ -23,7 +24,7 @@ pub const EXTENSION: &str = "ndlr";
 
 /// The first bytes of a `.ndlr` file; the last two count the format, which is not converted:
 /// results of another format are solved again.
-const MAGIC: &[u8; 8] = b"PLXRES\x00\x03";
+const MAGIC: &[u8; 8] = b"PLXRES\x00\x04";
 
 /// What a run of the built-in solver computed, as Nodalis keeps it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -78,19 +79,13 @@ impl SolverResults {
 
     /// The results as the bytes of a `.ndlr` file.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = MAGIC.to_vec();
-        // Serializing plain data into memory does not fail.
-        bytes.extend(postcard::to_stdvec(self).unwrap_or_default());
-        bytes
+        packed::pack(MAGIC, self.clone())
     }
 
     /// Reads the bytes of a `.ndlr` file.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ReadError> {
-        let data = bytes
-            .strip_prefix(MAGIC.as_slice())
-            .ok_or_else(|| ReadError("not results of this Nodalis version: solve again".into()))?;
-        let mut results: SolverResults = postcard::from_bytes(data)
-            .map_err(|e| ReadError(format!("results not readable: {e}")))?;
+        let mut results: SolverResults =
+            packed::unpack(MAGIC, bytes).map_err(|e| ReadError(e.0))?;
         results.model.rebuild_indices();
         Ok(results)
     }
@@ -103,6 +98,15 @@ impl SolverResults {
         let bytes =
             std::fs::read(path).map_err(|e| ReadError(format!("{}: {e}", path.display())))?;
         Self::from_bytes(&bytes).map_err(|e| ReadError(format!("{}: {e}", path.display())))
+    }
+}
+
+/// The arrays of the mesh (node ids and coordinates) and of the results.
+impl Packable for SolverResults {
+    fn arrays(&mut self, visit: &mut dyn FnMut(Array<'_>)) {
+        visit(Array::Ids(&mut self.model.nodes.ids));
+        visit(Array::F64x3(&mut self.model.nodes.coordinates));
+        self.results.arrays(visit);
     }
 }
 

@@ -9,6 +9,7 @@
 
 pub mod dat;
 pub mod frd;
+pub mod packed;
 pub mod sta;
 
 pub use dat::{EigenTable, write_dat};

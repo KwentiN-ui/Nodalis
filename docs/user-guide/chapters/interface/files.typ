@@ -46,7 +46,8 @@ Geometry, FE Model and Results workspaces it has these entries; importing is on 
 / `.frd` (CalculiX results): the results of the analysis' own runs with CalculiX. Result files
   from elsewhere are not opened.
 / `.ndlr` (Nodalis solver results): the results of the analysis' own runs with the built-in
-  solver, a compact binary file instead of `.frd` and `.dat` (@bind-result).
+  solver, a compact binary file instead of `.frd` and `.dat`, compressed in chunks without loss
+  of precision (@bind-result).
 / CAD files: imported with #menu("Geometry", "Import Geometry") (@geometry-import).
 
 Supported element types of `.inp` meshes: `C3D4`, `C3D6`, `C3D8`, `C3D10`, `C3D15`, `C3D20` with
