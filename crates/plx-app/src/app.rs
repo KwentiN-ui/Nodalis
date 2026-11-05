@@ -6124,6 +6124,7 @@ impl Workbench {
             self.output
                 .push("The changed Gmsh library is loaded after a restart".into());
         }
+        new.solver.apply_gpu();
         if new.graphics.theme != self.settings.graphics.theme {
             crate::style::set_theme(ctx, new.graphics.theme);
         }

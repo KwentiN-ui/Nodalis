@@ -91,7 +91,12 @@ pub enum GpuMode {
     On,
 }
 
+/// The mode of [`GpuMode::set_preferred`]: 0 automatic, 1 off, 2 on.
+static PREFERRED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 impl GpuMode {
+    /// `PLXS_GPU` when set, else the mode the application chose with
+    /// [`Self::set_preferred`] (automatic by default).
     pub fn from_environment() -> Self {
         match std::env::var("PLXS_GPU")
             .map(|v| v.to_ascii_lowercase())
@@ -99,6 +104,25 @@ impl GpuMode {
         {
             Ok("off") | Ok("0") | Ok("no") | Ok("false") => Self::Off,
             Ok("on") | Ok("1") | Ok("yes") | Ok("true") => Self::On,
+            _ => Self::preferred(),
+        }
+    }
+
+    /// The mode for the solves started from now on in this process, unless `PLXS_GPU`
+    /// says otherwise: the setting "Use graphics card" of the application.
+    pub fn set_preferred(mode: GpuMode) {
+        let value = match mode {
+            Self::Automatic => 0,
+            Self::Off => 1,
+            Self::On => 2,
+        };
+        PREFERRED.store(value, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn preferred() -> Self {
+        match PREFERRED.load(std::sync::atomic::Ordering::Relaxed) {
+            1 => Self::Off,
+            2 => Self::On,
             _ => Self::Automatic,
         }
     }
