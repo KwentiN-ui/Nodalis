@@ -70,7 +70,7 @@ pub fn panel(ui: &mut Ui, empty: Option<Content<'_>>) -> bool {
             ctx.data_mut(|d| d.insert_temp(key, (pass, inner, true)));
             return false;
         };
-        egui::Area::new(crate::ids::window(&ctx, "properties panel overlay"))
+        let layer = egui::Area::new(crate::ids::window(&ctx, "properties panel overlay"))
             .fixed_pos(outer.min)
             .order(egui::Order::Middle)
             .constrain(false)
@@ -82,7 +82,10 @@ pub fn panel(ui: &mut Ui, empty: Option<Content<'_>>) -> bool {
                     .auto_shrink(false)
                     .show(&mut child, |ui| add(ui));
                 ui.allocate_rect(outer, egui::Sense::hover());
-            });
+            })
+            .response
+            .layer_id;
+        under_windows(&ctx, layer);
         return closed;
     }
     egui::Panel::right("properties")
@@ -208,7 +211,33 @@ pub fn show<R>(
                 })
                 .inner
         });
+    under_windows(ctx, area.response.layer_id);
     Some(InnerResponse::new(Some(area.inner), area.response))
+}
+
+/// Keeps the panel `layer` under the floating windows, such as the Selection window.
+///
+/// The panel is an area of the same order as the windows, and egui puts an area on top
+/// when it is new or clicked. Then a window over the panel would be drawn under it: with
+/// the panel's text through the window where the panel draws no background of its own.
+/// Every other window is lifted above the panel, in the order they had.
+fn under_windows(ctx: &Context, layer: egui::LayerId) {
+    ctx.memory_mut(|m| {
+        let order: Vec<egui::LayerId> = m.layer_ids().collect();
+        let Some(at) = order.iter().position(|l| *l == layer) else {
+            return;
+        };
+        let window = |l: &egui::LayerId| {
+            l.order == layer.order && *l != layer && m.areas().visible_last_frame(l)
+        };
+        if !order[..at].iter().any(window) {
+            return;
+        }
+        let lift: Vec<egui::LayerId> = order.iter().filter(|l| window(l)).copied().collect();
+        for l in lift {
+            m.areas_mut().move_to_top(l);
+        }
+    });
 }
 
 /// The widest a column of a form gets in `ui`, so that the column of values wraps at the
@@ -298,6 +327,68 @@ mod tests {
         let over = over.expect("lies over the view");
         assert!(over.right() >= 999.0 && over.width() <= WIDTH, "{over:?}");
         assert!(drawn.is_some_and(|r| over.contains(r.min)), "{drawn:?}");
+    }
+
+    #[test]
+    fn windows_stay_over_the_editor() {
+        let ctx = Context::default();
+        let run = |editor: bool, click: Option<egui::Pos2>| {
+            let mut input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1600.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            if let Some(pos) = click {
+                for pressed in [true, false] {
+                    input.events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    });
+                }
+            }
+            let mut layers = (None, None);
+            let mut output = ctx.run_ui(input, |ui| {
+                panel(ui, None);
+                egui::CentralPanel::default().show(ui, |_| {});
+                // A window over the left edge of the panel, as the Selection window.
+                let id = crate::ids::window(ui.ctx(), "test window");
+                let w = egui::Window::new("Selection")
+                    .id(id)
+                    .fixed_pos(egui::pos2(1100.0, 300.0))
+                    .show(ui.ctx(), |ui| ui.label("window"));
+                layers.0 = w.map(|w| w.response.layer_id);
+                if editor {
+                    let mut open = true;
+                    let id = crate::ids::window(ui.ctx(), "test editor");
+                    let window = egui::Window::new("Editor").id(id);
+                    let shown = show(ui.ctx(), window, "Editor", &mut open, |ui| {
+                        ui.label("editor")
+                    });
+                    layers.1 = shown.map(|r| r.response.layer_id);
+                }
+            });
+            output.textures_delta.clear();
+            layers
+        };
+        let below = |(window, editor): (Option<egui::LayerId>, Option<egui::LayerId>)| {
+            let order: Vec<_> = ctx.memory(|m| m.layer_ids().collect());
+            let at = |l| order.iter().position(|o| Some(*o) == l);
+            at(editor) < at(window)
+        };
+        // The window first, then the editor opens: new, it would come on top.
+        run(false, None);
+        run(false, None);
+        run(true, None);
+        let layers = run(true, None);
+        assert!(below(layers), "editor over the window");
+        // A click into the panel does not lift it over the window either.
+        run(true, Some(egui::pos2(1500.0, 100.0)));
+        let layers = run(true, None);
+        assert!(below(layers), "editor over the window after a click");
     }
 
     #[test]
