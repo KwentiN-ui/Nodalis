@@ -244,12 +244,16 @@ impl AnalysisWindow {
             Cmd::SectionView | Cmd::ExplodedView => shown,
             Cmd::SectionOff => w.section.is_some(),
             Cmd::ExplodedOff => w.exploded_applied(),
-            Cmd::ZoomToFit
-            | Cmd::StandardViews
+            // A 2D model is seen from the front and only turns in its plane.
+            Cmd::StandardViews
             | Cmd::View(_)
             | Cmd::AxisView(_)
             | Cmd::IsometricAxis(_)
-            | Cmd::VerticalView
+            | Cmd::VerticalView => !w.viewport.planar(),
+            Cmd::RotateView | Cmd::RotateLeft | Cmd::RotateRight | Cmd::DefaultRotation => {
+                w.viewport.planar()
+            }
+            Cmd::ZoomToFit
             | Cmd::EdgesOnly
             | Cmd::MeshEdges
             | Cmd::ShellThickness
@@ -473,6 +477,9 @@ impl AnalysisWindow {
             Cmd::AxisView(axis) => w.view_command = Some(ViewCommand::AxisView(axis)),
             Cmd::IsometricAxis(axis) => w.view_command = Some(ViewCommand::IsometricAxis(axis)),
             Cmd::VerticalView => w.view_command = Some(ViewCommand::Vertical),
+            Cmd::RotateLeft => w.view_command = Some(ViewCommand::RotateLeft),
+            Cmd::RotateRight => w.view_command = Some(ViewCommand::RotateRight),
+            Cmd::DefaultRotation => w.view_command = Some(ViewCommand::DefaultRotation),
             Cmd::EdgesOnly => w.viewport.options.mesh_edges = false,
             Cmd::MeshEdges => w.viewport.options.mesh_edges = true,
             Cmd::ShellThickness => {
@@ -539,7 +546,13 @@ impl crate::ribbon::Host for RibbonHost<'_> {
     }
 
     fn visible(&self, cmd: Cmd) -> bool {
-        self.0.workbench.results_command_visible(cmd)
+        // The view of a 2D model turns in its plane instead of looking from the sides.
+        let planar = self.0.workbench.viewport.planar();
+        match cmd {
+            Cmd::StandardViews | Cmd::VerticalView => !planar,
+            Cmd::RotateView => planar,
+            _ => self.0.workbench.results_command_visible(cmd),
+        }
     }
 
     fn title(&self, cmd: Cmd) -> Option<&'static str> {

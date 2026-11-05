@@ -143,13 +143,15 @@ pub fn project(camera: &Camera, rect: Rect, point: Vec3) -> Pos2 {
     )
 }
 
-/// Draws the annotations; returns what was clicked in them.
+/// Draws the annotations; returns what was clicked in them. `planar` for the view of a 2D
+/// model, whose corner triad only shows the axes.
 pub fn draw(
     ui: &Ui,
     rect: Rect,
     camera: &Camera,
     overlay: &Overlay,
     offsets: &mut LabelOffsets,
+    planar: bool,
 ) -> OverlayResponse {
     let painter = ui.painter_at(rect);
     let mut clicked = OverlayResponse::default();
@@ -236,7 +238,9 @@ pub fn draw(
         }
         let corner = triad_center(free);
         triad(&painter, camera, corner, TRIAD, true);
-        clicked.axis = triad_buttons(ui, &painter, camera, corner, TRIAD);
+        if !planar {
+            clicked.axis = triad_buttons(ui, &painter, camera, corner, TRIAD);
+        }
     }
     for (marker, offset, id) in [
         (&overlay.minimum, &mut offsets.minimum, "minimum label"),

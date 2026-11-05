@@ -49,6 +49,9 @@ pub struct Viewport {
     /// owner sets it from [`ViewportResponse::pivot`]. Without one the camera turns about
     /// its target.
     pivot: Option<Vec3>,
+    /// The view of a flat 2D model: the camera looks at the x-y plane from +z and only
+    /// pans, zooms and turns in quarter turns about z.
+    planar: bool,
 }
 
 /// Lines and points in render coordinates drawn as the hover preview.
@@ -140,11 +143,24 @@ pub struct ViewportResponse {
     pub pivot: Option<Click>,
 }
 
-/// The view entries of the 3D view's context menu.
-pub fn view_menu(ui: &mut Ui) -> Option<ViewCommand> {
+/// The view entries of the 3D view's context menu; `planar` for the view of a 2D model,
+/// which only turns in the x-y plane.
+pub fn view_menu(ui: &mut Ui, planar: bool) -> Option<ViewCommand> {
     let mut command = None;
     if ui.button("Zoom to Fit").clicked() {
         command = Some(ViewCommand::Fit);
+    }
+    if planar {
+        for (entry, label) in [
+            (ViewCommand::RotateLeft, "Rotate Left"),
+            (ViewCommand::RotateRight, "Rotate Right"),
+            (ViewCommand::DefaultRotation, "Default Rotation"),
+        ] {
+            if ui.button(label).clicked() {
+                command = Some(entry);
+            }
+        }
+        return command;
     }
     if ui.button("Vertical View").clicked() {
         command = Some(ViewCommand::Vertical);
@@ -177,6 +193,12 @@ pub enum ViewCommand {
     AxisView(Axis),
     /// Isometric view with the given global axis up.
     IsometricAxis(Axis),
+    /// The view of a 2D model turned a quarter turn: the model turns counterclockwise.
+    RotateLeft,
+    /// The model turns clockwise.
+    RotateRight,
+    /// The view of a 2D model with y up.
+    DefaultRotation,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -234,6 +256,7 @@ impl Viewport {
             gizmo_state: GizmoState::default(),
             scene_version: 0,
             pivot: None,
+            planar: false,
         }
     }
 
@@ -241,6 +264,19 @@ impl Viewport {
     /// rotates about the target, e.g. when the cursor points into empty space.
     pub fn set_pivot(&mut self, pivot: Option<Vec3>) {
         self.pivot = pivot;
+    }
+
+    /// Makes the view that of a flat 2D model, or a free 3D view again. A 2D view that does
+    /// not look at the x-y plane is turned to the front.
+    pub fn set_planar(&mut self, planar: bool) {
+        self.planar = planar;
+        if planar && !self.camera.looks_at_xy_plane() {
+            self.camera.set_view(StandardView::Front);
+        }
+    }
+
+    pub fn planar(&self) -> bool {
+        self.planar
     }
 
     pub fn camera(&self) -> &Camera {
@@ -312,10 +348,16 @@ impl Viewport {
                     self.camera.fit(min, max);
                 }
             }
+            // A 2D model stays seen from the front.
+            ViewCommand::View(_) | ViewCommand::AxisView(_) | ViewCommand::IsometricAxis(_)
+                if self.planar => {}
             ViewCommand::View(view) => self.camera.set_view(view),
             ViewCommand::Vertical => self.camera.set_vertical_view(),
             ViewCommand::AxisView(axis) => self.camera.set_axis_view(axis.vector()),
             ViewCommand::IsometricAxis(axis) => self.camera.set_isometric_axis(axis.vector()),
+            ViewCommand::RotateLeft => self.camera.rotate_quarter(true),
+            ViewCommand::RotateRight => self.camera.rotate_quarter(false),
+            ViewCommand::DefaultRotation => self.camera.set_view(StandardView::Front),
         }
     }
 
@@ -341,6 +383,7 @@ impl Viewport {
             )
         });
         if middle_pressed
+            && !self.planar
             && response.hovered()
             && let Some(pointer) = ui.input(|i| i.pointer.interact_pos())
         {
@@ -352,10 +395,11 @@ impl Viewport {
         }
         // The mouse: the middle button rotates, with Shift it pans and with Ctrl it zooms;
         // the left button picks and draws selection boxes, the right one opens the context menu.
+        // The view of a 2D model does not rotate: the middle button pans.
         if response.dragged_by(PointerButton::Middle) {
             if ctrl {
                 self.camera.zoom((delta.y * ZOOM_PER_DRAG_POINT).exp());
-            } else if modifiers.shift {
+            } else if modifiers.shift || self.planar {
                 self.camera
                     .pan(delta.x, delta.y, rect.width(), rect.height());
             } else if let Some(pivot) = self.pivot {
@@ -428,7 +472,8 @@ impl Viewport {
                 dragged_box = None;
             }
         }
-        let orbiting = response.dragged_by(PointerButton::Middle) && !ctrl && !modifiers.shift;
+        let orbiting =
+            response.dragged_by(PointerButton::Middle) && !ctrl && !modifiers.shift && !self.planar;
         result.hover = self.hover(ui, rect, &response);
         result.response = Some(response);
 
@@ -459,7 +504,14 @@ impl Viewport {
             Color32::WHITE,
         );
         crate::symbols::draw(&painter, rect, &self.camera, &self.symbols);
-        let clicked = overlay::draw(ui, rect, &self.camera, &self.overlay, &mut self.labels);
+        let clicked = overlay::draw(
+            ui,
+            rect,
+            &self.camera,
+            &self.overlay,
+            &mut self.labels,
+            self.planar,
+        );
         if let Some(axis) = clicked.axis {
             self.camera.set_axis_view(axis);
             ui.ctx().request_repaint();

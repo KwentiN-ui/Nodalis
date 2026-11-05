@@ -22,6 +22,15 @@ pub enum Icon {
     Fit,
     /// Standard view; the cube face looked at is highlighted.
     View(ViewIcon),
+    /// View down an axis: the face looked at straight on, with the letter of the axis.
+    AxisView(crate::viewport::Axis),
+    /// Isometric view with an axis up: a small cube with the letter of the axis above.
+    IsometricAxis(crate::viewport::Axis),
+    /// A quarter turn of the view of a 2D model: an arrow around a block, counterclockwise
+    /// for `true`.
+    Rotate(bool),
+    /// The view of a 2D model with y up: an arrow pointing up with a Y.
+    DefaultRotation,
     /// Vertical view: an arrow standing on the ground line.
     Vertical,
     FeatureEdges,
@@ -215,6 +224,78 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
     // Coordinates on a 16 × 16 grid.
     let p = |x: f32, y: f32| pos2(r.left() + x, r.top() + y);
     match icon {
+        Icon::AxisView(axis) => {
+            polygon(
+                shapes,
+                vec![p(2.5, 2.5), p(13.5, 2.5), p(13.5, 13.5), p(2.5, 13.5)],
+                ACCENT,
+                OUTLINE,
+            );
+            letter(
+                shapes,
+                axis,
+                Rect::from_min_size(p(5.0, 5.0), vec2(6.0, 6.0)),
+                1.6,
+                Color32::WHITE,
+            );
+        }
+        Icon::IsometricAxis(axis) => {
+            let area = Rect::from_min_size(p(-1.5, 3.5), Vec2::splat(13.0));
+            cube_scaled(shapes, area, Some(ViewIcon::Top), false, 0.78);
+            letter(
+                shapes,
+                axis,
+                Rect::from_min_size(p(10.0, 0.5), vec2(5.0, 5.5)),
+                1.4,
+                axis_color(axis),
+            );
+        }
+        Icon::Rotate(left) => {
+            let x = |x: f32| if left { x } else { 16.0 - x };
+            let q = |px: f32, py: f32| p(x(px), py);
+            polygon(
+                shapes,
+                vec![q(5.5, 7.0), q(10.5, 7.0), q(10.5, 11.0), q(5.5, 11.0)],
+                FACE,
+                OUTLINE,
+            );
+            // An arc around the block, counterclockwise on the screen, ending at the top
+            // with its head pointing left.
+            let (c, radius) = ((8.0, 9.0), 5.5);
+            let at = |degrees: f32| {
+                let a = degrees.to_radians();
+                q(c.0 + radius * a.cos(), c.1 - radius * a.sin())
+            };
+            let arc: Vec<Pos2> = (0..=20).map(|i| at(165.0 + 13.75 * i as f32)).collect();
+            line(shapes, &arc, 1.6, ACCENT);
+            // The head goes on along the arc from its end.
+            let end = at(440.0);
+            let along = (at(441.0) - end).normalized();
+            let tip = end + along * 4.0;
+            let side = along.rot90();
+            polygon(
+                shapes,
+                vec![tip, end - side * 2.8, end + side * 2.8],
+                ACCENT,
+                ACCENT,
+            );
+        }
+        Icon::DefaultRotation => {
+            line(shapes, &[p(6.0, 14.5), p(6.0, 5.0)], 2.0, ACCENT);
+            polygon(
+                shapes,
+                vec![p(6.0, 1.0), p(9.5, 6.0), p(2.5, 6.0)],
+                ACCENT,
+                ACCENT,
+            );
+            letter(
+                shapes,
+                crate::viewport::Axis::Y,
+                Rect::from_min_size(p(9.5, 8.0), vec2(5.0, 6.0)),
+                1.4,
+                axis_color(crate::viewport::Axis::Y),
+            );
+        }
         Icon::Vertical => {
             line(shapes, &[p(2.5, 14.0), p(13.5, 14.0)], 1.5, OUTLINE);
             line(shapes, &[p(8.0, 13.0), p(8.0, 5.0)], 2.0, ACCENT);
@@ -1015,9 +1096,51 @@ fn exploded_blocks(shapes: &mut Vec<Shape>, r: Rect) {
     );
 }
 
+/// The colour of an axis, as in the triad of the 3D view.
+fn axis_color(axis: crate::viewport::Axis) -> Color32 {
+    match axis {
+        crate::viewport::Axis::X => Color32::from_rgb(220, 40, 40),
+        crate::viewport::Axis::Y => Color32::from_rgb(20, 160, 20),
+        crate::viewport::Axis::Z => Color32::from_rgb(40, 80, 230),
+    }
+}
+
+/// The letter of an axis drawn with strokes into `r`.
+fn letter(
+    shapes: &mut Vec<Shape>,
+    axis: crate::viewport::Axis,
+    r: Rect,
+    width: f32,
+    color: Color32,
+) {
+    let (a, b, c, d) = (
+        r.left_top(),
+        r.right_top(),
+        r.left_bottom(),
+        r.right_bottom(),
+    );
+    let middle = r.center();
+    match axis {
+        crate::viewport::Axis::X => {
+            line(shapes, &[a, d], width, color);
+            line(shapes, &[b, c], width, color);
+        }
+        crate::viewport::Axis::Y => {
+            line(shapes, &[a, middle, b], width, color);
+            line(shapes, &[middle, pos2(middle.x, r.bottom())], width, color);
+        }
+        crate::viewport::Axis::Z => line(shapes, &[a, b, c, d], width, color),
+    }
+}
+
 fn cube(shapes: &mut Vec<Shape>, r: Rect, view: Option<ViewIcon>, grid: bool) {
+    cube_scaled(shapes, r, view, grid, 1.0);
+}
+
+/// The cube of [`cube`], `scale` times as large.
+fn cube_scaled(shapes: &mut Vec<Shape>, r: Rect, view: Option<ViewIcon>, grid: bool, scale: f32) {
     let c = r.center() + vec2(0.0, 0.5);
-    let s = 6.2;
+    let s = 6.2 * scale;
     let project = |[x, y, z]: [f32; 3]| {
         // Centre the cube on the origin of the icon.
         let (x, y, z) = (x - 0.5, y - 0.5, z - 0.5);

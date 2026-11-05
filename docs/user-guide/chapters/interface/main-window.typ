@@ -36,8 +36,9 @@ ribbon:
     on the #ui("Mesh") tab of the FE Model workspace adds the mesh of input files as mesh
     parts (@mesh-import).],
   [Zoom to Fit, Standard Views, Vertical View], [#ui("View") tab, group #ui("Camera"). The
-    #ui("Standard Views") menu holds front, back, top, bottom, left, right, isometric and the
-    views normal to an axis (@view). #ui("Vertical View") rolls the view so that the axis
+    #ui("Standard Views") buttons hold front, back, top, bottom, left, right, isometric and
+    the views normal to an axis (@view); a 2D model has #ui("Rotate View") instead
+    (@view-2d). #ui("Vertical View") rolls the view so that the axis
     closest to screen-up points straight up.],
   [Edges Only, Mesh Edges], [#ui("View") tab, group #ui("Show"). Show only the feature edges
     of the model, or all element edges. Exactly one of the two is active.],

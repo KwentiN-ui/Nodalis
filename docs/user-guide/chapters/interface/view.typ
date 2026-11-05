@@ -10,7 +10,8 @@
   inset: (x: 5pt, y: 4pt),
   table.header([*Input*], [*Action*]),
   [Middle button drag], [Rotate about the point of the model under the cursor, marked by a
-    red dot while turning; over empty space about the centre of the view],
+    red dot while turning; over empty space about the centre of the view. The view of a 2D
+    model pans instead (@view-2d)],
   [#key("Shift") + middle button drag], [Pan],
   [Mouse wheel], [Zoom about the cursor, with #key("Ctrl") in finer steps],
   [#key("Ctrl") + middle button drag], [Zoom],
@@ -38,7 +39,8 @@ delete the selected tree item, #key("Space") activate or deactivate it. In dialo
 === Floating bar <floating-bar>
 
 At the bottom of the 3D view floats a bar with the view commands needed most:
-#ui("Zoom to Fit"), #ui("Standard Views"), #ui("Vertical View"), #ui("Edges Only"),
+#ui("Zoom to Fit"), #ui("Standard Views") (#ui("Rotate View") for a 2D model),
+#ui("Vertical View"), #ui("Edges Only"),
 #ui("Mesh Edges"), #ui("Section View"), #ui("Exploded View") and #ui("Screenshot"). They are
 the same as on the #ui("View") tab of the ribbon; a pressed tile shows what is on. The bar is
 left out of screenshots.
@@ -52,19 +54,49 @@ left out of screenshots.
 
 The projection is orthographic. Y points up in the front view.
 
-- #ui("Front"), #ui("Back"), #ui("Left"), #ui("Right"), #ui("Top"), #ui("Bottom") and
-  #ui("Isometric") are in #ui("Standard Views") on the #ui("View") tab of the ribbon.
+#ui("Standard Views") on the #ui("View") tab of the ribbon is a block of small buttons, one
+for each view; the tooltip of a button names it. Each cube marks the side you look at.
+
+#screenshot("standard-views.png", [#ui("Standard Views") on the #ui("View") tab of a 3D
+  model])
+
+- The first three columns hold #ui("Front View"), #ui("Top View") and #ui("Right View"), with
+  #ui("Back View"), #ui("Bottom View") and #ui("Left View") below them, and
+  #ui("Isometric View") at the bottom.
+- The fourth column, #ui("View Normal to X/Y/Z"), looks along an axis onto the plane normal to
+  it.
+- The fifth column, #ui("Isometric, X/Y/Z Up"), shows the isometric view with the chosen axis
+  pointing up, for models built with Z up.
 - #ui("Vertical View") rolls the view about the viewing direction so that the global axis
   closest to screen-up points exactly up.
-- #menu("View", "Standard Views", "View Normal to X/Y/Z") looks along an axis onto the plane normal to it.
-- #menu("View", "Standard Views", "Isometric, X/Y/Z Up") shows the isometric view with the chosen axis
-  pointing up, for models built with Z up.
 - The *coordinate triad* in the lower right corner can be clicked: a click on an axis tip (or on
   its grey negative half) looks along that axis.
 
-A 2D model always opens in the front view. The legend sits in the upper left corner, the info
+The legend sits in the upper left corner, the info
 block in the upper right corner, the scale bar above the floating bar. Legend, info block, scale bar and
 min/max labels can be dragged to another position in the view.
+
+=== The view of a 2D model <view-2d>
+
+A 2D model lies in the x-y plane, and its view stays on that plane: the camera always looks
+at the model from the front. The middle mouse button pans instead of rotating, the wheel and
+#key("Ctrl") + middle button zoom as in 3D, and the corner triad only shows the axes.
+
+In place of #ui("Standard Views") and #ui("Vertical View"), the #ui("View") tab and the
+floating bar offer #ui("Rotate View") with three commands, one per row:
+
+- #ui("Rotate Left") turns the model a quarter turn counterclockwise.
+- #ui("Rotate Right") turns it a quarter turn clockwise.
+- #ui("Default Rotation") turns it back so that y points up.
+
+The same three commands are in the context menu of the view.
+
+#screenshot("rotate-view.png", [#ui("Rotate View") of a 2D model after #ui("Rotate Left"):
+  y points to the left])
+
+Results of a 2D model are shown the same way as long as they stay flat. When a
+transformation turns them out of the plane, for example a circular pattern about the y axis of
+an axisymmetric model, the view becomes a 3D view again.
 
 === Showing and hiding parts
 

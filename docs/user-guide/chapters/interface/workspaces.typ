@@ -46,8 +46,8 @@ From left to right the app bar holds:
 
 Below the app bar, the *ribbon* shows the commands of the workspace in tabs. Each tab groups
 its commands, with the name of each group below it. A click on a tile runs its command; a
-tile with a small arrow opens a menu, for example #ui("Standard Views") on the #ui("View")
-tab. #ui("Solve") is split: its icon solves, its label opens #ui("Solve Again") and
+tile with a small arrow opens a menu, for example #ui("Screenshot") on the #ui("View")
+tab. Some tiles are a block of small buttons instead, such as #ui("Standard Views"). #ui("Solve") is split: its icon solves, its label opens #ui("Solve Again") and
 #ui("Campbell Diagram"). Tiles that cannot be used at the moment are greyed out, and the
 tooltip of a tile names its shortcut and what it does.
 
