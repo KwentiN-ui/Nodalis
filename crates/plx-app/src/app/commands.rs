@@ -538,6 +538,10 @@ impl crate::ribbon::Host for RibbonHost<'_> {
         self.0.command_checked(cmd)
     }
 
+    fn visible(&self, cmd: Cmd) -> bool {
+        self.0.workbench.results_command_visible(cmd)
+    }
+
     fn title(&self, cmd: Cmd) -> Option<&'static str> {
         self.0.workbench.results_title(cmd)
     }

@@ -81,9 +81,9 @@ it; the other tiles act at once and show pressed while their option is on.
   [First, Previous, Next, Last], [#ui("First") and #ui("Last") go to the start and end of the
     step; #ui("Previous") and #ui("Next") go on into the step before or after. The arrow keys,
     Home and End do the same.],
-  [Animate], [Starts or stops the animation and opens its window; the menu below it picks the
-    type of animation and has #ui("Sound") for the modes of a frequency step (@animation,
-    @sound).],
+  [Animate], [Starts or stops the animation that fits the shown result and opens its window,
+    where its type can be changed (@animation).],
+  [Sound], [Only for the modes of a frequency step: plays them as tones (@sound).],
 )
 
 === Timeline <results-timeline>

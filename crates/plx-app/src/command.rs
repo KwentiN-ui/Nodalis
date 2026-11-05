@@ -1923,59 +1923,54 @@ fn build() -> Vec<Command> {
             tip,
         ));
     }
-    add(tile(
-        command(
-            C::Animate,
-            "Animate",
-            r,
-            t,
-            STEP_GROUP,
-            Tool(Icon::Animate),
-            "",
-            "Animates the deformation; the menu below plays the increments of the step, of all \
-             steps or the positions of a moving load instead.",
-        ),
-        Tile::Split,
+    add(command(
+        C::Animate,
+        "Animate",
+        r,
+        t,
+        STEP_GROUP,
+        Tool(Icon::Animate),
+        "",
+        "Animates the shown result the way that fits it: a mode shape swings, a moving load \
+         runs through its positions, a step of several increments plays them, a single \
+         increment grows from zero. The animation window switches to another type.",
     ));
     for (cmd, name, tip) in [
         (
             C::AnimateScaleFactor,
-            "Scale Factor",
+            "Animate Scale Factor",
             "Scales the shown result from zero to its full size.",
         ),
         (
             C::AnimateStep,
-            "Step",
+            "Animate Step",
             "Plays the increments of the shown step one after another.",
         ),
         (
             C::AnimateAllSteps,
-            "All Steps",
+            "Animate All Steps",
             "Plays the increments of all steps one after another, as the timeline shows them.",
         ),
         (
             C::AnimatePositions,
-            "Positions",
+            "Animate Positions",
             "Plays the positions of the moving load of the shown step.",
         ),
     ] {
         add(tile(
             command(cmd, name, r, t, STEP_GROUP, TileIcon::None, "", tip),
-            Tile::In(C::Animate),
+            Tile::Hidden,
         ));
     }
-    add(tile(
-        command(
-            C::ModeSound,
-            "Sound",
-            r,
-            t,
-            STEP_GROUP,
-            Tool(Icon::Sound),
-            "",
-            "Plays the mode shapes of a frequency step as sound.",
-        ),
-        Tile::In(C::Animate),
+    add(command(
+        C::ModeSound,
+        "Sound",
+        r,
+        t,
+        STEP_GROUP,
+        Tool(Icon::Sound),
+        "",
+        "Plays the mode shapes of a frequency step as sound; shown only for a frequency step.",
     ));
     add(tile(
         command(
