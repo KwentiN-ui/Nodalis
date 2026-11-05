@@ -276,33 +276,31 @@ fn put_bytes(array: Array<'_>, encoding: Encoding, bytes: &[u8]) -> Result<(), P
     match (array, encoding) {
         (Array::Ids(ids), Encoding::Ids) => {
             let mut previous = 0u32;
-            *ids = (bytes.chunks_exact(4))
-                .map(|b| {
-                    previous = previous.wrapping_add(u32::from_le_bytes(b.try_into().unwrap()));
+            *ids = (bytes.as_chunks::<4>().0.iter())
+                .map(|&b| {
+                    previous = previous.wrapping_add(u32::from_le_bytes(b));
                     previous
                 })
                 .collect();
         }
         (Array::F64(values), Encoding::F64) => {
-            *values = (bytes.chunks_exact(8))
-                .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
+            *values = (bytes.as_chunks::<8>().0.iter())
+                .map(|&b| f64::from_le_bytes(b))
                 .collect();
         }
         (Array::F64x3(rows), Encoding::F64x3) => {
-            *rows = (bytes.chunks_exact(24))
+            *rows = (bytes.as_chunks::<24>().0.iter())
                 .map(|row| {
-                    std::array::from_fn(|k| {
-                        f64::from_le_bytes(row[8 * k..8 * k + 8].try_into().unwrap())
-                    })
+                    let (numbers, _) = row.as_chunks::<8>();
+                    std::array::from_fn(|k| f64::from_le_bytes(numbers[k]))
                 })
                 .collect();
         }
         (Array::F32x3(rows), Encoding::F32x3) => {
-            *rows = (bytes.chunks_exact(12))
+            *rows = (bytes.as_chunks::<12>().0.iter())
                 .map(|row| {
-                    std::array::from_fn(|k| {
-                        f32::from_le_bytes(row[4 * k..4 * k + 4].try_into().unwrap())
-                    })
+                    let (numbers, _) = row.as_chunks::<4>();
+                    std::array::from_fn(|k| f32::from_le_bytes(numbers[k]))
                 })
                 .collect();
         }
