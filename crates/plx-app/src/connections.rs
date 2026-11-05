@@ -399,7 +399,7 @@ fn auto_tolerance(ui: &Ui, model: &Model, parts: &[String]) -> f64 {
         model.mesh.coords().len(),
         model.mesh.elements().len(),
     );
-    let id = egui::Id::new("detection auto tolerance");
+    let id = crate::ids::window(ui.ctx(), "detection auto tolerance");
     let cached: Option<(Vec<bool>, usize, usize, f64)> = ui.data(|d| d.get_temp(id));
     if let Some((s, n, e, value)) = cached
         && (s, n, e) == key
@@ -846,7 +846,7 @@ pub fn validate_region(region: &ContactRegion, sides: &MasterSlave) -> Result<()
 /// The derivation of all contact regions of the model, kept until the model changes.
 fn resolved_contacts(ctx: &egui::Context, model: &Model) -> std::sync::Arc<ResolvedContacts> {
     type Cache = std::sync::Arc<(FeModel, std::sync::Arc<ResolvedContacts>)>;
-    let id = egui::Id::new("contact worksheet resolved");
+    let id = crate::ids::window(ctx, "contact worksheet resolved");
     let cached: Option<Cache> = ctx.data(|d| d.get_temp(id));
     if let Some(cache) = cached
         && cache.0 == model.fe
@@ -863,7 +863,7 @@ fn resolved_contacts(ctx: &egui::Context, model: &Model) -> std::sync::Arc<Resol
 fn contact_checks(ctx: &egui::Context, model: &Model) -> std::sync::Arc<Vec<Option<ContactCheck>>> {
     type Key = (FeModel, usize, usize);
     type Cache = std::sync::Arc<(Key, std::sync::Arc<Vec<Option<ContactCheck>>>)>;
-    let id = egui::Id::new("contact worksheet checks");
+    let id = crate::ids::window(ctx, "contact worksheet checks");
     let key = (
         model.fe.clone(),
         model.mesh.coords().len(),
@@ -1081,7 +1081,7 @@ pub fn worksheet(
     let solved = results.map(|r| solved_contacts(&model.fe, &model.mesh, &resolved, r));
     let units = model.fe.properties.units;
     let mut change = None;
-    let mu_id = egui::Id::new("contact worksheet mu");
+    let mu_id = crate::ids::window(ctx, "contact worksheet mu");
     let mut mu: f64 = ctx.data(|d| d.get_temp(mu_id)).unwrap_or(0.15);
     let mut close = false;
     egui::Window::new("Contact Worksheet")

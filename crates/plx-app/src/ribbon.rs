@@ -1026,6 +1026,9 @@ pub struct Bar {
     pub workspace: Workspace,
     /// The analyses of the project for the analysis combo; empty in an analysis window.
     pub analyses: Vec<(u64, String)>,
+    /// Those of `analyses` open in a window of their own: they are shown and steered there,
+    /// so the combo lists them greyed out.
+    pub own_windows: Vec<u64>,
     /// The analysis Geometry, FE Model and Results act on.
     pub active: Option<u64>,
     pub active_name: String,
@@ -1109,8 +1112,11 @@ pub fn app_bar(ui: &mut Ui, bar: &Bar, menus: &mut dyn FnMut(&mut Ui)) -> Vec<Ba
                     Workspace::FeModel => "Set up the model of the analysis and solve it",
                     _ => "Look at the results of the analysis",
                 }
-            } else {
+            } else if bar.analyses.is_empty() {
                 "Create an analysis in the project"
+            } else {
+                "Every analysis is open in a window of its own: work on it there, or close \
+                 that window to show it here"
             };
             if segment(
                 ui,
@@ -1129,15 +1135,28 @@ pub fn app_bar(ui: &mut Ui, bar: &Bar, menus: &mut dyn FnMut(&mut Ui)) -> Vec<Ba
             ui.add_space(6.0);
             let text = if bar.active.is_some() {
                 bar.active_name.clone()
-            } else {
+            } else if bar.analyses.is_empty() {
                 "(no analysis)".to_string()
+            } else {
+                "(all in own windows)".to_string()
             };
             egui::ComboBox::from_id_salt("active analysis")
                 .selected_text(text)
                 .width(130.0)
                 .show_ui(ui, |ui| {
                     for (id, name) in &bar.analyses {
-                        if ui.selectable_label(bar.active == Some(*id), name).clicked() {
+                        if bar.own_windows.contains(id) {
+                            // Shown in its own window: picked here, this window would steer
+                            // that one's view.
+                            ui.add_enabled(
+                                false,
+                                egui::Button::selectable(false, format!("{name} (own window)")),
+                            )
+                            .on_disabled_hover_text(
+                                "Open in a window of its own: work on it there, or close that \
+                                 window to show it here",
+                            );
+                        } else if ui.selectable_label(bar.active == Some(*id), name).clicked() {
                             events.push(BarEvent::Analysis(*id));
                         }
                     }

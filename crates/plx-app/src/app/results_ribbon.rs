@@ -649,7 +649,7 @@ fn increment_panel(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
                             }
                             // The shown entry scrolls into view once, when the list opens or
                             // another entry is shown.
-                            let seen = egui::Id::new("increment panel shown entry");
+                            let seen = crate::ids::window(ui.ctx(), "increment panel shown entry");
                             if selected
                                 && std::mem::take(&mut first)
                                 && ui.data(|d| d.get_temp::<usize>(seen)) != Some(index)

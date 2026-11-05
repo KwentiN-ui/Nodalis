@@ -1214,6 +1214,7 @@ impl AnalysisWindow {
             project: false,
             workspace: self.workspace(),
             analyses: Vec::new(),
+            own_windows: Vec::new(),
             active: None,
             active_name: self.workbench.analysis_name.clone(),
             title: self.workbench.analysis_name.clone(),
