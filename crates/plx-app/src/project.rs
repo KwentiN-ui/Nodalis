@@ -2016,6 +2016,7 @@ impl ProjectApp {
             .unwrap_or_default();
         settings.upgrade();
         settings.solver.apply_gpu();
+        crate::results::set_significant_digits(settings.post.digits);
         crate::style::set_theme(&cc.egui_ctx, settings.graphics.theme);
         plx_mesher::set_library_path(settings.gmsh.library());
         let mut app = Self {

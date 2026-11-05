@@ -6139,6 +6139,7 @@ impl Workbench {
                 .push("The changed Gmsh library is loaded after a restart".into());
         }
         new.solver.apply_gpu();
+        crate::results::set_significant_digits(new.post.digits);
         if new.graphics.theme != self.settings.graphics.theme {
             crate::style::set_theme(ctx, new.graphics.theme);
         }

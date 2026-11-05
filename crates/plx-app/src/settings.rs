@@ -111,6 +111,8 @@ pub struct PostProcessing {
     pub undeformed_outline: bool,
     /// Colour bands of the legend for newly opened results.
     pub levels: u32,
+    /// Significant digits of result values in legend, labels, query and tables.
+    pub digits: u32,
     /// FFmpeg for exporting animations as MP4 or MKV; empty for `ffmpeg` on the `PATH`.
     pub ffmpeg: String,
 }
@@ -123,6 +125,7 @@ impl Default for PostProcessing {
             status_block: true,
             undeformed_outline: true,
             levels: plx_render::contour::DEFAULT_LEVELS,
+            digits: 4,
             ffmpeg: String::new(),
         }
     }
@@ -529,6 +532,14 @@ impl SettingsWindow {
                         numeric::drag_value(&mut p.levels)
                             .range(2..=plx_render::contour::MAX_LEVELS),
                     );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Significant digits of result values");
+                    ui.add(numeric::drag_value(&mut p.digits).range(crate::results::DIGITS_RANGE))
+                        .on_hover_text(
+                            "Digits shown in the legend, labels, Query, tables and plots. \
+                         The stored values are not rounded.",
+                        );
                 });
                 ui.horizontal(|ui| {
                     ui.label("FFmpeg executable");

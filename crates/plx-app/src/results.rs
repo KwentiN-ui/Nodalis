@@ -1632,13 +1632,30 @@ pub(crate) fn round_significant(value: f64, digits: i32) -> f64 {
     (value * magnitude).round() / magnitude
 }
 
-/// Number with four significant digits, the "G4" format.
+/// Significant digits of result values (setting "Significant digits", default 4 = "G4").
+static SIGNIFICANT_DIGITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(4);
+
+/// Range of the significant-digits setting (values are `f32`, so about 7 are meaningful).
+pub const DIGITS_RANGE: std::ops::RangeInclusive<u32> = 2..=7;
+
+/// Sets the significant digits used by [`format_value`] (clamped to [`DIGITS_RANGE`]).
+pub fn set_significant_digits(digits: u32) {
+    let digits = digits.clamp(*DIGITS_RANGE.start(), *DIGITS_RANGE.end());
+    SIGNIFICANT_DIGITS.store(digits, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Number with the configured significant digits (four by default, the "G4" format).
 pub fn format_value(value: f32) -> String {
+    let digits = SIGNIFICANT_DIGITS.load(std::sync::atomic::Ordering::Relaxed) as i32;
+    format_significant(value, digits)
+}
+
+fn format_significant(value: f32, digits: i32) -> String {
     let abs = value.abs();
     if value == 0.0 {
         "0".into()
-    } else if (1e-3..1e4).contains(&abs) {
-        let decimals = (3 - abs.log10().floor() as i32).max(0) as usize;
+    } else if (1e-3..10f32.powi(digits)).contains(&abs) {
+        let decimals = (digits - 1 - abs.log10().floor() as i32).max(0) as usize;
         let text = format!("{value:.decimals$}");
         if text.contains('.') {
             text.trim_end_matches('0').trim_end_matches('.').to_string()
@@ -1646,7 +1663,8 @@ pub fn format_value(value: f32) -> String {
             text
         }
     } else {
-        format!("{value:.3E}")
+        let decimals = (digits - 1) as usize;
+        format!("{value:.decimals$E}")
     }
 }
 
@@ -2181,5 +2199,9 @@ mod tests {
         assert_eq!(format_value(-2.0), "-2");
         assert_eq!(format_value(123456.0), "1.235E5");
         assert_eq!(format_legend_value(1.5), "+1.5");
+        assert_eq!(format_significant(123.456, 6), "123.456");
+        assert_eq!(format_significant(123.456, 2), "1.2E2");
+        assert_eq!(format_significant(123456.0, 6), "123456");
+        assert_eq!(format_significant(1234567.0, 5), "1.2346E6");
     }
 }

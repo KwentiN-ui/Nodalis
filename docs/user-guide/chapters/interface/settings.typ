@@ -31,6 +31,8 @@ tab, see @shell-section, @beam-profiles and @links. Those toggles are stored wit
 
 === Post-processing
 
+#screenshot("settings-post-processing.png", [The post-processing page of the settings])
+
 #fields(
   [Show label at maximum / minimum], [Labels at the node with the largest / smallest value
     (default: maximum on, minimum off).],
@@ -39,6 +41,8 @@ tab, see @shell-section, @beam-profiles and @links. Those toggles are stored wit
     results.],
   [Color levels], [Number of colour bands of the legend for newly opened results (2 to 24,
     default 9).],
+  [Significant digits of result values], [Digits shown for result values in the legend,
+    labels, Query, tables and plots (2 to 7, default 4). Stored values are never rounded.],
   [FFmpeg executable], [FFmpeg for exporting animations as MP4 or MKV (@animation-export);
     empty for `ffmpeg` on the `PATH`.],
 )
