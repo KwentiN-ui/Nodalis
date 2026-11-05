@@ -45,7 +45,7 @@ pub use constraints::{Constraints, Equation, RigidBody, Submodel, Tie, Transform
 pub use contact::{Contact, ContactPair, SurfaceBehavior, SurfaceInteraction};
 pub use diagnostic::{Diagnostic, DiagnosticCode, ItemRef, Severity};
 pub use element::{Element, ElementFamily, ElementType};
-pub use error::{Error, Result};
+pub use error::{Convergence, Divergence, Error, Failure, Result, Stop};
 pub use material::Material;
 pub use mesh::{ElementId, NodeId, Nodes, Sets, Surface, SurfaceFace};
 pub use model::{Analysis, InitialConditions, Model, PhysicalConstants};

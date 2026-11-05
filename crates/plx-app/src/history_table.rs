@@ -4,6 +4,9 @@
 //! Columns are selected by their header (Ctrl adds one, Shift
 //! a range) and cells by dragging; Ctrl+P or the context menu's Plot draws the selection,
 //! the first selected column over the x axis and every other one as a curve.
+//!
+//! The arrow at the right of a header sorts the rows by that column (again: the other way
+//! round). Selection, Copy and Plot work on the rows in the order shown.
 
 use egui::{Color32, Modifiers, Rect, Sense, Stroke, pos2, vec2};
 use plx_results::history_output::{HistoryComponent, HistorySet};
@@ -19,6 +22,15 @@ const FIXED_WIDTHS: [f32; FIXED_COLUMNS] = [150.0, 72.0, 96.0];
 const COLUMN_WIDTH: f32 = 100.0;
 const ROW_HEIGHT: f32 = 20.0;
 const HEADER_HEIGHT: f32 = 22.0;
+/// Width of the sort arrow at the right of a header.
+const SORT_WIDTH: f32 = 14.0;
+
+/// The column the rows are sorted by.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sort {
+    pub column: usize,
+    pub descending: bool,
+}
 
 /// Cells chosen in the table: columns in the order they were chosen, and the rows.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -98,6 +110,12 @@ pub struct HistoryTable {
     pub field: usize,
     pub component: usize,
     pub selection: Selection,
+    /// `None` keeps the rows in the order of the file.
+    pub sort: Option<Sort>,
+    /// The press started on a sort arrow, so dragging does not select.
+    sort_press: bool,
+    /// The column of the last right click, for the context menu's sort entries.
+    menu_column: Option<usize>,
     /// Keyboard shortcuts go to the table after a click into it, until a click elsewhere.
     active: bool,
     /// Why the selection could not be plotted.
@@ -239,6 +257,9 @@ impl HistoryTable {
             field,
             component,
             selection: Selection::default(),
+            sort: None,
+            sort_press: false,
+            menu_column: None,
             active: false,
             message: None,
         }
@@ -261,6 +282,46 @@ impl HistoryTable {
         })
     }
 
+    /// Sorts by a column, ascending first and the other way round when it already is.
+    pub fn toggle_sort(&mut self, column: usize) {
+        let descending = self
+            .sort
+            .is_some_and(|s| s.column == column && !s.descending);
+        self.set_sort(Some(Sort { column, descending }));
+    }
+
+    /// The selected rows are the shown ones, so a new order clears a row selection.
+    fn set_sort(&mut self, sort: Option<Sort>) {
+        if self.sort != sort {
+            self.sort = sort;
+            if self.selection.rows.is_some() {
+                self.selection.rows = None;
+            }
+        }
+    }
+
+    /// The rows of the table in the order shown: the indices in the file.
+    fn order(&self, table: &Columns) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..table.rows()).collect();
+        if let Some(sort) = self.sort.filter(|s| s.column < table.count()) {
+            let values: Vec<f64> = (0..table.rows())
+                .map(|r| table.value(r, sort.column))
+                .collect();
+            // Stable, so equal values keep their order; empty cells go last either way.
+            order.sort_by(|&a, &b| {
+                let (a, b) = (values[a], values[b]);
+                match (a.is_nan(), b.is_nan()) {
+                    (true, true) => std::cmp::Ordering::Equal,
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (false, true) => std::cmp::Ordering::Less,
+                    _ if sort.descending => b.total_cmp(&a),
+                    _ => a.total_cmp(&b),
+                }
+            });
+        }
+        order
+    }
+
     /// The table as tab separated text, e.g. for a spreadsheet: the selected cells, or all
     /// when nothing is selected.
     pub fn text(&self, sets: &[HistorySet], kind: AnalysisKind, places: Places) -> String {
@@ -274,13 +335,14 @@ impl HistoryTable {
             columns.sort_unstable();
             columns
         };
+        let order = self.order(&table);
         let (first, last) = (self.selection.rows).unwrap_or((0, table.rows().saturating_sub(1)));
         let mut lines = vec![
             (columns.iter().map(|&c| table.title(c)))
                 .collect::<Vec<_>>()
                 .join("\t"),
         ];
-        for row in (first..=last).filter(|&r| r < table.rows()) {
+        for &row in (first..=last).filter_map(|r| order.get(r)) {
             let values: Vec<String> = (columns.iter())
                 .map(|&c| {
                     let value = table.value(row, c);
@@ -310,14 +372,15 @@ impl HistoryTable {
                         the first one selected becomes the x axis."
                 .into());
         }
+        let order = self.order(&table);
         let rows = match self.selection.rows {
-            Some((first, last)) => first..last.min(table.rows().saturating_sub(1)) + 1,
-            None => 0..table.rows(),
+            Some((first, last)) => &order[first.min(order.len())..(last + 1).min(order.len())],
+            None => &order[..],
         };
-        let x = rows.clone().map(|r| table.value(r, columns[0])).collect();
+        let x = rows.iter().map(|&r| table.value(r, columns[0])).collect();
         let curves = (columns[1..].iter())
             .map(|&c| {
-                let values = rows.clone().map(|r| table.value(r, c)).collect();
+                let values = rows.iter().map(|&r| table.value(r, c)).collect();
                 (table.title(c).to_string(), values)
             })
             .collect();
@@ -333,7 +396,7 @@ impl HistoryTable {
             y_max: None,
             ..Default::default()
         };
-        let row_data: Vec<(u32, u32, f64)> = rows.map(|r| table.set.rows[r]).collect();
+        let row_data: Vec<(u32, u32, f64)> = rows.iter().map(|&r| table.set.rows[r]).collect();
         // The increment of the results each row shows.
         data.increments = (row_data.iter())
             .map(|&(step, increment, _)| {
@@ -428,8 +491,9 @@ impl HistoryTable {
                 });
                 ui.weak(
                     "Select columns via the header (Ctrl: more, Shift: range), cells by \
-                     dragging. Ctrl+P plots the selection, the first column selected \
-                     becomes the x axis.",
+                     dragging. The arrow in a header sorts the rows. Ctrl+P plots the \
+                     selection in the order shown, the first column selected becomes the x \
+                     axis.",
                 );
                 if let Some(message) = &self.message {
                     ui.colored_label(crate::style::error(), message);
@@ -497,6 +561,7 @@ impl HistoryTable {
         places: Places,
     ) -> Option<TableAction> {
         let mut action = None;
+        let order = self.order(table);
         let total = vec2(
             table.left(table.count()),
             HEADER_HEIGHT + table.rows() as f32 * ROW_HEIGHT,
@@ -518,18 +583,38 @@ impl HistoryTable {
                         (column, Some(row.min(table.rows().saturating_sub(1))))
                     }
                 };
+                // The sort arrow at the right of a header.
+                let on_arrow = |p: egui::Pos2| {
+                    let (column, row) = cell_at(p);
+                    let right = origin.x + table.left(column) + table.width(column);
+                    (row.is_none() && p.x >= right - SORT_WIDTH).then_some(column)
+                };
+                let hover = ui
+                    .input(|i| i.pointer.hover_pos())
+                    .filter(|_| response.hovered());
+                let hover_arrow = hover.and_then(on_arrow);
+                if hover_arrow.is_some() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
                 let pressed = ui.input(|i| i.pointer.primary_pressed());
                 if pressed
                     && response.hovered()
                     && let Some(p) = ui.input(|i| i.pointer.interact_pos())
                 {
-                    let (column, row) = cell_at(p);
-                    let modifiers = ui.input(|i| i.modifiers);
-                    self.selection.press(column, row, modifiers);
+                    if let Some(column) = on_arrow(p) {
+                        self.toggle_sort(column);
+                        self.sort_press = true;
+                    } else {
+                        let (column, row) = cell_at(p);
+                        let modifiers = ui.input(|i| i.modifiers);
+                        self.selection.press(column, row, modifiers);
+                        self.sort_press = false;
+                    }
                     self.active = true;
                     self.message = None;
                 }
                 if response.dragged_by(egui::PointerButton::Primary)
+                    && !self.sort_press
                     && !ui.input(|i| i.modifiers.command)
                     && let Some(p) = response.interact_pointer_pos()
                 {
@@ -541,6 +626,7 @@ impl HistoryTable {
                 {
                     // A right click on a cell outside the selection selects it.
                     let (column, row) = cell_at(p);
+                    self.menu_column = Some(column);
                     let inside = match row {
                         Some(r) => self.selection.contains(column, r),
                         None => self.selection.columns.contains(&column),
@@ -567,13 +653,43 @@ impl HistoryTable {
                         self.selection.clear();
                         ui.close();
                     }
+                    if let Some(column) = self.menu_column {
+                        ui.separator();
+                        for (label, descending) in
+                            [("Sort Ascending", false), ("Sort Descending", true)]
+                        {
+                            let sort = Some(Sort { column, descending });
+                            if ui
+                                .add_enabled(self.sort != sort, egui::Button::new(label))
+                                .clicked()
+                            {
+                                self.set_sort(sort);
+                                ui.close();
+                            }
+                        }
+                        if ui
+                            .add_enabled(self.sort.is_some(), egui::Button::new("Original Order"))
+                            .clicked()
+                        {
+                            self.set_sort(None);
+                            ui.close();
+                        }
+                    }
                 });
-                self.paint(&painter, table, origin, viewport);
+                self.paint(&painter, table, &order, origin, viewport, hover_arrow);
             });
         action
     }
 
-    fn paint(&self, painter: &egui::Painter, table: &Columns, origin: egui::Pos2, view: Rect) {
+    fn paint(
+        &self,
+        painter: &egui::Painter,
+        table: &Columns,
+        order: &[usize],
+        origin: egui::Pos2,
+        view: Rect,
+        hover_arrow: Option<usize>,
+    ) {
         let font = egui::FontId::proportional(13.0);
         let text = crate::style::plot_text();
         let line = Stroke::new(1.0, crate::style::adapt(Color32::from_gray(215)));
@@ -583,7 +699,7 @@ impl HistoryTable {
         let top_row = ((view.min.y - HEADER_HEIGHT).max(0.0) / ROW_HEIGHT) as usize;
         let bottom_row =
             (((view.max.y - HEADER_HEIGHT).max(0.0) / ROW_HEIGHT) as usize + 1).min(table.rows());
-        for row in top_row..bottom_row {
+        for (row, &data_row) in order.iter().enumerate().take(bottom_row).skip(top_row) {
             let y = origin.y + HEADER_HEIGHT + row as f32 * ROW_HEIGHT;
             if row % 2 == 1 {
                 let band = Rect::from_min_size(
@@ -612,12 +728,14 @@ impl HistoryTable {
                         egui::Align2::RIGHT_CENTER,
                     )
                 };
-                painter.text(at, align, table.text(row, column), font.clone(), text);
+                painter.text(at, align, table.text(data_row, column), font.clone(), text);
                 painter.vline(cell.right(), cell.y_range(), line);
             }
             // The rows of a step are grouped: a darker line where the next step begins.
+            // Only in the order of the file: sorted rows mix the steps.
             let rows = &table.set.rows;
-            let step_ends = (rows.get(row + 1)).is_some_and(|next| next.0 != rows[row].0);
+            let step_ends = self.sort.is_none()
+                && (order.get(row + 1)).is_some_and(|&next| rows[next].0 != rows[data_row].0);
             let below = if step_ends {
                 Stroke::new(1.5, crate::style::adapt(Color32::from_gray(120)))
             } else {
@@ -654,13 +772,30 @@ impl HistoryTable {
             if x_column == Some(column) && self.selection.columns.len() > 1 {
                 title.push_str(" (X)");
             }
+            let sorted = self.sort.filter(|s| s.column == column);
+            let arrow_shown = sorted.is_some() || hover_arrow == Some(column);
+            // Room for the arrow on the right while it is shown.
+            let text_rect = if arrow_shown {
+                Rect::from_min_max(cell.min, pos2(cell.right() - SORT_WIDTH + 2.0, cell.max.y))
+            } else {
+                cell
+            };
             painter.text(
-                cell.center(),
+                text_rect.center(),
                 egui::Align2::CENTER_CENTER,
                 title,
                 egui::FontId::proportional(13.0),
                 crate::style::text(),
             );
+            if arrow_shown {
+                let color = if sorted.is_some() {
+                    crate::style::text()
+                } else {
+                    crate::style::text().gamma_multiply(0.45)
+                };
+                let descending = sorted.is_some_and(|s| s.descending);
+                sort_arrow(painter, cell, descending, color);
+            }
             painter.vline(
                 cell.right(),
                 cell.y_range(),
@@ -673,6 +808,19 @@ impl HistoryTable {
             Stroke::new(1.0, crate::style::adapt(Color32::from_gray(160))),
         );
     }
+}
+
+/// A small triangle at the right of a header: up when ascending, down when descending.
+fn sort_arrow(painter: &egui::Painter, cell: Rect, descending: bool, color: Color32) {
+    let center = pos2(cell.right() - SORT_WIDTH / 2.0, cell.center().y);
+    let (w, h) = (4.0, 3.0);
+    let (tip, base) = if descending { (h, -h) } else { (-h, h) };
+    let points = vec![
+        pos2(center.x, center.y + tip),
+        pos2(center.x - w, center.y + base),
+        pos2(center.x + w, center.y + base),
+    ];
+    painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
 }
 
 #[cfg(test)]
@@ -763,6 +911,66 @@ mod tests {
         assert_eq!(table.selection.columns, [3, 2]);
         table.selection.press(3, None, Modifiers::COMMAND);
         assert_eq!(table.selection.columns, [2]);
+    }
+
+    #[test]
+    fn sorting_a_column_orders_the_plot_and_the_copied_text() {
+        let sets = sets();
+        let mut table = HistoryTable::new(0, 0, 0);
+        // Node 62 ascending: -1, -0.5, and the empty cell last.
+        table.toggle_sort(4);
+        assert_eq!(
+            table.sort,
+            Some(Sort {
+                column: 4,
+                descending: false
+            })
+        );
+        table.selection.press(4, None, Modifiers::NONE);
+        table.selection.press(2, None, Modifiers::COMMAND);
+        let data = table
+            .plot(&sets, AnalysisKind::Static, no_places())
+            .unwrap();
+        assert_eq!(data.x[..2], [-1.0, -0.5]);
+        assert!(data.x[2].is_nan());
+        assert_eq!(data.curves[0].1, [0.5, 0.25, 1.0]);
+        // A second click sorts the other way round; empty cells stay last.
+        table.toggle_sort(4);
+        assert_eq!(
+            table.sort,
+            Some(Sort {
+                column: 4,
+                descending: true
+            })
+        );
+        let data = table
+            .plot(&sets, AnalysisKind::Static, no_places())
+            .unwrap();
+        assert_eq!(data.curves[0].1, [0.25, 0.5, 1.0]);
+        // Node 41 descending via two clicks; rows chosen by dragging are the shown ones.
+        table.toggle_sort(3);
+        table.toggle_sort(3);
+        table.selection.press(3, Some(0), Modifiers::NONE);
+        table.selection.drag_to(2, Some(1));
+        assert_eq!(
+            table.text(&sets, AnalysisKind::Static, no_places()),
+            "Time\t41\n0.25\t-1\n0.5\t-2\n"
+        );
+        let data = table
+            .plot(&sets, AnalysisKind::Static, no_places())
+            .unwrap();
+        assert_eq!(data.x, [-1.0, -2.0]);
+        // A new order clears the chosen rows but keeps the columns.
+        table.toggle_sort(3);
+        assert_eq!(table.selection.rows, None);
+        assert_eq!(table.selection.columns, [3, 2]);
+        assert_eq!(
+            table
+                .plot(&sets, AnalysisKind::Static, no_places())
+                .unwrap()
+                .x,
+            [-4.0, -2.0, -1.0]
+        );
     }
 
     #[test]

@@ -67,8 +67,8 @@ of the run once more. #ui("Solve Again") does not take steps over: it computes e
 
 === Monitor <monitor>
 
-The monitor is the #ui("Analysis") tab of the output pane below the 3D view; it comes to the
-front when a run starts, so the model and its results stay in view while the solver runs.
+The monitor is the #ui("Analysis") tab of the output pane below the 3D view (@output-pane); it
+opens when a run starts, so the model and its results stay in view while the solver runs.
 Its top row has #ui("Kill") to stop the solver, #ui("Results") to open the results once the run is
 finished, the #ui("Filter") field and the status with the running time and the current step,
 increment and iteration; below it is the output of the solver. The #ui("Output") tab goes back to
@@ -177,7 +177,7 @@ file and keeps its results.
 
 Nodalis checks the model continuously while you work. Items with a problem get a warning sign in
 the tree; items with an error and their containers are shown in red. Click the warning sign to see
-what is wrong and how to fix it. The #ui("Problems") tab below the 3D view lists all of them
+what is wrong and how to fix it. The #ui("Problems") tab of the output pane lists all of them
 (@problems).
 
 #screenshot("model-check.png", [Model check: parts without a section])
@@ -199,10 +199,40 @@ nothing uses.
 
 The solver checks the whole model again when a run starts (and with #ui("Check Model")) and
 reports what it finds on the items of the model: elements it cannot compute, missing material
-data, rigid body motion, a step type or feature it does not compute yet. When the solver
-aborts, Nodalis explains the messages it knows in the same way, for example radiation without
-physical constants as "Physical constants missing"; other messages appear as "Solver error"
-with the text of the monitor.
+data, rigid body motion, a step type or feature it does not compute yet.
+
+=== When the solver stops <solver-failures>
+
+When a run with the Nodalis solver stops, the solver tells Nodalis what failed, not only in
+words, and Nodalis explains it like the other problems: in the monitor as "Cause: ...", in the
+#ui("Problems") tab, at the analysis and at the step the run stopped in. Each diagnosis names
+the cause and the remedy:
+
+- *No convergence*: the increments of a nonlinear step did not converge. The detail says why
+  the last attempt was given up (the residual force grew, the iterations ran out or converged
+  too slowly, the solution grew without bound) and why no smaller increment was tried. When
+  the model has contact whose status had already settled, it says so: the load, the material
+  or the supports are then the more likely cause.
+- *Contact does not converge*: the same, while the contact status was still changing in the
+  last iterations (points opening and closing again), with the remedies for contact.
+- *Temperatures do not converge* in a heat transfer step.
+- *More increments needed than allowed*: the step needs more increments than
+  #ui("Max. increments").
+- *Rigid body motion possible* for a singular stiffness matrix, with the model check of the
+  solver that names the parts that move (@solver-model-check).
+- *Stiffness not positive definite*, *Not enough memory*, *Iterative equation solver failed*
+  (each with the equation solver to choose instead), *Eigenvalues not found* and *Undamped
+  resonance*.
+- *Value rejected by the solver*, *Not supported by the solver* and *Solver files not written*
+  for the checks of the solver before it computes, at the item it names.
+
+Only a failure inside the solver itself appears as "Internal solver error"; it is a bug to
+report, not a problem of the model. Runs of input files with another solver are read from their
+output text instead, for example radiation without physical constants as "Physical constants
+missing".
+
+#screenshot("solver-failure-diagnosis.png", [A step that needs more increments than allowed:
+  the diagnosis at the step, the cause in the monitor])
 
 The checks do not stop a run; their errors are listed at the top of the monitor. Missing
 references do stop it, because the input file cannot be written.

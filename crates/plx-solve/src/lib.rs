@@ -538,7 +538,13 @@ impl Run {
                             .cloned()
                             .or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_owned()))
                             .unwrap_or_else(|| "unknown cause".into());
-                        say(format!("*ERROR: the solver failed: {message}"));
+                        let message = format!("*ERROR: the solver failed: {message}");
+                        keep(vec![Diagnostic::new(
+                            plxs_core::DiagnosticCode::Numerical(plxs_core::Failure::Internal),
+                            plxs_core::Severity::Error,
+                            message.clone(),
+                        )]);
+                        say(message);
                         Finished::Error
                     }
                 }
@@ -847,6 +853,50 @@ S
         // What the stopped run computed is discarded.
         assert!(run.solver_results().is_none());
         assert!(run.results().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed increment comes with the kind of failure, typed, and the step it happened in,
+    /// for Nodalis to explain it without reading the message.
+    #[test]
+    fn a_failed_increment_tells_why() {
+        let dir = std::env::temp_dir().join(format!("plx-solve-collapse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Plastic, with one iteration allowed: no increment can converge.
+        let input = CUBE
+            .replace("210000, 0.3\n", "210000, 0.3\n*PLASTIC\n50, 0\n80, 0.1\n")
+            .replace(
+                "*STATIC\n",
+                "*STATIC\n*CONTROLS, PARAMETERS=TIME INCREMENTATION\n4, 8, 9, 1\n",
+            );
+        let mut job = Run::start(1, &dir, "Collapse", &input).unwrap();
+        let status = job.wait();
+        let output = job.new_output();
+        assert!(
+            matches!(status, JobStatus::Failed | JobStatus::FailedWithResults),
+            "{output:#?}"
+        );
+        let found = job.diagnostics().unwrap();
+        let failure = found
+            .iter()
+            .find_map(|d| match d.code {
+                plxs_core::DiagnosticCode::Numerical(f) => Some((f, d.step)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{found:#?}\n{output:#?}"));
+        assert!(
+            matches!(
+                failure,
+                (
+                    plxs_core::Failure::NoConvergence(plxs_core::Convergence {
+                        contact: false,
+                        ..
+                    }),
+                    Some(1)
+                )
+            ),
+            "{failure:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

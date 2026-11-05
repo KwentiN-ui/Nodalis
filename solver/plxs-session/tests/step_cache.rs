@@ -204,3 +204,32 @@ fn another_solver_build_computes_everything() {
     assert!(taken_over(&info).is_none(), "{info:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Sets and amplitudes defined for a later step (the model holds them all) leave the steps
+/// before it taken over.
+#[test]
+fn sets_and_amplitudes_of_a_later_step_keep_the_steps_before_it() {
+    let dir = fresh("named");
+    run(&dir, &[PULL], true);
+    let named = "*NSET, NSET=CORNER\n64\n*AMPLITUDE, NAME=RAMP\n0, 0, 1, 1\n";
+    let sideways = "*STEP, NLGEOM\n*STATIC\n0.5, 1\n*CLOAD, AMPLITUDE=RAMP\nCORNER, 2, 5\n\
+        *NODE FILE\nU\n*END STEP\n";
+    let (cached, info) = run(&dir, &[named, PULL, sideways], true);
+    assert!(
+        taken_over(&info).is_some_and(|l| l.contains("steps 1 to 1")),
+        "{info:?}"
+    );
+    let (full, _) = run(&fresh("named-full"), &[named, PULL, sideways], false);
+    assert_eq!(cached, full);
+    // A changed set that the first step does not use keeps it too, one it uses does not.
+    let (_, info) = run(
+        &dir,
+        &[&named.replace("\n64\n", "\n63\n"), PULL, sideways],
+        true,
+    );
+    assert!(
+        taken_over(&info).is_some_and(|l| l.contains("steps 1 to 1")),
+        "{info:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -89,11 +89,14 @@ impl AnalysisWindow {
     pub fn pill_clicked(&mut self) {
         // With problems the Problems tab, else the monitor of the solver.
         let workbench = &mut self.workbench;
+        // The pane opens also when the tab is the one it last showed.
         if workbench.solver_findings.is_empty() {
             workbench.analysis_tab = true;
+            workbench.analysis_tab_before = false;
             workbench.problems_tab = false;
         } else {
             workbench.problems_tab = true;
+            workbench.problems_tab_before = false;
         }
     }
 
@@ -395,7 +398,15 @@ impl AnalysisWindow {
                     w.cancel_meshing();
                 }
             }
-            Cmd::Monitor => w.analysis_tab = !w.analysis_tab,
+            Cmd::Monitor => {
+                // A hidden output pane opens on the monitor.
+                let hidden = crate::layout::output_folded(ctx);
+                w.analysis_tab = hidden || !w.analysis_tab;
+                if w.analysis_tab {
+                    w.problems_tab = false;
+                }
+                crate::layout::fold_output(ctx, false);
+            }
             Cmd::Campbell => w.requests.push(Request::Campbell),
             Cmd::NodeSet => w.create(NewItem::MeshSet(plx_model::SetKind::Nodes)),
             Cmd::ElementSet => w.create(NewItem::MeshSet(plx_model::SetKind::Elements)),

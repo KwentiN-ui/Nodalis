@@ -100,6 +100,17 @@ separates the rows of one step from the next. Rows of steps that run over time h
 
 #screenshot("history-table-steps.png", [The displacements of two nodes over three static steps])
 
+The small arrow at the right edge of a column header sorts the rows by that column: the first
+click sorts ascending, the next one descending. It appears when the pointer is over it and stays
+on the sorted column. Empty cells go last either way. #ui("Sort Ascending"), #ui("Sort
+Descending") and #ui("Original Order") in the context menu do the same for the column you
+right-clicked. Copy and Plot take the rows in the order shown, so a plot over a sorted column
+draws its curves from the smallest x value to the largest instead of in increment order. A new
+order keeps the selected columns but clears a selection of rows.
+
+#screenshot("history-table-sorted.png", [Rows sorted by the displacement of node 1, and the
+  plot of the time over it])
+
 === Steps in the plot <history-plot-steps>
 
 A plot over the step, increment or time column shows the steps as bands behind the curves, with
