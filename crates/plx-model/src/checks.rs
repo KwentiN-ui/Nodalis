@@ -535,7 +535,7 @@ impl Problem {
                  the analysis runs, but the temperature has no effect."
             }
             Problem::NoStoredModes => {
-                "Modal Dynamics, Steady State Dynamics and Complex Frequency steps work on \
+                "Modal Dynamics and Steady State Dynamics steps work on \
                  the eigenmodes a previous Frequency step with Storage keeps. Without \
                  them the run stops."
             }
@@ -598,9 +598,9 @@ impl Problem {
                  static, frequency and thermal steps ignore it without a message."
             }
             Problem::NoRotation => {
-                "The Coriolis forces of a Complex Frequency step come from the centrifugal \
-                 load of a static step before the Frequency step. Without a rotation the \
-                 complex eigenfrequencies are those of the Frequency step."
+                "The Coriolis forces of a Complex Frequency step come from its rotational \
+                 speed. At standstill the complex eigenfrequencies are the eigenfrequencies \
+                 of the model."
             }
             Problem::ContactIgnored => {
                 "The solver takes contact into account in a Frequency step only as a \
@@ -925,8 +925,7 @@ impl Problem {
             }
             Problem::NoStoredModes => {
                 "Add a Frequency step with \"Store eigenmodes (Storage)\" before it, with \
-                 the same supports (for Complex Frequency as a perturbation step after a \
-                 static step with the centrifugal load)."
+                 the same supports."
             }
             Problem::NoSensitivityBase => {
                 "Put a Static step (strain energy, mass) or a Frequency step with \"Store \
@@ -969,9 +968,7 @@ impl Problem {
                 "Preload the bolt by force or displacement in this step and lock it in the \
                  following steps."
             }
-            Problem::NoRotation => {
-                "Create a Centrifugal load in the static step before the Frequency step."
-            }
+            Problem::NoRotation => "Enter the rotational speed in the Complex Frequency step.",
             Problem::ContactIgnored => {
                 "Tick Perturbation in the Frequency step (after a static step), or join \
                  bonded parts with a Tie constraint instead of a tied contact pair (Connections > Tie)."
@@ -2519,28 +2516,11 @@ impl FeModel {
                     ),
                 ));
             }
-            let before = || self.steps[..s].iter().filter(|s| s.active);
-            let stored = before().rev().find_map(|s| match &s.kind {
-                StepKind::Frequency(f) => Some(f.storage),
-                _ => None,
-            });
-            if stored != Some(true) {
-                findings.push(Finding::new(
-                    ModelItem::Step(s),
-                    Problem::NoStoredModes,
-                    format!("{}: no Frequency step with Storage before it", step.name),
-                ));
-            }
-            let rotating = before().any(|s| {
-                s.kind.supports_loads()
-                    && (s.loads.iter())
-                        .any(|l| l.active && matches!(l.kind, LoadKind::Centrifugal { .. }))
-            });
-            if settings.coriolis && !rotating {
+            if settings.coriolis && settings.speed == 0.0 {
                 findings.push(Finding::new(
                     ModelItem::Step(s),
                     Problem::NoRotation,
-                    format!("{}: no centrifugal load in a step before it", step.name),
+                    format!("{}: rotational speed 0", step.name),
                 ));
             }
         }

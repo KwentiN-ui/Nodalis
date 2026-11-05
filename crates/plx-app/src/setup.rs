@@ -3697,7 +3697,12 @@ impl Editor {
                         return Err("The creep strain tolerance must be positive.".into());
                     }
                 }
-                StepKind::Static(_) | StepKind::ComplexFrequency(_) => {}
+                StepKind::ComplexFrequency(settings) => {
+                    if let Some(problem) = settings.problem() {
+                        return Err(problem);
+                    }
+                }
+                StepKind::Static(_) => {}
             }
         }
         Ok(())
@@ -5291,7 +5296,7 @@ fn step_form(
         StepKind::Dynamic(settings) => dynamic_form(ui, settings, units),
         StepKind::ModalDynamics(settings) => modal_dynamics_form(ui, settings, units),
         StepKind::SteadyStateDynamics(settings) => steady_state_form(ui, settings, units),
-        StepKind::ComplexFrequency(settings) => complex_frequency_form(ui, settings),
+        StepKind::ComplexFrequency(settings) => complex_frequency_form(ui, settings, units),
         StepKind::Buckle(settings) => buckle_form(ui, settings),
         StepKind::HeatTransfer(settings) => heat_transfer_form(ui, settings, units, false),
         StepKind::CoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, true),
@@ -5745,27 +5750,69 @@ fn nodal_diameter_rows(ui: &mut Ui, range: &mut Option<[u32; 2]>, sectors: u32) 
     ui.end_row();
 }
 
-/// Settings of a complex frequency step: the number of modes; the Coriolis
-/// option is CalculiX's, with a hint at what the step builds on. The perturbation flag is the
-/// one of the Frequency step, since the solver requires the same on both steps.
-fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep) {
-    ui.label("");
-    ui.checkbox(
-        &mut settings.coriolis,
-        "Coriolis forces of the rotation (CORIOLIS)",
-    );
+/// Settings of a complex frequency step: the rotation, the stress stiffening by it, the
+/// numbers of modes and the solver. The step is complete on its own; the solver preloads and
+/// computes the eigenmodes in steps of its own.
+fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep, units: UnitSystem) {
+    ui.label("Rotational speed");
+    expose::field(ui, Field::Speed, |ui| {
+        ui.add(numeric::quantity(&mut settings.speed, units, Quantity::RotationalSpeed).speed(1.0))
+    });
     ui.end_row();
-    ui.label("Number of complex frequencies");
+    ui.label("");
+    // The speed in rpm to six digits, which a speed typed in rad/s rarely hits exactly.
+    let rpm = settings.speed * 60.0 / std::f64::consts::TAU;
+    let rpm = if rpm.is_normal() {
+        let scale = 10f64.powi(5 - rpm.abs().log10().floor() as i32);
+        (rpm * scale).round() / scale
+    } else {
+        rpm
+    };
+    ui.weak(format!("= {} rpm", numeric::format_physical(rpm)));
+    ui.end_row();
+    for ((value, label), field) in (settings.point.iter_mut())
+        .zip(["Axis point X", "Axis point Y", "Axis point Z"])
+        .zip(Field::LOCATION)
+    {
+        ui.label(label);
+        expose::field(ui, field, |ui| {
+            ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.1))
+        });
+        ui.end_row();
+    }
+    for ((value, label), field) in (settings.axis.iter_mut())
+        .zip(["Axis direction X", "Axis direction Y", "Axis direction Z"])
+        .zip(Field::AXIS)
+    {
+        ui.label(label);
+        expose::field(ui, field, |ui| {
+            ui.add(numeric::drag_value(value).speed(0.01))
+        });
+        ui.end_row();
+    }
+    ui.label("Stress stiffening");
+    ui.checkbox(&mut settings.stiffening, "Centrifugal prestress")
+        .on_hover_text(
+            "Stress stiffening and spin softening: the eigenmodes of the structure preloaded \
+             by its centrifugal forces. Off, the eigenmodes are those at standstill, as some \
+             other programs compute them by default.",
+        );
+    ui.end_row();
+    ui.label("Coriolis forces");
+    ui.checkbox(&mut settings.coriolis, "Gyroscopic coupling")
+        .on_hover_text("Couples the eigenmodes by the Coriolis forces of the rotation.");
+    ui.end_row();
+    ui.label("Complex frequencies");
     ui.add(numeric::drag_value(&mut settings.num_frequencies).range(1..=10_000));
     ui.end_row();
+    ui.label("Eigenmodes used")
+        .on_hover_text("The eigenmodes the complex modes are combined from.");
+    let least = settings.num_frequencies;
+    ui.add(numeric::drag_value(&mut settings.num_modes).range(least..=10_000));
+    ui.end_row();
+    solver_row(ui, &mut settings.solver);
     ui.label("");
-    ui.weak(
-        "Solved on the modes of the last Frequency step with Storage before this step.\n\
-         The rotation comes from a Centrifugal load in the Static step before that one.\n\
-         Perturbation is taken from that Frequency step: tick \"Perturbation\" there\n\
-         to include the stiffening by the centrifugal preload.\n\
-         Loads have no effect in this step; only the boundary conditions count.",
-    );
+    ui.weak("Rotates the whole model; the materials\nneed a density. Results are the\ncomplex modes only.");
     ui.end_row();
 }
 

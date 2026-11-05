@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use egui::{Color32, Ui};
 pub use plx_model::campbell::{Mode, Setup, SpeedPoint, Whirl};
-use plx_model::{FeModel, LoadKind, StepKind};
+use plx_model::{FeModel, StepKind};
 use plx_solve::JobStatus;
 use plx_solve::Run;
 
@@ -69,45 +69,52 @@ pub fn order_values(orders: &str) -> Vec<f64> {
     orders
 }
 
-/// The rotational speed of the model: the fastest active centrifugal load of an active step,
-/// `None` when nothing rotates.
+/// The rotational speed of the model: that of its fastest active complex frequency step,
+/// `None` without one.
 pub fn rotor_speed(fe: &FeModel) -> Option<f64> {
-    (fe.steps
-        .iter()
-        .filter(|s| s.active && s.kind.supports_loads()))
-    .flat_map(|s| &s.loads)
-    .filter(|l| l.active)
-    .filter_map(|l| match l.kind {
-        LoadKind::Centrifugal { speed, .. } => Some(speed.abs()),
-        _ => None,
-    })
-    .reduce(f64::max)
+    (fe.steps.iter().filter(|s| s.active))
+        .filter_map(|s| match &s.kind {
+            StepKind::ComplexFrequency(c) => Some(c.speed.abs()),
+            _ => None,
+        })
+        .reduce(f64::max)
 }
 
-/// Number (from 1, among the active steps as CalculiX counts them) of the last active complex
-/// frequency step.
-pub fn complex_step(fe: &FeModel) -> Option<u32> {
-    (fe.steps.iter().filter(|s| s.active).enumerate())
-        .filter(|(_, s)| matches!(s.kind, StepKind::ComplexFrequency(_)))
-        .map(|(i, _)| i as u32 + 1)
-        .last()
+/// Index in the model of the last active complex frequency step.
+pub fn complex_step(fe: &FeModel) -> Option<usize> {
+    (fe.steps.iter().enumerate())
+        .filter(|(_, s)| s.active && matches!(s.kind, StepKind::ComplexFrequency(_)))
+        .map(|(i, _)| i)
+        .next_back()
 }
 
-/// Whether the model can have a Campbell diagram: it rotates and has a complex frequency step.
+/// Number (from 1) of the solver step the model's step `step` became: the last one made
+/// of it, after those that prepare it.
+fn solver_step(lowered: &plx_io::inp::Lowered, step: usize) -> Option<u32> {
+    (0..lowered.analysis.steps.len())
+        .filter(|i| {
+            lowered.origins.get(&plxs_core::ItemRef::Step(*i))
+                == Some(plx_model::ModelItem::Step(step))
+        })
+        .max()
+        .map(|i| i as u32 + 1)
+}
+
+/// Whether the model can have a Campbell diagram: it has a complex frequency step.
 pub fn applies(fe: &FeModel) -> bool {
-    rotor_speed(fe).is_some() && complex_step(fe).is_some()
+    complex_step(fe).is_some()
 }
 
-/// The model with every centrifugal load scaled from the model's speed to `speed`; at
-/// standstill every centrifugal load turns at `speed`.
+/// The model with the speed of every complex frequency step scaled from the model's speed
+/// to `speed`; at standstill every one turns at `speed`.
 pub fn with_speed(fe: &FeModel, speed: f64) -> FeModel {
     let mut fe = fe.clone();
-    // A model at standstill has no speed to scale from: its loads take the speed itself.
+    // A model at standstill has no speed to scale from: its steps take the speed itself.
     let factor = rotor_speed(&fe).filter(|r| *r > 0.0).map(|r| speed / r);
-    for load in fe.steps.iter_mut().flat_map(|s| &mut s.loads) {
-        if let LoadKind::Centrifugal { speed: own, .. } = &mut load.kind {
-            *own = match factor {
-                Some(factor) => *own * factor,
+    for step in &mut fe.steps {
+        if let StepKind::ComplexFrequency(c) = &mut step.kind {
+            c.speed = match factor {
+                Some(factor) => c.speed * factor,
                 None => speed,
             };
         }
@@ -587,8 +594,8 @@ struct SweepInput {
     mesh: Arc<plx_mesh::FeMesh>,
     /// The model at its own speed, with the default solver resolved.
     fe: FeModel,
-    /// Number of the complex frequency step in the `.dat` file.
-    step: u32,
+    /// Index of the complex frequency step in the model.
+    step: usize,
 }
 
 /// Runs the solver at one speed in a thread of its own and sends the modes back. The files of a
@@ -642,6 +649,8 @@ fn run_speed(
     let lowered = plx_io::inp::lower_unvalidated(&input.mesh, &fe, &heading)
         .map_err(|e| format!("{label}: analysis not set up: {e}"))?;
     let name = job_name(index);
+    let step = solver_step(&lowered, input.step)
+        .ok_or_else(|| format!("{label}: the Complex Frequency step is not solved"))?;
     let prepared = crate::analysis::prepare(lowered, &fe, &[]);
     let mut job = Run::start_analysis(input.threads, &input.work_dir, &name, prepared)
         .map_err(|e| format!("{label}: solver not started: {e}"))?;
@@ -659,9 +668,9 @@ fn run_speed(
     // The results are taken in memory: the history output, else the result fields.
     let modes = job.solver_results().map_or_else(Vec::new, |solved| {
         let history = plx_io::solver::history(&solved, None);
-        let modes = history.map_or_else(Vec::new, |h| modes_of_history(&h, input.step));
+        let modes = history.map_or_else(Vec::new, |h| modes_of_history(&h, step));
         if modes.is_empty() {
-            modes_of_frd(&plx_io::solver::import(&solved), input.step)
+            modes_of_frd(&plx_io::solver::import(&solved), step)
         } else {
             modes
         }
@@ -676,7 +685,7 @@ fn run_speed(
                 format!(
                     "Solver {status:?}, no complex frequencies of step {} in the results \
                      of {name}",
-                    input.step
+                    step
                 )
             });
         return Err(format!("{label}: {error}"));
@@ -875,13 +884,6 @@ impl CampbellWindow {
         let Some(step) = complex_step(fe) else {
             return Err("The analysis has no active Complex Frequency step.".into());
         };
-        if rotor_speed(fe).is_none() {
-            return Err(
-                "The analysis has no active Centrifugal load in a step before the Complex \
-                 Frequency step; its axis tells how the rotor turns."
-                    .into(),
-            );
-        }
         let Setup {
             min_speed,
             max_speed,
@@ -1762,49 +1764,28 @@ mod tests {
             kind: plx_model::BoundaryKind::displacement([Some(0.0); 6]),
             amplitude: None,
         };
-        let mut spin = plx_model::Step::new_static("Step-1");
-        spin.boundary_conditions.push(fixed.clone());
-        spin.loads.push(plx_model::Load {
-            distribution: None,
-            name: "Centrifugal-1".into(),
-            active: true,
-            visible: true,
-            region: plx_model::Region::Parts(vec!["EALL".into()]),
-            kind: LoadKind::Centrifugal {
-                point: [0.0, 5.0, 5.0],
-                axis: [1.0, 0.0, 0.0],
-                speed: 200.0,
-            },
-            amplitude: None,
-            factor_amplitude: None,
-        });
-        let mut frequency = plx_model::Step::new_frequency("Step-2");
-        frequency.boundary_conditions.push(fixed.clone());
-        if let StepKind::Frequency(f) = &mut frequency.kind {
-            f.perturbation = true;
-            f.storage = true;
-            f.num_frequencies = 4;
-        }
-        let mut complex = plx_model::Step::new_complex_frequency("Step-3");
+        let mut complex = plx_model::Step::new_complex_frequency("Step-1");
         complex.boundary_conditions.push(fixed);
         if let StepKind::ComplexFrequency(c) = &mut complex.kind {
             c.num_frequencies = 4;
+            c.num_modes = 4;
+            c.point = [0.0, 5.0, 5.0];
+            c.axis = [1.0, 0.0, 0.0];
+            c.speed = 200.0;
         }
-        fe.steps = vec![spin, frequency, complex];
+        fe.steps = vec![complex];
         assert!(applies(&fe));
         assert_eq!(
             (rotor_speed(&fe), complex_step(&fe)),
-            (Some(200.0), Some(3))
+            (Some(200.0), Some(0))
         );
-        // A rotor at standstill sweeps all the same: its loads take the speed, and the
+        // A rotor at standstill sweeps all the same: its steps take the speed, and the
         // fingerprint of the sweep leaves the speed out.
         let mut still = fe.clone();
         let speed_of = |fe: &FeModel| rotor_speed(fe).unwrap();
-        still.steps[0].loads[0].kind = LoadKind::Centrifugal {
-            point: [0.0, 5.0, 5.0],
-            axis: [1.0, 0.0, 0.0],
-            speed: 0.0,
-        };
+        if let StepKind::ComplexFrequency(c) = &mut still.steps[0].kind {
+            c.speed = 0.0;
+        }
         assert!(applies(&still));
         assert_eq!(speed_of(&with_speed(&still, 150.0)), 150.0);
         assert_eq!(speed_of(&with_speed(&fe, 50.0)), 50.0);
@@ -1819,7 +1800,7 @@ mod tests {
             work_dir: work_dir.clone(),
             mesh: Arc::new(mesh),
             fe,
-            step: 3,
+            step: 0,
         };
         let cancel = AtomicBool::new(false);
         let points: Vec<SpeedPoint> = (grid(50.0, 200.0, 3).into_iter().enumerate())

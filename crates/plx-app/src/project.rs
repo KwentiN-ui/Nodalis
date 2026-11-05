@@ -3710,8 +3710,8 @@ impl ProjectApp {
         let id = self.insert_campbell(position, window);
         let name = self.name_of(id);
         self.output.push(format!(
-            "{name} created: drag the Setup of an analysis with a Centrifugal load and a \
-             Complex Frequency step to its Analysis row; Update Project or its diagram then \
+            "{name} created: drag the Setup of an analysis with a Complex Frequency step to \
+             its Analysis row; Update Project or its diagram then \
              sweeps it."
         ));
         id
@@ -9628,8 +9628,8 @@ fn campbell_rows(node: &Node, incoming: &[(Vec<String>, String)], state: CellSta
         .map(|(_, source)| source.clone());
     let tip = match state {
         CellState::Missing if linked_from.is_none() => {
-            "The analysis to sweep: drag the Setup of an analysis with a Centrifugal load and a \
-             Complex Frequency step here."
+            "The analysis to sweep: drag the Setup of an analysis with a Complex Frequency \
+             step here."
         }
         CellState::Missing => "Not swept yet: Update Project or Start sweep in its diagram.",
         CellState::UpToDate => "The diagram is up to date with the analysis.",
@@ -9832,9 +9832,9 @@ impl BlockKind {
                 "Campbell",
                 "rotor speed rpm whirl critical speed complex frequency coriolis sweep diagram",
                 "Adds a block that sweeps the analysis linked to it over the speed of its \
-                 centrifugal loads and keeps the Campbell diagram with the critical speeds. Link \
-                 the Setup of an analysis with a Centrifugal load and a Complex Frequency step \
-                 to its Analysis row.",
+                 Complex Frequency step and keeps the Campbell diagram with the critical speeds. \
+                 Link the Setup of an analysis with a Complex Frequency step to its Analysis \
+                 row.",
             ),
             Self::MeshExport => (
                 "Export",

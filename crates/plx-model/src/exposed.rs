@@ -401,6 +401,14 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                         ValueKind::Count,
                     ));
                 }
+                StepKind::ComplexFrequency(complex) => {
+                    return rotation_slot(
+                        &mut complex.point,
+                        &mut complex.axis,
+                        &mut complex.speed,
+                        field,
+                    );
+                }
                 StepKind::Static(s) => s,
                 StepKind::HeatTransfer(h)
                 | StepKind::CoupledTempDisp(h)
