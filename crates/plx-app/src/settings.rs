@@ -139,6 +139,9 @@ pub struct Solver {
     pub work_dir: String,
     /// Most analyses Update Project solves at the same time.
     pub parallel_runs: u32,
+    /// Whether the iterative solver may use a discrete graphics card (it decides by
+    /// itself when, see [`plxs_linalg::GpuMode::Automatic`]).
+    pub gpu: bool,
 }
 
 /// [`Solver::threads`] for as many threads as the computer has cores.
@@ -155,11 +158,21 @@ impl Default for Solver {
             threads: AUTOMATIC_THREADS,
             work_dir: String::new(),
             parallel_runs: 2,
+            gpu: true,
         }
     }
 }
 
 impl Solver {
+    /// Hands [`Self::gpu`] to the solver, for the analyses started from now on.
+    pub fn apply_gpu(&self) {
+        plxs_linalg::GpuMode::set_preferred(if self.gpu {
+            plxs_linalg::GpuMode::Automatic
+        } else {
+            plxs_linalg::GpuMode::Off
+        });
+    }
+
     pub fn work_dir(&self) -> std::path::PathBuf {
         match clean_path(&self.work_dir) {
             "" => default_work_dir(),
@@ -191,6 +204,65 @@ fn threads_ui(ui: &mut egui::Ui, threads: &mut u32) {
             ui.weak(format!("{} cores", cores()));
         } else {
             ui.add(numeric::drag_value(threads).range(1..=256));
+        }
+    });
+}
+
+/// The graphics cards the solver finds, detected once on a thread of its own (a driver
+/// call that can take a moment) when the solver page is first shown.
+fn gpu_detection(ctx: &egui::Context) -> Option<&'static plxs_linalg::gpu::Detection> {
+    static DETECTION: std::sync::OnceLock<plxs_linalg::gpu::Detection> = std::sync::OnceLock::new();
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = DETECTION.set(plxs_linalg::gpu::detect());
+            ctx.request_repaint();
+        });
+    });
+    DETECTION.get()
+}
+
+/// The switch for the graphics card and what the solver found.
+fn gpu_ui(ui: &mut egui::Ui, gpu: &mut bool) {
+    ui.vertical(|ui| {
+        ui.checkbox(gpu, "Use for the iterative solver").on_hover_text(format!(
+            "Iterative solves of {} equations and more run on a discrete graphics card, which \
+             has many times the memory bandwidth of the processor. The solver takes at most 60 % \
+             of the card's memory and falls back to the processor when the model does not fit. \
+             Integrated graphics share the processor's memory and are not used. Applies to \
+             analyses started from now on.",
+            plxs_linalg::gpu::GPU_FROM
+        ));
+        match gpu_detection(ui.ctx()) {
+            None => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.weak("Detecting graphics cards …");
+                });
+            }
+            Some(found) => match &found.chosen {
+                Some(card) => {
+                    let backend = found.backend.as_deref().unwrap_or("");
+                    let precision = if found.double_precision {
+                        "conjugate gradients and multigrid cycle on the card"
+                    } else {
+                        "multigrid cycle on the card, conjugate gradients on the processor (no double precision)"
+                    };
+                    ui.label(format!("{card}, {backend}"));
+                    ui.weak(precision);
+                }
+                None => {
+                    let found_text = if found.adapters.is_empty() {
+                        "no graphics adapter found".to_owned()
+                    } else {
+                        format!("found: {}", found.adapters.join(", "))
+                    };
+                    ui.weak(format!(
+                        "No discrete graphics card ({found_text}); the solver runs on the processor."
+                    ));
+                }
+            },
         }
     });
 }
@@ -488,6 +560,9 @@ impl SettingsWindow {
                         ui.label("Parallel analyses");
                         ui.add(numeric::drag_value(&mut solver.parallel_runs).range(1..=64))
                             .on_hover_text("Update Project solves up to this many independent analyses at the same time; the Campbell sweep runs as many speeds at a time. The solver runs them in one pool of the threads above, so a single large analysis gets all of them. Each analysis needs its own memory.");
+                        ui.end_row();
+                        ui.label("Graphics card");
+                        gpu_ui(ui, &mut solver.gpu);
                         ui.end_row();
                     });
                 ui.add_space(8.0);

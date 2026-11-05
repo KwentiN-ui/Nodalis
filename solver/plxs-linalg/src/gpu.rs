@@ -104,6 +104,46 @@ fn describe(info: &wgpu::AdapterInfo) -> String {
     format!("{} ({kind})", info.name)
 }
 
+/// What the solver finds for the graphics card, without opening it: for the settings.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Detection {
+    /// Every adapter, with its kind, e.g. "NVIDIA GeForce RTX 4070 (discrete)".
+    pub adapters: Vec<String>,
+    /// The adapter the automatic mode would use: the first discrete one.
+    pub chosen: Option<String>,
+    /// Whether the chosen one computes in double precision, so that the conjugate
+    /// gradients run on it too (otherwise only the multigrid cycle).
+    pub double_precision: bool,
+    /// The graphics API the chosen one is driven by (Vulkan, DirectX 12, Metal).
+    pub backend: Option<String>,
+}
+
+/// Lists the graphics adapters and tells which one the automatic mode takes. Cheap
+/// against opening a device, but still a driver call: run it off the user interface.
+pub fn detect() -> Detection {
+    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    descriptor.backends = wgpu::Backends::PRIMARY;
+    let instance = wgpu::Instance::new(descriptor);
+    let adapters = block_on(instance.enumerate_adapters(wgpu::Backends::PRIMARY));
+    let mut detection = Detection {
+        adapters: adapters.iter().map(|a| describe(&a.get_info())).collect(),
+        ..Default::default()
+    };
+    // Vulkan and DirectX list the same card twice.
+    let mut seen = std::collections::HashSet::new();
+    detection.adapters.retain(|a| seen.insert(a.clone()));
+    if let Some(adapter) = adapters
+        .iter()
+        .find(|a| a.get_info().device_type == wgpu::DeviceType::DiscreteGpu)
+    {
+        let info = adapter.get_info();
+        detection.chosen = Some(describe(&info));
+        detection.double_precision = adapter.features().contains(wgpu::Features::SHADER_F64);
+        detection.backend = Some(info.backend.to_str().to_owned());
+    }
+    detection
+}
+
 fn open(any: bool) -> Result<Context, String> {
     let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
     descriptor.backends = wgpu::Backends::PRIMARY;

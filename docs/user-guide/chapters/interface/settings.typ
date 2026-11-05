@@ -60,6 +60,13 @@ killed. A step it cannot compute yet is reported when the analysis runs (@model-
   [Parallel analyses], [How many independent analyses #ui("Update Project") solves at the same
     time (default 2, @update-project). It limits the memory they need together; the threads
     are shared as described above.],
+  [Graphics card], [#ui("Use for the iterative solver") (default on) lets the iterative
+    equation solver run on a discrete graphics card for models of 100 000 equations and more
+    (@equation-solver). Below it the card the solver found is shown with its graphics interface,
+    and whether the conjugate gradients run on it too (cards with double precision) or only
+    the multigrid cycle. Without a discrete card, or switched off, the solver runs on the
+    processor. Switch it off when the card is weak or its memory is needed elsewhere; the
+    change applies to analyses started from then on.],
   [Test solver], [Computes a cantilever under a tip load and under pressure, and the tip load
     once more with the iterative equation solver (@equation-solver), and compares the results
     with beam theory. Each test shows OK or an error; while the test runs, a window over the
