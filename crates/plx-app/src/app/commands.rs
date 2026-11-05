@@ -228,6 +228,10 @@ impl AnalysisWindow {
             | Cmd::NextIncrement
             | Cmd::LastIncrement
             | Cmd::Animate
+            | Cmd::AnimateScaleFactor
+            | Cmd::AnimateStep
+            | Cmd::AnimateAllSteps
+            | Cmd::AnimatePositions
             | Cmd::ModeSound => w.results_command_enabled(cmd),
             Cmd::ExportVtu | Cmd::ExportVtk | Cmd::ExportFrd | Cmd::ExportDeformedMesh => {
                 results_open
@@ -251,6 +255,7 @@ impl AnalysisWindow {
             | Cmd::ShellThickness
             | Cmd::BeamProfiles
             | Cmd::ShowLinked
+            | Cmd::Timeline
             | Cmd::Checklist
             | Cmd::Screenshot
             | Cmd::ScreenshotClipboard
@@ -277,6 +282,7 @@ impl AnalysisWindow {
             Cmd::ShellThickness => graphics.shell_thickness,
             Cmd::BeamProfiles => graphics.beam_profiles,
             Cmd::ShowLinked => graphics.show_linked,
+            Cmd::Timeline => graphics.timeline,
             Cmd::Checklist => w.checklist_visible,
             Cmd::SectionView => w.section.is_some() || w.section_dialog.is_some(),
             Cmd::ExplodedView => w.exploded_applied() || w.exploded_dialog.is_some(),
@@ -286,6 +292,10 @@ impl AnalysisWindow {
             | Cmd::GlobalContours
             | Cmd::Transformations
             | Cmd::Animate
+            | Cmd::AnimateScaleFactor
+            | Cmd::AnimateStep
+            | Cmd::AnimateAllSteps
+            | Cmd::AnimatePositions
             | Cmd::ModeSound => w.results_command_checked(cmd),
             Cmd::Monitor => w.analysis_tab,
             Cmd::ContactWorksheet => w.contact_worksheet,
@@ -443,6 +453,10 @@ impl AnalysisWindow {
             | Cmd::NextIncrement
             | Cmd::LastIncrement
             | Cmd::Animate
+            | Cmd::AnimateScaleFactor
+            | Cmd::AnimateStep
+            | Cmd::AnimateAllSteps
+            | Cmd::AnimatePositions
             | Cmd::ModeSound => w.run_results_command(cmd),
             Cmd::ExportVtu => w.open_vtk_export(plx_io::vtk::VtkFormat::Xml),
             Cmd::ExportVtk => w.open_vtk_export(plx_io::vtk::VtkFormat::Legacy),
@@ -478,6 +492,10 @@ impl AnalysisWindow {
             Cmd::ShowLinked => {
                 let graphics = &mut w.settings.graphics;
                 graphics.show_linked = !graphics.show_linked;
+            }
+            Cmd::Timeline => {
+                let graphics = &mut w.settings.graphics;
+                graphics.timeline = !graphics.timeline;
             }
             Cmd::SectionView => w.open_section_dialog(),
             Cmd::SectionOff => {

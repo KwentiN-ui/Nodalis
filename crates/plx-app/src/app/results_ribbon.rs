@@ -32,6 +32,9 @@ impl Workbench {
             Cmd::PreviousIncrement => current > 0,
             Cmd::NextIncrement => current < last,
             Cmd::LastIncrement => current < last_in_step,
+            Cmd::AnimateScaleFactor | Cmd::AnimateStep => !view.increments.is_empty(),
+            Cmd::AnimateAllSteps => view.steps.steps.len() > 1,
+            Cmd::AnimatePositions => view.current_step().is_some_and(|s| s.has_positions()),
             // Only modes of a frequency step have a sound.
             Cmd::ModeSound => {
                 view.sound.is_some()
@@ -47,6 +50,7 @@ impl Workbench {
         let Some(view) = self.shown_results_view() else {
             return false;
         };
+        let playing = |kind| view.animation.as_ref().is_some_and(|a| a.kind == kind);
         match cmd {
             Cmd::ShowUndeformed => view.show_undeformed,
             Cmd::GlobalContours => view.show_global_contours,
@@ -54,6 +58,10 @@ impl Workbench {
                 !view.transformations.is_empty() || self.transformation_dialog.is_some()
             }
             Cmd::Animate => view.animation.is_some(),
+            Cmd::AnimateScaleFactor => playing(AnimationKind::ScaleFactor),
+            Cmd::AnimateStep => playing(AnimationKind::Step),
+            Cmd::AnimateAllSteps => playing(AnimationKind::AllSteps),
+            Cmd::AnimatePositions => playing(AnimationKind::Positions),
             Cmd::ModeSound => view.sound.is_some(),
             _ => false,
         }
@@ -91,6 +99,10 @@ impl Workbench {
                     view.start_animation(AnimationKind::ScaleFactor);
                 }
             }
+            Cmd::AnimateScaleFactor => view.start_animation(AnimationKind::ScaleFactor),
+            Cmd::AnimateStep => view.start_animation(AnimationKind::Step),
+            Cmd::AnimateAllSteps => view.start_animation(AnimationKind::AllSteps),
+            Cmd::AnimatePositions => view.start_animation(AnimationKind::Positions),
             Cmd::ModeSound => {
                 view.sound = match view.sound {
                     Some(_) => None,
@@ -110,7 +122,14 @@ impl Workbench {
             Cmd::Deformation => view.deformation.label(),
             Cmd::Representation => view.representation().label().into(),
             Cmd::ColorLevels => view.color_scale.levels.to_string(),
-            Cmd::ResultStep => view.step_title(view.current_step_index()?),
+            // A long step name is cut, so the tile keeps its size; the panel has it in full.
+            Cmd::ResultStep => {
+                let title = view.step_title(view.current_step_index()?);
+                match title.char_indices().nth(16) {
+                    Some((end, _)) => format!("{} ...", title[..end].trim_end()),
+                    None => title,
+                }
+            }
             Cmd::Increment => view.entry_value()?,
             _ => return None,
         })
@@ -123,6 +142,36 @@ impl Workbench {
         match cmd {
             Cmd::Increment => view.current_step().map(|s| s.entry_noun()),
             _ => None,
+        }
+    }
+
+    /// The timeline of the steps below the 3D view, for results with more than one
+    /// increment; it shows the increment clicked or dragged to.
+    pub(super) fn timeline(&mut self, ui: &mut egui::Ui) {
+        let shown = self.settings.graphics.timeline
+            && self.tree_view == TreeView::Results
+            && (self.shown_results_view()).is_some_and(|v| v.increments.len() > 1);
+        if !shown {
+            return;
+        }
+        let mut hide = false;
+        let chosen = egui::Panel::bottom("timeline")
+            .resizable(false)
+            .exact_size(crate::timeline::HEIGHT)
+            .frame(egui::Frame::new().fill(crate::style::control()))
+            .show(ui, |ui| {
+                self.shown_results_view()
+                    .and_then(|v| crate::timeline::show(ui, v, &mut hide))
+            })
+            .inner;
+        if hide {
+            self.settings.graphics.timeline = false;
+        }
+        if let Some(index) = chosen
+            && let Some(view) = self.shown_results_mut()
+        {
+            view.switch_increment(index);
+            self.results_changed = true;
         }
     }
 
@@ -185,6 +234,11 @@ impl Workbench {
         };
         if changed {
             self.results_changed = true;
+        }
+        if cmd == Cmd::ResultStep {
+            ui.separator();
+            ui.checkbox(&mut self.settings.graphics.timeline, "Timeline")
+                .on_hover_text("Shows the steps as a timeline below the 3D view.");
         }
     }
 }

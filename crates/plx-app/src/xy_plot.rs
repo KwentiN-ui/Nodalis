@@ -18,6 +18,71 @@ pub struct XyData {
     pub guides: Vec<(String, Vec<f64>)>,
     /// Upper end of the y axis; None fits the axis to the values.
     pub y_max: Option<f64>,
+    /// The x axes the plot can switch between, such as total time, step time and increment,
+    /// with `x_axis` the one `x` and `x_label` hold; empty when there is no choice.
+    pub x_axes: Vec<(String, Vec<f64>)>,
+    pub x_axis: usize,
+    /// The steps the rows belong to, drawn as bands behind the curves.
+    pub bands: Vec<Band>,
+    /// The increment of the results each row shows, if any: the plot marks the one shown in
+    /// the 3D view, and a click into it shows another.
+    pub increments: Vec<Option<usize>>,
+}
+
+/// A step of a history plot: its name and its first and last row.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Band {
+    pub name: String,
+    pub rows: [usize; 2],
+}
+
+impl XyData {
+    /// Switches to the x axis `index` of [`XyData::x_axes`].
+    pub fn choose_x_axis(&mut self, index: usize) {
+        if let Some((label, x)) = self.x_axes.get(index) {
+            self.x_label = label.clone();
+            self.x = x.clone();
+            self.x_axis = index;
+        }
+    }
+
+    /// The x value of the row that shows the increment `increment`.
+    fn x_of_increment(&self, increment: usize) -> Option<f64> {
+        let row = self.increments.iter().position(|&i| i == Some(increment))?;
+        self.x.get(row).copied().filter(|x| x.is_finite())
+    }
+
+    /// The increment of the row nearest to `x` that shows one.
+    fn increment_near(&self, x: f64) -> Option<usize> {
+        (self.x.iter().zip(&self.increments))
+            .filter_map(|(&rx, &i)| Some((rx, i?)))
+            .filter(|(rx, _)| rx.is_finite())
+            .min_by(|a, b| (a.0 - x).abs().total_cmp(&(b.0 - x).abs()))
+            .map(|(_, i)| i)
+    }
+
+    /// The x range of each band, when x grows with the rows (as times and increments do,
+    /// unlike the step time).
+    fn band_ranges(&self) -> Vec<(f64, f64)> {
+        let x = &self.x;
+        if self.bands.len() < 2 || x.windows(2).any(|w| w[1] < w[0] || w[1].is_nan()) {
+            return Vec::new();
+        }
+        let mut ranges = Vec::new();
+        for (index, band) in self.bands.iter().enumerate() {
+            let [first, last] = band.rows;
+            let (Some(&start), Some(&end)) = (x.get(first), x.get(last)) else {
+                return Vec::new();
+            };
+            // A step starts where the one before ended.
+            let start = match index {
+                0 => start,
+                _ => ranges.last().map_or(start, |&(_, end): &(f64, f64)| end),
+            };
+            ranges.push((start, end));
+        }
+        ranges
+    }
 }
 
 const GUIDE: Color32 = Color32::from_gray(60);
@@ -74,13 +139,28 @@ fn range(values: impl Iterator<Item = f64>) -> Option<(f64, f64)> {
     Some((min, max))
 }
 
-/// Draws the diagram into the available space of `ui`; returns where.
-pub fn show(ui: &mut Ui, data: &XyData) -> Rect {
+/// Draws the diagram into the available space of `ui`, with a line at the increment
+/// `current`; returns where, and the increment of a click into it.
+pub fn show(ui: &mut Ui, data: &XyData, current: Option<usize>) -> (Rect, Option<usize>) {
     let size = ui.available_size().max(vec2(360.0, 220.0));
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let sense = if data.increments.iter().any(Option::is_some) {
+        egui::Sense::click_and_drag()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(size, sense);
+    let axes = Axes {
+        current,
+        ..Axes::default()
+    };
     let painter = ui.painter_at(rect);
-    paint(&painter, rect, response.hover_pos(), data, &Axes::default());
-    rect
+    paint(&painter, rect, response.hover_pos(), data, &axes);
+    let picked = (response.clicked() || response.dragged())
+        .then(|| response.interact_pointer_pos())
+        .flatten()
+        .and_then(|p| pick(rect, p, data, &axes))
+        .filter(|&i| Some(i) != current);
+    (rect, picked)
 }
 
 /// What a viewport annotation changes of a diagram: the label of the value axis and a fixed
@@ -91,12 +171,31 @@ pub struct Axes<'a> {
     pub y_label: &'a str,
     /// Values shown, lowest and highest; `None` follows the data.
     pub y_range: Option<[f64; 2]>,
+    /// The increment shown in the 3D view, marked by a vertical line.
+    pub current: Option<usize>,
 }
 
 /// Smallest and largest value of the curves and guides.
 pub fn extremes(data: &XyData) -> Option<[f64; 2]> {
     let values = (data.curves.iter().chain(&data.guides)).flat_map(|(_, y)| y.iter().copied());
     range(values).map(|(min, max)| [min, max])
+}
+
+/// Where the axes of a diagram in `rect` lie.
+fn plot_area(rect: Rect, axes: &Axes) -> Rect {
+    let top = if axes.y_label.is_empty() { 12.0 } else { 26.0 };
+    Rect::from_min_max(rect.min + vec2(72.0, top), rect.max - vec2(16.0, 40.0))
+}
+
+/// The increment of the row nearest to a click at `pos` into the diagram in `rect`.
+pub fn pick(rect: Rect, pos: Pos2, data: &XyData, axes: &Axes) -> Option<usize> {
+    let area = plot_area(rect, axes);
+    let (x0, x1) = range(data.x.iter().copied())?;
+    if !area.contains(pos) {
+        return None;
+    }
+    let x = x0 + f64::from((pos.x - area.left()) / area.width()) * (x1 - x0);
+    data.increment_near(x)
 }
 
 /// Draws the diagram into `rect` with the value under `hover`.
@@ -125,8 +224,7 @@ pub fn paint(painter: &egui::Painter, rect: Rect, hover: Option<Pos2>, data: &Xy
         );
         return;
     };
-    let top = if axes.y_label.is_empty() { 12.0 } else { 26.0 };
-    let area = Rect::from_min_max(rect.min + vec2(72.0, top), rect.max - vec2(16.0, 40.0));
+    let area = plot_area(rect, axes);
     if !axes.y_label.is_empty() {
         painter.text(
             pos2(area.left(), rect.top() + 4.0),
@@ -182,6 +280,38 @@ pub fn paint(painter: &egui::Painter, rect: Rect, hover: Option<Pos2>, data: &Xy
     );
     // Curves leave the plot area when the y axis is limited.
     let plot = painter.with_clip_rect(area);
+    let x_screen = |x: f64| to_screen(x, y0).x;
+    for (index, (&(start, end), band)) in data.band_ranges().iter().zip(&data.bands).enumerate() {
+        let (left, right) = (x_screen(start), x_screen(end));
+        if index % 2 == 1 {
+            let shade = Rect::from_x_y_ranges(left..=right, area.y_range());
+            plot.rect_filled(shade, 0.0, crate::style::text().gamma_multiply(0.06));
+        }
+        if index > 0 {
+            plot.extend(egui::Shape::dashed_line(
+                &[pos2(left, area.top()), pos2(left, area.bottom())],
+                Stroke::new(1.0, crate::style::adapt(Color32::from_gray(120))),
+                4.0,
+                3.0,
+            ));
+        }
+        let name = plot
+            .with_clip_rect(Rect::from_x_y_ranges(left..=right, area.y_range()).intersect(area));
+        name.text(
+            pos2(left + 4.0, area.top() + 3.0),
+            egui::Align2::LEFT_TOP,
+            &band.name,
+            font.clone(),
+            crate::style::adapt(Color32::from_gray(110)),
+        );
+    }
+    if let Some(x) = axes.current.and_then(|i| data.x_of_increment(i)) {
+        plot.vline(
+            x_screen(x),
+            area.y_range(),
+            Stroke::new(1.5, crate::style::highlight()),
+        );
+    }
     let markers = data.x.len() <= 60;
     for (name, values) in &data.guides {
         let points: Vec<Pos2> = (data.x.iter().zip(values))
@@ -354,11 +484,19 @@ pub struct WindowResponse {
     pub export: Option<Export>,
     /// Where the diagram is drawn, in points.
     pub plot: Rect,
+    /// The increment a click into the diagram asks the 3D view to show.
+    pub picked: Option<usize>,
 }
 
 /// The diagram in its own window; `shown` is whether it is also an
 /// annotation in the 3D view.
-pub fn window(ctx: &egui::Context, data: &XyData, shown: bool) -> WindowResponse {
+pub fn window(
+    ctx: &egui::Context,
+    data: &mut XyData,
+    shown: bool,
+    current: Option<usize>,
+) -> WindowResponse {
+    let mut picked = None;
     let mut open = true;
     let mut toggle_view = false;
     let mut export = None;
@@ -401,16 +539,31 @@ pub fn window(ctx: &egui::Context, data: &XyData, shown: bool) -> WindowResponse
                             }
                         }
                     });
+                    if !data.x_axes.is_empty() {
+                        ui.label("X axis");
+                        let mut chosen = data.x_axis;
+                        egui::ComboBox::from_id_salt("plot x axis")
+                            .selected_text(data.x_label.clone())
+                            .show_ui(ui, |ui| {
+                                for (index, (label, _)) in data.x_axes.iter().enumerate() {
+                                    ui.selectable_value(&mut chosen, index, label);
+                                }
+                            });
+                        if chosen != data.x_axis {
+                            data.choose_x_axis(chosen);
+                        }
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         close = ui.button("Close").clicked();
                     });
                 });
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                    plot = show(ui, data);
+                    (plot, picked) = show(ui, data, current);
                 });
             });
         });
     WindowResponse {
+        picked,
         closed: !open || close,
         toggle_view,
         export,
@@ -625,6 +778,7 @@ mod tests {
             curves: vec![("11".into(), vec![1.0, 2.0, f64::NAN, 3.0, 4.0])],
             guides: Vec::new(),
             y_max: None,
+            ..Default::default()
         };
         let svg = to_svg(&data, 640.0, 400.0);
         assert!(svg.starts_with("<svg") && svg.trim_end().ends_with("</svg>"));

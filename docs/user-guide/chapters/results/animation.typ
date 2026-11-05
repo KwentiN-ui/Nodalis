@@ -2,15 +2,23 @@
 
 == Animation <animation>
 
-The animation button among the result controls of the ribbon opens the animation window.
+#ui("Animate") in the #ui("Step and Increment") group of the ribbon starts a scale factor
+animation and opens the animation window; a second click stops it. Its menu starts the other
+types: #ui("Scale Factor"), #ui("Step"), #ui("All Steps") and #ui("Positions") (only for a step
+with a moving load), and #ui("Sound") for the modes of a frequency step (@sound).
+
+#screenshot("results-animate-menu.png", [The menu of #ui("Animate"); the types a step does not
+  have are greyed out])
 
 #screenshot("animation.png", [Animation window])
 
 #fields(
   [Type], [#ui("Scale factor") grows the displayed increment from undeformed to deformed; a mode
-    swings between −1 and +1. #ui("Step increments") plays the increments of the step,
-    #ui("Steps") the last increment of every step of the same kind, e.g. the positions of a
-    moving load (@moving-load).],
+    swings between −1 and +1. #ui("Step") plays the increments of the shown step.
+    #ui("All steps") plays the increments of all steps one after another, as the timeline
+    (@results-timeline) shows them: the steps that run over time together, the modes of a
+    frequency step apart. #ui("Positions") plays the positions of the moving load of the step
+    (@moving-load), the last increment of each; it is offered only for such a step.],
   [Frames], [Number of frames of a scale factor animation (default 60).],
   [Frames per second], [Playback speed (default 30).],
   [Playback], [#ui("Once"), #ui("Loop") or #ui("Swing") (forth and back, default).],
@@ -54,7 +62,7 @@ numbers. The output pane reports the saved file or what went wrong.
 
 == Sound of the mode shapes <sound>
 
-For a frequency step, the sound button opens #ui("Sound of the Mode Shapes"). It plays the
+For a frequency step, #ui("Sound") in the menu of #ui("Animate") opens #ui("Sound of the Mode Shapes"). It plays the
 eigenfrequencies as tones, so you can hear how the structure would ring.
 
 #screenshot("sound.png", [Sound of the mode shapes])

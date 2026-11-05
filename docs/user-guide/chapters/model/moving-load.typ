@@ -56,8 +56,8 @@ positions; this is a reminder, not an error.
 The step is written once per position (`** Moving load position 3 of 31, Crane at -500`),
 everything else in the step stays the same in all of them. The wheel forces become `*CLOAD` on
 the nodes of the faces under each patch, with the shares of a uniform pressure on the covered
-part of each face (as for a #ui("Force"), @loads). The results have one step per
-position: step through them, or animate them with the animation type #ui("Steps")
+part of each face (as for a #ui("Force"), @loads). In the results the step has one
+position for each of them: step through them, or animate them with the animation type #ui("Positions")
 (@animation) to see the load travel. The animation keeps one deformation scale for all
 positions.
 

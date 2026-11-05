@@ -3572,6 +3572,7 @@ S
                         curves: vec![("12_1".into(), vec![0.5, 1.5])],
                         guides: Vec::new(),
                         y_max: None,
+                        ..Default::default()
                     })
                     .saved(),
                 ],

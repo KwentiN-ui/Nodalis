@@ -197,6 +197,8 @@ pub enum Cmd {
     Representation,
     ColorLevels,
     Transformations,
+    /// The timeline of the steps below the 3D view of results.
+    Timeline,
     /// The step of the results shown.
     ResultStep,
     /// The increment, mode or position shown within the step.
@@ -206,6 +208,10 @@ pub enum Cmd {
     NextIncrement,
     LastIncrement,
     Animate,
+    AnimateScaleFactor,
+    AnimateStep,
+    AnimateAllSteps,
+    AnimatePositions,
     ModeSound,
     OpenResults,
     RemoveResults,
@@ -1670,6 +1676,21 @@ fn build() -> Vec<Command> {
         "",
         "Shows the checklist in the properties panel while nothing is edited.",
     ));
+    // In the Step list and the context menu of the timeline, to leave room in the ribbon.
+    add(tile(
+        command(
+            C::Timeline,
+            "Timeline",
+            r,
+            t,
+            "Show",
+            Tool(Icon::Steps),
+            "",
+            "Shows the steps and their increments as a timeline below the 3D view; click or \
+             drag along it to show another increment.",
+        ),
+        Tile::Hidden,
+    ));
     add(command(
         C::SectionView,
         "Section\nView",
@@ -1842,7 +1863,7 @@ fn build() -> Vec<Command> {
             r,
             t,
             STEP_GROUP,
-            Tool(Icon::Steps),
+            Tool(Icon::Increments),
             "Ctrl+PgUp/PgDn",
             "The step shown, at its last increment.",
         ),
@@ -1902,26 +1923,59 @@ fn build() -> Vec<Command> {
             tip,
         ));
     }
-    add(command(
-        C::Animate,
-        "Animate",
-        r,
-        t,
-        STEP_GROUP,
-        Tool(Icon::Animate),
-        "",
-        "Animates the deformation, the increments or the steps; the animation window sets \
-         how.",
+    add(tile(
+        command(
+            C::Animate,
+            "Animate",
+            r,
+            t,
+            STEP_GROUP,
+            Tool(Icon::Animate),
+            "",
+            "Animates the deformation; the menu below plays the increments of the step, of all \
+             steps or the positions of a moving load instead.",
+        ),
+        Tile::Split,
     ));
-    add(command(
-        C::ModeSound,
-        "Sound",
-        r,
-        t,
-        STEP_GROUP,
-        Tool(Icon::Sound),
-        "",
-        "Plays the mode shapes of a frequency step as sound.",
+    for (cmd, name, tip) in [
+        (
+            C::AnimateScaleFactor,
+            "Scale Factor",
+            "Scales the shown result from zero to its full size.",
+        ),
+        (
+            C::AnimateStep,
+            "Step",
+            "Plays the increments of the shown step one after another.",
+        ),
+        (
+            C::AnimateAllSteps,
+            "All Steps",
+            "Plays the increments of all steps one after another, as the timeline shows them.",
+        ),
+        (
+            C::AnimatePositions,
+            "Positions",
+            "Plays the positions of the moving load of the shown step.",
+        ),
+    ] {
+        add(tile(
+            command(cmd, name, r, t, STEP_GROUP, TileIcon::None, "", tip),
+            Tile::In(C::Animate),
+        ));
+    }
+    add(tile(
+        command(
+            C::ModeSound,
+            "Sound",
+            r,
+            t,
+            STEP_GROUP,
+            Tool(Icon::Sound),
+            "",
+            "Plays the mode shapes of a frequency step as sound.",
+        ),
+        Tile::In(C::Animate),
     ));
     add(tile(
         command(

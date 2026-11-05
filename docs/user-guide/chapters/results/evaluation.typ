@@ -94,6 +94,12 @@ the selected columns over the first one.
 
 #screenshot("history-table.png", [Eigenfrequencies from the `.dat` file])
 
+The #ui("Step") column names the step of each row, as the FE model names it; a darker line
+separates the rows of one step from the next. Rows of steps that run over time have the
+#ui("Time") column.
+
+#screenshot("history-table-steps.png", [The displacements of two nodes over three static steps])
+
 The small arrow at the right edge of a column header sorts the rows by that column: the first
 click sorts ascending, the next one descending. It appears when the pointer is over it and stays
 on the sorted column. Empty cells go last either way. #ui("Sort Ascending"), #ui("Sort
@@ -104,6 +110,20 @@ order keeps the selected columns but clears a selection of rows.
 
 #screenshot("history-table-sorted.png", [Rows sorted by the displacement of node 1, and the
   plot of the time over it])
+
+=== Steps in the plot <history-plot-steps>
+
+A plot over the step, increment or time column shows the steps as bands behind the curves, with
+their names at the top and dashed lines where one step ends and the next begins. #ui("X axis")
+at the bottom of the plot window switches between #ui("Total time"), which runs on through the
+steps, #ui("Step time"), which starts again at zero in each step (without bands, as the steps
+then lie over each other), and #ui("Increment"), which counts the rows. A blue line marks the
+increment the 3D view shows, and follows it when another increment is shown, by the timeline
+(@results-timeline), the #ui("Increment") list or an animation. A click into the plot shows the
+increment nearest to it in the 3D view; drag to move through the increments.
+
+#screenshot("history-plot-steps.png", [Displacement of a node over three static steps; the 3D
+  view shows the increment at 1.5 s])
 
 #ui("Export") in the plot window copies the plot to the clipboard as an image (#ui("Copy to
 Clipboard")) or saves it as a PNG or SVG file. The SVG file is vector graphics with the curves,

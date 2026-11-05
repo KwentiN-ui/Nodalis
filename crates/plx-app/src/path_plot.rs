@@ -132,6 +132,7 @@ impl PathPlot {
                 curves: table.curves.clone(),
                 guides: Vec::new(),
                 y_max: None,
+                ..Default::default()
             });
         }
         plot.placement = Placement {
@@ -446,6 +447,7 @@ fn draw_box(
             &crate::xy_plot::Axes {
                 y_label: &plot.placement.y_label,
                 y_range: plot.placement.y_range,
+                current: None,
             },
         );
     } else {

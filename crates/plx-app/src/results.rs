@@ -1022,31 +1022,41 @@ impl ResultsView {
         self.show_animation_frame();
     }
 
-    /// The increments an animation plays from the current increment: those of its step, or
-    /// the last increment of every step of the same kind of analysis.
+    /// The increments an animation plays from the current increment: those of its step, of
+    /// all steps of its kind, or the last increment of each position of its moving load.
     fn animated_increments(&self, kind: AnimationKind) -> Vec<usize> {
-        let Some(current) = self.current_increment() else {
+        let Some(current) = self.current_step() else {
             return Vec::new();
         };
-        let (step, analysis) = (current.step, current.kind);
-        if kind != AnimationKind::Steps {
-            return (0..self.increments.len())
-                .filter(|&i| self.increments[i].step == step)
-                .collect();
-        }
-        let mut last: Vec<usize> = Vec::new();
-        for (i, increment) in self.increments.iter().enumerate() {
-            if increment.kind != analysis {
-                continue;
-            }
-            match last.last_mut() {
-                Some(previous) if self.increments[*previous].step == increment.step => {
-                    *previous = i
+        match kind {
+            AnimationKind::ScaleFactor | AnimationKind::Step => current.increments.clone(),
+            // Timed steps play one after another; modal steps show their modes, apart from
+            // the timed ones.
+            AnimationKind::AllSteps => (self.steps.steps.iter())
+                .filter(|s| {
+                    if current.is_timed() {
+                        s.is_timed()
+                    } else {
+                        s.category == current.category
+                    }
+                })
+                .flat_map(|s| s.increments.iter().copied())
+                .collect(),
+            AnimationKind::Positions => {
+                let mut last: Vec<usize> = Vec::new();
+                for &i in &current.increments {
+                    match last.last_mut() {
+                        Some(previous)
+                            if self.increments[*previous].step == self.increments[i].step =>
+                        {
+                            *previous = i
+                        }
+                        _ => last.push(i),
+                    }
                 }
-                _ => last.push(i),
+                last
             }
         }
-        last
     }
 
     /// Displacements as shown: those of the overlaid modes, or of the current increment.
@@ -1236,10 +1246,14 @@ impl ResultsView {
             (AnimationKind::ScaleFactor, ColorLimits::AllFrames) => {
                 Some((min.min(0.0), max.max(0.0)))
             }
-            (AnimationKind::Increments | AnimationKind::Steps, ColorLimits::CurrentFrame) => {
-                Some((min, max))
-            }
-            (AnimationKind::Increments | AnimationKind::Steps, ColorLimits::AllFrames) => animation
+            (
+                AnimationKind::Step | AnimationKind::AllSteps | AnimationKind::Positions,
+                ColorLimits::CurrentFrame,
+            ) => Some((min, max)),
+            (
+                AnimationKind::Step | AnimationKind::AllSteps | AnimationKind::Positions,
+                ColorLimits::AllFrames,
+            ) => animation
                 .increments
                 .iter()
                 .filter_map(|&i| {
@@ -1876,7 +1890,7 @@ mod tests {
             Some(([0.0; 3], [10.0; 3])),
         );
         view.select_increment(0);
-        view.start_animation(AnimationKind::Increments);
+        view.start_animation(AnimationKind::Step);
         view.animation.as_mut().unwrap().fps = 7.0;
         view.animation.as_mut().unwrap().play();
         view.switch_increment(2);
@@ -1891,7 +1905,7 @@ mod tests {
     }
 
     #[test]
-    fn a_steps_animation_plays_the_last_increment_of_each_step() {
+    fn animations_play_a_step_all_steps_or_the_positions_of_a_moving_load() {
         let still = [[0.0; 3]];
         let mut view = ResultsView::new(
             vec![
@@ -1904,10 +1918,36 @@ mod tests {
             Some(([0.0; 3], [10.0; 3])),
         );
         view.select_increment(3);
-        view.start_animation(AnimationKind::Steps);
+        // All timed steps, without the modes of the frequency step.
+        view.start_animation(AnimationKind::AllSteps);
         let animation = view.animation.as_ref().unwrap();
-        assert_eq!(animation.increments, [1, 3, 4]);
-        assert_eq!(animation.frame, 1);
+        assert_eq!(animation.increments, [0, 1, 3, 4]);
+        assert_eq!(animation.frame, 2);
+        view.start_animation(AnimationKind::Step);
+        assert_eq!(view.animation.as_ref().unwrap().increments, [3]);
+        // A moving load: one step of three solver steps, one position each.
+        use plx_results::steps::{StepCategory, StepRecord};
+        let record = |name: &str, category, steps: &[u32]| StepRecord {
+            name: name.into(),
+            category,
+            nlgeom: false,
+            perturbation: false,
+            time_period: None,
+            solver_steps: steps.to_vec(),
+            inherited_from: None,
+        };
+        view.set_step_records(
+            &[
+                record("Preload", StepCategory::Static, &[1]),
+                record("Modes", StepCategory::Frequency, &[2]),
+                record("Rolling", StepCategory::Static, &[3, 4]),
+            ],
+            &[],
+            None,
+        );
+        view.select_increment(3);
+        view.start_animation(AnimationKind::Positions);
+        assert_eq!(view.animation.as_ref().unwrap().increments, [3, 4]);
     }
 
     #[test]
@@ -1973,7 +2013,7 @@ mod tests {
         view.select_increment(0);
         view.field = 0;
         view.component = 3; // U3
-        view.start_animation(AnimationKind::Increments);
+        view.start_animation(AnimationKind::Step);
         let animation = view.animation.as_mut().unwrap();
         assert_eq!(animation.increments, [0, 1]);
         animation.limits = ColorLimits::AllFrames;

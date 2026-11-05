@@ -31,5 +31,5 @@ A dynamic step takes the same boundary conditions and loads as a static step, an
 need a density. Loads act from the start of the step with the amplitude of the step; a load that
 should be applied at once needs a stepped #ui("Amplitude") (@amplitudes) with the value 1 from
 time 0, otherwise CalculiX ramps it over the step. The results have one increment per written
-time step; the #ui("Step increments") animation (@animation) plays them, and history outputs
+time step; the #ui("Step") animation (@animation) plays them, and history outputs
 (@history-outputs) show the motion of selected nodes over time.

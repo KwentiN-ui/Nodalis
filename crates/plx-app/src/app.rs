@@ -1459,6 +1459,7 @@ impl AnalysisWindow {
             self.properties_panel(ui, workspace);
         }
         egui::CentralPanel::no_frame().show(ui, |ui| {
+            self.workbench.timeline(ui);
             self.workbench.viewport.selecting = self.workbench.picking()
                 || self.workbench.section_picks()
                 || self.workbench.transformation_picks()
@@ -4527,15 +4528,23 @@ impl Workbench {
     }
 
     fn history_table_window(&mut self, ctx: &egui::Context) {
-        if let Some(data) = &self.history_plot {
-            let model = match self.tree_view {
+        if let Some(data) = &mut self.history_plot {
+            let mut model = match self.tree_view {
                 TreeView::Results => self.results.get_mut(self.current_result),
                 _ => None,
             };
             let shown = model
                 .as_ref()
                 .is_some_and(|m| m.path_plots.iter().any(|p| p.is_table(data)));
-            let response = crate::xy_plot::window(ctx, data, shown);
+            // The line of the increment the 3D view shows; a click into the plot shows
+            // another.
+            let view = model.as_deref_mut().and_then(|m| m.results.as_mut());
+            let current = view.as_ref().map(|v| v.increment);
+            let response = crate::xy_plot::window(ctx, data, shown, current);
+            if let (Some(increment), Some(view)) = (response.picked, view) {
+                view.switch_increment(increment);
+                self.results_changed = true;
+            }
             // The annotation belongs to the shown results and stays after the window closes.
             if response.toggle_view
                 && let Some(model) = model
@@ -4594,9 +4603,13 @@ impl Workbench {
         let unit = (view.history_output_index(table.set))
             .and_then(|i| view.history_outputs.get(i))
             .and_then(|o| o.unit());
-        match table.show(ctx, &view.history, kind, unit) {
+        let places = crate::history_table::Places {
+            steps: &view.steps,
+            increments: &view.increments,
+        };
+        match table.show(ctx, &view.history, kind, places, unit) {
             crate::history_table::TableAction::Close => return,
-            crate::history_table::TableAction::Plot(data) => self.history_plot = Some(data),
+            crate::history_table::TableAction::Plot(data) => self.history_plot = Some(*data),
             crate::history_table::TableAction::None => {}
         }
         self.history_table = Some(table);
@@ -6771,6 +6784,10 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
     let mut event = WindowEvent::None;
     let mut open = true;
     let mut restart = None;
+    // The step the animation started in.
+    let positions = (view.animation.as_ref())
+        .and_then(|a| view.steps.step_of(a.start_increment))
+        .is_some_and(|s| s.has_positions());
     egui::Window::new("Animation")
         .id(crate::ids::window(ctx, "animation"))
         .open(&mut open)
@@ -6788,12 +6805,20 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
                 .show(ui, |ui| {
                     ui.label("Type");
                     ui.horizontal(|ui| {
-                        for (kind, label) in [
-                            (AnimationKind::ScaleFactor, "Scale factor"),
-                            (AnimationKind::Increments, "Step increments"),
-                            (AnimationKind::Steps, "Steps"),
+                        for kind in [
+                            AnimationKind::ScaleFactor,
+                            AnimationKind::Step,
+                            AnimationKind::AllSteps,
+                            AnimationKind::Positions,
                         ] {
-                            if ui.radio(animation.kind == kind, label).clicked()
+                            // Only a moving load has positions.
+                            if kind == AnimationKind::Positions
+                                && animation.kind != kind
+                                && !positions
+                            {
+                                continue;
+                            }
+                            if ui.radio(animation.kind == kind, kind.label()).clicked()
                                 && animation.kind != kind
                             {
                                 restart = Some(kind);

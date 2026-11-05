@@ -75,6 +75,7 @@ mod study;
 mod style;
 mod symbols;
 mod table_export;
+mod timeline;
 mod toast;
 mod transformation_dialog;
 mod tree;
