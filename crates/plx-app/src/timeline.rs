@@ -38,11 +38,22 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// The increment nearest to `x`.
+    /// The increment nearest to `x` within the step under `x`, so that a click into a step
+    /// shows one of its increments even where the step before has one nearer; between the
+    /// steps, or in a step without increments, the nearest of all.
     pub fn nearest(&self, x: f32) -> Option<usize> {
-        (self.entries.iter())
-            .min_by(|a, b| (a.1 - x).abs().total_cmp(&(b.1 - x).abs()))
-            .map(|&(index, _)| index)
+        let nearest = |entries: &mut dyn Iterator<Item = &(usize, f32)>| {
+            entries
+                .min_by(|a, b| (a.1 - x).abs().total_cmp(&(b.1 - x).abs()))
+                .map(|&(index, _)| index)
+        };
+        let segment = (self.segments.iter()).find(|s| (s.left..=s.right).contains(&x));
+        segment
+            .and_then(|s| {
+                let inside = |e: &&(usize, f32)| (s.left..=s.right).contains(&e.1);
+                nearest(&mut self.entries.iter().filter(inside))
+            })
+            .or_else(|| nearest(&mut self.entries.iter()))
     }
 
     pub fn x_of(&self, index: usize) -> Option<f32> {
@@ -482,6 +493,31 @@ mod tests {
         let modes = &layout.segments[2];
         assert!((layout.x_of(7).unwrap() - (modes.left + widths[2] / 2.0)).abs() < 1e-3);
         assert_eq!(layout.nearest(modes.right), Some(8));
+    }
+
+    #[test]
+    fn a_click_into_a_step_shows_one_of_its_increments() {
+        // Two steps of one increment each, at their ends: the middle of the second step is
+        // nearer to the end of the first, but belongs to the second.
+        let increments = vec![
+            inc(1, 1, AnalysisKind::Static, 1.0),
+            inc(2, 1, AnalysisKind::Static, 2.0),
+        ];
+        let mut view = ResultsView::new(increments, None);
+        view.set_step_records(
+            &[
+                record("Stiffness", StepCategory::Static, Some(1.0), &[1]),
+                record("Stress", StepCategory::Static, Some(1.0), &[2]),
+            ],
+            &[],
+            None,
+        );
+        let layout = layout(&view, 1000.0);
+        let second = &layout.segments[1];
+        assert_eq!(layout.nearest(second.left + 10.0), Some(1));
+        assert_eq!(layout.nearest(layout.segments[0].left + 10.0), Some(0));
+        // In the gap between the steps the nearest of all.
+        assert_eq!(layout.nearest(layout.segments[0].right + 1.0), Some(0));
     }
 
     #[test]
