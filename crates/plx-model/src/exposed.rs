@@ -401,6 +401,14 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                         ValueKind::Count,
                     ));
                 }
+                StepKind::ComplexFrequency(complex) => {
+                    return rotation_slot(
+                        &mut complex.point,
+                        &mut complex.axis,
+                        &mut complex.speed,
+                        field,
+                    );
+                }
                 StepKind::Static(s) => s,
                 StepKind::HeatTransfer(h)
                 | StepKind::CoupledTempDisp(h)
@@ -473,6 +481,14 @@ fn load_slot(kind: &mut LoadKind, field: Field) -> Option<(Slot<'_>, ValueKind)>
         (LoadKind::Pressure(p), Field::Value) => real(p, Quantity::Pressure),
         (LoadKind::Force { value, .. }, field) => real(&mut value[field.axis()?], Quantity::Force),
         (LoadKind::Moment(m), field) => real(&mut m[field.axis()?], Quantity::Moment),
+        // The force along X, Y and Z, the moment about RX, RY and RZ.
+        (LoadKind::RemoteForce(remote), field) => match field.axis() {
+            Some(axis) => real(&mut remote.force[axis], Quantity::Force),
+            None => {
+                let axis = Field::ROTATION.iter().position(|f| *f == field)?;
+                real(&mut remote.moment[axis], Quantity::Moment)
+            }
+        },
         (LoadKind::Gravity(g), field) => real(&mut g[field.axis()?], Quantity::Acceleration),
         (
             LoadKind::PreTension {

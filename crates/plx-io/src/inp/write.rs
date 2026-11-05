@@ -167,6 +167,10 @@ pub struct Lowered {
     /// The item of the model each section, tie, rigid body, contact pair, material,
     /// amplitude and step of the analysis came from, for the solver's diagnostics.
     pub origins: Origins,
+    /// The steps of the analysis (by index) that only prepare the step of the model they
+    /// come from, e.g. the preload and the eigenmodes of a complex frequency step; their
+    /// results are not kept.
+    pub preparation_steps: Vec<usize>,
 }
 
 impl Lowered {
@@ -307,6 +311,9 @@ struct StepBlock {
     /// The cards of its boundary conditions, then those of everything after them.
     boundaries: Vec<Card>,
     cards: Vec<Card>,
+    /// A step that only prepares the next one, such as the preload and the eigenmodes
+    /// of a complex frequency step; its results are not kept.
+    preparation: bool,
 }
 
 /// Everything of the analysis but the assembly of the steps.
@@ -336,6 +343,7 @@ impl Built {
         }
         let mut steps = Vec::new();
         let mut origins = self.origins;
+        let mut preparation_steps = Vec::new();
         // The steps written are those of the model, in order; the others are of the
         // analyses that continue from it.
         let mut model_step = 0;
@@ -358,6 +366,9 @@ impl Built {
                 steps.extend(assembler.end(&model));
                 for step in first..steps.len() {
                     origins.insert(ir::ItemRef::Step(step), ModelItem::Step(origin));
+                    if block.preparation {
+                        preparation_steps.push(step);
+                    }
                 }
             }
         }
@@ -369,6 +380,7 @@ impl Built {
             part_sets: self.part_sets,
             profile_comments: self.profile_comments,
             origins,
+            preparation_steps,
         }
     }
 }
@@ -569,7 +581,6 @@ fn lower_model_named(
     let mut steps = (model.steps.iter().enumerate())
         .map(|(s, step)| {
             let context = StepContext {
-                stored_perturbation: stored_perturbation(&model.steps[..s]),
                 cyclic: (model.ties.iter()).any(|t| t.active && t.cyclic.is_some()),
                 cyclic_slaves: &cyclic_slaves,
                 extra_boundary: extra_boundary.as_ref(),
@@ -1885,60 +1896,63 @@ fn constraints(
                         reason,
                     }
                 })?;
-            let (reference, rotation) = (next_node, next_node + 1);
-            next_node += 2;
-            generated.nodes.push((reference, point.position));
-            generated.nodes.push((rotation, point.position));
-            sets.remote_points
-                .push((bc.region.clone(), remote.clone(), [reference, rotation]));
-            (sets.remote_names.entry(bc.name.clone())).or_insert(([reference, rotation], behavior));
-            if let Some([x, y, _]) = point.axes {
-                let set =
-                    sets.free_name("Internal_Selection", &format!("{}_Point", name(&bc.name)));
-                sets.node_sets
-                    .push((set.clone(), vec![reference, rotation]));
-                sets.transforms.push((set, Transform::Rectangular(x, y)));
-            }
-            let all_steps = sets.dofs.replace_held(held);
-            match behavior {
-                RemoteBehavior::Rigid => {
-                    let whole = remote.pinball.is_none()
-                        && point.nodes.len() == bc.region.nodes(sets.mesh).len();
-                    let region = if whole {
-                        bc.region.clone()
-                    } else {
-                        Region::Nodes(point.nodes.clone())
-                    };
-                    owners.resize(items.len(), None);
-                    let written = rigid_body(
-                        &mut items,
-                        sets,
-                        &bc.name,
-                        &region,
-                        point.position,
-                        point.axes,
-                        [reference, rotation],
-                    );
-                    sets.dofs.replace_held(all_steps);
-                    written?;
-                    owners.resize(items.len(), Some(ModelItem::BoundaryCondition(s, i)));
-                }
-                RemoteBehavior::Deformable => {
-                    let space = model.properties.space;
-                    for equation_terms in point.equations(sets.mesh, space) {
-                        let mut terms =
-                            remote_terms(&equation_terms, point.axes, [reference, rotation]);
-                        let mesh = sets.mesh;
-                        if (sets.dofs).claim_equation(&bc.name, &mut terms, |n| {
-                            n != reference && n != rotation && mesh.node(n).is_some()
-                        }) {
-                            items.push(ConstraintItem::Equation(equation(&terms)));
-                        }
-                    }
-                    sets.dofs.replace_held(all_steps);
-                }
-            }
+            let nodes = remote_point(
+                RemoteSource {
+                    item: &bc.name,
+                    region: &bc.region,
+                    spec: remote,
+                    behavior,
+                    owner: ModelItem::BoundaryCondition(s, i),
+                },
+                point,
+                held,
+                &mut next_node,
+                (&mut items, &mut owners),
+                sets,
+                model,
+                generated,
+            )?;
+            (sets.remote_names.entry(bc.name.clone())).or_insert((nodes, behavior));
         }
+    }
+    // A remote force drives its region from a point of its own the same way, or from the
+    // point of a remote displacement of the same region and point. A force on a reference
+    // point acts on its nodes and needs none.
+    for (s, i, region, force) in model.remote_forces() {
+        if region.reference_point().is_some() {
+            continue;
+        }
+        let spec = force.point();
+        if (sets.remote_points.iter()).any(|(r, p, _)| r == region && p.same_point(&spec)) {
+            continue;
+        }
+        let load = &model.steps[s].loads[i];
+        *lowering = Some(s);
+        let steps = model.remote_force_steps(region, force);
+        let excluded = model.directly_held_nodes_in(sets.mesh, |s| steps.contains(&s));
+        let held = model.held_translations_in(sets.mesh, |s| steps.contains(&s));
+        let point = (spec.resolve(model, sets.mesh, region, &excluded)).map_err(|reason| {
+            WriteError::InvalidLoad {
+                item: load.name.clone(),
+                reason,
+            }
+        })?;
+        remote_point(
+            RemoteSource {
+                item: &load.name,
+                region,
+                spec: &spec,
+                behavior: force.behavior,
+                owner: ModelItem::Load(s, i),
+            },
+            point,
+            held,
+            &mut next_node,
+            (&mut items, &mut owners),
+            sets,
+            model,
+            generated,
+        )?;
     }
     *lowering = None;
     for t in model.ties.iter().filter(|t| t.active) {
@@ -1946,6 +1960,91 @@ fn constraints(
     }
     owners.resize(items.len(), None);
     Ok((items, owners))
+}
+
+/// What a point of a remote displacement or remote force comes from: the item, its region,
+/// the point as a displacement and how the region follows it.
+struct RemoteSource<'r> {
+    item: &'r str,
+    region: &'r Region,
+    spec: &'r plx_model::Displacement,
+    behavior: RemoteBehavior,
+    owner: ModelItem,
+}
+
+/// Adds the reference and rotation node of a resolved point and couples the nodes of the
+/// region to it, rigidly or as averaging equations. `held` are the translations boundary
+/// conditions hold in the steps the point acts in, which the coupling leaves out. The
+/// point's nodes get the local directions of the point, if it has some.
+#[allow(clippy::too_many_arguments)]
+fn remote_point(
+    source: RemoteSource,
+    point: plx_model::RemotePoint,
+    held: BTreeMap<NodeId, [bool; 3]>,
+    next_node: &mut NodeId,
+    (items, owners): (&mut Vec<ConstraintItem>, &mut Vec<Option<ModelItem>>),
+    sets: &mut Sets,
+    model: &FeModel,
+    generated: &mut constraints::Generated,
+) -> Result<[NodeId; 2], WriteError> {
+    let RemoteSource {
+        item,
+        region,
+        spec,
+        behavior,
+        owner,
+    } = source;
+    let (reference, rotation) = (*next_node, *next_node + 1);
+    *next_node += 2;
+    generated.nodes.push((reference, point.position));
+    generated.nodes.push((rotation, point.position));
+    sets.remote_points
+        .push((region.clone(), spec.clone(), [reference, rotation]));
+    if let Some([x, y, _]) = point.axes {
+        let set = sets.free_name("Internal_Selection", &format!("{}_Point", name(item)));
+        sets.node_sets
+            .push((set.clone(), vec![reference, rotation]));
+        sets.transforms.push((set, Transform::Rectangular(x, y)));
+    }
+    let all_steps = sets.dofs.replace_held(held);
+    match behavior {
+        RemoteBehavior::Rigid => {
+            let whole =
+                spec.pinball.is_none() && point.nodes.len() == region.nodes(sets.mesh).len();
+            let region = if whole {
+                region.clone()
+            } else {
+                Region::Nodes(point.nodes.clone())
+            };
+            owners.resize(items.len(), None);
+            let written = rigid_body(
+                items,
+                sets,
+                item,
+                &region,
+                point.position,
+                point.axes,
+                [reference, rotation],
+            );
+            sets.dofs.replace_held(all_steps);
+            written?;
+            owners.resize(items.len(), Some(owner));
+        }
+        RemoteBehavior::Deformable => {
+            let space = model.properties.space;
+            for equation_terms in point.equations(sets.mesh, space) {
+                let mut terms = remote_terms(&equation_terms, point.axes, [reference, rotation]);
+                let mesh = sets.mesh;
+                if (sets.dofs).claim_equation(item, &mut terms, |n| {
+                    n != reference && n != rotation && mesh.node(n).is_some()
+                }) {
+                    items.push(ConstraintItem::Equation(equation(&terms)));
+                }
+            }
+            sets.dofs.replace_held(all_steps);
+        }
+    }
+    Ok([reference, rotation])
 }
 
 /// A tie of a slave surface glued to its master, with its cyclic symmetry model if it is
@@ -2392,25 +2491,12 @@ struct StepContext<'a> {
     flux_kinds: FluxKinds,
     amplitudes: &'a [Amplitude],
     pair_surfaces: &'a PairSurfaces,
-    /// `*STEP, PERTURBATION` of the frequency step whose stored modes a complex frequency
-    /// step uses; the solver stops when the two differ.
-    stored_perturbation: bool,
     /// The model, for the coordinate systems of moving loads.
     model: &'a FeModel,
     /// The model is a cyclic symmetric sector: frequency steps select the nodal diameters.
     cyclic: bool,
     /// See [`cyclic_slave_nodes`].
     cyclic_slaves: &'a BTreeSet<NodeId>,
-}
-
-/// The perturbation flag of the last active frequency step with storage among `before`.
-fn stored_perturbation(before: &[Step]) -> bool {
-    (before.iter().rev().filter(|s| s.active))
-        .find_map(|s| match &s.kind {
-            StepKind::Frequency(f) if f.storage => Some(f.perturbation),
-            _ => None,
-        })
-        .unwrap_or(false)
 }
 
 /// A step as the solver takes it: the procedure, then the
@@ -2484,8 +2570,84 @@ fn lower_step(
             named: title.is_some(),
             boundaries: parts.boundaries,
             cards,
+            preparation: false,
         });
     }
+    if let StepKind::ComplexFrequency(settings) = &step.kind
+        && let Some(complex) = blocks.pop()
+    {
+        return complex_frequency_blocks(sets, step, settings, context, complex);
+    }
+    Ok(blocks)
+}
+
+/// The steps the solver solves a complex frequency step as: with stress stiffening a
+/// static step that preloads the model by the centrifugal forces of the rotation, then a
+/// frequency step that stores the eigenmodes (a perturbation of the preload with stress
+/// stiffening, which also brings the spin softening), then the complex frequency step
+/// `complex` on those modes. The rotation acts on all parts; the first step adds it to the
+/// loads the steps before left, the others take it over.
+fn complex_frequency_blocks(
+    sets: &mut Sets,
+    step: &Step,
+    settings: &ComplexFrequencyStep,
+    context: &StepContext,
+    complex: StepBlock,
+) -> Result<Vec<StepBlock>, WriteError> {
+    let invalid = |reason: String| WriteError::InvalidLoad {
+        item: step.name.clone(),
+        reason,
+    };
+    if let Some(problem) = settings.problem() {
+        return Err(invalid(problem));
+    }
+    let Some((_, axis)) = unit_vector(settings.axis) else {
+        return Err(invalid("the rotation axis has no direction".into()));
+    };
+    let parts: Vec<String> = sets.mesh.parts.iter().map(|p| p.name.clone()).collect();
+    let set = sets.element_set(&format!("{}_Rotation", step.name), &Region::Parts(parts))?;
+    let rotation = Card::Dload {
+        op_new: false,
+        items: vec![dload(
+            element_set_ref(&set),
+            ir::step::DistributedLoadKind::Centrifugal {
+                omega_squared: settings.speed * settings.speed,
+                point: settings.point,
+                axis,
+            },
+            &None,
+        )],
+    };
+    let helper = |ir_step: ir::Step, cards: Vec<Card>| StepBlock {
+        step: ir_step,
+        named: false,
+        boundaries: complex.boundaries.clone(),
+        cards,
+        preparation: true,
+    };
+    let mut blocks = Vec::with_capacity(3);
+    let mut first_cards = vec![rotation];
+    if settings.stiffening {
+        let preload = StaticStep {
+            solver: settings.solver,
+            ..StaticStep::default()
+        };
+        blocks.push(helper(
+            static_step(&preload),
+            std::mem::take(&mut first_cards),
+        ));
+    }
+    let modes = FrequencyStep {
+        num_frequencies: settings.num_modes,
+        storage: true,
+        perturbation: settings.stiffening,
+        solver: settings.solver,
+        ..FrequencyStep::default()
+    };
+    blocks.push(helper(frequency_step(&modes, context.cyclic), first_cards));
+    let mut complex = complex;
+    complex.step.perturbation = settings.stiffening;
+    blocks.push(complex);
     Ok(blocks)
 }
 
@@ -2742,7 +2904,6 @@ fn step_block<'f>(
         flux_kinds,
         amplitudes,
         pair_surfaces,
-        stored_perturbation,
         cyclic,
         cyclic_slaves,
         model,
@@ -2752,9 +2913,7 @@ fn step_block<'f>(
     let mut ir_step = match &step.kind {
         StepKind::Static(settings) => static_step(settings),
         StepKind::Frequency(settings) => frequency_step(settings, cyclic),
-        StepKind::ComplexFrequency(settings) => {
-            complex_frequency_step(settings, stored_perturbation)
-        }
+        StepKind::ComplexFrequency(settings) => complex_frequency_step(settings),
         StepKind::Buckle(settings) => buckle_step(settings),
         StepKind::HeatTransfer(settings) => heat_transfer_step(settings, HeatKind::Heat),
         StepKind::CoupledTempDisp(settings) => heat_transfer_step(settings, HeatKind::Coupled),
@@ -3049,6 +3208,57 @@ fn step_block<'f>(
                 for (dof, value) in (0..).zip(moment) {
                     if value != 0.0 && dof as usize + 4 <= dofs {
                         items.push(cload(target.clone(), first_dof + dof, value, &amplitude));
+                    }
+                }
+                vec![Card::Cload {
+                    op_new: false,
+                    items,
+                }]
+            }
+            LoadKind::RemoteForce(ref remote) => {
+                // The force acts on the reference node of the point, the moment on its
+                // rotation node, in the point's directions; a reference point takes them in
+                // global directions.
+                let (nodes, force, moment) = match load.region.reference_point() {
+                    Some(point) => {
+                        let nodes = sets.reference_nodes(&load.name, point)?;
+                        let position =
+                            (model.reference_point(point)).map_or([0.0; 3], |p| p.position);
+                        let (force, moment) =
+                            (remote.global(model, position)).map_err(|reason| {
+                                WriteError::InvalidLoad {
+                                    item: load.name.clone(),
+                                    reason,
+                                }
+                            })?;
+                        ([nodes.reference, nodes.rotation], force, moment)
+                    }
+                    None => {
+                        let spec = remote.point();
+                        let Some(&(_, _, nodes)) = (sets.remote_points.iter())
+                            .find(|(r, p, _)| *r == load.region && p.same_point(&spec))
+                        else {
+                            return Err(empty(&load.name, "nodes"));
+                        };
+                        let allowed = space.remote_dofs();
+                        let keep = |v: [f64; 3], offset: usize| {
+                            std::array::from_fn(|k| {
+                                if allowed.contains(&(k + offset)) {
+                                    v[k]
+                                } else {
+                                    0.0
+                                }
+                            })
+                        };
+                        (nodes, keep(remote.force, 0), keep(remote.moment, 3))
+                    }
+                };
+                let mut items = Vec::new();
+                for (node, values) in nodes.into_iter().zip([force, moment]) {
+                    for (dof, value) in (1..).zip(values) {
+                        if value != 0.0 {
+                            items.push(cload(NodeRef::Node(node), dof, value, &amplitude));
+                        }
                     }
                 }
                 vec![Card::Cload {
@@ -3817,7 +4027,7 @@ fn frequency_step(settings: &FrequencyStep, cyclic: bool) -> ir::Step {
 /// A complex frequency step.
 /// `perturbation` is the flag of the frequency step that stored the modes: CalculiX
 /// requires the same on both steps.
-fn complex_frequency_step(settings: &ComplexFrequencyStep, perturbation: bool) -> ir::Step {
+fn complex_frequency_step(settings: &ComplexFrequencyStep) -> ir::Step {
     let mut step = new_step(ir::step::Procedure::ComplexFrequency(
         ir::step::ComplexFrequency {
             coriolis: settings.coriolis,
@@ -3825,7 +4035,7 @@ fn complex_frequency_step(settings: &ComplexFrequencyStep, perturbation: bool) -
             count: settings.num_frequencies,
         },
     ));
-    step.perturbation = perturbation;
+    step.perturbation = settings.stiffening;
     step
 }
 

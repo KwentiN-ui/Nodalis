@@ -38,6 +38,7 @@ mod primitive;
 mod properties;
 mod region;
 mod remote;
+mod remote_force;
 mod section;
 mod signature;
 mod solver_diagnostics;
@@ -102,6 +103,7 @@ pub use remote::{
     Behavior, Displacement, Formulation, RemoteBehavior, RemoteDof, RemotePoint, expanded_nodes,
     rigid_rows,
 };
+pub use remote_force::RemoteForce;
 pub use section::{
     BeamOrientation, BeamSection, Section, SectionKind, line_tangent, membrane_type, unit_thickness,
 };
@@ -135,8 +137,8 @@ use serde::{Deserialize, Serialize};
 /// without them. Format 15 merges the remote displacement into the displacement, which
 /// chooses how it is written from its selection; older formats are refused. Format 16 gives
 /// the equation solver of a step only the choice Direct or Iterative; older formats are
-/// refused.
-pub const PROJECT_FORMAT: u32 = 16;
+/// refused. Format 17 adds the remote force; format 16 reads as it is.
+pub const PROJECT_FORMAT: u32 = 17;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1288,19 +1290,33 @@ impl Default for FrequencyStep {
     }
 }
 
-/// Settings of a `*COMPLEX FREQUENCY` step, with the default values. The solver solves it on
-/// the eigenmodes of the last frequency step with [`FrequencyStep::storage`]; the Coriolis
-/// forces come from the centrifugal load of the static step before that frequency step.
-///
-/// The step has no perturbation flag of its own: the solver stops unless `*STEP, PERTURBATION`
-/// of this step matches the one of the frequency step that stored the modes, so the writer
-/// takes [`FrequencyStep::perturbation`] of that step.
+/// Settings of a complex frequency step: the eigenmodes of a rotating structure with the
+/// Coriolis forces of the rotation. The step is complete on its own: it holds the rotation
+/// and the solver gets it as up to three steps (see `plx_io::inp`), a static preload by the
+/// centrifugal forces (with [`ComplexFrequencyStep::stiffening`]), a frequency step that
+/// stores [`ComplexFrequencyStep::num_modes`] eigenmodes (a perturbation of the preload
+/// with stiffening) and the complex frequency step on those modes. Only the complex modes
+/// are kept as results. The rotation acts on the whole model.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ComplexFrequencyStep {
     /// Number of complex eigenfrequencies to compute.
     pub num_frequencies: u32,
     /// Coriolis forces of the rotation (`CORIOLIS`); the usual reason for the step.
     pub coriolis: bool,
+    /// Rotational speed in radians per time.
+    pub speed: f64,
+    /// A point on the rotation axis.
+    pub point: [f64; 3],
+    /// Direction of the rotation axis.
+    pub axis: [f64; 3],
+    /// Stress stiffening and spin softening by the centrifugal forces: the eigenmodes are
+    /// those of the structure preloaded by the rotation. Off, they are those at standstill
+    /// (as some other programs compute them).
+    pub stiffening: bool,
+    /// Number of eigenmodes the complex modes are combined from; at least
+    /// [`ComplexFrequencyStep::num_frequencies`].
+    pub num_modes: u32,
+    pub solver: LinearSolverChoice,
 }
 
 impl Default for ComplexFrequencyStep {
@@ -1308,7 +1324,33 @@ impl Default for ComplexFrequencyStep {
         Self {
             num_frequencies: 10,
             coriolis: true,
+            speed: 0.0,
+            point: [0.0; 3],
+            axis: [0.0, 0.0, 1.0],
+            stiffening: true,
+            num_modes: 20,
+            solver: LinearSolverChoice::Automatic,
         }
+    }
+}
+
+impl ComplexFrequencyStep {
+    /// What keeps the settings from being solved, in words.
+    pub fn problem(&self) -> Option<String> {
+        let length = self.axis.iter().map(|c| c * c).sum::<f64>().sqrt();
+        if length == 0.0 || !length.is_finite() {
+            return Some("The rotation axis has no direction.".into());
+        }
+        if self.num_frequencies == 0 {
+            return Some("Compute at least one complex frequency.".into());
+        }
+        if self.num_modes < self.num_frequencies {
+            return Some(
+                "The number of eigenmodes must be at least the number of complex frequencies."
+                    .into(),
+            );
+        }
+        None
     }
 }
 
@@ -1680,6 +1722,9 @@ pub enum LoadKind {
     /// `each_node` the whole value acts at every node of the region instead
     /// (a concentrated force).
     Force { value: [f64; 3], each_node: bool },
+    /// Force and moment at a point the region follows, rigidly or on average, Ansys'
+    /// remote force; see [`RemoteForce`].
+    RemoteForce(RemoteForce),
     /// Bolt preload across a cut through the shank (`*PRE-TENSION SECTION`), the
     /// pre-tension load: the region is the element faces on one side of the cut, the value
     /// the force pulling the two sides together, or the shortening when `by_displacement`.
@@ -1746,6 +1791,7 @@ impl LoadKind {
             LoadKind::Moment(_)
                 | LoadKind::Pressure(_)
                 | LoadKind::Force { .. }
+                | LoadKind::RemoteForce(_)
                 | LoadKind::PreTension { .. }
                 | LoadKind::Gravity(_)
                 | LoadKind::Centrifugal { .. }

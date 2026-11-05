@@ -17,7 +17,7 @@ use plx_model::{
     Hardening, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialCondition,
     InitialConditionKind, ItemRef, LinearSolverChoice, Load, LoadKind, Material, MeshSet,
     ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad, NodeTie, OutputDimension,
-    OutputKind, PlasticPoint, Quantity, Region, RemoteBehavior, Section, SectionKind,
+    OutputKind, PlasticPoint, Quantity, Region, RemoteBehavior, RemoteForce, Section, SectionKind,
     SensitivityStep, SetKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind,
     SurfaceInteraction, SymmetryError, Tie, UnitSystem, ViscoStep, Wheel, next_name,
     symmetry_plane,
@@ -773,6 +773,96 @@ fn force_rows(ui: &mut Ui, force: &mut [f64; 3], two_d: bool, units: UnitSystem)
     }
 }
 
+/// Rows of a remote force: force and moment in the directions of its coordinate system,
+/// how the selection follows the point, and where the point is.
+fn remote_force_rows(
+    ui: &mut Ui,
+    remote: &mut RemoteForce,
+    region: &Region,
+    model: &Model,
+    units: UnitSystem,
+) {
+    let space = model.fe.properties.space;
+    let dofs = space.remote_dofs();
+    let force_labels = ["F1", "F2", "F3"].into_iter().zip(Field::VECTOR);
+    for (k, (value, (label, field))) in remote.force.iter_mut().zip(force_labels).enumerate() {
+        if !dofs.contains(&k) {
+            continue;
+        }
+        ui.label(label);
+        expose::field(ui, field, |ui| {
+            ui.add(numeric::quantity(value, units, Quantity::Force).speed(1.0))
+        });
+        ui.end_row();
+    }
+    let moment_labels = ["M1", "M2", "M3"].into_iter().zip(Field::ROTATION);
+    for (k, (value, (label, field))) in remote.moment.iter_mut().zip(moment_labels).enumerate() {
+        if !dofs.contains(&(k + 3)) {
+            continue;
+        }
+        ui.label(label);
+        expose::field(ui, field, |ui| {
+            ui.add(numeric::quantity(value, units, Quantity::Moment).speed(1.0))
+        });
+        ui.end_row();
+    }
+    if !space.has_remote_moment() {
+        ui.label("");
+        ui.weak("An axisymmetric model takes no moment.");
+        ui.end_row();
+    }
+    if region.reference_point().is_some() {
+        system_row(ui, &mut remote.system, &model.fe);
+        ui.label("");
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(
+                    "Acts at the reference point, which drives its rigid body; directions of \
+                     the coordinate system at the point.",
+                )
+                .weak(),
+            )
+            .wrap(),
+        );
+        ui.end_row();
+        return;
+    }
+    ui.label("Behavior");
+    egui::ComboBox::from_id_salt("remote force behavior")
+        .selected_text(behavior_label(remote.behavior))
+        .width(crate::dock::fit_width(ui, 200.0))
+        .show_ui(ui, |ui| {
+            for behavior in [RemoteBehavior::Rigid, RemoteBehavior::Deformable] {
+                ui.selectable_value(&mut remote.behavior, behavior, behavior_label(behavior));
+            }
+        });
+    ui.end_row();
+    ui.label("");
+    let hint = match remote.behavior {
+        RemoteBehavior::Rigid => {
+            "Rigid: the selection keeps its shape and follows a point, on which force and \
+             moment act."
+        }
+        RemoteBehavior::Deformable => {
+            "Deformable: force and moment act on a point that moves with the weighted mean \
+             of the selection, which may deform."
+        }
+    };
+    ui.add(egui::Label::new(egui::RichText::new(hint).weak()).wrap());
+    ui.end_row();
+    system_row(ui, &mut remote.system, &model.fe);
+    let mut point = remote.point();
+    point_rows(ui, &mut point, region, model, units);
+    remote.set_point(&point);
+}
+
+fn behavior_label(behavior: RemoteBehavior) -> &'static str {
+    match behavior {
+        RemoteBehavior::Rigid => "Rigid",
+        RemoteBehavior::Deformable => "Deformable",
+    }
+}
+
 /// Rows of a moving load: the path along an axis of a coordinate system, the contact patch
 /// and the wheels relative to the vehicle's reference point.
 fn moving_rows(ui: &mut Ui, moving: &mut MovingLoad, fe: &FeModel, two_d: bool, units: UnitSystem) {
@@ -1192,6 +1282,7 @@ const SUBMODEL: &str = "Submodel";
 const SYMMETRY: &str = "Symmetry";
 const FORCE: &str = "Force";
 const MOMENT: &str = "Moment";
+const REMOTE_FORCE: &str = "Remote_Force";
 const PRESSURE: &str = "Pressure";
 const PRE_TENSION: &str = "Pre-tension";
 const CFLUX: &str = "Concentrated_Flux";
@@ -1281,22 +1372,39 @@ fn displacement_rows(
         .wrap(),
     );
     ui.end_row();
+    system_row(ui, &mut remote.system, fe);
+    // Location and pinball region belong to a point.
+    if point {
+        point_rows(ui, remote, region, model, units);
+    }
+}
+
+/// The coordinate system of a remote displacement or remote force.
+fn system_row(ui: &mut Ui, system: &mut String, fe: &FeModel) {
     ui.label("Coordinate system");
     egui::ComboBox::from_id_salt("remote system")
-        .selected_text(remote.system.as_str())
+        .selected_text(system.as_str())
         .width(crate::dock::fit_width(ui, 200.0))
         .show_ui(ui, |ui| {
             let names = std::iter::once(GLOBAL)
                 .chain(fe.coordinate_systems.iter().map(|c| c.name.as_str()));
             for name in names {
-                ui.selectable_value(&mut remote.system, name.to_string(), name);
+                ui.selectable_value(system, name.to_string(), name);
             }
         });
     ui.end_row();
-    // Location and pinball region belong to a point.
-    if !point {
-        return;
-    }
+}
+
+/// Rows of a point a selection follows: where it is, where it resolves to, and the pinball
+/// region.
+fn point_rows(
+    ui: &mut Ui,
+    remote: &mut Displacement,
+    region: &Region,
+    model: &Model,
+    units: UnitSystem,
+) {
+    let fe = &model.fe;
     let system = fe.coordinate_system_or_global(&remote.system);
     let cylindrical = system
         .as_ref()
@@ -1542,9 +1650,14 @@ const DOF_LABELS: [&str; 6] = ["U1", "U2", "U3", "UR1", "UR2", "UR3"];
 
 /// The load kinds of the dialog, the force first: label, default name and the kind with zero
 /// values.
-fn load_kinds() -> [(&'static str, &'static str, LoadKind); 12] {
+fn load_kinds() -> [(&'static str, &'static str, LoadKind); 13] {
     [
         ("Force", FORCE, LoadKind::force([0.0; 3])),
+        (
+            "Remote Force",
+            REMOTE_FORCE,
+            LoadKind::RemoteForce(RemoteForce::default()),
+        ),
         ("Moment", MOMENT, LoadKind::Moment([0.0; 3])),
         ("Pressure", PRESSURE, LoadKind::Pressure(0.0)),
         ("Gravity", GRAVITY, LoadKind::Gravity([0.0, 0.0, -9.81])),
@@ -1653,6 +1766,7 @@ fn load_kind_name(kind: &LoadKind) -> &'static str {
         LoadKind::Moment(_) => MOMENT,
         LoadKind::Pressure(_) => PRESSURE,
         LoadKind::Force { .. } => FORCE,
+        LoadKind::RemoteForce(_) => REMOTE_FORCE,
         LoadKind::PreTension { .. } => PRE_TENSION,
         LoadKind::ConcentratedFlux(_) => CFLUX,
         LoadKind::SurfaceFlux(_) => SURFACE_FLUX,
@@ -1675,9 +1789,10 @@ enum LoadTarget {
 
 fn load_target(kind: &LoadKind) -> LoadTarget {
     match kind {
-        LoadKind::Force { .. } | LoadKind::Moment(_) | LoadKind::ConcentratedFlux(_) => {
-            LoadTarget::Nodes
-        }
+        LoadKind::Force { .. }
+        | LoadKind::RemoteForce(_)
+        | LoadKind::Moment(_)
+        | LoadKind::ConcentratedFlux(_) => LoadTarget::Nodes,
         LoadKind::BodyFlux(_) | LoadKind::Gravity(_) | LoadKind::Centrifugal { .. } => {
             LoadTarget::Elements
         }
@@ -2900,6 +3015,9 @@ impl Editor {
                         ui.end_row();
                         revolution_hint(ui, axisymmetric);
                     }
+                    LoadKind::RemoteForce(remote) => {
+                        remote_force_rows(ui, remote, &region.region(), model, units);
+                    }
                     LoadKind::PreTension {
                         value,
                         by_displacement,
@@ -3579,7 +3697,12 @@ impl Editor {
                         return Err("The creep strain tolerance must be positive.".into());
                     }
                 }
-                StepKind::Static(_) | StepKind::ComplexFrequency(_) => {}
+                StepKind::ComplexFrequency(settings) => {
+                    if let Some(problem) = settings.problem() {
+                        return Err(problem);
+                    }
+                }
+                StepKind::Static(_) => {}
             }
         }
         Ok(())
@@ -5173,7 +5296,7 @@ fn step_form(
         StepKind::Dynamic(settings) => dynamic_form(ui, settings, units),
         StepKind::ModalDynamics(settings) => modal_dynamics_form(ui, settings, units),
         StepKind::SteadyStateDynamics(settings) => steady_state_form(ui, settings, units),
-        StepKind::ComplexFrequency(settings) => complex_frequency_form(ui, settings),
+        StepKind::ComplexFrequency(settings) => complex_frequency_form(ui, settings, units),
         StepKind::Buckle(settings) => buckle_form(ui, settings),
         StepKind::HeatTransfer(settings) => heat_transfer_form(ui, settings, units, false),
         StepKind::CoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, true),
@@ -5627,27 +5750,69 @@ fn nodal_diameter_rows(ui: &mut Ui, range: &mut Option<[u32; 2]>, sectors: u32) 
     ui.end_row();
 }
 
-/// Settings of a complex frequency step: the number of modes; the Coriolis
-/// option is CalculiX's, with a hint at what the step builds on. The perturbation flag is the
-/// one of the Frequency step, since the solver requires the same on both steps.
-fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep) {
-    ui.label("");
-    ui.checkbox(
-        &mut settings.coriolis,
-        "Coriolis forces of the rotation (CORIOLIS)",
-    );
+/// Settings of a complex frequency step: the rotation, the stress stiffening by it, the
+/// numbers of modes and the solver. The step is complete on its own; the solver preloads and
+/// computes the eigenmodes in steps of its own.
+fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep, units: UnitSystem) {
+    ui.label("Rotational speed");
+    expose::field(ui, Field::Speed, |ui| {
+        ui.add(numeric::quantity(&mut settings.speed, units, Quantity::RotationalSpeed).speed(1.0))
+    });
     ui.end_row();
-    ui.label("Number of complex frequencies");
+    ui.label("");
+    // The speed in rpm to six digits, which a speed typed in rad/s rarely hits exactly.
+    let rpm = settings.speed * 60.0 / std::f64::consts::TAU;
+    let rpm = if rpm.is_normal() {
+        let scale = 10f64.powi(5 - rpm.abs().log10().floor() as i32);
+        (rpm * scale).round() / scale
+    } else {
+        rpm
+    };
+    ui.weak(format!("= {} rpm", numeric::format_physical(rpm)));
+    ui.end_row();
+    for ((value, label), field) in (settings.point.iter_mut())
+        .zip(["Axis point X", "Axis point Y", "Axis point Z"])
+        .zip(Field::LOCATION)
+    {
+        ui.label(label);
+        expose::field(ui, field, |ui| {
+            ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.1))
+        });
+        ui.end_row();
+    }
+    for ((value, label), field) in (settings.axis.iter_mut())
+        .zip(["Axis direction X", "Axis direction Y", "Axis direction Z"])
+        .zip(Field::AXIS)
+    {
+        ui.label(label);
+        expose::field(ui, field, |ui| {
+            ui.add(numeric::drag_value(value).speed(0.01))
+        });
+        ui.end_row();
+    }
+    ui.label("Stress stiffening");
+    ui.checkbox(&mut settings.stiffening, "Centrifugal prestress")
+        .on_hover_text(
+            "Stress stiffening and spin softening: the eigenmodes of the structure preloaded \
+             by its centrifugal forces. Off, the eigenmodes are those at standstill, as some \
+             other programs compute them by default.",
+        );
+    ui.end_row();
+    ui.label("Coriolis forces");
+    ui.checkbox(&mut settings.coriolis, "Gyroscopic coupling")
+        .on_hover_text("Couples the eigenmodes by the Coriolis forces of the rotation.");
+    ui.end_row();
+    ui.label("Complex frequencies");
     ui.add(numeric::drag_value(&mut settings.num_frequencies).range(1..=10_000));
     ui.end_row();
+    ui.label("Eigenmodes used")
+        .on_hover_text("The eigenmodes the complex modes are combined from.");
+    let least = settings.num_frequencies;
+    ui.add(numeric::drag_value(&mut settings.num_modes).range(least..=10_000));
+    ui.end_row();
+    solver_row(ui, &mut settings.solver);
     ui.label("");
-    ui.weak(
-        "Solved on the modes of the last Frequency step with Storage before this step.\n\
-         The rotation comes from a Centrifugal load in the Static step before that one.\n\
-         Perturbation is taken from that Frequency step: tick \"Perturbation\" there\n\
-         to include the stiffening by the centrifugal preload.\n\
-         Loads have no effect in this step; only the boundary conditions count.",
-    );
+    ui.weak("Rotates the whole model; the materials\nneed a density. Results are the\ncomplex modes only.");
     ui.end_row();
 }
 

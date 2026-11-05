@@ -3,43 +3,46 @@
 == Complex Frequency step <complex-frequency>
 
 A #ui("Complex Frequency (rotating, Coriolis)") step computes the eigenfrequencies of a rotating
-structure with its Coriolis forces (`*COMPLEX FREQUENCY`), for example the whirl modes of a
-shaft. Create it with #menu("Steps", "Step") and choose the type in the dialog.
+structure with its Coriolis forces, for example the whirl modes of a shaft. Create it with
+#menu("Steps", "Step") and choose the type in the dialog. The step is complete on its own: it
+holds the rotation, and no static or frequency step has to come before it.
 
 #screenshot("complex-frequency-step.png", [Complex Frequency step])
 
 #fields(
-  [Coriolis forces of the rotation (CORIOLIS)], [Adds the Coriolis matrix of the rotation
-    (default on). Without it the step repeats the frequencies of the frequency step.],
-  [Number of complex frequencies], [How many complex eigenfrequencies the solver computes
-    (default 10).],
+  [Rotational speed], [Speed of the rotation in radians per time; the line below shows it in
+    rpm.],
+  [Axis point X, Y, Z], [A point on the rotation axis.],
+  [Axis direction X, Y, Z], [Direction of the rotation axis (default z).],
+  [Stress stiffening: Centrifugal prestress], [Stress stiffening and spin softening. Computes the eigenmodes of the structure
+    preloaded by its centrifugal forces (default on): the stresses of the preload stiffen it,
+    the centrifugal forces soften it (spin softening). Off, the eigenmodes are those of the
+    structure at standstill, as some other programs compute them by default; switch it off to
+    compare with them.],
+  [Coriolis forces: Gyroscopic coupling], [Couples the eigenmodes by the
+    Coriolis forces (default on). Without it the step gives the eigenfrequencies of the
+    (preloaded) structure.],
+  [Complex frequencies], [How many complex eigenfrequencies to compute (default 10).],
+  [Eigenmodes used], [How many eigenmodes the complex modes are combined from (default 20,
+    at least the number of complex frequencies). More eigenmodes give more accurate complex
+    frequencies and take longer.],
+  [Equation solver], [As in a Frequency step.],
 )
 
-The step needs two steps before it, in this order:
+The rotation acts on the whole model, so every material needs a density. The solver computes
+the step in up to three steps of its own: with stress stiffening a static preload by the
+centrifugal forces, then the eigenmodes (with stress stiffening as a perturbation of the
+preload), then the complex modes. Only the complex modes are kept as results. The step starts
+from the state of the step before it: a bolt preload of an earlier Static step stays in place
+and stiffens the rotor as well. Loads of the step itself have no effect; the boundary
+conditions hold in all three solver steps.
 
-+ A #ui("Static") step with a #ui("Centrifugal") load (@loads). Its rotation axis and speed
-  define the rotation; the Coriolis forces come from this load.
-+ A #ui("Frequency") step with #ui("Store matrices and eigenmodes") and #ui("Perturbation")
-  switched on. The complex frequency step is solved on the eigenmodes this step writes to the
-  `.eig` file. Its number of eigenfrequencies limits how many complex frequencies make sense.
-
-The complex frequency step writes `*STEP, PERTURBATION` exactly when this frequency step has
-#ui("Perturbation") switched on, since CalculiX stops when the two steps differ ("the .eig-file
-was created without perturbation info"). Without perturbation the modes ignore the stiffening by
-the centrifugal preload of the static step.
-
-The complex frequency step takes the boundary conditions of the step before it and no loads. The
-model check (@model-check) reports a missing stored frequency step as an error ("No stored
-eigenmodes") and a Coriolis step without a centrifugal load as a warning ("No rotation").
+The model check (@model-check) warns about a Coriolis step at speed 0 ("No rotation").
 
 Join bonded parts of a rotor with a Tie constraint (#menu("Connections", "Tie")), not
-with a contact pair with tied surface behavior. CalculiX leaves contact pairs out of a frequency
-step without perturbation, so the parts they hold float; and even with perturbation the Coriolis
-coupling of the complex frequency step misses the contact, so whirl pairs do not split and modes
-go missing. The model check warns about both ("Contact ignored", "Contact with Coriolis").
-
-The node field output of a new complex frequency step is `U, PU`: `PU` writes the magnitude and
-phase of the displacements of every mode (`PDISP`), which the whirl animation needs.
+with a contact pair with tied surface behavior: the Coriolis coupling of the complex frequency
+step misses the contact, so whirl pairs do not split and modes go missing. The model check warns
+about it ("Contact with Coriolis").
 
 === Results of a complex frequency step
 
