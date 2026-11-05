@@ -102,17 +102,25 @@ pub fn applies(fe: &FeModel) -> bool {
 /// standstill every centrifugal load turns at `speed`.
 pub fn with_speed(fe: &FeModel, speed: f64) -> FeModel {
     let mut fe = fe.clone();
+    set_speed(&mut fe, speed);
+    fe
+}
+
+/// Sets the model to turn at `speed`, as [`with_speed`] does: every centrifugal load scaled
+/// from the model's speed, or at standstill turning at `speed` itself.
+pub fn set_speed(fe: &mut FeModel, speed: f64) {
     // A model at standstill has no speed to scale from: its loads take the speed itself.
-    let factor = rotor_speed(&fe).filter(|r| *r > 0.0).map(|r| speed / r);
+    // The ratio comes first, so that the fastest load turns at exactly `speed` and the
+    // fingerprint of a sweep does not change with the speed the model is set to.
+    let reference = rotor_speed(fe).filter(|r| *r > 0.0);
     for load in fe.steps.iter_mut().flat_map(|s| &mut s.loads) {
         if let LoadKind::Centrifugal { speed: own, .. } = &mut load.kind {
-            *own = match factor {
-                Some(factor) => *own * factor,
+            *own = match reference {
+                Some(reference) => speed * (*own / reference),
                 None => speed,
             };
         }
     }
-    fe
 }
 
 /// Fingerprint of what a sweep computes with: the mesh and the model but not the speed of
@@ -204,6 +212,42 @@ pub fn grid(min_speed: f64, max_speed: f64, count: usize) -> Vec<f64> {
     (0..count)
         .map(|i| low + (max_speed - low) * i as f64 / (count - 1) as f64)
         .collect()
+}
+
+/// The speeds that extend a sweep with `points` to a changed range `min_speed..=max_speed`:
+/// a coarse grid over each part of the range below or above the speeds it has, without the
+/// speed it joins. Empty when the range lies within the speeds, and the whole grid of the
+/// range when there are none. Up to `count` speeds go into each part, fewer into a narrow
+/// one.
+pub fn extension(points: &[SpeedPoint], min_speed: f64, max_speed: f64, count: usize) -> Vec<f64> {
+    let range = max_speed - min_speed;
+    if !(range.is_finite() && range > 0.0) {
+        return Vec::new();
+    }
+    let (low, high) = (points.iter().map(|p| p.speed))
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), s| {
+            (a.min(s), b.max(s))
+        });
+    if low > high {
+        return grid(min_speed, max_speed, count);
+    }
+    // Where the grid of the range would start: standstill itself is left out.
+    let first = grid(min_speed, max_speed, 2)[0];
+    let tolerance = 2.0 * MIN_GAP * range;
+    let speeds_in = |width: f64| {
+        let share = (count as f64 * width / range).ceil() as usize;
+        share.clamp(1, count.max(1)) + 1
+    };
+    let mut speeds = Vec::new();
+    if first < low - tolerance {
+        let part = grid(first, low, speeds_in(low - first));
+        speeds.extend(&part[..part.len() - 1]);
+    }
+    if max_speed > high + tolerance {
+        let part = grid(high, max_speed, speeds_in(max_speed - high));
+        speeds.extend(&part[1..]);
+    }
+    speeds
 }
 
 /// Radians per time to revolutions per minute, for a time unit of seconds.
@@ -711,6 +755,10 @@ pub struct CampbellWindow {
     fingerprint: Option<u64>,
     /// Number of the next solver job, counted over continued sweeps.
     next_index: u32,
+    /// Speed in radians per time selected in the diagram or the table of critical speeds.
+    selected: Option<f64>,
+    /// Speed the user asked to set the analysis to, see [`Self::take_analysis_speed`].
+    apply: Option<f64>,
     /// The critical speeds as last found, with the plot generation, the number of speeds and
     /// the orders they were found for.
     critical: std::cell::RefCell<Option<CriticalCache>>,
@@ -761,8 +809,21 @@ impl CampbellWindow {
             marking: None,
             fingerprint,
             next_index: 0,
+            selected: None,
+            apply: None,
             critical: Default::default(),
         }
+    }
+
+    /// The speed in radians per time the user asked to set the analysis to with Set Analysis
+    /// Speed, once.
+    pub fn take_analysis_speed(&mut self) -> Option<f64> {
+        self.apply.take()
+    }
+
+    /// Notes in the output of the window.
+    pub fn note(&mut self, line: String) {
+        self.log.push(line);
     }
 
     pub fn setup(&self) -> &Setup {
@@ -906,10 +967,21 @@ impl CampbellWindow {
             0 => "until stopped".to_string(),
             n => format!("up to {n} runs"),
         };
-        // A continued sweep refines between its speeds and needs no grid.
+        // A continued sweep keeps its speeds: a grid covers the part of the speed range beyond
+        // them, if any, and refinement goes between them.
         let grid = if keep {
-            self.log.push(format!("Sweep continued: {runs}."));
-            VecDeque::new()
+            let more = extension(&self.points, min_speed, max_speed, grid_count);
+            self.swept_speed = self.swept_speed.max(max_speed);
+            self.log.push(if more.is_empty() {
+                format!("Sweep continued: {runs}.")
+            } else {
+                format!(
+                    "Sweep continued over {} to {} rpm: {runs}, the speeds done stay.",
+                    shown(rpm(min_speed)),
+                    shown(rpm(max_speed))
+                )
+            });
+            more.into()
         } else {
             self.orders = order_values(&self.setup.orders);
             self.points.clear();
@@ -917,6 +989,7 @@ impl CampbellWindow {
             self.swept_speed = max_speed;
             self.plot_generation += 1;
             self.focus = None;
+            self.selected = None;
             self.fingerprint = Some(fingerprint);
             self.log = vec![format!(
                 "Sweep started: {} to {} rpm, {runs}, in {}",
@@ -971,12 +1044,12 @@ impl CampbellWindow {
                 Ok(point) => {
                     self.log.push(format!(
                         "{} rpm: {} modes, first {} Hz",
-                        numeric::format_physical(rpm(point.speed)),
+                        shown(rpm(point.speed)),
                         point.modes.len(),
-                        point.modes.first().map_or_else(
-                            || "-".to_string(),
-                            |m| numeric::format_physical(m.frequency)
-                        )
+                        point
+                            .modes
+                            .first()
+                            .map_or_else(|| "-".to_string(), |m| shown(m.frequency))
                     ));
                     self.points.push(point);
                 }
@@ -1044,6 +1117,9 @@ impl CampbellWindow {
 
     /// Shows the window; returns false when it was closed. `can_start` tells whether the
     /// model is ready; `start` is called with the setup when the user starts the sweep.
+    ///
+    /// The diagram fills the left, the setup, the selected speed, the critical speeds and the
+    /// output of the sweep stand in a panel on the right whose width the separator sets.
     pub fn show(
         &mut self,
         ctx: &egui::Context,
@@ -1060,101 +1136,42 @@ impl CampbellWindow {
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_size([820.0, 600.0])
-            .min_size([480.0, 360.0])
+            .default_size([1060.0, 680.0])
+            .min_size([640.0, 400.0])
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
-                self.setup_row(ui, running);
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(can_start && !running, egui::Button::new("Start Sweep"))
-                        .on_hover_text("Starts a new sweep; the speeds of the last one go.")
-                        .clicked()
-                        && let Err(error) = start(self, false)
-                    {
-                        self.log.push(error);
-                    }
-                    if ui
-                        .add_enabled(running && !self.is_paused(), egui::Button::new("Pause"))
-                        .on_hover_text(
-                            "The running speeds finish, no new ones start. Mark a range in \
-                             the diagram meanwhile and continue.",
-                        )
-                        .clicked()
-                    {
-                        self.pause();
-                    }
-                    if ui
-                        .add_enabled(
-                            can_start && self.can_continue(),
-                            egui::Button::new("Continue"),
-                        )
-                        .on_hover_text(
-                            "Goes on with the sweep: a paused one where it stopped, a finished \
-                             one with another Maximum runs between its speeds, within the \
-                             marked range if there is one.",
-                        )
-                        .clicked()
-                        && let Err(error) = start(self, true)
-                    {
-                        self.log.push(error);
-                    }
-                    if ui
-                        .add_enabled(running, egui::Button::new("Stop"))
-                        .on_hover_text("Stops the sweep; the speeds done so far stay.")
-                        .clicked()
-                    {
-                        self.cancel();
-                    }
-                    if let Some(sweep) = &self.sweep {
-                        if sweep.paused && sweep.running.is_empty() {
-                            ui.label("Paused,");
-                        } else {
-                            ui.spinner();
-                        }
-                        let total = match sweep.max_runs {
-                            0 => String::new(),
-                            n => format!(" of {n}"),
-                        };
-                        ui.label(format!(
-                            "{} speeds done{total}, {} running",
-                            self.points.len() + sweep.failed.len(),
-                            sweep.running.len()
-                        ));
-                    }
-                    if ui
-                        .add_enabled(!self.points.is_empty(), egui::Button::new("Copy Table"))
-                        .on_hover_text("Copies the sweep with tabs, for a spreadsheet.")
-                        .clicked()
-                    {
-                        ui.ctx()
-                            .copy_text(table_text(&self.points, &self.shown_orders(), '\t'));
-                    }
-                    for (label, format) in [
-                        ("Export CSV …", table_export::Format::Csv),
-                        ("Export JSON …", table_export::Format::Json),
-                    ] {
-                        let button = egui::Button::new(label);
-                        if ui.add_enabled(!self.points.is_empty(), button).clicked() {
-                            self.export(format);
-                        }
-                    }
-                });
+                self.toolbar(ui, can_start, running, &mut start);
                 ui.separator();
                 close = crate::dialog::close_bar(ui, "campbell");
+                let tracks = track(&self.points);
+                let orders = self.shown_orders();
+                let critical = critical_speeds(&tracks, &orders);
+                egui::Panel::right(egui::Id::new(("campbell side", id)))
+                    .resizable(true)
+                    .default_size(340.0)
+                    .size_range(250.0..=700.0)
+                    .frame(egui::Frame::new().inner_margin(egui::Margin {
+                        left: 10,
+                        ..Default::default()
+                    }))
+                    .show(ui, |ui| self.side(ui, running, &tracks, &critical));
                 if self.points.len() >= 2 {
-                    self.diagram_and_table(ui);
+                    let end =
+                        (self.points.iter().map(|p| p.speed)).fold(self.swept_speed, f64::max);
+                    let data = diagram(&tracks, &orders, end);
+                    self.plot(ui, &data);
                 } else if self.swept && !running {
                     ui.colored_label(
                         ui.visuals().warn_fg_color,
                         format!(
                             "No diagram: {} of the speeds gave complex frequencies, at least \
-                             2 are needed. The messages below say why the others failed.",
+                             2 are needed. The output says why the others failed.",
                             self.points.len()
                         ),
                     );
                 } else {
+                    ui.add_space(8.0);
                     ui.weak(
                         "The sweep runs the analysis once per speed, with the centrifugal \
                          load set to it, and plots the complex frequencies of the last \
@@ -1167,16 +1184,6 @@ impl CampbellWindow {
                          the solver's.",
                     );
                 }
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .id_salt("campbell log")
-                    .max_height(80.0)
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        for line in &self.log {
-                            ui.monospace(line);
-                        }
-                    });
             });
         if running {
             ctx.request_repaint_after(Duration::from_millis(200));
@@ -1184,12 +1191,153 @@ impl CampbellWindow {
         open && !close
     }
 
-    fn setup_row(&mut self, ui: &mut Ui, running: bool) {
-        egui::Grid::new("campbell setup")
-            .num_columns(3)
-            .spacing([12.0, 4.0])
+    /// The toolbar of the window: the sweep on the left, its progress, the export on the right.
+    fn toolbar(
+        &mut self,
+        ui: &mut Ui,
+        can_start: bool,
+        running: bool,
+        start: &mut impl FnMut(&mut Self, bool) -> Result<(), String>,
+    ) {
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(can_start && !running, egui::Button::new("Start Sweep"))
+                .on_hover_text("Starts a new sweep; the speeds of the last one go.")
+                .clicked()
+                && let Err(error) = start(self, false)
+            {
+                self.log.push(error);
+            }
+            if ui
+                .add_enabled(running && !self.is_paused(), egui::Button::new("Pause"))
+                .on_hover_text(
+                    "The running speeds finish, no new ones start. Mark a range in the diagram \
+                     or change the speed range meanwhile and continue.",
+                )
+                .clicked()
+            {
+                self.pause();
+            }
+            if ui
+                .add_enabled(
+                    can_start && self.can_continue(),
+                    egui::Button::new("Continue"),
+                )
+                .on_hover_text(
+                    "Goes on with the sweep, keeping its speeds: a paused one where it \
+                     stopped, a finished one with another Maximum runs. New speeds first fill \
+                     a part of the speed range not swept yet, then go between the speeds it \
+                     has, within the marked range if there is one.",
+                )
+                .clicked()
+                && let Err(error) = start(self, true)
+            {
+                self.log.push(error);
+            }
+            if ui
+                .add_enabled(running, egui::Button::new("Stop"))
+                .on_hover_text("Stops the sweep; the speeds done so far stay.")
+                .clicked()
+            {
+                self.cancel();
+            }
+            if let Some(sweep) = &self.sweep {
+                ui.separator();
+                if sweep.paused && sweep.running.is_empty() {
+                    ui.label("Paused:");
+                } else {
+                    ui.spinner();
+                }
+                let total = match sweep.max_runs {
+                    0 => String::new(),
+                    n => format!(" of {n}"),
+                };
+                ui.label(format!(
+                    "{} runs done{total}, {} running",
+                    sweep.started as usize - sweep.running.len(),
+                    sweep.running.len()
+                ));
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let any = !self.points.is_empty();
+                for (label, format) in [
+                    ("Export JSON …", table_export::Format::Json),
+                    ("Export CSV …", table_export::Format::Csv),
+                ] {
+                    if ui.add_enabled(any, egui::Button::new(label)).clicked() {
+                        self.export(format);
+                    }
+                }
+                if ui
+                    .add_enabled(any, egui::Button::new("Copy Table"))
+                    .on_hover_text("Copies the sweep with tabs, for a spreadsheet.")
+                    .clicked()
+                {
+                    ui.ctx()
+                        .copy_text(table_text(&self.points, &self.shown_orders(), '\t'));
+                }
+            });
+        });
+    }
+
+    /// The panel on the right: setup, selected speed, critical speeds and the output, which
+    /// takes the height left.
+    fn side(&mut self, ui: &mut Ui, running: bool, tracks: &Tracks, critical: &[CriticalSpeed]) {
+        // The output takes the foot of the panel, with a separator of its own to drag.
+        egui::Panel::bottom(ui.id().with("campbell output"))
+            .resizable(true)
+            .default_size(120.0)
+            .size_range(60.0..=600.0)
+            .frame(egui::Frame::new())
             .show(ui, |ui| {
-                ui.label("Speed range [rpm]");
+                heading(ui, "Output");
+                egui::ScrollArea::vertical()
+                    .id_salt("campbell log")
+                    .auto_shrink(false)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        for line in &self.log {
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(line).monospace().small())
+                                    .wrap(),
+                            );
+                        }
+                    });
+            });
+        egui::ScrollArea::vertical()
+            .id_salt("campbell details")
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                heading(ui, "Sweep");
+                self.setup_grid(ui, running);
+                if !running && self.extends_beyond_points() {
+                    ui.weak("Continue sweeps the new part of the range and keeps the speeds done.");
+                }
+                heading(ui, "Critical speeds");
+                self.critical_table(ui, critical);
+                heading(ui, "Selected speed");
+                self.selection(ui, tracks);
+            });
+    }
+
+    /// Whether the speed range of the setup reaches beyond the speeds of the sweep, so that
+    /// Continue sweeps the new part.
+    fn extends_beyond_points(&self) -> bool {
+        self.points.len() >= 2
+            && !extension(&self.points, self.setup.min_speed, self.setup.max_speed, 2).is_empty()
+    }
+
+    fn setup_grid(&mut self, ui: &mut Ui, running: bool) {
+        egui::Grid::new("campbell setup")
+            .num_columns(2)
+            .spacing([10.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Speed range [rpm]").on_hover_text(format!(
+                    "{} to {} rad/s. It can change after a sweep: Continue then sweeps the \
+                     new part and keeps the speeds done.",
+                    numeric::format_physical(self.setup.min_speed),
+                    numeric::format_physical(self.setup.max_speed)
+                ));
                 ui.horizontal(|ui| {
                     let mut low = rpm(self.setup.min_speed);
                     let mut high = rpm(self.setup.max_speed);
@@ -1217,35 +1365,128 @@ impl CampbellWindow {
                         self.setup.max_speed = from_rpm(high);
                     }
                 });
-                ui.label(format!(
-                    "= {} to {} rad/s",
-                    numeric::format_physical(self.setup.min_speed),
-                    numeric::format_physical(self.setup.max_speed)
-                ));
                 ui.end_row();
-                ui.label("Maximum runs");
+                ui.label("Maximum runs").on_hover_text(
+                    "The solver runs once per speed; 0 runs until Stop. Continue does as many \
+                     runs again.",
+                );
                 ui.add_enabled(
                     !running,
                     numeric::drag_value(&mut self.setup.max_runs).range(0..=10_000),
                 );
-                ui.weak("The solver runs once per speed; 0 runs until Stop.");
                 ui.end_row();
-                ui.label("Engine orders");
+                ui.label("Engine orders")
+                    .on_hover_text("Lines f = order x speed, e.g. 1, 2, 3");
                 ui.add_enabled(
                     !running,
                     egui::TextEdit::singleline(&mut self.setup.orders).desired_width(120.0),
                 );
-                ui.weak("Lines f = order x speed, e.g. 1, 2, 3");
                 ui.end_row();
                 // The axis can change any time, also while the sweep runs.
-                ui.label("Frequency axis up to [Hz]");
+                ui.label("Frequency axis [Hz]")
+                    .on_hover_text("Upper end of the frequency axis; 0 fits it to the modes.");
                 ui.add(
                     numeric::drag_value(&mut self.setup.max_frequency)
                         .range(0.0..=f64::MAX)
                         .speed(10.0),
                 );
-                ui.weak("0 fits the axis to the modes");
                 ui.end_row();
+            });
+    }
+
+    /// The speed selected in the diagram or the table, its modes, and the button that sets the
+    /// analysis to it.
+    fn selection(&mut self, ui: &mut Ui, tracks: &Tracks) {
+        let Some(speed) = self.selected else {
+            ui.weak("Click a point in the diagram or a critical speed to select its speed.");
+            return;
+        };
+        ui.horizontal(|ui| {
+            ui.strong(format!("{} rpm", shown(rpm(speed))));
+            ui.weak(format!("= {} rad/s", shown(speed)));
+        });
+        let modes: Vec<(&str, &Mode)> = (tracks.modes.iter())
+            .filter_map(|t| {
+                let (_, mode) = t.points.iter().find(|(s, _)| *s == speed)?;
+                Some((t.name.as_str(), mode))
+            })
+            .collect();
+        if modes.is_empty() {
+            ui.weak("Between the computed speeds; the diagram has no modes here.");
+        } else {
+            egui::Grid::new("campbell selected modes")
+                .num_columns(2)
+                .spacing([16.0, 1.0])
+                .show(ui, |ui| {
+                    for (name, mode) in modes {
+                        ui.label(name);
+                        ui.label(format!("{} Hz", shown(mode.frequency)));
+                        ui.end_row();
+                    }
+                });
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .button("Set Analysis Speed")
+                .on_hover_text(
+                    "Sets the centrifugal loads of the analysis to this speed. Solve the \
+                     analysis then to see all results at this speed; the diagram stays as it \
+                     is.",
+                )
+                .clicked()
+            {
+                self.apply = Some(speed);
+            }
+            if ui.button("Clear").clicked() {
+                self.selected = None;
+            }
+        });
+    }
+
+    /// The crossings of the modes with the engine order lines; a click on a row selects its
+    /// speed.
+    fn critical_table(&mut self, ui: &mut Ui, critical: &[CriticalSpeed]) {
+        if critical.is_empty() {
+            ui.weak(if self.points.len() >= 2 {
+                "No crossing of a mode with an engine order line in the sweep."
+            } else {
+                "The crossings of the modes with the engine order lines, after a sweep."
+            });
+            return;
+        }
+        egui::ScrollArea::vertical()
+            .id_salt("critical speeds")
+            .max_height(160.0)
+            .show(ui, |ui| {
+                egui::Grid::new("critical speeds grid")
+                    .num_columns(5)
+                    .striped(true)
+                    .spacing([14.0, 2.0])
+                    .show(ui, |ui| {
+                        for title in ["Order", "Mode", "Whirl", "Speed [rpm]", "Freq. [Hz]"] {
+                            ui.strong(title);
+                        }
+                        ui.end_row();
+                        for c in critical {
+                            ui.label(format!("{}x", numeric::format_physical(c.order)));
+                            ui.label(c.mode.to_string());
+                            ui.label(match c.whirl {
+                                Whirl::Forward => "forward",
+                                Whirl::Backward => "backward",
+                                Whirl::Unknown => "-",
+                            });
+                            let selected = self.selected == Some(c.speed);
+                            if ui
+                                .selectable_label(selected, shown(rpm(c.speed)))
+                                .on_hover_text("Selects this speed.")
+                                .clicked()
+                            {
+                                self.selected = Some(c.speed);
+                            }
+                            ui.label(shown(c.order * c.speed / std::f64::consts::TAU));
+                            ui.end_row();
+                        }
+                    });
             });
     }
 
@@ -1273,66 +1514,21 @@ impl CampbellWindow {
             });
     }
 
-    fn diagram_and_table(&mut self, ui: &mut Ui) {
-        let orders = self.shown_orders();
-        let tracks = track(&self.points);
-        let data = diagram(&tracks, &orders, self.swept_speed);
-        let critical = critical_speeds(&tracks, &orders);
-        let table_height = if critical.is_empty() {
-            24.0
-        } else {
-            (critical.len().min(6) as f32 + 1.5) * 20.0
-        };
-        let plot_height = (ui.available_height() - table_height - 136.0).max(220.0);
-        self.plot(ui, &data, plot_height);
-        ui.add_space(4.0);
-        if critical.is_empty() {
-            ui.weak("No crossing of a mode with an engine order line in the sweep.");
-            return;
-        }
-        ui.strong("Critical speeds");
-        egui::ScrollArea::vertical()
-            .id_salt("critical speeds")
-            .max_height(table_height)
-            .show(ui, |ui| {
-                egui::Grid::new("critical speeds grid")
-                    .num_columns(5)
-                    .striped(true)
-                    .spacing([16.0, 2.0])
-                    .show(ui, |ui| {
-                        for title in ["Order", "Mode", "Whirl", "Speed [rpm]", "Frequency [Hz]"] {
-                            ui.strong(title);
-                        }
-                        ui.end_row();
-                        for c in &critical {
-                            ui.label(format!("{}x", numeric::format_physical(c.order)));
-                            ui.label(c.mode.to_string());
-                            ui.label(match c.whirl {
-                                Whirl::Forward => "forward",
-                                Whirl::Backward => "backward",
-                                Whirl::Unknown => "-",
-                            });
-                            ui.label(numeric::format_physical(rpm(c.speed)));
-                            ui.label(numeric::format_physical(
-                                c.order * c.speed / std::f64::consts::TAU,
-                            ));
-                            ui.end_row();
-                        }
-                    });
-            });
-    }
-
-    /// The diagram as an interactive plot: drag to pan, scroll or drag along an axis to
-    /// zoom, double-click to fit, click a legend entry to hide or show it.
-    fn plot(&mut self, ui: &mut Ui, data: &Diagram, height: f32) {
-        use egui_plot::{Legend, Line, LineStyle, MarkerShape, Plot, Points, Span};
+    /// The diagram as an interactive plot over the height left: drag to pan, scroll or drag
+    /// along an axis to zoom, double-click to fit, click a legend entry to hide or show it,
+    /// click a point to select its speed, Shift and drag to mark a range to refine.
+    fn plot(&mut self, ui: &mut Ui, data: &Diagram) {
+        use egui_plot::{Legend, Line, LineStyle, MarkerShape, Plot, Points, Span, VLine};
         let max_frequency = self.setup.max_frequency;
+        let line = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
+        let height = (ui.available_height() - line - 6.0).max(160.0);
         let mut plot = Plot::new(("campbell plot", self.plot_generation))
             .height(height)
             .legend(Legend::default().follow_insertion_order(true))
             .x_axis_label("Speed [rpm]")
             .y_axis_label("Frequency [Hz]")
             .allow_axis_zoom_drag(true)
+            .allow_double_click_reset(true)
             .grid_color(crate::style::plot_grid())
             .include_x(0.0)
             .include_y(0.0)
@@ -1343,8 +1539,8 @@ impl CampbellWindow {
                     ..
                 } => Some(format!(
                     "{plot_name}\n{} rpm\n{} Hz",
-                    numeric::format_physical(position.x),
-                    numeric::format_physical(position.y)
+                    shown(position.x),
+                    shown(position.y)
                 )),
                 _ => None,
             });
@@ -1370,6 +1566,7 @@ impl CampbellWindow {
             (None, Some([a, b])) => Some([rpm(a), rpm(b)]),
             (None, None) => None,
         };
+        let selected = self.selected.map(rpm);
         let response = plot.show(ui, |plot_ui| {
             if let Some([a, b]) = marked {
                 let color = crate::style::adapt(Color32::from_rgb(40, 110, 200));
@@ -1377,6 +1574,14 @@ impl CampbellWindow {
                     Span::new("Refine range", a..=b)
                         .fill(color.gamma_multiply(0.12))
                         .border_color(color),
+                );
+            }
+            if let Some(x) = selected {
+                plot_ui.vline(
+                    VLine::new("", x)
+                        .color(crate::style::plot_text().gamma_multiply(0.7))
+                        .width(1.0)
+                        .allow_hover(false),
                 );
             }
             for (name, points) in &data.guides {
@@ -1399,6 +1604,20 @@ impl CampbellWindow {
                         .color(color)
                         .radius(radius),
                 );
+                // The modes at the selected speed stand out.
+                if let Some(x) = selected {
+                    let at: Vec<[f64; 2]> = points.iter().filter(|p| p[0] == x).copied().collect();
+                    if !at.is_empty() {
+                        plot_ui.points(
+                            Points::new(name.as_str(), at)
+                                .color(color)
+                                .shape(MarkerShape::Circle)
+                                .filled(false)
+                                .radius(6.0)
+                                .allow_hover(false),
+                        );
+                    }
+                }
             }
             if !data.unmatched.is_empty() {
                 plot_ui.points(
@@ -1416,9 +1635,10 @@ impl CampbellWindow {
                         .radius(4.0),
                 );
             }
-            plot_ui.pointer_coordinate().map(|p| p.x)
+            let pixels_per_rpm = plot_ui.transform().dpos_dvalue_x().abs();
+            (plot_ui.pointer_coordinate().map(|p| p.x), pixels_per_rpm)
         });
-        let (pointer, response) = (response.inner, response.response);
+        let ((pointer, pixels_per_rpm), response) = (response.inner, response.response);
         if let Some(x) = pointer {
             if shift && response.drag_started_by(egui::PointerButton::Primary) {
                 self.marking = Some([x, x]);
@@ -1434,6 +1654,16 @@ impl CampbellWindow {
                 self.focus = Some([from_rpm(low), from_rpm(high)]);
             }
         }
+        // A click selects the computed speed nearest to it, within a few pixels.
+        if response.clicked()
+            && !shift
+            && let Some(x) = pointer
+            && let Some(nearest) = (self.points.iter().map(|p| p.speed))
+                .min_by(|a, b| (rpm(*a) - x).abs().total_cmp(&(rpm(*b) - x).abs()))
+            && (rpm(nearest) - x).abs() * pixels_per_rpm <= 8.0
+        {
+            self.selected = Some(nearest);
+        }
         ui.horizontal(|ui| match self.focus {
             Some([a, b]) => {
                 ui.label(format!(
@@ -1442,7 +1672,7 @@ impl CampbellWindow {
                     numeric::format_physical(rpm(b))
                 ));
                 if ui
-                    .button("Clear range")
+                    .button("Clear Range")
                     .on_hover_text("New speeds go anywhere in the speed range again.")
                     .clicked()
                 {
@@ -1450,14 +1680,28 @@ impl CampbellWindow {
                 }
             }
             None => {
-                ui.weak("Shift and drag in the diagram to mark a speed range to refine.");
+                ui.weak(
+                    "Click a point to select its speed; Shift and drag marks a range to refine.",
+                );
             }
         });
-        ui.weak(
-            "Drag to pan, scroll or drag along an axis to zoom, double-click to fit. Click a \
-             legend entry to hide or show it.",
-        );
     }
+}
+
+/// A heading of the side panel of the Campbell window.
+fn heading(ui: &mut Ui, title: &str) {
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new(title).strong());
+    ui.separator();
+}
+
+/// A number for reading, to six significant digits.
+pub fn shown(value: f64) -> String {
+    if value == 0.0 || !value.is_finite() {
+        return numeric::format_physical(value);
+    }
+    let scale = 10f64.powi(5 - value.abs().log10().floor() as i32);
+    numeric::format_physical((value * scale).round() / scale)
 }
 
 #[cfg(test)]
@@ -1710,6 +1954,67 @@ mod tests {
         assert_eq!(rows[1][1..], ["60", "90", "B", "110", "1", "2"]);
         assert_eq!(rows[3][1..], ["180", "70", "B", "5", "3", "6"]);
         assert_eq!(rows.len(), 4);
+    }
+
+    #[test]
+    fn a_wider_range_adds_a_grid_beyond_the_swept_speeds() {
+        let swept: Vec<SpeedPoint> = [100.0, 200.0, 300.0]
+            .iter()
+            .map(|&s| point(s, &[(10.0, Whirl::Forward)]))
+            .collect();
+        // Within the swept speeds nothing is added: refinement goes between them.
+        assert!(extension(&swept, 100.0, 300.0, 8).is_empty());
+        assert!(extension(&swept, 150.0, 250.0, 8).is_empty());
+        // Above: a grid from the highest speed on, without it.
+        let above = extension(&swept, 100.0, 500.0, 8);
+        // Half the range gets half the grid.
+        assert_eq!(above, vec![350.0, 400.0, 450.0, 500.0]);
+        // Below: down to the lowest speed of the range, without the lowest swept one.
+        let below = extension(&swept, 20.0, 300.0, 8);
+        assert_eq!(below.first(), Some(&20.0));
+        assert!(below.iter().all(|&s| s < 100.0), "{below:?}");
+        // From standstill the grid starts at a fiftieth of the highest speed, as a new sweep
+        // would: a sweep from standstill made wider adds nothing below its speeds.
+        let wider = extension(&swept, 0.0, 5000.0, 8);
+        assert!(wider.iter().all(|&s| s > 300.0), "{wider:?}");
+        // No speeds yet: the whole grid.
+        assert_eq!(extension(&[], 100.0, 300.0, 3), vec![100.0, 200.0, 300.0]);
+    }
+
+    #[test]
+    fn setting_the_speed_scales_the_centrifugal_loads_exactly() {
+        let spin = |speed: f64| plx_model::Load {
+            distribution: None,
+            name: "Centrifugal".into(),
+            active: true,
+            visible: true,
+            region: plx_model::Region::Parts(vec!["EALL".into()]),
+            kind: LoadKind::Centrifugal {
+                point: [0.0; 3],
+                axis: [1.0, 0.0, 0.0],
+                speed,
+            },
+            amplitude: None,
+            factor_amplitude: None,
+        };
+        let mut step = plx_model::Step::new_static("Step-1");
+        step.loads = vec![spin(3.0), spin(1.5)];
+        let mut fe = FeModel {
+            steps: vec![step],
+            ..FeModel::default()
+        };
+        let speeds = |fe: &FeModel| -> Vec<f64> {
+            (fe.steps[0].loads.iter())
+                .filter_map(|l| match l.kind {
+                    LoadKind::Centrifugal { speed, .. } => Some(speed),
+                    _ => None,
+                })
+                .collect()
+        };
+        set_speed(&mut fe, 2042.035);
+        // The fastest load turns at exactly the speed, the others keep their ratio.
+        assert_eq!(speeds(&fe), vec![2042.035, 2042.035 * 0.5]);
+        assert_eq!(rotor_speed(&fe), Some(2042.035));
     }
 
     #[test]
