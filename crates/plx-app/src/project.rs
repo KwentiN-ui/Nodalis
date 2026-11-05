@@ -4263,7 +4263,9 @@ impl ProjectApp {
     /// its window, or with `own` in a window of its own. An analysis already open in a
     /// window of its own is brought to the front.
     fn open_analysis(&mut self, ctx: &egui::Context, id: u64, view: Option<Show>, own: bool) {
-        if !own {
+        // One in a window of its own stays out of the project window: it is brought to the
+        // front there, and the project window keeps its active analysis.
+        if !own && !self.in_own_window(id) {
             self.active = Some(id);
         }
         let shown_here = !self.in_project && self.active == Some(id);
@@ -4284,13 +4286,6 @@ impl ProjectApp {
                 self.in_project = false;
             }
             return;
-        }
-        // Open in a window of its own: shown here, it would be shown twice.
-        if (self.nodes.iter().find(|n| n.id == id))
-            .and_then(Node::as_analysis)
-            .is_some_and(|a| a.window.is_some())
-        {
-            self.in_project = true;
         }
         let path = self.model_path();
         let folder = crate::analysis::job_name(&self.project_name());
@@ -5612,13 +5607,15 @@ impl ProjectApp {
             }
             selected = vec![id];
         }
-        // An analysis selected alone becomes the one Geometry, FE Model and Results show.
+        // An analysis selected alone becomes the one Geometry, FE Model and Results show,
+        // unless it is open in a window of its own.
         if selected != self.selected
             && let [id] = selected[..]
             && self
                 .nodes
                 .iter()
                 .any(|n| n.id == id && n.kind() == Kind::Analysis)
+            && !self.in_own_window(id)
         {
             self.active = Some(id);
         }

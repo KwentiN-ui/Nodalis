@@ -1715,14 +1715,15 @@ fn load_region(
 /// shows it for a few seconds.
 pub(crate) fn dropped_note(ui: &Ui, dropped: bool) {
     let until = dropped.then(|| ui.input(|i| i.time) + DROPPED_NOTE_SECONDS);
-    ui.data_mut(|d| d.insert_temp(egui::Id::new("dropped note"), until));
+    ui.data_mut(|d| d.insert_temp(crate::ids::window(ui.ctx(), "dropped note"), until));
 }
 
 const DROPPED_NOTE_SECONDS: f64 = 6.0;
 
 /// The hint row left by [`dropped_note`].
 pub(crate) fn show_dropped_note(ui: &mut Ui) {
-    let until = ui.data(|d| d.get_temp::<Option<f64>>(egui::Id::new("dropped note")));
+    let until =
+        ui.data(|d| d.get_temp::<Option<f64>>(crate::ids::window(ui.ctx(), "dropped note")));
     if let Some(Some(until)) = until
         && ui.input(|i| i.time) < until
     {

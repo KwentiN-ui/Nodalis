@@ -54,11 +54,25 @@ impl ProjectApp {
         (analysis.window.is_some() && !analysis.own_window).then_some(id)
     }
 
-    /// Keeps the active analysis one of the project's: the first one if it is gone.
+    /// Whether the analysis is open in a window of its own. It is shown and steered only
+    /// there: it is never the active analysis of the project window.
+    pub(super) fn in_own_window(&self, id: u64) -> bool {
+        (self.nodes.iter().find(|n| n.id == id))
+            .and_then(Node::as_analysis)
+            .is_some_and(|a| a.window.is_some() && a.own_window)
+    }
+
+    /// Keeps the active analysis one of the project's that is not in a window of its own:
+    /// the first such one if it is gone or moved out, none if all are out.
     pub(super) fn check_active(&mut self) {
-        let analyses = || self.nodes.iter().filter(|n| n.kind() == Kind::Analysis);
-        if self.active.is_none_or(|id| !analyses().any(|n| n.id == id)) {
-            self.active = analyses().next().map(|n| n.id);
+        let candidates = || {
+            (self.nodes.iter()).filter(|n| n.kind() == Kind::Analysis && !self.in_own_window(n.id))
+        };
+        if self
+            .active
+            .is_none_or(|id| !candidates().any(|n| n.id == id))
+        {
+            self.active = candidates().next().map(|n| n.id);
         }
         if self.embedded().is_none() {
             self.in_project = true;
@@ -72,7 +86,7 @@ impl ProjectApp {
             self.in_project = true;
             return;
         };
-        let Some(id) = self.active else {
+        let Some(id) = self.active.filter(|&id| !self.in_own_window(id)) else {
             return;
         };
         let show = Show { view, step: None };
@@ -133,6 +147,10 @@ impl ProjectApp {
             .filter(|n| n.kind() == Kind::Analysis)
             .map(|n| (n.id, n.name.clone()))
             .collect();
+        let own_windows: Vec<u64> = (analyses.iter())
+            .map(|(id, _)| *id)
+            .filter(|&id| self.in_own_window(id))
+            .collect();
         let active_name = (self.active)
             .and_then(|id| analyses.iter().find(|(a, _)| *a == id))
             .map_or_else(String::new, |(_, name)| name.clone());
@@ -147,6 +165,7 @@ impl ProjectApp {
             project: true,
             workspace,
             analyses,
+            own_windows,
             active: self.active,
             active_name,
             title: self.project_name(),
@@ -171,12 +190,13 @@ impl ProjectApp {
         for event in events {
             match event {
                 BarEvent::Workspace(workspace) => self.show_workspace(&ctx, workspace),
-                BarEvent::Analysis(id) => {
+                BarEvent::Analysis(id) if !self.in_own_window(id) => {
                     self.active = Some(id);
                     if workspace != Workspace::Project {
                         self.show_workspace(&ctx, workspace);
                     }
                 }
+                BarEvent::Analysis(_) => {}
                 BarEvent::Save => self.save(false),
                 BarEvent::Undo | BarEvent::Redo => {
                     let undo = event == BarEvent::Undo;
