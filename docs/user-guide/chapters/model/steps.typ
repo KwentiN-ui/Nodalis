@@ -255,16 +255,20 @@ Results workspace (@history-outputs).
 
 ==== Forces and moments of a point <history-point>
 
-For the forces, moments and rotations of a rigid body or of a displacement on a point, choose
-#ui("Reference Point") as the region of a node output. The list offers the reference points
-under #ui("Features") (@features), which a rigid body constraint drives (@rigid-body), and the
-displacements of all steps that are written with a point (@displacement-behavior), whose point
-exists only in the input file. The point's values appear under the name of the history output: `RF` gives the forces
+For the forces, moments and rotations of a rigid body, of a displacement on a point or of a
+remote force, choose #ui("Reference Point") as the region of a node output. The list offers the
+reference points under #ui("Features") (@features), which a rigid body constraint drives
+(@rigid-body), the displacements of all steps that are written with a point
+(@displacement-behavior) and, under #ui("Remote forces"), the remote forces of all steps
+(@remote-force), whose points exist only in the input file. A remote force that acts on a
+reference point is listed with that reference point. The point's values appear under the name of the history output: `RF` gives the forces
 (`FORCES`) and the moments (`MOMENTS`, `RM1` to `RM3`), `U` the displacements and the rotations
 (`ROTATIONS`, `UR1` to `UR3`, in radians), `V` the velocities and the angular velocities.
 
 #screenshot("history-output-point.png", [Node history output of the point of a
   displacement])
+#screenshot("history-output-remote-force.png", [The point of a remote force as the region of a
+  node history output])
 
 The solver computes reaction forces and moments only at the point of a rigid body: a rigid body
 constraint or a displacement on a #ui("Rigid") point. At a #ui("Deformable") point only the
