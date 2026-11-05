@@ -8162,6 +8162,60 @@ fn a_remote_point_history_output_prints_the_nodes_of_the_point() {
     );
 }
 
+/// A node history output on the point of a remote force prints its reference and rotation
+/// node, rigid and deformable alike: the moment about z turns the tip upwards.
+#[test]
+fn solver_prints_the_rotation_of_the_point_of_a_remote_force() {
+    for behavior in [RemoteBehavior::Rigid, RemoteBehavior::Deformable] {
+        let (mesh, mut model) = cantilever(remote_force(|r| {
+            r.moment = [0.0, 0.0, 10_000.0];
+            r.behavior = behavior;
+        }));
+        let mut output =
+            HistoryOutput::node("NH_Output-1", Region::RemotePoint("Remote_Force-1".into()));
+        output.variables = vec!["U".into()];
+        model.steps[0].history_outputs.push(output);
+        let text = write_inp(&mesh, &model, "").unwrap();
+        assert!(
+            text.contains("*Nset, Nset=INTERNAL_SELECTION-1_NH_OUTPUT-1\n100\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("*Nset, Nset=INTERNAL_ROTATION-1_NH_OUTPUT-1\n101\n"),
+            "{text}"
+        );
+        let name = format!("remote-force-point-{behavior:?}");
+        let Some(dat) = run_dat(&name, &text) else {
+            return;
+        };
+        let import = crate::dat::parse_dat(&dat);
+        assert!(import.warnings.is_empty(), "{:?}", import.warnings);
+        let set = (import.sets.iter())
+            .find(|s| s.name == "NH_OUTPUT-1")
+            .unwrap();
+        let last = |field: &str, component: &str| {
+            let component = set.field(field).unwrap().component(component).unwrap();
+            *component.entries[0].values.last().unwrap()
+        };
+        let (lift, turn) = (last("DISPLACEMENTS", "U2"), last("ROTATIONS", "UR3"));
+        assert!(lift > 0.0 && turn > 0.0, "{behavior:?}: {lift} {turn}");
+    }
+    // A deactivated remote force has no point.
+    let (mesh, mut model) = cantilever(remote_force(|_| {}));
+    model.steps[0].loads[0].active = false;
+    (model.steps[0].history_outputs).push(HistoryOutput::node(
+        "NH_Output-1",
+        Region::RemotePoint("Remote_Force-1".into()),
+    ));
+    assert_eq!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::UnknownRemotePoint {
+            item: "NH_Output-1".into(),
+            point: "Remote_Force-1".into(),
+        })
+    );
+}
+
 /// The moment and rotation of a point turned by 0.01 about z, from the `.dat` file, and the
 /// moment of the reactions at the clamped end about the point's axis, which balances it.
 fn point_moment(

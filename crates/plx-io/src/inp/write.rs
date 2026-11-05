@@ -998,7 +998,8 @@ struct Sets<'a> {
     /// with its region; boundary conditions with the same region and point share it.
     remote_points: Vec<(Region, plx_model::Displacement, [NodeId; 2])>,
     /// Reference and rotation node of the point of each displacement written with a point by
-    /// the boundary condition's name, with its behavior.
+    /// the boundary condition's name, and of each remote force by the load's name, with its
+    /// behavior.
     remote_names: BTreeMap<String, ([NodeId; 2], RemoteBehavior)>,
     /// Local coordinate systems (`*Transform`) of node sets whose symmetry plane is no
     /// coordinate plane or whose displacement is in a system of its own: the set with the
@@ -1912,10 +1913,14 @@ fn constraints(
             continue;
         }
         let spec = force.point();
-        if (sets.remote_points.iter()).any(|(r, p, _)| r == region && p.same_point(&spec)) {
+        let load = &model.steps[s].loads[i];
+        // Node history outputs find the point by the load's name.
+        if let Some(&(_, _, nodes)) =
+            (sets.remote_points.iter()).find(|(r, p, _)| r == region && p.same_point(&spec))
+        {
+            (sets.remote_names.entry(load.name.clone())).or_insert((nodes, force.behavior));
             continue;
         }
-        let load = &model.steps[s].loads[i];
         *lowering = Some(s);
         let steps = model.remote_force_steps(region, force);
         let excluded = model.directly_held_nodes_in(sets.mesh, |s| steps.contains(&s));
@@ -1926,7 +1931,7 @@ fn constraints(
                 reason,
             }
         })?;
-        remote_point(
+        let nodes = remote_point(
             RemoteSource {
                 item: &load.name,
                 region,
@@ -1942,6 +1947,7 @@ fn constraints(
             model,
             generated,
         )?;
+        (sets.remote_names.entry(load.name.clone())).or_insert((nodes, force.behavior));
     }
     *lowering = None;
     for t in model.ties.iter().filter(|t| t.active) {
