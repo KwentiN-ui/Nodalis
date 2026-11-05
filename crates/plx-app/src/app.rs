@@ -1394,6 +1394,10 @@ impl AnalysisWindow {
             self.import_paths(dropped, &ctx);
         }
 
+        // A flat 2D model is seen from the front: the ribbon offers its turns instead of the
+        // standard views.
+        let planar = self.workbench.planar_view();
+        self.workbench.viewport.set_planar(planar);
         let workspace = self.workspace();
         let mut ribbon = std::mem::take(&mut self.ribbon);
         let clicked = egui::Panel::top("ribbon")
@@ -1472,6 +1476,9 @@ impl AnalysisWindow {
                     (Some(dialog), Some(model)) => Some(dialog.gizmo(model)),
                     _ => None,
                 };
+            // Again, after what the ribbon and the panels changed this frame.
+            let planar = self.workbench.planar_view();
+            self.workbench.viewport.set_planar(planar);
             let response = self.workbench.viewport.ui(ui);
             if let (Some(drag), Some(dialog)) = (response.gizmo, &mut self.workbench.section_dialog)
             {
@@ -2745,6 +2752,30 @@ impl Workbench {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// Whether the 3D view shows a flat 2D model: the camera then stays on the x-y plane.
+    /// Results of a 2D model count while they are flat and their transformed copies stay
+    /// in the plane; a circular pattern about y turns them into a 3D body.
+    fn planar_view(&self) -> bool {
+        if !(self.model.as_ref()).is_some_and(|m| m.fe.properties.space.is_2d()) {
+            return false;
+        }
+        let Some(shown) = self.shown() else {
+            return true;
+        };
+        if !shown.is_results() {
+            return true;
+        }
+        let flat = shown.mesh.bounds().is_none_or(|(min, max)| {
+            (max[2] - min[2]).abs() <= 1e-6 * (max[0] - min[0]).abs().max(1e-30)
+        });
+        let in_plane = |m: &glam::DAffine3| {
+            m.matrix3.x_axis.z.abs() < 1e-9
+                && m.matrix3.y_axis.z.abs() < 1e-9
+                && m.translation.z.abs() < 1e-9
+        };
+        flat && (shown.results.as_ref()).is_none_or(|v| v.instances().iter().all(in_plane))
     }
 
     /// The y axis of an axisymmetric model, from below to above the
@@ -4232,7 +4263,7 @@ impl Workbench {
                 );
                 ui.separator();
             }
-            command = crate::viewport::view_menu(ui);
+            command = crate::viewport::view_menu(ui, self.viewport.planar());
         });
         if command.is_some() {
             self.view_command = command;

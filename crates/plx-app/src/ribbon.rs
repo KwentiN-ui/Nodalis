@@ -67,6 +67,10 @@ impl RibbonState {
 /// commands out.
 pub trait Host {
     fn enabled(&self, cmd: Cmd) -> bool;
+    /// Whether the tile shows at all, such as the standard views only for a 3D model.
+    fn shown(&self, _cmd: Cmd) -> bool {
+        true
+    }
     /// Whether the tile shows pressed: a tool that is open or an option that is on.
     fn checked(&self, _cmd: Cmd) -> bool {
         false
@@ -128,9 +132,15 @@ pub fn show(
         .filter(|c| {
             matches!(
                 c.tile,
-                Tile::Button | Tile::Split | Tile::Menu | Tile::Panel | Tile::Custom
+                Tile::Button
+                    | Tile::Split
+                    | Tile::Menu
+                    | Tile::Panel
+                    | Tile::Custom
+                    | Tile::Grid { .. }
             )
         })
+        .filter(|c| host.shown(c.cmd))
         .collect();
     let row: Vec<&Command> = (commands.iter().copied())
         .filter(|c| c.tab_in(workspace) == tab)
@@ -378,6 +388,14 @@ fn menu_entry(ui: &mut Ui, c: &Command, host: &mut dyn Host) -> Option<Cmd> {
                 ui.menu_button(c.name(), |ui| host.panel(ui, c.cmd));
             });
         }
+        Tile::Grid { rows, labels } => {
+            ui.menu_button(c.name(), |ui| {
+                if let Some(cmd) = grid(ui, rows, labels, host) {
+                    run = Some(cmd);
+                    ui.close();
+                }
+            });
+        }
         Tile::Menu | Tile::Split => {
             ui.menu_button(c.name(), |ui| {
                 if c.tile == Tile::Split && button(ui, c, host) {
@@ -476,6 +494,9 @@ fn tile_width(ui: &Ui, c: &Command, compact: bool) -> f32 {
     if compact {
         return COMPACT.x;
     }
+    if let Tile::Grid { rows, labels } = c.tile {
+        return grid_size(ui, rows, labels).x + 4.0;
+    }
     if c.tile == Tile::Panel {
         // Its label holds a value of the workspace: the width it took last frame.
         let id = custom_width_id(c.cmd);
@@ -540,6 +561,14 @@ fn tile(ui: &mut Ui, c: &Command, host: &mut dyn Host, compact: bool) -> Option<
     let font = FontId::proportional(11.5);
     if compact {
         return compact_tile(ui, c, host, enabled, checked);
+    }
+    if let Tile::Grid { rows, labels } = c.tile {
+        // The buttons fill the height of a tile, centred in it.
+        let size = vec2(tile_width(ui, c, false), TILE.y);
+        let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+        let inner = Rect::from_center_size(rect.center(), grid_size(ui, rows, labels));
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
+        return grid(&mut child, rows, labels, host);
     }
     let label = label_with_value(c, host);
     let width = if c.tile == Tile::Panel {
@@ -679,7 +708,10 @@ fn compact_tile(
         }
         let icon = Rect::from_center_size(rect.center(), Vec2::splat(ICON));
         paint_icon(painter, c.icon, icon, enabled);
-        if matches!(c.tile, Tile::Menu | Tile::Split | Tile::Panel) {
+        if matches!(
+            c.tile,
+            Tile::Menu | Tile::Split | Tile::Panel | Tile::Grid { .. }
+        ) {
             let color = if enabled {
                 ui.visuals().text_color()
             } else {
@@ -697,6 +729,13 @@ fn compact_tile(
         Tile::Panel => {
             panel(&response, c.cmd, host);
             None
+        }
+        Tile::Grid { rows, labels } => {
+            let mut run = None;
+            egui::Popup::menu(&response).show(|ui| {
+                run = grid(ui, rows, labels, host);
+            });
+            run
         }
         Tile::Menu | Tile::Split => {
             let mut run = None;
@@ -728,6 +767,7 @@ fn compact_tile(
 pub const VIEW_BAR: &[Cmd] = &[
     Cmd::ZoomToFit,
     Cmd::StandardViews,
+    Cmd::RotateView,
     Cmd::VerticalView,
     Cmd::EdgesOnly,
     Cmd::MeshEdges,
@@ -775,7 +815,11 @@ pub fn floating_bar(
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 1.0;
-                        for c in cmds.iter().filter_map(|&cmd| command::find(cmd)) {
+                        let shown: Vec<&Command> = (cmds.iter())
+                            .filter(|&&cmd| host.shown(cmd))
+                            .filter_map(|&cmd| command::find(cmd))
+                            .collect();
+                        for c in shown {
                             let enabled = host.enabled(c.cmd);
                             let checked = host.checked(c.cmd);
                             if let Some(cmd) = compact_tile(ui, c, host, enabled, checked) {
@@ -785,6 +829,113 @@ pub fn floating_bar(
                     });
                 });
         });
+    run
+}
+
+/// The side of a button of a grid tile; three rows fill the height of a tile.
+const CELL: f32 = 20.0;
+/// The size of the icon in a button of a grid tile.
+const CELL_ICON: f32 = 16.0;
+
+/// The width of the labelled buttons of a grid tile, or of one without labels.
+fn cell_width(ui: &Ui, rows: &[&[Option<Cmd>]], labels: bool) -> f32 {
+    if !labels {
+        return CELL;
+    }
+    let font = FontId::proportional(11.5);
+    let widest = (rows.iter().flat_map(|r| r.iter().flatten()))
+        .filter_map(|&cmd| command::find(cmd))
+        .map(|c| {
+            ui.ctx()
+                .fonts_mut(|f| f.layout_no_wrap(c.name(), font.clone(), Color32::WHITE))
+                .size()
+                .x
+        })
+        .fold(0.0, f32::max);
+    CELL + widest + 6.0
+}
+
+/// The size the buttons of a grid tile take.
+fn grid_size(ui: &Ui, rows: &[&[Option<Cmd>]], labels: bool) -> Vec2 {
+    let columns = rows.iter().map(|r| r.len()).max().unwrap_or(0) as f32;
+    let width = cell_width(ui, rows, labels);
+    vec2(
+        columns * width + (columns - 1.0).max(0.0),
+        rows.len() as f32 * CELL + (rows.len() as f32 - 1.0).max(0.0),
+    )
+}
+
+/// The buttons of a grid tile in their rows: the icon, with `labels` the name after it.
+/// Returns the command clicked.
+fn grid(ui: &mut Ui, rows: &[&[Option<Cmd>]], labels: bool, host: &mut dyn Host) -> Option<Cmd> {
+    let mut run = None;
+    let width = cell_width(ui, rows, labels);
+    let font = FontId::proportional(11.5);
+    let (area, _) = ui.allocate_exact_size(grid_size(ui, rows, labels), Sense::hover());
+    let origin = area.min;
+    for (r, row) in rows.iter().enumerate() {
+        for (i, cell) in row.iter().enumerate() {
+            let Some(c) = cell.and_then(command::find) else {
+                continue;
+            };
+            let rect = Rect::from_min_size(
+                origin + vec2(i as f32 * (width + 1.0), r as f32 * (CELL + 1.0)),
+                vec2(width, CELL),
+            );
+            let enabled = host.enabled(c.cmd) && ui.is_enabled();
+            let sense = if enabled {
+                Sense::click()
+            } else {
+                Sense::hover()
+            };
+            let response = ui.interact(
+                rect,
+                ui.id().with(("grid cell", format!("{:?}", c.cmd))),
+                sense,
+            );
+            if ui.is_rect_visible(rect) {
+                let painter = ui.painter();
+                if enabled && response.hovered() {
+                    let fill = if response.is_pointer_button_down_on() {
+                        pressed_fill()
+                    } else {
+                        hover_fill()
+                    };
+                    painter.rect(
+                        rect,
+                        3.0,
+                        fill,
+                        Stroke::new(1.0, highlight()),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                let icon = Rect::from_center_size(
+                    pos2(rect.left() + CELL / 2.0, rect.center().y),
+                    Vec2::splat(CELL_ICON),
+                );
+                paint_icon(painter, c.icon, icon, enabled);
+                if labels {
+                    let color = if enabled {
+                        ui.visuals().text_color()
+                    } else {
+                        ui.visuals().weak_text_color()
+                    };
+                    painter.text(
+                        pos2(rect.left() + CELL + 2.0, rect.center().y),
+                        Align2::LEFT_CENTER,
+                        c.name(),
+                        font.clone(),
+                        color,
+                    );
+                }
+            }
+            let tip = command::tooltip(c);
+            let response = response.on_hover_text(&tip).on_disabled_hover_text(tip);
+            if response.clicked() {
+                run = Some(c.cmd);
+            }
+        }
+    }
     run
 }
 

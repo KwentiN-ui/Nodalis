@@ -231,6 +231,11 @@ pub enum Cmd {
     View(StandardView),
     AxisView(Axis),
     IsometricAxis(Axis),
+    /// The quarter turns of the view of a 2D model, in place of the standard views.
+    RotateView,
+    RotateLeft,
+    RotateRight,
+    DefaultRotation,
     VerticalView,
     EdgesOnly,
     MeshEdges,
@@ -268,6 +273,13 @@ pub enum Tile {
     Menu,
     /// An entry of the menu of this command; not a tile of its own.
     In(Cmd),
+    /// A block of small buttons in rows, one for each command in it; a narrow window shows
+    /// it as a menu tile. `labels`: each button shows the name of its command after the
+    /// icon, else the icon alone.
+    Grid {
+        rows: &'static [&'static [Option<Cmd>]],
+        labels: bool,
+    },
     /// A tile whose label shows a value of the workspace, such as the deformation, and
     /// which opens a panel the workspace fills to change it.
     Panel,
@@ -378,6 +390,39 @@ const ALL: &[Workspace] = &[
     Workspace::Geometry,
     Workspace::FeModel,
     Workspace::Results,
+];
+
+/// The buttons of the Standard Views tile: the faces of the cube with their opposite ones
+/// below, then the views along the axes and the isometric views with an axis up.
+const VIEW_GRID: &[&[Option<Cmd>]] = &[
+    &[
+        Some(Cmd::View(StandardView::Front)),
+        Some(Cmd::View(StandardView::Top)),
+        Some(Cmd::View(StandardView::Right)),
+        Some(Cmd::AxisView(Axis::X)),
+        Some(Cmd::IsometricAxis(Axis::X)),
+    ],
+    &[
+        Some(Cmd::View(StandardView::Back)),
+        Some(Cmd::View(StandardView::Bottom)),
+        Some(Cmd::View(StandardView::Left)),
+        Some(Cmd::AxisView(Axis::Y)),
+        Some(Cmd::IsometricAxis(Axis::Y)),
+    ],
+    &[
+        None,
+        Some(Cmd::View(StandardView::Isometric)),
+        None,
+        Some(Cmd::AxisView(Axis::Z)),
+        Some(Cmd::IsometricAxis(Axis::Z)),
+    ],
+];
+
+/// The buttons of the Rotate View tile of a 2D model, one per row.
+const ROTATE_GRID: &[&[Option<Cmd>]] = &[
+    &[Some(Cmd::RotateLeft)],
+    &[Some(Cmd::RotateRight)],
+    &[Some(Cmd::DefaultRotation)],
 ];
 
 pub const STANDARD_VIEWS: [(StandardView, &str); 7] = [
@@ -1549,7 +1594,10 @@ fn build() -> Vec<Command> {
             "",
             "Looks at the model from a side.",
         ),
-        Tile::Menu,
+        Tile::Grid {
+            rows: VIEW_GRID,
+            labels: false,
+        },
     ));
     for (view, label) in STANDARD_VIEWS {
         add(tile(
@@ -1579,9 +1627,9 @@ fn build() -> Vec<Command> {
                 v,
                 t,
                 "Camera",
-                TileIcon::None,
+                Tool(Icon::AxisView(axis)),
                 "",
-                "Looks along the axis.",
+                "Looks down the axis onto the plane normal to it.",
             ),
             Tile::In(C::StandardViews),
         ));
@@ -1599,11 +1647,52 @@ fn build() -> Vec<Command> {
                 v,
                 t,
                 "Camera",
-                TileIcon::None,
+                Tool(Icon::IsometricAxis(axis)),
                 "",
                 "An isometric view with the axis pointing up.",
             ),
             Tile::In(C::StandardViews),
+        ));
+    }
+    add(tile(
+        command(
+            C::RotateView,
+            "Rotate\nView",
+            v,
+            t,
+            "Camera",
+            Tool(Icon::Rotate(true)),
+            "",
+            "Turns the view of the 2D model in its plane.",
+        ),
+        Tile::Grid {
+            rows: ROTATE_GRID,
+            labels: true,
+        },
+    ));
+    for (cmd, label, icon, tip) in [
+        (
+            C::RotateLeft,
+            "Rotate Left",
+            Icon::Rotate(true),
+            "Turns the model a quarter turn counterclockwise.",
+        ),
+        (
+            C::RotateRight,
+            "Rotate Right",
+            Icon::Rotate(false),
+            "Turns the model a quarter turn clockwise.",
+        ),
+        (
+            C::DefaultRotation,
+            "Default Rotation",
+            Icon::DefaultRotation,
+            "Turns the model back so that y points up.",
+        ),
+    ] {
+        add(tile(
+            command(cmd, label, v, t, "Camera", Tool(icon), "", tip),
+            Tile::In(C::RotateView),
         ));
     }
     add(command(
@@ -2070,7 +2159,11 @@ pub fn search_entries(workspaces: &[Workspace]) -> Vec<SearchEntry> {
     let mut seen = Vec::new();
     let mut entries = Vec::new();
     for c in registry() {
-        if matches!(c.tile, Tile::Custom | Tile::Menu | Tile::Panel) || seen.contains(&c.cmd) {
+        if matches!(
+            c.tile,
+            Tile::Custom | Tile::Menu | Tile::Panel | Tile::Grid { .. }
+        ) || seen.contains(&c.cmd)
+        {
             continue;
         }
         let Some(&workspace) = c.workspaces.iter().find(|w| workspaces.contains(w)) else {
@@ -2159,8 +2252,32 @@ mod tests {
         for c in registry() {
             if let Tile::In(parent) = c.tile {
                 let parent = find(parent).expect("menu is registered");
-                assert!(matches!(parent.tile, Tile::Menu | Tile::Split));
+                assert!(matches!(
+                    parent.tile,
+                    Tile::Menu | Tile::Split | Tile::Grid { .. }
+                ));
             }
+        }
+    }
+
+    #[test]
+    fn grids_hold_each_of_their_entries_once() {
+        for c in registry() {
+            let Tile::Grid { rows, .. } = c.tile else {
+                continue;
+            };
+            let mut cells: Vec<Cmd> = rows
+                .iter()
+                .flat_map(|r| r.iter().flatten())
+                .copied()
+                .collect();
+            let entries: Vec<Cmd> = (registry().iter())
+                .filter(|e| e.tile == Tile::In(c.cmd))
+                .map(|e| e.cmd)
+                .collect();
+            assert_eq!(cells.len(), entries.len(), "{:?}", c.cmd);
+            cells.retain(|cell| entries.contains(cell));
+            assert_eq!(cells.len(), entries.len(), "{:?}", c.cmd);
         }
     }
 

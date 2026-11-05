@@ -224,6 +224,21 @@ impl Camera {
         self.orient(-diagonal.normalize(), axis);
     }
 
+    /// Turns the view a quarter turn about the viewing direction: `left` turns the scene
+    /// counterclockwise on the screen, else clockwise.
+    pub fn rotate_quarter(&mut self, left: bool) {
+        let angle = std::f32::consts::FRAC_PI_2 * if left { 1.0 } else { -1.0 };
+        // Turning the camera clockwise about where it looks turns the scene the other way.
+        let turn = Quat::from_axis_angle(self.forward(), angle);
+        self.rotation = (turn * self.rotation).normalize();
+    }
+
+    /// Whether the camera looks straight at the x-y plane from +z, as the view of a 2D
+    /// model does; it may be turned about z.
+    pub fn looks_at_xy_plane(&self) -> bool {
+        self.forward().dot(Vec3::NEG_Z) > 1.0 - 1e-5
+    }
+
     /// Looks along `forward` with `up` made perpendicular to it.
     fn orient(&mut self, forward: Vec3, up: Vec3) {
         let right = forward.cross(up);
@@ -371,6 +386,30 @@ mod tests {
             assert!((camera.forward() + eye).length() < EPS, "{view:?}");
             assert!((camera.up() - up).length() < EPS, "{view:?}");
         }
+    }
+
+    #[test]
+    fn quarter_turns_keep_looking_at_the_xy_plane() {
+        let mut camera = Camera::default();
+        camera.set_view(StandardView::Front);
+        camera.rotate_quarter(true);
+        // The scene turned counterclockwise: global Y points to the left of the screen.
+        assert!(
+            (camera.right() - Vec3::NEG_Y).length() < EPS,
+            "{}",
+            camera.right()
+        );
+        assert!(camera.looks_at_xy_plane());
+        camera.rotate_quarter(false);
+        camera.rotate_quarter(false);
+        assert!(
+            (camera.right() - Vec3::Y).length() < EPS,
+            "{}",
+            camera.right()
+        );
+        assert!(camera.looks_at_xy_plane());
+        camera.set_isometric();
+        assert!(!camera.looks_at_xy_plane());
     }
 
     #[test]
