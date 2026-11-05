@@ -160,7 +160,8 @@ list shows them in the #ui("Problems") tab.
 #screenshot("checklist.png", [The checklist of the FE Model workspace with a material defined])
 
 The cross in the head of the panel hides the checklist, and the 3D view takes the room;
-#ui("Checklist") on the #ui("View") tab shows it again.
+#ui("Checklist") on the #ui("View") tab shows it again. Nodalis remembers the choice
+in the user settings, so a hidden checklist stays hidden after a restart.
 
 === Problems <problems>
 

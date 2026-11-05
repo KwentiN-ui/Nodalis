@@ -79,6 +79,9 @@ pub struct Graphics {
     /// The FE Model tree lists the items an analysis takes from another one; off, it shows
     /// only its own items.
     pub show_linked: bool,
+    /// The properties panel shows the checklist while no item is edited; the cross in its head
+    /// turns it off for good.
+    pub checklist: bool,
     /// The timeline of the steps and increments below the 3D view of results.
     pub timeline: bool,
 }
@@ -93,6 +96,7 @@ impl Default for Graphics {
             shell_thickness: true,
             beam_profiles: true,
             show_linked: false,
+            checklist: true,
             timeline: true,
         }
     }
@@ -768,6 +772,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hidden_checklist_is_stored() {
+        let mut settings = Settings::default();
+        settings.graphics.checklist = false;
+        let back: Settings = ron::from_str(&ron::to_string(&settings).unwrap()).unwrap();
+        assert!(!back.graphics.checklist);
+    }
+
+    #[test]
     fn missing_fields_take_their_defaults() {
         // Settings files of older versions lack newer fields.
         let settings: Settings = ron::from_str("(post: (min_label: true))").unwrap();
@@ -776,6 +788,7 @@ mod tests {
         assert!(settings.graphics.global_axes);
         assert!(settings.graphics.shell_thickness);
         assert!(settings.updates.check_at_startup);
+        assert!(settings.graphics.checklist);
     }
 
     #[test]
