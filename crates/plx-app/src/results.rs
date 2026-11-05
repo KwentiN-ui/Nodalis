@@ -8,6 +8,7 @@ use plx_model::{ColorScale, Quantity, UnitSystem};
 use plx_results::display::Representation;
 use plx_results::field_output::{self, FieldOutput};
 use plx_results::history_output::{self, HistoryOutput, HistorySet};
+use plx_results::solver::{MODE, MODE_PHASES};
 use plx_results::transformation::{self, Transformation};
 use plx_results::{AnalysisKind, Component, Field, Increment};
 
@@ -83,6 +84,12 @@ pub struct ResultsView {
     /// results or a contact pair in the input next to them.
     pub contact: bool,
     pub user_scale: f64,
+    /// How mode shapes are scaled, apart from [`ResultsView::deformation`]: their size is
+    /// arbitrary, so a true scale means nothing and a factor picked for the displacements of
+    /// another step would distort them.
+    pub mode_deformation: Deformation,
+    /// The largest displacement of a mode drawn, for a user defined mode deformation.
+    pub mode_amplitude: f64,
     /// Colour spectrum, number of colours and limits of the legend.
     pub color_scale: ColorScale,
     /// Draw the undeformed outline behind the deformed shape.
@@ -217,6 +224,8 @@ impl ResultsView {
             deformation_chosen: false,
             contact: false,
             user_scale: 10.0,
+            mode_deformation: Deformation::Automatic(1.0),
+            mode_amplitude: 1.0,
             color_scale: ColorScale::default(),
             show_undeformed: true,
             show_global_contours: false,
@@ -241,6 +250,7 @@ impl ResultsView {
             model_size: bounds.map_or(1.0, model_size),
             deformation_peaks: Vec::new(),
         };
+        view.mode_amplitude = round_significant(0.25 * view.model_size, 2);
         view.deformation_peaks = (view.increments.iter())
             .map(|_| Default::default())
             .collect();
@@ -251,12 +261,11 @@ impl ResultsView {
         view
     }
 
-    /// The automatic scale, except for contact outside eigenmode steps: exaggerated,
-    /// the touching parts appear to penetrate each other, which confuses new users. Mode
-    /// shapes are scaled arbitrarily, so they always get the automatic scale.
+    /// The automatic scale, except for contact: exaggerated, the touching parts appear to
+    /// penetrate each other, which confuses new users. Mode shapes have a deformation of
+    /// their own, [`ResultsView::mode_deformation`].
     pub fn default_deformation(&self) -> Deformation {
-        let modal = self.current_increment().is_some_and(|i| i.kind.is_modal());
-        if self.contact && !modal {
+        if self.contact {
             Deformation::TrueScale
         } else {
             Deformation::Automatic(1.0)
@@ -367,6 +376,8 @@ impl ResultsView {
             view: plx_results::saved_view::SavedView {
                 deformation: self.deformation_chosen.then_some(self.deformation.into()),
                 user_scale: Some(self.user_scale),
+                mode_deformation: Some(self.mode_deformation.into()),
+                mode_amplitude: Some(self.mode_amplitude),
                 show_undeformed: Some(self.show_undeformed),
                 levels: Some(self.color_scale.levels),
                 color_scale: Some(self.color_scale.clone()),
@@ -401,6 +412,10 @@ impl ResultsView {
         }
         self.follow_default_deformation();
         self.user_scale = view.user_scale.unwrap_or(self.user_scale);
+        if let Some(deformation) = view.mode_deformation {
+            self.mode_deformation = deformation.into();
+        }
+        self.mode_amplitude = view.mode_amplitude.unwrap_or(self.mode_amplitude);
         self.show_undeformed = view.show_undeformed.unwrap_or(self.show_undeformed);
         if let Some(display) = &view.vector_display {
             self.vector_display = display.clone();
@@ -804,10 +819,22 @@ impl ResultsView {
                 }
             });
         }
-        lines.push(format!(
-            "Deformation variable: Displacements   Deformation scale factor: {}",
-            format_value(self.scale())
-        ));
+        let shape = self
+            .current_increment()
+            .is_some_and(Increment::is_mode_shape);
+        lines.push(if shape {
+            // A normalized shape: the factor is the largest displacement drawn.
+            format!(
+                "Deformation variable: Mode shape (normalized)   Largest displacement: {} {}",
+                format_value(self.scale()),
+                self.units.unit(Quantity::Length)
+            )
+        } else {
+            format!(
+                "Deformation variable: Displacements   Deformation scale factor: {}",
+                format_value(self.scale())
+            )
+        });
         lines
     }
 
@@ -827,38 +854,72 @@ impl ResultsView {
         }
     }
 
-    pub fn scale(&self) -> f32 {
-        match self.deformation {
-            Deformation::Undeformed => 0.0,
-            Deformation::TrueScale => 1.0,
-            Deformation::UserDefined => self.user_scale as f32,
-            Deformation::Automatic(factor) => {
-                // An increment animation keeps one scale for all frames: that of the largest
-                // displacement among them.
-                let animated = self
-                    .animation
-                    .as_ref()
-                    .filter(|a| a.kind.plays_increments())
-                    .map(|a| a.increments.as_slice());
-                let max = match animated.filter(|i| !i.is_empty()) {
-                    _ if self.superposition.is_some() => {
-                        self.superposition.as_ref().map(|s| s.peak)
-                    }
-                    Some(indices) => indices
-                        .iter()
-                        .filter_map(|&i| self.deformation_peak(i))
-                        .reduce(f32::max),
-                    None => self.deformation_peak(self.increment),
-                };
-                let Some(max) = max else {
-                    return 0.0;
-                };
-                if max <= 0.0 {
-                    return 1.0;
-                }
-                round_significant(factor as f64 * 0.25 * self.model_size / max as f64, 2) as f32
-            }
+    /// Whether a mode is shown (or several overlaid): its shape is scaled arbitrarily, so it
+    /// has a deformation setting of its own, [`ResultsView::mode_deformation`].
+    pub fn shows_mode(&self) -> bool {
+        self.superposition.is_some() || self.current_increment().is_some_and(|i| i.kind.is_modal())
+    }
+
+    /// The deformation setting that applies to what is shown.
+    pub fn active_deformation(&self) -> Deformation {
+        if self.shows_mode() {
+            self.mode_deformation
+        } else {
+            self.deformation
         }
+    }
+
+    pub fn scale(&self) -> f32 {
+        let user_defined = if self.shows_mode() {
+            // The largest displacement of the mode drawn at the length the user typed.
+            match self.shown_peak() {
+                Some(peak) if peak > 0.0 => (self.mode_amplitude / f64::from(peak)) as f32,
+                Some(_) => 1.0,
+                None => 0.0,
+            }
+        } else {
+            self.user_scale as f32
+        };
+        match self.active_deformation() {
+            Deformation::Undeformed => 0.0,
+            // Not offered for modes, whose size means nothing.
+            Deformation::TrueScale if !self.shows_mode() => 1.0,
+            Deformation::UserDefined => user_defined,
+            Deformation::TrueScale => self.automatic_scale(1.0),
+            Deformation::Automatic(factor) => self.automatic_scale(factor),
+        }
+    }
+
+    /// The largest displacement of what is shown: of the overlaid modes, of all increments
+    /// an increment animation plays, or of the current increment.
+    fn shown_peak(&self) -> Option<f32> {
+        let animated = self
+            .animation
+            .as_ref()
+            .filter(|a| a.kind.plays_increments())
+            .map(|a| a.increments.as_slice());
+        match animated.filter(|i| !i.is_empty()) {
+            _ if self.superposition.is_some() => self.superposition.as_ref().map(|s| s.peak),
+            Some(indices) => indices
+                .iter()
+                .filter_map(|&i| self.deformation_peak(i))
+                .reduce(f32::max),
+            None => self.deformation_peak(self.increment),
+        }
+    }
+
+    /// The scale that draws the largest displacement as a quarter of the model size, times
+    /// `factor`.
+    fn automatic_scale(&self, factor: f32) -> f32 {
+        // An increment animation keeps one scale for all frames: that of the largest
+        // displacement among them.
+        let Some(max) = self.shown_peak() else {
+            return 0.0;
+        };
+        if max <= 0.0 {
+            return 1.0;
+        }
+        round_significant(factor as f64 * 0.25 * self.model_size / max as f64, 2) as f32
     }
 
     /// Factor on the deformation of the shown animation frame; 1 without animation, and 1
@@ -896,7 +957,7 @@ impl ResultsView {
         if increment.kind != AnalysisKind::ComplexFrequency {
             return None;
         }
-        let field = increment.field("PDISP")?;
+        let field = (increment.field("PDISP")).or_else(|| increment.field(MODE_PHASES))?;
         let complete = ["MAG1", "MAG2", "MAG3", "PHA1", "PHA2", "PHA3"]
             .iter()
             .all(|n| field.component(n).is_some());
@@ -928,7 +989,7 @@ impl ResultsView {
     /// Values of the shown displacement component of a whirling complex mode.
     fn whirl_values(&self, phase: f32, field: &Field) -> Option<Vec<f32>> {
         let (shown, component) = self.current()?;
-        if shown.name != "DISP" {
+        if shown.name != "DISP" && shown.name != MODE {
             return None;
         }
         let displacements = Self::whirl_displacements(phase, field);
@@ -948,7 +1009,7 @@ impl ResultsView {
     /// Range of the displacement component over a whole turn of a whirling complex mode.
     fn whirl_range(&self, field: &Field) -> Option<(f32, f32)> {
         let (shown, component) = self.current()?;
-        if shown.name != "DISP" {
+        if shown.name != "DISP" && shown.name != MODE {
             return None;
         }
         let magnitude = ["MAG1", "MAG2", "MAG3"].map(|n| &field.component(n).unwrap().values);
@@ -1084,7 +1145,7 @@ impl ResultsView {
         if let Some(superposition) = &self.superposition {
             return superposition.displacements.get(node).copied();
         }
-        let field = self.current_increment()?.field("DISP")?;
+        let field = self.current_increment()?.deformation_field()?;
         Some(["U1", "U2", "U3"].map(|n| field.component(n).map_or(0.0, |c| c.values[node])))
     }
 
@@ -1496,8 +1557,31 @@ pub fn convert_history(sets: &mut [HistorySet], units: UnitSystem) {
 /// The measure of the largest displacement: the root of the summed squares of the
 /// largest absolute value of every `DISP` component, including `ALL`.
 fn max_deformation(increment: &Increment) -> Option<f32> {
+    // A mode of the built-in solver is normalized to a largest displacement of 1 (over a
+    // turn, for a complex mode).
+    if increment.is_mode_shape() {
+        return Some(1.0);
+    }
+    // Other mode shapes by their largest displacement at a node, which a user defined
+    // mode deformation draws at the length typed.
+    if increment.kind.is_modal()
+        && increment.field("PDISP").is_none()
+        && let Some(field) = increment.deformation_field()
+    {
+        let [x, y, z] = ["U1", "U2", "U3"].map(|n| field.component(n));
+        if let (Some(x), Some(y), Some(z)) = (x, y, z) {
+            let peak = (x.values.iter().zip(&y.values).zip(&z.values))
+                .map(|((a, b), c)| a * a + b * b + c * c)
+                .filter(|v| v.is_finite())
+                .fold(0.0, f32::max);
+            return Some(peak.sqrt());
+        }
+    }
     // A complex mode reaches its magnitudes over a turn, not in its real part alone.
-    let field = match increment.field("PDISP") {
+    let field = match increment
+        .field("PDISP")
+        .or_else(|| increment.field(MODE_PHASES))
+    {
         Some(pdisp)
             if ["MAG1", "MAG2", "MAG3"]
                 .iter()
@@ -1512,7 +1596,7 @@ fn max_deformation(increment: &Increment) -> Option<f32> {
             );
             return max_deformation_of(&magnitudes);
         }
-        _ => increment.field("DISP")?,
+        _ => increment.deformation_field()?,
     };
     max_deformation_of(field)
 }
@@ -1669,22 +1753,53 @@ mod tests {
                 increment(2, 1, AnalysisKind::Frequency, &disp),
                 increment(3, 1, AnalysisKind::Static, &disp),
             ],
-            None,
+            Some(([0.0; 3], [10.0; 3])),
         );
         assert!(view.contact);
         assert_eq!(view.deformation, Deformation::TrueScale);
+        assert_eq!(view.scale(), 1.0);
+        // Modes are scaled on their own, automatically.
         view.select_increment(1);
-        assert_eq!(view.deformation, Deformation::Automatic(1.0));
+        assert!(view.shows_mode());
+        assert_eq!(view.active_deformation(), Deformation::Automatic(1.0));
+        assert_eq!(view.scale(), 2.5);
         view.select_increment(0);
-        assert_eq!(view.deformation, Deformation::TrueScale);
-        // A deformation the user picked stays for every step.
-        (view.deformation, view.deformation_chosen) = (Deformation::Automatic(2.0), true);
+        assert_eq!(view.active_deformation(), Deformation::TrueScale);
+        // A deformation the user picked stays for every step, except the modes.
+        (view.deformation, view.deformation_chosen) = (Deformation::TrueScale, true);
+        view.select_increment(2);
+        assert_eq!(view.active_deformation(), Deformation::TrueScale);
         view.select_increment(1);
-        assert_eq!(view.deformation, Deformation::Automatic(2.0));
+        assert_eq!(view.active_deformation(), Deformation::Automatic(1.0));
+        assert_eq!(view.scale(), 2.5);
+        // A user defined mode deformation draws the largest displacement at the typed length.
+        view.mode_deformation = Deformation::UserDefined;
+        view.mode_amplitude = 0.5;
+        assert_eq!(view.scale(), 0.5);
+        view.select_increment(2);
+        assert_eq!(view.scale(), 1.0);
 
         let without = ResultsView::new(vec![increment(1, 1, AnalysisKind::Static, &disp)], None);
         assert!(!without.contact);
         assert_eq!(without.deformation, Deformation::Automatic(1.0));
+    }
+
+    #[test]
+    fn the_mode_deformation_is_saved_with_the_results() {
+        let disp = [[0.0, 0.0, 1.0]];
+        let mut view = ResultsView::new(
+            vec![increment(1, 1, AnalysisKind::Buckling, &disp)],
+            Some(([0.0; 3], [10.0; 3])),
+        );
+        (view.mode_deformation, view.mode_amplitude) = (Deformation::UserDefined, 3.0);
+        let settings = view.settings();
+        let mut restored = ResultsView::new(
+            vec![increment(1, 1, AnalysisKind::Buckling, &disp)],
+            Some(([0.0; 3], [10.0; 3])),
+        );
+        restored.restore(&settings, &FeMesh::default());
+        assert_eq!(restored.mode_deformation, Deformation::UserDefined);
+        assert_eq!(restored.scale(), 3.0);
     }
 
     #[test]

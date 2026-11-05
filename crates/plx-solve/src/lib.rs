@@ -384,6 +384,9 @@ impl Run {
         }
         let input_path = work_dir.join(format!("{name}.inp"));
         std::fs::write(&input_path, job.text())?;
+        if let Job::Analysis(prepared) = &mut job {
+            keep_modes_as_shapes(&mut prepared.analysis);
+        }
         // `<name>.eig` beside the input: the modes of an earlier run, as the reader of an
         // input file takes them, when a step needs them. (A run's own frequency step writes
         // the file too, which is no input of the next run.)
@@ -718,6 +721,20 @@ fn solver_build() -> u64 {
     hash.finish()
 }
 
+/// Nodalis keeps the modes of an eigenvalue step as their normalized shapes
+/// ([`plxs_core::results::ModeSet`]): the field outputs such a step asks for, or takes
+/// over from the step before as an input file would, are left out, as the stresses,
+/// strains and forces of a mode of arbitrary size tell nothing.
+pub fn keep_modes_as_shapes(analysis: &mut plxs_core::Analysis) {
+    for step in &mut analysis.steps {
+        if step.procedure.computes_eigenmodes() {
+            step.outputs.node_file.clear();
+            step.outputs.el_file.clear();
+            step.outputs.contact_file.clear();
+        }
+    }
+}
+
 impl Drop for Run {
     fn drop(&mut self) {
         self.kill();
@@ -788,6 +805,67 @@ S
         assert_eq!(read, *solved);
         assert!(run.file("inp").is_file());
         assert!(run.file("sta").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn eigenvalue_steps_keep_their_mode_shapes_only() {
+        let dir = std::env::temp_dir().join(format!("plx-solve-modes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // The cube of `CUBE`, with a density, its static step, then a frequency and a buckle
+        // step that ask for no field output.
+        let text = CUBE
+            .replace("210000, 0.3\n", "210000, 0.3\n*DENSITY\n7.85e-9\n")
+            .replace(
+                "*END STEP\n",
+                "*END STEP\n*STEP\n*FREQUENCY\n3\n*END STEP\n\
+             *STEP\n*BUCKLE\n2\n*CLOAD\nPULL, 1, -25\n*END STEP\n",
+            );
+        // An analysis of the FE model: the eigenvalue steps leave out the field outputs
+        // they take over from the static step.
+        let mut run = Run::start_analysis(1, &dir, "Modes", prepared(&text)).unwrap();
+        let status = run.wait();
+        let output = run.new_output();
+        assert_eq!(status, JobStatus::Completed, "{output:#?}");
+        let solved = run.solver_results().unwrap();
+        // The modes are kept as shapes, the steps write no fields for them.
+        let steps: Vec<u32> = solved.results.increments.iter().map(|i| i.step).collect();
+        assert_eq!(steps, [1]);
+        let sets: Vec<(u32, usize)> = (solved.results.modes.iter())
+            .map(|m| (m.step, m.modes.len()))
+            .collect();
+        assert_eq!(sets, [(2, 3), (3, 2)]);
+        for mode in solved.results.modes.iter().flat_map(|m| &m.modes) {
+            let largest = (mode.shape.iter())
+                .map(|u| u.iter().map(|v| v * v).sum::<f32>().sqrt())
+                .fold(0.0, f32::max);
+            assert!((largest - 1.0).abs() < 1e-6, "{largest}");
+        }
+        // Nodalis shows each mode as an increment with the field MODE alone.
+        let import = plx_results::from_solver(&solved);
+        let shown: Vec<(u32, u32, Vec<&str>)> = (import.increments.iter())
+            .map(|i| {
+                let fields = i.fields.iter().map(|f| f.name.as_str()).collect();
+                (i.step, i.increment, fields)
+            })
+            .collect();
+        assert_eq!(shown[0], (1, 1, vec!["DISP", "STRESS", "FORC", "ERROR"]));
+        let modes: Vec<(u32, u32)> = shown[1..].iter().map(|(s, i, _)| (*s, *i)).collect();
+        assert_eq!(modes, [(2, 1), (2, 2), (2, 3), (3, 1), (3, 2)]);
+        assert!(shown[1..].iter().all(|(_, _, f)| *f == ["MODE"]));
+        let mode = &import.increments[1];
+        assert_eq!(mode.kind, plx_results::AnalysisKind::Frequency);
+        assert!(mode.value > 0.0);
+        assert!(mode.is_mode_shape());
+        let all = mode.field("MODE").unwrap().component("ALL").unwrap();
+        assert!((all.range().unwrap().1 - 1.0).abs() < 1e-6);
+        assert_eq!(
+            import.increments[4].kind,
+            plx_results::AnalysisKind::Buckling
+        );
+        // What `.ndlr` keeps reads back the same.
+        let read = SolverResults::read(&run.file("ndlr")).unwrap();
+        assert_eq!(read, *solved);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

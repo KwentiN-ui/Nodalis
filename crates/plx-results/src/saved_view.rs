@@ -12,6 +12,12 @@ pub struct SavedView {
     pub deformation: Option<SavedDeformation>,
     /// Factor of the user-defined deformation.
     pub user_scale: Option<f64>,
+    /// How mode shapes are scaled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode_deformation: Option<SavedDeformation>,
+    /// The largest displacement of a mode drawn with a user-defined mode deformation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode_amplitude: Option<f64>,
     pub show_undeformed: Option<bool>,
     /// Colour levels of the legend; also in `color_scale`, kept for older projects.
     pub levels: Option<u32>,

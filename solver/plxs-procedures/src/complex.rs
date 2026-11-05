@@ -18,12 +18,12 @@
 
 use plxs_assembly::ElementTable;
 use plxs_core::mesh::ElementRef;
-use plxs_core::results::{HistoryBlock, IncrementKind, ResultsIncrement};
+use plxs_core::results::{HistoryBlock, IncrementKind, ModeKind, ResultsIncrement};
 use plxs_core::step::{DistributedLoadKind, Procedure as ProcedureKind};
 use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Step};
 use plxs_linalg::dense::symmetric_eigen;
 
-use crate::fields::{build_fields, node_order};
+use crate::fields::{add_mode, build_fields, node_order};
 use crate::modal::stored_modes;
 use crate::static_linear::integration_point_results;
 use crate::{Procedure, ProcedureContext, StepOutcome};
@@ -410,10 +410,25 @@ impl Procedure for ComplexFrequencyProcedure {
                     x_im[k] += b * v;
                 }
             }
-            integration_point_results(ctx.table, ctx.model, &x_re, &mut strains, &mut stresses);
-            let mut fields = build_fields(
-                ctx.table, ctx.model, step, &x_re, &zero, &stresses, &strains,
+            let frequency = mode.mu / (2.0 * std::f64::consts::PI);
+            add_mode(
+                ctx,
+                ModeKind::ComplexFrequency,
+                number,
+                mode.mu,
+                frequency,
+                None,
+                &x_re,
+                Some(&x_im),
             );
+            // The fields CalculiX writes for the mode, where the step asks for them.
+            let mut fields = Vec::new();
+            if crate::fields::writes_fields(step) {
+                integration_point_results(ctx.table, ctx.model, &x_re, &mut strains, &mut stresses);
+                fields = build_fields(
+                    ctx.table, ctx.model, step, &x_re, &zero, &stresses, &strains,
+                );
+            }
             fields.retain(|f| f.name != "FORC" && f.name != "ENER");
             let (re, _) = ctx.table.reported(ctx.model, &x_re, &zero);
             let (im, _) = ctx.table.reported(ctx.model, &x_im, &zero);
@@ -447,9 +462,11 @@ impl Procedure for ComplexFrequencyProcedure {
                 ];
                 turn -= cross[0] * axis[0] + cross[1] * axis[1] + cross[2] * axis[2];
             }
-            let frequency = mode.mu / (2.0 * std::f64::consts::PI);
             eigen_rows.push((number, vec![mode.mu, frequency, 0.0]));
             turning_rows.push((number, vec![if turn >= 0.0 { 1.0 } else { -1.0 }]));
+            if fields.is_empty() {
+                continue;
+            }
             ctx.results.increments.push(ResultsIncrement {
                 step: ctx.step_number,
                 increment: number,

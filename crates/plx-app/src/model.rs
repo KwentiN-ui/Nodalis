@@ -3549,6 +3549,8 @@ S
             view: plx_results::saved_view::SavedView {
                 deformation: Some(plx_results::saved_view::SavedDeformation::TrueScale),
                 user_scale: Some(2.5),
+                mode_deformation: Some(plx_results::saved_view::SavedDeformation::Automatic(2.0)),
+                mode_amplitude: Some(4.0),
                 show_undeformed: Some(false),
                 levels: Some(12),
                 color_scale: Some(plx_model::ColorScale {

@@ -3100,6 +3100,19 @@ impl Workbench {
             }
             return;
         }
+        if let NewItem::FieldOutput(step) | NewItem::ContactFieldOutput(step) = kind
+            && let Some(step) = (self.setup_model()).and_then(|m| m.fe.steps.get(step))
+            && step.kind.computes_eigenmodes()
+        {
+            self.toast = Some(crate::toast::Toast::new(
+                format!(
+                    "{} keeps its mode shapes and takes no field outputs",
+                    step.name
+                ),
+                false,
+            ));
+            return;
+        }
         if let Some(model) = self.setup_model() {
             // The solver writes the values of all contacts with one contact field output, so
             // a step that has one opens it.

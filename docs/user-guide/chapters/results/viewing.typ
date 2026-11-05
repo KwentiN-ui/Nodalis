@@ -51,10 +51,11 @@ it; the other tiles act at once and show pressed while their option is on.
     0.25 to 5, or #ui("User defined"), with the #ui("Factor") below them; it is typed for
     #ui("User defined"). Results open in #ui("Automatic"); static and dynamic
     steps of a model with contact open in #ui("True scale"), so touching parts do not appear to
-    penetrate each other, while mode shapes keep #ui("Automatic"). Contact is recognised by a
+    penetrate each other. Contact is recognised by a
     contact pair in the input file next to the results (same name, as CalculiX leaves it) or
     contact results in the file. Until you pick a deformation yourself, it follows the shown
-    step.],
+    step. Mode shapes have a deformation of their own (@mode-shapes): the tile is then called
+    #ui("Mode Scale").],
   [Show Undeformed], [Draws the undeformed outline behind the deformed shape.],
   [Global Contours], [For a submodel: the edges of the global model around the results.],
   [Display], [#ui("Contour"), #ui("Arrows") (@arrows) or #ui("LIC") streaks (@lic). Below them,
@@ -235,7 +236,26 @@ with it; a result file that is read again, for example after another run, keeps 
 #screenshot("color-scale-cool-warm.png", [The same stress in the Cool-warm spectrum with
 automatic limits])
 
-#screenshot("results-mode.png", [First mode shape of a frequency step])
+=== Mode shapes <mode-shapes>
+
+Frequency, complex frequency and buckle steps solve an eigenvalue problem. Their results are
+the modes: the eigenvalue (frequency or buckling factor) and the shape of each mode, kept once
+and normalized so that its largest displacement is 1. A mode shape has no size of its own, so
+its stresses, strains and forces would tell nothing; the built-in solver does not compute or
+keep them, and these steps take no field outputs. A mode shows the single field #ui("MODE")
+with the components `U1`, `U2`, `U3` and their magnitude `ALL`, without a unit; a complex
+mode also has #ui("PMODE") with the magnitudes and phase angles that make it whirl.
+
+Modes are scaled apart from the other steps: while a mode is shown, the #ui("Deformation") tile
+is called #ui("Mode Scale") and keeps its own setting, so a #ui("True scale") picked for a
+static step does not distort the modes. It offers #ui("Undeformed"), #ui("Automatic") with its
+factors (the largest displacement drawn as a quarter of the model size, times the factor) and
+#ui("User defined"), where you type the #ui("Largest displacement") drawn in the length unit of
+the model. Results kept with the project remember both settings. Mode shapes of results read
+from a CalculiX `.frd` file are scaled by the same setting.
+
+#screenshot("results-mode.png", [First mode shape of a frequency step: the field #ui("MODE")
+and the #ui("Mode Scale") panel])
 
 === Parts without colour contours <color-contours>
 
@@ -250,5 +270,6 @@ their colour.
 
 #screenshot("color-contours-off.png", [The left part without colour contours])
 
-Increment 0 of a buckle step is the reference state (#ui("Reference") on the #ui("Mode") tile);
-the modes follow as modes 1, 2, ...
+The modes of a buckle step count from 1. In results read from a CalculiX `.frd` file,
+increment 0 of a buckle step is the reference state (#ui("Reference") on the #ui("Mode") tile)
+before them.
