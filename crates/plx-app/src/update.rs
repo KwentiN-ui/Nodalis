@@ -432,18 +432,30 @@ impl Updater {
         self.state = State::Checking { manual, receiver };
     }
 
-    /// The symbol next to the version in the menu bar while a newer release is known; a click
-    /// opens the update window. Call it in a right-to-left layout.
-    pub fn indicator(&mut self, ui: &mut egui::Ui) {
-        let Some(release) = &self.available else {
-            return;
-        };
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
-        let response = response
-            .on_hover_text(format!(
+    /// The tooltip of the symbol next to the version in the app bar while a newer release is
+    /// known.
+    pub fn indicator_tip(&self) -> Option<String> {
+        self.available.as_ref().map(|release| {
+            format!(
                 "Nodalis {} is available. Click for what's new and to update.",
                 release.version
-            ))
+            )
+        })
+    }
+
+    /// Opens the update window (a click on the symbol).
+    pub fn open_window(&mut self) {
+        self.message = None;
+        self.window = true;
+    }
+}
+
+/// The symbol of a newer release, drawn between the User Guide button and the version.
+pub fn indicator(ui: &mut egui::Ui, tip: &str) -> egui::Response {
+    {
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+        let response = response
+            .on_hover_text(tip)
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         let painter = ui.painter();
         let fill = if response.hovered() {
@@ -467,12 +479,11 @@ impl Updater {
             [c + egui::vec2(3.5, -0.5), c + egui::vec2(0.0, 3.5)],
             stroke,
         );
-        if response.clicked() {
-            self.message = None;
-            self.window = true;
-        }
+        response
     }
+}
 
+impl Updater {
     /// Takes the answer of a running check or installation and shows the update window.
     /// Lines for the output pane are pushed to `output`.
     pub fn show(&mut self, ctx: &egui::Context, output: &mut Vec<String>) {
