@@ -1218,6 +1218,7 @@ impl AnalysisWindow {
             active_name: self.workbench.analysis_name.clone(),
             title: self.workbench.analysis_name.clone(),
             pill: self.pill(),
+            update: None,
             can_undo: self.can_undo(),
             can_redo: self.can_redo(),
         };
@@ -1245,6 +1246,7 @@ impl AnalysisWindow {
                 BarEvent::Settings => self.open_settings(),
                 BarEvent::Help => self.open_user_guide(),
                 BarEvent::Pill => self.pill_clicked(),
+                BarEvent::Update => {}
             }
         }
         let workspace = self.workspace();

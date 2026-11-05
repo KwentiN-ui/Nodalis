@@ -5393,8 +5393,6 @@ impl ProjectApp {
                     updater.check(ui.ctx(), true);
                 }
             });
-            // The symbol of a newer release.
-            self.updater.indicator(ui);
         }
     }
 

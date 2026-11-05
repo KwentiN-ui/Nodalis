@@ -151,6 +151,7 @@ impl ProjectApp {
             active_name,
             title: self.project_name(),
             pill: self.pill(),
+            update: self.updater.indicator_tip(),
             can_undo,
             can_redo,
         };
@@ -194,6 +195,7 @@ impl ProjectApp {
                 }
                 BarEvent::Settings => self.run_command(&ctx, Cmd::Settings),
                 BarEvent::Help => self.run_command(&ctx, Cmd::UserGuide),
+                BarEvent::Update => self.updater.open_window(),
                 BarEvent::Pill => match embedded
                     .and_then(|id| self.node(id))
                     .and_then(Node::window_mut)

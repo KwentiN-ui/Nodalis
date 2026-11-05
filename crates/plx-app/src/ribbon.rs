@@ -1031,6 +1031,8 @@ pub struct Bar {
     pub active_name: String,
     pub title: String,
     pub pill: Option<(CellState, String)>,
+    /// With a newer release known: the tooltip of the update symbol next to the version.
+    pub update: Option<String>,
     pub can_undo: bool,
     pub can_redo: bool,
 }
@@ -1048,6 +1050,7 @@ pub enum BarEvent {
     Settings,
     Help,
     Pill,
+    Update,
 }
 
 /// The app bar. `menus` draws the menus after the segments.
@@ -1162,6 +1165,11 @@ pub fn app_bar(ui: &mut Ui, bar: &Bar, menus: &mut dyn FnMut(&mut Ui)) -> Vec<Ba
                     egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
                         .color(ui.visuals().weak_text_color()),
                 );
+                if let Some(tip) = &bar.update
+                    && crate::update::indicator(ui, tip).clicked()
+                {
+                    events.push(BarEvent::Update);
+                }
                 if small(ui, Glyph::Help, "User Guide", true).clicked() {
                     events.push(BarEvent::Help);
                 }
