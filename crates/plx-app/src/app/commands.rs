@@ -486,7 +486,7 @@ impl AnalysisWindow {
             Cmd::Checklist => {
                 // A narrow window hides the checklist until it is asked for.
                 let overlay = crate::layout::current(ctx).overlay;
-                w.checklist_shown = !w.checklist_visible;
+                w.settings.graphics.checklist = !w.checklist_visible;
                 w.checklist_fold.set(overlay, false);
             }
             Cmd::ShowLinked => {

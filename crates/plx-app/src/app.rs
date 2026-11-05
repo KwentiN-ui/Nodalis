@@ -173,8 +173,6 @@ struct Workbench {
     toast: Option<crate::toast::Toast>,
     /// The output pane shows the Problems tab.
     problems_tab: bool,
-    /// The properties panel shows the checklist while no item is edited.
-    checklist_shown: bool,
     /// The checklist lying over the 3D view of a narrow window waits until it is asked for.
     checklist_fold: crate::layout::Fold,
     /// Whether the checklist was shown in the last frame, for its ribbon tile.
@@ -338,7 +336,6 @@ impl AnalysisWindow {
                 confirm_remove_results: false,
                 toast: None,
                 problems_tab: false,
-                checklist_shown: true,
                 checklist_fold: Default::default(),
                 checklist_visible: false,
                 analysis_tab_before: false,
@@ -1274,7 +1271,7 @@ impl AnalysisWindow {
         let ctx = ui.ctx().clone();
         let overlay = crate::layout::current(&ctx).overlay;
         let folded = self.workbench.checklist_fold.folded(overlay);
-        self.workbench.checklist_visible = self.workbench.checklist_shown && !folded;
+        self.workbench.checklist_visible = self.workbench.settings.graphics.checklist && !folded;
         if self.workbench.one_docked() {
             crate::dock::panel(ui, None);
         } else if self.workbench.checklist_visible {
@@ -1285,7 +1282,7 @@ impl AnalysisWindow {
                 clicked = crate::checklist::show(ui, &steps, problems);
             };
             if crate::dock::panel(ui, Some(("Checklist", &mut draw))) {
-                self.workbench.checklist_shown = false;
+                self.workbench.settings.graphics.checklist = false;
             }
             match clicked {
                 Some(crate::checklist::Clicked::Run(cmd)) => {

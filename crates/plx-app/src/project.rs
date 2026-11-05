@@ -7576,6 +7576,7 @@ impl ProjectApp {
         new.graphics.shell_thickness = live.shell_thickness;
         new.graphics.beam_profiles = live.beam_profiles;
         new.graphics.show_linked = live.show_linked;
+        new.graphics.checklist = live.checklist;
         self.settings = new;
         self.share_settings();
     }
