@@ -18,7 +18,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
 use egui::{Color32, Ui};
-pub use plx_model::campbell::{Mode, Setup, SpeedPoint, Whirl};
+pub use plx_model::campbell::{Frame, Mode, Setup, SpeedPoint, Whirl};
 use plx_model::{FeModel, StepKind};
 use plx_solve::JobStatus;
 use plx_solve::Run;
@@ -46,15 +46,61 @@ const MIN_TRACK: usize = 3;
 /// the modes the solver computes, before it counts as ended.
 const MAX_MISSED: usize = 2;
 
+/// Which line of a mode crosses an engine order: the mode as the solver gives it in the
+/// rotating frame, or one of its travelling waves in the stationary frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Branch {
+    Rotating,
+    Forward,
+    Backward,
+}
+
 /// A crossing of a mode with an engine order line.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CriticalSpeed {
+    /// The engine order; 0 in the stationary frame where a backward wave comes to rest, a
+    /// standing wave every load at rest excites.
     pub order: f64,
     /// Mode number, from 1.
     pub mode: usize,
     /// Rotational speed in radians per time.
     pub speed: f64,
     pub whirl: Whirl,
+    pub branch: Branch,
+    pub nodal_diameter: Option<u32>,
+}
+
+impl CriticalSpeed {
+    /// The frequency of the crossing in Hz.
+    pub fn frequency(&self) -> f64 {
+        self.order * self.speed / std::f64::consts::TAU
+    }
+
+    /// The order as the diagram labels it: "2x", or "standing" for a wave at rest.
+    pub fn order_label(&self) -> String {
+        if self.order == 0.0 {
+            "standing".into()
+        } else {
+            format!("{}x", numeric::format_physical(self.order))
+        }
+    }
+
+    /// The branch as the table names it.
+    pub fn branch_label(&self) -> String {
+        let diameter = match self.nodal_diameter {
+            Some(n) => format!(", ND {n}"),
+            None => String::new(),
+        };
+        match self.branch {
+            Branch::Rotating => match self.whirl {
+                Whirl::Forward => format!("forward{diameter}"),
+                Whirl::Backward => format!("backward{diameter}"),
+                Whirl::Unknown => format!("-{diameter}"),
+            },
+            Branch::Forward => format!("forward wave{diameter}"),
+            Branch::Backward => format!("backward wave{diameter}"),
+        }
+    }
 }
 
 /// The engine orders of `orders`, e.g. "1, 2", as numbers, in order and without repeats.
@@ -169,6 +215,7 @@ pub fn modes_of_history(import: &plx_io::dat::DatImport, step: u32) -> Vec<Mode>
     let whirls = values("TURNING_DIRECTION");
     let omegas = values("OMEGA");
     let imaginary = values("OMEGA_IM");
+    let diameters = values("NODAL_DIAMETER");
     (frequencies.iter().enumerate())
         .map(|(i, &frequency)| Mode {
             frequency,
@@ -181,6 +228,7 @@ pub fn modes_of_history(import: &plx_io::dat::DatImport, step: u32) -> Vec<Mode>
                 (Some(&real), Some(&imaginary)) => is_unstable(real, imaginary),
                 _ => false,
             },
+            nodal_diameter: diameters.get(i).filter(|d| **d >= 0.0).map(|d| *d as u32),
         })
         .collect()
 }
@@ -199,6 +247,7 @@ pub fn modes_of_frd(frd: &plx_io::frd::FrdImport, step: u32) -> Vec<Mode> {
             frequency,
             whirl: Whirl::Unknown,
             unstable: false,
+            nodal_diameter: None,
         })
         .collect()
 }
@@ -282,6 +331,36 @@ impl Track {
             Some(first) if whirls.all(|w| w == first) => first,
             _ => Whirl::Unknown,
         }
+    }
+
+    /// The number of nodal diameters most of the speeds agree on, `None` when fewer than
+    /// half of them have one or they disagree.
+    pub fn nodal_diameter(&self) -> Option<u32> {
+        let mut counts: Vec<(u32, usize)> = Vec::new();
+        for (_, mode) in &self.points {
+            if let Some(n) = mode.nodal_diameter {
+                match counts.iter_mut().find(|(d, _)| *d == n) {
+                    Some((_, c)) => *c += 1,
+                    None => counts.push((n, 1)),
+                }
+            }
+        }
+        let (n, count) = counts.into_iter().max_by_key(|(_, c)| *c)?;
+        (2 * count >= self.points.len()).then_some(n)
+    }
+
+    /// The number of the mode in its name, "Mode 3 (F, ND 2)" being 3.
+    fn number(&self) -> &str {
+        self.name.split(' ').nth(1).unwrap_or_default()
+    }
+
+    /// The frequency of the mode at `speed` in the stationary frame: the forward wave
+    /// `f + n Ω` and the backward wave `f − n Ω` (negative once it has come to rest and
+    /// turned around), `None` without a nodal diameter.
+    fn waves(&self, speed: f64, mode: &Mode) -> Option<(f64, f64)> {
+        let n = f64::from(self.nodal_diameter()?);
+        let shift = n * speed / std::f64::consts::TAU;
+        Some((mode.frequency + shift, mode.frequency - shift))
     }
 }
 
@@ -375,9 +454,17 @@ pub fn track(points: &[SpeedPoint]) -> Tracks {
                 name: String::new(),
                 points,
             };
-            track.name = match track.whirl() {
-                Whirl::Unknown => format!("Mode {}", i + 1),
-                whirl => format!("Mode {} ({})", i + 1, whirl.letter()),
+            let mut marks: Vec<String> = Vec::new();
+            if let whirl @ (Whirl::Forward | Whirl::Backward) = track.whirl() {
+                marks.push(whirl.letter().into());
+            }
+            if let Some(n) = track.nodal_diameter() {
+                marks.push(format!("ND {n}"));
+            }
+            track.name = if marks.is_empty() {
+                format!("Mode {}", i + 1)
+            } else {
+                format!("Mode {} ({})", i + 1, marks.join(", "))
             };
             track
         })
@@ -393,31 +480,69 @@ pub fn track(points: &[SpeedPoint]) -> Tracks {
 }
 
 /// The crossings of the curves with the engine order lines, by linear interpolation between
-/// neighbouring speeds of a curve.
-pub fn critical_speeds(tracks: &Tracks, orders: &[f64]) -> Vec<CriticalSpeed> {
+/// neighbouring speeds of a curve. In the stationary frame the travelling waves of every
+/// mode with a nodal diameter cross the lines, and a backward wave coming to rest (the
+/// line of order 0) is a critical speed of its own: a standing wave.
+pub fn critical_speeds(tracks: &Tracks, orders: &[f64], frame: Frame) -> Vec<CriticalSpeed> {
     let mut found = Vec::new();
-    for &order in orders {
-        for (index, track) in tracks.modes.iter().enumerate() {
-            for pair in track.points.windows(2) {
-                let ((sa, a), (sb, b)) = (&pair[0], &pair[1]);
-                let line = |speed: f64| order * speed / std::f64::consts::TAU;
-                let (da, db) = (a.frequency - line(*sa), b.frequency - line(*sb));
-                // A crossing has the mode above the line at one end and below at the other;
-                // standstill itself (speed 0, line 0) is no critical speed.
-                if da == db || da * db > 0.0 || (*sa == 0.0 && da == 0.0) {
-                    continue;
+    let mut add = |order: f64,
+                   index: usize,
+                   branch: Branch,
+                   track: &Track,
+                   value: &dyn Fn(f64, &Mode) -> f64| {
+        for pair in track.points.windows(2) {
+            let ((sa, a), (sb, b)) = (&pair[0], &pair[1]);
+            let line = |speed: f64| order * speed / std::f64::consts::TAU;
+            let (da, db) = (value(*sa, a) - line(*sa), value(*sb, b) - line(*sb));
+            // A crossing has the mode above the line at one end and below at the other;
+            // standstill itself (speed 0, line 0) is no critical speed, and neither is a
+            // curve running along the line within rounding, such as the rigid tilt of a
+            // free rotor at exactly 1x.
+            let along = 1e-6 * (value(*sa, a).abs() + value(*sb, b).abs() + 1.0);
+            if da == db
+                || da * db > 0.0
+                || (*sa == 0.0 && da == 0.0)
+                || (da.abs() <= along && db.abs() <= along)
+            {
+                continue;
+            }
+            let t = da / (da - db);
+            let speed = sa + t * (sb - sa);
+            if speed <= 0.0 {
+                continue;
+            }
+            found.push(CriticalSpeed {
+                order,
+                mode: index + 1,
+                speed,
+                whirl: if t < 0.5 { a.whirl } else { b.whirl },
+                branch,
+                nodal_diameter: track.nodal_diameter(),
+            });
+        }
+    };
+    for (index, track) in tracks.modes.iter().enumerate() {
+        match frame {
+            Frame::Rotating => {
+                for &order in orders {
+                    add(order, index, Branch::Rotating, track, &|_, m| m.frequency);
                 }
-                let t = da / (da - db);
-                let speed = sa + t * (sb - sa);
-                if speed <= 0.0 {
+            }
+            Frame::Stationary => {
+                let Some(n) = track.nodal_diameter() else {
                     continue;
+                };
+                let forward = |s: f64, m: &Mode| track.waves(s, m).map_or(f64::NAN, |w| w.0);
+                let backward = |s: f64, m: &Mode| track.waves(s, m).map_or(f64::NAN, |w| w.1);
+                for &order in orders {
+                    add(order, index, Branch::Forward, track, &forward);
+                    if n > 0 {
+                        add(order, index, Branch::Backward, track, &backward);
+                    }
                 }
-                found.push(CriticalSpeed {
-                    order,
-                    mode: index + 1,
-                    speed,
-                    whirl: if t < 0.5 { a.whirl } else { b.whirl },
-                });
+                if n > 0 {
+                    add(0.0, index, Branch::Backward, track, &backward);
+                }
             }
         }
     }
@@ -508,26 +633,85 @@ pub fn round_range(low: f64, high: f64) -> [f64; 2] {
     [(low / step).round() * step, (high / step).round() * step]
 }
 
+/// A curve of the diagram, in rpm over Hz.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Curve {
+    pub name: String,
+    pub points: Vec<[f64; 2]>,
+    /// Index of the mode the curve belongs to, which gives its colour.
+    pub mode: usize,
+    /// A backward travelling wave, drawn dashed.
+    pub dashed: bool,
+}
+
 /// What the diagram draws, in rpm over Hz.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Diagram {
-    pub curves: Vec<(String, Vec<[f64; 2]>)>,
+    pub curves: Vec<Curve>,
     pub unmatched: Vec<[f64; 2]>,
     pub unstable: Vec<[f64; 2]>,
     /// Engine order lines from standstill to the highest speed.
     pub guides: Vec<(String, Vec<[f64; 2]>)>,
+    /// Modes left out of the stationary frame for want of a nodal diameter.
+    pub left_out: Vec<String>,
 }
 
 /// The diagram of the curves, with the engine order lines from standstill to `max_speed`.
-pub fn diagram(tracks: &Tracks, orders: &[f64], max_speed: f64) -> Diagram {
+/// In the stationary frame every mode with a nodal diameter `n` becomes its forward wave
+/// `f + n Ω` and, for `n > 0`, its backward wave `|f − n Ω|`; the others are left out and
+/// named.
+pub fn diagram(tracks: &Tracks, orders: &[f64], max_speed: f64, frame: Frame) -> Diagram {
     let to_plot = |&(s, f): &(f64, f64)| [rpm(s), f];
+    let mut curves = Vec::new();
+    let mut left_out = Vec::new();
+    for (index, t) in tracks.modes.iter().enumerate() {
+        match frame {
+            Frame::Rotating => curves.push(Curve {
+                name: t.name.clone(),
+                points: t
+                    .points
+                    .iter()
+                    .map(|(s, m)| [rpm(*s), m.frequency])
+                    .collect(),
+                mode: index,
+                dashed: false,
+            }),
+            Frame::Stationary => {
+                let Some(n) = t.nodal_diameter() else {
+                    left_out.push(t.name.clone());
+                    continue;
+                };
+                let waves: Vec<(f64, (f64, f64))> = (t.points.iter())
+                    .filter_map(|(s, m)| Some((rpm(*s), t.waves(*s, m)?)))
+                    .collect();
+                if n == 0 {
+                    curves.push(Curve {
+                        name: t.name.clone(),
+                        points: waves.iter().map(|(s, w)| [*s, w.0]).collect(),
+                        mode: index,
+                        dashed: false,
+                    });
+                    continue;
+                }
+                let number = t.number();
+                curves.push(Curve {
+                    name: format!("Mode {number} forward (ND {n})"),
+                    points: waves.iter().map(|(s, w)| [*s, w.0]).collect(),
+                    mode: index,
+                    dashed: false,
+                });
+                curves.push(Curve {
+                    name: format!("Mode {number} backward (ND {n})"),
+                    points: waves.iter().map(|(s, w)| [*s, w.1.abs()]).collect(),
+                    mode: index,
+                    dashed: true,
+                });
+            }
+        }
+    }
     Diagram {
-        curves: (tracks.modes.iter())
-            .map(|t| {
-                let points = t.points.iter().map(|(s, m)| [rpm(*s), m.frequency]);
-                (t.name.clone(), points.collect())
-            })
-            .collect(),
+        curves,
+        left_out,
         unmatched: tracks.unmatched.iter().map(to_plot).collect(),
         unstable: tracks.unstable.iter().map(to_plot).collect(),
         guides: (orders.iter())
@@ -552,9 +736,10 @@ pub fn table_text(points: &[SpeedPoint], orders: &[f64], separator: char) -> Str
     speeds.dedup();
     let mut cells = vec!["Speed [rad/s]".to_string(), "Speed [rpm]".to_string()];
     for track in &tracks.modes {
-        let number = track.name.split(' ').nth(1).unwrap_or_default();
+        let number = track.number();
         cells.push(format!("Mode {number} [Hz]"));
         cells.push(format!("Whirl {number}"));
+        cells.push(format!("ND {number}"));
     }
     cells.push("Other roots [Hz]".into());
     for &order in orders {
@@ -575,8 +760,9 @@ pub fn table_text(points: &[SpeedPoint], orders: &[f64], separator: char) -> Str
                 Some((_, m)) => {
                     cells.push(numeric::format_physical(m.frequency));
                     cells.push(m.whirl.letter().to_string());
+                    cells.push(m.nodal_diameter.map_or(String::new(), |n| n.to_string()));
                 }
-                None => cells.extend([String::new(), String::new()]),
+                None => cells.extend([String::new(), String::new(), String::new()]),
             }
         }
         let others: Vec<String> = (tracks.unmatched.iter().chain(&tracks.unstable))
@@ -774,7 +960,7 @@ pub struct CampbellWindow {
 }
 
 /// See [`CampbellWindow::critical`].
-type CriticalCache = ((u32, usize, Vec<f64>), Vec<CriticalSpeed>);
+type CriticalCache = ((u32, usize, Vec<f64>, Frame), Vec<CriticalSpeed>);
 
 impl CampbellWindow {
     /// A window for the model: the sweep runs up to the speed of its centrifugal load, or
@@ -855,14 +1041,19 @@ impl CampbellWindow {
 
     /// The critical speeds of the diagram as shown, by order and speed.
     pub fn critical_speeds(&self) -> Vec<CriticalSpeed> {
-        let key = (self.plot_generation, self.points.len(), self.shown_orders());
+        let key = (
+            self.plot_generation,
+            self.points.len(),
+            self.shown_orders(),
+            self.setup.frame,
+        );
         let mut cache = self.critical.borrow_mut();
         if let Some((cached, speeds)) = &*cache
             && *cached == key
         {
             return speeds.clone();
         }
-        let speeds = critical_speeds(&track(&self.points), &key.2);
+        let speeds = critical_speeds(&track(&self.points), &key.2, key.3);
         *cache = Some((key, speeds.clone()));
         speeds
     }
@@ -1148,7 +1339,7 @@ impl CampbellWindow {
                 close = crate::dialog::close_bar(ui, "campbell");
                 let tracks = track(&self.points);
                 let orders = self.shown_orders();
-                let critical = critical_speeds(&tracks, &orders);
+                let critical = critical_speeds(&tracks, &orders, self.setup.frame);
                 egui::Panel::right(egui::Id::new(("campbell side", id)))
                     .resizable(true)
                     .default_size(340.0)
@@ -1161,7 +1352,7 @@ impl CampbellWindow {
                 if self.points.len() >= 2 {
                     let end =
                         (self.points.iter().map(|p| p.speed)).fold(self.swept_speed, f64::max);
-                    let data = diagram(&tracks, &orders, end);
+                    let data = diagram(&tracks, &orders, end, self.setup.frame);
                     self.plot(ui, &data);
                 } else if self.swept && !running {
                     ui.colored_label(
@@ -1183,7 +1374,9 @@ impl CampbellWindow {
                          the engine order lines are the critical speeds. The solver computes \
                          the Coriolis modes in the rotating frame of reference; the \
                          frequencies and the whirl directions (F forward, B backward) are \
-                         the solver's.",
+                         the solver's. Frame of reference switches the diagram to what an \
+                         observer at rest sees: every mode of n nodal diameters as its \
+                         forward wave f + n x speed and its backward wave f - n x speed.",
                     );
                 }
             });
@@ -1393,6 +1586,24 @@ impl CampbellWindow {
                         .speed(10.0),
                 );
                 ui.end_row();
+                // The frame is a view of the same sweep, so it can change any time too.
+                ui.label("Frame of reference").on_hover_text(
+                    "Rotating: the frequencies as the solver computes them, in the frame \
+                     turning with the rotor. Stationary: as a sensor or microphone at rest \
+                     sees them. A mode of n nodal diameters (ND n in the legend, from its \
+                     shape) is then a forward travelling wave at f + n x speed and a backward \
+                     one at |f - n x speed|; where the backward wave comes to rest, the rotor \
+                     carries a standing wave that any load at rest excites.",
+                );
+                egui::ComboBox::from_id_salt("campbell frame")
+                    .selected_text(self.setup.frame.label())
+                    .width(190.0)
+                    .show_ui(ui, |ui| {
+                        for frame in Frame::ALL {
+                            ui.selectable_value(&mut self.setup.frame, frame, frame.label());
+                        }
+                    });
+                ui.end_row();
             });
     }
 
@@ -1407,22 +1618,41 @@ impl CampbellWindow {
             ui.strong(format!("{} rpm", shown(rpm(speed))));
             ui.weak(format!("= {} rad/s", shown(speed)));
         });
-        let modes: Vec<(&str, &Mode)> = (tracks.modes.iter())
+        let modes: Vec<(&Track, &Mode)> = (tracks.modes.iter())
             .filter_map(|t| {
                 let (_, mode) = t.points.iter().find(|(s, _)| *s == speed)?;
-                Some((t.name.as_str(), mode))
+                Some((t, mode))
             })
             .collect();
         if modes.is_empty() {
             ui.weak("Between the computed speeds; the diagram has no modes here.");
         } else {
+            let stationary = self.setup.frame == Frame::Stationary;
             egui::Grid::new("campbell selected modes")
-                .num_columns(2)
+                .num_columns(if stationary { 3 } else { 2 })
                 .spacing([16.0, 1.0])
                 .show(ui, |ui| {
-                    for (name, mode) in modes {
-                        ui.label(name);
-                        ui.label(format!("{} Hz", shown(mode.frequency)));
+                    if stationary {
+                        ui.strong("Mode");
+                        ui.strong("Forward");
+                        ui.strong("Backward");
+                        ui.end_row();
+                    }
+                    for (track, mode) in modes {
+                        ui.label(&track.name);
+                        match (stationary, track.waves(speed, mode)) {
+                            (true, Some((forward, backward))) => {
+                                ui.label(format!("{} Hz", shown(forward)));
+                                ui.label(format!("{} Hz", shown(backward.abs())));
+                            }
+                            (true, None) => {
+                                ui.label(format!("{} Hz", shown(mode.frequency)));
+                                ui.weak("rotating, no ND");
+                            }
+                            (false, _) => {
+                                ui.label(format!("{} Hz", shown(mode.frequency)));
+                            }
+                        }
                         ui.end_row();
                     }
                 });
@@ -1450,10 +1680,13 @@ impl CampbellWindow {
     /// speed.
     fn critical_table(&mut self, ui: &mut Ui, critical: &[CriticalSpeed]) {
         if critical.is_empty() {
-            ui.weak(if self.points.len() >= 2 {
-                "No crossing of a mode with an engine order line in the sweep."
-            } else {
+            ui.weak(if self.points.len() < 2 {
                 "The crossings of the modes with the engine order lines, after a sweep."
+            } else if self.setup.frame == Frame::Stationary {
+                "No crossing of a travelling wave with an engine order line, and no wave \
+                 coming to rest, in the sweep. Modes without a nodal diameter are left out."
+            } else {
+                "No crossing of a mode with an engine order line in the sweep."
             });
             return;
         }
@@ -1466,18 +1699,19 @@ impl CampbellWindow {
                     .striped(true)
                     .spacing([14.0, 2.0])
                     .show(ui, |ui| {
-                        for title in ["Order", "Mode", "Whirl", "Speed [rpm]", "Freq. [Hz]"] {
+                        for title in ["Order", "Mode", "Branch", "Speed [rpm]", "Freq. [Hz]"] {
                             ui.strong(title);
                         }
                         ui.end_row();
                         for c in critical {
-                            ui.label(format!("{}x", numeric::format_physical(c.order)));
-                            ui.label(c.mode.to_string());
-                            ui.label(match c.whirl {
-                                Whirl::Forward => "forward",
-                                Whirl::Backward => "backward",
-                                Whirl::Unknown => "-",
+                            ui.label(c.order_label()).on_hover_text(if c.order == 0.0 {
+                                "The backward travelling wave of the mode comes to rest: the \
+                                 rotor carries a standing wave that any load at rest excites."
+                            } else {
+                                "The line crosses this engine order."
                             });
+                            ui.label(c.mode.to_string());
+                            ui.label(c.branch_label());
                             let selected = self.selected == Some(c.speed);
                             if ui
                                 .selectable_label(selected, shown(rpm(c.speed)))
@@ -1486,7 +1720,7 @@ impl CampbellWindow {
                             {
                                 self.selected = Some(c.speed);
                             }
-                            ui.label(shown(c.order * c.speed / std::f64::consts::TAU));
+                            ui.label(shown(c.frequency()));
                             ui.end_row();
                         }
                     });
@@ -1529,7 +1763,10 @@ impl CampbellWindow {
             .height(height)
             .legend(Legend::default().follow_insertion_order(true))
             .x_axis_label("Speed [rpm]")
-            .y_axis_label("Frequency [Hz]")
+            .y_axis_label(match self.setup.frame {
+                Frame::Rotating => "Frequency [Hz], rotating frame",
+                Frame::Stationary => "Frequency [Hz], stationary frame",
+            })
             .allow_axis_zoom_drag(true)
             .allow_double_click_reset(true)
             .grid_color(crate::style::plot_grid())
@@ -1562,7 +1799,13 @@ impl CampbellWindow {
         }
         let guide = crate::style::adapt(Color32::from_gray(110));
         // Every speed is a marker, so the adaptive sampling shows; smaller when many.
-        let many = data.curves.iter().map(|(_, p)| p.len()).max().unwrap_or(0) > 80;
+        let many = data
+            .curves
+            .iter()
+            .map(|c| c.points.len())
+            .max()
+            .unwrap_or(0)
+            > 80;
         let radius = if many { 1.8 } else { 2.5 };
         let marked = match (self.marking, self.focus) {
             (Some([a, b]), _) => Some([a.min(b), a.max(b)]),
@@ -1595,13 +1838,21 @@ impl CampbellWindow {
                         .allow_hover(false),
                 );
             }
-            for (index, (name, points)) in data.curves.iter().enumerate() {
-                let color = xy_plot::color(index);
-                plot_ui.line(
-                    Line::new(name.as_str(), points.clone())
-                        .color(color)
-                        .width(2.0),
-                );
+            for curve in &data.curves {
+                let Curve {
+                    name,
+                    points,
+                    mode,
+                    dashed,
+                } = curve;
+                let color = xy_plot::color(*mode);
+                let mut line = Line::new(name.as_str(), points.clone())
+                    .color(color)
+                    .width(2.0);
+                if *dashed {
+                    line = line.style(LineStyle::dashed_dense());
+                }
+                plot_ui.line(line);
                 plot_ui.points(
                     Points::new(name.as_str(), points.clone())
                         .color(color)
@@ -1667,6 +1918,12 @@ impl CampbellWindow {
         {
             self.selected = Some(nearest);
         }
+        if !data.left_out.is_empty() {
+            ui.weak(format!(
+                "Not in the stationary frame, no nodal diameter: {}.",
+                data.left_out.join(", ")
+            ));
+        }
         ui.horizontal(|ui| match self.focus {
             Some([a, b]) => {
                 ui.label(format!(
@@ -1720,6 +1977,7 @@ mod tests {
                     frequency,
                     whirl,
                     unstable: false,
+                    nodal_diameter: None,
                 })
                 .collect(),
         }
@@ -1741,20 +1999,85 @@ mod tests {
                 )
             })
             .collect();
-        let critical = critical_speeds(&track(&points), &[1.0]);
+        let critical = critical_speeds(&track(&points), &[1.0], Frame::Rotating);
         assert_eq!(critical.len(), 1, "{critical:?}");
         let c = &critical[0];
         assert_eq!((c.order, c.mode, c.whirl), (1.0, 1, Whirl::Backward));
         let t = 100.0 / (10.0 + 60.0 / std::f64::consts::TAU);
         assert!((c.speed - 60.0 * t).abs() < 1e-9, "{}", c.speed);
         // With the 20x line both modes are crossed.
-        assert_eq!(critical_speeds(&track(&points), &[20.0]).len(), 2);
+        assert_eq!(
+            critical_speeds(&track(&points), &[20.0], Frame::Rotating).len(),
+            2
+        );
         // Standstill, where every order line starts at zero, is no critical speed.
         let still = vec![
             point(0.0, &[(0.0, Whirl::Unknown)]),
             point(60.0, &[(5.0, Whirl::Forward)]),
         ];
-        assert!(critical_speeds(&track(&still), &[1.0]).is_empty());
+        assert!(critical_speeds(&track(&still), &[1.0], Frame::Rotating).is_empty());
+    }
+
+    /// A disc mode of two nodal diameters rising with the speed: in the stationary frame
+    /// it is a forward wave f + 2 F and a backward wave |f − 2 F|, and the backward wave
+    /// comes to rest where the mode crosses the 2x line of the rotating frame.
+    #[test]
+    fn the_stationary_frame_splits_a_disc_mode_into_travelling_waves() {
+        let tau = std::f64::consts::TAU;
+        let points: Vec<SpeedPoint> = (1..=16)
+            .map(|i| {
+                let speed = 25.0 * tau * f64::from(i);
+                SpeedPoint {
+                    speed,
+                    modes: vec![Mode {
+                        frequency: (120f64.powi(2) + 2.3 * (25.0 * f64::from(i)).powi(2)).sqrt(),
+                        whirl: Whirl::Forward,
+                        unstable: false,
+                        nodal_diameter: Some(2),
+                    }],
+                }
+            })
+            .collect();
+        let tracks = track(&points);
+        assert_eq!(tracks.modes[0].name, "Mode 1 (F, ND 2)");
+        let data = diagram(&tracks, &[1.0], 400.0 * tau, Frame::Stationary);
+        let names: Vec<&str> = data.curves.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["Mode 1 forward (ND 2)", "Mode 1 backward (ND 2)"]);
+        assert!(!data.curves[0].dashed && data.curves[1].dashed);
+        let f = points[0].modes[0].frequency;
+        assert!((data.curves[0].points[0][1] - (f + 50.0)).abs() < 1e-9);
+        assert!((data.curves[1].points[0][1] - (f - 50.0).abs()).abs() < 1e-9);
+        // The standing wave: f = 2 F, at F = 120 / sqrt(4 − 2.3) Hz.
+        let critical = critical_speeds(&tracks, &[], Frame::Stationary);
+        assert_eq!(critical.len(), 1, "{critical:?}");
+        let c = &critical[0];
+        assert_eq!(
+            (c.order, c.branch, c.nodal_diameter),
+            (0.0, Branch::Backward, Some(2))
+        );
+        assert_eq!(
+            (c.order_label(), c.branch_label()),
+            ("standing".into(), "backward wave, ND 2".into())
+        );
+        let expected = 120.0 / (4.0f64 - 2.3).sqrt();
+        assert!(
+            (c.speed / tau - expected).abs() < 2.0,
+            "{} vs {expected}",
+            c.speed / tau
+        );
+        // The same speed is the crossing with the 2x line in the rotating frame.
+        let rotating = critical_speeds(&tracks, &[2.0], Frame::Rotating);
+        assert_eq!(rotating.len(), 1);
+        assert!((rotating[0].speed - c.speed).abs() < 1e-9);
+        // Without a nodal diameter a mode stays out of the stationary frame.
+        let mut unknown = points.clone();
+        for p in &mut unknown {
+            p.modes[0].nodal_diameter = None;
+        }
+        let data = diagram(&track(&unknown), &[], 400.0 * tau, Frame::Stationary);
+        assert!(data.curves.is_empty());
+        assert_eq!(data.left_out, ["Mode 1 (F)"]);
+        assert!(critical_speeds(&track(&unknown), &[2.0], Frame::Stationary).is_empty());
     }
 
     #[test]
@@ -1771,10 +2094,10 @@ mod tests {
                 &[(70.0, Whirl::Backward), (130.0, Whirl::Unknown)],
             ),
         ];
-        let data = diagram(&track(&points), &[1.0, 2.0], 3.0 * tau);
-        let names: Vec<&str> = data.curves.iter().map(|(n, _)| n.as_str()).collect();
+        let data = diagram(&track(&points), &[1.0, 2.0], 3.0 * tau, Frame::Rotating);
+        let names: Vec<&str> = data.curves.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["Mode 1 (B)", "Mode 2"]);
-        let [x, y] = data.curves[0].1[0];
+        let [x, y] = data.curves[0].points[0];
         assert!((x - 60.0).abs() < 1e-9 && y == 90.0, "{x} {y}");
         let guides: Vec<&str> = data.guides.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(guides, ["1x", "2x"]);
@@ -1833,6 +2156,7 @@ mod tests {
             frequency: 0.0,
             whirl: Whirl::Unknown,
             unstable: true,
+            nodal_diameter: None,
         });
         let tracks = track(&points);
         assert_eq!(tracks.unstable, [(500.0, 0.0)]);
@@ -1949,13 +2273,14 @@ mod tests {
                 "Speed [rpm]",
                 "Mode 1 [Hz]",
                 "Whirl 1",
+                "ND 1",
                 "Other roots [Hz]",
                 "1x [Hz]",
                 "2x [Hz]"
             ]
         );
-        assert_eq!(rows[1][1..], ["60", "90", "B", "110", "1", "2"]);
-        assert_eq!(rows[3][1..], ["180", "70", "B", "5", "3", "6"]);
+        assert_eq!(rows[1][1..], ["60", "90", "B", "", "110", "1", "2"]);
+        assert_eq!(rows[3][1..], ["180", "70", "B", "", "5", "3", "6"]);
         assert_eq!(rows.len(), 4);
     }
 
@@ -2019,6 +2344,7 @@ mod tests {
             max_runs: 0,
             orders: "2, 1; 1 x".into(),
             max_frequency: 0.0,
+            frame: Frame::Rotating,
         };
         assert_eq!(order_values(&setup.orders), [1.0, 2.0]);
         assert_eq!(grid(0.0, 100.0, 3), [2.0, 51.0, 100.0]);
@@ -2132,10 +2458,167 @@ mod tests {
         let whirls = [points[2].modes[0].whirl, points[2].modes[1].whirl];
         assert!(whirls.contains(&Whirl::Forward) && whirls.contains(&Whirl::Backward));
         let tracks = track(&points);
-        let critical = critical_speeds(&tracks, &[1.0]);
+        let critical = critical_speeds(&tracks, &[1.0], Frame::Rotating);
         assert!(critical.is_empty(), "{critical:?}");
-        assert_eq!(diagram(&tracks, &[1.0], 200.0).curves.len(), 4);
+        assert_eq!(
+            diagram(&tracks, &[1.0], 200.0, Frame::Rotating)
+                .curves
+                .len(),
+            4
+        );
+        // The bending pair of a shaft has one nodal diameter: in the stationary frame its
+        // forward and backward waves are the pair's frequencies shifted by the speed.
+        for t in &tracks.modes {
+            assert_eq!(t.nodal_diameter(), Some(1), "{t:?}");
+        }
+        let stationary = diagram(&tracks, &[1.0], 200.0, Frame::Stationary);
+        assert_eq!(stationary.curves.len(), 8);
+        assert!(stationary.left_out.is_empty());
         assert!(table_text(&points, &[1.0], ',').lines().count() == 4);
+    }
+
+    /// Writes the demo project of the user guide's Campbell chapter: a spinning disc (a CD
+    /// of polycarbonate as S4 shells, clamped at the hub) swept to 16000 rpm, its diagram
+    /// set to the stationary frame. Run by hand: `NODALIS_DEMO=/tmp/disc.ndl cargo test -p plx-app --release
+    /// -- --ignored demo_project`.
+    #[test]
+    #[ignore]
+    fn demo_project_of_a_spinning_disc() {
+        use std::fmt::Write as _;
+        let Ok(path) = std::env::var("NODALIS_DEMO") else {
+            return;
+        };
+        let (inner, outer, rings, around) = (7.5e-3, 60e-3, 8, 48);
+        let mut inp = String::from("*HEADING\nDisc\n*NODE, NSET=NALL\n");
+        for i in 0..=rings {
+            let r = inner + (outer - inner) * f64::from(i) / f64::from(rings);
+            for j in 0..around {
+                let t = std::f64::consts::TAU * f64::from(j) / f64::from(around);
+                let id = i * around + j + 1;
+                writeln!(inp, "{id}, {:.8e}, {:.8e}, 0", r * t.cos(), r * t.sin()).unwrap();
+            }
+        }
+        inp.push_str("*NSET, NSET=HUB, GENERATE\n");
+        writeln!(inp, "1, {around}").unwrap();
+        inp.push_str("*ELEMENT, TYPE=S4, ELSET=DISC\n");
+        for i in 0..rings {
+            for j in 0..around {
+                let j2 = (j + 1) % around;
+                let n = |i: u32, j: u32| i * around + j + 1;
+                let id = i * around + j + 1;
+                writeln!(
+                    inp,
+                    "{id}, {}, {}, {}, {}",
+                    n(i, j),
+                    n(i + 1, j),
+                    n(i + 1, j2),
+                    n(i, j2)
+                )
+                .unwrap();
+            }
+        }
+        let mesh = plx_io::inp::read_inp_str(&inp, None).unwrap().mesh;
+        let mut fe = FeModel {
+            materials: vec![plx_model::Material {
+                name: "Polycarbonate".into(),
+                density: Some(1200.0),
+                elastic: Some(plx_model::Elastic {
+                    young: 2.3e9,
+                    poisson: 0.37,
+                }),
+                ..Default::default()
+            }],
+            sections: vec![plx_model::Section {
+                name: "Shell-1".into(),
+                material: "Polycarbonate".into(),
+                region: plx_model::Region::Parts(vec!["DISC".into()]),
+                thickness: 1.0,
+                kind: plx_model::SectionKind::Shell {
+                    thickness: 1.2e-3,
+                    offset: 0.0,
+                },
+            }],
+            properties: plx_model::ModelProperties {
+                units: plx_model::UnitSystem::MKgSC,
+                ..Default::default()
+            },
+            ..FeModel::default()
+        };
+        let mut complex = plx_model::Step::new_complex_frequency("Step-1");
+        complex
+            .boundary_conditions
+            .push(plx_model::BoundaryCondition {
+                distribution: None,
+                name: "Hub".into(),
+                active: true,
+                visible: true,
+                region: plx_model::Region::NodeSet("HUB".into()),
+                kind: plx_model::BoundaryKind::displacement([Some(0.0); 6]),
+                amplitude: None,
+            });
+        if let StepKind::ComplexFrequency(c) = &mut complex.kind {
+            c.num_frequencies = 8;
+            c.num_modes = 24;
+            c.axis = [0.0, 0.0, 1.0];
+            c.speed = from_rpm(16_000.0);
+        }
+        fe.steps = vec![complex];
+        let work_dir = std::env::temp_dir().join(format!("plx-disc-{}", std::process::id()));
+        let input = SweepInput {
+            threads: 2,
+            work_dir: work_dir.clone(),
+            mesh: Arc::new(mesh.clone()),
+            fe: fe.clone(),
+            step: 0,
+        };
+        let cancel = AtomicBool::new(false);
+        let points: Vec<SpeedPoint> = (grid(from_rpm(1000.0), from_rpm(16_000.0), 16)
+            .into_iter()
+            .enumerate())
+        .map(|(i, speed)| run_speed(&input, speed, i as u32, &cancel).unwrap())
+        .collect();
+        let _ = std::fs::remove_dir_all(&work_dir);
+        let setup = Setup {
+            min_speed: 0.0,
+            max_speed: from_rpm(16_000.0),
+            max_runs: 16,
+            orders: "1, 2, 3".into(),
+            max_frequency: 1500.0,
+            frame: Frame::Stationary,
+        };
+        let fingerprint = sweep_fingerprint(&mesh, &fe);
+        let project = plx_io::project::Project {
+            nodes: vec![
+                plx_io::project::ProjectNode::Analysis(Box::new(
+                    plx_io::project::ProjectAnalysis {
+                        id: 1,
+                        name: "Disc".into(),
+                        position: [-200.0, 0.0],
+                        mesh,
+                        model: fe,
+                        ..Default::default()
+                    },
+                )),
+                plx_io::project::ProjectNode::Campbell(Box::new(plx_io::project::CampbellBlock {
+                    id: 2,
+                    name: "Campbell".into(),
+                    position: [140.0, 40.0],
+                    setup,
+                    points,
+                    focus: None,
+                    fingerprint: Some(fingerprint),
+                })),
+            ],
+            links: vec![plx_io::project::Link {
+                source: 1,
+                target: 2,
+                item: vec!["Setup".into()],
+                slot: vec!["Analysis".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        plx_io::project::save_project(std::path::Path::new(&path), &project).unwrap();
     }
 
     #[test]
@@ -2156,10 +2639,10 @@ mod tests {
 
     Axis reference direction:  0.1000E+01  0.0000E+00  0.0000E+00
 
- MODE NO     TURNING DIRECTION (F=FORWARD,B=BACKWARD)
+ MODE NO     TURNING DIRECTION (F=FORWARD,B=BACKWARD)   NODAL DIAMETER
 
-      1          F
-      2          B
+      1          F                            1
+      2          B                            -
 ";
         let modes = modes_of(dat, 3);
         assert_eq!(
@@ -2169,14 +2652,24 @@ mod tests {
                     frequency: 732.5508,
                     whirl: Whirl::Forward,
                     unstable: false,
+                    nodal_diameter: Some(1),
                 },
                 Mode {
                     frequency: 1049.649,
                     whirl: Whirl::Backward,
                     unstable: false,
+                    nodal_diameter: None,
                 }
             ]
         );
         assert!(modes_of(dat, 2).is_empty());
+        // CalculiX's table without the column.
+        let without = dat
+            .replace("   NODAL DIAMETER", "")
+            .replace("                            1", "")
+            .replace("                            -", "");
+        let modes = modes_of(&without, 3);
+        assert_eq!(modes.len(), 2);
+        assert!(modes.iter().all(|m| m.nodal_diameter.is_none()));
     }
 }

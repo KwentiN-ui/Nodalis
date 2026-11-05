@@ -18,7 +18,9 @@
 //! "participation factors"), the mode `x = Φ c` goes to the `.frd` as its real part
 //! (`DISP`, stresses and strains of it) and as magnitude and phase (`PDISP`, phase
 //! `atan(Im/Re)` in degrees, plus 180° where the real part is negative); the `.dat` gets
-//! the frequencies and the turning direction of every mode about the rotation axis.
+//! the frequencies and the turning direction of every mode about the rotation axis, with
+//! (Nodalis's own) the number of nodal diameters of the mode, which tells the frequencies of
+//! the mode in the stationary frame: `f ± n Ω` for a mode of `n` nodal diameters.
 
 use plxs_assembly::ElementTable;
 use plxs_core::mesh::ElementRef;
@@ -39,6 +41,7 @@ pub struct ComplexFrequencyProcedure;
 struct Rotation {
     omega: [f64; 3],
     axis: [f64; 3],
+    point: [f64; 3],
     entries: Vec<u32>,
 }
 
@@ -48,7 +51,7 @@ fn rotation(model: &Model, table: &ElementTable, step: &Step) -> Option<Rotation
         let DistributedLoadKind::Centrifugal {
             omega_squared,
             axis,
-            ..
+            point,
         } = &load.kind
         else {
             continue;
@@ -71,6 +74,7 @@ fn rotation(model: &Model, table: &ElementTable, step: &Step) -> Option<Rotation
         let rotation = found.get_or_insert(Rotation {
             omega: unit.map(|c| c * speed),
             axis: unit,
+            point: *point,
             entries: Vec::new(),
         });
         for id in elements {
@@ -217,6 +221,142 @@ fn coriolis_times(
         }
     }
     Ok(out)
+}
+
+/// Highest number of nodal diameters told apart, where the mesh resolves them.
+const MAX_NODAL_DIAMETER: usize = 16;
+
+/// The number of nodal diameters of a mode about the axis through `point`: the
+/// circumferential harmonic `e^{±inθ}` that carries most of the mode, from the cylindrical
+/// components (radial, tangential, axial) of the complex mode `re + i im` (3 per node) at
+/// every node off the axis. A mode of a rotor that is not axisymmetric, or one spread over
+/// many harmonics, gives `None`.
+fn nodal_diameter(
+    model: &Model,
+    re: &[f64],
+    im: &[f64],
+    point: &[f64; 3],
+    axis: &[f64; 3],
+) -> Option<u32> {
+    let dot = |a: &[f64; 3], b: &[f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let cross = |a: &[f64; 3], b: &[f64; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    // A basis (e1, e2) across the axis for the angle.
+    let other = if axis[0].abs() < 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let mut e1 = cross(axis, &other);
+    let len = dot(&e1, &e1).sqrt();
+    e1 = e1.map(|c| c / len);
+    let e2 = cross(axis, &e1);
+    let nodes = re.len() / 3;
+    let extent = (0..nodes)
+        .filter_map(|n| model.nodes.coordinates.get(n))
+        .map(|x| {
+            let r = [x[0] - point[0], x[1] - point[1], x[2] - point[2]];
+            dot(&r, &r).sqrt()
+        })
+        .fold(0.0, f64::max);
+    if extent <= 0.0 {
+        return None;
+    }
+    // The nodes resolve harmonics up to half their number of distinct angles (in bins of
+    // a degree): beyond that a harmonic cannot be told from a lower one.
+    let mut bins = vec![false; 360];
+    let mut angle_of = Vec::with_capacity(nodes);
+    for n in 0..nodes {
+        let Some(x) = model.nodes.coordinates.get(n) else {
+            angle_of.push(None);
+            continue;
+        };
+        let r = [x[0] - point[0], x[1] - point[1], x[2] - point[2]];
+        let along = dot(&r, axis);
+        let radial = [
+            r[0] - along * axis[0],
+            r[1] - along * axis[1],
+            r[2] - along * axis[2],
+        ];
+        let rho = dot(&radial, &radial).sqrt();
+        if rho <= 1e-6 * extent {
+            angle_of.push(None);
+            continue;
+        }
+        let theta = dot(&radial, &e2).atan2(dot(&radial, &e1));
+        let bin = ((theta.to_degrees() + 360.0) % 360.0).floor() as usize;
+        bins[bin.min(359)] = true;
+        angle_of.push(Some(theta));
+    }
+    let distinct = bins.iter().filter(|b| **b).count();
+    if distinct < 4 {
+        return None;
+    }
+    let harmonics = (distinct / 2).min(MAX_NODAL_DIAMETER + 1);
+    // Σ u_c e^{∓inθ} for the three cylindrical components and both senses of rotation,
+    // as (re, im).
+    let mut sums = vec![[(0.0, 0.0); 6]; harmonics];
+    let mut used = 0usize;
+    for n in 0..nodes {
+        let Some(theta) = angle_of[n] else {
+            continue;
+        };
+        let Some(x) = model.nodes.coordinates.get(n) else {
+            continue;
+        };
+        let r = [x[0] - point[0], x[1] - point[1], x[2] - point[2]];
+        let along = dot(&r, axis);
+        let radial = [
+            r[0] - along * axis[0],
+            r[1] - along * axis[1],
+            r[2] - along * axis[2],
+        ];
+        let rho = dot(&radial, &radial).sqrt();
+        let e_r = radial.map(|c| c / rho);
+        let e_t = cross(axis, &e_r);
+        let a: [f64; 3] = std::array::from_fn(|k| re[3 * n + k]);
+        let b: [f64; 3] = std::array::from_fn(|k| im[3 * n + k]);
+        let components = [
+            (dot(&a, &e_r), dot(&b, &e_r)),
+            (dot(&a, &e_t), dot(&b, &e_t)),
+            (dot(&a, axis), dot(&b, axis)),
+        ];
+        used += 1;
+        for (h, sum) in sums.iter_mut().enumerate() {
+            let (c, s) = ((h as f64 * theta).cos(), (h as f64 * theta).sin());
+            for (k, &(ur, ui)) in components.iter().enumerate() {
+                // u e^{−ihθ} and u e^{+ihθ}.
+                sum[k].0 += ur * c + ui * s;
+                sum[k].1 += ui * c - ur * s;
+                sum[3 + k].0 += ur * c - ui * s;
+                sum[3 + k].1 += ui * c + ur * s;
+            }
+        }
+    }
+    if used < 4 {
+        return None;
+    }
+    let energy: Vec<f64> = (sums.iter().enumerate())
+        .map(|(h, sum)| {
+            let both: f64 = sum.iter().map(|(r, i)| r * r + i * i).sum();
+            // Harmonic 0 is one and the same in both senses.
+            if h == 0 { both / 2.0 } else { both }
+        })
+        .collect();
+    let total: f64 = energy.iter().sum();
+    let (best, strongest) = (energy.iter().enumerate())
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(h, e)| (h, *e))?;
+    // The harmonic must carry most of the mode to count.
+    if total <= 0.0 || strongest < 0.5 * total {
+        return None;
+    }
+    Some(best as u32)
 }
 
 /// A complex mode in modal coordinates: frequency `mu` (rad/time), growth rate `sigma`
@@ -475,7 +615,12 @@ impl Procedure for ComplexFrequencyProcedure {
                 turn -= cross[0] * axis[0] + cross[1] * axis[1] + cross[2] * axis[2];
             }
             eigen_rows.push((number, vec![mode.mu, frequency, mode.sigma]));
-            turning_rows.push((number, vec![if turn >= 0.0 { 1.0 } else { -1.0 }]));
+            // The nodal diameter, −1 where the mode has no clear one.
+            let diameter = rotation
+                .as_ref()
+                .and_then(|r| nodal_diameter(ctx.model, &re, &im, &r.point, &r.axis))
+                .map_or(-1.0, f64::from);
+            turning_rows.push((number, vec![if turn >= 0.0 { 1.0 } else { -1.0 }, diameter]));
             if fields.is_empty() {
                 continue;
             }

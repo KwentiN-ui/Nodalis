@@ -469,17 +469,18 @@ pub fn parse_dat(text: &str) -> DatImport {
                     i -= 1;
                     break;
                 };
-                // Cyclic symmetry: nodal diameter, then the mode within it.
-                if line.split_whitespace().count() == 3 {
-                    let Some(local) = tokens.next().and_then(|t| t.parse::<u32>().ok()) else {
-                        break;
-                    };
+                // Cyclic symmetry: nodal diameter, then the mode within it, then the
+                // direction. Nodalis's complex modes: the direction, then the nodal diameter
+                // of the mode (`-` without one).
+                let mut next = tokens.next();
+                if let Some(local) = next.and_then(|t| t.parse::<u32>().ok()) {
                     let Some(mode) = cyclic_mode(offset + local) else {
                         continue;
                     };
                     m = mode;
+                    next = tokens.next();
                 }
-                let direction = match tokens.next() {
+                let direction = match next {
                     Some("F") => 1.0,
                     Some("B") => -1.0,
                     _ => 0.0,
@@ -488,6 +489,13 @@ pub fn parse_dat(text: &str) -> DatImport {
                 let row = data.row(step, m, frequency);
                 let name = "TURNING_DIRECTION";
                 data.add(&set, "EIGENVALUE_OUTPUT", name, name, row, direction);
+                // Every mode gets a value where the column exists, −1 without a diameter,
+                // so the values line up with the modes.
+                if let Some(diameter) = tokens.next() {
+                    let diameter = diameter.parse::<u32>().map_or(-1.0, f64::from);
+                    let name = "NODAL_DIAMETER";
+                    data.add(&set, "EIGENVALUE_OUTPUT", name, name, row, diameter);
+                }
             }
             continue;
         }

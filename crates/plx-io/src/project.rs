@@ -1564,6 +1564,7 @@ mod tests {
                     frequency: 12.5,
                     whirl: plx_model::campbell::Whirl::Backward,
                     unstable: false,
+                    nodal_diameter: None,
                 }],
             }],
             focus: Some([100.0, 200.0]),
