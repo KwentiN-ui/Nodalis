@@ -139,6 +139,28 @@ pub struct Prepared {
     pub warnings: Vec<String>,
     /// The steps of the FE model the analysis' steps come from, kept with the results.
     pub steps: Vec<plx_results::steps::StepRecord>,
+    /// The steps of the analysis, numbered from 1, that only prepare the next one (the
+    /// preload and the eigenmodes of a complex frequency step): their results are dropped.
+    pub preparation_steps: Vec<u32>,
+}
+
+/// `results` without what the steps `preparation` gave; a run that stopped in one of them
+/// stopped in the step it prepares.
+fn drop_preparation_steps(results: &mut SolverResults, preparation: &[u32]) {
+    if preparation.is_empty() {
+        return;
+    }
+    let kept = |step: &u32| !preparation.contains(step);
+    let solved = &mut results.results;
+    solved.increments.retain(|i| kept(&i.step));
+    solved.history.retain(|h| kept(&h.step));
+    solved.modes.retain(|m| kept(&m.step));
+    results.convergence.retain(|c| kept(&c.step));
+    if let Some(step) = &mut results.unconverged_step {
+        while preparation.contains(step) {
+            *step += 1;
+        }
+    }
 }
 
 /// Collects from the progress of a run how its increments went.
@@ -416,9 +438,9 @@ impl Run {
             ..plxs_session::JobOptions::new(work_dir, name)
         };
         let lines = Arc::clone(&output);
-        let records = match &job {
-            Job::Analysis(prepared) => prepared.steps.clone(),
-            Job::Text(_) => Vec::new(),
+        let (records, preparation) = match &job {
+            Job::Analysis(prepared) => (prepared.steps.clone(), prepared.preparation_steps.clone()),
+            Job::Text(_) => (Vec::new(), Vec::new()),
         };
         let solved = Arc::new(Mutex::new(None));
         let keep_results = Arc::clone(&solved);
@@ -483,6 +505,7 @@ impl Run {
                     let failed = !matches!(run, Ok(Ok(plxs_session::JobOutcome::Finished)));
                     results.unconverged_step = track.step.filter(|_| failed).or(track.unconverged);
                     results.convergence = track.increments;
+                    drop_preparation_steps(&mut results, &preparation);
                     match results.write(&results_file) {
                         Ok(()) => {
                             *keep_results.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -1021,6 +1044,7 @@ S
             text: text.to_owned(),
             warnings: vec!["a lowering warning".into()],
             steps: Vec::new(),
+            preparation_steps: Vec::new(),
         }
     }
 

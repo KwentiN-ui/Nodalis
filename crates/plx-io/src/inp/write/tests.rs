@@ -6309,36 +6309,23 @@ fn solver_reactions_balance_the_weight_and_the_centrifugal_force() {
     );
 }
 
-/// The cantilever spinning about its own axis like a shaft: a static step with the
-/// centrifugal load, a frequency step storing its modes and a complex frequency step with
-/// the Coriolis forces, as CalculiX wants them.
+/// The cantilever spinning about its own axis like a shaft: one complex frequency step with
+/// the rotation, which the solver gets as a static preload, a frequency step storing the
+/// modes and the complex frequency step with the Coriolis forces.
 fn rotor_analysis(speed: f64) -> (FeMesh, FeModel) {
-    let (mesh, mut model) = analysis(
-        "kragbalken_c3d8.inp",
-        body_load(LoadKind::Centrifugal {
-            point: [0.0, 5.0, 5.0],
-            axis: [1.0, 0.0, 0.0],
-            speed,
-        }),
-    );
-    let mut frequency = Step::new_frequency("Step-2");
-    frequency.field_outputs = ccx_eigen_outputs(&frequency.kind);
-    frequency.boundary_conditions = model.steps[0].boundary_conditions.clone();
-    let StepKind::Frequency(settings) = &mut frequency.kind else {
-        unreachable!()
-    };
-    settings.perturbation = true;
-    settings.storage = true;
-    settings.num_frequencies = 4;
-    model.steps.push(frequency);
-    let mut complex = Step::new_complex_frequency("Step-3");
-    complex.field_outputs = ccx_eigen_outputs(&complex.kind);
-    complex.boundary_conditions = model.steps[0].boundary_conditions.clone();
-    let StepKind::ComplexFrequency(settings) = &mut complex.kind else {
-        unreachable!()
-    };
-    settings.num_frequencies = 4;
-    model.steps.push(complex);
+    let (mesh, mut model) = cantilever(tip_force());
+    let step = &mut model.steps[0];
+    step.name = "Rotor".into();
+    step.loads.clear();
+    step.kind = StepKind::ComplexFrequency(ComplexFrequencyStep {
+        num_frequencies: 4,
+        num_modes: 4,
+        point: [0.0, 5.0, 5.0],
+        axis: [1.0, 0.0, 0.0],
+        speed,
+        ..ComplexFrequencyStep::default()
+    });
+    step.field_outputs = ccx_eigen_outputs(&step.kind);
     (mesh, model)
 }
 
@@ -6401,73 +6388,106 @@ fn cantilever_submodel(dofs: [bool; 6]) -> (FeMesh, FeModel) {
 }
 
 #[test]
-fn a_complex_frequency_step_is_written() {
+fn a_complex_frequency_step_is_solved_as_preload_eigenmodes_and_complex_modes() {
     let (mesh, mut model) = rotor_analysis(100.0);
-    let text = write_inp(&mesh, &model, "").unwrap();
-    let complex = &text[text.find("** Step-3").unwrap()..];
+    let lowered = lower_unvalidated(&mesh, &model, "").unwrap();
+    // Preload and eigenmodes only prepare the complex modes; all three come from the step.
+    assert_eq!(lowered.analysis.steps.len(), 3);
+    assert_eq!(lowered.preparation_steps, [0, 1]);
+    for step in 0..3 {
+        assert_eq!(
+            lowered.origins.get(&ir::ItemRef::Step(step)),
+            Some(plx_model::ModelItem::Step(0))
+        );
+    }
+    let text = lowered.text();
+    let rotation = "*Dload, op=New\nINTERNAL_SELECTION-1_ROTOR_ROTATION, CENTRIF, 10000, 0, 5, 5, \
+                    1, 0, 0\n";
     for line in [
+        "*Step, Inc=100, Amplitude=Ramp\n*Static\n",
+        "*Step, Perturbation, Inc=100, Amplitude=Ramp\n*Frequency, Storage=Yes\n4\n",
+        "** Rotor +",
         "*Step, Perturbation, Inc=100, Amplitude=Ramp\n*Complex frequency, Coriolis\n4\n",
         "\nFIX, 1, 6, 0\n",
         "*Node file\nU, PU\n",
     ] {
-        assert!(complex.contains(line), "missing {line:?} in\n{complex}");
+        assert!(text.contains(line), "missing {line:?} in\n{text}");
     }
-    let StepKind::ComplexFrequency(settings) = &mut model.steps[2].kind else {
+    assert_eq!(text.matches(rotation).count(), 3, "{text}");
+
+    // Without stress stiffening: the eigenmodes at standstill, no preload, no perturbation.
+    let StepKind::ComplexFrequency(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
+    settings.stiffening = false;
     settings.coriolis = false;
-    let StepKind::Frequency(settings) = &mut model.steps[1].kind else {
-        unreachable!()
-    };
-    settings.perturbation = false;
-    let text = write_inp(&mesh, &model, "").unwrap();
+    let lowered = lower_unvalidated(&mesh, &model, "").unwrap();
+    assert_eq!(lowered.analysis.steps.len(), 2);
+    assert_eq!(lowered.preparation_steps, [0]);
+    let text = lowered.text();
+    assert!(!text.contains("*Static"), "{text}");
+    assert!(!text.contains("Perturbation"), "{text}");
     assert!(
         text.contains("*Step, Inc=100, Amplitude=Ramp\n*Complex frequency\n4\n"),
         "{text}"
     );
+
+    // Fewer eigenmodes than complex frequencies cannot be solved.
+    let StepKind::ComplexFrequency(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.num_modes = 3;
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::InvalidLoad { item, .. }) if item == "Rotor"
+    ));
 }
 
 #[test]
-fn the_complex_frequency_step_takes_perturbation_from_the_stored_frequency_step() {
-    // CalculiX stops ("the .eig-file was created without perturbation info") unless both
-    // steps agree; a rotor without prestress in the frequency step must solve as well.
-    for perturbation in [false, true] {
-        let (mesh, mut model) = rotor_analysis(100.0);
-        let StepKind::Frequency(settings) = &mut model.steps[1].kind else {
+fn solver_takes_the_stress_stiffening_of_the_rotation_on_request() {
+    // Stress stiffening and spin softening change the whirl frequencies of the spinning
+    // cantilever; without them the modes are those at standstill.
+    let mut frequencies = Vec::new();
+    for stiffening in [false, true] {
+        let (mesh, mut model) = rotor_analysis(2000.0);
+        let StepKind::ComplexFrequency(settings) = &mut model.steps[0].kind else {
             unreachable!()
         };
-        settings.perturbation = perturbation;
+        settings.stiffening = stiffening;
         let text = write_inp(&mesh, &model, "").unwrap();
-        let complex = &text[text.find("** Step-3").unwrap()..];
-        let header = if perturbation {
-            "*Step, Perturbation, Inc=100, Amplitude=Ramp\n"
-        } else {
-            "*Step, Inc=100, Amplitude=Ramp\n"
-        };
-        assert!(
-            complex.contains(&format!("{header}*Complex frequency, Coriolis\n")),
-            "{complex}"
-        );
-        let Some(frd) = run_solver(&format!("rotor-perturbation-{perturbation}"), &text) else {
+        let Some(frd) = run_solver(&format!("rotor-stiffening-{stiffening}"), &text) else {
             return;
         };
-        let whirling = (frd.increments.iter())
+        let whirling: Vec<f64> = (frd.increments.iter())
             .filter(|i| i.kind == plx_results::AnalysisKind::ComplexFrequency)
-            .count();
-        assert_eq!(whirling, 4);
+            .map(|i| i.value)
+            .collect();
+        assert_eq!(whirling.len(), 4, "{whirling:?}");
+        frequencies.push(whirling);
     }
+    eprintln!("{frequencies:?}");
+    assert_ne!(frequencies[0], frequencies[1]);
 }
 
 #[test]
 fn solver_splits_the_bending_modes_of_the_rotating_cantilever() {
     // At 100 rad/s about its axis the two bending modes of the square beam split into a
     // backward and a forward whirl around the frequency of the standing beam.
-    let (mesh, model) = rotor_analysis(100.0);
+    let (mesh, mut model) = rotor_analysis(100.0);
     let Some(frd) = run_solver("rotor", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
-    let standing: Vec<f64> = (frd.increments.iter())
-        .filter(|i| i.kind == plx_results::AnalysisKind::Frequency)
+    // Without Coriolis forces and stiffening the complex modes are those of the standing beam.
+    let StepKind::ComplexFrequency(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.coriolis = false;
+    settings.stiffening = false;
+    let Some(still) = run_solver("rotor-standing", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let standing: Vec<f64> = (still.increments.iter())
+        .filter(|i| i.kind == plx_results::AnalysisKind::ComplexFrequency)
         .map(|i| i.value)
         .collect();
     let whirling: Vec<&plx_results::Increment> = (frd.increments.iter())

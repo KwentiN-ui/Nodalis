@@ -256,6 +256,9 @@ pub fn prepare(
 ) -> plx_solve::Prepared {
     plx_solve::Prepared {
         steps: step_records(&lowered, fe, inherited),
+        preparation_steps: (lowered.preparation_steps.iter())
+            .map(|&s| s as u32 + 1)
+            .collect(),
         text: lowered.text(),
         analysis: lowered.analysis,
         warnings: lowered.warnings,
@@ -278,6 +281,10 @@ pub fn step_records(
         let Some(step) = fe.steps.get(model) else {
             continue;
         };
+        // Steps that only prepare the next one keep no results.
+        if lowered.preparation_steps.contains(&index) {
+            continue;
+        }
         let number = index as u32 + 1;
         match records.iter_mut().find(|(m, _)| *m == model) {
             Some((_, record)) => record.solver_steps.push(number),
@@ -953,6 +960,46 @@ mod tests {
         assert_eq!(place.total_time, Some(2.0));
         assert_eq!(place.step_time, Some(1.0));
         assert_eq!(place.attempts, Some(1));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A complex frequency step alone: the solver preloads and stores the eigenmodes in
+    /// steps of its own, whose results are dropped; the results have the complex modes only.
+    #[test]
+    fn a_complex_frequency_step_keeps_only_its_complex_modes() {
+        let dir = std::env::temp_dir().join(format!("nodalis-rotor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut model = pulled_cubes(0.03);
+        model.fe.materials[0].density = Some(7.85e-9);
+        let mut rotor = plx_model::Step::new_complex_frequency("Rotor");
+        rotor.boundary_conditions = vec![model.fe.steps[0].boundary_conditions[0].clone()];
+        if let plx_model::StepKind::ComplexFrequency(c) = &mut rotor.kind {
+            c.num_frequencies = 4;
+            c.num_modes = 6;
+            c.point = [0.0, 0.5, 0.5];
+            c.axis = [1.0, 0.0, 0.0];
+            c.speed = 500.0;
+        }
+        model.fe.steps = vec![rotor];
+        solve_as(&model, &dir.join("Rotor"), "Rotor", &Default::default());
+        let solved = plx_results::SolverResults::read(&dir.join("Rotor/Rotor.ndlr")).unwrap();
+        let records: Vec<(&str, &[u32])> = (solved.steps.iter())
+            .map(|r| (r.name.as_str(), r.solver_steps.as_slice()))
+            .collect();
+        assert_eq!(records, [("Rotor", &[3][..])]);
+        assert!(solved.results.increments.iter().all(|i| i.step == 3));
+        let modes: Vec<(u32, plxs_core::results::ModeKind, usize)> = (solved.results.modes.iter())
+            .map(|m| (m.step, m.kind, m.modes.len()))
+            .collect();
+        assert_eq!(
+            modes,
+            [(3, plxs_core::results::ModeKind::ComplexFrequency, 4)]
+        );
+        let units = plx_model::UnitSystem::default();
+        let loaded = crate::model::load(&dir.join("Rotor/Rotor.ndlr"), units).unwrap();
+        let view = loaded.model.results.unwrap();
+        let names: Vec<&str> = view.steps.steps.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["Rotor"]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

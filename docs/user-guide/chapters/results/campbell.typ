@@ -8,9 +8,8 @@ and collects the results.
 
 The sweep lives in a #ui("Campbell") block of the project schematic (@project-window), which
 takes the analysis to sweep and keeps the diagram. The analysis needs an active
-#ui("Centrifugal") load, whose axis and point tell how the rotor turns, and a
-#ui("Complex Frequency") step (@complex-frequency); the speed of the load does not matter, 0
-included, as the sweep sets it. #menu("Solve", "Campbell Diagram") in the window of such
+#ui("Complex Frequency") step (@complex-frequency), whose axis tells how the rotor turns; the
+speed of the step does not matter, 0 included, as the sweep sets it. #menu("Solve", "Campbell Diagram") in the window of such
 an analysis opens its Campbell block, and makes one next to the analysis and links it first if
 there is none. A block can also be added from the block picker or the context menu of the
 schematic (category #ui("Campbell")); then drag the #ui("Setup") pin of the analysis to the
@@ -22,7 +21,7 @@ speeds of its sweep and the critical speeds of its diagram])
 The block shows the state of its diagram in its #ui("Analysis") row, how many speeds it has and
 up to five critical speeds. The speeds and the settings of the sweep are saved in the project
 file, so the diagram is there again when the project is opened. The diagram stays up to date
-while the analysis is unchanged, apart from the speed of its centrifugal loads; once the mesh or
+while the analysis is unchanged, apart from the speed of its Complex Frequency step; once the mesh or
 the model of the analysis changes, the block turns out of date. #ui("Update Project") starts the
 sweep of every Campbell block that is out of date or has not swept yet, beside the solves of the
 analyses; the sweep runs the model of its analysis by itself and needs no results of it.
@@ -34,7 +33,7 @@ closed while the sweep runs: the block goes on and shows its progress.
 
 #fields(
   [Speed range \[rpm\]], [The lowest and the highest speed of the diagram, shown in rad/s
-    next to them. Default: from 0 to the speed of the centrifugal load, or to 10000 rpm when the
+    next to them. Default: from 0 to the speed of the Complex Frequency step, or to 10000 rpm when the
     analysis stands still. Standstill itself is not
     computed, as CalculiX merges the coinciding modes there; a range from 0 starts at a fiftieth
     of the highest speed.],
@@ -47,7 +46,7 @@ closed while the sweep runs: the block goes on and shows its progress.
     run close to the speed axis. It can be changed at any time, also during the sweep.],
 )
 
-#ui("Start Sweep") sets the centrifugal loads of the model to every speed, runs the solver in
+#ui("Start Sweep") sets the Complex Frequency step to every speed, runs the solver in
 a folder named after the block in that of the project in the work directory (@settings) and takes the complex frequencies of the
 last Complex Frequency step and the whirl direction of every mode from its results. As many speeds run at the same time as #ui("Parallel analyses") of
 the solver settings allows. The files of a speed are deleted once its frequencies are read; those
