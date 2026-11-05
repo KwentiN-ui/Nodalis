@@ -656,6 +656,15 @@ impl AnalysisWindow {
         Some(&mut model.fe)
     }
 
+    /// Counts a change the project made through [`Self::fe_mut`] at once, as one the user can
+    /// undo, so that the state of the analysis follows it also while its window is not shown
+    /// (the window records changes only at the end of its own frames).
+    pub fn note_change(&mut self) {
+        if let Some(model) = &mut self.workbench.model {
+            crate::undo::record(model);
+        }
+    }
+
     /// Whether a Check Model run of the window runs.
     pub fn is_running(&self) -> bool {
         (self.workbench.analysis.as_ref()).is_some_and(Analysis::is_running)

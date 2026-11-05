@@ -1479,6 +1479,16 @@ impl Node {
         Some(Self::new(id, name, block))
     }
 
+    /// Brings the state of an analysis up to date after the project changed its model
+    /// through [`Self::exposing_fe_mut`]: an open window counts the change, a closed analysis
+    /// finds its state again.
+    fn model_changed(&mut self) {
+        match self.window_mut() {
+            Some(window) => window.note_change(),
+            None => self.refresh_closed(),
+        }
+    }
+
     /// Finds the state of a closed analysis from its data, once after it changed.
     fn refresh_closed(&mut self) {
         let Some(analysis) = self.as_analysis_mut() else {
@@ -1585,7 +1595,7 @@ impl Node {
         };
         let changed = fe.set_value(&path, value);
         if changed {
-            self.refresh_closed();
+            self.model_changed();
         }
         changed
     }
@@ -3871,7 +3881,7 @@ impl ProjectApp {
             return format!("Speed not set: {name} has no active Complex Frequency step.");
         }
         crate::campbell::set_speed(fe, speed);
-        node.refresh_closed();
+        node.model_changed();
         self.sync_due = true;
         format!(
             "{name}: Complex Frequency step set to {shown} rpm; solve it for the results there."
