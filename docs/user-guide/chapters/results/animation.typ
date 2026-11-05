@@ -2,13 +2,15 @@
 
 == Animation <animation>
 
-#ui("Animate") in the #ui("Step and Increment") group of the ribbon starts a scale factor
-animation and opens the animation window; a second click stops it. Its menu starts the other
-types: #ui("Scale Factor"), #ui("Step"), #ui("All Steps") and #ui("Positions") (only for a step
-with a moving load), and #ui("Sound") for the modes of a frequency step (@sound).
+#ui("Animate") in the #ui("Step and Increment") group of the ribbon starts the animation that
+fits the shown result and opens the animation window; a second click stops it. A mode shape
+swings by its scale factor, a step with a moving load runs through its positions, a step of
+several increments plays them one after another, and a single increment grows from undeformed to
+deformed. #ui("Type") in the animation window switches to another type. For the modes of a
+frequency step, #ui("Sound") appears right of #ui("Animate") (@sound).
 
-#screenshot("results-animate-menu.png", [The menu of #ui("Animate"); the types a step does not
-  have are greyed out])
+#screenshot("results-animate-menu.png", [#ui("Animate") and, for a frequency step,
+  #ui("Sound") in the ribbon])
 
 #screenshot("animation.png", [Animation window])
 
@@ -62,7 +64,7 @@ numbers. The output pane reports the saved file or what went wrong.
 
 == Sound of the mode shapes <sound>
 
-For a frequency step, #ui("Sound") in the menu of #ui("Animate") opens #ui("Sound of the Mode Shapes"). It plays the
+For a frequency step, #ui("Sound") right of #ui("Animate") in the ribbon opens #ui("Sound of the Mode Shapes"). It plays the
 eigenfrequencies as tones, so you can hear how the structure would ring.
 
 #screenshot("sound.png", [Sound of the mode shapes])

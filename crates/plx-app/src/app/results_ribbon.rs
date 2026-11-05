@@ -35,12 +35,22 @@ impl Workbench {
             Cmd::AnimateScaleFactor | Cmd::AnimateStep => !view.increments.is_empty(),
             Cmd::AnimateAllSteps => view.steps.steps.len() > 1,
             Cmd::AnimatePositions => view.current_step().is_some_and(|s| s.has_positions()),
-            // Only modes of a frequency step have a sound.
-            Cmd::ModeSound => {
-                view.sound.is_some()
-                    || (view.current_increment())
-                        .is_some_and(|i| i.kind == plx_results::AnalysisKind::Frequency)
-            }
+            Cmd::ModeSound => self.results_command_visible(cmd),
+            _ => true,
+        }
+    }
+
+    /// Whether the result tile is in the ribbon: Sound only while modes of a frequency step
+    /// are shown, or its window is open.
+    pub(super) fn results_command_visible(&self, cmd: Cmd) -> bool {
+        match cmd {
+            Cmd::ModeSound => (self.shown_results_view())
+                .filter(|_| self.tree_view == TreeView::Results)
+                .is_some_and(|view| {
+                    view.sound.is_some()
+                        || (view.current_increment())
+                            .is_some_and(|i| i.kind == plx_results::AnalysisKind::Frequency)
+                }),
             _ => true,
         }
     }
@@ -96,7 +106,7 @@ impl Workbench {
                 if view.animation.is_some() {
                     view.stop_animation();
                 } else {
-                    view.start_animation(AnimationKind::ScaleFactor);
+                    view.start_animation(view.automatic_animation());
                 }
             }
             Cmd::AnimateScaleFactor => view.start_animation(AnimationKind::ScaleFactor),

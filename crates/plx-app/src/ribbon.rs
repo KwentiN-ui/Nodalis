@@ -67,6 +67,10 @@ impl RibbonState {
 /// commands out.
 pub trait Host {
     fn enabled(&self, cmd: Cmd) -> bool;
+    /// Whether the tile is in the ribbon at all, such as Sound only for a frequency step.
+    fn visible(&self, _cmd: Cmd) -> bool {
+        true
+    }
     /// Whether the tile shows pressed: a tool that is open or an option that is on.
     fn checked(&self, _cmd: Cmd) -> bool {
         false
@@ -134,6 +138,7 @@ pub fn show(
         .collect();
     let row: Vec<&Command> = (commands.iter().copied())
         .filter(|c| c.tab_in(workspace) == tab)
+        .filter(|c| host.visible(c.cmd))
         .collect();
     let pinned: Vec<&Command> = commands
         .iter()
