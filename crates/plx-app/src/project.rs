@@ -3838,6 +3838,11 @@ impl ProjectApp {
                 });
                 window.visible = open;
             }
+            if let Some(speed) = window.take_analysis_speed() {
+                let note = self.set_analysis_speed(id, speed);
+                self.output.push(note.clone());
+                window.note(note);
+            }
             if window.is_running() {
                 ctx.request_repaint_after(Duration::from_millis(250));
             }
@@ -3845,6 +3850,32 @@ impl ProjectApp {
                 campbell.window = Some(window);
             }
         }
+    }
+
+    /// Sets the analysis the Campbell block `id` sweeps to turn at `speed`, so that solving it
+    /// gives the results at that speed; the diagram stays up to date, as the sweep sets the
+    /// speed itself. Returns what happened, for the output.
+    fn set_analysis_speed(&mut self, id: u64, speed: f64) -> String {
+        let shown = crate::campbell::shown(crate::campbell::rpm(speed));
+        let Some(source) = self.campbell_source(id).map(|n| n.id) else {
+            return "Speed not set: no analysis is linked to the block.".into();
+        };
+        let name = self.name_of(source);
+        let Some(node) = self.node(source) else {
+            return format!("Speed not set: {name} is gone.");
+        };
+        let Some(fe) = node.exposing_fe_mut() else {
+            return format!("Speed not set: {name} is loading.");
+        };
+        if crate::campbell::rotor_speed(fe).is_none() {
+            return format!("Speed not set: {name} has no active Complex Frequency step.");
+        }
+        crate::campbell::set_speed(fe, speed);
+        node.refresh_closed();
+        self.sync_due = true;
+        format!(
+            "{name}: Complex Frequency step set to {shown} rpm; solve it for the results there."
+        )
     }
 
     /// Starts the sweeps of the Campbell blocks whose diagram is not up to date; returns

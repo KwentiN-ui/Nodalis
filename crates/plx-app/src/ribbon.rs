@@ -84,10 +84,6 @@ pub trait Host {
     }
     /// Fills the panel a panel tile opens.
     fn panel(&mut self, _ui: &mut Ui, _cmd: Cmd) {}
-    /// A line shown after the groups, such as how to place a block.
-    fn hint(&self, _tab: &str) -> Option<&'static str> {
-        None
-    }
 }
 
 /// Shows the ribbon of `workspace`; returns the command clicked.
@@ -245,13 +241,6 @@ fn groups(
                     if let Some(cmd) = clicked {
                         run = Some(cmd);
                     }
-                }
-                if let Some(hint) = host.hint(tab)
-                    && !compact
-                    && !folded.contains(&true)
-                {
-                    ui.add_space(12.0);
-                    ui.add(egui::Label::new(egui::RichText::new(hint).weak()).wrap());
                 }
             });
         });
