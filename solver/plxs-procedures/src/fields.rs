@@ -3,7 +3,9 @@
 //! stress error estimator; appended to the results in the order CalculiX writes them.
 
 use plxs_assembly::ElementTable;
-use plxs_core::results::{IncrementKind, ResultField, ResultsIncrement};
+use plxs_core::results::{
+    IncrementKind, ModeKind, ModeSet, ModeShape, ResultField, ResultsIncrement,
+};
 use plxs_core::state::IntegrationPointField;
 use plxs_core::{Model, ProgressEvent, Result, Step};
 
@@ -24,6 +26,52 @@ fn requested(step: &Step) -> Vec<String> {
 /// The requested field variables of a step, upper case.
 pub fn requested_variables(step: &Step) -> Vec<String> {
     requested(step)
+}
+
+/// Whether the step asks for any field output (`*NODE FILE`, `*EL FILE`, `*CONTACT FILE`).
+pub fn writes_fields(step: &Step) -> bool {
+    !requested(step).is_empty()
+}
+
+/// Adds a mode of an eigenvalue step to the step's [`ModeSet`]: its displacements `u` (and
+/// imaginary part `imaginary`) in the layout of the state, on the written nodes as
+/// reported, normalized. Every eigenvalue step keeps its modes so, whatever field outputs
+/// it asks for.
+#[allow(clippy::too_many_arguments)]
+pub fn add_mode(
+    ctx: &mut ProcedureContext<'_>,
+    kind: ModeKind,
+    number: u32,
+    eigenvalue: f64,
+    value: f64,
+    nodal_diameter: Option<u32>,
+    u: &[f64],
+    imaginary: Option<&[f64]>,
+) {
+    let order = node_order(ctx.model);
+    let zeros = vec![0.0; u.len()];
+    let rows = |u: &[f64]| -> Vec<[f32; 3]> {
+        let (reported, _) = ctx.table.reported(ctx.model, u, &zeros);
+        (order.iter())
+            .map(|&(_, i)| {
+                let at = i as usize * 3;
+                [0, 1, 2].map(|k| reported.get(at + k).copied().unwrap_or(0.0) as f32)
+            })
+            .collect()
+    };
+    let mut mode = ModeShape::new(number, eigenvalue, value, rows(u), imaginary.map(rows));
+    mode.nodal_diameter = nodal_diameter;
+    let step = ctx.step_number;
+    let modes = &mut ctx.results.modes;
+    match modes.iter_mut().find(|m| m.step == step) {
+        Some(set) => set.modes.push(mode),
+        None => modes.push(ModeSet {
+            step,
+            kind,
+            nodes: order.iter().map(|&(id, _)| id).collect(),
+            modes: vec![mode],
+        }),
+    }
 }
 
 /// Node ids in ascending order with their dense indices.

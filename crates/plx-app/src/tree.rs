@@ -2044,7 +2044,10 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                     step.name.clone()
                 };
                 tree.branch(ui, TreeItem::Step(s), &label, true, |tree, ui| {
+                    // An eigenvalue step leaves out the field outputs it has (from a
+                    // project of an earlier version): the solver keeps its mode shapes.
                     let outputs = (step.field_outputs.iter().enumerate())
+                        .filter(|_| !step.kind.computes_eigenmodes())
                         .map(|(i, f)| (TreeItem::FieldOutput(s, i), f.name.as_str()))
                         .collect();
                     tree.step_container(ui, s, "Field Outputs", outputs);

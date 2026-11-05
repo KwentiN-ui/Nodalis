@@ -197,7 +197,10 @@ A static step over a creep time in which materials with a creep law creep (`*VIS
 
 Field outputs control what the solver writes to the results as `*NODE FILE`,
 `*EL FILE` and `*CONTACT FILE`. A new step gets a node and an element field output whose
-variables depend on the step type. Create more with #ui("Field Output") on the #ui("Steps") tab; it
+variables depend on the step type. Frequency, complex frequency and buckle steps take none:
+their results are the normalized mode shapes (@mode-shapes), so the tree shows no
+#ui("Field Outputs") under such a step and #ui("Field Output") on the #ui("Steps") tab does not
+add one to it. Create more with #ui("Field Output") on the #ui("Steps") tab; it
 goes into the active step (@active-step). Edit one with a double-click. Hovering over
 a variable shows what it is.
 

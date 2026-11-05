@@ -189,22 +189,6 @@ impl FieldOutput {
         ]
     }
 
-    /// Field outputs added to a new frequency step: no reaction forces, as the
-    /// mode shapes are scaled arbitrarily.
-    pub fn frequency_defaults() -> Vec<Self> {
-        let mut outputs = Self::defaults();
-        outputs[0].variables = vec!["U".into()];
-        outputs
-    }
-
-    /// Field outputs added to a new complex frequency step: the displacements with
-    /// their magnitudes and phases (`PU`), so the whirling of a mode can be shown.
-    pub fn complex_frequency_defaults() -> Vec<Self> {
-        let mut outputs = Self::defaults();
-        outputs[0].variables = vec!["U".into(), "PU".into()];
-        outputs
-    }
-
     /// Field outputs of a new visco step: those of a static step and the equivalent creep
     /// strain, which the solver writes as `PEEQ`.
     pub fn visco_defaults() -> Vec<Self> {

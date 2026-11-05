@@ -131,6 +131,7 @@ impl StepCache {
             let step: Results = restart::decode(RESULTS_MAGIC, "step results", &bytes).ok()?;
             results.increments.extend(step.increments);
             results.history.extend(step.history);
+            results.modes.extend(step.modes);
         }
         let bytes = std::fs::read(self.path(keys[steps - 1], "state")).ok()?;
         let snapshot = restart::decode_snapshot(&bytes).ok()?;
@@ -152,6 +153,10 @@ impl StepCache {
                 .collect(),
             history: (results.history.iter())
                 .filter(|h| h.step == step)
+                .cloned()
+                .collect(),
+            modes: (results.modes.iter())
+                .filter(|m| m.step == step)
                 .cloned()
                 .collect(),
         };

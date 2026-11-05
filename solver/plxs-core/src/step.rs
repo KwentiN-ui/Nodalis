@@ -85,6 +85,15 @@ pub enum Procedure {
 }
 
 impl Procedure {
+    /// Whether the step solves an eigenvalue problem: its results are the modes
+    /// ([`crate::results::ModeSet`]).
+    pub fn computes_eigenmodes(&self) -> bool {
+        matches!(
+            self,
+            Procedure::Frequency(_) | Procedure::ComplexFrequency(_) | Procedure::Buckle(_)
+        )
+    }
+
     /// The keyword of the procedure as written in the input.
     pub fn keyword(&self) -> &'static str {
         match self {

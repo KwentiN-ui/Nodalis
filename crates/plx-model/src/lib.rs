@@ -805,6 +805,16 @@ impl StepKind {
         matches!(self, StepKind::Frequency(_) | StepKind::ComplexFrequency(_))
     }
 
+    /// Whether the step is an eigenvalue problem (frequency, complex frequency or
+    /// buckling): its results are the mode shapes with their eigenvalues, kept once and
+    /// normalized, and it takes no field outputs.
+    pub fn computes_eigenmodes(&self) -> bool {
+        matches!(
+            self,
+            StepKind::Frequency(_) | StepKind::ComplexFrequency(_) | StepKind::Buckle(_)
+        )
+    }
+
     /// Whether the step takes defined fields. A thermal step solves for the temperatures
     /// instead of taking them, and a step that superposes stored eigenmodes
     /// only takes the loads the solver allows there (forces, pressures, base motion).
@@ -1427,7 +1437,7 @@ impl Step {
         }
     }
 
-    /// A complex frequency step with the default field outputs.
+    /// A complex frequency step; its results are the mode shapes, without field outputs.
     pub fn new_complex_frequency(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -1436,7 +1446,7 @@ impl Step {
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
             history_outputs: Vec::new(),
-            field_outputs: FieldOutput::complex_frequency_defaults(),
+            field_outputs: Vec::new(),
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),
             bolt_changes: Vec::new(),
@@ -1467,7 +1477,7 @@ impl Step {
         }
     }
 
-    /// A frequency step with the default field outputs.
+    /// A frequency step; its results are the mode shapes, without field outputs.
     pub fn new_frequency(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -1479,11 +1489,11 @@ impl Step {
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),
             bolt_changes: Vec::new(),
-            field_outputs: FieldOutput::frequency_defaults(),
+            field_outputs: Vec::new(),
         }
     }
 
-    /// A buckle step with the default field outputs.
+    /// A buckle step; its results are the mode shapes, without field outputs.
     pub fn new_buckle(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -1495,7 +1505,7 @@ impl Step {
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),
             bolt_changes: Vec::new(),
-            field_outputs: FieldOutput::defaults(),
+            field_outputs: Vec::new(),
         }
     }
 
@@ -1898,6 +1908,21 @@ pub fn next_name<'a>(prefix: &str, existing: impl IntoIterator<Item = &'a str>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eigenvalue_steps_start_without_field_outputs() {
+        for step in [
+            Step::new_frequency("F"),
+            Step::new_buckle("B"),
+            Step::new_complex_frequency("C"),
+        ] {
+            assert!(step.kind.computes_eigenmodes());
+            assert!(step.field_outputs.is_empty(), "{}", step.name);
+        }
+        let static_step = Step::new_static("S");
+        assert!(!static_step.kind.computes_eigenmodes());
+        assert_eq!(static_step.field_outputs.len(), 2);
+    }
 
     #[test]
     fn only_steps_with_prescribed_temperatures_take_defined_fields() {

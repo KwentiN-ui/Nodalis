@@ -208,7 +208,7 @@ impl FieldRank {
     /// number of raw components.
     pub fn of_calculix(name: &str, raw_components: usize) -> Self {
         match (name, raw_components) {
-            ("DISP" | "VELO" | "FORC" | "FLUX" | "NORM", 3) => FieldRank::Vector,
+            ("DISP" | "MODE" | "VELO" | "FORC" | "FLUX" | "NORM", 3) => FieldRank::Vector,
             ("STRESS" | "ZZSTR", 6) => FieldRank::Tensor(TensorKind::Stress),
             ("TOSTRAIN" | "MESTRAIN", 6) => FieldRank::Tensor(TensorKind::Strain),
             _ => FieldRank::Scalar,
@@ -274,9 +274,22 @@ impl Increment {
         self.fields.iter().find(|f| f.name == name)
     }
 
-    /// Nodal displacements, if the increment has a `DISP` field with three components.
+    /// The field that moves the nodes: the displacements (`DISP`), or the shape of a mode
+    /// of the built-in solver ([`solver::MODE`]).
+    pub fn deformation_field(&self) -> Option<&Field> {
+        self.field("DISP").or_else(|| self.field(solver::MODE))
+    }
+
+    /// Whether the increment is a mode as the built-in solver keeps it: its shape only,
+    /// normalized to a largest displacement of 1.
+    pub fn is_mode_shape(&self) -> bool {
+        self.field(solver::MODE).is_some()
+    }
+
+    /// Nodal displacements, if the increment has a `DISP` field (or a mode shape) with three
+    /// components.
     pub fn displacements(&self) -> Option<Vec<[f32; 3]>> {
-        let field = self.field("DISP")?;
+        let field = self.deformation_field()?;
         let [x, y, z] = ["U1", "U2", "U3"].map(|n| field.component(n));
         let (x, y, z) = (x?, y?, z?);
         Some(

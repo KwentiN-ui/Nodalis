@@ -5039,7 +5039,7 @@ fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
 }
 
 /// The step kinds of the dialog: label, the kind with its settings and its default field
-/// outputs, in order.
+/// outputs (none for eigenvalue steps, which keep their mode shapes), in order.
 fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 12] {
     let heat = HeatTransferStep::default();
     [
@@ -5051,7 +5051,7 @@ fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 12] 
         (
             FREQUENCY_LABEL,
             StepKind::Frequency(FrequencyStep::default()),
-            FieldOutput::frequency_defaults(),
+            Vec::new(),
         ),
         (
             DYNAMIC_LABEL,
@@ -5071,12 +5071,12 @@ fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 12] 
         (
             COMPLEX_FREQUENCY_LABEL,
             StepKind::ComplexFrequency(ComplexFrequencyStep::default()),
-            FieldOutput::complex_frequency_defaults(),
+            Vec::new(),
         ),
         (
             BUCKLE_LABEL,
             StepKind::Buckle(BuckleStep::default()),
-            FieldOutput::defaults(),
+            Vec::new(),
         ),
         (
             HEAT_TRANSFER_LABEL,

@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use plxs_assembly::{Spc, assemble_mass};
-use plxs_core::results::{IncrementKind, ResultField, ResultsIncrement};
+use plxs_core::results::{IncrementKind, ModeKind, ResultField, ResultsIncrement};
 use plxs_core::state::{NodalField, StoredModes};
 use plxs_core::step::Frequency;
 use plxs_core::{Error, Progress, ProgressEvent, Result, Step};
@@ -32,7 +32,7 @@ use crate::eigen::{
     increment_results, lanczos_modes, preload_displacements, reference_stiffness, restrict_to_free,
     rigid_body_motions,
 };
-use crate::fields::build_fields;
+use crate::fields::{add_mode, build_fields, writes_fields};
 use crate::history::write_table;
 use crate::{ProcedureContext, StepOutcome};
 
@@ -223,8 +223,18 @@ pub(crate) fn cyclic_frequency(
             }
             let x = set.expand(v, &zeros);
             let (a, b) = x.split_at(total_dofs);
+            add_mode(
+                ctx,
+                ModeKind::Frequency,
+                global_mode,
+                *lambda,
+                frequency,
+                Some(diameter),
+                a,
+                Some(b),
+            );
             let mut parts = Vec::with_capacity(2);
-            for part in [a, b] {
+            for part in [a, b].into_iter().filter(|_| writes_fields(step)) {
                 increment_results(
                     ctx.table,
                     ctx.model,
@@ -238,17 +248,17 @@ pub(crate) fn cyclic_frequency(
                     ctx.table, ctx.model, step, part, &forces, &stresses, &strains,
                 ));
             }
-            let imaginary = parts.pop().unwrap();
-            let real = parts.pop().unwrap();
-            ctx.results.increments.push(ResultsIncrement {
-                step: ctx.step_number,
-                increment: global_mode,
-                kind: IncrementKind::Frequency,
-                value: frequency,
-                total_time: ctx.state.total_time,
-                nodal_diameter: Some(diameter),
-                fields: interleave(real, imaginary),
-            });
+            if let (Some(imaginary), Some(real)) = (parts.pop(), parts.pop()) {
+                ctx.results.increments.push(ResultsIncrement {
+                    step: ctx.step_number,
+                    increment: global_mode,
+                    kind: IncrementKind::Frequency,
+                    value: frequency,
+                    total_time: ctx.state.total_time,
+                    nodal_diameter: Some(diameter),
+                    fields: interleave(real, imaginary),
+                });
+            }
             if parameters.storage {
                 stored_values.push(*lambda);
                 stored_diameters.push(diameter);

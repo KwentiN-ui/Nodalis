@@ -28,7 +28,7 @@ use plxs_assembly::{
     assemble_mass, assemble_stiffness, assemble_tangent_stiffness, load_vector,
 };
 use plxs_constraints::{ConstraintSet, ModelConstraints};
-use plxs_core::results::{IncrementKind, ResultsIncrement};
+use plxs_core::results::{IncrementKind, ModeKind, ResultsIncrement};
 use plxs_core::state::{IntegrationPointField, NodalField, StoredModes};
 use plxs_core::step::{EquationSolver, Procedure as ProcedureKind, SolverMode};
 use plxs_core::{Error, Failure, Model, Progress, ProgressEvent, Result, Step};
@@ -38,7 +38,7 @@ use plxs_output::{EigenTable, StaRow};
 use rayon::prelude::*;
 
 use crate::equations::{Equations, in_increment};
-use crate::fields::build_fields;
+use crate::fields::{add_mode, build_fields, writes_fields};
 use crate::history::write_table;
 use crate::{Procedure, ProcedureContext, StepOutcome};
 
@@ -484,27 +484,40 @@ impl Procedure for FrequencyProcedure {
             modal_mass_rows.push((mode_number, effective));
 
             let phi = reduction.expand(phi_free, &zeros);
-            increment_results(
-                ctx.table,
-                ctx.model,
-                &u_pre,
+            add_mode(
+                ctx,
+                ModeKind::Frequency,
+                mode_number,
+                *lambda,
+                frequency,
+                None,
                 &phi,
-                &mut strains,
-                &mut stresses,
-                &mut forces,
+                None,
             );
-            let fields = build_fields(
-                ctx.table, ctx.model, step, &phi, &forces, &stresses, &strains,
-            );
-            ctx.results.increments.push(ResultsIncrement {
-                step: ctx.step_number,
-                increment: mode_number,
-                kind: IncrementKind::Frequency,
-                value: frequency,
-                total_time: ctx.state.total_time,
-                nodal_diameter: None,
-                fields,
-            });
+            // The fields CalculiX writes for the mode, where the step asks for them.
+            if writes_fields(step) {
+                increment_results(
+                    ctx.table,
+                    ctx.model,
+                    &u_pre,
+                    &phi,
+                    &mut strains,
+                    &mut stresses,
+                    &mut forces,
+                );
+                let fields = build_fields(
+                    ctx.table, ctx.model, step, &phi, &forces, &stresses, &strains,
+                );
+                ctx.results.increments.push(ResultsIncrement {
+                    step: ctx.step_number,
+                    increment: mode_number,
+                    kind: IncrementKind::Frequency,
+                    value: frequency,
+                    total_time: ctx.state.total_time,
+                    nodal_diameter: None,
+                    fields,
+                });
+            }
             if parameters.storage {
                 stored_values.push(*lambda);
                 stored_modes.push(NodalField {
@@ -647,16 +660,19 @@ impl Procedure for BuckleProcedure {
             &mut stresses,
             &mut forces,
         );
-        let fields = build_fields(ctx.table, ctx.model, step, &u, &forces, &stresses, &strains);
-        ctx.results.increments.push(ResultsIncrement {
-            step: ctx.step_number,
-            increment: 0,
-            kind: IncrementKind::Buckling,
-            value: 0.0,
-            total_time: ctx.state.total_time,
-            nodal_diameter: None,
-            fields,
-        });
+        // The reference solution, where the step asks for fields.
+        if writes_fields(step) {
+            let fields = build_fields(ctx.table, ctx.model, step, &u, &forces, &stresses, &strains);
+            ctx.results.increments.push(ResultsIncrement {
+                step: ctx.step_number,
+                increment: 0,
+                kind: IncrementKind::Buckling,
+                value: 0.0,
+                total_time: ctx.state.total_time,
+                nodal_diameter: None,
+                fields,
+            });
+        }
 
         // Initial stress stiffness of the buckling load and the eigenvalue problem.
         let mut k_sigma = SparseMatrix::zeros(ctx.pattern.clone());
@@ -725,6 +741,19 @@ impl Procedure for BuckleProcedure {
             });
             rows.push((mode, vec![*factor]));
             let mut phi = reduction.expand(phi_free, &zeros);
+            add_mode(
+                ctx,
+                ModeKind::Buckling,
+                mode,
+                *factor,
+                *factor,
+                None,
+                &phi,
+                None,
+            );
+            if !writes_fields(step) {
+                continue;
+            }
             normalize_buckling_mode(&k, &mut phi, &mut forces);
             // CalculiX derives the stresses of a buckling mode from the linear strains even
             // with a preload (the reference solution above and the modes of a perturbed

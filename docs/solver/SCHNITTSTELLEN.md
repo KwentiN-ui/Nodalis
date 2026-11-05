@@ -1445,3 +1445,19 @@ Was T15 gebaut hat:
   der Hierarchie auf der CPU (3 s).
 - Ohne f64, bei zu großer f64-Matrix (Bindungsgrenze, lavapipe 128 MB) oder bei einem
   Fehler bleibt das CG auf der CPU; der Grund steht in der Vorkonditionierer-Zeile.
+
+## Moden als eigener Ergebnistyp (2026-11-05, Thread "Add dedicated mode shape result type")
+
+- Eigenwertschritte (`*FREQUENCY`, `*BUCKLE`, `*COMPLEX FREQUENCY`, auch zyklisch) legen ihre
+  Moden immer in `Results::modes` ab: je Schritt ein `ModeSet` (Knotenliste einmal, je Mode
+  Eigenwert, Frequenz bzw. Lastfaktor, Knotendurchmesser, Form als `f32`-Zeilen x, y, z und
+  bei komplexen/zyklischen Moden der Imaginärteil). Normiert auf größte Verschiebung 1
+  (mit Imaginärteil: größtes `|Re|² + |Im|²`), keine Spannungen, Dehnungen, Kräfte.
+- Die `.frd`-Felder der Moden (DISP, STRESS, ...) wie CalculiX entstehen nur noch, wenn der
+  Schritt `*NODE FILE`/`*EL FILE`/`*CONTACT FILE` anfordert (CLI, Fixture-Korpus
+  unverändert). Spannungen der Moden werden sonst gar nicht berechnet.
+- `OutputMap::apply` behandelt die Moden wie `DISP` (über `Results::mode_fields` und
+  `set_mode_fields`), danach neu normiert. Der Schritt-Cache führt sie mit.
+- Nodalis (`plx-solve`) lässt in Eigenwertschritten alle Feldausgaben weg, auch die aus dem
+  Schritt davor übernommenen (`keep_modes_as_shapes`). `plx-results::from_solver` zeigt jede
+  Mode als Inkrement mit dem Feld `MODE` (komplex zusätzlich `PMODE`, Betrag und Phase).

@@ -186,7 +186,8 @@ mesh. The pin is there before anything is solved, so the whole chain can be link
   [Mode], [The mode of a buckle or frequency step, or the increment of any other step, counted
     from 1.],
   [Factor], [What the displacements are multiplied by; negative values turn the mode around.
-    Mode shapes are normalized, so the factor sets the amplitude of the imperfection.],
+    Mode shapes are normalized to a largest displacement of 1 (@mode-shapes), so the factor is
+    the amplitude of the imperfection in the length unit of the analysis.],
   [Mesh], [The deformed mesh, with its state. Its row shows the largest displacement of a node
     times the factor, the amplitude of the imperfection, in the units of the analysis.],
 )

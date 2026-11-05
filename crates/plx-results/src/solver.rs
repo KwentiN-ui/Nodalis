@@ -23,7 +23,7 @@ pub const EXTENSION: &str = "ndlr";
 
 /// The first bytes of a `.ndlr` file; the last two count the format, which is not converted:
 /// results of another format are solved again.
-const MAGIC: &[u8; 8] = b"PLXRES\x00\x02";
+const MAGIC: &[u8; 8] = b"PLXRES\x00\x03";
 
 /// What a run of the built-in solver computed, as Nodalis keeps it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -126,11 +126,14 @@ pub struct SolverImport {
 /// The mesh and increments of `solved`, the same as reading the `.frd` file the solver would
 /// write for them, without writing and parsing it.
 pub fn from_solver(solved: &SolverResults) -> SolverImport {
+    // The modes of the eigenvalue steps join the increments as fields of their own.
+    let with_modes = with_mode_increments(&solved.results);
+    let results = with_modes.as_ref().unwrap_or(&solved.results);
     // A cyclic symmetric model on all the sectors the `.frd` file has.
-    let expanded = plxs_output::frd::expand_sectors(&solved.model, &solved.results);
+    let expanded = plxs_output::frd::expand_sectors(&solved.model, results);
     let (model, results) = match &expanded {
         Some((model, results)) => (model, results),
-        None => (&solved.model, &solved.results),
+        None => (&solved.model, results),
     };
     let mut import = SolverImport::default();
     for (i, material) in model.materials.iter().enumerate() {
@@ -274,6 +277,11 @@ pub fn from_solver(solved: &SolverResults) -> SolverImport {
                     }
                 })
                 .collect();
+            // The imaginary part of a cyclic symmetric mode only turned it into the other
+            // sectors.
+            if field.name == MODE_IMAGINARY {
+                continue;
+            }
             let mut converted = Field::new(field.name.clone(), components);
             add_derived_components(&mut converted);
             let target = (import.increments.iter_mut())
@@ -300,4 +308,101 @@ pub fn from_solver(solved: &SolverResults) -> SolverImport {
         }
     }
     import
+}
+
+/// The field of a mode shape of an eigenvalue step, normalized to a largest displacement of
+/// 1, see [`plxs_core::results::ModeSet`].
+pub const MODE: &str = "MODE";
+/// Magnitudes and phase angles of a complex mode (`MAG1`..., `PHA1`... in degrees), which
+/// make it whirl: `u_k = MAG_k cos(ωt + PHA_k)`.
+pub const MODE_PHASES: &str = "PMODE";
+/// The imaginary part of a mode shape, while the sectors of a cyclic symmetric model are
+/// made of it.
+const MODE_IMAGINARY: &str = "MODEI";
+
+/// The results with the modes of their eigenvalue steps as increments of one field each
+/// ([`MODE`], with [`MODE_PHASES`] for complex modes and [`MODE_IMAGINARY`] for cyclic
+/// symmetric ones), after the increments of the steps before; `None` without modes.
+fn with_mode_increments(results: &Results) -> Option<Results> {
+    use plxs_core::results::{ModeKind, ResultField, ResultsIncrement};
+    if results
+        .modes
+        .iter()
+        .all(|set| (results.increments.iter()).any(|i| i.step == set.step))
+    {
+        return None;
+    }
+    let mut out = Results {
+        increments: Vec::new(),
+        history: Vec::new(),
+        modes: Vec::new(),
+    };
+    let mut modes: Vec<ResultsIncrement> = Vec::new();
+    // A step that asked for fields (an input file run by the solver alone) shows them as
+    // CalculiX writes them.
+    let written = |step: u32| results.increments.iter().any(|i| i.step == step);
+    for set in results.modes.iter().filter(|set| !written(set.step)) {
+        let field = |name: &str, components: &[&str], values: Vec<Vec<f64>>| ResultField {
+            name: name.into(),
+            components: components.iter().map(|c| c.to_string()).collect(),
+            nodes: set.nodes.clone(),
+            values,
+        };
+        let columns = |rows: &[[f32; 3]]| -> Vec<Vec<f64>> {
+            (0..3)
+                .map(|k| rows.iter().map(|r| f64::from(r[k])).collect())
+                .collect()
+        };
+        for mode in &set.modes {
+            let mut fields = vec![field(MODE, &["D1", "D2", "D3"], columns(&mode.shape))];
+            match (&mode.imaginary, set.kind) {
+                (Some(im), ModeKind::ComplexFrequency) => {
+                    let mut values: Vec<Vec<f64>> =
+                        (0..6).map(|_| Vec::with_capacity(im.len())).collect();
+                    for (re, im) in mode.shape.iter().zip(im) {
+                        for k in 0..3 {
+                            let (a, b) = (f64::from(re[k]), f64::from(im[k]));
+                            values[k].push(a.hypot(b));
+                            // Round-off magnitudes get the phase 0.
+                            let phase = if a.hypot(b) <= 1e-6 {
+                                0.0
+                            } else {
+                                b.atan2(a).to_degrees()
+                            };
+                            values[k + 3].push(phase);
+                        }
+                    }
+                    let names = ["MAG1", "MAG2", "MAG3", "PHA1", "PHA2", "PHA3"];
+                    fields.push(field(MODE_PHASES, &names, values));
+                }
+                (Some(im), _) => {
+                    fields.push(field(MODE_IMAGINARY, &["D1", "D2", "D3"], columns(im)));
+                }
+                (None, _) => {}
+            }
+            modes.push(ResultsIncrement {
+                step: set.step,
+                increment: mode.number,
+                kind: match set.kind {
+                    ModeKind::Frequency => IncrementKind::Frequency,
+                    ModeKind::Buckling => IncrementKind::Buckling,
+                    ModeKind::ComplexFrequency => IncrementKind::ComplexFrequency,
+                },
+                value: mode.value,
+                total_time: 0.0,
+                nodal_diameter: mode.nodal_diameter,
+                fields,
+            });
+        }
+    }
+    // The modes of a step follow its other increments (a buckle step's reference state).
+    let mut written = results.increments.iter().cloned().peekable();
+    for mode in modes {
+        while let Some(increment) = written.next_if(|i| i.step <= mode.step) {
+            out.increments.push(increment);
+        }
+        out.increments.push(mode);
+    }
+    out.increments.extend(written);
+    Some(out)
 }

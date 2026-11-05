@@ -119,7 +119,7 @@ impl Workbench {
     pub(super) fn results_value(&self, cmd: Cmd) -> Option<String> {
         let view = self.shown_results_view()?;
         Some(match cmd {
-            Cmd::Deformation => view.deformation.label(),
+            Cmd::Deformation => view.active_deformation().label(),
             Cmd::Representation => view.representation().label().into(),
             Cmd::ColorLevels => view.color_scale.levels.to_string(),
             // A long step name is cut, so the tile keeps its size; the panel has it in full.
@@ -141,6 +141,8 @@ impl Workbench {
         let view = self.shown_results_view()?;
         match cmd {
             Cmd::Increment => view.current_step().map(|s| s.entry_noun()),
+            // Modes are scaled on their own.
+            Cmd::Deformation => view.shows_mode().then_some("Mode Scale"),
             _ => None,
         }
     }
@@ -252,31 +254,66 @@ fn directional_fields(view: &ResultsView) -> Vec<String> {
         .collect()
 }
 
-/// The deformation and its factor, which can be typed for "User defined".
+/// The deformation and its factor, which can be typed for "User defined". A mode has a
+/// deformation of its own, without a true scale: its size means nothing, so the user types
+/// the largest displacement drawn instead of a factor.
 fn deformation_panel(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
-    let before = (view.deformation, view.user_scale);
+    let mode = view.shows_mode();
+    let before = (
+        view.deformation,
+        view.user_scale,
+        view.mode_deformation,
+        view.mode_amplitude,
+    );
+    if mode {
+        ui.strong("Mode shapes");
+    }
     for choice in Deformation::CHOICES {
-        let selected = view.deformation == choice;
+        if mode && choice == Deformation::TrueScale {
+            continue;
+        }
+        let selected = view.active_deformation() == choice;
         if ui.radio(selected, choice.label()).clicked() && !selected {
-            view.deformation = choice;
-            view.deformation_chosen = true;
+            if mode {
+                view.mode_deformation = choice;
+            } else {
+                view.deformation = choice;
+                view.deformation_chosen = true;
+            }
         }
     }
     ui.separator();
     ui.horizontal(|ui| {
-        ui.label("Factor");
-        let user = view.deformation == Deformation::UserDefined;
-        let factor = if user {
-            view.user_scale
+        let user = view.active_deformation() == Deformation::UserDefined;
+        let (label, value, hint) = if mode {
+            let unit = view.units.unit(plx_model::Quantity::Length);
+            (
+                format!("Largest displacement [{unit}]"),
+                if user {
+                    view.mode_amplitude
+                } else {
+                    f64::from(view.scale())
+                },
+                "Choose User defined to type the largest displacement drawn",
+            )
         } else {
-            f64::from(view.scale())
+            (
+                "Factor".to_owned(),
+                if user {
+                    view.user_scale
+                } else {
+                    f64::from(view.scale())
+                },
+                "Choose User defined to type a factor",
+            )
         };
-        let id = ui.id().with("deformation factor");
+        ui.label(label);
+        let id = ui.id().with(("deformation factor", mode));
         let focused = ui.memory(|m| m.has_focus(id));
         let mut text = focused
             .then(|| ui.data_mut(|d| d.get_temp::<String>(id)))
             .flatten()
-            .unwrap_or_else(|| numeric::format_physical(factor));
+            .unwrap_or_else(|| numeric::format_physical(value));
         let response = ui
             .add_enabled(
                 user,
@@ -284,7 +321,7 @@ fn deformation_panel(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
                     .id(id)
                     .desired_width(90.0),
             )
-            .on_disabled_hover_text("Choose User defined to type a factor");
+            .on_disabled_hover_text(hint);
         if response.has_focus() {
             ui.data_mut(|d| d.insert_temp(id, text.clone()));
         }
@@ -295,11 +332,24 @@ fn deformation_panel(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
             if let Some(value) = numeric::evaluate(&text)
                 && value > 0.0
             {
-                view.user_scale = value;
+                if mode {
+                    view.mode_amplitude = value;
+                } else {
+                    view.user_scale = value;
+                }
             }
         }
     });
-    (view.deformation, view.user_scale) != before
+    if mode {
+        ui.weak("Mode shapes are kept normalized: the largest displacement is 1.");
+    }
+    let after = (
+        view.deformation,
+        view.user_scale,
+        view.mode_deformation,
+        view.mode_amplitude,
+    );
+    after != before
 }
 
 /// Contours, arrows or streaks; the field whose directions they follow, its principal

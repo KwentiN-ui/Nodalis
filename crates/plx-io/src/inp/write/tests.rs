@@ -251,6 +251,20 @@ fn empty_regions_and_unknown_materials_are_errors() {
 }
 
 /// Runs the solver on the input file and reads the results.
+/// The field outputs eigenvalue steps had before Nodalis kept their modes as shapes only:
+/// the solver corpus compares what CalculiX writes for them, so the fixtures keep asking.
+fn ccx_eigen_outputs(kind: &StepKind) -> Vec<FieldOutput> {
+    let node: &[&str] = match kind {
+        StepKind::Frequency(_) => &["U"],
+        StepKind::ComplexFrequency(_) => &["U", "PU"],
+        _ => &["RF", "U"],
+    };
+    vec![
+        FieldOutput::new("NF-Output-1", OutputKind::Node, node),
+        FieldOutput::new("EF-Output-1", OutputKind::Element, &["S", "E"]),
+    ]
+}
+
 fn run_solver(name: &str, text: &str) -> Option<FrdImport> {
     dump_fixture(name, text);
     let dir = run_dir(name)?;
@@ -1822,6 +1836,7 @@ fn run_dat(name: &str, text: &str) -> Option<String> {
 fn frequency_analysis() -> (FeMesh, FeModel) {
     let (mesh, mut model) = analysis("kragbalken_c3d20r.inp", tip_force());
     let mut step = Step::new_frequency("Step-2");
+    step.field_outputs = ccx_eigen_outputs(&step.kind);
     step.boundary_conditions = model.steps[0].boundary_conditions.clone();
     // A load left in a frequency step must not reach CalculiX.
     step.loads = model.steps[0].loads.clone();
@@ -2088,6 +2103,7 @@ fn modal_cantilever(damping: Option<ModalDamping>) -> (FeMesh, FeModel) {
     let mut force = model.steps[0].loads[0].clone();
     force.amplitude = Some("Stepped".into());
     let mut frequency = Step::new_frequency("Step-1");
+    frequency.field_outputs = ccx_eigen_outputs(&frequency.kind);
     frequency.boundary_conditions = supports.clone();
     let StepKind::Frequency(settings) = &mut frequency.kind else {
         unreachable!()
@@ -2135,6 +2151,7 @@ fn buckle_analysis() -> (FeMesh, FeModel) {
         },
     );
     let mut step = Step::new_buckle("Step-1");
+    step.field_outputs = ccx_eigen_outputs(&step.kind);
     step.boundary_conditions = model.steps[0].boundary_conditions.clone();
     step.loads = model.steps[0].loads.clone();
     model.steps = vec![step];
@@ -6305,6 +6322,7 @@ fn rotor_analysis(speed: f64) -> (FeMesh, FeModel) {
         }),
     );
     let mut frequency = Step::new_frequency("Step-2");
+    frequency.field_outputs = ccx_eigen_outputs(&frequency.kind);
     frequency.boundary_conditions = model.steps[0].boundary_conditions.clone();
     let StepKind::Frequency(settings) = &mut frequency.kind else {
         unreachable!()
@@ -6314,6 +6332,7 @@ fn rotor_analysis(speed: f64) -> (FeMesh, FeModel) {
     settings.num_frequencies = 4;
     model.steps.push(frequency);
     let mut complex = Step::new_complex_frequency("Step-3");
+    complex.field_outputs = ccx_eigen_outputs(&complex.kind);
     complex.boundary_conditions = model.steps[0].boundary_conditions.clone();
     let StepKind::ComplexFrequency(settings) = &mut complex.kind else {
         unreachable!()
@@ -7124,6 +7143,7 @@ fn solver_filters_the_sensitivities() {
 fn solver_computes_the_sensitivities_of_the_eigenfrequencies() {
     let (mesh, mut model) = cantilever(tip_force());
     let mut frequency = Step::new_frequency("Step-1");
+    frequency.field_outputs = ccx_eigen_outputs(&frequency.kind);
     frequency.boundary_conditions = model.steps[0].boundary_conditions.clone();
     let StepKind::Frequency(settings) = &mut frequency.kind else {
         unreachable!()
@@ -7334,6 +7354,7 @@ fn disk(sectors: u32, full: bool) -> (FeMesh, FeModel, Faces, Faces) {
     let mesh = read_inp_str(&text, None).unwrap().mesh;
     let mut model = cantilever(tip_force()).1;
     let mut step = Step::new_frequency("Step-1");
+    step.field_outputs = ccx_eigen_outputs(&step.kind);
     step.boundary_conditions = model.steps[0].boundary_conditions.clone();
     model.steps = vec![step];
     (mesh, model, left, right)
