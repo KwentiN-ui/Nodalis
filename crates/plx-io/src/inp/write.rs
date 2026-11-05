@@ -2624,22 +2624,35 @@ fn complex_frequency_blocks(
             &None,
         )],
     };
-    let helper = |ir_step: ir::Step, cards: Vec<Card>| StepBlock {
-        step: ir_step,
-        named: false,
-        boundaries: complex.boundaries.clone(),
-        cards,
-        preparation: true,
+    // Named after the step, so that they do not take the name of another one.
+    let helper = |mut ir_step: ir::Step, purpose: &str, cards: Vec<Card>| {
+        ir_step.name = format!("{} {purpose}", complex.step.name);
+        StepBlock {
+            step: ir_step,
+            named: complex.named,
+            boundaries: complex.boundaries.clone(),
+            cards,
+            preparation: true,
+        }
     };
     let mut blocks = Vec::with_capacity(3);
     let mut first_cards = vec![rotation];
     if settings.stiffening {
+        // The frequency step after it factorizes the same stiffness anyway, so the
+        // automatic choice solves the preload directly as well: the multigrid of the
+        // iterative solver converges badly on thin shells, which are solids of one
+        // element through the thickness.
+        let solver = match settings.solver {
+            plx_model::LinearSolverChoice::Automatic => plx_model::LinearSolverChoice::Direct,
+            other => other,
+        };
         let preload = StaticStep {
-            solver: settings.solver,
+            solver,
             ..StaticStep::default()
         };
         blocks.push(helper(
             static_step(&preload),
+            "Preload",
             std::mem::take(&mut first_cards),
         ));
     }
@@ -2650,7 +2663,11 @@ fn complex_frequency_blocks(
         solver: settings.solver,
         ..FrequencyStep::default()
     };
-    blocks.push(helper(frequency_step(&modes, context.cyclic), first_cards));
+    blocks.push(helper(
+        frequency_step(&modes, context.cyclic),
+        "Eigenmodes",
+        first_cards,
+    ));
     let mut complex = complex;
     complex.step.perturbation = settings.stiffening;
     blocks.push(complex);

@@ -48,9 +48,10 @@ pub struct Equations {
     /// The current choice; `None` until the first [`Self::prepare`] decides automatically.
     iterative: Option<bool>,
     pcg: Option<PcgSolver>,
-    /// Automatic and iterative: the prepared matrix, to factorize it after all when the
-    /// iteration fails.
-    kept: Option<SparseMatrix>,
+    /// Automatic and iterative: the prepared matrix with the positions of its unknowns, to
+    /// factorize it after all when the iteration fails (ordered by the positions, as the
+    /// direct solver is ordered otherwise: without them the factor fills many times more).
+    kept: Option<(SparseMatrix, Vec<[f64; 3]>)>,
     /// Whether the automatic choice already fell back once (it does not switch back).
     fell_back: bool,
     /// The memory the automatic choice works with, `None`: ask the platform.
@@ -207,8 +208,9 @@ impl Equations {
                         "iterative solver: {}; solving directly instead",
                         message(&error)
                     )));
-                    let k = self.kept.take().expect("kept for the fall-back");
+                    let (k, coordinates) = self.kept.take().expect("kept for the fall-back");
                     self.switch(false);
+                    direct.set_coordinates(Some(coordinates));
                     direct.analyze(k.pattern())?;
                     direct.factorize(&k)?;
                     rhs.copy_from_slice(&b.expect("checked"));
@@ -288,7 +290,7 @@ impl Equations {
             started.elapsed().as_secs_f64()
         )));
         if self.mode == SolverMode::Automatic && !self.fell_back {
-            self.kept = Some(k.clone());
+            self.kept = Some((k.clone(), unknowns.coordinates.clone()));
         }
         Ok(())
     }
@@ -519,5 +521,62 @@ mod tests {
                 .solve(&mut direct, &mut x, &mut NoProgress)
                 .is_err()
         );
+    }
+
+    /// The five-point Laplacian of an `m` x `m` grid held at its first node, with the
+    /// unknowns at the grid points; `last` on the diagonal of the last unknown.
+    fn grid(m: usize, last: f64) -> (SparseMatrix, Vec<[f64; 3]>) {
+        let n = m * m;
+        let index = |i: usize, j: usize| (i * m + j) as u32;
+        let mut blocks = Vec::new();
+        for i in 0..m {
+            for j in 0..m {
+                if j + 1 < m {
+                    blocks.push(vec![index(i, j), index(i, j + 1)]);
+                }
+                if i + 1 < m {
+                    blocks.push(vec![index(i, j), index(i + 1, j)]);
+                }
+            }
+        }
+        let pattern = Pattern::from_blocks(n, blocks.iter().map(|b| b.as_slice()));
+        let mut k = SparseMatrix::zeros(Arc::new(pattern));
+        for block in &blocks {
+            k.add(block[0], block[1], -1.0);
+        }
+        for d in 0..n {
+            k.add(d as u32, d as u32, if d + 1 == n { last } else { 4.0 });
+        }
+        k.add(0, 0, 4.0);
+        let coordinates = (0..n)
+            .map(|d| [(d / m) as f64, (d % m) as f64, 0.0])
+            .collect();
+        (k, coordinates)
+    }
+
+    #[test]
+    fn the_direct_solver_taking_over_orders_by_the_positions_of_the_unknowns() {
+        // Indefinite: CG breaks down in the solve, and the direct solver takes over. Its
+        // ordering bisects the grid by the positions, as when it solves from the start
+        // (without them a fine mesh of thin shells filled the memory).
+        let (k, coordinates) = grid(60, 0.5);
+        let n = k.dimension();
+        let unknowns = || Unknowns::from_free(&(0..n as u32).collect::<Vec<_>>(), 1, &coordinates);
+        let factor = |mut equations: Equations| {
+            let mut direct = LdltSolver::new(1);
+            equations.set_automatic_limits(10, 1 << 30);
+            equations
+                .prepare(&mut direct, &k, unknowns, true, &mut NoProgress)
+                .unwrap();
+            let mut x = vec![1.0; n];
+            equations
+                .solve(&mut direct, &mut x, &mut NoProgress)
+                .unwrap();
+            assert!(!equations.is_iterative());
+            direct.factor_nonzeros().unwrap()
+        };
+        let taken_over = factor(Equations::new(EquationSolver::Default));
+        let direct = factor(Equations::new(EquationSolver::Pastix));
+        assert_eq!(taken_over, direct);
     }
 }

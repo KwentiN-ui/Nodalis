@@ -6556,7 +6556,10 @@ fn a_complex_frequency_step_is_solved_as_preload_eigenmodes_and_complex_modes() 
     let rotation = "*Dload, op=New\nINTERNAL_SELECTION-1_ROTOR_ROTATION, CENTRIF, 10000, 0, 5, 5, \
                     1, 0, 0\n";
     for line in [
-        "*Step, Inc=100, Amplitude=Ramp\n*Static\n",
+        // The preload is solved directly: the eigenmodes factorize the stiffness anyway.
+        "** Rotor Preload +",
+        "*Step, Inc=100, Amplitude=Ramp\n*Static, Solver=PaStiX\n",
+        "** Rotor Eigenmodes +",
         "*Step, Perturbation, Inc=100, Amplitude=Ramp\n*Frequency, Storage=Yes\n4\n",
         "** Rotor +",
         "*Step, Perturbation, Inc=100, Amplitude=Ramp\n*Complex frequency, Coriolis\n4\n",
