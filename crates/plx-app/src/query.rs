@@ -1,21 +1,24 @@
-//! The Query tool (Query on the View and Evaluate tabs): clicks in the 3D view write what was hit to the
-//! output pane, as aligned lines, and leave an annotation in the view.
-//! Nodes, elements, edges, surfaces and parts are queried with one click, edges and
-//! surfaces picked as the geometry based selection picks them; distances, angles and
-//! circles need two or three nodes. The annotations stay when the window is closed;
-//! a right click on one deletes it, Remove Annotations deletes them all.
+//! The Query tool (Query on the View and Evaluate tabs): picks in the 3D view write what was
+//! selected to the output pane, as aligned lines, and leave an annotation in the view.
+//! Nodes, elements, edges, surfaces and parts are picked with the selection window, like
+//! every region of the model: a plain click starts a query, Shift adds to it and Ctrl removes
+//! from it, a box selects many at once. Distances, angles and circles need two or three
+//! points, picked one after another in the mode of the selection window. The annotations
+//! stay when the window is closed; a right click on one deletes it, Remove Annotations
+//! deletes them all.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use glam::{DVec3, Vec3};
-use plx_mesh::{CadEntity, NodeId};
-use plx_model::Quantity;
+use plx_mesh::{CadEntity, ElementId, NodeId};
+use plx_model::{Quantity, Region};
 
 use crate::model::{Hit, Model};
 use crate::overlay::Marker;
 use crate::results::{field_unit, format_value};
-use crate::selection::{Items, Picker, Target};
-use crate::viewport::Preview;
+use crate::selection::{GeometryRegion, Items, Operation, Picker, PickerAction, Target};
+use crate::setup::{RegionDraft, Source};
+use crate::viewport::{BoxSelect, Preview};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueryKind {
@@ -61,19 +64,20 @@ impl QueryKind {
 /// shown deformation and stays where it belongs when another increment is shown.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Annotation {
-    Node(NodeId),
-    Element(usize),
-    /// The segments along an edge of a part.
+    /// The nodes of one query, which has one label.
+    Nodes(Vec<NodeId>),
+    /// Elements by index.
+    Elements(Vec<usize>),
+    /// The segments along the picked edges.
     Edge {
-        part: usize,
         segments: Vec<[NodeId; 2]>,
     },
-    /// The faces of a surface of a part by their corner nodes.
+    /// The faces of the picked surfaces by their corner nodes.
     Surface {
-        part: usize,
         faces: Vec<Vec<NodeId>>,
     },
-    Part(usize),
+    /// Parts by index.
+    Parts(Vec<usize>),
     Distance([NodeId; 2]),
     Angle([NodeId; 3]),
     Circle([NodeId; 3]),
@@ -84,17 +88,15 @@ impl From<&Annotation> for plx_results::saved_view::SavedAnnotation {
     fn from(annotation: &Annotation) -> Self {
         use plx_results::saved_view::SavedAnnotation as Saved;
         match *annotation {
-            Annotation::Node(node) => Saved::Node(node),
-            Annotation::Element(element) => Saved::Element(element),
-            Annotation::Edge { part, ref segments } => Saved::Edge {
-                part,
+            Annotation::Nodes(ref nodes) => Saved::Nodes(nodes.clone()),
+            Annotation::Elements(ref elements) => Saved::Elements(elements.clone()),
+            Annotation::Edge { ref segments } => Saved::Edge {
                 segments: segments.clone(),
             },
-            Annotation::Surface { part, ref faces } => Saved::Surface {
-                part,
+            Annotation::Surface { ref faces } => Saved::Surface {
                 faces: faces.clone(),
             },
-            Annotation::Part(part) => Saved::Part(part),
+            Annotation::Parts(ref parts) => Saved::Parts(parts.clone()),
             Annotation::Distance(nodes) => Saved::Distance(nodes),
             Annotation::Angle(nodes) => Saved::Angle(nodes),
             Annotation::Circle(nodes) => Saved::Circle(nodes),
@@ -107,11 +109,11 @@ impl From<plx_results::saved_view::SavedAnnotation> for Annotation {
     fn from(saved: plx_results::saved_view::SavedAnnotation) -> Self {
         use plx_results::saved_view::SavedAnnotation as Saved;
         match saved {
-            Saved::Node(node) => Annotation::Node(node),
-            Saved::Element(element) => Annotation::Element(element),
-            Saved::Edge { part, segments } => Annotation::Edge { part, segments },
-            Saved::Surface { part, faces } => Annotation::Surface { part, faces },
-            Saved::Part(part) => Annotation::Part(part),
+            Saved::Nodes(nodes) => Annotation::Nodes(nodes),
+            Saved::Elements(elements) => Annotation::Elements(elements),
+            Saved::Edge { segments } => Annotation::Edge { segments },
+            Saved::Surface { faces } => Annotation::Surface { faces },
+            Saved::Parts(parts) => Annotation::Parts(parts),
             Saved::Distance(nodes) => Annotation::Distance(nodes),
             Saved::Angle(nodes) => Annotation::Angle(nodes),
             Saved::Circle(nodes) => Annotation::Circle(nodes),
@@ -132,27 +134,27 @@ pub struct QueryMarks {
 
 pub enum QueryAction {
     Open,
-    /// The overlay has to be rebuilt, e.g. for the nodes picked so far.
+    /// The overlay has to be rebuilt: a query changed what the view shows.
     Changed,
-    /// A query that needs no click left this annotation.
-    Add(Annotation),
     /// Remove Annotations: all of the shown model.
     RemoveAll,
     Close,
 }
 
-/// What a click in the 3D view did.
-pub enum QueryClick {
-    Nothing,
-    /// A node was picked for a query that needs more of them.
-    Picked,
-    /// The query is complete and left this annotation.
-    Added(Annotation),
-}
+/// The sources of the selection of a query: picks in the 3D view, or whole parts.
+const PICKS: &[Source] = &[Source::Selection];
+const PARTS: &[Source] = &[Source::Parts];
 
 pub struct QueryWindow {
     kind: QueryKind,
-    /// Nodes picked so far for a distance, angle or circle.
+    /// What a click selects, as in every other dialog that picks in the 3D view.
+    picker: Picker,
+    /// The selection of a node, element, edge, surface or part query, picked with the
+    /// selection window: a plain click starts a new query, Shift adds, Ctrl removes.
+    selection: RegionDraft,
+    /// The annotation of the selection, until a plain click starts the next query.
+    live: Option<Annotation>,
+    /// Points picked so far for a distance, angle or circle, in order.
     picked: Vec<NodeId>,
 }
 
@@ -160,23 +162,61 @@ impl Default for QueryWindow {
     fn default() -> Self {
         Self {
             kind: QueryKind::Node,
+            picker: Picker::default(),
+            selection: draft(QueryKind::Node),
+            live: None,
             picked: Vec::new(),
         }
     }
 }
 
+/// The empty selection of a query.
+fn draft(kind: QueryKind) -> RegionDraft {
+    match kind {
+        QueryKind::Part => RegionDraft::new(PARTS, Target::Faces),
+        _ => RegionDraft::new(PICKS, kind.target()),
+    }
+}
+
+impl QueryKind {
+    /// What the picks of the query select.
+    fn target(self) -> Target {
+        match self {
+            QueryKind::Node => Target::Nodes,
+            QueryKind::Edge => Target::Lines,
+            QueryKind::Distance | QueryKind::Angle | QueryKind::Circle => Target::Point,
+            _ => Target::Faces,
+        }
+    }
+
+    /// Whether the query picks in the 3D view, with the selection window open.
+    fn picks(self) -> bool {
+        !matches!(self, QueryKind::Assembly | QueryKind::BoundingBox)
+    }
+
+    /// Whether it picks points one after another instead of a selection.
+    fn points(self) -> bool {
+        self.nodes_needed() > 1
+    }
+}
+
 impl QueryWindow {
-    /// The window with the list of queries. Choosing Assembly or Bounding box writes the
-    /// values at once, the other queries wait for clicks in the 3D view.
+    /// The window with the list of queries and, for those that pick in the 3D view, the
+    /// selection window beside it. Choosing Assembly or Bounding box writes the values at
+    /// once.
     pub fn show(
         &mut self,
         ctx: &egui::Context,
-        model: Option<&Model>,
+        mut model: Option<&mut Model>,
         output: &mut Vec<String>,
     ) -> QueryAction {
         let mut action = QueryAction::Open;
         let mut open = true;
-        egui::Window::new("Query")
+        let any = model
+            .as_ref()
+            .is_some_and(|m| !m.query_annotations.is_empty())
+            || !self.picked.is_empty();
+        let window = egui::Window::new("Query")
             .id(crate::ids::window(ctx, "query"))
             .open(&mut open)
             .collapsible(false)
@@ -189,8 +229,8 @@ impl QueryWindow {
                     ui.selectable_value(&mut self.kind, kind, label);
                 }
                 if self.kind != before {
-                    self.picked.clear();
-                    if let Some(model) = model {
+                    self.restart();
+                    if let Some(model) = model.as_deref_mut() {
                         match self.kind {
                             QueryKind::Assembly => {
                                 output.extend(assembly_lines(model));
@@ -198,165 +238,458 @@ impl QueryWindow {
                             }
                             QueryKind::BoundingBox => {
                                 output.extend(bounding_box_lines(model));
-                                action = QueryAction::Add(Annotation::BoundingBox);
+                                model.query_annotations.push(Annotation::BoundingBox);
+                                action = QueryAction::Changed;
                             }
+                            _ if !self.picked.is_empty() => action = QueryAction::Changed,
                             _ => {}
                         }
                     }
                 }
                 ui.add_space(4.0);
-                let hint = match self.kind.nodes_needed() {
-                    0 if matches!(
-                        self.kind,
-                        QueryKind::Element | QueryKind::Edge | QueryKind::Surface | QueryKind::Part
-                    ) =>
-                    {
-                        "Click an item in the 3D view.".to_string()
-                    }
-                    0 => "The values are written to the output pane.".to_string(),
-                    1 => "Click a node in the 3D view.".to_string(),
-                    n => format!(
-                        "Click {n} nodes in the 3D view ({} picked).",
-                        self.picked.len()
-                    ),
-                };
-                ui.weak(hint);
-                let any = model.is_some_and(|m| !m.query_annotations.is_empty())
-                    || !self.picked.is_empty();
+                ui.weak(self.hint());
                 let mut remove = false;
                 let footer = crate::dialog::tool_footer_with(ui, None, |ui| {
                     let clear = egui::Button::new("Remove Annotations");
                     remove = ui.add_enabled(any, clear).clicked();
                 });
                 if remove {
-                    self.picked.clear();
+                    self.restart();
                     action = QueryAction::RemoveAll;
                 }
                 if footer == crate::dialog::Tool::Close {
                     action = QueryAction::Close;
                 }
             });
+        if let (Some(window), Some(model)) = (window, model)
+            && self.kind.picks()
+        {
+            let anchor = window.response.rect;
+            if let Some(picked) = self.picker_window(ctx, anchor, model) {
+                self.action(model, picked, output);
+                action = QueryAction::Changed;
+            }
+        }
         if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             action = QueryAction::Close;
         }
         action
     }
 
-    /// A click in the 3D view: writes the queried values and returns the annotation.
-    /// `precision` is the pick tolerance at the hit in render units.
+    fn hint(&self) -> String {
+        match self.kind {
+            QueryKind::Assembly | QueryKind::BoundingBox => {
+                "The values are written to the output pane.".to_string()
+            }
+            QueryKind::Distance | QueryKind::Angle | QueryKind::Circle => format!(
+                "Pick {} points in the 3D view ({} picked).",
+                self.kind.nodes_needed(),
+                self.picked.len()
+            ),
+            _ => "Pick in the 3D view; Shift adds to the query, Ctrl removes.".to_string(),
+        }
+    }
+
+    /// Forgets the selection and the points picked so far; the annotations stay.
+    fn restart(&mut self) {
+        self.selection = draft(self.kind);
+        self.live = None;
+        self.picked.clear();
+    }
+
+    /// Whether edges and surfaces are picked as CAD entities of the Geometry tab, with the
+    /// geometry based modes of the selection window.
+    fn picks_geometry(&self, model: &Model) -> bool {
+        model.is_geometry() && matches!(self.kind, QueryKind::Edge | QueryKind::Surface)
+    }
+
+    fn picker_window(
+        &mut self,
+        ctx: &egui::Context,
+        anchor: egui::Rect,
+        model: &Model,
+    ) -> Option<PickerAction> {
+        if self.kind.points() {
+            return self
+                .picker
+                .window(ctx, anchor, Target::Point, !self.picked.is_empty());
+        }
+        let can_undo = self.selection.can_undo();
+        match self.kind {
+            QueryKind::Part => self.picker.parts_window(ctx, anchor, can_undo),
+            QueryKind::Edge if self.picks_geometry(model) => {
+                let region = GeometryRegion::FacesAndEdges;
+                self.picker.geometry_window(ctx, anchor, region, can_undo)
+            }
+            QueryKind::Surface if self.picks_geometry(model) => {
+                let region = GeometryRegion::Faces;
+                self.picker.geometry_window(ctx, anchor, region, can_undo)
+            }
+            kind => self.picker.window(ctx, anchor, kind.target(), can_undo),
+        }
+    }
+
+    /// A button of the selection window.
+    fn action(&mut self, model: &mut Model, action: PickerAction, output: &mut Vec<String>) {
+        if self.kind.points() {
+            match action {
+                PickerAction::Undo => {
+                    self.picked.pop();
+                }
+                PickerAction::Clear => self.picked.clear(),
+                PickerAction::Ids(Operation::Add, ids) => {
+                    for id in ids {
+                        if model.mesh.node_index(id).is_some() {
+                            self.add_point(model, id, output);
+                        }
+                    }
+                }
+                // All, Invert and removing ids say nothing about the order of points.
+                _ => {}
+            }
+            return;
+        }
+        if self.picks_geometry(model) {
+            match action {
+                PickerAction::All | PickerAction::Invert if self.kind == QueryKind::Surface => {
+                    let mut faces = crate::geometry_selection::visible_faces(model);
+                    if action == PickerAction::Invert
+                        && let Region::Geometry(picked) = self.selection.region()
+                    {
+                        faces.retain(|f| !picked.contains(f));
+                    }
+                    let items = Items::Geometry(faces);
+                    self.selection.take(&model.mesh, items, Operation::Replace);
+                }
+                PickerAction::Undo | PickerAction::Clear => self.selection.action(model, action),
+                // The buttons that work on nodes and faces of the mesh have nothing to do on
+                // the CAD entities of the Geometry tab.
+                _ => return,
+            }
+        } else {
+            self.selection.action(model, action);
+        }
+        self.update(model, false, output);
+    }
+
+    /// A click in the 3D view: picks for the query and writes what it found to the output
+    /// pane. Returns whether the overlay has to be rebuilt. `precision` is the pick tolerance
+    /// at the hit in render units.
     pub fn click(
         &mut self,
-        model: &Model,
+        model: &mut Model,
         hit: Option<&Hit>,
         precision: f32,
+        operation: Operation,
         output: &mut Vec<String>,
-    ) -> QueryClick {
+    ) -> bool {
+        // A click into empty space keeps the query; Clear in the selection window ends it.
         let Some(hit) = hit else {
-            return QueryClick::Nothing;
+            return false;
         };
-        match self.kind {
+        if !self.kind.picks() {
+            return false;
+        }
+        if self.kind.points() {
+            let Some(node) = self.point(model, hit, precision) else {
+                return false;
+            };
+            self.add_point(model, node, output);
+            return true;
+        }
+        let items = self.pick(model, hit, precision);
+        match items {
+            Some(items) => self.selection.take(&model.mesh, items, operation),
+            None => {
+                let pick = Some((hit, precision));
+                self.selection.click(model, &self.picker, pick, operation);
+            }
+        }
+        self.update(model, operation == Operation::Replace, output);
+        true
+    }
+
+    /// A selection box dragged in the 3D view; returns whether the overlay has to be rebuilt.
+    pub fn box_select(
+        &mut self,
+        model: &mut Model,
+        area: &BoxSelect,
+        operation: Operation,
+        output: &mut Vec<String>,
+    ) -> bool {
+        if !self.kind.picks() || self.kind.points() {
+            return false;
+        }
+        if self.picks_geometry(model) {
+            if self.kind == QueryKind::Edge {
+                return false;
+            }
+            let items = Items::Geometry(crate::geometry_selection::pick_box(model, area));
+            self.selection.take(&model.mesh, items, operation);
+        } else {
+            self.selection
+                .box_select(model, &self.picker, area, operation);
+        }
+        self.update(model, operation == Operation::Replace, output);
+        true
+    }
+
+    /// What a click picks where the selection draft does not know how: the CAD entities of
+    /// the Geometry tab, and the lines of a beam part as an edge, which have no outline
+    /// edges to pick.
+    fn pick(&self, model: &Model, hit: &Hit, precision: f32) -> Option<Items> {
+        if self.picks_geometry(model) {
+            let region = match self.kind {
+                QueryKind::Edge => GeometryRegion::FacesAndEdges,
+                _ => GeometryRegion::Faces,
+            };
+            let mut entities =
+                crate::geometry_selection::pick(model, &self.picker, region, hit, precision);
+            if self.kind == QueryKind::Edge {
+                // A click on a face takes its edge nearest to the click.
+                entities.retain(|e| matches!(e, CadEntity::Edge(_)));
+                if entities.is_empty()
+                    && let Some(edge) = crate::geometry_selection::edge_at(model, hit)
+                {
+                    entities.insert(CadEntity::Edge(edge));
+                }
+            }
+            return Some(Items::Geometry(entities));
+        }
+        // Line elements have no faces to pick; the hit segment is its element.
+        if self.kind == QueryKind::Element && hit.line {
+            let element = model.hit_element(hit)?;
+            let id = model.mesh.elements().get(element)?.id;
+            return Some(Items::Faces(BTreeSet::from([(id, 1)])));
+        }
+        let key = |[a, b]: [NodeId; 2]| [a.min(b), a.max(b)];
+        if self.kind == QueryKind::Edge && hit.line {
+            let segments = pick_edge(model, hit, precision);
+            return Some(Items::Edges(segments.into_iter().map(key).collect()));
+        }
+        if self.kind == QueryKind::Edge
+            && let Items::Geometry(entities) =
+                (self.picker).pick(model, hit, Target::Lines, precision)
+        {
+            // A CAD edge the mesh has no segments for, as on results of a mesh from
+            // geometry, is taken along the mesh's own edges.
+            let entities: Vec<CadEntity> = entities.into_iter().collect();
+            if crate::selection::cad_segments(&model.mesh, &entities).is_empty() {
+                let segments = crate::selection::edge_segments(model, hit.part, hit.point);
+                return Some(Items::Edges(segments.into_iter().map(key).collect()));
+            }
+        }
+        None
+    }
+
+    /// The point a click picks for a distance, angle or circle: the node the selection
+    /// window's mode selects, or of several the one nearest to the click.
+    fn point(&self, model: &Model, hit: &Hit, precision: f32) -> Option<NodeId> {
+        let items = (self.picker)
+            .pick(model, hit, Target::Point, precision)
+            .resolved(&model.mesh, Target::Point);
+        let Items::Nodes(nodes) = items else {
+            return None;
+        };
+        let distance = |id: &NodeId| {
+            let index = model.mesh.node_index(*id);
+            index
+                .and_then(|i| model.node_position(i))
+                .map_or(f32::INFINITY, |p| p.distance(hit.point))
+        };
+        nodes
+            .into_iter()
+            .min_by(|a, b| distance(a).total_cmp(&distance(b)))
+    }
+
+    /// Adds a point; with enough of them the query is complete and leaves its annotation.
+    fn add_point(&mut self, model: &mut Model, node: NodeId, output: &mut Vec<String>) {
+        self.picked.push(node);
+        if self.picked.len() < self.kind.nodes_needed() {
+            return;
+        }
+        let picked = std::mem::take(&mut self.picked);
+        let annotation = match self.kind {
+            QueryKind::Distance => {
+                let nodes = [picked[0], picked[1]];
+                output.extend(distance_lines(model, nodes));
+                Annotation::Distance(nodes)
+            }
+            QueryKind::Angle => {
+                let nodes = [picked[0], picked[1], picked[2]];
+                output.extend(angle_lines(model, nodes));
+                Annotation::Angle(nodes)
+            }
+            _ => {
+                let nodes = [picked[0], picked[1], picked[2]];
+                output.extend(circle_lines(model, nodes));
+                Annotation::Circle(nodes)
+            }
+        };
+        model.query_annotations.push(annotation);
+    }
+
+    /// Writes the query of the selection to the output pane and shows its annotation in
+    /// place of the one before, or as a new one when `new` (a plain click) starts a query.
+    fn update(&mut self, model: &mut Model, new: bool, output: &mut Vec<String>) {
+        let annotation = self.annotation(model);
+        if let Some(annotation) = &annotation {
+            output.extend(self.lines(model, annotation));
+        }
+        let annotations = &mut model.query_annotations;
+        let shown =
+            (self.live.as_ref()).and_then(|live| annotations.iter().rposition(|a| a == live));
+        match (shown, annotation.clone()) {
+            // The same pick again does not repeat the annotation.
+            (Some(_), Some(a)) if new && self.live.as_ref() == Some(&a) => {}
+            (Some(i), Some(a)) if !new => annotations[i] = a,
+            (Some(i), None) if !new => {
+                annotations.remove(i);
+            }
+            (_, Some(a)) => annotations.push(a),
+            (_, None) => {}
+        }
+        self.live = annotation;
+    }
+
+    /// The annotation of the selection; `None` while nothing is selected.
+    fn annotation(&self, model: &Model) -> Option<Annotation> {
+        let mesh = &model.mesh;
+        let region = self.selection.region();
+        let annotation = match self.kind {
+            QueryKind::Node => Annotation::Nodes(region.nodes(mesh)),
             QueryKind::Element => {
-                let Some(element) = model.hit_element(hit) else {
-                    return QueryClick::Nothing;
-                };
-                output.extend(element_lines(model, element));
-                QueryClick::Added(Annotation::Element(element))
+                let elements: BTreeSet<usize> = (selected_faces(model, &region).into_iter())
+                    .filter_map(|(element, _)| mesh.element_index(element))
+                    .collect();
+                Annotation::Elements(elements.into_iter().collect())
             }
-            QueryKind::Edge => {
-                let segments = pick_edge(model, hit, precision);
-                if segments.is_empty() {
-                    return QueryClick::Nothing;
-                }
-                output.extend(edge_lines(model, hit.part, &segments));
-                QueryClick::Added(Annotation::Edge {
-                    part: hit.part,
-                    segments,
-                })
-            }
-            QueryKind::Surface => {
-                let faces = pick_surface(model, hit, precision);
-                if faces.is_empty() {
-                    return QueryClick::Nothing;
-                }
-                output.extend(surface_lines(model, hit.part, &faces));
-                QueryClick::Added(Annotation::Surface {
-                    part: hit.part,
-                    faces,
-                })
-            }
+            QueryKind::Edge => Annotation::Edge {
+                segments: selected_segments(model, &region),
+            },
+            QueryKind::Surface => Annotation::Surface {
+                faces: face_corners(model, &selected_faces(model, &region)),
+            },
             QueryKind::Part => {
-                output.extend(part_lines(model, hit.part));
-                QueryClick::Added(Annotation::Part(hit.part))
+                let Region::Parts(names) = region else {
+                    return None;
+                };
+                Annotation::Parts(
+                    (0..model.parts.len())
+                        .filter(|&p| names.contains(&model.parts[p].name))
+                        .collect(),
+                )
             }
-            QueryKind::Assembly | QueryKind::BoundingBox => QueryClick::Nothing,
-            QueryKind::Node | QueryKind::Distance | QueryKind::Angle | QueryKind::Circle => {
-                let node = model.hit_node(hit);
-                self.picked.push(node);
-                if self.picked.len() < self.kind.nodes_needed() {
-                    return QueryClick::Picked;
-                }
-                let picked = std::mem::take(&mut self.picked);
-                QueryClick::Added(match self.kind {
-                    QueryKind::Node => {
-                        output.extend(node_lines(model, node));
-                        Annotation::Node(node)
-                    }
-                    QueryKind::Distance => {
-                        let nodes = [picked[0], picked[1]];
-                        output.extend(distance_lines(model, nodes));
-                        Annotation::Distance(nodes)
-                    }
-                    QueryKind::Angle => {
-                        let nodes = [picked[0], picked[1], picked[2]];
-                        output.extend(angle_lines(model, nodes));
-                        Annotation::Angle(nodes)
-                    }
-                    _ => {
-                        let nodes = [picked[0], picked[1], picked[2]];
-                        output.extend(circle_lines(model, nodes));
-                        Annotation::Circle(nodes)
-                    }
-                })
-            }
+            _ => return None,
+        };
+        let empty = match &annotation {
+            Annotation::Nodes(nodes) => nodes.is_empty(),
+            Annotation::Elements(items) | Annotation::Parts(items) => items.is_empty(),
+            Annotation::Edge { segments } => segments.is_empty(),
+            Annotation::Surface { faces } => faces.is_empty(),
+            _ => false,
+        };
+        (!empty).then_some(annotation)
+    }
+
+    /// The lines the output pane gets for the annotation of a selection.
+    fn lines(&self, model: &Model, annotation: &Annotation) -> Vec<String> {
+        match annotation {
+            Annotation::Nodes(nodes) => match nodes.as_slice() {
+                [node] => node_lines(model, *node),
+                nodes => nodes_lines(model, nodes),
+            },
+            Annotation::Elements(elements) => match elements.as_slice() {
+                [element] => element_lines(model, *element),
+                elements => elements_lines(model, elements),
+            },
+            Annotation::Edge { segments } => edge_lines(model, segments),
+            Annotation::Surface { faces } => surface_lines(model, faces),
+            Annotation::Parts(parts) => parts.iter().flat_map(|&p| part_lines(model, p)).collect(),
+            _ => Vec::new(),
         }
     }
 
-    /// What a click would query: the nearest node, the edge or surface the geometry based
-    /// selection picks, or the edges of the hit face.
+    /// What a click would select where the mouse rests, as the selection window's mode
+    /// selects it.
     pub fn preview(&self, model: &Model, hit: &Hit, precision: f32) -> Preview {
-        let lines = |segments: &[[NodeId; 2]]| render_segments(model, segments);
-        match self.kind {
-            QueryKind::Assembly | QueryKind::BoundingBox => Preview::default(),
-            QueryKind::Edge => Preview {
-                lines: lines(&pick_edge(model, hit, precision)),
-                points: Vec::new(),
-            },
-            QueryKind::Surface => Preview {
-                lines: lines(&outline(&pick_surface(model, hit, precision))),
-                points: Vec::new(),
-            },
-            QueryKind::Element | QueryKind::Part => Preview {
+        if !self.kind.picks() {
+            return Preview::default();
+        }
+        if self.kind.points() {
+            let Some(node) = self.point(model, hit, precision) else {
+                return Preview::default();
+            };
+            return crate::selection::preview(model, &Items::Nodes(BTreeSet::from([node])));
+        }
+        if self.kind == QueryKind::Element && hit.line {
+            return Preview {
                 lines: model.hit_outline(hit),
                 points: Vec::new(),
-            },
-            _ => {
-                let node = model.hit_node(hit);
-                let index = model.mesh.node_index(node);
-                Preview {
-                    lines: Vec::new(),
-                    points: index
-                        .and_then(|i| model.node_position(i))
-                        .into_iter()
-                        .collect(),
-                }
+            };
+        }
+        match self.pick(model, hit, precision) {
+            Some(Items::Geometry(entities)) if model.is_geometry() => {
+                crate::meshing::entities_preview(model, &entities)
             }
+            Some(items) => crate::selection::preview(model, &items),
+            None => self.selection.preview(model, &self.picker, hit, precision),
         }
     }
 
-    /// The nodes picked so far.
+    /// The points picked so far.
     pub fn picked(&self) -> &[NodeId] {
         &self.picked
     }
+}
+
+/// The element faces of a selection: picked, or those of CAD faces.
+fn selected_faces(model: &Model, region: &Region) -> BTreeSet<(ElementId, u8)> {
+    match region {
+        Region::Faces(faces) => faces.iter().copied().collect(),
+        Region::Geometry(entities) if model.is_geometry() => {
+            let tags = (entities.iter())
+                .filter_map(|e| match e {
+                    CadEntity::Face(tag) => Some(*tag),
+                    _ => None,
+                })
+                .collect();
+            model.cad_face_items(&tags).into_iter().collect()
+        }
+        Region::Geometry(entities) => model.mesh.cad_faces(entities).into_iter().collect(),
+        _ => BTreeSet::new(),
+    }
+}
+
+/// The segments of a selection of edges: picked, or those along CAD edges.
+fn selected_segments(model: &Model, region: &Region) -> Vec<[NodeId; 2]> {
+    match region {
+        Region::Edges(segments) => segments.clone(),
+        Region::Geometry(entities) if model.is_geometry() => {
+            let tags = (entities.iter())
+                .filter_map(|e| match e {
+                    CadEntity::Edge(tag) => Some(*tag),
+                    _ => None,
+                })
+                .collect();
+            model.cad_edge_segments(&tags)
+        }
+        Region::Geometry(entities) => {
+            (crate::selection::cad_segments(&model.mesh, entities).into_iter()).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The corner nodes of the faces on the skins of the parts that are among `faces`.
+fn face_corners(model: &Model, faces: &BTreeSet<(ElementId, u8)>) -> Vec<Vec<NodeId>> {
+    let ids = model.mesh.node_ids();
+    let elements = model.mesh.elements();
+    (0..model.parts.len())
+        .flat_map(|part| model.skin(part).faces.iter())
+        .filter(|face| faces.contains(&(elements[face.element].id, face.face as u8 + 1)))
+        .map(|face| face.corners.iter().map(|&n| ids[n]).collect())
+        .collect()
 }
 
 /// The annotations and the nodes picked so far, in render coordinates of the shown model.
@@ -376,28 +709,51 @@ pub fn marks(model: &Model, picked: &[NodeId]) -> QueryMarks {
     marks.points = picked.iter().filter_map(|&id| position(id)).collect();
     for (owner, annotation) in model.query_annotations.iter().enumerate() {
         match annotation {
-            Annotation::Node(id) => {
-                let Some(p) = position(*id) else { continue };
-                let mut text = format!("Node id: {id}");
-                if let Some((value, unit)) = field_value(model, *id) {
-                    text.push_str(&format!("\nValue: {value} {unit}"));
-                }
-                marks.points.push(p);
-                marks.markers.push(Marker { position: p, text });
+            Annotation::Nodes(nodes) => {
+                let points: Vec<(NodeId, Vec3)> = (nodes.iter())
+                    .filter_map(|&id| Some((id, position(id)?)))
+                    .collect();
+                let Some(&(first, p)) = points.first() else {
+                    continue;
+                };
+                marks.points.extend(points.iter().map(|&(_, p)| p));
+                let (position, text) = if let [_] = points.as_slice() {
+                    let mut text = format!("Node id: {first}");
+                    if let Some((value, unit)) = field_value(model, first) {
+                        text.push_str(&format!("\nValue: {value} {unit}"));
+                    }
+                    (p, text)
+                } else {
+                    let mut text = format!("Nodes: {}", points.len());
+                    let ids: Vec<NodeId> = points.iter().map(|&(id, _)| id).collect();
+                    if let Some((min, max, unit)) = field_range(model, &ids) {
+                        text.push_str(&format!("\nMin: {min} {unit}\nMax: {max} {unit}"));
+                    }
+                    let all: Vec<Vec3> = points.iter().map(|&(_, p)| p).collect();
+                    (nearest_to_middle(&all).unwrap_or(p), text)
+                };
+                marks.markers.push(Marker { position, text });
             }
-            Annotation::Element(index) => {
-                let Some(element) = model.mesh.elements().get(*index) else {
+            Annotation::Elements(elements) => {
+                let mut centers = Vec::new();
+                for &index in elements {
+                    let outline = model.element_outline(index);
+                    centers.extend(centroid(&outline));
+                    marks.lines.extend(outline.iter().map(|&[a, b]| vec![a, b]));
+                }
+                let Some(position) = nearest_to_middle(&centers) else {
                     continue;
                 };
-                let outline = model.element_outline(*index);
-                let Some(center) = centroid(&outline) else {
-                    continue;
+                let text = match elements.as_slice() {
+                    [index] => {
+                        let Some(element) = model.mesh.elements().get(*index) else {
+                            continue;
+                        };
+                        format!("Element id: {}\n{}", element.id, element.type_name)
+                    }
+                    _ => format!("Elements: {}", centers.len()),
                 };
-                marks.lines.extend(outline.iter().map(|&[a, b]| vec![a, b]));
-                marks.markers.push(Marker {
-                    position: center,
-                    text: format!("Element id: {}\n{}", element.id, element.type_name),
-                });
+                marks.markers.push(Marker { position, text });
             }
             Annotation::Edge { segments, .. } => {
                 let lines = render_segments(model, segments);
@@ -423,17 +779,16 @@ pub fn marks(model: &Model, picked: &[NodeId]) -> QueryMarks {
                     text: format!("Area: {} {area_unit}", number(area * s * s)),
                 });
             }
-            Annotation::Part(index) => {
-                let Some(part) = model.parts.get(*index) else {
-                    continue;
-                };
-                let Some((min, max)) = part.bounds else {
-                    continue;
-                };
-                marks.markers.push(Marker {
-                    position: (min + max) * 0.5,
-                    text: format!("Part: {}", part.name),
-                });
+            Annotation::Parts(parts) => {
+                for part in parts.iter().filter_map(|&p| model.parts.get(p)) {
+                    let Some((min, max)) = part.bounds else {
+                        continue;
+                    };
+                    marks.markers.push(Marker {
+                        position: (min + max) * 0.5,
+                        text: format!("Part: {}", part.name),
+                    });
+                }
             }
             Annotation::Distance([a, b]) => {
                 let (Some(pa), Some(pb)) = (position(*a), position(*b)) else {
@@ -645,6 +1000,109 @@ fn element_lines(model: &Model, index: usize) -> Vec<String> {
     }
     lines.push(String::new());
     lines
+}
+
+/// Several nodes picked together: how many, the centre of their base positions and the
+/// smallest and largest value of the shown field among them.
+fn nodes_lines(model: &Model, nodes: &[NodeId]) -> Vec<String> {
+    let length = model.units().unit(Quantity::Length);
+    let s = length_scale(model);
+    let item = if model.is_geometry() {
+        "Vertices"
+    } else {
+        "Nodes"
+    };
+    let bases: Vec<DVec3> = (nodes.iter())
+        .filter_map(|&n| base_position(model, n))
+        .collect();
+    let mut lines = vec![
+        String::new(),
+        row(item, "", "#:", &[nodes.len().to_string()]),
+    ];
+    if !bases.is_empty() {
+        let center = bases.iter().sum::<DVec3>() / bases.len() as f64 * s;
+        lines.push(row("Center", length, "x, y, z:", &xyz(center)));
+    }
+    if let Some(view) = &model.results
+        && let Some((field, component)) = view.current()
+        && let Some(extremes) = field_extremes(model, nodes)
+    {
+        let unit = field_unit(&field.name, &component.name, view.units).unwrap_or_default();
+        let name = format!("{}, {}:", field.name, component.name);
+        let ((min, min_id), (max, max_id)) = extremes;
+        lines.push(row("Field min", &unit, &name, &[format_value(min)]));
+        lines.push(row("  at node", "", "id:", &[min_id.to_string()]));
+        lines.push(row("Field max", &unit, &name, &[format_value(max)]));
+        lines.push(row("  at node", "", "id:", &[max_id.to_string()]));
+    }
+    lines.push(String::new());
+    lines
+}
+
+/// The smallest and largest value of the shown field at the nodes, with the node of each.
+fn field_extremes(model: &Model, nodes: &[NodeId]) -> Option<((f32, NodeId), (f32, NodeId))> {
+    let (_, component) = model.results.as_ref()?.current()?;
+    let mut extremes: Option<((f32, NodeId), (f32, NodeId))> = None;
+    for &node in nodes {
+        let Some(&value) = (model.mesh.node_index(node)).and_then(|i| component.values.get(i))
+        else {
+            continue;
+        };
+        if !value.is_finite() {
+            continue;
+        }
+        extremes = Some(match extremes {
+            None => ((value, node), (value, node)),
+            Some((min, max)) => (
+                if value < min.0 { (value, node) } else { min },
+                if value > max.0 { (value, node) } else { max },
+            ),
+        });
+    }
+    extremes
+}
+
+/// The range of the shown field at the nodes, formatted, with its unit.
+fn field_range(model: &Model, nodes: &[NodeId]) -> Option<(String, String, String)> {
+    let view = model.results.as_ref()?;
+    let (field, component) = view.current()?;
+    let ((min, _), (max, _)) = field_extremes(model, nodes)?;
+    let unit = field_unit(&field.name, &component.name, view.units).unwrap_or_default();
+    Some((format_value(min), format_value(max), unit))
+}
+
+/// Several elements picked together: how many, and of which types.
+fn elements_lines(model: &Model, elements: &[usize]) -> Vec<String> {
+    let item = if model.is_geometry() {
+        "Facets"
+    } else {
+        "Elements"
+    };
+    let mut lines = vec![
+        String::new(),
+        row(item, "", "#:", &[elements.len().to_string()]),
+    ];
+    if !model.is_geometry() {
+        let mut types: Vec<(String, usize)> = Vec::new();
+        for element in elements
+            .iter()
+            .filter_map(|&e| model.mesh.elements().get(e))
+        {
+            match types.iter_mut().find(|(n, _)| *n == element.type_name) {
+                Some((_, count)) => *count += 1,
+                None => types.push((element.type_name.clone(), 1)),
+            }
+        }
+        lines.extend(element_type_lines(&types));
+    }
+    lines.push(String::new());
+    lines
+}
+
+/// Of the points the one nearest to their middle, where a label lies on what it names.
+fn nearest_to_middle(points: &[Vec3]) -> Option<Vec3> {
+    let middle = points.iter().sum::<Vec3>() / points.len().max(1) as f32;
+    (points.iter().copied()).min_by(|a, b| a.distance(middle).total_cmp(&b.distance(middle)))
 }
 
 fn element_type_lines(types: &[(String, usize)]) -> Vec<String> {
@@ -924,26 +1382,6 @@ fn pick_edge(model: &Model, hit: &Hit, precision: f32) -> Vec<[NodeId; 2]> {
         .collect()
 }
 
-/// The faces of the surface a click picks, as the geometry based selection does: the CAD
-/// face, or the patch bounded by feature edges, by their corner nodes.
-fn pick_surface(model: &Model, hit: &Hit, precision: f32) -> Vec<Vec<NodeId>> {
-    if hit.line {
-        return Vec::new();
-    }
-    let picked = Picker::default()
-        .pick(model, hit, Target::Faces, precision)
-        .resolved(&model.mesh, Target::Faces);
-    let Items::Faces(picked) = picked else {
-        return Vec::new();
-    };
-    let ids = model.mesh.node_ids();
-    let elements = model.mesh.elements();
-    (model.skin(hit.part).faces.iter())
-        .filter(|face| picked.contains(&(elements[face.element].id, face.face as u8 + 1)))
-        .map(|face| face.corners.iter().map(|&n| ids[n]).collect())
-        .collect()
-}
-
 /// The edges of a surface that only one of its faces has: its outline.
 fn outline(faces: &[Vec<NodeId>]) -> Vec<[NodeId; 2]> {
     let edges = |face: &Vec<NodeId>| {
@@ -1015,14 +1453,26 @@ fn deformed_position(model: &Model, node: NodeId) -> Option<DVec3> {
     base_and_deformed(model, node)?.1
 }
 
-fn edge_lines(model: &Model, part: usize, segments: &[[NodeId; 2]]) -> Vec<String> {
+/// The names of the parts the nodes belong to, joined.
+fn part_names(model: &Model, nodes: impl IntoIterator<Item = NodeId>) -> String {
+    let parts: BTreeSet<usize> = nodes
+        .into_iter()
+        .filter_map(|n| model.node_part(n))
+        .collect();
+    let names: Vec<&str> = (parts.into_iter())
+        .filter_map(|p| Some(model.parts.get(p)?.name.as_str()))
+        .collect();
+    names.join(", ")
+}
+
+fn edge_lines(model: &Model, segments: &[[NodeId; 2]]) -> Vec<String> {
     let length = model.units().unit(Quantity::Length);
     let s = length_scale(model);
     let base = edge_length(segments, |n| base_position(model, n)) * s;
-    let name = model.parts.get(part).map_or("", |p| p.name.as_str());
+    let names = part_names(model, segments.iter().map(|&[a, _]| a));
     let mut lines = vec![
         String::new(),
-        format!("Edge on part: {name}"),
+        format!("Edge on part: {names}"),
         row("Base", length, "L:", &[number(base)]),
     ];
     if model.results.is_some() {
@@ -1034,14 +1484,14 @@ fn edge_lines(model: &Model, part: usize, segments: &[[NodeId; 2]]) -> Vec<Strin
     lines
 }
 
-fn surface_lines(model: &Model, part: usize, faces: &[Vec<NodeId>]) -> Vec<String> {
+fn surface_lines(model: &Model, faces: &[Vec<NodeId>]) -> Vec<String> {
     let unit = model.units().unit(Quantity::Area);
     let s = length_scale(model).powi(2);
     let base = surface_area(faces, |n| base_position(model, n)) * s;
-    let name = model.parts.get(part).map_or("", |p| p.name.as_str());
+    let names = part_names(model, faces.iter().filter_map(|f| f.first().copied()));
     let mut lines = vec![
         String::new(),
-        format!("Surface on part: {name}"),
+        format!("Surface on part: {names}"),
         row("Base", unit, "A:", &[number(base)]),
     ];
     if model.results.is_some() {
@@ -1100,6 +1550,159 @@ mod tests {
         assert_eq!(edges.len(), 6);
         assert!(!edges.iter().any(|e| matches!(e, [2, 5] | [5, 2])));
         assert!((edge_length(&edges, position) - 6.0).abs() < 1e-12);
+    }
+
+    /// The 100 x 10 x 10 cantilever of 10 x 2 x 2 hexahedra and a hit from above at x, y.
+    fn beam_hit(x: f32, y: f32) -> (Model, Hit) {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/kragbalken_c3d8.inp");
+        let model = crate::model::load(&path, plx_model::UnitSystem::Unitless)
+            .unwrap()
+            .model;
+        let p = model.mesh.coords()[0];
+        let first = Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32);
+        let origin = Vec3::new(x, y, 50.0) - first + model.render_position(0);
+        let hit = model.pick(origin, Vec3::NEG_Z).unwrap();
+        (model, hit)
+    }
+
+    fn query(kind: QueryKind) -> QueryWindow {
+        QueryWindow {
+            kind,
+            selection: draft(kind),
+            ..QueryWindow::default()
+        }
+    }
+
+    #[test]
+    fn surface_queries_take_the_selection_of_the_picker() {
+        let (mut model, hit) = beam_hit(95.0, 5.0);
+        let mut output = Vec::new();
+        let mut query = query(QueryKind::Surface);
+        // The geometry mode picks the whole top of the beam: 100 x 10.
+        assert!(query.click(&mut model, Some(&hit), 0.5, Operation::Replace, &mut output));
+        let [Annotation::Surface { faces }] = model.query_annotations.as_slice() else {
+            panic!("{:?}", model.query_annotations);
+        };
+        assert_eq!(faces.len(), 20);
+        let area = surface_area(faces, |n| base_position(&model, n));
+        assert!((area - 1000.0).abs() < 1e-6, "{area}");
+        assert!(
+            output
+                .iter()
+                .any(|l| l.starts_with("Element faces") && l.ends_with(" 20"))
+        );
+
+        // In the surface mode a plain click starts a new query, Shift adds to it and Ctrl
+        // removes from it; the annotation follows.
+        query.picker.select_by = crate::selection::SelectBy::Surface;
+        query.click(&mut model, Some(&hit), 0.5, Operation::Replace, &mut output);
+        assert_eq!(model.query_annotations.len(), 2);
+        let (_, other) = beam_hit(85.0, 5.0);
+        query.click(&mut model, Some(&other), 0.5, Operation::Add, &mut output);
+        let faces = |model: &Model| match model.query_annotations.last() {
+            Some(Annotation::Surface { faces }) => faces.len(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(model.query_annotations.len(), 2);
+        assert_eq!(faces(&model), 2);
+        query.click(
+            &mut model,
+            Some(&hit),
+            0.5,
+            Operation::Subtract,
+            &mut output,
+        );
+        assert_eq!(faces(&model), 1);
+        // The same pick again does not repeat the label; a click into empty space keeps it.
+        query.click(
+            &mut model,
+            Some(&other),
+            0.5,
+            Operation::Replace,
+            &mut output,
+        );
+        assert!(!query.click(&mut model, None, 0.5, Operation::Replace, &mut output));
+        assert_eq!(model.query_annotations.len(), 2);
+        // Undo and Clear of the selection window change the query being picked.
+        query.click(&mut model, Some(&hit), 0.5, Operation::Add, &mut output);
+        assert_eq!(faces(&model), 2);
+        query.action(&mut model, PickerAction::Undo, &mut output);
+        assert_eq!(faces(&model), 1);
+        query.action(&mut model, PickerAction::Clear, &mut output);
+        assert_eq!(model.query_annotations.len(), 1, "the first query stays");
+    }
+
+    #[test]
+    fn edge_queries_take_the_edge_nearest_to_the_click() {
+        let (mut model, hit) = beam_hit(95.0, 9.0);
+        let mut output = Vec::new();
+        let mut edge = query(QueryKind::Edge);
+        assert!(!edge.preview(&model, &hit, 0.5).lines.is_empty());
+        edge.click(&mut model, Some(&hit), 0.5, Operation::Replace, &mut output);
+        let [Annotation::Edge { segments }] = model.query_annotations.as_slice() else {
+            panic!("{:?}", model.query_annotations);
+        };
+        let length = edge_length(segments, |n| base_position(&model, n));
+        assert!((length - 100.0).abs() < 1e-6, "{length}");
+    }
+
+    #[test]
+    fn element_queries_take_the_elements_of_the_picked_faces() {
+        let (mut model, hit) = beam_hit(95.0, 5.0);
+        let mut output = Vec::new();
+        let mut elements = query(QueryKind::Element);
+        assert!(!elements.preview(&model, &hit, 0.5).lines.is_empty());
+        elements.click(&mut model, Some(&hit), 0.5, Operation::Replace, &mut output);
+        assert!(
+            matches!(
+                model.query_annotations.as_slice(),
+                [Annotation::Elements(e)] if e.len() == 20
+            ),
+            "{:?}",
+            model.query_annotations
+        );
+        elements.picker.select_by = crate::selection::SelectBy::Element;
+        elements.click(&mut model, Some(&hit), 0.5, Operation::Replace, &mut output);
+        assert!(matches!(
+            model.query_annotations.last(),
+            Some(Annotation::Elements(e)) if e.len() == 1
+        ));
+        assert!(output.iter().any(|l| l.starts_with("Element type")));
+    }
+
+    #[test]
+    fn node_and_point_queries() {
+        let (mut model, hit) = beam_hit(95.0, 5.0);
+        let mut output = Vec::new();
+        // The element mode of a node query takes the nodes of the element.
+        let mut nodes = query(QueryKind::Node);
+        nodes.picker.select_by = crate::selection::SelectBy::Element;
+        nodes.click(&mut model, Some(&hit), 0.5, Operation::Replace, &mut output);
+        assert!(matches!(
+            model.query_annotations.as_slice(),
+            [Annotation::Nodes(n)] if n.len() == 8
+        ));
+        assert!(
+            output
+                .iter()
+                .any(|l| l.starts_with("Nodes") && l.ends_with('8'))
+        );
+
+        // A distance takes the corner points of the geometry mode: across the top.
+        let mut distance = query(QueryKind::Distance);
+        let (_, far) = beam_hit(5.0, 5.0);
+        distance.click(&mut model, Some(&hit), 0.5, Operation::Replace, &mut output);
+        assert_eq!(distance.picked().len(), 1);
+        distance.click(&mut model, Some(&far), 0.5, Operation::Replace, &mut output);
+        assert!(distance.picked().is_empty());
+        let Some(Annotation::Distance([a, b])) = model.query_annotations.last() else {
+            panic!("{:?}", model.query_annotations);
+        };
+        let length = base_position(&model, *a)
+            .unwrap()
+            .distance(base_position(&model, *b).unwrap());
+        assert!((length - 100.0).abs() < 1e-6, "{length}");
     }
 
     #[test]

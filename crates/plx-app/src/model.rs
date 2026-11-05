@@ -3559,7 +3559,7 @@ S
                 }),
                 hidden_parts: vec![model.parts[0].name.clone()],
                 annotations: vec![
-                    plx_results::saved_view::SavedAnnotation::Node(99),
+                    plx_results::saved_view::SavedAnnotation::Nodes(vec![99]),
                     plx_results::saved_view::SavedAnnotation::Distance([1, 99]),
                 ],
                 path_plots: vec![

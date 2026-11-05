@@ -304,12 +304,40 @@ table or a plot.
 
 == Query <query>
 
-#ui("Query") on the #ui("View") or #ui("Evaluate") tab or the #ui("Query") tile of the ribbon (the pipette) reads values from the model by clicking: #ui("Vertex/Node"),
-#ui("Facet/Element"), #ui("Edge") (length), #ui("Surface") (area), #ui("Part"), #ui("Assembly"), #ui("Bounding box size"), #ui("Distance")
-(two nodes), #ui("Angle") (three nodes) and #ui("Circle") (centre and radius through three
-nodes). The values appear in the output pane and as labels in the 3D view. On results, node
-queries also show the deformed position, the displacement and the value of the displayed
-component.
+#ui("Query") on the #ui("View") or #ui("Evaluate") tab or the #ui("Query") tile of the ribbon (the
+pipette) reads values from the model: #ui("Vertex/Node"), #ui("Facet/Element"), #ui("Edge")
+(length), #ui("Surface") (area), #ui("Part"), #ui("Assembly"), #ui("Bounding box size"),
+#ui("Distance") (two points), #ui("Angle") (three points) and #ui("Circle") (centre and radius
+through three points). The values appear in the output pane and as labels in the 3D view. On
+results, node queries also show the deformed position, the displacement and the value of the
+displayed component; edges and surfaces also have the deformed length or area and the change.
+
+The queries that pick in the 3D view open the #ui("Selection") window beside the query window,
+the same as every region of the model (@selection), and pick the way it says: in the geometry
+based mode a click takes the CAD face or edge, or the smooth patch bounded by feature edges, the
+angle modes grow it across smooth edges, and #ui("More") offers the mesh based modes (single
+nodes, elements, faces, IDs). Hovering shows what a click would pick.
+
+- A plain click starts a new query and leaves its label; the labels of earlier queries stay.
+- #key("Shift") + click adds to the query just made, #key("Ctrl") + click removes from it; its
+  label and the output pane follow, e.g. the total area of several faces or the length of a chain
+  of edges.
+- Dragging a box picks everything inside it; #ui("All"), #ui("Invert"), #ui("Undo") and
+  #ui("Clear") of the selection window work on the query just made.
+- Several nodes give their number, their centre and the smallest and largest value of the
+  displayed component; several elements their number by element type; several parts one
+  block each.
+- #ui("Distance"), #ui("Angle") and #ui("Circle") take one point per click, in order. The
+  geometry based mode takes the corner point nearest to the click, the #ui("Node") mode under
+  #ui("More") any node.
+
+On the Geometry tab, #ui("Edge") and #ui("Surface") pick CAD edges and faces with the geometry
+based modes only, as for a local mesh size.
+
+#screenshot("query.png", [Three holes queried as one surface: the first by a click, the others
+  with Shift + click; the fourth hole shows what the next click would pick])
+
+#screenshot("query-geometry.png", [Edge and surface queries on the Geometry tab])
 
 The labels stay in the view when the query window is closed and can be dragged
 aside. A right click on a label offers #ui("Delete") for this label and #ui("Delete All
@@ -317,15 +345,6 @@ Annotations"); #ui("Remove Annotations") in the query window and on the
 ribbon deletes all of them. Each model keeps its own labels: the geometry, the FE model and every
 result file. Meshing again removes those of the FE model, since they refer to node and element
 ids.
-
-#screenshot("query.png", [Querying nodes on a result])
-
-#ui("Edge") and #ui("Surface") pick like the geometry based selection (@selection): an edge runs
-from corner to corner, on the Geometry tab and on meshes generated from CAD geometry it is the CAD
-edge; a surface is the CAD face or the smooth patch bounded by feature edges. Hovering shows what a
-click would pick. On results the output pane also has the deformed length or area and the change.
-
-#screenshot("query-geometry.png", [Edge and surface queries on the Geometry tab])
 
 #screenshot("query-annotation-menu.png", [Query labels after closing the window, with the
   context menu of a label])
