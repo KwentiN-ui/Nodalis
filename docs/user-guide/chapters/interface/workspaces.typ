@@ -230,3 +230,5 @@ While an analysis has a window of its own, it is shown and steered only there. T
 combo of the main window lists it greyed out with #ui("(own window)"), and a click on its
 block selects it without making it the active analysis. If the active analysis moves out into
 its own window, the main window takes the next analysis that is not in a window of its own.
+
+#screenshot("analysis-own-window-combo.png", [Analysis combo with Analysis-1 open in its own window])
