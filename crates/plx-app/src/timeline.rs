@@ -1,6 +1,5 @@
 //! The timeline below the 3D view of the results: one segment per step of the FE model, as
-//! long as its time period or, for a step without time such as a frequency step, as wide as
-//! its modes need; a tick or dot per increment, mode or position; cutbacks, steps taken over
+//! wide as what can be picked in it needs, its increments, modes or positions; a tick or dot per increment, mode or position; cutbacks, steps taken over
 //! from another analysis and a step the solver did not finish marked. Clicking or dragging
 //! along it shows the increment under the pointer.
 
@@ -14,10 +13,12 @@ pub const HEIGHT: f32 = 62.0;
 const GAP: f32 = 4.0;
 const BAR_TOP: f32 = 20.0;
 const BAR_HEIGHT: f32 = 14.0;
-/// Width of a segment per entry of a step without time, and its limits.
-const ENTRY_WIDTH: f32 = 26.0;
-const UNTIMED: std::ops::RangeInclusive<f32> = 90.0..=260.0;
-const MIN_TIMED: f32 = 60.0;
+/// The room a step needs for each entry: a tick of an increment, a mode with its frequency
+/// below it, a position of a moving load; and the least room of a step.
+const TICK_WIDTH: f32 = 12.0;
+const MODE_WIDTH: f32 = 56.0;
+const POSITION_WIDTH: f32 = 26.0;
+const MIN_STEP: f32 = 60.0;
 
 /// Where a step and its entries lie along the timeline, in points from its left end.
 #[derive(Clone, Debug, PartialEq)]
@@ -59,47 +60,26 @@ pub fn layout(view: &ResultsView, width: f32) -> Layout {
     }
     let duration = |s: &ResultStep| (s.end_time - s.start_time).max(0.0);
     let timed = |s: &ResultStep| s.is_timed() && duration(s) > 0.0 && !s.has_positions();
-    let fixed = |s: &ResultStep| {
-        let entries = if s.has_positions() {
-            s.solver_steps.len()
+    // Each step takes the width by what can be picked in it, not by its time: a static step
+    // of one increment gets little, a frequency step room for the frequency of each mode.
+    let need = |s: &ResultStep| {
+        let need = if s.has_positions() {
+            s.solver_steps.len() as f32 * POSITION_WIDTH
+        } else if timed(s) {
+            s.increments.len() as f32 * TICK_WIDTH
         } else {
-            s.increments.len()
+            s.increments.len() as f32 * MODE_WIDTH
         };
-        (entries as f32 * ENTRY_WIDTH).clamp(*UNTIMED.start(), *UNTIMED.end())
+        need.max(MIN_STEP)
     };
     let gaps = GAP * (steps.len() - 1) as f32;
-    let fixed_total: f32 = steps.iter().filter(|s| !timed(s)).map(fixed).sum();
-    let timed_count = steps.iter().filter(|s| timed(s)).count();
-    let total_time: f64 = steps.iter().filter(|s| timed(s)).map(duration).sum();
-    let free = width - gaps - fixed_total;
-    // Without room for the timed steps, every step gets the same width.
-    let even = free < MIN_TIMED * timed_count as f32 || (timed_count == 0 && free < 0.0);
-    let widths: Vec<f32> = steps
-        .iter()
-        .map(|s| {
-            if even {
-                ((width - gaps) / steps.len() as f32).max(1.0)
-            } else if timed(s) {
-                (free * (duration(s) / total_time) as f32).max(MIN_TIMED)
-            } else if timed_count == 0 {
-                // Steps without time fill the width by their share of it.
-                fixed(s) * (width - gaps) / fixed_total
-            } else {
-                fixed(s)
-            }
-        })
-        .collect();
-    // Minimum widths can overshoot: the whole is scaled back to the width.
-    let sum: f32 = widths.iter().sum::<f32>() + gaps;
-    let scale = if sum > width {
-        (width - gaps) / (sum - gaps)
-    } else {
-        1.0
-    };
+    let needs: Vec<f32> = steps.iter().map(need).collect();
+    let total: f32 = needs.iter().sum();
+    let scale = (width - gaps).max(steps.len() as f32) / total;
+    let widths: Vec<f32> = needs.iter().map(|n| n * scale).collect();
     let mut layout = Layout::default();
     let mut left = 0.0;
     for (index, (step, width)) in steps.iter().zip(widths).enumerate() {
-        let width = width * scale;
         let right = left + width;
         let count = step.increments.len();
         for (k, &increment) in step.increments.iter().enumerate() {
@@ -236,27 +216,29 @@ pub fn show(ui: &mut Ui, view: &ResultsView, hide: &mut bool) -> Option<usize> {
                     weak,
                 );
             }
-        } else if let (Some(&first), Some(&last)) =
-            (step.increments.first(), step.increments.last())
-            && step.category.family() == StepFamily::Modal
-        {
-            let value = |i: usize| format_value(view.increments[i].value as f32);
-            painter.text(
-                pos2(bar.left(), below),
-                Align2::LEFT_TOP,
-                value(first),
-                small.clone(),
-                weak,
-            );
-            if last != first {
-                let label = format!("{} {hertz}", value(last));
-                painter.text(
-                    pos2(bar.right(), below),
-                    Align2::RIGHT_TOP,
-                    label.trim(),
-                    small.clone(),
-                    weak,
-                );
+        } else if step.category.family() == StepFamily::Modal {
+            // The frequency of each mode below its dot, where it fits; the unit after the
+            // last one.
+            let mut free_from = bar.left();
+            let count = step.increments.len();
+            for (k, &increment) in step.increments.iter().enumerate() {
+                let Some(ex) = layout.x_of(increment).map(x) else {
+                    continue;
+                };
+                let mut label = format_value(view.increments[increment].value as f32);
+                if k + 1 == count {
+                    label = format!("{label} {hertz}").trim().to_string();
+                }
+                let galley = ui.painter().layout_no_wrap(label, small.clone(), weak);
+                let w = galley.size().x;
+                let left = (ex - w * 0.5).clamp(bar.left(), (bar.right() - w).max(bar.left()));
+                // The last one is always written, so the range shows.
+                let last = k + 1 == count;
+                if left < free_from && !last {
+                    continue;
+                }
+                painter.galley(pos2(left.max(free_from), below), galley, weak);
+                free_from = left.max(free_from) + w + 6.0;
             }
         }
         // The entries: ticks over time, dots for modes, diamonds for positions.
@@ -483,32 +465,46 @@ mod tests {
     }
 
     #[test]
-    fn timed_steps_take_the_width_by_their_time_and_modes_a_fixed_width() {
+    fn steps_take_the_width_their_increments_and_modes_need() {
         let view = view();
         let layout = layout(&view, 1000.0);
         let widths: Vec<f32> = layout.segments.iter().map(|s| s.right - s.left).collect();
-        // The modes get their minimum width; the rest is shared 1 : 3.
-        assert_eq!(widths[2], 90.0);
-        let free = 1000.0 - 2.0 * GAP - 90.0;
-        assert!((widths[0] - free * 0.25).abs() < 1e-3, "{widths:?}");
-        assert!((widths[1] - free * 0.75).abs() < 1e-3, "{widths:?}");
-        // The last increment of the first step lies at its end, the modes in the middle of
-        // their thirds.
+        // Both static steps need their least width, the three modes room for each frequency:
+        // 60 : 60 : 168, scaled to the width.
+        let scale = (1000.0 - 2.0 * GAP) / (60.0 + 60.0 + 3.0 * MODE_WIDTH);
+        for (width, need) in widths.iter().zip([60.0, 60.0, 3.0 * MODE_WIDTH]) {
+            assert!((width - need * scale).abs() < 1e-3, "{widths:?}");
+        }
+        assert!((layout.segments[2].right - 1000.0).abs() < 1e-3);
+        // The last increment of the first step lies at its end, by its time; the modes in the
+        // middle of their thirds.
         assert!((layout.x_of(3).unwrap() - widths[0]).abs() < 1e-3);
         let modes = &layout.segments[2];
-        assert!((layout.x_of(7).unwrap() - (modes.left + 45.0)).abs() < 1e-3);
+        assert!((layout.x_of(7).unwrap() - (modes.left + widths[2] / 2.0)).abs() < 1e-3);
         assert_eq!(layout.nearest(modes.right), Some(8));
     }
 
     #[test]
-    fn a_narrow_timeline_gives_every_step_the_same_width() {
-        let layout = layout(&view(), 200.0);
-        let widths: Vec<f32> = layout.segments.iter().map(|s| s.right - s.left).collect();
-        assert!(
-            widths.iter().all(|w| (w - widths[0]).abs() < 1e-3),
-            "{widths:?}"
+    fn one_static_increment_leaves_the_room_to_the_modes() {
+        let mut increments = vec![inc(1, 1, AnalysisKind::Static, 1.0)];
+        for k in 1..=10 {
+            increments.push(inc(2, k, AnalysisKind::Frequency, 100.0 * k as f64));
+        }
+        let mut view = ResultsView::new(increments, None);
+        view.set_step_records(
+            &[
+                record("Step-1", StepCategory::Static, Some(1.0), &[1]),
+                record("Step-2", StepCategory::Frequency, None, &[2]),
+            ],
+            &[],
+            None,
         );
-        assert!(layout.segments[2].right <= 200.0 + 1e-3);
+        let layout = layout(&view, 1600.0);
+        let modes = &layout.segments[1];
+        assert!(modes.right - modes.left > 1400.0, "{layout:?}");
+        // A narrow timeline keeps every step inside it.
+        let narrow = super::layout(&view, 200.0);
+        assert!(narrow.segments[1].right <= 200.0 + 1e-3);
     }
 
     #[test]

@@ -88,11 +88,13 @@ it; the other tiles act at once and show pressed while their option is on.
 === Timeline <results-timeline>
 
 Below the 3D view, the timeline shows the steps of the results side by side. A step that runs
-over time takes the length of its time period, with a tick for each increment; a frequency or
-buckle step takes the width its modes need, with a dot for each mode, and a step with a moving
-load a diamond for each position. Each step has the colour of its kind (static, dynamic,
-thermal, modal), the shown step is brighter and the white marker is the shown increment. Below
-the steps stand the times where they start, or the first and last frequency. Click or drag
+over time has a tick for each increment, placed by its time; a frequency or buckle step has a
+dot for each mode, and a step with a moving load a diamond for each position. The steps share
+the width by what can be picked in them, not by their time: a static step of one increment
+takes little, a frequency step room to write the frequency under each of its modes. Each step
+has the colour of its kind (static, dynamic, thermal, modal), the shown step is brighter and
+the white marker is the shown increment. Below the steps stand the times where they start, or
+the frequency of each mode (as many as fit, the last one always). Click or drag
 along the timeline to show the increment under the pointer; hovering over it tells the step,
 the increment, its step time and total time and how many iterations it took.
 
@@ -104,8 +106,8 @@ last increment, the rest is dashed and a red mark says #ui("not converged"). The
 #ui("Hide Timeline") in its context menu or #ui("Timeline") in the command search (#key("Ctrl+K"));
 results with a single increment have none.
 
-#screenshot("results-timeline.png", [The timeline of three static steps and a frequency step,
-  with the tooltip of an increment])
+#screenshot("results-timeline.png", [The timeline of three static steps and a frequency step
+  with the frequency of each mode])
 
 #screenshot("results-step-list.png", [The #ui("Step") list: each step of the FE model with its kind,
   its increments and the time it covers])
