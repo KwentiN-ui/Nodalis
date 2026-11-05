@@ -67,8 +67,8 @@ impl RibbonState {
 /// commands out.
 pub trait Host {
     fn enabled(&self, cmd: Cmd) -> bool;
-    /// Whether the tile shows at all, such as the standard views only for a 3D model.
-    fn shown(&self, _cmd: Cmd) -> bool {
+    /// Whether the tile is in the ribbon at all, such as Sound only for a frequency step.
+    fn visible(&self, _cmd: Cmd) -> bool {
         true
     }
     /// Whether the tile shows pressed: a tool that is open or an option that is on.
@@ -88,10 +88,6 @@ pub trait Host {
     }
     /// Fills the panel a panel tile opens.
     fn panel(&mut self, _ui: &mut Ui, _cmd: Cmd) {}
-    /// A line shown after the groups, such as how to place a block.
-    fn hint(&self, _tab: &str) -> Option<&'static str> {
-        None
-    }
 }
 
 /// Shows the ribbon of `workspace`; returns the command clicked.
@@ -140,7 +136,7 @@ pub fn show(
                     | Tile::Grid { .. }
             )
         })
-        .filter(|c| host.shown(c.cmd))
+        .filter(|c| host.visible(c.cmd))
         .collect();
     let row: Vec<&Command> = (commands.iter().copied())
         .filter(|c| c.tab_in(workspace) == tab)
@@ -255,13 +251,6 @@ fn groups(
                     if let Some(cmd) = clicked {
                         run = Some(cmd);
                     }
-                }
-                if let Some(hint) = host.hint(tab)
-                    && !compact
-                    && !folded.contains(&true)
-                {
-                    ui.add_space(12.0);
-                    ui.add(egui::Label::new(egui::RichText::new(hint).weak()).wrap());
                 }
             });
         });
@@ -816,7 +805,7 @@ pub fn floating_bar(
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 1.0;
                         let shown: Vec<&Command> = (cmds.iter())
-                            .filter(|&&cmd| host.shown(cmd))
+                            .filter(|&&cmd| host.visible(cmd))
                             .filter_map(|&cmd| command::find(cmd))
                             .collect();
                         for c in shown {

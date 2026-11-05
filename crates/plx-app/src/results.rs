@@ -1083,6 +1083,23 @@ impl ResultsView {
         self.show_animation_frame();
     }
 
+    /// The animation Animate plays: a mode shape swings by its scale factor, a moving load
+    /// runs through its positions, a step of several increments plays them, and a single
+    /// increment grows from zero to its full size.
+    pub fn automatic_animation(&self) -> AnimationKind {
+        let modal = self.current_increment().is_some_and(|i| i.kind.is_modal());
+        let Some(step) = self.current_step().filter(|_| !modal) else {
+            return AnimationKind::ScaleFactor;
+        };
+        if step.has_positions() {
+            AnimationKind::Positions
+        } else if step.increments.len() > 1 {
+            AnimationKind::Step
+        } else {
+            AnimationKind::ScaleFactor
+        }
+    }
+
     /// The increments an animation plays from the current increment: those of its step, of
     /// all steps of its kind, or the last increment of each position of its moving load.
     fn animated_increments(&self, kind: AnimationKind) -> Vec<usize> {
@@ -1889,6 +1906,28 @@ mod tests {
         let lines = view.status_lines("r.ndlr");
         assert_eq!(lines[1], "Step 1 of 2: Preload (Static)");
         assert!(lines[2].starts_with("Increment 2 of 2"), "{lines:?}");
+    }
+
+    #[test]
+    fn animate_picks_the_animation_that_fits_the_result() {
+        let disp = [[0.0, 0.0, 1.0]];
+        let mut view = ResultsView::new(
+            vec![
+                increment(1, 1, AnalysisKind::Static, &disp),
+                increment(2, 1, AnalysisKind::Static, &disp),
+                increment(2, 2, AnalysisKind::Static, &disp),
+                increment(3, 1, AnalysisKind::Frequency, &disp),
+                increment(3, 2, AnalysisKind::Frequency, &disp),
+            ],
+            None,
+        );
+        view.select_increment(0);
+        assert_eq!(view.automatic_animation(), AnimationKind::ScaleFactor);
+        view.select_increment(2);
+        assert_eq!(view.automatic_animation(), AnimationKind::Step);
+        // Modes swing by their scale factor, not one after another.
+        view.select_increment(3);
+        assert_eq!(view.automatic_animation(), AnimationKind::ScaleFactor);
     }
 
     #[test]

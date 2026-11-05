@@ -493,7 +493,7 @@ impl AnalysisWindow {
             Cmd::Checklist => {
                 // A narrow window hides the checklist until it is asked for.
                 let overlay = crate::layout::current(ctx).overlay;
-                w.checklist_shown = !w.checklist_visible;
+                w.settings.graphics.checklist = !w.checklist_visible;
                 w.checklist_fold.set(overlay, false);
             }
             Cmd::ShowLinked => {
@@ -545,13 +545,13 @@ impl crate::ribbon::Host for RibbonHost<'_> {
         self.0.command_checked(cmd)
     }
 
-    fn shown(&self, cmd: Cmd) -> bool {
+    fn visible(&self, cmd: Cmd) -> bool {
         // The view of a 2D model turns in its plane instead of looking from the sides.
         let planar = self.0.workbench.viewport.planar();
         match cmd {
             Cmd::StandardViews | Cmd::VerticalView => !planar,
             Cmd::RotateView => planar,
-            _ => true,
+            _ => self.0.workbench.results_command_visible(cmd),
         }
     }
 

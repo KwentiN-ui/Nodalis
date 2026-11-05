@@ -30,10 +30,6 @@ impl BlockTile {
     }
 }
 
-/// How to place a block, shown after the tiles of the tabs that place blocks.
-const PLACE_HINT: &str = "Click a tile: the block hangs at the pointer, a click into the \
-                          schematic places it, Esc cancels.";
-
 impl ProjectApp {
     /// The workspace the window shows.
     pub(super) fn workspace(&self) -> Workspace {
@@ -494,9 +490,5 @@ impl ribbon::Host for ProjectHost<'_> {
             Cmd::NewAnalysis => self.0.placing == Some(BlockTile::Analysis),
             _ => false,
         }
-    }
-
-    fn hint(&self, tab: &str) -> Option<&'static str> {
-        matches!(tab, "Sources" | "Parameters" | "Evaluate" | "Annotate").then_some(PLACE_HINT)
     }
 }

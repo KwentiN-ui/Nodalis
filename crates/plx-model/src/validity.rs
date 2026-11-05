@@ -425,8 +425,8 @@ impl FeModel {
     /// with a point.
     fn missing_remote_point(&self, mesh: &FeMesh, region: &Region) -> Option<String> {
         let name = region.remote_point()?;
-        (self.remote_displacement(mesh, name).is_none())
-            .then(|| format!("Displacement {name} does not exist or has no point"))
+        (self.remote_point_named(mesh, name).is_none())
+            .then(|| format!("Displacement or Remote Force {name} does not exist or has no point"))
     }
 
     /// The distribution reference, if it names no distribution of the model.

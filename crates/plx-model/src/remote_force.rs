@@ -140,6 +140,67 @@ impl FeModel {
     }
 }
 
+impl FeModel {
+    /// The point a node history output on `Region::RemotePoint(name)` prints: that of the
+    /// displacement of the name written with a point, else that of the first remote force of
+    /// the name that has a point of its own (not on a reference point). Its region and how
+    /// the region follows it.
+    pub fn remote_point_named(
+        &self,
+        mesh: &FeMesh,
+        name: &str,
+    ) -> Option<(&Region, RemoteBehavior)> {
+        if let Some((s, bc, _)) = self.remote_displacement(mesh, name) {
+            let i = (self.steps[s].boundary_conditions.iter()).position(|b| std::ptr::eq(b, bc))?;
+            if let Some(crate::Formulation::Point(behavior)) = self.formulation(mesh, s, i) {
+                return Some((&bc.region, behavior));
+            }
+        }
+        self.remote_force_named(name)
+            .map(|(region, remote)| (region, remote.behavior))
+    }
+
+    /// The first remote force of the name, of any step, that has a point of its own.
+    pub fn remote_force_named(&self, name: &str) -> Option<(&Region, &RemoteForce)> {
+        (self.steps.iter().flat_map(|step| &step.loads)).find_map(|load| match &load.kind {
+            LoadKind::RemoteForce(remote)
+                if load.name == name && load.region.reference_point().is_none() =>
+            {
+                Some((&load.region, remote))
+            }
+            _ => None,
+        })
+    }
+
+    /// The names of the remote displacements and remote forces with a point, which node
+    /// history outputs can print, each once: displacements first.
+    pub fn remote_point_names(&self, mesh: &FeMesh) -> (Vec<&str>, Vec<&str>) {
+        let mut displacements: Vec<&str> = Vec::new();
+        for (s, step) in self.steps.iter().enumerate() {
+            for (i, bc) in step.boundary_conditions.iter().enumerate() {
+                if matches!(
+                    self.formulation(mesh, s, i),
+                    Some(crate::Formulation::Point(_))
+                ) && !displacements.contains(&bc.name.as_str())
+                {
+                    displacements.push(&bc.name);
+                }
+            }
+        }
+        let mut forces: Vec<&str> = Vec::new();
+        for load in self.steps.iter().flat_map(|step| &step.loads) {
+            if matches!(load.kind, LoadKind::RemoteForce(_))
+                && load.region.reference_point().is_none()
+                && !displacements.contains(&load.name.as_str())
+                && !forces.contains(&load.name.as_str())
+            {
+                forces.push(&load.name);
+            }
+        }
+        (displacements, forces)
+    }
+}
+
 impl ModelSpace {
     /// Whether a remote force can have a moment in the space.
     pub fn has_remote_moment(self) -> bool {

@@ -633,23 +633,15 @@ impl RegionDraft {
         let points: Vec<&str> = (model.fe.reference_points.iter())
             .map(|p| p.name.as_str())
             .collect();
-        let mut remotes: Vec<&str> = Vec::new();
-        if self.sources.contains(&Source::RemotePoint) {
-            for (s, step) in model.fe.steps.iter().enumerate() {
-                for (i, bc) in step.boundary_conditions.iter().enumerate() {
-                    if matches!(
-                        model.fe.formulation(&model.mesh, s, i),
-                        Some(Formulation::Point(_))
-                    ) && !remotes.contains(&bc.name.as_str())
-                    {
-                        remotes.push(&bc.name);
-                    }
-                }
-            }
-        }
-        if points.is_empty() && remotes.is_empty() {
+        let (remotes, forces) = if self.sources.contains(&Source::RemotePoint) {
+            model.fe.remote_point_names(&model.mesh)
+        } else {
+            Default::default()
+        };
+        if points.is_empty() && remotes.is_empty() && forces.is_empty() {
             ui.weak(if self.sources.contains(&Source::RemotePoint) {
-                "The model has no reference points (Features) and no displacements on a point."
+                "The model has no reference points (Features), no displacements on a point and \
+                 no remote forces."
             } else {
                 "The model has no reference points (Features)."
             });
@@ -671,7 +663,20 @@ impl RegionDraft {
                     }
                     ui.weak("Displacements on a point");
                 }
+                let any_remotes = !remotes.is_empty();
                 for name in remotes {
+                    let chosen = source == Source::RemotePoint && set == name;
+                    if ui.selectable_label(chosen, name).clicked() {
+                        (source, set) = (Source::RemotePoint, name.to_string());
+                    }
+                }
+                if !forces.is_empty() {
+                    if !points.is_empty() || any_remotes {
+                        ui.separator();
+                    }
+                    ui.weak("Remote forces");
+                }
+                for name in forces {
                     let chosen = source == Source::RemotePoint && set == name;
                     if ui.selectable_label(chosen, name).clicked() {
                         (source, set) = (Source::RemotePoint, name.to_string());
@@ -1134,8 +1139,8 @@ pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
         Region::ReferencePoint(_) => {}
         // The point of a remote displacement exists only in the input file; its region shows.
         Region::RemotePoint(name) => {
-            if let Some((_, bc, _)) = model.fe.remote_displacement(&model.mesh, name) {
-                return region_highlight(model, &bc.region);
+            if let Some((region, _)) = model.fe.remote_point_named(&model.mesh, name) {
+                return region_highlight(model, region);
             }
         }
         Region::Nodes(_) | Region::NodeSet(_) => {
@@ -3926,10 +3931,18 @@ impl Editor {
                     load.active = moved.active;
                 }
                 let list = &mut fe.steps[s].loads;
+                let mut renamed = None;
                 if let Some(existing) = index.and_then(|i| list.get(i)) {
                     load.active = existing.active;
+                    renamed = Some(existing.name.clone()).filter(|old| *old != load.name);
                 }
+                let remote = matches!(load.kind, LoadKind::RemoteForce(_));
+                let new = load.name.clone();
                 put(list, index, load);
+                // History outputs of a remote force's point follow a renamed one.
+                if let Some(old) = renamed.filter(|_| remote) {
+                    fe.rename_remote_point(&old, &new);
+                }
             }
             Draft::InitialCondition(mut condition, region) => {
                 condition.region = region.region();
@@ -4604,17 +4617,7 @@ fn history_output_form(
 fn point_hint(region: &Region, fe: &FeModel, mesh: &FeMesh) -> Option<&'static str> {
     let behavior = match region {
         Region::ReferencePoint(_) => RemoteBehavior::Rigid,
-        Region::RemotePoint(name) => match fe.remote_displacement(mesh, name) {
-            Some((s, bc, _)) => {
-                let i =
-                    (fe.steps[s].boundary_conditions.iter()).position(|b| std::ptr::eq(b, bc))?;
-                match fe.formulation(mesh, s, i)? {
-                    Formulation::Point(behavior) => behavior,
-                    Formulation::Nodes => return None,
-                }
-            }
-            None => return None,
-        },
+        Region::RemotePoint(name) => fe.remote_point_named(mesh, name)?.1,
         _ => return None,
     };
     Some(match behavior {
