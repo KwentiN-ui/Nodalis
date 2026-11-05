@@ -44,6 +44,8 @@ pub enum StepOutcome {
     Converged,
     Diverged {
         increment: u32,
+        /// What failed, for Nodalis to explain it.
+        failure: plxs_core::Failure,
         message: String,
     },
     Partial {

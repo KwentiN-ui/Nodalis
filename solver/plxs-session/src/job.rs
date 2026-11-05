@@ -321,12 +321,23 @@ fn run_continuing(
             // The steps after a step that did not finish are not kept: the cache holds a
             // start of the step chain.
             StepOutcome::Partial { .. } => keeping = false,
-            StepOutcome::Diverged { increment, message } => {
+            StepOutcome::Diverged {
+                increment,
+                failure,
+                message,
+            } => {
                 write(&session)?;
+                // The step that did not converge is the one after those done.
                 return Err(Error::Numerical {
-                    step: session.state().steps_done,
+                    step: session.state().steps_done + 1,
                     increment,
-                    message: format!("no convergence: {message}"),
+                    failure,
+                    message: match failure {
+                        plxs_core::Failure::NoConvergence(_) => {
+                            format!("no convergence: {message}")
+                        }
+                        _ => message,
+                    },
                 });
             }
             StepOutcome::Cancelled => {

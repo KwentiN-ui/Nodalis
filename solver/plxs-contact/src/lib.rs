@@ -691,6 +691,123 @@ impl ContactModel {
     }
 }
 
+/// How deep (in typical master edge lengths) one Newton correction may push a contact
+/// point into the master before the correction is shortened (see
+/// [`ContactModel::step_limit`]).
+pub const PENETRATION_STEP_LIMIT: f64 = 0.1;
+
+impl ContactModel {
+    /// The factor (in `(0, 1]`) by which a Newton correction `du` from the displacements `u`
+    /// is shortened when it drives contact points deep into the master: more than
+    /// [`PENETRATION_STEP_LIMIT`] typical master edge lengths where they were not that deep
+    /// already. `work` is `du · r` with the residual force `r` the correction was solved
+    /// for. `start` are the contact states at the start of the increment.
+    ///
+    /// A body that is held only by weak springs until it touches (a ball pressed onto a
+    /// plate by a force) moves through the master by its rigid-body displacement under the
+    /// full load in the first iteration: the predictor stiffness only reaches the points
+    /// within the cutoff, a fraction of a micrometre. All points within reach are then
+    /// deeply closed and the contact set shrinks by a few points per iteration, more than
+    /// the iteration limit allows, and a smaller increment changes nothing.
+    ///
+    /// Along such a correction the structure takes the force `(1 - α) r` (it is linear in
+    /// the correction, which was solved without the contact), the contact the rest. The
+    /// step stops where the contact force along `du` balances it, a line search on the
+    /// contact alone: the contact then starts about at the size the load gives it. The
+    /// overclosure limit bounds the step in any case.
+    pub fn step_limit(
+        &self,
+        coords: &[[f64; 3]],
+        u: &[f64],
+        du: &[f64],
+        start: &[Vec<ContactPointState>],
+        work: f64,
+    ) -> f64 {
+        let at =
+            |alpha: f64| -> Vec<f64> { u.iter().zip(du).map(|(a, b)| a + alpha * b).collect() };
+        let trial_u = at(1.0);
+        let current = current_configuration(coords, u);
+        let trial = current_configuration(coords, &trial_u);
+        let mut cap = 1.0_f64;
+        for pair in &self.pairs {
+            if !pair.active || pair.law.is_tied() || pair.typical <= 0.0 {
+                continue;
+            }
+            let limit = PENETRATION_STEP_LIMIT * pair.typical;
+            // Cheap test first: a correction smaller than the limit cannot overclose by
+            // more.
+            let moves = |nodes: &[u32]| {
+                nodes
+                    .iter()
+                    .any(|&n| (0..3).any(|d| du[n as usize * 3 + d].abs() > limit))
+            };
+            if !pair.points.iter().any(|point| moves(&point.nodes))
+                && !pair.master.iter().any(|face| moves(&face.nodes))
+            {
+                continue;
+            }
+            for p in 0..pair.points.len() {
+                let Ok(after) = pair.kinematics(p, &trial, &trial_u) else {
+                    continue;
+                };
+                if -after.gap <= limit {
+                    continue;
+                }
+                // Before the correction: the gap against the same master face where the
+                // point had none (it came from beside or beyond the search margin).
+                let before = match pair.kinematics(p, &current, u) {
+                    Ok(kin) => kin.gap,
+                    Err(_) => continue,
+                };
+                if -before >= limit || before <= after.gap {
+                    continue;
+                }
+                // The gap changes about linearly with the length of the step.
+                let f = (before + limit) / (before - after.gap);
+                cap = cap.min(f);
+            }
+        }
+        if cap >= 1.0 || work <= 0.0 || !work.is_finite() {
+            return cap;
+        }
+        // The work of the contact forces along du, relative to the start of the step.
+        let contact_work = |alpha: f64| -> f64 {
+            let v = at(alpha);
+            let evaluation = self.evaluate(coords, &v, start, false);
+            evaluation
+                .elements
+                .iter()
+                .map(|e| {
+                    e.dofs
+                        .iter()
+                        .zip(&e.fe)
+                        .map(|(&d, f)| du[d as usize] * f)
+                        .sum::<f64>()
+                })
+                .sum()
+        };
+        let base = contact_work(0.0);
+        let unbalanced = |alpha: f64| (1.0 - alpha) * work - (contact_work(alpha) - base);
+        if unbalanced(cap) >= 0.0 {
+            return cap;
+        }
+        // Bisection: the contact force grows with the overclosure, the rest falls.
+        let (mut low, mut high) = (0.0, cap);
+        for _ in 0..40 {
+            let mid = 0.5 * (low + high);
+            if unbalanced(mid) > 0.0 {
+                low = mid;
+            } else {
+                high = mid;
+            }
+            if high - low <= 1e-3 * high {
+                break;
+            }
+        }
+        high
+    }
+}
+
 /// Heat conduction across a closed contact point: the temperature difference `Σ c_i T_i`
 /// (slave point minus master foot point) over the point's area, for `*GAP CONDUCTANCE`.
 #[derive(Clone, Debug)]

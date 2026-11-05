@@ -185,9 +185,12 @@ impl ShiftInvertLanczos {
         }
         self.solver.analyze(k.pattern())?;
         self.solver.factorize(&shifted).map_err(|e| match e {
-            Error::Numerical { message, .. } => Error::Numerical {
+            Error::Numerical {
+                    failure, message, ..
+            } => Error::Numerical {
                 step: 0,
                 increment: 0,
+                failure,
                 message: format!(
                     "{message}; the stiffness matrix is singular at the shift {shift:e} (free structure or insufficient constraints)"
                 ),
@@ -322,9 +325,12 @@ impl ShiftInvertLanczos {
         if !(factorized && self.solver.is_factorized()) {
             self.solver.analyze(k.pattern())?;
             self.solver.factorize(k).map_err(|e| match e {
-                Error::Numerical { message, .. } => Error::Numerical {
+                Error::Numerical {
+                    failure, message, ..
+                } => Error::Numerical {
                     step: 0,
                     increment: 0,
+                    failure,
                     message: format!(
                         "{message}; the model is probably not sufficiently constrained"
                     ),
@@ -337,6 +343,7 @@ impl ShiftInvertLanczos {
             return Err(Error::Numerical {
                 step: 0,
                 increment: 0,
+                failure: plxs_core::Failure::NotPositiveDefinite,
                 message: "the stiffness matrix is not positive definite; buckling needs a stable reference state".into(),
             });
         }
@@ -795,6 +802,7 @@ impl Lanczos {
                 return Err(Error::Numerical {
                     step: 0,
                     increment: 0,
+                    failure: plxs_core::Failure::Eigenvalues,
                     message: format!(
                         "the eigenvalue iteration did not converge after {} restarts",
                         self.restarts

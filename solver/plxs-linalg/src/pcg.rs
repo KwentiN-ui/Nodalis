@@ -242,7 +242,7 @@ impl PcgSolver {
     pub fn solve_counted(&self, rhs: &mut [f64]) -> Result<PcgStats> {
         let pattern = (self.pattern.as_ref())
             .filter(|_| self.factorized)
-            .ok_or_else(|| numerical("solve before factorize"))?;
+            .ok_or_else(|| numerical(plxs_core::Failure::Internal, "solve before factorize"))?;
         assert_eq!(
             rhs.len(),
             pattern.dimension(),
@@ -259,7 +259,10 @@ impl PcgSolver {
             });
         }
         if !b_norm.is_finite() {
-            return Err(numerical("the right-hand side is not finite"));
+            return Err(numerical(
+                plxs_core::Failure::IterativeSolver,
+                "the right-hand side is not finite",
+            ));
         }
         let mut max_iterations = self
             .max_iterations
@@ -731,22 +734,28 @@ impl LinearSolver for PcgSolver {
     }
 
     fn factorize(&mut self, matrix: &SparseMatrix) -> Result<()> {
-        let pattern =
-            (self.pattern.as_ref()).ok_or_else(|| numerical("factorize before analyze"))?;
+        let pattern = (self.pattern.as_ref())
+            .ok_or_else(|| numerical(plxs_core::Failure::Internal, "factorize before analyze"))?;
         if **matrix.pattern() != **pattern {
-            return Err(numerical("factorize with another pattern than analyzed"));
+            return Err(numerical(
+                plxs_core::Failure::Internal,
+                "factorize with another pattern than analyzed",
+            ));
         }
         let values = matrix.values();
         let n = pattern.dimension();
         for i in 0..n {
             let diagonal = pattern.col_ptr()[i + 1] as usize - 1;
             if values[diagonal] <= 0.0 || !values[diagonal].is_finite() {
-                return Err(numerical(format!(
-                    "the matrix is not positive definite (diagonal entry {} is {:.3e}), \
+                return Err(numerical(
+                    plxs_core::Failure::NotPositiveDefinite,
+                    format!(
+                        "the matrix is not positive definite (diagonal entry {} is {:.3e}), \
                      which the iterative solver needs",
-                    i + 1,
-                    values[diagonal]
-                )));
+                        i + 1,
+                        values[diagonal]
+                    ),
+                ));
             }
         }
         let src = &self.full_src;
@@ -886,29 +895,29 @@ fn reverse_cuthill_mckee(adjacency: &[Vec<u32>]) -> Vec<u32> {
 
 fn indefinite() -> Error {
     numerical(
+        plxs_core::Failure::NotPositiveDefinite,
         "the matrix is not positive definite, which the iterative solver needs; \
          choose the direct equation solver",
     )
 }
 
 fn not_converged(max_iterations: usize, residual: f64, reused: bool) -> Error {
-    numerical(format!(
-        "the iterative solver did not converge in {max_iterations} iterations \
+    numerical(
+        plxs_core::Failure::IterativeSolver,
+        format!(
+            "the iterative solver did not converge in {max_iterations} iterations \
          (relative residual {residual:.3e}){}",
-        if reused {
-            " with the kept preconditioner"
-        } else {
-            "; choose the direct equation solver"
-        }
-    ))
+            if reused {
+                " with the kept preconditioner"
+            } else {
+                "; choose the direct equation solver"
+            }
+        ),
+    )
 }
 
-fn numerical(message: impl Into<String>) -> Error {
-    Error::Numerical {
-        step: 0,
-        increment: 0,
-        message: message.into(),
-    }
+fn numerical(failure: plxs_core::Failure, message: impl Into<String>) -> Error {
+    Error::numerical(failure, message)
 }
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {
