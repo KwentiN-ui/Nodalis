@@ -15,11 +15,12 @@ From top to bottom the window contains:
 / Model tree: on the left, with the items of the workspace (@model-tree).
 / 3D view: in the centre (@view).
 / Properties panel: on the right, while an item is created or edited (@properties-panel).
-/ Output pane: below the 3D view, with three tabs. #ui("Problems") lists what the model check
+/ Output pane: above the status bar, hidden until one of its tabs at the left of the status
+  bar is clicked (@output-pane), with three tabs. #ui("Problems") lists what the model check
   finds (@problems). #ui("Output") collects messages: what was loaded
   or saved, warnings, keywords of an imported `.inp` that were skipped ("Not yet evaluated:
   ..."), unit conversions and the output of the query tool. #ui("Analysis") is the monitor of
-  the solver (@monitor); it comes to the front when a run starts.
+  the solver (@monitor); it opens when a run starts.
 / Status bar: on the left what is loaded ("bracket.ndl: 12345 nodes, 6789 elements, 3 parts") or
   what is running ("Meshing ..."), on the right the unit system and the model space of the
   analysis.

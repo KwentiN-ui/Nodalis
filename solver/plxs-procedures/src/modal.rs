@@ -577,6 +577,7 @@ impl Procedure for SteadyStateProcedure {
                     return Err(Error::Numerical {
                         step: ctx.step_number,
                         increment,
+                        failure: plxs_core::Failure::Resonance,
                         message: format!(
                             "undamped mode {} excited at its eigenfrequency {frequency}",
                             j + 1

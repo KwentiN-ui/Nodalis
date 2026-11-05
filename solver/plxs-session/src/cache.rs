@@ -3,8 +3,9 @@
 //! longest unchanged start of its step chain instead of computing it again.
 //!
 //! The key of step `k` is a hash of what the solver is given for the steps `1..=k`: the
-//! model (nodes, elements, sets, materials, sections, constraints, contact, amplitudes,
-//! initial conditions, physical constants), the files it reads (stored modes, the global
+//! model (nodes, elements, materials, sections, constraints, contact, initial conditions,
+//! physical constants), the sets, surfaces and amplitudes these and the steps refer to (by
+//! their definitions, only where they are referred to), the files it reads (stored modes, the global
 //! results of a submodel, temperatures of a step) by their content, the steps up to `k`
 //! themselves and the solver build ([`StepCache::salt`]). Nothing else is known about the
 //! steps: adding a step after them, or changing a later one, leaves their keys as they
@@ -50,26 +51,25 @@ impl StepCache {
     /// The key of each step of `analysis` (before shells and beams are expanded), for a job
     /// in `work_dir`, where the files it reads are.
     pub fn keys(&self, analysis: &Analysis, work_dir: &Path) -> Vec<u64> {
-        fn part(h: &mut Fnv, value: &impl Serialize) {
-            // Writing into the hasher cannot fail; a serialization error only changes the
-            // hash.
-            let _ = postcard::to_io(value, &mut *h);
-        }
         let model = &analysis.model;
+        let named = Named::of(model);
         let mut h = Fnv::new();
         h.write_u64(self.salt);
         part(&mut h, &model.nodes);
         part(&mut h, &model.elements);
-        part(&mut h, &model.sets);
-        part(&mut h, &model.materials);
-        part(&mut h, &model.sections);
-        part(&mut h, &model.constraints);
-        part(&mut h, &model.contact);
-        part(&mut h, &model.amplitudes);
-        part(&mut h, &model.initial);
-        part(&mut h, &model.physical);
-        part(&mut h, &model.design_variables);
-        part(&mut h, &model.restart_read);
+        // What refers to sets, surfaces and amplitudes by name; those it names count by
+        // their definitions.
+        let definitions = bytes(&(
+            &model.materials,
+            &model.sections,
+            &model.constraints,
+            &model.contact,
+            &model.initial,
+            &model.physical,
+            &model.design_variables,
+            &model.restart_read,
+        ));
+        named.referenced(&mut h, &definitions);
         file(&mut h, model.stored_modes_file.as_deref());
         if let Some(submodel) = &model.constraints.submodel {
             file(&mut h, Some(&work_dir.join(&submodel.input)));
@@ -79,7 +79,7 @@ impl StepCache {
         for step in &analysis.steps {
             let mut h = Fnv::new();
             h.write_u64(key);
-            part(&mut h, step);
+            named.referenced(&mut h, &bytes(step));
             for field in &step.fields {
                 if let DefinedFieldKind::TemperatureFile { file: name, .. } = &field.kind {
                     file(&mut h, Some(&work_dir.join(name)));
@@ -171,6 +171,61 @@ impl StepCache {
         if written.is_none() {
             let _ = std::fs::remove_file(self.path(key, "results"));
             let _ = std::fs::remove_file(self.path(key, "state"));
+        }
+    }
+}
+
+fn part(h: &mut Fnv, value: &impl Serialize) {
+    // Writing into the hasher cannot fail; a serialization error only changes the hash.
+    let _ = postcard::to_io(value, &mut *h);
+}
+
+fn bytes(value: &impl Serialize) -> Vec<u8> {
+    postcard::to_stdvec(value).unwrap_or_default()
+}
+
+/// The sets, surfaces and amplitudes of a model: items the model and the steps refer to by
+/// name. Each counts only where it is referred to, so that the sets and amplitudes the
+/// steps after a step define (the model holds them all) leave its key as it was.
+struct Named {
+    /// The name as it is encoded where it is referred to, and the definition.
+    items: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl Named {
+    fn of(model: &plxs_core::Model) -> Self {
+        let mut items = Vec::new();
+        let mut add = |kind: u8, name: &str, definition: Vec<u8>| {
+            let mut definition = definition;
+            definition.insert(0, kind);
+            items.push((bytes(&name), definition));
+        };
+        let sets = &model.sets;
+        for (name, ids) in &sets.node_sets {
+            add(0, name, bytes(ids));
+        }
+        for (name, ids) in &sets.element_sets {
+            add(1, name, bytes(ids));
+        }
+        for (name, surface) in &sets.surfaces {
+            add(2, name, bytes(surface));
+        }
+        for amplitude in &model.amplitudes {
+            add(3, &amplitude.name, bytes(amplitude));
+        }
+        Named { items }
+    }
+
+    /// Hashes `encoded` (an item in postcard encoding) and the definitions of the items it
+    /// names. A name is found as a string is encoded; a string that only looks like a name
+    /// adds an item that does not matter, which costs a step taken over, never a wrong one.
+    fn referenced(&self, h: &mut Fnv, encoded: &[u8]) {
+        h.write(encoded);
+        for (name, definition) in &self.items {
+            if encoded.windows(name.len()).any(|w| w == name.as_slice()) {
+                h.write(name);
+                h.write(definition);
+            }
         }
     }
 }

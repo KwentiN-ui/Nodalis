@@ -663,6 +663,226 @@ fn factor_front(
     Ok(info.dynamic_regularization_count)
 }
 
+struct SolveContext<'a> {
+    supernodal: &'a SymbolicSupernodalCholesky<FactorIndex>,
+    tree: &'a TreeSymbolic,
+    factor: &'a [f64],
+    /// The rows of every supernode, taken by its task while it runs ...
+    slots: Vec<Mutex<Option<&'a mut [f64]>>>,
+    /// ... and shared once it has finished.
+    done: Vec<OnceLock<&'a [f64]>>,
+    /// The supernode of every (permuted) row.
+    index_to_super: &'a [u32],
+    parallel_subtree: f64,
+}
+
+impl<'a> SolveContext<'a> {
+    fn take(&self, s: usize) -> &'a mut [f64] {
+        (self.slots[s].lock().unwrap_or_else(|e| e.into_inner()))
+            .take()
+            .expect("a supernode is solved once per substitution")
+    }
+
+    fn finished(&self, s: usize) -> &'a [f64] {
+        self.done[s].get().expect("finished before it is read")
+    }
+
+    /// Rows, columns and the column-major values (rows `c + p`, columns `c`) of supernode s.
+    fn supernode(&self, s: usize) -> (usize, usize, &[FactorIndex], &[f64]) {
+        let begin = self.supernodal.supernode_begin()[s] as usize;
+        let end = self.supernodal.supernode_end()[s] as usize;
+        let ptr = self.supernodal.col_ptr_for_val();
+        let values = &self.factor[ptr[s] as usize..ptr[s + 1] as usize];
+        (begin, end, self.supernodal.supernode(s).pattern(), values)
+    }
+
+    /// Forward substitution of supernode `s`: `x_s ← L_ss⁻¹ (b_s − Σ
+    /// L_sd x_d)` over the descendants `d` whose rows reach into it (left-looking, so that
+    /// a task writes only its own rows).
+    fn forward(&self, s: usize) {
+        let (begin, end, _, values) = self.supernode(s);
+        let c = end - begin;
+        let rows = values.len() / c.max(1);
+        let xs = self.take(s);
+        for &d in self.tree.updaters(s) {
+            let (d_begin, d_end, pattern, d_values) = self.supernode(d as usize);
+            let cd = d_end - d_begin;
+            let d_rows = cd + pattern.len();
+            let k0 = pattern.partition_point(|&r| (r as usize) < begin);
+            let k1 = pattern.partition_point(|&r| (r as usize) < end);
+            if k0 == k1 {
+                continue;
+            }
+            let xd = self.finished(d as usize);
+            for (j, &xj) in xd.iter().enumerate() {
+                if xj == 0.0 {
+                    continue;
+                }
+                let column = &d_values[j * d_rows + cd..j * d_rows + cd + pattern.len()];
+                for k in k0..k1 {
+                    xs[pattern[k] as usize - begin] -= column[k] * xj;
+                }
+            }
+        }
+        for j in 0..c {
+            let xj = xs[j];
+            if xj != 0.0 {
+                let column = &values[j * rows..j * rows + c];
+                for i in j + 1..c {
+                    xs[i] -= column[i] * xj;
+                }
+            }
+        }
+        let _ = self.done[s].set(xs);
+    }
+
+    /// Diagonal and backward substitution of supernode `s`: `x_s ← L_ssᵀ⁻¹ (D_s⁻¹ x_s −
+    /// L_psᵀ x_p)` with the
+    /// rows `p` below its diagonal block, which belong to finished ancestors.
+    fn backward(&self, s: usize) {
+        let (begin, end, pattern, values) = self.supernode(s);
+        let c = end - begin;
+        let rows = c + pattern.len();
+        let xs = self.take(s);
+        // The rows below, gathered from the ancestors (consecutive rows mostly belong to
+        // one).
+        let mut below_x = Vec::with_capacity(pattern.len());
+        let mut current = (usize::MAX, 0usize, &[][..]);
+        for &r in pattern {
+            let r = r as usize;
+            let owner = self.index_to_super[r] as usize;
+            if owner != current.0 {
+                current = (
+                    owner,
+                    self.supernodal.supernode_begin()[owner] as usize,
+                    self.finished(owner),
+                );
+            }
+            below_x.push(current.2[r - current.1]);
+        }
+        for (j, x) in xs.iter_mut().enumerate() {
+            let below = &values[j * rows + c..(j + 1) * rows];
+            let sum: f64 = below.iter().zip(&below_x).map(|(l, x)| l * x).sum();
+            *x = *x / values[j * rows + j] - sum;
+        }
+        for j in (0..c).rev() {
+            let column = &values[j * rows..j * rows + c];
+            let sum: f64 = (j + 1..c).map(|i| column[i] * xs[i]).sum();
+            xs[j] -= sum;
+        }
+        let _ = self.done[s].set(xs);
+    }
+
+    fn forward_subtree(&self, s: usize) {
+        let children = self.tree.children(s);
+        if children.len() > 1 && self.tree.subtree_work[s] >= self.parallel_subtree {
+            children
+                .par_iter()
+                .for_each(|&c| self.forward_subtree(c as usize));
+            self.forward(s);
+            return;
+        }
+        // Post-order without recursion.
+        let mut stack = vec![(s, false)];
+        while let Some((s, expanded)) = stack.pop() {
+            if expanded {
+                self.forward(s);
+            } else {
+                stack.push((s, true));
+                stack.extend(self.tree.children(s).iter().map(|&c| (c as usize, false)));
+            }
+        }
+    }
+
+    fn backward_subtree(&self, s: usize) {
+        let children = self.tree.children(s);
+        if children.len() > 1 && self.tree.subtree_work[s] >= self.parallel_subtree {
+            self.backward(s);
+            children
+                .par_iter()
+                .for_each(|&c| self.backward_subtree(c as usize));
+            return;
+        }
+        // Pre-order: a supernode before its descendants.
+        let mut stack = vec![s];
+        while let Some(s) = stack.pop() {
+            self.backward(s);
+            stack.extend(self.tree.children(s).iter().map(|&c| c as usize));
+        }
+    }
+}
+
+/// The rows of `x` per supernode, each in a slot of its own, and the empty list of
+/// finished supernodes.
+#[allow(clippy::type_complexity)]
+fn split_rows<'a>(
+    supernodal: &SymbolicSupernodalCholesky<FactorIndex>,
+    x: &'a mut [f64],
+) -> (Vec<Mutex<Option<&'a mut [f64]>>>, Vec<OnceLock<&'a [f64]>>) {
+    let n_super = supernodal.n_supernodes();
+    let (begin, end) = (supernodal.supernode_begin(), supernodal.supernode_end());
+    let mut slots = Vec::with_capacity(n_super);
+    let mut rest = x;
+    for s in 0..n_super {
+        let (head, tail) = rest.split_at_mut((end[s] - begin[s]) as usize);
+        slots.push(Mutex::new(Some(head)));
+        rest = tail;
+    }
+    (slots, (0..n_super).map(|_| OnceLock::new()).collect())
+}
+
+/// Solves `L D Lᵀ x = b` in place for the factor of [`factorize`], with `x` holding `b`
+/// in the permuted order of the factor. Parallel over the elimination tree like the
+/// factorization: `faer`'s solve runs a single right-hand side on one core, which made the
+/// substitutions most of the time of a Lanczos step (0.2 s for a factor of 170 million
+/// entries, read twice at the memory bandwidth of one core).
+pub fn solve(
+    supernodal: &SymbolicSupernodalCholesky<FactorIndex>,
+    tree: &TreeSymbolic,
+    factor: &[f64],
+    x: &mut [f64],
+    threads: usize,
+) {
+    assert_eq!(factor.len(), supernodal.len_val());
+    assert_eq!(x.len(), supernodal.nrows());
+    let n_super = supernodal.n_supernodes();
+    let (begin, end) = (supernodal.supernode_begin(), supernodal.supernode_end());
+    let mut index_to_super = vec![0u32; x.len()];
+    for s in 0..n_super {
+        index_to_super[begin[s] as usize..end[s] as usize].fill(s as u32);
+    }
+    let parallel_subtree =
+        (tree.total_work / (16.0 * threads.max(1) as f64)).max(MIN_PARALLEL_SUBTREE);
+    {
+        let (slots, done) = split_rows(supernodal, x);
+        let ctx = SolveContext {
+            supernodal,
+            tree,
+            factor,
+            slots,
+            done,
+            index_to_super: &index_to_super,
+            parallel_subtree,
+        };
+        tree.roots
+            .par_iter()
+            .for_each(|&r| ctx.forward_subtree(r as usize));
+    }
+    let (slots, done) = split_rows(supernodal, x);
+    let ctx = SolveContext {
+        supernodal,
+        tree,
+        factor,
+        slots,
+        done,
+        index_to_super: &index_to_super,
+        parallel_subtree,
+    };
+    tree.roots
+        .par_iter()
+        .for_each(|&r| ctx.backward_subtree(r as usize));
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{LdltSolver, LinearSolver, Pattern, SparseMatrix};

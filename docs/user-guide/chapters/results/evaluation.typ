@@ -94,6 +94,17 @@ the selected columns over the first one.
 
 #screenshot("history-table.png", [Eigenfrequencies from the `.dat` file])
 
+The small arrow at the right edge of a column header sorts the rows by that column: the first
+click sorts ascending, the next one descending. It appears when the pointer is over it and stays
+on the sorted column. Empty cells go last either way. #ui("Sort Ascending"), #ui("Sort
+Descending") and #ui("Original Order") in the context menu do the same for the column you
+right-clicked. Copy and Plot take the rows in the order shown, so a plot over a sorted column
+draws its curves from the smallest x value to the largest instead of in increment order. A new
+order keeps the selected columns but clears a selection of rows.
+
+#screenshot("history-table-sorted.png", [Rows sorted by the displacement of node 1, and the
+  plot of the time over it])
+
 #ui("Export") in the plot window copies the plot to the clipboard as an image (#ui("Copy to
 Clipboard")) or saves it as a PNG or SVG file. The SVG file is vector graphics with the curves,
 grid and legend, for reports in good print quality.

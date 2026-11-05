@@ -89,15 +89,28 @@ Nodalis fits its layout to the size of the window:
   shrinks to its magnifier.
 - *Narrower than 900 points*: the ribbon shows its icons only, their names are in the
   tooltips. The tree folds away; the button left of #ui("Project") in the app bar shows it
-  again. The output pane folds to its tabs.
-- *Lower than 700 points*: the ribbon folds to its tabs, and so does the output pane.
+  again.
+- *Lower than 700 points*: the ribbon folds to its tabs.
 
-A folded output pane opens with a click on one of its tabs, and it opens by itself when a
-solve or a problem brings its tab to the front; a double-click on its tabs folds it again.
 What you unfold or fold yourself stays so until the window crosses one of these sizes.
 
+=== Output pane <output-pane>
+
+The pane with the #ui("Problems"), #ui("Analysis") and #ui("Output") tabs (in the project
+window #ui("Output") and #ui("Analyses")) is hidden, so the 3D view takes the full height. Its
+tabs are at the left of the status bar at the bottom of the window: a click on one shows the
+pane above the status bar with that tab, a click on the tab shown hides the pane again. The
+#ui("Problems") tab counts the problems and turns red when one of them is an error. The pane
+opens by itself when a solve starts or a problem is asked for (the state in the app bar, the
+link in the checklist); its upper edge can be dragged to make it higher or lower. Messages that
+come while the #ui("Output") tab is not shown are counted on it (#ui("Output (2 new)")), and the
+newest of them stays next to the tabs for a few seconds; a click on it shows the output.
+
+#screenshot("output-pane-status-bar.png", [The tabs of the output pane in the status bar, the
+  #ui("Problems") tab shown above them])
+
 #screenshot("narrow-window.png", [A window 850 points wide: icons only, the tree behind the
-  button in the app bar, the output pane folded to its tabs])
+  button in the app bar])
 
 #screenshot("properties-overlay.png", [In a window 1100 points wide the properties panel lies
   over the 3D view])
@@ -151,7 +164,7 @@ The cross in the head of the panel hides the checklist, and the 3D view takes th
 
 === Problems <problems>
 
-The #ui("Problems") tab below the 3D view lists what the model check (@model-check) and the
+The #ui("Problems") tab of the output pane (@output-pane) lists what the model check (@model-check) and the
 last check by the solver found, errors first; its title counts them. The tooltip of an entry
 says why it is a problem and how to fix it. A click selects the item in the tree and the 3D
 view, a double-click opens it in the properties panel. A click on the state in the app bar

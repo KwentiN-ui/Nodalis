@@ -1864,6 +1864,8 @@ pub struct ProjectApp {
     settings_window: Option<SettingsWindow>,
     updater: crate::update::Updater,
     output: Vec<String>,
+    /// What the status bar tells of the output while its tab is not shown.
+    output_news: crate::output_news::OutputNews,
     /// The project file; `None` until the project is saved.
     path: Option<PathBuf>,
     nodes: Vec<Node>,
@@ -2066,6 +2068,7 @@ impl ProjectApp {
             solves: Vec::new(),
             forced: BTreeSet::new(),
             monitor: Monitor::default(),
+            output_news: Default::default(),
             startup_import: Vec::new(),
             applied: HashMap::new(),
             sync_due: true,
@@ -4975,6 +4978,7 @@ impl ProjectApp {
         self.solves.retain(|s| s.id != id);
         self.solves.push(solve);
         self.monitor.show(id);
+        crate::layout::fold_output(ctx, false);
         Start::Started
     }
 
@@ -5292,8 +5296,12 @@ impl ProjectApp {
             || self.looping.is_some()
     }
 
-    fn toggle_monitor(&mut self) {
-        self.monitor.shown = !self.monitor.shown;
+    /// Switches the output pane between the monitor and the output; a hidden pane opens on
+    /// the monitor.
+    fn toggle_monitor(&mut self, ctx: &egui::Context) {
+        let hidden = crate::layout::output_folded(ctx);
+        self.monitor.shown = hidden || !self.monitor.shown;
+        crate::layout::fold_output(ctx, false);
         if self.monitor.shown && self.monitor.selected.is_none() {
             self.monitor.selected = self.updating.first().copied();
         }
@@ -7833,6 +7841,31 @@ impl ProjectApp {
         self.project_ribbon(ui);
         egui::Panel::bottom("project status").show(ui, |ui| {
             ui.horizontal(|ui| {
+                // The tabs of the output pane: a click shows the tab, a click on the shown
+                // tab hides the pane.
+                let shown = (!crate::layout::output_folded(&ctx))
+                    .then_some(usize::from(self.monitor.shown));
+                let (unread, newest) =
+                    (self.output_news).update(&ctx, &self.output, shown == Some(0));
+                let titles = [
+                    crate::output_news::OutputNews::title(unread).into(),
+                    "Analyses".into(),
+                ];
+                let mut clicked = crate::style::status_tabs(ui, &titles, shown);
+                if let Some(line) = newest
+                    && crate::output_news::OutputNews::line(ui, line)
+                {
+                    clicked = Some(0);
+                }
+                if let Some(index) = clicked {
+                    if shown == Some(index) {
+                        crate::layout::fold_output(&ctx, true);
+                    } else {
+                        self.monitor.shown = index == 1;
+                        crate::layout::fold_output(&ctx, false);
+                    }
+                }
+                ui.separator();
                 if let Some((path, _)) = &self.opening {
                     ui.spinner();
                     ui.label(format!("Opening {} …", path.display()));
@@ -7846,62 +7879,32 @@ impl ProjectApp {
         let pane = egui::Frame::new()
             .fill(crate::style::window())
             .stroke(egui::Stroke::new(1.0, crate::style::border()));
-        // In a small window the output pane shows only its tabs until one is clicked.
-        let folded = crate::layout::output_folded(&ctx);
-        let panel = if folded {
-            egui::Panel::bottom("project output folded")
-                .resizable(false)
-                .exact_size(crate::app::OUTPUT_TABS)
-        } else {
+        // The output pane is hidden until one of its tabs in the status bar is clicked or a
+        // solve starts.
+        if !crate::layout::output_folded(&ctx) {
             egui::Panel::bottom("project output")
                 .resizable(true)
                 .default_size(170.0)
                 .size_range(70.0..=500.0)
-        };
-        panel
-            .frame(egui::Frame::new().fill(crate::style::control()))
-            .show(ui, |ui| {
-                let titles = ["Output", "Analyses"];
-                let selected = usize::from(self.monitor.shown);
-                let top = ui.cursor().top();
-                let (clicked, tab) = crate::style::tabs(ui, &titles, selected);
-                let row =
-                    egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
-                if let Some(index) = clicked {
-                    self.monitor.shown = index == 1;
-                    if folded {
-                        crate::layout::fold_output(&ctx, false);
-                    }
-                }
-                let double = ui.input(|i| {
-                    i.pointer
-                        .button_double_clicked(egui::PointerButton::Primary)
-                        && i.pointer.interact_pos().is_some_and(|p| row.contains(p))
+                .frame(egui::Frame::new().fill(crate::style::control()))
+                .show(ui, |ui| {
+                    pane.inner_margin(4).show(ui, |ui| {
+                        ui.set_min_size(ui.available_size());
+                        if self.monitor.shown {
+                            self.monitor_panel(ui);
+                        } else {
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .stick_to_bottom(true)
+                                .show(ui, |ui| {
+                                    for line in &self.output {
+                                        ui.label(line);
+                                    }
+                                });
+                        }
+                    });
                 });
-                if double && !folded {
-                    crate::layout::fold_output(&ctx, true);
-                }
-                if folded {
-                    crate::style::open_tab(ui, tab);
-                    return;
-                }
-                pane.inner_margin(4).show(ui, |ui| {
-                    ui.set_min_size(ui.available_size());
-                    if self.monitor.shown {
-                        self.monitor_panel(ui);
-                    } else {
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false, false])
-                            .stick_to_bottom(true)
-                            .show(ui, |ui| {
-                                for line in &self.output {
-                                    ui.label(line);
-                                }
-                            });
-                    }
-                });
-                crate::style::open_tab(ui, tab);
-            });
+        }
         let central = egui::CentralPanel::no_frame().show(ui, |ui| self.schematic(ui));
         for action in central.inner {
             self.act(&ctx, action);

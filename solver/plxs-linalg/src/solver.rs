@@ -218,12 +218,8 @@ impl LdltSolver {
     }
 }
 
-fn numerical(message: impl Into<String>) -> Error {
-    Error::Numerical {
-        step: 0,
-        increment: 0,
-        message: message.into(),
-    }
+fn numerical(failure: plxs_core::Failure, message: impl Into<String>) -> Error {
+    Error::numerical(failure, message)
 }
 
 impl LdltSolver {
@@ -282,7 +278,12 @@ impl LdltSolver {
                 ..Default::default()
             },
         )
-        .map_err(|e| numerical(format!("symbolic factorization failed: {e:?}")))?;
+        .map_err(|e| {
+            numerical(
+                plxs_core::Failure::Internal,
+                format!("symbolic factorization failed: {e:?}"),
+            )
+        })?;
         trace(&clock, "symbolic factorization");
         self.values = Vec::new();
         self.allocated = false;
@@ -309,15 +310,18 @@ impl LdltSolver {
     /// memory is an error the run reports, not an abort of the process (the built-in solver
     /// runs inside Nodalis).
     fn allocate(&mut self) -> Result<()> {
-        let symbolic =
-            (self.symbolic.as_ref()).ok_or_else(|| numerical("allocate before analyze"))?;
+        let symbolic = (self.symbolic.as_ref())
+            .ok_or_else(|| numerical(plxs_core::Failure::Internal, "allocate before analyze"))?;
         let (len, n) = (symbolic.len_val(), symbolic.nrows());
         self.values = Vec::new();
         self.values.try_reserve_exact(len).map_err(|_| {
-            numerical(format!(
-                "{OUT_OF_MEMORY}: the factor of the {n} equations needs {:.1} GB",
-                len as f64 * 8.0 / 1e9
-            ))
+            numerical(
+                plxs_core::Failure::OutOfMemory,
+                format!(
+                    "{OUT_OF_MEMORY}: the factor of the {n} equations needs {:.1} GB",
+                    len as f64 * 8.0 / 1e9
+                ),
+            )
         })?;
         // The allocation is mapped lazily; writing it once here takes its page faults in one
         // thread. Taken by the threads of the factorization at once they cost several times
@@ -341,7 +345,7 @@ impl LinearSolver for LdltSolver {
         let symbolic = self
             .symbolic
             .as_ref()
-            .ok_or_else(|| numerical("factorize before analyze"))?;
+            .ok_or_else(|| numerical(plxs_core::Failure::Internal, "factorize before analyze"))?;
         let pattern = matrix.pattern();
         let threshold = if self.regularization > 0.0 {
             let largest = matrix
@@ -374,9 +378,10 @@ impl LinearSolver for LdltSolver {
                 )
                 .map_err(|e| match e {
                     supernodal::FactorError::Cancelled => Error::Cancelled,
-                    supernodal::FactorError::Ldlt(e) => {
-                        numerical(format!("the stiffness matrix is singular: {e:?}"))
-                    }
+                    supernodal::FactorError::Ldlt(e) => numerical(
+                        plxs_core::Failure::Singular,
+                        format!("the stiffness matrix is singular: {e:?}"),
+                    ),
                 })?;
             }
             _ => {
@@ -386,8 +391,12 @@ impl LinearSolver for LdltSolver {
                 );
                 let scratch =
                     symbolic.factorize_numeric_ldlt_scratch::<f64>(self.par, Default::default());
-                let mut buffer = MemBuffer::try_new(scratch)
-                    .map_err(|_| numerical("out of memory in the factorization"))?;
+                let mut buffer = MemBuffer::try_new(scratch).map_err(|_| {
+                    numerical(
+                        plxs_core::Failure::OutOfMemory,
+                        "out of memory in the factorization",
+                    )
+                })?;
                 symbolic
                     .factorize_numeric_ldlt::<f64>(
                         &mut self.values,
@@ -402,7 +411,12 @@ impl LinearSolver for LdltSolver {
                         MemStack::new(&mut buffer),
                         Default::default(),
                     )
-                    .map_err(|e| numerical(format!("the stiffness matrix is singular: {e:?}")))?;
+                    .map_err(|e| {
+                        numerical(
+                            plxs_core::Failure::Singular,
+                            format!("the stiffness matrix is singular: {e:?}"),
+                        )
+                    })?;
             }
         }
         self.factorized = true;
@@ -414,13 +428,43 @@ impl LinearSolver for LdltSolver {
             .symbolic
             .as_ref()
             .filter(|_| self.factorized)
-            .ok_or_else(|| numerical("solve before factorize"))?;
+            .ok_or_else(|| numerical(plxs_core::Failure::Internal, "solve before factorize"))?;
         let n = symbolic.nrows();
         assert_eq!(rhs.len(), n, "right-hand side of the wrong size");
+        // The tree-parallel substitutions (`PLXS_SOLVE=faer` takes faer's own).
+        if let (SymbolicCholeskyRaw::Supernodal(raw), Some(tree), true) = (
+            symbolic.raw(),
+            &self.tree,
+            self.par.degree() > 1 && std::env::var("PLXS_SOLVE").as_deref() != Ok("faer"),
+        ) {
+            let mut x = match symbolic.perm() {
+                Some(perm) => perm
+                    .arrays()
+                    .0
+                    .iter()
+                    .map(|&old| rhs[old as usize])
+                    .collect(),
+                None => rhs.to_vec(),
+            };
+            supernodal::solve(raw, tree, &self.values, &mut x, self.par.degree());
+            match symbolic.perm() {
+                Some(perm) => {
+                    for (&old, &value) in perm.arrays().0.iter().zip(&x) {
+                        rhs[old as usize] = value;
+                    }
+                }
+                None => rhs.copy_from_slice(&x),
+            }
+            return Ok(());
+        }
         let factor = faer::sparse::linalg::cholesky::LdltRef::new(symbolic, &self.values);
         let scratch = symbolic.solve_in_place_scratch::<f64>(1, self.par);
-        let mut buffer =
-            MemBuffer::try_new(scratch).map_err(|_| numerical("out of memory in the solve"))?;
+        let mut buffer = MemBuffer::try_new(scratch).map_err(|_| {
+            numerical(
+                plxs_core::Failure::OutOfMemory,
+                "out of memory in the solve",
+            )
+        })?;
         let mut x = faer::MatMut::from_column_major_slice_mut(rhs, n, 1);
         factor.solve_in_place_with_conj(
             faer::Conj::No,

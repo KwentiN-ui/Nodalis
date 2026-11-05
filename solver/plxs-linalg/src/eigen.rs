@@ -185,9 +185,12 @@ impl ShiftInvertLanczos {
         }
         self.solver.analyze(k.pattern())?;
         self.solver.factorize(&shifted).map_err(|e| match e {
-            Error::Numerical { message, .. } => Error::Numerical {
+            Error::Numerical {
+                    failure, message, ..
+            } => Error::Numerical {
                 step: 0,
                 increment: 0,
+                failure,
                 message: format!(
                     "{message}; the stiffness matrix is singular at the shift {shift:e} (free structure or insufficient constraints)"
                 ),
@@ -322,9 +325,12 @@ impl ShiftInvertLanczos {
         if !(factorized && self.solver.is_factorized()) {
             self.solver.analyze(k.pattern())?;
             self.solver.factorize(k).map_err(|e| match e {
-                Error::Numerical { message, .. } => Error::Numerical {
+                Error::Numerical {
+                    failure, message, ..
+                } => Error::Numerical {
                     step: 0,
                     increment: 0,
+                    failure,
                     message: format!(
                         "{message}; the model is probably not sufficiently constrained"
                     ),
@@ -337,6 +343,7 @@ impl ShiftInvertLanczos {
             return Err(Error::Numerical {
                 step: 0,
                 increment: 0,
+                failure: plxs_core::Failure::NotPositiveDefinite,
                 message: "the stiffness matrix is not positive definite; buckling needs a stable reference state".into(),
             });
         }
@@ -795,11 +802,33 @@ impl Lanczos {
                 return Err(Error::Numerical {
                     step: 0,
                     increment: 0,
+                    failure: plxs_core::Failure::Eigenvalues,
                     message: format!(
                         "the eigenvalue iteration did not converge after {} restarts",
                         self.restarts
                     ),
                 });
+            }
+            if std::env::var("PLXS_LANCZOS_TRACE").is_ok() {
+                let (thetas, _, residuals) = self.ritz();
+                let order = Self::order(&thetas, &preference);
+                let shown: Vec<String> = order
+                    .iter()
+                    .take(6)
+                    .map(|&i| format!("{:.6e} ({:.1e})", thetas[i], residuals[i] / thetas[i].abs()))
+                    .collect();
+                let extremes = (
+                    thetas.iter().cloned().fold(f64::INFINITY, f64::min),
+                    thetas.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+                );
+                eprintln!(
+                    "lanczos: restart {} after {} steps: {} | range {:.3e}..{:.3e}",
+                    self.restarts,
+                    self.steps,
+                    shown.join(", "),
+                    extremes.0,
+                    extremes.1
+                );
             }
             // Thick restart: keep the wanted Ritz vectors plus a buffer, leaving room for
             // new vectors.

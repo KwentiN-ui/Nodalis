@@ -56,7 +56,11 @@ pub enum DiagnosticCode {
     Input,
     /// The model is complete, but the solver cannot compute it (yet).
     Unsupported,
-    /// Another error of the solver.
+    /// A numerical failure of the run: no convergence, a singular matrix, too little memory.
+    Numerical(crate::error::Failure),
+    /// A file of the job could not be read or written.
+    Files,
+    /// Another error of the solver (the run was stopped, the solver failed).
     Solver,
     /// Size of the factorized stiffness matrix: equations and memory.
     FactorSize { equations: usize, bytes: u64 },
@@ -115,9 +119,16 @@ impl Diagnostic {
             | Error::UndefinedReference { .. }
             | Error::Duplicate { .. } => DiagnosticCode::Input,
             Error::Unsupported(_) => DiagnosticCode::Unsupported,
-            Error::Numerical { .. } | Error::Io { .. } | Error::Cancelled => DiagnosticCode::Solver,
+            Error::Numerical { failure, .. } => DiagnosticCode::Numerical(*failure),
+            Error::Io { .. } => DiagnosticCode::Files,
+            Error::Cancelled => DiagnosticCode::Solver,
         };
-        let diagnostic = Self::new(code, Severity::Error, error.to_string());
+        let mut diagnostic = Self::new(code, Severity::Error, error.to_string());
+        if let Error::Numerical { step, .. } = error.plain()
+            && *step > 0
+        {
+            diagnostic.step = Some(*step);
+        }
         match error.item() {
             Some(item) => diagnostic.concerning(item.clone()),
             None => diagnostic,

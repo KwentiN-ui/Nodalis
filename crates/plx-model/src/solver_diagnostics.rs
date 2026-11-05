@@ -6,7 +6,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use plx_mesh::FeMesh;
-use plxs_core::{Diagnostic, DiagnosticCode, ItemRef, Severity as SolverSeverity};
+use plxs_core::{
+    Diagnostic, DiagnosticCode, Divergence, Failure, ItemRef, Severity as SolverSeverity, Stop,
+};
 
 use crate::checks::{Finding, Problem, describe_motions};
 use crate::{FeModel, ModelItem, ModelSpace};
@@ -141,10 +143,35 @@ pub fn diagnose_solver_check(
                     ));
                 }
             }
-            DiagnosticCode::Input | DiagnosticCode::Unsupported | DiagnosticCode::Solver => {
+            DiagnosticCode::Numerical(failure) => {
+                let (problem, detail) = explain_failure(*failure, diagnostic, fe, has_contact);
+                findings.push(Finding::new(ModelItem::Analysis, problem, detail.clone()));
+                // The step it happened in, through the lowering's table.
+                let step = (diagnostic.step).and_then(|s| {
+                    let index = (s as usize).checked_sub(1)?;
+                    match origins.get(&ItemRef::Step(index)) {
+                        Some(ModelItem::Step(step)) => Some(step),
+                        _ if origins.is_empty() => active.get(index).copied(),
+                        _ => None,
+                    }
+                });
+                if let Some(step) = step {
+                    findings.push(Finding::new(ModelItem::Step(step), problem, detail));
+                }
+            }
+            DiagnosticCode::Input
+            | DiagnosticCode::Unsupported
+            | DiagnosticCode::Files
+            | DiagnosticCode::Solver => {
+                let problem = match diagnostic.code {
+                    DiagnosticCode::Input => Problem::SolverInput,
+                    DiagnosticCode::Unsupported => Problem::SolverUnsupported,
+                    DiagnosticCode::Files => Problem::SolverFiles,
+                    _ => Problem::SolverError,
+                };
                 findings.push(Finding::new(
                     ModelItem::Analysis,
-                    Problem::SolverError,
+                    problem,
                     diagnostic.message.clone(),
                 ));
                 // The item the solver names: an element by its part, the rest by the
@@ -157,17 +184,105 @@ pub fn diagnose_solver_check(
                     None => None,
                 };
                 if let Some(item) = item.filter(|&i| i != ModelItem::Analysis) {
-                    findings.push(Finding::new(
-                        item,
-                        Problem::SolverError,
-                        diagnostic.message.clone(),
-                    ));
+                    findings.push(Finding::new(item, problem, diagnostic.message.clone()));
                 }
             }
             DiagnosticCode::NearlySingular | DiagnosticCode::FactorSize { .. } => {}
         }
     }
     findings
+}
+
+/// The problem a numerical failure of the solver stands for, and the detail: the solver's
+/// message without its `*ERROR: ` and what it means for this model.
+fn explain_failure(
+    failure: Failure,
+    diagnostic: &Diagnostic,
+    fe: &FeModel,
+    has_contact: bool,
+) -> (Problem, String) {
+    let message = diagnostic.message.trim();
+    let message = message.strip_prefix("*ERROR:").unwrap_or(message).trim();
+    let with = |meaning: &str| {
+        if meaning.is_empty() {
+            message.to_string()
+        } else {
+            format!("{message}. {meaning}")
+        }
+    };
+    match failure {
+        Failure::NoConvergence(c) => {
+            let stop = match c.stop {
+                Stop::Cutbacks => "smaller increments did not help either",
+                Stop::MinimumIncrement => "the increment fell below the minimum",
+                Stop::FixedIncrement => "the increment size is fixed (Incrementation Direct)",
+            };
+            if matches!(
+                c.cause,
+                Divergence::Temperatures | Divergence::ThermalContact
+            ) {
+                let what = if c.cause == Divergence::ThermalContact {
+                    "The contact of the heat transfer step did not settle"
+                } else {
+                    "The temperatures did not settle"
+                };
+                return (Problem::HeatNoConvergence, with(&format!("{what}; {stop}")));
+            }
+            let plastic = fe.materials.iter().any(|m| m.plastic.is_some());
+            let cause = match c.cause {
+                Divergence::ResidualGrows => {
+                    if plastic {
+                        "The residual force grew: the load may exceed the strength of the \
+                         structure (plastic collapse) or its buckling load"
+                    } else {
+                        "The residual force grew: the load may exceed the buckling load, or \
+                         the structure snaps through"
+                    }
+                }
+                Divergence::IterationLimit => "The iterations ran out before the forces balanced",
+                Divergence::TooSlow => "The iterations converged too slowly to finish in time",
+                Divergence::NotFinite => {
+                    "The solution grew without bound: a part moves without resistance or \
+                     a material constant is wrong"
+                }
+                Divergence::CreepTolerance => {
+                    "The creep strain changes faster than the creep tolerance allows, even \
+                     in small increments"
+                }
+                Divergence::Equations => "The equations of an iteration could not be solved",
+                Divergence::Temperatures | Divergence::ThermalContact => unreachable!(),
+            };
+            if c.contact && c.contact_changing {
+                (
+                    Problem::ContactNoConvergence,
+                    with(&format!(
+                        "The contact status was still changing in the last iterations; {stop}"
+                    )),
+                )
+            } else if c.contact || has_contact {
+                (
+                    Problem::NoConvergence,
+                    with(&format!(
+                        "{cause}; {stop}. The contact status had settled, so the cause is \
+                         more likely the load, the material or the supports than the contact"
+                    )),
+                )
+            } else {
+                (Problem::NoConvergence, with(&format!("{cause}; {stop}")))
+            }
+        }
+        Failure::IncrementLimit => (Problem::IncrementLimit, with("")),
+        Failure::Singular => (
+            Problem::RigidBodyMotion,
+            with("A part or a degree of freedom is not held: the stiffness matrix is singular"),
+        ),
+        Failure::NotPositiveDefinite => (Problem::NotPositiveDefinite, with("")),
+        Failure::OutOfMemory => (Problem::OutOfMemory, with("")),
+        Failure::IterativeSolver => (Problem::IterativeSolverFailed, with("")),
+        Failure::Eigenvalues => (Problem::EigenvaluesNotFound, with("")),
+        Failure::Resonance => (Problem::UndampedResonance, with("")),
+        Failure::Internal => (Problem::SolverError, with("")),
+    }
 }
 
 /// Parts by index that contain each node.
@@ -254,6 +369,120 @@ mod tests {
             describe_motions(ModelSpace::ThreeD, &free),
             "rotation about Z free"
         );
+    }
+
+    fn failed(failure: Failure, step: Option<u32>) -> Diagnostic {
+        let mut d = Diagnostic::new(
+            DiagnosticCode::Numerical(failure),
+            SolverSeverity::Error,
+            "*ERROR: no convergence: no convergence after 16 iterations; more than 5 cutbacks \
+             in one increment (step 1, increment 1)",
+        );
+        d.step = step;
+        d
+    }
+
+    fn convergence(contact: bool, contact_changing: bool) -> Failure {
+        Failure::NoConvergence(plxs_core::Convergence {
+            cause: Divergence::IterationLimit,
+            stop: Stop::Cutbacks,
+            contact,
+            contact_changing,
+        })
+    }
+
+    /// A failed increment whose contact status still changed is a contact problem, at the
+    /// analysis and at its step; with a settled contact it is the general one, and the
+    /// detail says why the contact is not the likely cause.
+    #[test]
+    fn a_failed_increment_is_explained_by_its_contact_status() {
+        let mut fe = FeModel::default();
+        fe.steps.push(crate::Step::new_static("Step-1"));
+        let mut origins = Origins::default();
+        origins.insert(ItemRef::Step(0), ModelItem::Step(0));
+        let mesh = FeMesh::default();
+        let found = diagnose_solver_check(
+            &[failed(convergence(true, true), Some(1))],
+            &mesh,
+            &fe,
+            &origins,
+        );
+        let items: Vec<(ModelItem, Problem)> = found.iter().map(|f| (f.item, f.problem)).collect();
+        assert_eq!(
+            items,
+            vec![
+                (ModelItem::Analysis, Problem::ContactNoConvergence),
+                (ModelItem::Step(0), Problem::ContactNoConvergence),
+            ]
+        );
+        assert!(
+            found[0]
+                .detail
+                .starts_with("no convergence: no convergence after 16"),
+            "{}",
+            found[0].detail
+        );
+        assert!(
+            found[0].detail.contains("still changing"),
+            "{}",
+            found[0].detail
+        );
+
+        let found = diagnose_solver_check(
+            &[failed(convergence(true, false), Some(1))],
+            &mesh,
+            &fe,
+            &origins,
+        );
+        assert_eq!(found[0].problem, Problem::NoConvergence);
+        assert!(
+            found[0].detail.contains("had settled"),
+            "{}",
+            found[0].detail
+        );
+    }
+
+    /// Every kind of failure has its own explanation; only a failure inside the solver is
+    /// the general solver error.
+    #[test]
+    fn every_failure_has_its_own_problem() {
+        let fe = FeModel::default();
+        let mesh = FeMesh::default();
+        let origins = Origins::default();
+        let problem = |failure: Failure| {
+            diagnose_solver_check(&[failed(failure, None)], &mesh, &fe, &origins)[0].problem
+        };
+        for (failure, expected) in [
+            (convergence(false, false), Problem::NoConvergence),
+            (Failure::IncrementLimit, Problem::IncrementLimit),
+            (Failure::Singular, Problem::RigidBodyMotion),
+            (Failure::NotPositiveDefinite, Problem::NotPositiveDefinite),
+            (Failure::OutOfMemory, Problem::OutOfMemory),
+            (Failure::IterativeSolver, Problem::IterativeSolverFailed),
+            (Failure::Eigenvalues, Problem::EigenvaluesNotFound),
+            (Failure::Resonance, Problem::UndampedResonance),
+            (Failure::Internal, Problem::SolverError),
+            (
+                Failure::NoConvergence(plxs_core::Convergence {
+                    cause: Divergence::Temperatures,
+                    stop: Stop::MinimumIncrement,
+                    contact: false,
+                    contact_changing: false,
+                }),
+                Problem::HeatNoConvergence,
+            ),
+        ] {
+            assert_eq!(problem(failure), expected, "{failure:?}");
+        }
+        for (code, expected) in [
+            (DiagnosticCode::Input, Problem::SolverInput),
+            (DiagnosticCode::Unsupported, Problem::SolverUnsupported),
+            (DiagnosticCode::Files, Problem::SolverFiles),
+        ] {
+            let d = Diagnostic::new(code, SolverSeverity::Error, "*ERROR: x");
+            let found = diagnose_solver_check(&[d], &mesh, &fe, &origins);
+            assert_eq!(found[0].problem, expected);
+        }
     }
 
     /// The items the solver names lead to the model's through the lowering's table: an

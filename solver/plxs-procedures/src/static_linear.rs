@@ -234,9 +234,12 @@ impl StaticLinear {
                     equations
                         .prepare(&mut ctx.solver, &k_red, coordinates, true, progress)
                         .map_err(|e| match e {
-                            Error::Numerical { message, .. } => Error::Numerical {
+                            Error::Numerical {
+                                    failure, message, ..
+                            } => Error::Numerical {
                                 step: ctx.step_number,
                                 increment,
+                                failure,
                                 message: if equations.is_iterative() {
                                     message
                                 } else {

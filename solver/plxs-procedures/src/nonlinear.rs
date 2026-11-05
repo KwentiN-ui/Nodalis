@@ -19,7 +19,7 @@ use plxs_assembly::{
 };
 use plxs_constraints::ConstraintSet;
 use plxs_core::step::{DefaultAmplitude, Incrementation, Procedure as ProcedureKind};
-use plxs_core::{Error, Progress, ProgressEvent, Result, Step};
+use plxs_core::{Convergence, Divergence, Error, Progress, ProgressEvent, Result, Step, Stop};
 use plxs_linalg::SparseMatrix;
 use plxs_linalg::Unknowns;
 use plxs_output::{CvgRow, StaRow};
@@ -131,10 +131,11 @@ impl Controls {
 
 /// Why an attempt at an increment failed.
 enum Failure {
-    /// The residual grew in two consecutive iterations, or the iteration limit was hit.
-    Diverging(String),
+    /// The residual grew in two consecutive iterations, the iteration limit was hit or the
+    /// correction is not finite; whether the contact status changed in the last iteration.
+    Diverging(Divergence, String, bool),
     /// The logarithmic estimate predicts too many iterations.
-    TooSlow(String),
+    TooSlow(String, bool),
     /// The creep strain changed more than `CETOL` allows (visco steps).
     CreepTolerance { error: f64 },
 }
@@ -284,6 +285,7 @@ impl Procedure for NonlinearStatic {
             if increment > step.max_increments {
                 return Ok(StepOutcome::Diverged {
                     increment,
+                    failure: plxs_core::Failure::IncrementLimit,
                     message: format!(
                         "more than INC={} increments are needed; increase INC on *STEP",
                         step.max_increments
@@ -391,25 +393,44 @@ impl Procedure for NonlinearStatic {
                 match result {
                     Ok(converged) => break converged,
                     Err(failure) => {
-                        let (factor, reason) = match &failure {
-                            Failure::Diverging(why) => (controls.cutback_divergence, why.clone()),
-                            Failure::TooSlow(why) => (controls.cutback_slow, why.clone()),
+                        let (factor, reason, cause, contact_changing) = match &failure {
+                            Failure::Diverging(cause, why, changing) => {
+                                (controls.cutback_divergence, why.clone(), *cause, *changing)
+                            }
+                            Failure::TooSlow(why, changing) => (
+                                controls.cutback_slow,
+                                why.clone(),
+                                Divergence::TooSlow,
+                                *changing,
+                            ),
                             Failure::CreepTolerance { error } => (
                                 (0.8 * cetol / error).clamp(0.1, 0.9),
                                 format!(
                                     "creep strain change {error:.3e} exceeds CETOL={cetol:.3e}"
                                 ),
+                                Divergence::CreepTolerance,
+                                false,
                             ),
+                        };
+                        let failed = |stop| {
+                            plxs_core::Failure::NoConvergence(Convergence {
+                                cause,
+                                stop,
+                                contact: has_contact,
+                                contact_changing,
+                            })
                         };
                         if direct {
                             return Ok(StepOutcome::Diverged {
                                 increment,
+                                failure: failed(Stop::FixedIncrement),
                                 message: format!("{reason}; the increment size is fixed (DIRECT)"),
                             });
                         }
                         if attempt > controls.max_cutbacks {
                             return Ok(StepOutcome::Diverged {
                                 increment,
+                                failure: failed(Stop::Cutbacks),
                                 message: format!(
                                     "{reason}; more than {} cutbacks in one increment",
                                     controls.max_cutbacks
@@ -426,6 +447,7 @@ impl Procedure for NonlinearStatic {
                         if dt < minimum {
                             return Ok(StepOutcome::Diverged {
                                 increment,
+                                failure: failed(Stop::MinimumIncrement),
                                 message: format!(
                                     "{reason}; the increment size {dt:.3e} fell below the minimum {minimum:.3e}"
                                 ),
@@ -625,6 +647,8 @@ impl NonlinearStatic {
         let mut last_correction = f64::INFINITY;
         let mut previous_correction = f64::INFINITY;
         let mut acting: Option<Vec<u8>> = None;
+        // The last iteration in which the contact status changed.
+        let mut last_change: Option<u32> = None;
         let mut iteration = 0u32;
         loop {
             let started = Instant::now();
@@ -668,6 +692,11 @@ impl NonlinearStatic {
             ctx.profile.add(Phase::Assembly, started);
             let gaps_changed = acting.as_ref().is_some_and(|a| *a != status);
             acting = Some(status);
+            if gaps_changed {
+                last_change = Some(iteration);
+            }
+            // The contact status changed in one of the last three iterations.
+            let changing = last_change.is_some_and(|i| iteration - i <= 2);
             let flux = if output.flux_count > 0 {
                 output.flux_sum / output.flux_count as f64
             } else {
@@ -770,7 +799,9 @@ impl NonlinearStatic {
                     && residuals[n - 2] > residuals[n - 3]
                 {
                     return Ok(Err(Failure::Diverging(
+                        Divergence::ResidualGrows,
                         "the residual force increased in two consecutive iterations".into(),
+                        changing,
                     )));
                 }
                 if iteration >= controls.estimate_after && n >= 2 && !direct && !gaps_changed {
@@ -779,18 +810,25 @@ impl NonlinearStatic {
                     if r1 > 0.0 && r0 > 0.0 && r1 < r0 && target > 0.0 {
                         let estimate = f64::from(iteration) + (target / r1).ln() / (r1 / r0).ln();
                         if estimate > f64::from(controls.max_iterations) {
-                            return Ok(Err(Failure::TooSlow(format!(
-                                "about {} iterations would be needed to converge",
-                                estimate.ceil()
-                            ))));
+                            return Ok(Err(Failure::TooSlow(
+                                format!(
+                                    "about {} iterations would be needed to converge",
+                                    estimate.ceil()
+                                ),
+                                changing,
+                            )));
                         }
                     }
                 }
                 if iteration >= controls.max_iterations {
-                    return Ok(Err(Failure::Diverging(format!(
-                        "no convergence after {} iterations",
-                        controls.max_iterations
-                    ))));
+                    return Ok(Err(Failure::Diverging(
+                        Divergence::IterationLimit,
+                        format!(
+                            "no convergence after {} iterations",
+                            controls.max_iterations
+                        ),
+                        changing,
+                    )));
                 }
             }
 
@@ -810,9 +848,12 @@ impl NonlinearStatic {
             equations
                 .prepare(&mut ctx.solver, &k_reduced, coordinates, true, &mut sink)
                 .map_err(|e| match e {
-                    Error::Numerical { message, .. } => Error::Numerical {
+                    Error::Numerical {
+                        failure, message, ..
+                    } => Error::Numerical {
                         step: ctx.step_number,
                         increment,
+                        failure,
                         message: if equations.hints_constraints() {
                             format!("{message}; the model is probably not sufficiently constrained")
                         } else {
@@ -862,12 +903,37 @@ impl NonlinearStatic {
                 plxs_linalg::gmres(&apply, &precondition, &residual, 1e-10, 60, 300)?.0
             };
             ctx.profile.add(Phase::Solve, started);
-            let du = set.expand(&dv, &vec![0.0; total_dofs]);
+            let mut du = set.expand(&dv, &vec![0.0; total_dofs]);
+            // A correction that drives contact points deep into the master (a body held
+            // only by weak springs until it touches) is shortened; see
+            // `ContactModel::step_limit`.
+            if !ctx.contact.is_empty() {
+                let full: Vec<f64> = if pending_g {
+                    du.iter().zip(&delta_g).map(|(a, b)| a + b).collect()
+                } else {
+                    du.clone()
+                };
+                let work: f64 = du.iter().zip(&residual_full).map(|(d, r)| d * r).sum();
+                let factor = ctx.contact.step_limit(
+                    &ctx.model.nodes.coordinates,
+                    &u,
+                    &full,
+                    &ctx.state.contact,
+                    work,
+                );
+                if factor < 1.0 {
+                    for d in &mut du {
+                        *d *= factor;
+                    }
+                }
+            }
             previous_correction = last_correction;
             last_correction = du.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
             if !last_correction.is_finite() {
                 return Ok(Err(Failure::Diverging(
+                    Divergence::NotFinite,
                     "the solution correction is not finite".into(),
+                    false,
                 )));
             }
             for (ui, d) in u.iter_mut().zip(&du) {

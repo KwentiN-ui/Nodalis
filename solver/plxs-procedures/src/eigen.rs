@@ -31,7 +31,7 @@ use plxs_constraints::{ConstraintSet, ModelConstraints};
 use plxs_core::results::{IncrementKind, ResultsIncrement};
 use plxs_core::state::{IntegrationPointField, NodalField, StoredModes};
 use plxs_core::step::{EquationSolver, Procedure as ProcedureKind, SolverMode};
-use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Step};
+use plxs_core::{Error, Failure, Model, Progress, ProgressEvent, Result, Step};
 use plxs_linalg::Unknowns;
 use plxs_linalg::{LanczosOptions, ShiftInvertLanczos, SparseMatrix};
 use plxs_output::{EigenTable, StaRow};
@@ -269,22 +269,26 @@ pub(crate) fn lanczos_modes(
                     Ok(p) => return Ok(p),
                     // A singular stiffness (free structure): the factorization says so, the
                     // iteration breaks down or does not converge.
-                    Err(Error::Numerical { message, .. })
-                        if (message.contains("singular") || lanczos.is_iterative())
-                            && lower_shift.is_none() =>
+                    Err(Error::Numerical {
+                        failure, message, ..
+                    }) if (message.contains("singular") || lanczos.is_iterative())
+                        && lower_shift.is_none() =>
                     {
                         progress.event(ProgressEvent::Info(format!(
                             "shift {shift:e}: {message}; trying a negative shift"
                         )));
-                        last_error = Some(message);
+                        last_error = Some((failure, message));
                     }
                     Err(e) => return Err(e),
                 }
             }
+            let (failure, message) =
+                last_error.unwrap_or_else(|| (Failure::Eigenvalues, "no eigenvalues found".into()));
             Err(Error::Numerical {
                 step: ctx.step_number,
                 increment: 1,
-                message: last_error.unwrap_or_else(|| "no eigenvalues found".into()),
+                failure,
+                message,
             })
         },
     )?;
@@ -607,9 +611,12 @@ impl Procedure for BuckleProcedure {
         equations
             .prepare(&mut ctx.solver, &k_free, coordinates, true, progress)
             .map_err(|e| match e {
-                Error::Numerical { message, .. } => Error::Numerical {
+                Error::Numerical {
+                    failure, message, ..
+                } => Error::Numerical {
                     step: ctx.step_number,
                     increment: 1,
+                    failure,
                     message: if equations.hints_constraints() {
                         format!("{message}; the model is probably not sufficiently constrained")
                     } else {

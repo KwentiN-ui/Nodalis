@@ -319,18 +319,7 @@ fn message(error: &Error) -> String {
 }
 
 fn with_message(error: Error, f: impl FnOnce(&str) -> String) -> Error {
-    match error {
-        Error::Numerical {
-            step,
-            increment,
-            message,
-        } => Error::Numerical {
-            step,
-            increment,
-            message: f(&message),
-        },
-        other => other,
-    }
+    error.map_message(|message| f(&message))
 }
 
 /// The automatic choice for a system of `k`'s pattern: whether its factor (estimated by
@@ -381,14 +370,7 @@ impl Progress for FirstOrWarnings<'_> {
 
 /// A numerical error of the linear solver, placed in the step and increment it happened in.
 pub fn in_increment(error: Error, step: u32, increment: u32) -> Error {
-    match error {
-        Error::Numerical { message, .. } => Error::Numerical {
-            step,
-            increment,
-            message,
-        },
-        other => other,
-    }
+    error.in_increment(step, increment)
 }
 
 #[cfg(test)]

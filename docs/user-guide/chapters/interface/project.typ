@@ -321,7 +321,7 @@ with #ui("<block> updated").
 
 The project window has its own monitor, like the monitor of an analysis window (@monitor) but
 for all analyses of the project. It is the #ui("Analyses") tab of the output pane below the
-schematic and comes to the front when an update or #ui("Solve") on a block starts;
+schematic (@output-pane) and opens when an update or #ui("Solve") on a block starts;
 #ui("Monitor") or #ui("Monitor") on the ribbon switches between it
 and the #ui("Output") tab.
 

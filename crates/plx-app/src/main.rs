@@ -50,6 +50,7 @@ mod motion_preview;
 mod node_icons;
 mod node_picker;
 mod numeric;
+mod output_news;
 mod overlay;
 mod parameter_set;
 mod path_plot;
