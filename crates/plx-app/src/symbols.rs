@@ -251,6 +251,43 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     add(center, DVec3::from(force), SymbolShape::Arrow);
                 }
             }
+            // A remote force: an arrow for the force and one for the moment at its point,
+            // with lines to it from nodes spread over the region; at a reference point the
+            // arrows alone.
+            Kind::Load(LoadKind::RemoteForce(ref remote)) => {
+                let (centre, nodes) = match item.region.reference_point() {
+                    Some(name) => match model.fe.reference_point(name) {
+                        Some(point) => (DVec3::from(point.position), None),
+                        None => continue,
+                    },
+                    None => {
+                        let none = Default::default();
+                        let point = remote.point();
+                        let Ok(point) = point.resolve(&model.fe, &model.mesh, &item.region, &none)
+                        else {
+                            continue;
+                        };
+                        (DVec3::from(point.position), Some(point.nodes))
+                    }
+                };
+                let Ok((force, moment)) = remote.global(&model.fe, centre.into()) else {
+                    continue;
+                };
+                add(centre, DVec3::from(force), SymbolShape::Arrow);
+                add(centre, DVec3::from(moment), SymbolShape::MomentArrow);
+                let to = (centre - model.origin()).as_vec3();
+                let points = nodes.map_or_else(Vec::new, |nodes| {
+                    node_points(model, &Region::Nodes(nodes), &visible)
+                });
+                for index in sample(&points, DIVISIONS / 2.0) {
+                    symbols.push(Symbol {
+                        position: (points[index] - model.origin()).as_vec3(),
+                        direction: Vec3::ZERO,
+                        shape: SymbolShape::LineTo(to),
+                        color,
+                    });
+                }
+            }
             Kind::Load(LoadKind::PreTension {
                 value, direction, ..
             }) => {

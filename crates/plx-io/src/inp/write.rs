@@ -1885,60 +1885,63 @@ fn constraints(
                         reason,
                     }
                 })?;
-            let (reference, rotation) = (next_node, next_node + 1);
-            next_node += 2;
-            generated.nodes.push((reference, point.position));
-            generated.nodes.push((rotation, point.position));
-            sets.remote_points
-                .push((bc.region.clone(), remote.clone(), [reference, rotation]));
-            (sets.remote_names.entry(bc.name.clone())).or_insert(([reference, rotation], behavior));
-            if let Some([x, y, _]) = point.axes {
-                let set =
-                    sets.free_name("Internal_Selection", &format!("{}_Point", name(&bc.name)));
-                sets.node_sets
-                    .push((set.clone(), vec![reference, rotation]));
-                sets.transforms.push((set, Transform::Rectangular(x, y)));
-            }
-            let all_steps = sets.dofs.replace_held(held);
-            match behavior {
-                RemoteBehavior::Rigid => {
-                    let whole = remote.pinball.is_none()
-                        && point.nodes.len() == bc.region.nodes(sets.mesh).len();
-                    let region = if whole {
-                        bc.region.clone()
-                    } else {
-                        Region::Nodes(point.nodes.clone())
-                    };
-                    owners.resize(items.len(), None);
-                    let written = rigid_body(
-                        &mut items,
-                        sets,
-                        &bc.name,
-                        &region,
-                        point.position,
-                        point.axes,
-                        [reference, rotation],
-                    );
-                    sets.dofs.replace_held(all_steps);
-                    written?;
-                    owners.resize(items.len(), Some(ModelItem::BoundaryCondition(s, i)));
-                }
-                RemoteBehavior::Deformable => {
-                    let space = model.properties.space;
-                    for equation_terms in point.equations(sets.mesh, space) {
-                        let mut terms =
-                            remote_terms(&equation_terms, point.axes, [reference, rotation]);
-                        let mesh = sets.mesh;
-                        if (sets.dofs).claim_equation(&bc.name, &mut terms, |n| {
-                            n != reference && n != rotation && mesh.node(n).is_some()
-                        }) {
-                            items.push(ConstraintItem::Equation(equation(&terms)));
-                        }
-                    }
-                    sets.dofs.replace_held(all_steps);
-                }
-            }
+            let nodes = remote_point(
+                RemoteSource {
+                    item: &bc.name,
+                    region: &bc.region,
+                    spec: remote,
+                    behavior,
+                    owner: ModelItem::BoundaryCondition(s, i),
+                },
+                point,
+                held,
+                &mut next_node,
+                (&mut items, &mut owners),
+                sets,
+                model,
+                generated,
+            )?;
+            (sets.remote_names.entry(bc.name.clone())).or_insert((nodes, behavior));
         }
+    }
+    // A remote force drives its region from a point of its own the same way, or from the
+    // point of a remote displacement of the same region and point. A force on a reference
+    // point acts on its nodes and needs none.
+    for (s, i, region, force) in model.remote_forces() {
+        if region.reference_point().is_some() {
+            continue;
+        }
+        let spec = force.point();
+        if (sets.remote_points.iter()).any(|(r, p, _)| r == region && p.same_point(&spec)) {
+            continue;
+        }
+        let load = &model.steps[s].loads[i];
+        *lowering = Some(s);
+        let steps = model.remote_force_steps(region, force);
+        let excluded = model.directly_held_nodes_in(sets.mesh, |s| steps.contains(&s));
+        let held = model.held_translations_in(sets.mesh, |s| steps.contains(&s));
+        let point = (spec.resolve(model, sets.mesh, region, &excluded)).map_err(|reason| {
+            WriteError::InvalidLoad {
+                item: load.name.clone(),
+                reason,
+            }
+        })?;
+        remote_point(
+            RemoteSource {
+                item: &load.name,
+                region,
+                spec: &spec,
+                behavior: force.behavior,
+                owner: ModelItem::Load(s, i),
+            },
+            point,
+            held,
+            &mut next_node,
+            (&mut items, &mut owners),
+            sets,
+            model,
+            generated,
+        )?;
     }
     *lowering = None;
     for t in model.ties.iter().filter(|t| t.active) {
@@ -1946,6 +1949,91 @@ fn constraints(
     }
     owners.resize(items.len(), None);
     Ok((items, owners))
+}
+
+/// What a point of a remote displacement or remote force comes from: the item, its region,
+/// the point as a displacement and how the region follows it.
+struct RemoteSource<'r> {
+    item: &'r str,
+    region: &'r Region,
+    spec: &'r plx_model::Displacement,
+    behavior: RemoteBehavior,
+    owner: ModelItem,
+}
+
+/// Adds the reference and rotation node of a resolved point and couples the nodes of the
+/// region to it, rigidly or as averaging equations. `held` are the translations boundary
+/// conditions hold in the steps the point acts in, which the coupling leaves out. The
+/// point's nodes get the local directions of the point, if it has some.
+#[allow(clippy::too_many_arguments)]
+fn remote_point(
+    source: RemoteSource,
+    point: plx_model::RemotePoint,
+    held: BTreeMap<NodeId, [bool; 3]>,
+    next_node: &mut NodeId,
+    (items, owners): (&mut Vec<ConstraintItem>, &mut Vec<Option<ModelItem>>),
+    sets: &mut Sets,
+    model: &FeModel,
+    generated: &mut constraints::Generated,
+) -> Result<[NodeId; 2], WriteError> {
+    let RemoteSource {
+        item,
+        region,
+        spec,
+        behavior,
+        owner,
+    } = source;
+    let (reference, rotation) = (*next_node, *next_node + 1);
+    *next_node += 2;
+    generated.nodes.push((reference, point.position));
+    generated.nodes.push((rotation, point.position));
+    sets.remote_points
+        .push((region.clone(), spec.clone(), [reference, rotation]));
+    if let Some([x, y, _]) = point.axes {
+        let set = sets.free_name("Internal_Selection", &format!("{}_Point", name(item)));
+        sets.node_sets
+            .push((set.clone(), vec![reference, rotation]));
+        sets.transforms.push((set, Transform::Rectangular(x, y)));
+    }
+    let all_steps = sets.dofs.replace_held(held);
+    match behavior {
+        RemoteBehavior::Rigid => {
+            let whole =
+                spec.pinball.is_none() && point.nodes.len() == region.nodes(sets.mesh).len();
+            let region = if whole {
+                region.clone()
+            } else {
+                Region::Nodes(point.nodes.clone())
+            };
+            owners.resize(items.len(), None);
+            let written = rigid_body(
+                items,
+                sets,
+                item,
+                &region,
+                point.position,
+                point.axes,
+                [reference, rotation],
+            );
+            sets.dofs.replace_held(all_steps);
+            written?;
+            owners.resize(items.len(), Some(owner));
+        }
+        RemoteBehavior::Deformable => {
+            let space = model.properties.space;
+            for equation_terms in point.equations(sets.mesh, space) {
+                let mut terms = remote_terms(&equation_terms, point.axes, [reference, rotation]);
+                let mesh = sets.mesh;
+                if (sets.dofs).claim_equation(item, &mut terms, |n| {
+                    n != reference && n != rotation && mesh.node(n).is_some()
+                }) {
+                    items.push(ConstraintItem::Equation(equation(&terms)));
+                }
+            }
+            sets.dofs.replace_held(all_steps);
+        }
+    }
+    Ok([reference, rotation])
 }
 
 /// A tie of a slave surface glued to its master, with its cyclic symmetry model if it is
@@ -3049,6 +3137,57 @@ fn step_block<'f>(
                 for (dof, value) in (0..).zip(moment) {
                     if value != 0.0 && dof as usize + 4 <= dofs {
                         items.push(cload(target.clone(), first_dof + dof, value, &amplitude));
+                    }
+                }
+                vec![Card::Cload {
+                    op_new: false,
+                    items,
+                }]
+            }
+            LoadKind::RemoteForce(ref remote) => {
+                // The force acts on the reference node of the point, the moment on its
+                // rotation node, in the point's directions; a reference point takes them in
+                // global directions.
+                let (nodes, force, moment) = match load.region.reference_point() {
+                    Some(point) => {
+                        let nodes = sets.reference_nodes(&load.name, point)?;
+                        let position =
+                            (model.reference_point(point)).map_or([0.0; 3], |p| p.position);
+                        let (force, moment) =
+                            (remote.global(model, position)).map_err(|reason| {
+                                WriteError::InvalidLoad {
+                                    item: load.name.clone(),
+                                    reason,
+                                }
+                            })?;
+                        ([nodes.reference, nodes.rotation], force, moment)
+                    }
+                    None => {
+                        let spec = remote.point();
+                        let Some(&(_, _, nodes)) = (sets.remote_points.iter())
+                            .find(|(r, p, _)| *r == load.region && p.same_point(&spec))
+                        else {
+                            return Err(empty(&load.name, "nodes"));
+                        };
+                        let allowed = space.remote_dofs();
+                        let keep = |v: [f64; 3], offset: usize| {
+                            std::array::from_fn(|k| {
+                                if allowed.contains(&(k + offset)) {
+                                    v[k]
+                                } else {
+                                    0.0
+                                }
+                            })
+                        };
+                        (nodes, keep(remote.force, 0), keep(remote.moment, 3))
+                    }
+                };
+                let mut items = Vec::new();
+                for (node, values) in nodes.into_iter().zip([force, moment]) {
+                    for (dof, value) in (1..).zip(values) {
+                        if value != 0.0 {
+                            items.push(cload(NodeRef::Node(node), dof, value, &amplitude));
+                        }
                     }
                 }
                 vec![Card::Cload {

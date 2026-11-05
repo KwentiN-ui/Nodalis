@@ -152,6 +152,9 @@ step. A frequency step takes no loads.
     to the nodes (`*CLOAD`). With #ui("Apply to all nodes individually") the whole force acts
     at every node of the region instead, as a concentrated force in CalculiX; it is off by
     default.],
+  [Remote Force], [Force `F1` to `F3` and moment `M1` to `M3` at a point that the selected
+    faces, edges or points follow, rigidly or on average, as Ansys' remote force does
+    (@remote-force). The way to put a moment on faces of solids.],
   [Moment], [`M1`, `M2`, `M3` at the reference point of a rigid body (@rigid-body) or at every
     node of beams and shells, which have rotations. 3D models only.],
   [Pressure], [Pressure on faces; positive values push into the material (`*DLOAD`). A
@@ -203,6 +206,43 @@ selection of faces and edges carry the force.
 #screenshot("surface-traction-edge.png", [Force of 100 N along the free edge of a shell plate])
 
 #screenshot("force-dialog.png", [Force dialog with the Selection window])
+
+=== Remote force <remote-force>
+
+Nodes of solids have no rotations, so a #ui("Moment") cannot act on a face of a solid directly,
+and a #ui("Force") on a face acts at the face, not at a point away from it. A
+#ui("Remote Force") puts both on a point that the selection follows, the same point as that of a
+displacement on a point (@displacement-behavior): a torque on a shaft end, a bending moment on a
+flange, the force of a lever acting at its pin, a load on a bracket at the position of a part
+that is not modelled. Pick faces, edges or points like for a #ui("Force"); Nodalis adds the point
+and the coupling when the input file is written.
+
+#screenshot("remote-force.png", [Remote force with `F2` and a torque `M1` on the end face of
+  a solid beam: the arrows at the point with lines to the face])
+
+#fields(
+  [F1, F2, F3], [Force at the point, in the directions of the coordinate system. In plane
+    models `F1` and `F2`, in axisymmetric models on the full circumference.],
+  [M1, M2, M3], [Moment about the axes of the coordinate system through the point. Plane
+    models take `M3`, axisymmetric models none.],
+  [Behavior], [#ui("Rigid") (default): the selection keeps its shape and follows the point as a
+    rigid body (`*RIGID BODY`), which stiffens it. #ui("Deformable"): the point moves with the
+    area-weighted mean of the selection, which may deform (`*EQUATION`s, RBE3); the face takes
+    the load spread by area without being stiffened.],
+  [Coordinate system], [The directions of the components and of the coordinates below.],
+  [Location, Pinball region], [Where the point is and which nodes follow it, as for a
+    displacement on a point (@displacement-behavior). #ui("Point") shows the position in global
+    coordinates.],
+)
+
+A remote force with the same selection, behavior, coordinate system, location and pinball region
+as another remote force, also of another step, or a displacement on a point shares that point:
+a remote force and a remote displacement on one face act on the same rigid body. Like that of a
+displacement, the coupling belongs to the whole model and stays in steps without the load.
+Nodes held directly by a support in a step with the load are left out of the coupling. On the
+reference point of a rigid body the force and moment act on the rigid body itself, without a
+point of their own. The force and moment components have a #ui("P") button for parameter
+studies (@exposed-parameters).
 
 == Hiding symbols <hide-symbols>
 

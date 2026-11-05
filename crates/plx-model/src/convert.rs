@@ -197,6 +197,19 @@ impl FeModel {
                         c.value(value, quantity);
                     }
                     LoadKind::Force { value: force, .. } => c.all(force, Quantity::Force),
+                    LoadKind::RemoteForce(remote) => {
+                        c.all(&mut remote.force, Quantity::Force);
+                        c.all(&mut remote.moment, Quantity::Moment);
+                        c.option(&mut remote.pinball, Quantity::Length);
+                        if let Some(location) = &mut remote.location {
+                            if cylindrical.contains(&remote.system) {
+                                c.value(&mut location[0], Quantity::Length);
+                                c.value(&mut location[2], Quantity::Length);
+                            } else {
+                                c.all(location, Quantity::Length);
+                            }
+                        }
+                    }
                     LoadKind::Pressure(pressure) => c.value(pressure, Quantity::Pressure),
                     LoadKind::ConcentratedFlux(flux) => c.value(flux, Quantity::Power),
                     LoadKind::SurfaceFlux(flux) => c.value(flux, Quantity::HeatFlux),

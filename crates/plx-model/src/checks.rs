@@ -1714,6 +1714,26 @@ impl FeModel {
                 }
             }
         }
+        // A rigid remote force couples its selection to a point of its own, unless a remote
+        // displacement of the same region and point has it already.
+        let mut owned: Vec<crate::Displacement> =
+            points.iter().map(|(_, p)| (*p).clone()).collect();
+        let mut regions: Vec<&Region> = points.iter().map(|(r, _)| *r).collect();
+        for (s, i, region, remote) in self.remote_forces() {
+            let point = remote.point();
+            if remote.behavior != crate::RemoteBehavior::Rigid
+                || (regions.iter().zip(&owned)).any(|(r, p)| *r == region && p.same_point(&point))
+            {
+                continue;
+            }
+            regions.push(region);
+            owned.push(point);
+            if let Ok((point, _)) = self.remote_force_nodes(mesh, region, remote) {
+                let nodes = point.nodes.into_iter().collect();
+                let name = &self.steps[s].loads[i].name;
+                bodies.push((ModelItem::Load(s, i), name, nodes));
+            }
+        }
         if let Some(step) = (self.steps.iter()).find(|s| s.active && s.kind.nlgeom()) {
             let expanded = crate::expanded_nodes(mesh);
             for (item, name, nodes) in &bodies {
@@ -2376,7 +2396,10 @@ impl FeModel {
             let point_loads = step.kind.supports_loads()
                 && step.loads.iter().any(|load| {
                     load.active
-                        && matches!(load.kind, LoadKind::Force { .. } | LoadKind::Moment(_))
+                        && matches!(
+                            load.kind,
+                            LoadKind::Force { .. } | LoadKind::Moment(_) | LoadKind::RemoteForce(_)
+                        )
                         && load.region.nodes(mesh).iter().any(|n| nodes.contains(n))
                 });
             if point_loads {
@@ -2728,6 +2751,17 @@ impl FeModel {
             };
             for dof in (0..6).filter(|&d| held[d].is_some()) {
                 support(node, axes[dof % 3], dof >= 3);
+            }
+        }
+        // A rigid remote force joins its selection like a rigid body, holding nothing.
+        for (_, _, region, remote) in self.remote_forces().filter(|(t, ..)| *t == s) {
+            if remote.behavior != crate::RemoteBehavior::Rigid {
+                continue;
+            }
+            if let Ok((point, _)) = self.remote_force_nodes(mesh, region, remote) {
+                let tied = pieces(&Region::Nodes(point.nodes));
+                join(&mut ties, &tied, &[]);
+                join(&mut contacts, &tied, &[]);
             }
         }
         for tie in self.node_ties.iter().filter(|t| t.active) {

@@ -319,6 +319,18 @@ impl FeModel {
                             self.missing_amplitude([&load.amplitude, &load.factor_amplitude])
                         })
                         .or_else(|| self.missing_distribution(&load.distribution))
+                        .or_else(|| match &load.kind {
+                            // An unknown coordinate system, or no node in the pinball region.
+                            LoadKind::RemoteForce(remote)
+                                if load.region.reference_point().is_none() =>
+                            {
+                                (remote.point())
+                                    .resolve(self, mesh, &load.region, &Default::default())
+                                    .and_then(|point| remote.global(self, point.position))
+                                    .err()
+                            }
+                            _ => None,
+                        })
                 };
                 if let Some(reason) = reason {
                     invalid.push(Invalid {
