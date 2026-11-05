@@ -15,6 +15,7 @@ pub mod path;
 pub mod principal;
 pub mod saved_view;
 pub mod solver;
+pub mod steps;
 pub mod transformation;
 
 pub use derived::{add_derived_components, principal_values};

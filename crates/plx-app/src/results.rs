@@ -70,6 +70,8 @@ impl Deformation {
 /// Selection and display settings for the results of one `.frd` file.
 pub struct ResultsView {
     pub increments: Vec<Increment>,
+    /// The steps the increments belong to, see [`ResultsView::set_step_records`].
+    pub steps: plx_results::steps::ResultSteps,
     pub increment: usize,
     pub field: usize,
     pub component: usize,
@@ -204,8 +206,10 @@ impl Legend {
 
 impl ResultsView {
     pub fn new(increments: Vec<Increment>, bounds: Option<([f64; 3], [f64; 3])>) -> Self {
+        let steps = plx_results::steps::ResultSteps::new(&increments, &[], &[], None);
         let mut view = Self {
             increments,
+            steps,
             increment: 0,
             field: 0,
             component: 0,
@@ -861,6 +865,22 @@ impl ResultsView {
             }
             _ => None,
         }
+    }
+
+    /// Ties the increments to the steps of the FE model the solver recorded with them, see
+    /// [`plx_results::steps`].
+    pub fn set_step_records(
+        &mut self,
+        records: &[plx_results::steps::StepRecord],
+        convergence: &[plx_results::steps::IncrementRecord],
+        unconverged: Option<u32>,
+    ) {
+        self.steps = plx_results::steps::ResultSteps::new(
+            &self.increments,
+            records,
+            convergence,
+            unconverged,
+        );
     }
 
     /// Shows another increment, also while the animation window is open: the animation then

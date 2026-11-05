@@ -399,6 +399,9 @@ pub struct Continuation {
     /// The own steps of the analyses that continue it, after the index of the step of this
     /// one they follow: their sets go into its input file.
     pub dependent_steps: Vec<(usize, Vec<Step>)>,
+    /// The steps it takes over from the analysis it continues, by name, with the name of
+    /// that analysis.
+    pub inherited_steps: Vec<(String, String)>,
 }
 
 /// What the results of a step of another analysis are used for, by the slot they go to.

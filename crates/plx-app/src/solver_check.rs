@@ -162,7 +162,7 @@ fn solve(
 ) -> Result<FrdImport, String> {
     let lowered = plx_io::inp::lower_unvalidated(mesh, model, "Nodalis self-test")
         .map_err(|e| format!("Analysis not set up: {e}"))?;
-    let prepared = crate::analysis::prepare(lowered);
+    let prepared = crate::analysis::prepare(lowered, model, &[]);
     let mut job =
         Run::start_analysis(threads, dir, name, prepared).map_err(|e| format!("Start: {e}"))?;
     let status = job.wait();
@@ -227,7 +227,7 @@ pub(crate) fn solve_beam_built_in(dir: &Path) -> std::path::PathBuf {
     let output = plx_model::HistoryOutput::node("H-Output-1", Region::Nodes(fixed.collect()));
     fe.steps[0].history_outputs.push(output);
     let lowered = plx_io::inp::lower_unvalidated(&mesh, &fe, "built-in").unwrap();
-    let prepared = crate::analysis::prepare(lowered);
+    let prepared = crate::analysis::prepare(lowered, &fe, &[]);
     let mut run = Run::start_analysis(1, dir, "Beam", prepared).unwrap();
     assert_eq!(run.wait(), JobStatus::Completed, "{:?}", run.new_output());
     run.results().unwrap()

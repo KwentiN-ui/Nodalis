@@ -246,13 +246,52 @@ pub fn forget_steps(work_dir: &std::path::Path, name: &str) {
     let _ = std::fs::remove_dir_all(work_dir.join(format!("{}.steps", job_name(name))));
 }
 
-/// The lowered analysis for the solver, with its input text for reference.
-pub fn prepare(lowered: plx_io::inp::Lowered) -> plx_solve::Prepared {
+/// The lowered analysis for the solver, with its input text for reference and the steps of
+/// `fe` it was lowered from. `inherited` names the steps taken over from another analysis,
+/// with that analysis.
+pub fn prepare(
+    lowered: plx_io::inp::Lowered,
+    fe: &plx_model::FeModel,
+    inherited: &[(String, String)],
+) -> plx_solve::Prepared {
     plx_solve::Prepared {
+        steps: step_records(&lowered, fe, inherited),
         text: lowered.text(),
         analysis: lowered.analysis,
         warnings: lowered.warnings,
     }
+}
+
+/// The steps of `fe` with the solver's steps the lowering made of them, numbered from 1.
+/// Deactivated steps have none and are left out.
+pub fn step_records(
+    lowered: &plx_io::inp::Lowered,
+    fe: &plx_model::FeModel,
+    inherited: &[(String, String)],
+) -> Vec<plx_results::steps::StepRecord> {
+    let mut records: Vec<(usize, plx_results::steps::StepRecord)> = Vec::new();
+    for index in 0..lowered.analysis.steps.len() {
+        let origin = lowered.origins.get(&plxs_core::ItemRef::Step(index));
+        let Some(plx_model::ModelItem::Step(model)) = origin else {
+            continue;
+        };
+        let Some(step) = fe.steps.get(model) else {
+            continue;
+        };
+        let number = index as u32 + 1;
+        match records.iter_mut().find(|(m, _)| *m == model) {
+            Some((_, record)) => record.solver_steps.push(number),
+            None => {
+                let mut record =
+                    plx_results::steps::StepRecord::new(&step.name, &step.kind, vec![number]);
+                record.inherited_from = (inherited.iter())
+                    .find(|(name, _)| *name == step.name)
+                    .map(|(_, source)| source.clone());
+                records.push((model, record));
+            }
+        }
+    }
+    records.into_iter().map(|(_, record)| record).collect()
 }
 
 /// Initial temperatures taken from the results of another analysis.
@@ -370,8 +409,8 @@ impl Analysis {
             initial.apply(&mut lowered.analysis)?;
         }
         let overlaps = std::mem::take(&mut lowered.resolved_overlaps);
-        let origins = std::mem::take(&mut lowered.origins);
-        let prepared = prepare(lowered);
+        let origins = lowered.origins.clone();
+        let prepared = prepare(lowered, &fe, &continuation.inherited_steps);
         let copied = copy_result_files(&fe, work_dir);
         let job = if check_model {
             Run::check_analysis(solver.threads, work_dir, &job_name, prepared)
@@ -875,6 +914,45 @@ mod tests {
         };
         let output = solve_as(&target, &dir.join("Target"), "Target", &continuation);
         assert!(output.iter().any(|l| l.trim() == "STEP 3"), "{output:?}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The results keep the names of the model's steps: a deactivated step is left out of
+    /// the solver's numbering, and the steps taken over from another analysis say so.
+    #[test]
+    fn the_results_know_the_steps_of_the_model() {
+        let dir = std::env::temp_dir().join(format!("nodalis-step-records-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut model = pulled_cubes(0.03);
+        model.fe.steps[0].name = "Preload".into();
+        model.fe.steps[1].active = false;
+        model.fe.steps[2].name = "Pull".into();
+        let continuation = crate::links::Continuation {
+            inherited_steps: vec![("Preload".into(), "Assembly".into())],
+            ..Default::default()
+        };
+        solve_as(&model, &dir.join("Steps"), "Steps", &continuation);
+        let solved = plx_results::SolverResults::read(&dir.join("Steps/Steps.ndlr")).unwrap();
+        let records: Vec<(&str, &[u32])> = (solved.steps.iter())
+            .map(|r| (r.name.as_str(), r.solver_steps.as_slice()))
+            .collect();
+        assert_eq!(records, [("Preload", &[1][..]), ("Pull", &[2][..])]);
+        assert_eq!(solved.steps[0].inherited_from.as_deref(), Some("Assembly"));
+        assert_eq!(solved.steps[1].time_period, Some(1.0));
+        assert!(!solved.convergence.is_empty());
+        assert_eq!(solved.unconverged_step, None);
+        // The view of the results puts each increment into its step.
+        let units = plx_model::UnitSystem::default();
+        let loaded = crate::model::load(&dir.join("Steps/Steps.ndlr"), units).unwrap();
+        let view = loaded.model.results.unwrap();
+        let names: Vec<&str> = view.steps.steps.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["Preload", "Pull"]);
+        let last = view.increments.len() - 1;
+        assert_eq!(view.steps.step_of(last).unwrap().name, "Pull");
+        let place = view.steps.place(last).unwrap();
+        assert_eq!(place.total_time, Some(2.0));
+        assert_eq!(place.step_time, Some(1.0));
+        assert_eq!(place.attempts, Some(1));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
