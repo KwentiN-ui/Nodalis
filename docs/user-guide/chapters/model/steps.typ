@@ -116,6 +116,8 @@ preconditioner ends with "conjugate gradients and V-cycle on the graphics card" 
 "V-cycle on the graphics card", with the reason) and its name. If a card was found
 but cannot be used, for example because the model does not fit into its memory, the line
 says "V-cycle on the processor" with the reason, and the solve continues on the processor.
+The solver takes at most 60 % of the graphics memory the driver grants, so that the window
+and the desktop, which draw on the same card, keep enough of it.
 For measurements the environment variable `PLXS_GPU=off` keeps the cycle on the processor
 and `PLXS_GPU=on` uses any graphics adapter, including software renderers, for models of
 any size.

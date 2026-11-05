@@ -37,6 +37,8 @@ use crate::bsr::{Bsr, Scalar};
 /// Automatic mode: systems of at least this many unknowns go to the card.
 pub const GPU_FROM: usize = 100_000;
 /// Block rows per slice of the sliced storage (`SLICE` in the shaders).
+/// Percent of the card's memory budget the solver's buffers may take.
+const MEMORY_SHARE_PERCENT: u8 = 60;
 const SLICE: usize = 32;
 /// Block rows per window sorted by length.
 const WINDOW: usize = 256;
@@ -105,8 +107,15 @@ fn describe(info: &wgpu::AdapterInfo) -> String {
 fn open(any: bool) -> Result<Context, String> {
     let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
     descriptor.backends = wgpu::Backends::PRIMARY;
-    // No memory budget threshold: wgpu would apply it to the staging memory of uploads
-    // too, which on cards without resizable BAR is a heap of 256 MB.
+    // The solver's buffers stop at a share of the memory budget the driver reports, so
+    // that the user interface (which draws on the same card with a device of its own) and
+    // the desktop keep theirs: a card with 2 GB filled by a large model made the window's
+    // renderer fail and the desktop stutter. Uploads go in pieces of 16 MB, so the
+    // threshold also suits the small staging heap of cards without resizable BAR.
+    descriptor.memory_budget_thresholds = wgpu::MemoryBudgetThresholds {
+        for_resource_creation: Some(MEMORY_SHARE_PERCENT),
+        for_device_loss: None,
+    };
     let instance = wgpu::Instance::new(descriptor);
     let adapters = block_on(instance.enumerate_adapters(wgpu::Backends::PRIMARY));
     let rank = |t: wgpu::DeviceType| match t {
@@ -810,11 +819,14 @@ impl GpuCycle {
             vector_op(&mut ops, ADD, w.n, &w.t, None, &w.x, l, Coefficient::None);
             smooth(&mut ops, l, w, false);
         }
-        if let Some(e) = block_on(validation.pop()) {
-            return Err(e.to_string());
-        }
+        // Scopes pop innermost first. A buffer the card had no memory for makes every
+        // later use of it a validation error: the shortage is the reason to report.
+        let invalid = block_on(validation.pop());
         if let Some(e) = block_on(oom.pop()) {
-            return Err(format!("not enough memory on the card ({e})"));
+            return Err(format!("not enough free memory on the card ({e})"));
+        }
+        if let Some(e) = invalid {
+            return Err(e.to_string());
         }
         if let Some(e) = ctx.take_error() {
             return Err(e);
@@ -1176,11 +1188,14 @@ impl GpuCycle {
             scalar(3),
             update(1, &q),
         ]);
-        if let Some(e) = block_on(validation.pop()) {
-            return Err(e.to_string());
-        }
+        // Scopes pop innermost first. A buffer the card had no memory for makes every
+        // later use of it a validation error: the shortage is the reason to report.
+        let invalid = block_on(validation.pop());
         if let Some(e) = block_on(oom.pop()) {
-            return Err(format!("not enough memory on the card ({e})"));
+            return Err(format!("not enough free memory on the card ({e})"));
+        }
+        if let Some(e) = invalid {
+            return Err(e.to_string());
         }
         if let Some(e) = ctx.take_error() {
             return Err(e);
