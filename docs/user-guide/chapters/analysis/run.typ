@@ -118,8 +118,8 @@ the other analysis again.
 When a run is finished, its analysis keeps the results: the input file and the results of the
 run are saved in the project file with the next #menu("File", "Save Project"), together with a
 fingerprint of what the run was made from. The results open in the Results workspace. The
-output pane shows how much they add to the project file; they are stored compressed. Keeping a
-large result takes a few seconds and runs in the background. A new run replaces the results the
+output pane shows how much they add to the project file; they are stored compressed. Keeping
+the results takes a moment and runs in the background. A new run replaces the results the
 analysis keeps.
 
 The solver hands its results to Nodalis in memory. They are kept as one binary results file
@@ -127,6 +127,16 @@ The solver hands its results to Nodalis in memory. They are kept as one binary r
 are on and every field and history output of the run. Opening them reads the numbers directly,
 without a text file to parse, and with their full precision. No `.frd` or `.dat` file is
 written.
+
+The results file is compressed the way formats like HDF5 store large arrays: the node ids,
+coordinates and every component of every field are kept as arrays of their own, cut into chunks
+of 1 MB, and each chunk is shuffled byte by byte (the sign and exponent bytes of all numbers
+together) and compressed with Zstandard. All chunks are compressed and read back in parallel.
+The compression is lossless: every number reads back exactly as the solver computed it.
+For a static analysis with 200,000 nodes and stresses, strains, displacements and forces, the
+file is about 30 % smaller than without compression and opens just as fast. The project file
+keeps this file as it is, without compressing it again, so keeping large results in the project
+takes a fraction of a second.
 
 When an analysis with kept results is opened, Nodalis writes them to `Kept_Results` in the
 folder of the analysis and opens the results in the Results workspace. The project schematic

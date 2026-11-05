@@ -565,8 +565,9 @@ pub struct BoundResults {
     pub settings: Option<ResultsSettings>,
 }
 
-/// A file of [`BoundResults`]: its name and its content, deflated and base64 encoded so that
-/// it is a compact string in the project's RON.
+/// A file of [`BoundResults`]: its name and its content, base64 encoded so that it is a
+/// string in the project's RON. The results of the built-in solver (`.ndlr`) are compressed
+/// already and stored as they are, the other files deflated.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundFile {
     pub name: String,
@@ -672,6 +673,9 @@ fn unpack(file: &BoundFile, path: &Path) -> Result<Vec<u8>, ProjectError> {
     let compressed = BASE64
         .decode(&file.data)
         .map_err(|e| format(format!("bound file {}: {e}", file.name)))?;
+    if !deflated(Path::new(&file.name)) {
+        return Ok(compressed);
+    }
     let mut content = Vec::with_capacity(file.size as usize);
     DeflateDecoder::new(compressed.as_slice())
         .read_to_end(&mut content)
@@ -802,13 +806,18 @@ pub fn bind_results(
             }
             Err(e) => return Err(io(e)),
         };
-        // Level 3: a third of the time of the default level for a few percent more.
-        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::new(3));
-        encoder.write_all(&content).map_err(io)?;
-        let compressed = encoder.finish().map_err(io)?;
+        let size = content.len() as u64;
+        let compressed = if deflated(path) {
+            // Level 3: a third of the time of the default level for a few percent more.
+            let mut encoder = DeflateEncoder::new(Vec::new(), Compression::new(3));
+            encoder.write_all(&content).map_err(io)?;
+            encoder.finish().map_err(io)?
+        } else {
+            content
+        };
         let file = BoundFile {
             name: file_name(path).unwrap_or_default(),
-            size: content.len() as u64,
+            size,
             data: BASE64.encode(compressed),
         };
         if plx_results::solver::is_solver_results(path) {
@@ -905,6 +914,13 @@ pub fn restore_file(bound: &BoundResults, name: &str, path: &Path) -> Result<boo
         source,
     })?;
     Ok(true)
+}
+
+/// Whether a bound file is stored deflated: all but the results of the built-in solver,
+/// which their file compresses already (deflating them again takes seconds for large
+/// results and saves next to nothing).
+fn deflated(path: &Path) -> bool {
+    !plx_results::solver::is_solver_results(path)
 }
 
 /// Whether a file holds results: `.frd` of CalculiX or `.ndlr` of the built-in solver.
@@ -1830,6 +1846,26 @@ mod tests {
         let mut evil = bound.clone();
         evil.files[0].name = "../evil.frd".into();
         assert!(restore_results(&evil, &dir.join("restored")).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn results_of_the_built_in_solver_are_bound_as_their_file() {
+        let dir = std::env::temp_dir().join(format!("plx-bound-ndlr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut solved = plx_results::SolverResults::default();
+        solved.version = "test".into();
+        solved.model.nodes.insert(4, [1.0, 2.0, 3.0]);
+        let path = dir.join("Analysis-1.ndlr");
+        solved.write(&path).unwrap();
+        let bound = bind_results("Analysis-1", &[path.clone()], false).unwrap();
+        let file = bound.solver.as_ref().unwrap();
+        // Compressed by its own format already: stored as it is, not deflated again.
+        let written = std::fs::read(&path).unwrap();
+        assert_eq!(BASE64.decode(&file.data).unwrap(), written);
+        assert_eq!(bound.solver_results().unwrap().unwrap(), solved);
+        let restored = restore_results(&bound, &dir.join("restored")).unwrap();
+        assert_eq!(std::fs::read(restored).unwrap(), written);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

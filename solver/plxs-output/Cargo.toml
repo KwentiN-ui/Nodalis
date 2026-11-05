@@ -8,6 +8,10 @@ repository.workspace = true
 
 [dependencies]
 plxs-core.workspace = true
+postcard.workspace = true
+rayon.workspace = true
+serde.workspace = true
+zstd.workspace = true
 
 [lints]
 workspace = true
