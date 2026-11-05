@@ -70,7 +70,8 @@ enum Encoding {
 }
 
 impl Encoding {
-    /// The size of one value in bytes, by which a chunk is shuffled.
+    /// The size of one value in bytes, by which a chunk is shuffled: rows of three numbers
+    /// are shuffled as one value of their own (all first bytes of x, then of y...).
     fn width(self) -> usize {
         match self {
             Encoding::Bytes => 1,
@@ -84,12 +85,6 @@ impl Encoding {
     /// The size of a chunk: [`CHUNK`] rounded down to whole values.
     fn chunk(self) -> usize {
         CHUNK - CHUNK % self.width()
-    }
-
-    /// The width a value's bytes are shuffled by: the size of one number, the rows of three
-    /// shuffled as three numbers of their own (all x first bytes, all y first bytes...).
-    fn shuffle(self) -> usize {
-        self.width()
     }
 }
 
@@ -121,7 +116,7 @@ pub fn pack<T: Packable>(magic: &[u8; 8], mut value: T) -> Vec<u8> {
     let compressed: Vec<Vec<u8>> = pieces
         .par_iter()
         .map_init(compressor, |compressor, &(i, chunk)| {
-            let shuffled = shuffle(chunk, raw[i].0.shuffle());
+            let shuffled = shuffle(chunk, raw[i].0.width());
             // Compressing into memory does not fail.
             (compressor.as_mut())
                 .and_then(|c| c.compress(&shuffled).ok())
@@ -200,7 +195,7 @@ pub fn unpack<T: Packable>(magic: &[u8; 8], bytes: &[u8]) -> Result<T, PackError
             if shuffled.len() != target.len() {
                 return Err(error("results not readable: a chunk is cut short"));
             }
-            unshuffle(&shuffled, encoding.shuffle(), target);
+            unshuffle(&shuffled, encoding.width(), target);
             Ok(())
         })?;
 
