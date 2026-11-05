@@ -6,7 +6,7 @@ use plx_model::{
     BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition, CrossSection,
     DefinedField, DefinedFieldKind, Displacement, DynamicStep, Elastic, Hardening,
     LinearSolverChoice, Load, Material, ModalDamping, ModalDynamicsStep, NodeTie, Plastic,
-    PlasticPoint, ReferencePoint, RigidBody, Section, SectionKind, StaticStep,
+    PlasticPoint, ReferencePoint, RemoteBehavior, RigidBody, Section, SectionKind, StaticStep,
     SteadyStateDynamicsStep, UnitSystem,
 };
 
@@ -1018,6 +1018,158 @@ fn solver_moves_the_region_of_a_remote_displacement_rigidly() {
         assert!((u1 - expected).abs() < 1e-7, "{u1} != {expected}");
         assert!((u2 - shift).abs() < 1e-7, "{u2} != {shift}");
     }
+}
+
+/// A remote force on the tip face of the cantilever, changed by `edit`.
+fn remote_force(edit: impl FnOnce(&mut plx_model::RemoteForce)) -> Load {
+    let mut remote = plx_model::RemoteForce::default();
+    edit(&mut remote);
+    Load {
+        name: "Remote_Force-1".into(),
+        region: Region::Surface("TIP".into()),
+        kind: LoadKind::RemoteForce(remote),
+        ..tip_force()
+    }
+}
+
+/// Moment of the reactions at the clamped end about the z axis through the centre of the
+/// beam's cross section, and their sum along each direction.
+fn clamped_reactions(mesh: &FeMesh, frd: &FrdImport) -> (f64, [f64; 3]) {
+    let mut moment = 0.0;
+    let mut sum = [0.0; 3];
+    for &node in &mesh.node_sets["FIX"] {
+        let y = mesh.node(node).unwrap()[1];
+        let f = ["F1", "F2", "F3"].map(|c| node_value(frd, "FORC", c, node));
+        moment += (y - 5.0) * f[0];
+        for k in 0..3 {
+            sum[k] += f[k];
+        }
+    }
+    (moment, sum)
+}
+
+/// The point of a remote force sits at the centre of the tip face, the face follows it as a
+/// rigid body, and its force and moment act on the reference and rotation node.
+#[test]
+fn a_remote_force_acts_on_a_rigid_point_at_the_centre_of_its_region() {
+    let load = remote_force(|r| {
+        r.force = [0.0, 0.0, -100.0];
+        r.moment = [0.0, 0.0, 1000.0];
+    });
+    let (mesh, mut model) = cantilever(load);
+    // The same load in a second step shares the point.
+    let mut second = model.steps[0].clone();
+    second.name = "Step-2".into();
+    model.steps.push(second);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let analysis = lowered(&mesh, &model);
+    for node in [100, 101] {
+        let at = coordinates(&analysis, node);
+        assert!(
+            (0..3).all(|i| (at[i] - [100.0, 5.0, 5.0][i]).abs() < 1e-9),
+            "{at:?}"
+        );
+    }
+    assert_eq!(text.matches("*Rigid body").count(), 1, "{text}");
+    assert!(
+        text.contains("*Rigid body, Nset=INTERNAL-1_TIP, Ref node=100, Rot node=101\n"),
+        "{text}"
+    );
+    assert_eq!(
+        text.matches("*Cload, op=New\n100, 3, -100\n101, 3, 1000\n")
+            .count(),
+        2,
+        "{text}"
+    );
+    // A deformable point averages the face by equations instead.
+    if let LoadKind::RemoteForce(r) = &mut model.steps[0].loads[0].kind {
+        r.behavior = RemoteBehavior::Deformable;
+    }
+    model.steps.truncate(1);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("*Rigid body"), "{text}");
+    assert_eq!(equations(&mesh, &model), 6, "{text}");
+    // A pinball region without nodes cannot be written.
+    if let LoadKind::RemoteForce(r) = &mut model.steps[0].loads[0].kind {
+        r.location = Some([0.0; 3]);
+        r.pinball = Some(1.0);
+    }
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::InvalidLoad { .. })
+    ));
+}
+
+/// A moment on the tip face of the solid cantilever, which has no rotations, bends it: the
+/// reactions balance it, rigidly and deformably coupled alike.
+#[test]
+fn solver_bends_the_cantilever_by_a_remote_moment_on_its_tip_face() {
+    let m = 10_000.0;
+    for behavior in [RemoteBehavior::Rigid, RemoteBehavior::Deformable] {
+        let (mesh, model) = cantilever(remote_force(|r| {
+            r.moment = [0.0, 0.0, m];
+            r.behavior = behavior;
+        }));
+        let name = format!("remote-moment-{behavior:?}");
+        let Some(frd) = run_solver(&name, &write_inp(&mesh, &model, "").unwrap()) else {
+            return;
+        };
+        let (reaction, sum) = clamped_reactions(&mesh, &frd);
+        assert!(
+            (reaction - m).abs() < 1e-3 * m,
+            "{behavior:?}: {reaction} != {m}"
+        );
+        assert!(sum.iter().all(|f| f.abs() < 1e-6 * m), "{sum:?}");
+        // Bent upwards, less than M L^2 / (2 E I) by the stiff linear bricks.
+        let tip = node_value(&frd, "DISP", "U2", 99);
+        let expected = m * 100f64.powi(2) / (2.0 * 210_000.0 * 1e4 / 12.0);
+        assert!(
+            tip > 0.6 * expected && tip < expected,
+            "{tip} != {expected}"
+        );
+    }
+}
+
+/// In a coordinate system turned about z, F1 is the global y direction: the point's nodes
+/// get the system's directions.
+#[test]
+fn solver_pushes_a_remote_force_in_its_coordinate_system() {
+    let (mesh, mut model) = cantilever(remote_force(|r| {
+        r.force = [100.0, 0.0, 0.0];
+        r.system = "Turned".into();
+    }));
+    turned_system(&mut model);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Transform, Nset=INTERNAL_SELECTION-1_REMOTE_FORCE-1_POINT, Type=R\n"),
+        "{text}"
+    );
+    let Some(frd) = run_solver("remote-force-system", &text) else {
+        return;
+    };
+    let (_, sum) = clamped_reactions(&mesh, &frd);
+    assert!(
+        sum[0].abs() < 1e-3 && (sum[1] + 100.0).abs() < 1e-3 && sum[2].abs() < 1e-3,
+        "{sum:?}"
+    );
+}
+
+/// At a reference point the remote force acts on its nodes in global directions, without a
+/// point of its own.
+#[test]
+fn a_remote_force_on_a_reference_point_acts_on_its_nodes() {
+    let mut load = remote_force(|r| {
+        r.force = [0.0, 0.0, -100.0];
+        r.moment = [0.0, 0.0, 1000.0];
+    });
+    load.region = Region::ReferencePoint("RP-1".into());
+    let (mesh, model) = rigid_tip(Some(load), None);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert_eq!(text.matches("*Rigid body").count(), 1, "{text}");
+    assert!(
+        text.contains("*Cload, op=New\n100, 3, -100\n101, 3, 1000\n"),
+        "{text}"
+    );
 }
 
 /// Steel S235 with a linear hardening to 400 MPa at 20 % plastic strain.

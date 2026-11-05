@@ -38,6 +38,7 @@ mod primitive;
 mod properties;
 mod region;
 mod remote;
+mod remote_force;
 mod section;
 mod signature;
 mod solver_diagnostics;
@@ -102,6 +103,7 @@ pub use remote::{
     Behavior, Displacement, Formulation, RemoteBehavior, RemoteDof, RemotePoint, expanded_nodes,
     rigid_rows,
 };
+pub use remote_force::RemoteForce;
 pub use section::{
     BeamOrientation, BeamSection, Section, SectionKind, line_tangent, membrane_type, unit_thickness,
 };
@@ -135,8 +137,8 @@ use serde::{Deserialize, Serialize};
 /// without them. Format 15 merges the remote displacement into the displacement, which
 /// chooses how it is written from its selection; older formats are refused. Format 16 gives
 /// the equation solver of a step only the choice Direct or Iterative; older formats are
-/// refused.
-pub const PROJECT_FORMAT: u32 = 16;
+/// refused. Format 17 adds the remote force; format 16 reads as it is.
+pub const PROJECT_FORMAT: u32 = 17;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1680,6 +1682,9 @@ pub enum LoadKind {
     /// `each_node` the whole value acts at every node of the region instead
     /// (a concentrated force).
     Force { value: [f64; 3], each_node: bool },
+    /// Force and moment at a point the region follows, rigidly or on average, Ansys'
+    /// remote force; see [`RemoteForce`].
+    RemoteForce(RemoteForce),
     /// Bolt preload across a cut through the shank (`*PRE-TENSION SECTION`), the
     /// pre-tension load: the region is the element faces on one side of the cut, the value
     /// the force pulling the two sides together, or the shortening when `by_displacement`.
@@ -1746,6 +1751,7 @@ impl LoadKind {
             LoadKind::Moment(_)
                 | LoadKind::Pressure(_)
                 | LoadKind::Force { .. }
+                | LoadKind::RemoteForce(_)
                 | LoadKind::PreTension { .. }
                 | LoadKind::Gravity(_)
                 | LoadKind::Centrifugal { .. }
