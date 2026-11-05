@@ -617,12 +617,7 @@ impl FeatureDialog {
         let header = format!("{} {}", field.name, component.name);
         ui.horizontal(|ui| {
             ui.strong(&header);
-            ui.label(format!(
-                "Increment {}",
-                crate::results::ResultsView::increment_label(
-                    view.current_increment().unwrap_or(&view.increments[0])
-                )
-            ));
+            ui.label(view.shown_label());
         });
         let Some((cut, [min, max])) = cut.and_then(|c| Some((c, c.extremes?))) else {
             ui.colored_label(
@@ -732,12 +727,7 @@ impl FeatureDialog {
         let inside = values.iter().filter(|v| v.is_finite()).count();
         ui.horizontal(|ui| {
             ui.strong(&header);
-            ui.label(format!(
-                "Increment {}",
-                crate::results::ResultsView::increment_label(
-                    view.current_increment().unwrap_or(&view.increments[0])
-                )
-            ));
+            ui.label(view.shown_label());
         });
         if inside == 0 {
             ui.colored_label(

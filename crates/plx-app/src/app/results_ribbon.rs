@@ -3,6 +3,8 @@
 
 use super::*;
 use crate::command::Cmd;
+use crate::results::format_value;
+use plx_results::AnalysisKind as AnalysisKindAlias;
 use plx_results::display::Representation;
 
 impl Workbench {
@@ -15,14 +17,21 @@ impl Workbench {
             return false;
         };
         let (current, last) = (view.increment, view.increments.len().saturating_sub(1));
+        let step = view.current_step().map(|s| s.increments.as_slice());
+        let (first_in_step, last_in_step) = (
+            step.and_then(|s| s.first()).copied().unwrap_or(0),
+            step.and_then(|s| s.last()).copied().unwrap_or(last),
+        );
         match cmd {
             Cmd::GlobalContours => {
                 (self.results.get(self.current_result)).is_some_and(|m| m.global.is_some())
             }
             Cmd::Representation => !directional_fields(view).is_empty(),
-            Cmd::Increment => !view.increments.is_empty(),
-            Cmd::FirstIncrement | Cmd::PreviousIncrement => current > 0,
-            Cmd::NextIncrement | Cmd::LastIncrement => current < last,
+            Cmd::ResultStep | Cmd::Increment => !view.increments.is_empty(),
+            Cmd::FirstIncrement => current > first_in_step,
+            Cmd::PreviousIncrement => current > 0,
+            Cmd::NextIncrement => current < last,
+            Cmd::LastIncrement => current < last_in_step,
             // Only modes of a frequency step have a sound.
             Cmd::ModeSound => {
                 view.sound.is_some()
@@ -61,13 +70,20 @@ impl Workbench {
         };
         let last = view.increments.len().saturating_sub(1);
         let current = view.increment;
+        let step = view.current_step().map(|s| s.increments.clone());
+        let first_in_step = step.as_ref().and_then(|s| s.first()).copied().unwrap_or(0);
+        let last_in_step = step
+            .as_ref()
+            .and_then(|s| s.last())
+            .copied()
+            .unwrap_or(last);
         match cmd {
             Cmd::ShowUndeformed => view.show_undeformed = !view.show_undeformed,
             Cmd::GlobalContours => view.show_global_contours = !view.show_global_contours,
-            Cmd::FirstIncrement => view.switch_increment(0),
+            Cmd::FirstIncrement => view.switch_increment(first_in_step),
             Cmd::PreviousIncrement => view.switch_increment(current.saturating_sub(1)),
             Cmd::NextIncrement => view.switch_increment((current + 1).min(last)),
-            Cmd::LastIncrement => view.switch_increment(last),
+            Cmd::LastIncrement => view.switch_increment(last_in_step),
             Cmd::Animate => {
                 if view.animation.is_some() {
                     view.stop_animation();
@@ -94,9 +110,50 @@ impl Workbench {
             Cmd::Deformation => view.deformation.label(),
             Cmd::Representation => view.representation().label().into(),
             Cmd::ColorLevels => view.color_scale.levels.to_string(),
-            Cmd::Increment => view.current_increment().map(ResultsView::increment_label)?,
+            Cmd::ResultStep => view.step_title(view.current_step_index()?),
+            Cmd::Increment => view.entry_value()?,
             _ => return None,
         })
+    }
+
+    /// The name of a result tile that follows the shown step: "Mode" for the increments of
+    /// a frequency step.
+    pub(super) fn results_title(&self, cmd: Cmd) -> Option<&'static str> {
+        let view = self.shown_results_view()?;
+        match cmd {
+            Cmd::Increment => view.current_step().map(|s| s.entry_noun()),
+            _ => None,
+        }
+    }
+
+    /// Moves through the increments and steps of the results with the keyboard: arrows
+    /// for the increments, Home and End within the step, Ctrl+Page Up and Ctrl+Page Down
+    /// for the steps.
+    pub(super) fn results_keys(&mut self, ctx: &egui::Context) {
+        if self.tree_view != TreeView::Results || ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        use egui::{Key, Modifiers};
+        let pressed = |modifiers, key| ctx.input_mut(|i| i.consume_key(modifiers, key));
+        for (key, cmd) in [
+            (Key::ArrowLeft, Cmd::PreviousIncrement),
+            (Key::ArrowRight, Cmd::NextIncrement),
+            (Key::Home, Cmd::FirstIncrement),
+            (Key::End, Cmd::LastIncrement),
+        ] {
+            if pressed(Modifiers::NONE, key) && self.results_command_enabled(cmd) {
+                self.run_results_command(cmd);
+            }
+        }
+        for (key, forward) in [(Key::PageUp, false), (Key::PageDown, true)] {
+            if pressed(Modifiers::COMMAND, key)
+                && let Some(view) = self.shown_results_mut()
+                && let Some(step) = view.neighbour_step(forward)
+            {
+                view.switch_step(step);
+                self.results_changed = true;
+            }
+        }
     }
 
     /// Fills the panel a result tile opens.
@@ -122,6 +179,7 @@ impl Workbench {
                 ui.weak("2 to 24 bands; Color Scale sets the spectrum and limits.");
                 changed
             }
+            Cmd::ResultStep => step_panel(ui, view),
             Cmd::Increment => increment_panel(ui, view),
             _ => false,
         };
@@ -331,23 +389,203 @@ fn lic_options(ui: &mut egui::Ui, lic: &mut plx_results::display::LicOptions) {
     }
 }
 
-/// The increments of the results, the shown one selected.
-fn increment_panel(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
+/// The steps of the results with their kind, entries and time range; choosing one shows
+/// its last increment.
+fn step_panel(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
     let mut chosen = None;
-    ui.weak("Step, increment");
+    let current = view.current_step_index();
+    ui.weak("Steps");
+    egui::ScrollArea::vertical()
+        .max_height(360.0)
+        .show(ui, |ui| {
+            egui::Grid::new("result steps")
+                .num_columns(2)
+                .spacing([16.0, 2.0])
+                .show(ui, |ui| {
+                    for (index, step) in view.steps.steps.iter().enumerate() {
+                        let has = !step.increments.is_empty();
+                        let title = view.step_title(index);
+                        let response = ui.add_enabled(
+                            has,
+                            egui::Button::selectable(current == Some(index), title),
+                        );
+                        if response.clicked() {
+                            chosen = Some(index);
+                        }
+                        let response = ui.add_enabled(
+                            has,
+                            egui::Label::new(egui::RichText::new(step_summary(view, index)).weak())
+                                .sense(egui::Sense::click()),
+                        );
+                        if response.clicked() {
+                            chosen = Some(index);
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+    ui.separator();
+    ui.weak("Ctrl+Page Up / Ctrl+Page Down: step before / after");
+    if chosen.is_some() {
+        ui.close();
+    }
+    match chosen {
+        Some(index) if Some(index) != current => {
+            view.switch_step(index);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The kind, the number of entries and the time range of a step, for the step list.
+fn step_summary(view: &ResultsView, index: usize) -> String {
+    let step = &view.steps.steps[index];
+    let mut parts = vec![step.description()];
+    if let Some(source) = &step.inherited_from {
+        parts.push(format!("from {source}"));
+    }
+    let count = view.entry_count(index).unwrap_or(0);
+    if step.increments.is_empty() {
+        parts.push("no results".into());
+    } else {
+        let noun = step.entry_noun().to_lowercase();
+        parts.push(format!(
+            "{count} {noun}{}",
+            if count == 1 { "" } else { "s" }
+        ));
+    }
+    if step.is_timed() && step.end_time > step.start_time {
+        let unit = view.units.unit(plx_model::Quantity::Time);
+        parts.push(format!(
+            "{} to {} {unit}",
+            format_value(step.start_time as f32),
+            format_value(step.end_time as f32)
+        ));
+    }
+    if !step.converged {
+        parts.push("not converged".into());
+    }
+    parts.join(" \u{b7} ")
+}
+
+/// The increments, modes or positions of the shown step as a table with the values that
+/// fit the step: step and total time, frequency or buckling factor; the shown one selected.
+fn increment_panel(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
+    use plx_results::steps::StepCategory;
+    let Some(step) = view.current_step().cloned() else {
+        return false;
+    };
+    let mut chosen = None;
+    let noun = step.entry_noun();
+    let plural = match noun {
+        "Frequency" => "Frequencies".to_owned(),
+        _ => format!("{noun}s"),
+    };
+    ui.weak(format!("{plural} of {}", step.name));
+    let time = view.units.unit(plx_model::Quantity::Time);
+    let hertz = view.units.unit(plx_model::Quantity::Frequency);
+    let first = step.increments.first().map(|&i| view.increments[i].kind);
+    let value_column = match (step.category, first) {
+        (StepCategory::SteadyStateDynamics, _) => Some(format!("Frequency ({hertz})")),
+        (_, Some(AnalysisKindAlias::Frequency | AnalysisKindAlias::ComplexFrequency)) => {
+            Some(format!("Frequency ({hertz})"))
+        }
+        (_, Some(AnalysisKindAlias::Buckling)) => Some("Buckling factor".to_owned()),
+        _ => None,
+    };
+    let timed = step.is_timed() && value_column.is_none();
+    let cutbacks = (step.increments.iter()).any(|&i| {
+        view.steps
+            .place(i)
+            .and_then(|p| p.attempts)
+            .is_some_and(|a| a > 1)
+    });
+    // The header stays above the list as it scrolls, in columns as wide as the list's.
+    const COLUMN: f32 = 72.0;
+    egui::Grid::new("step increments header")
+        .num_columns(4)
+        .spacing([14.0, 2.0])
+        .min_col_width(COLUMN)
+        .show(ui, |ui| {
+            let header = |ui: &mut egui::Ui, text: String| {
+                ui.add_sized(
+                    [COLUMN, 18.0],
+                    egui::Label::new(egui::RichText::new(text).weak()),
+                );
+            };
+            header(ui, noun.to_owned());
+            if timed {
+                header(ui, format!("Step time ({time})"));
+                header(ui, format!("Total time ({time})"));
+            } else if let Some(column) = &value_column {
+                header(ui, column.clone());
+            }
+            if cutbacks {
+                header(ui, "Attempts".into());
+            }
+            ui.end_row();
+        });
     egui::ScrollArea::vertical()
         .max_height(320.0)
         .show(ui, |ui| {
-            for (index, inc) in view.increments.iter().enumerate() {
-                let label = ResultsView::increment_label(inc);
-                if ui
-                    .selectable_label(index == view.increment, label)
-                    .clicked()
-                {
-                    chosen = Some(index);
-                }
-            }
+            egui::Grid::new("step increments")
+                .num_columns(4)
+                .spacing([14.0, 2.0])
+                .min_col_width(COLUMN)
+                .show(ui, |ui| {
+                    for &index in &step.increments {
+                        let selected = index == view.increment;
+                        let mut first = true;
+                        let mut row = |ui: &mut egui::Ui, text: String| {
+                            let button = egui::Button::selectable(selected, text);
+                            let response = ui.add_sized([COLUMN, 18.0], button);
+                            if response.clicked() {
+                                chosen = Some(index);
+                            }
+                            // The shown entry scrolls into view once, when the list opens or
+                            // another entry is shown.
+                            let seen = egui::Id::new("increment panel shown entry");
+                            if selected
+                                && std::mem::take(&mut first)
+                                && ui.data(|d| d.get_temp::<usize>(seen)) != Some(index)
+                            {
+                                response.scroll_to_me(Some(egui::Align::Center));
+                                ui.data_mut(|d| d.insert_temp(seen, index));
+                            }
+                        };
+                        let label = view.entry_label(index);
+                        let number = label
+                            .strip_prefix(noun)
+                            .map_or(label.clone(), |n| n.trim().to_owned());
+                        row(ui, number);
+                        let place = view.steps.place(index).copied().unwrap_or_default();
+                        if timed {
+                            let text =
+                                |v: Option<f64>| v.map_or("-".into(), |v| format_value(v as f32));
+                            row(ui, text(place.step_time));
+                            row(ui, text(place.total_time));
+                        } else if value_column.is_some() {
+                            row(ui, format_value(view.increments[index].value as f32));
+                        }
+                        if cutbacks {
+                            let attempts = place.attempts.unwrap_or(1);
+                            row(
+                                ui,
+                                if attempts > 1 {
+                                    format!("{attempts}, cutback")
+                                } else {
+                                    "1".into()
+                                },
+                            );
+                        }
+                        ui.end_row();
+                    }
+                });
         });
+    if chosen.is_some() {
+        ui.close();
+    }
     match chosen {
         Some(index) if index != view.increment => {
             view.switch_increment(index);

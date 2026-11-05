@@ -21,7 +21,7 @@ The animation button among the result controls of the ribbon opens the animation
 The buttons step through the frames or play them; the slider selects a frame. Closing the window
 shows the increment that was shown at the start, or the one you selected meanwhile.
 
-The window can stay open while you change the increment: the #ui("Step, Increment") list and the
+The window can stay open while you change the increment: the #ui("Step") and #ui("Increment") lists and the
 #ui("First"), #ui("Previous"), #ui("Next") and #ui("Last") tiles keep working. The
 animation continues with the new increment (or the increments of its step) and keeps its
 settings, so you can page through modes or steps without reopening the window.

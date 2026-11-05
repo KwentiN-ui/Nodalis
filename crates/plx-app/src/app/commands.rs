@@ -221,6 +221,7 @@ impl AnalysisWindow {
             | Cmd::Representation
             | Cmd::ColorLevels
             | Cmd::Transformations
+            | Cmd::ResultStep
             | Cmd::Increment
             | Cmd::FirstIncrement
             | Cmd::PreviousIncrement
@@ -517,6 +518,10 @@ impl crate::ribbon::Host for RibbonHost<'_> {
 
     fn checked(&self, cmd: Cmd) -> bool {
         self.0.command_checked(cmd)
+    }
+
+    fn title(&self, cmd: Cmd) -> Option<&'static str> {
+        self.0.workbench.results_title(cmd)
     }
 
     fn value(&self, cmd: Cmd) -> Option<String> {

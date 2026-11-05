@@ -80,8 +80,10 @@ pub enum Icon {
     Levels,
     /// A spectrum with its two limit marks: the colour scale.
     ColorScale,
-    /// Three frames one behind the other: the increments of the results.
+    /// A bar of ticks with a marker on one: the increments of a step.
     Increments,
+    /// A bar of three segments with a marker in the middle one: the steps of the results.
+    Steps,
 }
 
 /// Flat toolbar button in the Windows style: frame only while hovered or checked.
@@ -768,17 +770,42 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
             }
         }
         Icon::Increments => {
-            for (i, fill) in [FACE, FACE, ACCENT].into_iter().enumerate() {
-                let o = 3.0 * i as f32;
-                let frame = Rect::from_min_max(p(1.5 + o, 1.5 + o), p(9.5 + o, 8.5 + o));
-                shapes.push(Shape::rect_filled(frame, 0.0, fill));
+            let bar = Rect::from_min_max(p(0.5, 6.0), p(15.5, 10.0));
+            shapes.push(Shape::rect_filled(bar, 0.0, FACE));
+            shapes.push(Shape::rect_stroke(
+                bar,
+                0.0,
+                Stroke::new(1.0, OUTLINE),
+                egui::StrokeKind::Middle,
+            ));
+            for x in [3.0, 5.5, 8.0, 13.0] {
+                line(shapes, &[p(x, 6.0), p(x, 10.0)], 1.0, OUTLINE);
+            }
+            let marker = Rect::from_min_max(p(9.6, 3.0), p(11.6, 13.0));
+            shapes.push(Shape::rect_filled(marker, 0.0, ACCENT));
+            shapes.push(Shape::rect_stroke(
+                marker,
+                0.0,
+                Stroke::new(1.0, OUTLINE),
+                egui::StrokeKind::Middle,
+            ));
+        }
+        Icon::Steps => {
+            for (i, (x0, x1)) in [(0.5, 4.8), (5.8, 10.2), (11.2, 15.5)]
+                .into_iter()
+                .enumerate()
+            {
+                let segment = Rect::from_min_max(p(x0, 5.5), p(x1, 10.5));
+                let fill = if i == 1 { ACCENT } else { FACE };
+                shapes.push(Shape::rect_filled(segment, 1.0, fill));
                 shapes.push(Shape::rect_stroke(
-                    frame,
-                    0.0,
+                    segment,
+                    1.0,
                     Stroke::new(1.0, OUTLINE),
                     egui::StrokeKind::Middle,
                 ));
             }
+            line(shapes, &[p(8.0, 2.5), p(8.0, 13.5)], 1.5, OUTLINE);
         }
         Icon::RemoveAnnotations => {
             // A query label: framed text with the arrow to its point.
