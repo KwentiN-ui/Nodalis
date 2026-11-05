@@ -725,9 +725,7 @@ impl ContactModel {
     ) -> f64 {
         let at =
             |alpha: f64| -> Vec<f64> { u.iter().zip(du).map(|(a, b)| a + alpha * b).collect() };
-        let trial_u = at(1.0);
         let current = current_configuration(coords, u);
-        let trial = current_configuration(coords, &trial_u);
         let mut cap = 1.0_f64;
         for pair in &self.pairs {
             if !pair.active || pair.law.is_tied() || pair.typical <= 0.0 {
@@ -747,23 +745,27 @@ impl ContactModel {
                 continue;
             }
             for p in 0..pair.points.len() {
-                let Ok(after) = pair.kinematics(p, &trial, &trial_u) else {
+                // The gap after the correction, linearised at the current position against
+                // the master face of now: `Σ c_i du_i` along its normal. Not the gap found
+                // anew at the end of the correction: after a move of metres the point lies
+                // beside every master face it could be projected on (the master moved, for
+                // a curved master as the slave of a flat surface), and the deep overclosure
+                // would go unseen.
+                let Ok(kin) = pair.kinematics(p, &current, u) else {
                     continue;
                 };
-                if -after.gap <= limit {
-                    continue;
+                let mut change = 0.0;
+                for (&node, &c) in kin.nodes.iter().zip(&kin.coefficients) {
+                    for d in 0..3 {
+                        change += c * du[node as usize * 3 + d] * kin.normal[d];
+                    }
                 }
-                // Before the correction: the gap against the same master face where the
-                // point had none (it came from beside or beyond the search margin).
-                let before = match pair.kinematics(p, &current, u) {
-                    Ok(kin) => kin.gap,
-                    Err(_) => continue,
-                };
-                if -before >= limit || before <= after.gap {
+                let (before, after) = (kin.gap, kin.gap + change);
+                if -after <= limit || -before >= limit {
                     continue;
                 }
                 // The gap changes about linearly with the length of the step.
-                let f = (before + limit) / (before - after.gap);
+                let f = (before + limit) / (before - after);
                 cap = cap.min(f);
             }
         }
