@@ -1853,12 +1853,14 @@ mod tests {
     fn results_of_the_built_in_solver_are_bound_as_their_file() {
         let dir = std::env::temp_dir().join(format!("plx-bound-ndlr-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut solved = plx_results::SolverResults::default();
-        solved.version = "test".into();
+        let mut solved = plx_results::SolverResults {
+            version: "test".into(),
+            ..Default::default()
+        };
         solved.model.nodes.insert(4, [1.0, 2.0, 3.0]);
         let path = dir.join("Analysis-1.ndlr");
         solved.write(&path).unwrap();
-        let bound = bind_results("Analysis-1", &[path.clone()], false).unwrap();
+        let bound = bind_results("Analysis-1", std::slice::from_ref(&path), false).unwrap();
         let file = bound.solver.as_ref().unwrap();
         // Compressed by its own format already: stored as it is, not deflated again.
         let written = std::fs::read(&path).unwrap();
