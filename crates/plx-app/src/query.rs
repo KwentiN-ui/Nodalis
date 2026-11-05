@@ -1694,7 +1694,13 @@ mod tests {
         // Off the middle of the width, so that one corner is nearest to each click.
         let (_, near) = beam_hit(95.0, 2.0);
         let (_, far) = beam_hit(5.0, 2.0);
-        distance.click(&mut model, Some(&near), 0.5, Operation::Replace, &mut output);
+        distance.click(
+            &mut model,
+            Some(&near),
+            0.5,
+            Operation::Replace,
+            &mut output,
+        );
         assert_eq!(distance.picked().len(), 1);
         distance.click(&mut model, Some(&far), 0.5, Operation::Replace, &mut output);
         assert!(distance.picked().is_empty());
