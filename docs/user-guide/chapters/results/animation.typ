@@ -9,7 +9,7 @@ several increments plays them one after another, and a single increment grows fr
 deformed. #ui("Type") in the animation window switches to another type. For the modes of a
 frequency step, #ui("Sound") appears right of #ui("Animate") (@sound).
 
-#screenshot("results-animate-menu.png", [#ui("Animate") and, for a frequency step,
+#screenshot("results-animate.png", [#ui("Animate") and, for a frequency step,
   #ui("Sound") in the ribbon])
 
 #screenshot("animation.png", [Animation window])
