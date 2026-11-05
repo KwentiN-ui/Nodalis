@@ -57,19 +57,17 @@ pub enum SavedDeformation {
 /// A query annotation; nodes by id, elements and parts by index.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SavedAnnotation {
-    Node(u32),
-    Element(usize),
-    /// The segments along an edge of a part.
+    Nodes(Vec<u32>),
+    Elements(Vec<usize>),
+    /// The segments along the picked edges.
     Edge {
-        part: usize,
         segments: Vec<[u32; 2]>,
     },
-    /// The faces of a surface of a part by their corner nodes.
+    /// The faces of the picked surfaces by their corner nodes.
     Surface {
-        part: usize,
         faces: Vec<Vec<u32>>,
     },
-    Part(usize),
+    Parts(Vec<usize>),
     Distance([u32; 2]),
     Angle([u32; 3]),
     Circle([u32; 3]),

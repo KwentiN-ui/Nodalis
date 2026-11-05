@@ -29,7 +29,7 @@ use crate::overlay::AnnotationCommand;
 use crate::overlay::{Marker, Overlay};
 use crate::path_plot::{self, PathPlot, PlotEvent};
 use crate::properties;
-use crate::query::{QueryAction, QueryClick, QueryWindow};
+use crate::query::{QueryAction, QueryWindow};
 use crate::results::{Deformation, ResultsView, format_legend_value};
 use crate::screenshot::{self, Screenshot};
 use crate::section::{PlaneDefinition, SectionDialog, SectionResult, SectionView};
@@ -3167,19 +3167,13 @@ impl Workbench {
             return;
         };
         let model = match self.tree_view {
-            TreeView::Results => self.results.get(self.current_result),
-            TreeView::Geometry => self.geometry.as_ref(),
-            TreeView::FeModel => self.model.as_ref(),
+            TreeView::Results => self.results.get_mut(self.current_result),
+            TreeView::Geometry => self.geometry.as_mut(),
+            TreeView::FeModel => self.model.as_mut(),
         };
         match query.show(ctx, model, &mut self.output) {
             QueryAction::Open => {}
             QueryAction::Changed => self.update_contour(),
-            QueryAction::Add(annotation) => {
-                if let Some(model) = self.shown_mut() {
-                    model.query_annotations.push(annotation);
-                }
-                self.update_contour();
-            }
             QueryAction::RemoveAll => self.annotations(AnnotationCommand::DeleteAll),
             QueryAction::Close => self.close_query(),
         }
@@ -4053,22 +4047,16 @@ impl Workbench {
     fn click(&mut self, click: Click) {
         if let Some(query) = &mut self.query {
             let model = match self.tree_view {
-                TreeView::Results => self.results.get(self.current_result),
-                TreeView::Geometry => self.geometry.as_ref(),
-                TreeView::FeModel => self.model.as_ref(),
+                TreeView::Results => self.results.get_mut(self.current_result),
+                TreeView::Geometry => self.geometry.as_mut(),
+                TreeView::FeModel => self.model.as_mut(),
             };
             if let Some(model) = model {
                 let hit = model.pick_click(&click);
                 let precision = hit.as_ref().map_or(0.0, |h| click.precision_at(h.point));
-                match query.click(model, hit.as_ref(), precision, &mut self.output) {
-                    QueryClick::Nothing => {}
-                    QueryClick::Picked => self.update_contour(),
-                    QueryClick::Added(annotation) => {
-                        if let Some(model) = self.shown_mut() {
-                            model.query_annotations.push(annotation);
-                        }
-                        self.update_contour();
-                    }
+                let operation = Operation::from_modifiers(click.shift, click.ctrl);
+                if query.click(model, hit.as_ref(), precision, operation, &mut self.output) {
+                    self.update_contour();
                 }
             }
             return;
@@ -4257,6 +4245,19 @@ impl Workbench {
             return;
         }
         let operation = Operation::from_modifiers(area.shift, area.ctrl);
+        if let Some(query) = &mut self.query {
+            let model = match self.tree_view {
+                TreeView::Results => self.results.get_mut(self.current_result),
+                TreeView::Geometry => self.geometry.as_mut(),
+                TreeView::FeModel => self.model.as_mut(),
+            };
+            if let Some(model) = model
+                && query.box_select(model, area, operation, &mut self.output)
+            {
+                self.update_contour();
+            }
+            return;
+        }
         if self.feature_picks()
             && let Some(dialog) = &mut self.feature_dialog
         {

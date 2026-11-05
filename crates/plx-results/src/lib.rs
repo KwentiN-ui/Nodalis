@@ -319,7 +319,10 @@ mod tests {
             reference_points: vec![on_faces],
             ..Default::default()
         };
-        settings.view.annotations = vec![SavedAnnotation::Node(3), SavedAnnotation::BoundingBox];
+        settings.view.annotations = vec![
+            SavedAnnotation::Nodes(vec![3]),
+            SavedAnnotation::BoundingBox,
+        ];
         assert_eq!(settings.without_mesh_references().len(), 3);
         assert_eq!(settings.view.annotations, [SavedAnnotation::BoundingBox]);
         assert_eq!(settings.hot_spots.len(), 1);
