@@ -516,7 +516,22 @@ fn draw_status(
         .iter()
         .map(|l| painter.layout_no_wrap(l.clone(), font(), crate::style::viewport_text()))
         .collect();
-    let width = galleys.iter().map(|g| g.size().x).fold(0.0, f32::max);
+    let mut width = galleys.iter().map(|g| g.size().x).fold(0.0, f32::max);
+    // Numbers change length while an animation plays; the block is anchored on the right, so
+    // a changing width would make it flicker. It only grows while the text stays the same
+    // apart from its numbers, and starts afresh when the wording changes.
+    let skeleton: String = (lines.iter())
+        .flat_map(|l| l.chars())
+        .filter(|c| !c.is_ascii_digit() && !matches!(c, '.' | '-' | '+' | 'e' | 'E'))
+        .collect();
+    let id = egui::Id::new("status_block_width");
+    let (old_skeleton, old_width): (String, f32) = ui
+        .data(|d| d.get_temp(id))
+        .unwrap_or_else(|| (String::new(), 0.0));
+    if old_skeleton == skeleton {
+        width = width.max(old_width);
+    }
+    ui.data_mut(|d| d.insert_temp(id, (skeleton, width)));
     let line_height = galleys.first().map_or(0.0, |g| g.size().y) + 2.0;
     let size = vec2(width, line_height * galleys.len() as f32)
         + vec2(2.0 * STATUS_PADDING, STATUS_PADDING);
