@@ -9704,22 +9704,28 @@ fn campbell_rows(node: &Node, incoming: &[(Vec<String>, String)], state: CellSta
     const SHOWN: usize = 5;
     let critical = window.critical_speeds();
     for (index, speed) in critical.iter().enumerate().take(SHOWN) {
-        let order = crate::numeric::format_physical(speed.order);
+        let order = speed.order_label();
         rows.push(row(
             &["Campbell", "Critical", &index.to_string()],
             format!(
-                "{order}x: {} rpm",
+                "{order}: {} rpm",
                 crate::numeric::format_physical(crate::campbell::rpm(speed.speed).round())
             ),
             NodeIcon::Results,
-            format!(
-                "Critical speed: mode {}{} crosses the {order}x engine order line here.",
-                speed.mode,
-                match speed.whirl.letter() {
-                    "" => String::new(),
-                    letter => format!(" ({letter})"),
-                }
-            ),
+            if speed.order == 0.0 {
+                format!(
+                    "Critical speed: the backward wave of mode {} ({}) comes to rest here, a \
+                     standing wave in the stationary frame.",
+                    speed.mode,
+                    speed.branch_label()
+                )
+            } else {
+                format!(
+                    "Critical speed: mode {} ({}) crosses the {order} engine order line here.",
+                    speed.mode,
+                    speed.branch_label()
+                )
+            },
         ));
     }
     if critical.len() > SHOWN {
@@ -13190,6 +13196,7 @@ mod tests {
                     frequency: 200.0 - 10.0 * i as f64,
                     whirl: Whirl::Backward,
                     unstable: false,
+                    nodal_diameter: None,
                 }],
             })
             .collect();
@@ -13216,7 +13223,7 @@ mod tests {
         // The 1x line f = speed / 2 pi meets the mode at 200 / (1 / 2 pi + 0.05) = 956 rad/s.
         let texts: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
         assert_eq!(texts[2..], ["1x: 9131 rpm"]);
-        assert!(rows[2].tip.contains("mode 1 (B)"), "{}", rows[2].tip);
+        assert!(rows[2].tip.contains("mode 1 (backward)"), "{}", rows[2].tip);
     }
 
     #[test]

@@ -18,9 +18,59 @@ pub fn symmetric_eigen(n: usize, a: &[f64]) -> (Vec<f64>, Vec<Vec<f64>>) {
     (values, vectors)
 }
 
+/// A complex number as `(re, im)`.
+pub type Complex = (f64, f64);
+
+/// Eigenvalues and right eigenvectors of a real general (non-symmetric) `n × n` matrix given
+/// row major: the values in no particular order, the vectors as columns, one per value.
+/// Complex values come in conjugate pairs.
+pub fn general_eigen(n: usize, a: &[f64]) -> (Vec<Complex>, Vec<Vec<Complex>>) {
+    assert_eq!(a.len(), n * n, "general_eigen needs an n × n matrix");
+    if n == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    let m = faer::Mat::<f64>::from_fn(n, n, |i, j| a[i * n + j]);
+    let evd = m
+        .eigen()
+        .expect("eigendecomposition of a dense general matrix");
+    let values = (0..n)
+        .map(|i| {
+            let s = evd.S()[i];
+            (s.re, s.im)
+        })
+        .collect();
+    let vectors = (0..n)
+        .map(|c| {
+            (0..n)
+                .map(|r| {
+                    let u = evd.U()[(r, c)];
+                    (u.re, u.im)
+                })
+                .collect()
+        })
+        .collect();
+    (values, vectors)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rotation_has_imaginary_eigenvalues() {
+        // [[0, 1], [−1, 0]]: eigenvalues ±i with eigenvectors (1, ±i).
+        let (values, vectors) = general_eigen(2, &[0.0, 1.0, -1.0, 0.0]);
+        let mut im: Vec<f64> = values.iter().map(|v| v.1).collect();
+        im.sort_by(f64::total_cmp);
+        assert!((im[0] + 1.0).abs() < 1e-14 && (im[1] - 1.0).abs() < 1e-14);
+        assert!(values.iter().all(|v| v.0.abs() < 1e-14));
+        for (value, v) in values.iter().zip(&vectors) {
+            // A v = s v, first row: v[1] = s v[0].
+            let (sr, si) = *value;
+            let expect = (sr * v[0].0 - si * v[0].1, sr * v[0].1 + si * v[0].0);
+            assert!((v[1].0 - expect.0).abs() < 1e-12 && (v[1].1 - expect.1).abs() < 1e-12);
+        }
+    }
 
     #[test]
     fn a_two_by_two_matrix() {

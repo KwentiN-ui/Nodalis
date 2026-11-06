@@ -4,24 +4,30 @@
 //! With mass-normalised modes `Φ`, their eigenvalues `Λ = diag(ω²)` and the Coriolis
 //! matrix `G = 2 ∫ ρ Nᵀ Ω̃ N dV` (`Ω̃ x = ω × x`, the angular velocity of the `CENTRIF`
 //! load), the modal coordinates obey `q̈ + Γ q̇ + Λ q = 0` with the skew-symmetric
-//! `Γ = Φᵀ G Φ`. With `y = (Λ^½ q, q̇)` this is `ẏ = S y`, `S = [[0, Λ^½], [−Λ^½, −Γ]]`
-//! real skew-symmetric: its eigenvalues are `±iμ` and `−iS` is Hermitian, solved through
-//! the real symmetric matrix `[[0, S], [−S, 0]]` of twice the size. Every positive `μ` is a
-//! complex mode with the frequency `μ`.
+//! `Γ = Φᵀ G Φ`. With `z = (q, q̇)` this is `ż = A z`, `A = [[0, I], [−Λ, −Γ]]`, a real
+//! general matrix whose eigenvalues `s = σ + iμ` come in conjugate pairs: `μ > 0` is the
+//! frequency of a complex mode, `σ` its growth rate (zero while the mode is stable).
+//!
+//! `Λ` may hold negative entries: the spin softening of the stored perturbation modes
+//! makes the rigid motions across the axis of a free rotor `−Ω²`, and in the rotating
+//! frame the Coriolis forces turn them into two modes at exactly `Ω`. Clamping them to
+//! zero (as a `Λ^½` formulation would) gives `0` and `2Ω` instead.
 //!
 //! As CalculiX prints them (observed with ccx 2.21 on the `rotor` fixtures, no source
 //! consulted): the modal coordinates of a mode are scaled so that the largest is 1 (its
 //! "participation factors"), the mode `x = Φ c` goes to the `.frd` as its real part
 //! (`DISP`, stresses and strains of it) and as magnitude and phase (`PDISP`, phase
 //! `atan(Im/Re)` in degrees, plus 180° where the real part is negative); the `.dat` gets
-//! the frequencies and the turning direction of every mode about the rotation axis.
+//! the frequencies and the turning direction of every mode about the rotation axis, with
+//! (Nodalis's own) the number of nodal diameters of the mode, which tells the frequencies of
+//! the mode in the stationary frame: `f ± n Ω` for a mode of `n` nodal diameters.
 
 use plxs_assembly::ElementTable;
 use plxs_core::mesh::ElementRef;
 use plxs_core::results::{HistoryBlock, IncrementKind, ModeKind, ResultsIncrement};
 use plxs_core::step::{DistributedLoadKind, Procedure as ProcedureKind};
 use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Step};
-use plxs_linalg::dense::symmetric_eigen;
+use plxs_linalg::dense::general_eigen;
 
 use crate::fields::{add_mode, build_fields, node_order};
 use crate::modal::stored_modes;
@@ -35,6 +41,7 @@ pub struct ComplexFrequencyProcedure;
 struct Rotation {
     omega: [f64; 3],
     axis: [f64; 3],
+    point: [f64; 3],
     entries: Vec<u32>,
 }
 
@@ -44,7 +51,7 @@ fn rotation(model: &Model, table: &ElementTable, step: &Step) -> Option<Rotation
         let DistributedLoadKind::Centrifugal {
             omega_squared,
             axis,
-            ..
+            point,
         } = &load.kind
         else {
             continue;
@@ -67,6 +74,7 @@ fn rotation(model: &Model, table: &ElementTable, step: &Step) -> Option<Rotation
         let rotation = found.get_or_insert(Rotation {
             omega: unit.map(|c| c * speed),
             axis: unit,
+            point: *point,
             entries: Vec::new(),
         });
         for id in elements {
@@ -215,60 +223,204 @@ fn coriolis_times(
     Ok(out)
 }
 
-/// A complex mode in modal coordinates: frequency (rad/time) and coefficients.
+/// Highest number of nodal diameters told apart, where the mesh resolves them.
+const MAX_NODAL_DIAMETER: usize = 16;
+
+/// The number of nodal diameters of a mode about the axis through `point`: the
+/// circumferential harmonic `e^{±inθ}` that carries most of the mode, from the cylindrical
+/// components (radial, tangential, axial) of the complex mode `re + i im` (3 per node) at
+/// every node off the axis. A mode of a rotor that is not axisymmetric, or one spread over
+/// many harmonics, gives `None`.
+fn nodal_diameter(
+    model: &Model,
+    re: &[f64],
+    im: &[f64],
+    point: &[f64; 3],
+    axis: &[f64; 3],
+) -> Option<u32> {
+    let dot = |a: &[f64; 3], b: &[f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let cross = |a: &[f64; 3], b: &[f64; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    // A basis (e1, e2) across the axis for the angle.
+    let other = if axis[0].abs() < 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let mut e1 = cross(axis, &other);
+    let len = dot(&e1, &e1).sqrt();
+    e1 = e1.map(|c| c / len);
+    let e2 = cross(axis, &e1);
+    let nodes = re.len() / 3;
+    let extent = (0..nodes)
+        .filter_map(|n| model.nodes.coordinates.get(n))
+        .map(|x| {
+            let r = [x[0] - point[0], x[1] - point[1], x[2] - point[2]];
+            dot(&r, &r).sqrt()
+        })
+        .fold(0.0, f64::max);
+    if extent <= 0.0 {
+        return None;
+    }
+    // The nodes resolve harmonics up to half their number of distinct angles (in bins of
+    // a degree): beyond that a harmonic cannot be told from a lower one.
+    let mut bins = vec![false; 360];
+    let mut angle_of = Vec::with_capacity(nodes);
+    for n in 0..nodes {
+        let Some(x) = model.nodes.coordinates.get(n) else {
+            angle_of.push(None);
+            continue;
+        };
+        let r = [x[0] - point[0], x[1] - point[1], x[2] - point[2]];
+        let along = dot(&r, axis);
+        let radial = [
+            r[0] - along * axis[0],
+            r[1] - along * axis[1],
+            r[2] - along * axis[2],
+        ];
+        let rho = dot(&radial, &radial).sqrt();
+        if rho <= 1e-6 * extent {
+            angle_of.push(None);
+            continue;
+        }
+        let theta = dot(&radial, &e2).atan2(dot(&radial, &e1));
+        let bin = ((theta.to_degrees() + 360.0) % 360.0).floor() as usize;
+        bins[bin.min(359)] = true;
+        angle_of.push(Some(theta));
+    }
+    let distinct = bins.iter().filter(|b| **b).count();
+    if distinct < 4 {
+        return None;
+    }
+    let harmonics = (distinct / 2).min(MAX_NODAL_DIAMETER + 1);
+    // Σ u_c e^{∓inθ} for the three cylindrical components and both senses of rotation,
+    // as (re, im).
+    let mut sums = vec![[(0.0, 0.0); 6]; harmonics];
+    let mut used = 0usize;
+    for n in 0..nodes {
+        let Some(theta) = angle_of[n] else {
+            continue;
+        };
+        let Some(x) = model.nodes.coordinates.get(n) else {
+            continue;
+        };
+        let r = [x[0] - point[0], x[1] - point[1], x[2] - point[2]];
+        let along = dot(&r, axis);
+        let radial = [
+            r[0] - along * axis[0],
+            r[1] - along * axis[1],
+            r[2] - along * axis[2],
+        ];
+        let rho = dot(&radial, &radial).sqrt();
+        let e_r = radial.map(|c| c / rho);
+        let e_t = cross(axis, &e_r);
+        let a: [f64; 3] = std::array::from_fn(|k| re[3 * n + k]);
+        let b: [f64; 3] = std::array::from_fn(|k| im[3 * n + k]);
+        let components = [
+            (dot(&a, &e_r), dot(&b, &e_r)),
+            (dot(&a, &e_t), dot(&b, &e_t)),
+            (dot(&a, axis), dot(&b, axis)),
+        ];
+        used += 1;
+        for (h, sum) in sums.iter_mut().enumerate() {
+            let (c, s) = ((h as f64 * theta).cos(), (h as f64 * theta).sin());
+            for (k, &(ur, ui)) in components.iter().enumerate() {
+                // u e^{−ihθ} and u e^{+ihθ}.
+                sum[k].0 += ur * c + ui * s;
+                sum[k].1 += ui * c - ur * s;
+                sum[3 + k].0 += ur * c - ui * s;
+                sum[3 + k].1 += ui * c + ur * s;
+            }
+        }
+    }
+    if used < 4 {
+        return None;
+    }
+    let energy: Vec<f64> = (sums.iter().enumerate())
+        .map(|(h, sum)| {
+            let both: f64 = sum.iter().map(|(r, i)| r * r + i * i).sum();
+            // Harmonic 0 is one and the same in both senses.
+            if h == 0 { both / 2.0 } else { both }
+        })
+        .collect();
+    let total: f64 = energy.iter().sum();
+    let (best, strongest) = (energy.iter().enumerate())
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(h, e)| (h, *e))?;
+    // The harmonic must carry most of the mode to count.
+    if total <= 0.0 || strongest < 0.5 * total {
+        return None;
+    }
+    Some(best as u32)
+}
+
+/// A complex mode in modal coordinates: frequency `mu` (rad/time), growth rate `sigma`
+/// (per time, zero for a stable mode) and coefficients.
 struct ComplexMode {
     mu: f64,
+    sigma: f64,
     re: Vec<f64>,
     im: Vec<f64>,
 }
 
-/// The complex modes of `q̈ + Γ q̇ + Λ q = 0`, ascending in frequency, at most `count`.
+/// The complex modes of `q̈ + Γ q̇ + Λ q = 0`, ascending in frequency, at most `count`:
+/// one of every conjugate pair `σ ± iμ`, and of a real pair `±σ` (a diverging motion,
+/// frequency 0) the growing one.
 fn complex_modes(lambda: &[f64], gamma: &[f64], count: usize) -> Vec<ComplexMode> {
     let m = lambda.len();
-    let w: Vec<f64> = lambda.iter().map(|l| l.max(0.0).sqrt()).collect();
-    // S = [[0, W], [−W, −Γ]], 2m × 2m.
-    let n2 = 2 * m;
-    let mut s = vec![0.0; n2 * n2];
-    for i in 0..m {
-        s[i * n2 + m + i] = w[i];
-        s[(m + i) * n2 + i] = -w[i];
-        for j in 0..m {
-            s[(m + i) * n2 + m + j] = -gamma[i * m + j];
-        }
-    }
-    // R = [[0, S], [−S, 0]] (symmetric since S is skew).
-    let n4 = 2 * n2;
-    let mut r = vec![0.0; n4 * n4];
-    for i in 0..n2 {
-        for j in 0..n2 {
-            r[i * n4 + n2 + j] = s[i * n2 + j];
-            r[(n2 + i) * n4 + j] = -s[i * n2 + j];
-        }
-    }
-    let (values, vectors) = symmetric_eigen(n4, &r);
-    // Positive eigenvalues come twice (y and i y); take every other one.
-    let mut modes = Vec::new();
-    let positive: Vec<usize> = (0..n4)
-        .filter(|&k| values[k] > 1e-9 * values[n4 - 1].abs())
+    // Rigid motions come out of the eigensolver as ±1e-7 of the largest eigenvalue; as
+    // negative ones they would be diverging motions. Spin softening is far above that.
+    let largest = lambda.iter().fold(0.0, |a: f64, l| a.max(l.abs()));
+    let lambda: Vec<f64> = lambda
+        .iter()
+        .map(|&l| if l.abs() <= 1e-6 * largest { 0.0 } else { l })
         .collect();
-    let mut k = 0;
-    while k < positive.len() && modes.len() < count {
-        let index = positive[k];
-        let v = &vectors[index];
-        // y = x_r + i x_i; the first half of y is W q.
-        let q_re: Vec<f64> = (0..m)
-            .map(|i| if w[i] > 0.0 { v[i] / w[i] } else { 0.0 })
-            .collect();
-        let q_im: Vec<f64> = (0..m)
-            .map(|i| if w[i] > 0.0 { v[n2 + i] / w[i] } else { 0.0 })
-            .collect();
-        modes.push(ComplexMode {
-            mu: values[index],
-            re: q_re,
-            im: q_im,
-        });
-        k += 2;
+    // A = [[0, I], [−Λ, −Γ]], 2m × 2m.
+    let n2 = 2 * m;
+    let mut a = vec![0.0; n2 * n2];
+    for i in 0..m {
+        a[i * n2 + m + i] = 1.0;
+        a[(m + i) * n2 + i] = -lambda[i];
+        for j in 0..m {
+            a[(m + i) * n2 + m + j] = -gamma[i * m + j];
+        }
     }
+    let (values, vectors) = general_eigen(n2, &a);
+    let scale = values
+        .iter()
+        .map(|(re, im)| re.hypot(*im))
+        .fold(0.0, f64::max);
+    // A double root with one eigenvector (the free mass above) is only accurate to about
+    // the square root of the machine precision, so growth rates below that are noise.
+    let tolerance = 1e-9 * scale;
+    let noise = 1e-5 * scale;
+    // A rigid motion is a double eigenvalue 0 of `A`: one mode for every two of them.
+    let mut zeros = 0;
+    let mut modes: Vec<ComplexMode> = values
+        .iter()
+        .zip(&vectors)
+        .filter(|((sigma, mu), _)| {
+            if sigma.hypot(*mu) <= noise {
+                zeros += 1;
+                zeros % 2 == 1
+            } else {
+                *mu > tolerance || (mu.abs() <= tolerance && *sigma > 0.0)
+            }
+        })
+        .map(|((sigma, mu), z)| ComplexMode {
+            mu: if *mu > tolerance { *mu } else { 0.0 },
+            sigma: if sigma.abs() > noise { *sigma } else { 0.0 },
+            re: z[..m].iter().map(|c| c.0).collect(),
+            im: z[..m].iter().map(|c| c.1).collect(),
+        })
+        .collect();
+    modes.sort_by(|a, b| a.mu.total_cmp(&b.mu).then(b.sigma.total_cmp(&a.sigma)));
+    modes.truncate(count);
     modes
 }
 
@@ -462,8 +614,13 @@ impl Procedure for ComplexFrequencyProcedure {
                 ];
                 turn -= cross[0] * axis[0] + cross[1] * axis[1] + cross[2] * axis[2];
             }
-            eigen_rows.push((number, vec![mode.mu, frequency, 0.0]));
-            turning_rows.push((number, vec![if turn >= 0.0 { 1.0 } else { -1.0 }]));
+            eigen_rows.push((number, vec![mode.mu, frequency, mode.sigma]));
+            // The nodal diameter, −1 where the mode has no clear one.
+            let diameter = rotation
+                .as_ref()
+                .and_then(|r| nodal_diameter(ctx.model, &re, &im, &r.point, &r.axis))
+                .map_or(-1.0, f64::from);
+            turning_rows.push((number, vec![if turn >= 0.0 { 1.0 } else { -1.0 }, diameter]));
             if fields.is_empty() {
                 continue;
             }
@@ -524,6 +681,7 @@ mod tests {
         assert!((modes[1].mu - upper).abs() < 1e-10, "{}", modes[1].mu);
         let mut m = ComplexMode {
             mu: modes[0].mu,
+            sigma: 0.0,
             re: modes[0].re.clone(),
             im: modes[0].im.clone(),
         };
@@ -531,6 +689,49 @@ mod tests {
         // A circular whirl: both coefficients of modulus 1, a quarter period apart.
         assert!((m.re[1].hypot(m.im[1]) - 1.0).abs() < 1e-9);
         assert!(m.re[1].abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_spin_softened_rigid_motion_circles_at_the_speed_of_rotation() {
+        // A free mass in the rotating frame: Λ = −Ω² (spin softening), Γ = 2Ω [[0, 1], [−1, 0]]
+        // (Coriolis). Seen from the rotating frame a mass at rest circles at Ω, so both
+        // modes lie at exactly Ω; clamping Λ to zero would give 0 and 2Ω.
+        let omega = 1675.5;
+        let modes = complex_modes(
+            &[-omega * omega, -omega * omega],
+            &[0.0, 2.0 * omega, -2.0 * omega, 0.0],
+            2,
+        );
+        assert_eq!(modes.len(), 2);
+        for mode in &modes {
+            // A double root with a single eigenvector: accurate to about √ε only.
+            assert!((mode.mu - omega).abs() < 1e-4 * omega, "{}", mode.mu);
+            assert_eq!(mode.sigma, 0.0);
+        }
+    }
+
+    #[test]
+    fn a_slightly_negative_rigid_mode_is_not_diverging() {
+        let modes = complex_modes(&[-0.6, 1.0e8], &[0.0; 4], 2);
+        assert_eq!(modes.len(), 2);
+        assert!(
+            modes[0].mu.abs() < 1e-3 && modes[0].sigma == 0.0,
+            "{} {}",
+            modes[0].mu,
+            modes[0].sigma
+        );
+        assert!((modes[1].mu - 1.0e4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_diverging_motion_is_a_growing_mode_without_frequency() {
+        // Λ < 0 without Coriolis: q̈ = Ω² q, growing as e^{Ωt}.
+        let modes = complex_modes(&[-4.0, 9.0], &[0.0; 4], 2);
+        assert_eq!(modes.len(), 2);
+        assert_eq!(modes[0].mu, 0.0);
+        assert!((modes[0].sigma - 2.0).abs() < 1e-12, "{}", modes[0].sigma);
+        assert!((modes[1].mu - 3.0).abs() < 1e-12);
+        assert_eq!(modes[1].sigma, 0.0);
     }
 
     #[test]
