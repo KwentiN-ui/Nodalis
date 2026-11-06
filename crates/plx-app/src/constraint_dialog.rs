@@ -641,12 +641,8 @@ fn joint_rows(ui: &mut Ui, model: &Model, joint: &mut Joint, pair: &mut MasterSl
     hint(
         ui,
         &format!(
-            "The joint holds the motion of End 2 relative to End 1 in its fixed degrees of \
-             freedom, like a Displacement/Rotation relative to another body instead of \
-             ground. {axis} The joint frame turns with End 1 (in large deformations). A \
-             selection follows a point of its own at the joint; points are reference points \
-             of rigid bodies and the points of Displacement/Rotation conditions and Remote \
-             Forces."
+            "End 2 moves against End 1 in the free degrees of freedom only. {axis} The joint \
+             frame turns with End 1."
         ),
     );
 }

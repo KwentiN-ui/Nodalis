@@ -115,7 +115,8 @@ point of a Displacement/Rotation condition or Remote Force). A selection follows
 its own at the joint, rigidly (#ui("Rigid"), the selection keeps its shape) or on average
 (#ui("Deformable")), chosen under #ui("Behavior").
 
-#screenshot("constraint-joint.png", [A revolute joint between the bore of a lever and a pin])
+#screenshot("constraint-joint.png", [A revolute joint from the side face of a cantilever to ground:
+  the ball marks the joint at the centre of the face, the double arrow its free rotation about z])
 
 #ui("Joint type") chooses the free relative degrees of freedom in the joint frame:
 
