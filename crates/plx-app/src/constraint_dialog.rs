@@ -4,8 +4,8 @@
 use egui::Ui;
 use plx_mesh::FeMesh;
 use plx_model::{
-    CompressionOnly, Constraint, FeModel, Quantity, Region, RigidBody, Spring, SpringEnd,
-    SpringLayout, UnitSystem, next_name,
+    CompressionOnly, Constraint, FeModel, ModelSpace, Quantity, Region, RigidBody, Spring,
+    SpringEnd, SpringLayout, UnitSystem, next_name,
 };
 
 use crate::contacts::{MasterSlave, Side};
@@ -428,9 +428,14 @@ fn spring_rows(
     }
     let quantity = stiffness(spring.is_per_area());
     stiffness_rows(ui, &mut spring.stiffness, units, quantity, dofs);
-    // A plane model has no rotations at points.
-    if spring.takes_rotations() && dofs == 3 {
-        rotational_rows(ui, &mut spring.rotational, units);
+    // A plane model turns about z only, an axisymmetric one not at all.
+    let rotations: &[usize] = match model.fe.properties.space {
+        ModelSpace::ThreeD => &[0, 1, 2],
+        ModelSpace::PlaneStress | ModelSpace::PlaneStrain => &[2],
+        ModelSpace::Axisymmetric => &[],
+    };
+    if spring.takes_rotations() {
+        rotational_rows(ui, &mut spring.rotational, units, rotations);
     }
     if selection {
         ui.label("");
@@ -472,9 +477,10 @@ fn spring_rows(
 }
 
 /// Rotational stiffness about the global axes, in moment per radian.
-fn rotational_rows(ui: &mut Ui, rotational: &mut [f64; 3], units: UnitSystem) {
+fn rotational_rows(ui: &mut Ui, rotational: &mut [f64; 3], units: UnitSystem, axes: &[usize]) {
     let unit = format!("{}/rad", units.unit(Quantity::Moment));
-    for (value, label) in rotational.iter_mut().zip(["KR1", "KR2", "KR3"]) {
+    for &axis in axes {
+        let (value, label) = (&mut rotational[axis], ["KR1", "KR2", "KR3"][axis]);
         ui.label(label)
             .on_hover_text("Rotational stiffness about the global axis.");
         ui.horizontal(|ui| {

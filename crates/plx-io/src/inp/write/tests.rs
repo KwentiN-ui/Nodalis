@@ -4247,6 +4247,51 @@ fn solver_turns_a_hinge_against_a_rotational_spring_on_its_point() {
     assert!((u2 - angle * (x - 100.0)).abs() < 1e-6, "{u2}");
 }
 
+/// The hinge of a plane stress strip: its left edge turns about z on the point of a
+/// displacement, held by a torsion spring KR3 on the third degree of freedom of the point's
+/// rotation node. Against a practically rigid spring the tip sinks by M / k L more.
+#[test]
+fn solver_turns_a_plane_hinge_against_a_torsion_spring() {
+    let (force, length, k) = (100.0, 10.0, 1.0e6);
+    let mesh = rectangle(0.0, length, 2.0, 5, 2);
+    let tip = Region::Faces(edges_at(&mesh, 0, length));
+    let mut tips = Vec::new();
+    for (name, stiffness) in [("weich", k), ("steif", 1.0e12)] {
+        let load = LoadKind::force([0.0, -force, 0.0]);
+        let mut model = plane_model(ModelSpace::PlaneStress, 1.0, vec![], load, tip.clone());
+        let free_z = [Some(0.0), Some(0.0), None, None, None, None];
+        model.steps[0].boundary_conditions.push(BoundaryCondition {
+            distribution: None,
+            name: "Hinge".into(),
+            active: true,
+            visible: true,
+            region: Region::Faces(edges_at(&mesh, 0, 0.0)),
+            kind: BoundaryKind::Displacement(Displacement::rigid(free_z)),
+            amplitude: None,
+        });
+        model.constraints.push(Constraint::Spring(plx_model::Spring {
+            ends: [
+                plx_model::SpringEnd::Region(Region::RemotePoint("Hinge".into())),
+                plx_model::SpringEnd::World,
+            ],
+            // Only KR3 acts in a plane model.
+            rotational: [5.0, 5.0, stiffness],
+            ..plx_model::Spring::new("Torsion")
+        }));
+        let text = write_inp(&mesh, &model, "").unwrap();
+        assert!(text.contains("*Spring, Elset=TORSION_ROTATION_DOF_3\n3\n"), "{text}");
+        assert!(!text.contains("TORSION_ROTATION_DOF_1"), "{text}");
+        let Some(frd) = run_solver(&format!("drehfeder-scheibe-{name}"), &text) else {
+            return;
+        };
+        let corner = nodes_at(&mesh, 0, length)[0];
+        tips.push(node_value(&frd, "DISP", "U2", corner));
+    }
+    let extra = tips[1] - tips[0];
+    let expected = force * length / k * length;
+    assert!((extra - expected).abs() < 0.02 * expected, "{extra} != {expected}");
+}
+
 /// Springs between two points connect their reference and their rotation nodes; springs
 /// from a selection to a point end on its reference node.
 #[test]
