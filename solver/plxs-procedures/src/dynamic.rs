@@ -964,6 +964,16 @@ pub(crate) fn write_increment(
             .map_or(0, |p| p + 1);
         fields.insert(at, field);
     }
+    if let Some(evaluation) = &ctx.contact.last {
+        let contact =
+            crate::contact::contact_fields(ctx.model, step, &ctx.contact, evaluation, &order);
+        // As in a static increment: the contact fields before the error estimator.
+        let at = fields
+            .iter()
+            .position(|f| f.name == "ERROR")
+            .unwrap_or(fields.len());
+        fields.splice(at..at, contact);
+    }
     ctx.results.increments.push(ResultsIncrement {
         step: ctx.step_number,
         increment,

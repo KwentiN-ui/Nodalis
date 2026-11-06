@@ -1217,7 +1217,11 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
     }
 }
 
-/// Whether a step type takes contact; the mortar formulation takes static steps only.
+/// Whether a step type takes contact; the mortar formulation takes static and dynamic
+/// steps only.
 pub fn mortar_supports(kind: &StepKind) -> bool {
-    matches!(kind, StepKind::Static(_) | StepKind::Visco(_))
+    matches!(
+        kind,
+        StepKind::Static(_) | StepKind::Visco(_) | StepKind::Dynamic(_)
+    )
 }

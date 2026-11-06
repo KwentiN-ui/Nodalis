@@ -150,8 +150,8 @@ pub enum Problem {
     InvalidTiedContact,
     /// Contact pairs of different formulations: the solver takes one for all of them.
     ContactFormulationsDiffer,
-    /// Mortar contact in a step that is not static: the solver takes mortar in static steps
-    /// only.
+    /// Mortar contact in a step that is neither static nor dynamic: the solver takes mortar
+    /// in static and dynamic steps only.
     MortarNotSupported,
     /// A contact region whose sides do not touch in the mesh: a bonded one ties nothing,
     /// another one lets its parts move freely until they meet.
@@ -638,8 +638,8 @@ impl Problem {
                  Connections."
             }
             Problem::MortarNotSupported => {
-                "The solver takes mortar contact in static steps only. In frequency, \
-                 buckling, dynamic and thermal steps the run aborts or the contact is left \
+                "The solver takes mortar contact in static and dynamic steps only. In \
+                 frequency, buckling and thermal steps the run aborts or the contact is left \
                  out."
             }
             Problem::ContactRegionOpen => {
@@ -1499,7 +1499,10 @@ impl FeModel {
                 findings.push(Finding::new(
                     ModelItem::Step(s),
                     Problem::MortarNotSupported,
-                    format!("{}: mortar contact in a step that is not static", step.name),
+                    format!(
+                        "{}: mortar contact in a step that is neither static nor dynamic",
+                        step.name
+                    ),
                 ));
             }
         }

@@ -22,6 +22,16 @@
 //! rotation in every iteration and their members put where the rotation takes them (see
 //! [`plxs_constraints::ModelConstraints::at_rotations`]).
 //!
+//! Contact pairs (node to surface, surface to surface, with friction; also the reason a
+//! small-deformation dynamic step comes here) add their penalty springs to the internal
+//! forces: `f_c(u)` enters the equation of motion α-weighted like `f(u)`, the springs are
+//! evaluated from the contact states at the start of every (sub-)increment (the friction
+//! slips), and an iteration in which the contact status changed is never the last. Rayleigh
+//! damping leaves the springs out: `β_R ḟ_c` would hold a body that bounces off a surface as
+//! if glued (the contact force falls to zero as it lifts off). An impact is resolved by the
+//! adaptive sub-increments: the jump of the accelerations raises the local error estimate,
+//! and an increment whose Newton iterations do not settle the contact set is split.
+//!
 //! An increment that does not converge is split in halves (up to 64 parts); the result
 //! frames stay on the increments of the step.
 //!
@@ -33,7 +43,8 @@ use plxs_assembly::{
     load_vector, rotate_concentrated_loads,
 };
 use plxs_constraints::{ConstraintSet, ModelConstraints};
-use plxs_core::state::{IntegrationPointField, NodalField};
+use plxs_contact::Evaluation;
+use plxs_core::state::{ContactPointState, IntegrationPointField, NodalField};
 use plxs_core::step::{Procedure as ProcedureKind, Rayleigh};
 use plxs_core::{Convergence, Divergence, Error, Progress, ProgressEvent, Result, Step, Stop};
 use plxs_linalg::{SparseMatrix, Unknowns};
@@ -55,6 +66,12 @@ pub struct NonlinearDynamic;
 const MAX_ITERATIONS: u32 = 16;
 /// How often an increment may be halved.
 const MAX_SPLITS: u32 = 6;
+/// How often an increment may be halved for an impact (see [`IMPACT_ENERGY`]): down to a
+/// few nanoseconds of a millisecond, only around the impact.
+const MAX_IMPACT_SPLITS: u32 = 16;
+/// Largest error of the contact's energy in a (sub-)increment relative to the energy of the
+/// motion (kinetic energy, work of the loads, energy of the springs).
+const IMPACT_ENERGY: f64 = 1e-3;
 /// Iterations above which the following increments are computed in twice as many parts,
 /// and at or below which in half as many: large rotations per increment converge slowly
 /// and lose accuracy.
@@ -84,8 +101,18 @@ struct At {
     stresses: IntegrationPointField,
     strains: IntegrationPointField,
     material: IntegrationPointField,
-    /// Accumulated energies (internal: work of the internal forces).
+    /// Accumulated energies (internal: work of the internal and contact forces).
     energies: Energies,
+    /// The forces of the contact springs (empty without contact), the states of the slave
+    /// points (friction slips) and the springs of the last evaluation.
+    contact: Vec<f64>,
+    /// The part of `contact` that is damping, the part from the normal springs alone and
+    /// the energy these store.
+    contact_damping: Vec<f64>,
+    contact_normal: Vec<f64>,
+    contact_energy: f64,
+    contact_states: Vec<Vec<ContactPointState>>,
+    evaluation: Option<Evaluation>,
 }
 
 /// What the increments share.
@@ -107,12 +134,20 @@ struct Setup<'s> {
     period: f64,
     discrete: Vec<&'s DiscreteElement>,
     energies_wanted: bool,
+    /// Whether contact pairs are in force; the mass matrix on the pattern with the contact
+    /// springs of the current sub-increment.
+    has_contact: bool,
+    m_contact: Option<SparseMatrix>,
+    /// The size of the model (diagonal of its bounding box).
+    size: f64,
 }
 
 /// Why an attempt failed.
 struct Failed {
     cause: Divergence,
     reason: String,
+    /// The contact status changed in one of the last iterations.
+    contact_changing: bool,
 }
 
 impl Procedure for NonlinearDynamic {
@@ -164,10 +199,21 @@ impl Procedure for NonlinearDynamic {
             started.elapsed().as_secs_f64()
         )));
         progress.event(ProgressEvent::Info(format!(
-            "large deformations: time step {} s resolves vibrations up to {} Hz",
+            "{}: time step {} s resolves vibrations up to {} Hz",
+            if step.nlgeom || ctx.table.has_nonlinear_material() {
+                "large deformations"
+            } else {
+                "contact"
+            },
             short(initial),
             short(1.0 / (10.0 * initial))
         )));
+        // Contact: *MODEL CHANGE / *CHANGE FRICTION of the step, then a contact state per
+        // slave point.
+        for warning in ctx.contact.begin_step(step, ctx.state) {
+            progress.event(ProgressEvent::Warning(warning));
+        }
+        let has_contact = ctx.contact.is_active();
 
         // Material state and displacements with the layout of this model.
         let layout = plxs_assembly::nonlinear::material_state(ctx.table);
@@ -229,6 +275,9 @@ impl Procedure for NonlinearDynamic {
             period,
             discrete: table.discrete.iter().collect(),
             energies_wanted: !energy_requests(step).is_empty(),
+            has_contact,
+            m_contact: None,
+            size: model_size(&ctx.model.nodes.coordinates),
         };
         let mut equations = Equations::new(parameters.solver).preferring_direct();
 
@@ -264,6 +313,19 @@ impl Procedure for NonlinearDynamic {
         );
         let mut internal = at_start.f_int;
         NonlinearStatic::add_discrete(&setup.discrete, &motion.u, &mut setup.k, &mut internal);
+        // The contact forces at the start (a body resting on another).
+        let mut contact_states = ctx.state.contact.clone();
+        let (contact_start, contact_normal_start, contact_energy_start, evaluation) = if has_contact
+        {
+            ctx.contact.prepare(&ctx.model.nodes.coordinates, &motion.u);
+            let evaluation =
+                evaluate_contact(ctx, &motion.u, &motion.v, &contact_states, false, 0.0, 0.0);
+            contact_states = evaluation.states();
+            let springs = contact_springs(&evaluation, n, 0.0, None);
+            (springs.0, springs.2, springs.3, Some(evaluation))
+        } else {
+            (vec![0.0; n], vec![0.0; n], 0.0, None)
+        };
 
         // The initial velocities are damped with the initial stiffness (`ḟ = K₀ v`).
         let cv_start = damping(&setup, &setup.k0, &motion.v);
@@ -271,7 +333,15 @@ impl Procedure for NonlinearDynamic {
         // linear procedure takes (a tenth of the first increment keeps it regular where the
         // mass alone is singular).
         {
-            let r = combine(&[(1.0, &load), (-1.0, &internal), (-1.0, &cv_start)], n);
+            let r = combine(
+                &[
+                    (1.0, &load),
+                    (-1.0, &internal),
+                    (-1.0, &contact_start),
+                    (-1.0, &cv_start),
+                ],
+                n,
+            );
             let (c_m, c_k) = matrix_factors(scheme, Rayleigh::default(), initial / 10.0, true);
             let matrix =
                 initial_acceleration_matrix(ctx.table, ctx.model, &ctx.pattern, c_m, c_k, true)?;
@@ -308,6 +378,12 @@ impl Procedure for NonlinearDynamic {
             },
             motion,
             load,
+            contact: contact_start,
+            contact_damping: vec![0.0; n],
+            contact_normal: contact_normal_start,
+            contact_energy: contact_energy_start,
+            contact_states,
+            evaluation,
             stresses: ctx.state.stresses.clone(),
             strains: ctx.state.strains.clone(),
             material: ctx.state.material.clone(),
@@ -396,7 +472,7 @@ impl Procedure for NonlinearDynamic {
                         &current,
                         end,
                         increment,
-                        0,
+                        (0, 0),
                     )? {
                         Ok((next, its)) => {
                             let error = local_error(scheme, &setup.active, &current, &next);
@@ -428,8 +504,8 @@ impl Procedure for NonlinearDynamic {
                         failure: plxs_core::Failure::NoConvergence(Convergence {
                             cause: failed.cause,
                             stop: Stop::Cutbacks,
-                            contact: false,
-                            contact_changing: false,
+                            contact: setup.has_contact,
+                            contact_changing: failed.contact_changing,
                         }),
                         message: format!(
                             "{}; no convergence even with the increment split into {} parts",
@@ -452,8 +528,17 @@ impl Procedure for NonlinearDynamic {
             let dt = t1 - state.time;
             state = next;
 
-            // Outputs: the internal forces carried to the reference points.
+            if let Some(evaluation) = &state.evaluation {
+                ctx.state.contact.clone_from(&state.contact_states);
+                ctx.contact.last = Some(evaluation.clone());
+            }
+            // Outputs: the internal and contact forces carried to the reference points.
             let mut reactions = state.internal.clone();
+            if setup.has_contact {
+                for (r, c) in reactions.iter_mut().zip(&state.contact) {
+                    *r += c;
+                }
+            }
             let constraints = rotated(ctx.constraints, &setup, &state.motion.u);
             constraints
                 .as_ref()
@@ -496,6 +581,20 @@ impl Procedure for NonlinearDynamic {
                 &state.strains,
                 Some(&state.material),
             );
+            if let Some(evaluation) = &ctx.contact.last {
+                for request in &step.outputs.contact_print {
+                    let blocks = plxs_contact::output::history_blocks(
+                        &ctx.contact,
+                        evaluation,
+                        request,
+                        &ctx.model.nodes.ids,
+                        ctx.step_number,
+                        increment,
+                        total,
+                    );
+                    ctx.results.history.extend(blocks);
+                }
+            }
             ctx.sta.push(StaRow {
                 step: ctx.step_number,
                 increment,
@@ -578,6 +677,93 @@ fn input<'a>(step: &Step, u: &'a [f64], dt: f64, time: f64) -> NonlinearInput<'a
     }
 }
 
+/// Damping of the contact springs, as a fraction of the time step: `c = η Δt dp/dd` (see
+/// [`plxs_contact::Damping`]). A slave node on a stiff penalty spring is a small mass on a
+/// stiff spring: with a consistent mass matrix it bounces off the master at the frequency
+/// of the spring, a few time steps per period, and the contact force chatters between zero
+/// and several times its mean (the impact of a bar on a wall). Numerical damping of the time
+/// integration hardly reaches this frequency. `η = 1` damps it about critically
+/// (`ζ ≈ ω Δt / 2`) and leaves motions much slower than the time step alone (`ζ ≪ 1`), like
+/// the waves of the impact.
+const CONTACT_DAMPING: f64 = 1.0;
+
+/// The springs of a contact evaluation in the tangent `k` (scaled by `scale`): their
+/// forces over all DOFs, separately the part of them from their damping and that from the
+/// normal springs alone, and the energy the normal springs store.
+fn contact_springs(
+    evaluation: &Evaluation,
+    n: usize,
+    scale: f64,
+    mut k: Option<&mut SparseMatrix>,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, f64) {
+    let mut f = vec![0.0; n];
+    let mut fd = vec![0.0; n];
+    let mut normal = vec![0.0; n];
+    let mut block = Vec::new();
+    for element in &evaluation.elements {
+        if let Some(k) = k.as_deref_mut() {
+            block.clear();
+            block.extend(element.ke.iter().map(|k| k * scale));
+            k.add_block(&element.dofs, &block);
+        }
+        for (a, &dof) in element.dofs.iter().enumerate() {
+            f[dof as usize] += element.fe[a];
+        }
+        for (&dof, d) in element.dofs.iter().zip(&element.damping) {
+            fd[dof as usize] += d;
+        }
+        for (&dof, d) in element.dofs.iter().zip(&element.normal) {
+            normal[dof as usize] += d;
+        }
+    }
+    let energy = evaluation
+        .points
+        .iter()
+        .flatten()
+        .map(|p| p.normal_energy)
+        .sum();
+    (f, fd, normal, energy)
+}
+
+/// The contact springs at `u` from the states `start`, damped with the velocities `v`
+/// (`damping` the coefficient as a time, `rate` = dv/du).
+fn evaluate_contact(
+    ctx: &mut ProcedureContext<'_>,
+    u: &[f64],
+    v: &[f64],
+    start: &[Vec<ContactPointState>],
+    predictor: bool,
+    damping: f64,
+    rate: f64,
+) -> Evaluation {
+    ctx.contact.damping = Some(plxs_contact::Damping {
+        velocities: v.to_vec(),
+        coefficient: damping,
+        rate,
+    });
+    let evaluation = ctx
+        .contact
+        .evaluate(&ctx.model.nodes.coordinates, u, start, predictor);
+    ctx.contact.damping = None;
+    evaluation
+}
+
+/// The diagonal of the bounding box of the nodes.
+fn model_size(coordinates: &[[f64; 3]]) -> f64 {
+    let mut low = [f64::INFINITY; 3];
+    let mut high = [f64::NEG_INFINITY; 3];
+    for c in coordinates {
+        for d in 0..3 {
+            low[d] = low[d].min(c[d]);
+            high[d] = high[d].max(c[d]);
+        }
+    }
+    (0..3)
+        .map(|d| (high[d] - low[d]).max(0.0).powi(2))
+        .sum::<f64>()
+        .sqrt()
+}
+
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
@@ -656,7 +842,9 @@ fn constraint_set(ctx: &ProcedureContext<'_>, setup: &Setup<'_>, u: &[f64]) -> C
 }
 
 /// Integrates from `from` to step time `t1`; a failed attempt is split into two halves
-/// (`depth` splits so far). Returns the state at `t1` and the iterations it took.
+/// (`cuts` such splits so far, at most [`MAX_SPLITS`]), and so is an attempt in which a
+/// contact closes or opens too abruptly (`depth` splits of any kind so far, at most
+/// [`MAX_IMPACT_SPLITS`]). Returns the state at `t1` and the iterations it took.
 #[allow(clippy::too_many_arguments)]
 fn advance(
     ctx: &mut ProcedureContext<'_>,
@@ -666,46 +854,37 @@ fn advance(
     from: &At,
     t1: f64,
     increment: u32,
-    depth: u32,
+    (depth, cuts): (u32, u32),
 ) -> Result<std::result::Result<(At, u32), Failed>> {
-    match attempt(ctx, setup, equations, progress, from, t1, increment, depth)? {
-        Ok(done) => Ok(Ok(done)),
-        Err(failed) if depth >= MAX_SPLITS => Ok(Err(failed)),
-        Err(failed) => {
-            progress.event(ProgressEvent::Cutback {
-                step: ctx.step_number,
-                increment,
-                attempt: depth + 1,
-                reason: format!("{}; the increment is split in two", failed.reason),
-            });
-            let middle = 0.5 * (from.time + t1);
-            let (half, first) = match advance(
-                ctx,
-                setup,
-                equations,
-                progress,
-                from,
-                middle,
-                increment,
-                depth + 1,
-            )? {
-                Ok(done) => done,
-                Err(failed) => return Ok(Err(failed)),
-            };
-            match advance(
-                ctx,
-                setup,
-                equations,
-                progress,
-                &half,
-                t1,
-                increment,
-                depth + 1,
-            )? {
-                Ok((end, second)) => Ok(Ok((end, first + second))),
-                Err(failed) => Ok(Err(failed)),
-            }
+    let (reason, cut) = match attempt(ctx, setup, equations, progress, from, t1, increment, depth)?
+    {
+        Ok((done, its, impact)) if impact <= IMPACT_ENERGY || depth >= MAX_IMPACT_SPLITS => {
+            return Ok(Ok((done, its)));
         }
+        Ok(_) => (None, 0),
+        Err(failed) if cuts >= MAX_SPLITS => return Ok(Err(failed)),
+        Err(failed) => (Some(failed.reason), 1),
+    };
+    // An impact is refined silently (it may take a dozen halvings).
+    if let Some(reason) = reason {
+        progress.event(ProgressEvent::Cutback {
+            step: ctx.step_number,
+            increment,
+            attempt: depth + 1,
+            reason: format!("{reason}; the increment is split in two"),
+        });
+    }
+    let middle = 0.5 * (from.time + t1);
+    let next = (depth + 1, cuts + cut);
+    let (half, first) = match advance(
+        ctx, setup, equations, progress, from, middle, increment, next,
+    )? {
+        Ok(done) => done,
+        Err(failed) => return Ok(Err(failed)),
+    };
+    match advance(ctx, setup, equations, progress, &half, t1, increment, next)? {
+        Ok((end, second)) => Ok(Ok((end, first + second))),
+        Err(failed) => Ok(Err(failed)),
     }
 }
 
@@ -720,7 +899,7 @@ fn attempt(
     t1: f64,
     increment: u32,
     depth: u32,
-) -> Result<std::result::Result<(At, u32), Failed>> {
+) -> Result<std::result::Result<(At, u32, f64), Failed>> {
     let n = ctx.table.dofs.len();
     let dt = t1 - from.time;
     let total = setup.start_total + t1;
@@ -737,7 +916,7 @@ fn attempt(
     let v_tilde = combine(&[(1.0, &m0.v), (dt * (1.0 - gamma), &m0.a)], n);
     // The part of the residual that does not change in the iterations.
     let cv0 = &from.damping;
-    let fixed = combine(
+    let mut fixed = combine(
         &[
             (1.0 + alpha, &load),
             (-alpha, &from.load),
@@ -746,6 +925,21 @@ fn attempt(
         ],
         n,
     );
+    if setup.has_contact {
+        for (f, c) in fixed.iter_mut().zip(&from.contact) {
+            *f += alpha * c;
+        }
+        // Candidate master faces from the start of the sub-increment and a matrix pattern
+        // with every spring they allow (kept while it does, see `contact::cached_pattern`).
+        let blocks = ctx
+            .contact
+            .prepare(&ctx.model.nodes.coordinates, &from.motion.u);
+        let pattern = crate::contact::cached_pattern(ctx.table, &blocks, &mut ctx.contact_pattern);
+        if !std::sync::Arc::ptr_eq(setup.k.pattern(), &pattern) {
+            setup.k = SparseMatrix::zeros(pattern.clone());
+            setup.m_contact = Some(setup.m.embed(pattern));
+        }
+    }
     let (c_m, _) = matrix_factors(setup.scheme, setup.rayleigh, dt, false);
     // Damping and mass part of the tangent (c_m); the stiffness part is (1+α) K_T plus the
     // stiffness-proportional damping (1+α) β_R K_T/Δt.
@@ -763,8 +957,24 @@ fn attempt(
     // The material state the increment starts from.
     ctx.state.material.clone_from(&from.material);
     let mut u = m0.u.clone();
+    // With contact the iterations start from the predictor `ũ` (the motion continued at the
+    // velocity and acceleration of the start): a body that slides or flies on is then
+    // evaluated where it will be, not held by the friction or the contact status of where it
+    // was. Prescribed DOFs keep their start; they move with the first correction.
+    if setup.has_contact {
+        u.clone_from(&u_tilde);
+        for &dof in &setup.spc_dofs {
+            u[dof as usize] = m0.u[dof as usize];
+        }
+        if setup.large_rotations {
+            ctx.constraints.project_rigid(&mut u, &setup.spc_dofs);
+        }
+    }
     let mut last_correction = f64::INFINITY;
     let mut iteration = 0u32;
+    // The contact status of the last iteration and the last iteration in which it changed.
+    let mut status: Option<Vec<u8>> = None;
+    let mut last_change: Option<u32> = None;
     loop {
         let started = std::time::Instant::now();
         let mut output = assemble_nonlinear(
@@ -774,10 +984,45 @@ fn attempt(
             ctx.state,
             Some(&mut setup.k),
         );
-        NonlinearStatic::add_discrete(&setup.discrete, &u, &mut setup.k, &mut output.f_int);
-        ctx.profile.add(crate::profile::Phase::Assembly, started);
+        let gaps: Vec<u8> =
+            NonlinearStatic::add_discrete(&setup.discrete, &u, &mut setup.k, &mut output.f_int)
+                .into_iter()
+                .map(u8::from)
+                .collect();
+        // Contact springs at `u` from the states at the start of the sub-increment. Their
+        // stiffness enters the tangent with (1 + α) only (no stiffness-proportional
+        // damping), which the scaling undoes for the factor of `setup.k` below.
         let a1 = combine(&[(c1, &u), (-c1, &u_tilde)], n);
         let v1 = combine(&[(1.0, &v_tilde), (gamma * dt, &a1)], n);
+        // The springs are damped (see `CONTACT_DAMPING`) with the velocities of `u`.
+        let evaluation = setup.has_contact.then(|| {
+            evaluate_contact(
+                ctx,
+                &u,
+                &v1,
+                &from.contact_states,
+                iteration == 0,
+                CONTACT_DAMPING * dt,
+                gamma / (beta * dt),
+            )
+        });
+        let (fc, fd, fn1, energy1) = match &evaluation {
+            Some(evaluation) => {
+                contact_springs(evaluation, n, 1.0 / (1.0 + beta_r / dt), Some(&mut setup.k))
+            }
+            None => (Vec::new(), Vec::new(), Vec::new(), 0.0),
+        };
+        let mut key = gaps;
+        if let Some(evaluation) = &evaluation {
+            key.extend(evaluation.status_key());
+        }
+        let changed = status.as_ref().is_some_and(|s| *s != key);
+        status = Some(key);
+        if changed {
+            last_change = Some(iteration);
+        }
+        let changing = last_change.is_some_and(|i| iteration - i <= 2);
+        ctx.profile.add(crate::profile::Phase::Assembly, started);
         let ma = multiply(&setup.m, &a1);
         let cv1 = if alpha_r == 0.0 && beta_r == 0.0 {
             vec![0.0; n]
@@ -794,7 +1039,7 @@ fn attempt(
         };
         // The tangent: c_m M + (1+α)(1 + β_R/Δt) K_T.
         let tangent = SparseMatrix::linear_combination(
-            &setup.m,
+            setup.m_contact.as_ref().unwrap_or(&setup.m),
             c_m,
             &setup.k,
             (1.0 + alpha) * (1.0 + beta_r / dt),
@@ -808,6 +1053,9 @@ fn attempt(
             ],
             n,
         );
+        for (r, c) in residual_full.iter_mut().zip(&fc) {
+            *r -= (1.0 + alpha) * c;
+        }
         if pending_g {
             let td = multiply(&tangent, &delta_g);
             for (r, t) in residual_full.iter_mut().zip(&td) {
@@ -823,7 +1071,14 @@ fn attempt(
         } else {
             0.0
         };
-        let scale = flux.max(largest(&load)).max(largest(&ma));
+        // A body in free flight has none of these forces: the round-off of its inertial
+        // forces against the momentum it carries (`M v / Δt`) is the floor.
+        let momentum = 1e-8 * largest(&multiply(&setup.m, &v1)) / dt;
+        let scale = flux
+            .max(largest(&load))
+            .max(largest(&ma))
+            .max(largest(&fc))
+            .max(momentum);
         let motion = u
             .iter()
             .zip(&m0.u)
@@ -835,16 +1090,21 @@ fn attempt(
                 increment,
                 attempt: depth + 1,
                 iteration,
-                contact_elements: 0,
+                contact_elements: evaluation.as_ref().map_or(0, |e| e.active as u32),
                 residual: r_max,
                 correction: last_correction,
                 step_time: t1,
                 increment_size: dt,
             });
             let residual_ok = r_max <= RESIDUAL * scale || r_max == 0.0;
-            let correction_ok =
-                last_correction <= CORRECTION * motion || motion == 0.0 || r_max <= 1e-10 * scale;
-            let converged = residual_ok && correction_ok;
+            // A body at rest moves by nothing in an increment: a correction at the round-off
+            // of the model's size is converged as well.
+            let correction_ok = last_correction <= CORRECTION * motion
+                || last_correction <= 1e-13 * setup.size
+                || motion == 0.0
+                || r_max <= 1e-10 * scale;
+            // An iteration that opened or closed a contact point needs another one.
+            let converged = residual_ok && correction_ok && !changed;
             progress.event(ProgressEvent::Iteration {
                 step: ctx.step_number,
                 increment,
@@ -860,8 +1120,52 @@ fn attempt(
                 let mean_load = combine(&[(0.5, &from.load), (0.5, &load)], n);
                 energies.internal += dot(&mean_internal, &du);
                 energies.external_work += dot(&mean_load, &du);
+                let kinetic = if setup.energies_wanted || setup.has_contact {
+                    0.5 * dot(&v1, &multiply(&setup.m, &v1))
+                } else {
+                    0.0
+                };
+                // The error of the contact's energy: the work of the normal springs over the
+                // increment by the trapezoidal rule of the time integration against the
+                // energy they store. A point that closes or opens within a coarse increment
+                // makes it large (an impact computed with steps longer than it lasts gives
+                // energy), and the increment is computed in parts.
+                let mut impact = 0.0;
+                if setup.has_contact {
+                    // The springs store energy, their damping dissipates it, the friction
+                    // takes the rest.
+                    let mean_damping = combine(&[(0.5, &from.contact_damping), (0.5, &fd)], n);
+                    let mean_normal = combine(&[(0.5, &from.contact_normal), (0.5, &fn1)], n);
+                    let mean_other = combine(
+                        &[
+                            (0.5, &from.contact),
+                            (0.5, &fc),
+                            (-1.0, &mean_damping),
+                            (-1.0, &mean_normal),
+                        ],
+                        n,
+                    );
+                    let stored = energy1 - from.contact_energy;
+                    energies.internal += stored + dot(&mean_other, &du);
+                    energies.dissipation += dot(&mean_damping, &du);
+                    let error = (dot(&mean_normal, &du) - stored).abs();
+                    let reference = from
+                        .energies
+                        .kinetic
+                        .max(kinetic)
+                        .max(energies.external_work.abs())
+                        .max(energy1)
+                        .max(from.contact_energy);
+                    impact = if reference > 0.0 {
+                        error / reference
+                    } else {
+                        0.0
+                    };
+                }
+                if setup.energies_wanted || setup.has_contact {
+                    energies.kinetic = kinetic;
+                }
                 if setup.energies_wanted {
-                    energies.kinetic = 0.5 * dot(&v1, &multiply(&setup.m, &v1));
                     energies.dissipation += 0.5 * dt * (dot(&m0.v, cv0) + dot(&v1, &cv1));
                 }
                 return Ok(Ok((
@@ -875,14 +1179,24 @@ fn attempt(
                         strains: output.strains,
                         material: output.material,
                         energies,
+                        contact_states: evaluation
+                            .as_ref()
+                            .map_or_else(|| from.contact_states.clone(), Evaluation::states),
+                        contact: if setup.has_contact { fc } else { vec![0.0; n] },
+                        contact_damping: if setup.has_contact { fd } else { vec![0.0; n] },
+                        contact_normal: if setup.has_contact { fn1 } else { vec![0.0; n] },
+                        contact_energy: energy1,
+                        evaluation,
                     },
                     iteration,
+                    impact,
                 )));
             }
             if iteration >= MAX_ITERATIONS {
                 return Ok(Err(Failed {
                     cause: Divergence::IterationLimit,
                     reason: format!("no convergence after {MAX_ITERATIONS} iterations"),
+                    contact_changing: changing,
                 }));
             }
         }
@@ -901,23 +1215,77 @@ fn attempt(
             .map_err(|e| numerical(e, ctx.step_number, increment, equations))?;
         ctx.profile
             .add(crate::profile::Phase::Factorization, started);
-        let mut dv = residual;
-        equations
-            .solve(
-                &mut ctx.solver,
-                &mut dv,
-                &mut FirstOrWarnings {
-                    inner: &mut *progress,
-                    all: false,
-                },
-            )
-            .map_err(|e| in_increment(e, ctx.step_number, increment))?;
-        let du = set.expand(&dv, &vec![0.0; n]);
+        let unsymmetric: Vec<&plxs_contact::ContactElement> = evaluation
+            .as_ref()
+            .map(|e| {
+                e.elements
+                    .iter()
+                    .filter(|e| !e.unsymmetric.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let dv = if unsymmetric.is_empty() {
+            let mut dv = residual;
+            equations
+                .solve(
+                    &mut ctx.solver,
+                    &mut dv,
+                    &mut FirstOrWarnings {
+                        inner: &mut *progress,
+                        all: false,
+                    },
+                )
+                .map_err(|e| in_increment(e, ctx.step_number, increment))?;
+            dv
+        } else {
+            // Sliding friction makes the tangent unsymmetric: GMRES on the full tangent,
+            // preconditioned by the factorized symmetric part.
+            let zero = vec![0.0; n];
+            let solver = &ctx.solver;
+            let apply = |v: &[f64], out: &mut [f64]| {
+                reduced.multiply(v, out);
+                let full = set.expand(v, &zero);
+                let mut e = vec![0.0; n];
+                for element in &unsymmetric {
+                    element.apply_unsymmetric(&full, &mut e);
+                }
+                for (o, r) in out.iter_mut().zip(set.reduce_rhs(&e)) {
+                    *o += (1.0 + alpha) * r;
+                }
+            };
+            let precondition = |v: &mut [f64]| equations.apply_inverse(solver, v);
+            plxs_linalg::gmres(&apply, &precondition, &residual, 1e-10, 60, 300)?.0
+        };
+        let mut du = set.expand(&dv, &vec![0.0; n]);
+        // A correction that drives contact points deep into the master (a body arriving
+        // fast in a sub-increment it was still free in) is shortened, see
+        // `ContactModel::step_limit`.
+        if setup.has_contact {
+            let full: Vec<f64> = if pending_g {
+                du.iter().zip(&delta_g).map(|(a, b)| a + b).collect()
+            } else {
+                du.clone()
+            };
+            let work: f64 = du.iter().zip(&residual_full).map(|(d, r)| d * r).sum();
+            let factor = ctx.contact.step_limit(
+                &ctx.model.nodes.coordinates,
+                &u,
+                &full,
+                &from.contact_states,
+                work,
+            );
+            if factor < 1.0 {
+                for d in &mut du {
+                    *d *= factor;
+                }
+            }
+        }
         last_correction = du.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
         if !last_correction.is_finite() {
             return Ok(Err(Failed {
                 cause: Divergence::NotFinite,
                 reason: "the solution correction is not finite".into(),
+                contact_changing: changing,
             }));
         }
         for (ui, d) in u.iter_mut().zip(&du) {

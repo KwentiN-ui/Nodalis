@@ -258,6 +258,31 @@ impl SparseMatrix {
         }
     }
 
+    /// The same matrix on a larger pattern that holds every entry of this one (a pattern
+    /// with extra contact springs); the new entries are zero. Returns a clone when the
+    /// pattern is the same.
+    pub fn embed(&self, pattern: Arc<Pattern>) -> SparseMatrix {
+        if Arc::ptr_eq(&self.pattern, &pattern) || *self.pattern == *pattern {
+            return SparseMatrix {
+                pattern,
+                values: self.values.clone(),
+            };
+        }
+        assert_eq!(self.pattern.n, pattern.n, "embed needs the same dimension");
+        let mut out = SparseMatrix::zeros(pattern);
+        for col in 0..self.pattern.n {
+            let start = self.pattern.col_ptr[col] as usize;
+            for (k, &row) in self.pattern.column(col).iter().enumerate() {
+                let at = out
+                    .pattern
+                    .position(row, col as u32)
+                    .unwrap_or_else(|| panic!("entry ({row}, {col}) is not in the larger pattern"));
+                out.values[at] = self.values[start + k];
+            }
+        }
+        out
+    }
+
     /// `alpha · a + beta · b` on the pattern of `a` (`b` must share it).
     pub fn linear_combination(
         a: &SparseMatrix,
