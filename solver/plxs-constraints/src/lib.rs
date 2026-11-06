@@ -18,6 +18,7 @@
 
 pub mod cyclic;
 pub mod elimination;
+pub mod joint;
 pub mod set;
 pub mod tie;
 pub mod transform;

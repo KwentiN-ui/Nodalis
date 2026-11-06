@@ -466,6 +466,25 @@ fn constraints(out: &mut Out, model: &Model) {
             body.reference_node, body.rotation_node
         ));
     }
+    for joint in &constraints.joints {
+        out.keyword(&format!("*Joint, Name={}", joint.name));
+        let [first, second] = joint.ends.map(|end| end.unwrap_or([0, 0]));
+        out.line(&format!(
+            "{}, {}, {}, {}",
+            first[0], first[1], second[0], second[1]
+        ));
+        let [x, y, _] = joint.axes;
+        let o = joint.origin;
+        let frame: Vec<String> = [o, x, y].iter().flatten().map(|&v| number(v)).collect();
+        out.line(&frame.join(", "));
+        let held: Vec<String> = (1..=6)
+            .filter(|&d| joint.fixed[d - 1])
+            .map(|d| d.to_string())
+            .collect();
+        if !held.is_empty() {
+            out.line(&held.join(", "));
+        }
+    }
     if !constraints.equations.is_empty() {
         out.keyword("*Equation");
         for equation in &constraints.equations {

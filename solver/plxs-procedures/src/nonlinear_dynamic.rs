@@ -205,7 +205,7 @@ impl Procedure for NonlinearDynamic {
                 r
             }
         };
-        let large_rotations = step.nlgeom && ctx.constraints.has_rigid_bodies();
+        let large_rotations = step.nlgeom && ctx.constraints.has_finite_rotations();
         let table: &plxs_assembly::ElementTable = ctx.table;
         let mut setup = Setup {
             step,

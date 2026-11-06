@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use plxs_core::amplitude::Amplitude;
 use plxs_core::constraints::{
-    CyclicSymmetryModel, Equation, EquationTerm, RigidBody, RigidBodyNodes, Submodel, Tie,
+    CyclicSymmetryModel, Equation, EquationTerm, Joint, RigidBody, RigidBodyNodes, Submodel, Tie,
     Transform, TransformKind,
 };
 use plxs_core::contact::{
@@ -259,6 +259,7 @@ impl Reader {
             "*GAP" => self.gap(k, data)?,
             "*EQUATION" => self.equation(k, data)?,
             "*RIGIDBODY" => self.rigid_body(k)?,
+            "*JOINT" => self.joint(k, data)?,
             "*TIE" => self.tie(k, data)?,
             "*CYCLICSYMMETRYMODEL" => self.cyclic_symmetry_model(k, data)?,
             "*TRANSFORM" => self.transform(k, data)?,
@@ -1026,6 +1027,64 @@ impl Reader {
             nodes,
             reference_node,
             rotation_node,
+        });
+        Ok(())
+    }
+
+    /// `*JOINT, NAME=..`: the reference and rotation nodes of both ends (0 for ground), the
+    /// origin with the local x and y directions, and the held relative degrees of freedom
+    /// (1-3 translations, 4-6 rotations, local).
+    fn joint(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
+        k.check_parameters(&["NAME"])?;
+        let name = k.value("NAME").map(normalized_name).unwrap_or_default();
+        let (nodes, frame, dofs) = match data {
+            [nodes, frame] => (nodes, frame, None),
+            [nodes, frame, dofs] => (nodes, frame, Some(dofs)),
+            _ => return Err(k.error("data lines are nodes, frame and held DOFs")),
+        };
+        let n = numbers(k, nodes)?;
+        if n.len() != 4 {
+            return Err(data_error(k, nodes, "four nodes are needed (0 for ground)"));
+        }
+        let end = |r: f64, q: f64| (r > 0.0).then_some([r as NodeId, q as NodeId]);
+        let f = numbers(k, frame)?;
+        if f.len() != 9 {
+            return Err(data_error(k, frame, "origin, x and y direction are needed"));
+        }
+        let unit = |v: [f64; 3]| {
+            let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            (l > 0.0).then(|| [v[0] / l, v[1] / l, v[2] / l])
+        };
+        let (Some(x), Some(y)) = (unit([f[3], f[4], f[5]]), unit([f[6], f[7], f[8]])) else {
+            return Err(data_error(k, frame, "the directions must not be zero"));
+        };
+        let Some(z) = unit([
+            x[1] * y[2] - x[2] * y[1],
+            x[2] * y[0] - x[0] * y[2],
+            x[0] * y[1] - x[1] * y[0],
+        ]) else {
+            return Err(data_error(k, frame, "x and y must not be parallel"));
+        };
+        let y = [
+            z[1] * x[2] - z[2] * x[1],
+            z[2] * x[0] - z[0] * x[2],
+            z[0] * x[1] - z[1] * x[0],
+        ];
+        let mut fixed = [false; 6];
+        if let Some(line) = dofs {
+            for d in numbers(k, line)? {
+                if !(1.0..=6.0).contains(&d) {
+                    return Err(data_error(k, line, "degrees of freedom are 1 to 6"));
+                }
+                fixed[d as usize - 1] = true;
+            }
+        }
+        self.model().constraints.joints.push(Joint {
+            name,
+            ends: [end(n[0], n[1]), end(n[2], n[3])],
+            origin: [f[0], f[1], f[2]],
+            axes: [x, y, z],
+            fixed,
         });
         Ok(())
     }

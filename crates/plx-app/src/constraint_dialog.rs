@@ -4,8 +4,8 @@
 use egui::Ui;
 use plx_mesh::FeMesh;
 use plx_model::{
-    CompressionOnly, Constraint, FeModel, ModelSpace, Quantity, Region, RigidBody, Spring,
-    SpringEnd, SpringLayout, UnitSystem, next_name,
+    CompressionOnly, Constraint, FeModel, Joint, JointKind, ModelSpace, Quantity, Region,
+    RemoteBehavior, RigidBody, Spring, SpringEnd, SpringLayout, UnitSystem, next_name,
 };
 
 use crate::contacts::{MasterSlave, Side};
@@ -22,8 +22,9 @@ pub(crate) const WIDTH: f32 = 440.0;
 
 /// The list of constraint types, its point and surface springs merged into one spring
 /// that also connects two surfaces.
-const TYPES: [(&str, Type); 3] = [
+const TYPES: [(&str, Type); 4] = [
     ("Spring", Type::Spring),
+    ("Joint", Type::Joint),
     ("Compression Only", Type::CompressionOnly),
     ("Rigid Body", Type::RigidBody),
 ];
@@ -31,6 +32,7 @@ const TYPES: [(&str, Type); 3] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Type {
     Spring,
+    Joint,
     CompressionOnly,
     RigidBody,
 }
@@ -39,6 +41,7 @@ impl Type {
     fn of(constraint: &Constraint) -> Self {
         match constraint {
             Constraint::Spring(_) => Type::Spring,
+            Constraint::Joint(_) => Type::Joint,
             Constraint::CompressionOnly(_) => Type::CompressionOnly,
             Constraint::RigidBody(_) => Type::RigidBody,
             // Moved to the ties and node ties when the project was read; never edited here.
@@ -51,6 +54,7 @@ impl Type {
     fn prefix(self) -> &'static str {
         match self {
             Type::Spring => "Spring",
+            Type::Joint => "Joint",
             Type::CompressionOnly => "Compression_Only",
             Type::RigidBody => "Rigid_Body",
         }
@@ -61,6 +65,7 @@ impl Type {
         let faces = || Region::Faces(Vec::new());
         match self {
             Type::Spring => Constraint::Spring(Spring::new(name)),
+            Type::Joint => Constraint::Joint(Joint::new(name)),
             Type::CompressionOnly => Constraint::CompressionOnly(CompressionOnly {
                 name,
                 active: true,
@@ -77,6 +82,11 @@ impl Type {
             Type::RigidBody => Constraint::RigidBody(RigidBody::new(name, "")),
         }
     }
+
+    /// Springs and joints connect two ends.
+    fn has_ends(self) -> bool {
+        matches!(self, Type::Spring | Type::Joint)
+    }
 }
 
 /// The two ends of a spring, the first as the slave and the second as the master side of
@@ -84,6 +94,11 @@ impl Type {
 /// end picks nodes, the second element faces, as with selections on both ends the second
 /// is the surface the springs end on; picked faces and nodes stay what they are.
 fn spring_ends(faces: Target, mesh: &FeMesh, spring: Option<&Spring>) -> MasterSlave {
+    ends(faces, mesh, spring.map(|s| &s.ends), Target::Nodes)
+}
+
+/// The two ends of a spring or joint; `first` is what End 1 picks by default.
+fn ends(faces: Target, mesh: &FeMesh, ends: Option<&[SpringEnd; 2]>, first: Target) -> MasterSlave {
     let draft = |end: &SpringEnd, target: Target| match end {
         SpringEnd::World => RegionDraft::new(SPRING_END_SOURCES, target),
         SpringEnd::Region(region) => {
@@ -95,10 +110,10 @@ fn spring_ends(faces: Target, mesh: &FeMesh, spring: Option<&Spring>) -> MasterS
             RegionDraft::from_region(region, SPRING_END_SOURCES, target, mesh)
         }
     };
-    let (first, second) = match spring {
-        Some(s) => (draft(&s.ends[0], Target::Nodes), draft(&s.ends[1], faces)),
+    let (first, second) = match ends {
+        Some(e) => (draft(&e[0], first), draft(&e[1], faces)),
         None => {
-            let mut first = RegionDraft::new(SPRING_END_SOURCES, Target::Nodes);
+            let mut first = RegionDraft::new(SPRING_END_SOURCES, first);
             first.source = Source::Selection;
             (first, RegionDraft::new(SPRING_END_SOURCES, faces))
         }
@@ -146,6 +161,10 @@ impl ConstraintDraft {
                 RegionDraft::new(FACE_SOURCES, faces),
                 spring_ends(faces, mesh, Some(spring)),
             ),
+            Constraint::Joint(joint) => (
+                RegionDraft::new(FACE_SOURCES, faces),
+                ends(faces, mesh, Some(&joint.ends), faces),
+            ),
             _ => (
                 RegionDraft::from_region(constraint.regions()[0], FACE_SOURCES, faces, mesh),
                 spring_ends(faces, mesh, None),
@@ -164,7 +183,7 @@ impl ConstraintDraft {
 
     /// The picks of a constraint of the type, which stay when another type is chosen.
     fn region_of(&self, kind: Type) -> &RegionDraft {
-        if kind == Type::Spring {
+        if kind.has_ends() {
             self.pair.current()
         } else {
             &self.region
@@ -177,7 +196,7 @@ impl ConstraintDraft {
 
     /// The region that clicks in the 3D view pick.
     pub(crate) fn region(&self) -> &RegionDraft {
-        if self.kind() == Type::Spring {
+        if self.kind().has_ends() {
             self.pair.current()
         } else {
             &self.region
@@ -185,7 +204,7 @@ impl ConstraintDraft {
     }
 
     pub(crate) fn region_mut(&mut self) -> &mut RegionDraft {
-        if self.kind() == Type::Spring {
+        if self.kind().has_ends() {
             self.pair.current_mut()
         } else {
             &mut self.region
@@ -193,7 +212,7 @@ impl ConstraintDraft {
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
-        if self.kind() == Type::Spring {
+        if self.kind().has_ends() {
             return self.validate_spring();
         }
         if self.region.is_empty() {
@@ -227,7 +246,7 @@ impl ConstraintDraft {
     /// primary and its first end in the secondary colour.
     pub(crate) fn highlight(&self, model: &Model) -> Highlight {
         match self.kind() {
-            Type::Spring => self.pair.highlight(model),
+            Type::Spring | Type::Joint => self.pair.highlight(model),
             _ => self.region.highlight(model),
         }
     }
@@ -252,6 +271,9 @@ impl ConstraintDraft {
         match &mut constraint {
             Constraint::Spring(spring) => {
                 spring.ends = [spring_end(&self.pair.slave), spring_end(&self.pair.master)];
+            }
+            Constraint::Joint(joint) => {
+                joint.ends = [spring_end(&self.pair.slave), spring_end(&self.pair.master)];
             }
             _ => {
                 for slot in constraint.regions_mut() {
@@ -303,6 +325,7 @@ impl ConstraintDraft {
         };
         match &mut self.constraint {
             Constraint::Spring(spring) => spring_rows(ui, model, spring, &mut self.pair, dofs),
+            Constraint::Joint(joint) => joint_rows(ui, model, joint, &mut self.pair),
             Constraint::CompressionOnly(support) => {
                 self.region.ui(ui, model);
                 compression_only_rows(ui, support, units);
@@ -364,13 +387,18 @@ impl ConstraintDraft {
         }
         let mesh = &model.mesh;
         let faces = face_target(&model.fe);
-        let (draft, dropped) = if kind == Type::Spring {
-            // A spring's first end takes nodes, or faces where the picks are some.
-            let (mut draft, dropped) =
-                match picks.converted(SPRING_END_SOURCES, Target::Nodes, mesh) {
-                    (_, true) => picks.converted(SPRING_END_SOURCES, faces, mesh),
-                    kept => kept,
-                };
+        let (draft, dropped) = if kind.has_ends() {
+            // A spring's first end takes nodes, or faces where the picks are some; a
+            // joint's faces.
+            let first = if kind == Type::Joint {
+                faces
+            } else {
+                Target::Nodes
+            };
+            let (mut draft, dropped) = match picks.converted(SPRING_END_SOURCES, first, mesh) {
+                (_, true) => picks.converted(SPRING_END_SOURCES, faces, mesh),
+                kept => kept,
+            };
             if draft.is_world() {
                 draft.source = Source::Selection;
             }
@@ -378,7 +406,7 @@ impl ConstraintDraft {
         } else {
             picks.converted(FACE_SOURCES, faces, mesh)
         };
-        if kind == Type::Spring {
+        if kind.has_ends() {
             self.pair.slave = draft;
         } else {
             self.region = draft;
@@ -476,6 +504,153 @@ fn spring_rows(
     hint(ui, &text);
 }
 
+/// The relative degrees of freedom of a joint, in its frame.
+const JOINT_DOFS: [&str; 6] = ["Ux", "Uy", "Uz", "URx", "URy", "URz"];
+
+/// The two ends of a joint, its kind and, for a general joint, the free degrees of
+/// freedom, how a selection follows its point, and the joint frame.
+fn joint_rows(ui: &mut Ui, model: &Model, joint: &mut Joint, pair: &mut MasterSlave) {
+    let fe = &model.fe;
+    let units = fe.properties.units;
+    let first = pair.side == Side::Slave;
+    if pair.slave.ui_labeled(ui, model, "End 1", "slave", first) {
+        pair.side = Side::Slave;
+    }
+    if pair.master.ui_labeled(ui, model, "End 2", "master", !first) {
+        pair.side = Side::Master;
+    }
+    joint.ends = [spring_end(&pair.slave), spring_end(&pair.master)];
+    ui.label("Joint type");
+    egui::ComboBox::from_id_salt("joint kind")
+        .selected_text(joint.kind.label())
+        .width(crate::dock::fit_width(ui, 200.0))
+        .show_ui(ui, |ui| {
+            for kind in JointKind::ALL {
+                ui.selectable_value(&mut joint.kind, kind, kind.label());
+            }
+        });
+    ui.end_row();
+    let dofs = fe.properties.space.remote_dofs();
+    if joint.kind == JointKind::General {
+        for &d in dofs {
+            ui.label(JOINT_DOFS[d]);
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut joint.free[d], false, "Fixed");
+                ui.radio_value(&mut joint.free[d], true, "Free");
+            });
+            ui.end_row();
+        }
+    } else {
+        let free = joint.free_dofs();
+        let names: Vec<&str> = (dofs.iter())
+            .filter(|&&d| free[d])
+            .map(|&d| JOINT_DOFS[d])
+            .collect();
+        ui.label("Free");
+        ui.label(if names.is_empty() {
+            "None".to_string()
+        } else {
+            names.join(", ")
+        });
+        ui.end_row();
+    }
+    if joint.ends.iter().any(|end| end.selection().is_some()) {
+        ui.label("Behavior");
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut joint.behavior, RemoteBehavior::Rigid, "Rigid")
+                .on_hover_text("The selection keeps its shape at the joint.");
+            ui.radio_value(
+                &mut joint.behavior,
+                RemoteBehavior::Deformable,
+                "Deformable",
+            )
+            .on_hover_text("The joint follows the mean motion of the selection.");
+        });
+        ui.end_row();
+    }
+    crate::setup::system_row(ui, &mut joint.system, fe);
+    let system = fe.coordinate_system_or_global(&joint.system);
+    let cylindrical =
+        (system.as_ref()).is_some_and(|s| s.kind == plx_model::CoordinateSystemKind::Cylindrical);
+    ui.label("Location");
+    ui.horizontal_wrapped(|ui| {
+        let centre = if joint.ends[0].region().is_some() {
+            "Centre of End 1"
+        } else {
+            "Centre of End 2"
+        };
+        if ui.radio(joint.location.is_none(), centre).clicked() {
+            joint.location = None;
+        }
+        if ui.radio(joint.location.is_some(), "Coordinates").clicked() && joint.location.is_none() {
+            // Starts from the centre, in the coordinates of the system.
+            let centre = (fe.joint_origin(&model.mesh, joint)).unwrap_or([0.0; 3]);
+            let local = (system.as_ref())
+                .and_then(|s| s.local(centre).ok())
+                .unwrap_or(centre);
+            joint.location = Some(if cylindrical {
+                [local[0], local[1].to_degrees(), local[2]]
+            } else {
+                local
+            });
+        }
+    });
+    ui.end_row();
+    if let Some(location) = &mut joint.location {
+        let labels = if cylindrical {
+            ["R", "Theta", "Z"]
+        } else {
+            ["X", "Y", "Z"]
+        };
+        let count = if fe.properties.space.is_2d() { 2 } else { 3 };
+        for (k, (value, label)) in location.iter_mut().zip(labels).take(count).enumerate() {
+            ui.label(label);
+            if cylindrical && k == 1 {
+                ui.add(numeric::drag_value(value).speed(1.0).suffix(" °"));
+            } else {
+                ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.1));
+            }
+            ui.end_row();
+        }
+    }
+    ui.label("Joint");
+    match fe.joint_origin(&model.mesh, joint) {
+        Ok(origin) => {
+            let [x, y, z] = origin
+                .map(|v| crate::results::format_value(units.shown(v, Quantity::Length) as f32));
+            let unit = units.unit(Quantity::Length);
+            ui.label(format!("({x}, {y}, {z}) {unit}").trim_end())
+                .on_hover_text("Global position of the joint");
+        }
+        Err(_) if pair.slave.is_empty() && pair.master.is_empty() => {
+            ui.weak("Choose the ends");
+        }
+        Err(error) => {
+            ui.add(
+                egui::Label::new(egui::RichText::new(error).color(crate::style::error())).wrap(),
+            );
+        }
+    }
+    ui.end_row();
+    let axis = if fe.properties.space.is_2d() {
+        "The joint turns about the axis normal to the model plane."
+    } else {
+        "The z axis of the coordinate system is the axis of a revolute, cylindrical or \
+         slider joint and the normal of a planar joint."
+    };
+    hint(
+        ui,
+        &format!(
+            "The joint holds the motion of End 2 relative to End 1 in its fixed degrees of \
+             freedom, like a Displacement/Rotation relative to another body instead of \
+             ground. {axis} The joint frame turns with End 1 (in large deformations). A \
+             selection follows a point of its own at the joint; points are reference points \
+             of rigid bodies and the points of Displacement/Rotation conditions and Remote \
+             Forces."
+        ),
+    );
+}
+
 /// Rotational stiffness about the global axes, in moment per radian.
 fn rotational_rows(ui: &mut Ui, rotational: &mut [f64; 3], units: UnitSystem, axes: &[usize]) {
     let unit = format!(" {}/rad", units.unit(Quantity::Moment));
@@ -500,6 +675,7 @@ fn names(fe: &FeModel) -> impl Iterator<Item = &str> {
 fn name_row(ui: &mut Ui, constraint: &mut Constraint) {
     let name = match constraint {
         Constraint::Spring(c) => &mut c.name,
+        Constraint::Joint(c) => &mut c.name,
         Constraint::CompressionOnly(c) => &mut c.name,
         Constraint::RigidBody(c) => &mut c.name,
         Constraint::Tie(_) => unreachable!("ties are not constraints"),

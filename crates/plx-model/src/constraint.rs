@@ -1,5 +1,5 @@
-//! The spring and support constraints, with springs between ground, selections and points. Ties
-//! are in [`crate::contact`].
+//! The spring, joint and support constraints, with springs and joints between ground,
+//! selections and points. Ties are in [`crate::contact`].
 //!
 //! Like everything in the model they store what the user defined. The spring and gap elements,
 //! extra nodes and equations the solver needs for them are generated when the input file is
@@ -71,7 +71,7 @@ impl RigidBody {
     }
 }
 
-/// One end of a spring: fixed ground, a region of the mesh or a point.
+/// One end of a spring or joint: fixed ground, a region of the mesh or a point.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SpringEnd {
     /// Fixed ground.
@@ -266,6 +266,174 @@ impl Spring {
         } else {
             [0.0; 3]
         }
+    }
+}
+
+/// The kind of a joint: which relative motions of its ends it leaves free, in its frame,
+/// whose z axis is the axis of a hinge, cylinder or slider and the normal of a planar
+/// joint.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum JointKind {
+    /// The ends move as one.
+    Fixed,
+    /// A hinge: the ends turn against each other about z.
+    #[default]
+    Revolute,
+    /// Turning about and sliding along z.
+    Cylindrical,
+    /// Sliding along z without turning.
+    Slider,
+    /// A ball joint: turning freely, no sliding.
+    Spherical,
+    /// Sliding in the x-y plane and turning about z.
+    Planar,
+    /// Free and held degrees of freedom chosen one by one.
+    General,
+}
+
+impl JointKind {
+    pub const ALL: [JointKind; 7] = [
+        Self::Fixed,
+        Self::Revolute,
+        Self::Cylindrical,
+        Self::Slider,
+        Self::Spherical,
+        Self::Planar,
+        Self::General,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fixed => "Fixed",
+            Self::Revolute => "Revolute",
+            Self::Cylindrical => "Cylindrical",
+            Self::Slider => "Slider",
+            Self::Spherical => "Spherical",
+            Self::Planar => "Planar",
+            Self::General => "General",
+        }
+    }
+
+    /// The free relative degrees of freedom (Ux, Uy, Uz, URx, URy, URz in the joint frame);
+    /// `None` for a general joint, which keeps its own.
+    pub fn free(self) -> Option<[bool; 6]> {
+        Some(match self {
+            Self::Fixed => [false; 6],
+            Self::Revolute => [false, false, false, false, false, true],
+            Self::Cylindrical => [false, false, true, false, false, true],
+            Self::Slider => [false, false, true, false, false, false],
+            Self::Spherical => [false, false, false, true, true, true],
+            Self::Planar => [true, true, false, false, false, true],
+            Self::General => return None,
+        })
+    }
+}
+
+/// A joint between two ends, each ground ("World"), a selection of the mesh or a point (a
+/// reference point or the point a boundary condition or remote force creates): like a
+/// Displacement/Rotation that holds the motion of the second end relative to the first
+/// instead of to ground. The joint frame sits at `location` with the directions of
+/// `system` and turns with the first end. A selection follows a point of its own at the
+/// joint, rigidly or on average (`behavior`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Joint {
+    pub name: String,
+    #[serde(default = "crate::active")]
+    pub active: bool,
+    /// Hidden constraints have no symbol in the 3D view unless selected.
+    #[serde(default = "crate::active")]
+    pub visible: bool,
+    pub ends: [SpringEnd; 2],
+    pub kind: JointKind,
+    /// The free degrees of freedom of a general joint, see [`JointKind::free`].
+    pub free: [bool; 6],
+    /// How a selection end follows its point.
+    pub behavior: crate::RemoteBehavior,
+    /// Coordinate system of the location and the joint directions, by name.
+    pub system: String,
+    /// Coordinates of the joint in `system`; `None` is the centre of the first end (of the
+    /// second with ground as the first).
+    pub location: Option<[f64; 3]>,
+}
+
+impl Joint {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            active: true,
+            visible: true,
+            ends: [
+                SpringEnd::Region(Region::Faces(Vec::new())),
+                SpringEnd::Region(Region::Faces(Vec::new())),
+            ],
+            kind: JointKind::Revolute,
+            free: [false; 6],
+            behavior: crate::RemoteBehavior::Rigid,
+            system: crate::features::GLOBAL.to_string(),
+            location: None,
+        }
+    }
+
+    /// The free relative degrees of freedom, from the kind or chosen one by one.
+    pub fn free_dofs(&self) -> [bool; 6] {
+        self.kind.free().unwrap_or(self.free)
+    }
+
+    /// The end whose centre is the default location: the first, or the second with ground
+    /// as the first.
+    pub fn locating_end(&self) -> Option<&Region> {
+        self.ends[0].region().or(self.ends[1].region())
+    }
+}
+
+impl crate::FeModel {
+    /// The global position of a point: a reference point, or the point of a
+    /// Displacement/Rotation condition or remote force.
+    pub fn point_position(&self, mesh: &plx_mesh::FeMesh, point: &Region) -> Option<[f64; 3]> {
+        match point {
+            Region::ReferencePoint(name) => self.reference_point(name).map(|p| p.position),
+            Region::RemotePoint(name) => {
+                if let Some((_, bc, remote)) = self.remote_displacement(mesh, name) {
+                    let excluded = self.point_excluded_nodes(mesh, &bc.region, remote);
+                    return (remote.resolve(self, mesh, &bc.region, &excluded).ok())
+                        .map(|p| p.position);
+                }
+                let (region, force) = self.remote_force_named(name)?;
+                (self.remote_force_nodes(mesh, region, force).ok()).map(|(p, _)| p.position)
+            }
+            _ => None,
+        }
+    }
+
+    /// Where a joint is, globally: its location, or the centre of its first end (of the
+    /// second with ground as the first).
+    pub fn joint_origin(&self, mesh: &plx_mesh::FeMesh, joint: &Joint) -> Result<[f64; 3], String> {
+        let system = (self.coordinate_system_or_global(&joint.system))
+            .ok_or_else(|| format!("Coordinate System {} does not exist", joint.system))?;
+        if let Some(local) = joint.location {
+            return system.global(local);
+        }
+        let end = joint.locating_end().ok_or("Both ends are World")?;
+        if is_point(end) {
+            self.point_position(mesh, end)
+                .ok_or_else(|| format!("{} has no position", end.describe()))
+        } else {
+            end.centroid(mesh)
+                .ok_or_else(|| "The selection contains no nodes.".to_string())
+        }
+    }
+
+    /// The joint frame: its origin and the x, y and z directions of its coordinate system
+    /// there.
+    pub fn joint_frame(
+        &self,
+        mesh: &plx_mesh::FeMesh,
+        joint: &Joint,
+    ) -> Result<([f64; 3], [[f64; 3]; 3]), String> {
+        let origin = self.joint_origin(mesh, joint)?;
+        let system = (self.coordinate_system_or_global(&joint.system))
+            .ok_or_else(|| format!("Coordinate System {} does not exist", joint.system))?;
+        Ok((origin, system.directions_at(origin)?))
     }
 }
 

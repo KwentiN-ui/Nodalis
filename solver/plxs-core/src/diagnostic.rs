@@ -32,6 +32,8 @@ pub enum ItemRef {
     Tie(String),
     /// A rigid body by its index in `Constraints::rigid_bodies`.
     RigidBody(usize),
+    /// A joint by its name.
+    Joint(String),
     /// A contact pair by its index in `Contact::pairs`.
     ContactPair(usize),
     /// A step by its 0-based index in `Analysis::steps`.
