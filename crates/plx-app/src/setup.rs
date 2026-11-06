@@ -1863,7 +1863,9 @@ fn load_picks(kind: &LoadKind, fe: &FeModel) -> (&'static [Source], Target) {
         LoadTarget::Nodes if !kind.is_thermal() => (SUPPORT_SOURCES, Target::Nodes),
         LoadTarget::Nodes => (NODE_SOURCES, Target::Nodes),
         LoadTarget::Faces => (FACE_SOURCES, face_target(fe)),
-        LoadTarget::Elements => (SOLID_SOURCES, face_target(fe)),
+        // Body loads act on elements: whole parts or element sets. Picked faces or edges
+        // hold no elements.
+        LoadTarget::Elements => (ELEMENT_SOURCES, face_target(fe)),
     }
 }
 

@@ -159,7 +159,7 @@ step. A frequency step takes no loads.
     node of beams and shells, which have rotations. 3D models only.],
   [Pressure], [Pressure on faces; positive values push into the material (`*DLOAD`). A
     #ui("Distribution") (@distributions) makes it vary over the faces, e.g. with depth.],
-  [Gravity], [Body force on the mass of parts or elements (`*DLOAD`, `GRAV`); the materials need
+  [Gravity], [Body force on the mass of whole parts or element sets (`*DLOAD`, `GRAV`); the materials need
     a density. #ui("Definition") #ui("Standard Gravity") (default) takes only a
     #ui("Direction") along an axis (`+X` to `-Z`, in plane models only `X` and `Y`; default
     `-Z`, or `-Y` in plane models) with the standard acceleration of 9.80665 m/s² in every unit
