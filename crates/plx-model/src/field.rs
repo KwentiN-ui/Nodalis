@@ -206,11 +206,11 @@ impl FieldOutput {
         outputs
     }
 
-    /// Field outputs added to a new dynamic step: velocities and energies too.
+    /// Field outputs added to a new dynamic step: velocities too.
     pub fn dynamic_defaults() -> Vec<Self> {
         let mut outputs = Self::defaults();
         outputs[0].variables = ["RF", "U", "V"].map(String::from).to_vec();
-        outputs[1].variables = ["S", "E", "ENER"].map(String::from).to_vec();
+        outputs[1].variables = ["S", "E"].map(String::from).to_vec();
         outputs
     }
 

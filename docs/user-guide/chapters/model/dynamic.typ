@@ -2,34 +2,57 @@
 
 == Dynamic step <dynamic-step>
 
-A #ui("Dynamic (time integration)") step computes the motion of the model over time
-(`*DYNAMIC`): the response to a suddenly applied load, an impact or an initial velocity
-(@initial-conditions). Create it with #menu("Steps", "Step") and choose the type in
-the dialog.
+A #ui("Dynamic (time integration)") step computes the motion of the model over time: the
+response to a suddenly applied load, a pulse, a vibration or an initial velocity
+(@initial-conditions). Create it with #menu("Steps", "Step") and choose the type in the
+dialog. You decide how long the step lasts, how many results you want to see and how the
+structure is damped; Nodalis chooses the time step and the integration from that.
 
 #screenshot("dynamic-step.png", [Dynamic step])
 
 #fields(
-  [Procedure], [Implicit or explicit integration for the structure and for a fluid, written as
-    `EXPLICIT=`: #ui("Implicit / Implicit") (default), #ui("Implicit / Explicit"),
-    #ui("Explicit / Implicit") or #ui("Explicit / Explicit").],
-  [Alpha (HHT)], [Numerical damping of the Hilber-Hughes-Taylor integration (`ALPHA=`), between
-    −1/3 and 0; −0.05 is the default of CalculiX and damps high frequencies a little.],
-  [Nonlinear geometry, Incrementation, Equation solver], [As in a static step (@steps,
-    @equation-solver); the effective matrix of the time integration is positive definite,
-    so the iterative solver takes it as well. A new dynamic
-    step starts with #ui("Automatic") incrementation and an initial increment of 0.01; choose
-    the increment from the highest frequency you want to resolve, about a tenth to a twentieth
-    of its period.],
-  [Rayleigh damping], [Damping of the whole model, written as `*DAMPING, ALPHA=, BETA=` in the
-    step. #ui("Alpha (mass)") has the unit of a frequency, #ui("Beta
-    (stiffness)") that of a time. For a damping ratio ζ at the circular frequency ω,
-    α = 2ζω damps the low modes and β = 2ζ/ω the high ones.],
+  [Duration], [The time the step covers, from 0 (step time).],
+  [Frames], [The number of result frames kept, evenly spaced over the duration; the last one
+    at its end. The dialog shows the time between two frames. 200 frames are plenty for an
+    animation; for the history of a fast vibration use at least two frames per period.],
+  [Damping], [#ui("None"): undamped, only the numerical damping of the integration removes
+    energy. #ui("Damping ratio"): the viscous damping ratio of the structure (0.02 = 2 % of
+    critical damping, typical for steel structures), applied as Rayleigh damping
+    C = α M + β K that meets the ratio exactly at both ends of a #ui("Frequency range")
+    and is lower between them. #ui("Automatic") fits it from the lowest eigenfrequency of
+    the model to the highest frequency the time step resolves; #ui("Between") takes two
+    frequencies. #ui("Rayleigh coefficients"): α (mass, unit of a frequency) and β
+    (stiffness, unit of a time) directly.],
+  [Starts from], [What the step starts from, for information: rest, the state at the end of
+    the step before it, or an initial velocity (@initial-conditions).],
 )
 
-A dynamic step takes the same boundary conditions and loads as a static step, and materials
-need a density. Loads act from the start of the step with the amplitude of the step; a load that
-should be applied at once needs a stepped #ui("Amplitude") (@amplitudes) with the value 1 from
-time 0, otherwise CalculiX ramps it over the step. The results have one increment per written
-time step; the #ui("Step") animation (@animation) plays them, and history outputs
-(@history-outputs) show the motion of selected nodes over time.
+#ui("Advanced settings") are rarely needed:
+
+#fields(
+  [Time step], [#ui("Automatic") takes the shortest of: the time between two frames, a tenth
+    of the shortest segment of an amplitude the loads follow (@amplitudes), and the
+    frequency limit below. #ui("At most") takes your value. Either way the time step is
+    shortened so that the frames fall exactly on time steps; the line under the settings
+    shows the time step used and the number of increments.],
+  [Resolve frequencies up to], [The highest frequency the integration must follow, with 20
+    time steps per period. Set it when the structure vibrates faster than the frames show,
+    e.g. to see the stresses of an impact correctly in each frame.],
+  [Numerical damping], [Damping of the time integration (Hilber-Hughes-Taylor) that removes
+    the high frequencies the time step cannot resolve: #ui("Normal") (slight),
+    #ui("None") (conserves the energy) or #ui("Strong").],
+  [Equation solver], [As in a static step (@equation-solver).],
+)
+
+Loads act at once from the start of the step. Give a load an #ui("Amplitude")
+(@amplitudes) for a ramp, a pulse or a vibration; the automatic time step follows its
+points. Materials need a density. The integration is linear: no large deformations, no
+contact and no plasticity in a dynamic step.
+
+The model check warns when the frequency limit is higher than the frames can show
+(#ui("Too few frames for the frequency limit")) and when all points of an amplitude the
+step follows lie after its end (#ui("Amplitude starts after the step")).
+
+The results have one increment per frame; the #ui("Step") animation (@animation) plays
+them, and history outputs (@history-outputs) show the motion of selected nodes at every
+time step.

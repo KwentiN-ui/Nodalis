@@ -405,9 +405,17 @@ impl DynamicProcedure {
                 size = (size * 1.5).min(maximum);
             }
             let remaining = period - time;
-            let last = size >= remaining * (1.0 - 1e-9);
-            let dt = if last { remaining } else { size };
-            let t1 = time + dt;
+            // Fixed increments are counted rather than summed, so that the n-th one ends
+            // exactly at n times the size (the frames a Dynamic step writes lie there).
+            let (last, t1) = if increments.direct {
+                let end = increment as f64 * size;
+                let last = end >= period * (1.0 - 1e-9);
+                (last, if last { period } else { end })
+            } else {
+                let last = size >= remaining * (1.0 - 1e-9);
+                (last, if last { period } else { time + size })
+            };
+            let dt = t1 - time;
             let total = start_total + t1;
             progress.event(ProgressEvent::Increment {
                 step: ctx.step_number,

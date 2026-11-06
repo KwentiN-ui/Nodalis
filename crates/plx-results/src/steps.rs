@@ -150,7 +150,7 @@ impl StepRecord {
             K::HeatTransfer(s) | K::CoupledTempDisp(s) | K::UncoupledTempDisp(s) => {
                 Some(s.increments.time_period)
             }
-            K::Dynamic(s) => Some(s.increments.time_period),
+            K::Dynamic(s) => Some(s.duration),
             K::Visco(s) => Some(s.increments.time_period),
             K::ModalDynamics(s) => Some(s.time_period),
             _ => None,

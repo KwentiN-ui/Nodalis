@@ -3,11 +3,11 @@ use std::path::PathBuf;
 
 use plx_mesh::CadEntity;
 use plx_model::{
-    BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition, CrossSection,
-    DefinedField, DefinedFieldKind, Displacement, DynamicStep, Elastic, Hardening,
-    LinearSolverChoice, Load, Material, ModalDamping, ModalDynamicsStep, NodeTie, Plastic,
-    PlasticPoint, ReferencePoint, RemoteBehavior, RigidBody, Section, SectionKind, StaticStep,
-    SteadyStateDynamicsStep, UnitSystem,
+    BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition, CrossSection, Damping,
+    DampingRange, DefinedField, DefinedFieldKind, Displacement, DynamicStep, Elastic, Hardening,
+    LinearSolverChoice, Load, Material, ModalDamping, ModalDynamicsStep, NodeTie, NumericalDamping,
+    Plastic, PlasticPoint, ReferencePoint, RemoteBehavior, RigidBody, Section, SectionKind,
+    StaticStep, SteadyStateDynamicsStep, UnitSystem,
 };
 
 use super::*;
@@ -2061,28 +2061,20 @@ fn solver_finds_the_bending_frequency_of_the_cantilever() {
     }
 }
 
-/// The cantilever with a dynamic step of the given duration, increments of `increment`,
-/// the tip force applied at once (a stepped amplitude) and the given damping.
+/// The cantilever with a dynamic step of the given duration, a frame (and time step) every
+/// `increment`, the tip force applied at once and the given Rayleigh damping.
 fn dynamic_cantilever(
     duration: f64,
     increment: f64,
     damping: Option<plx_model::RayleighDamping>,
 ) -> (FeMesh, FeModel) {
     let (mesh, mut model) = analysis("kragbalken_c3d20r.inp", tip_force());
-    model
-        .amplitudes
-        .push(amplitude("Stepped", vec![[0.0, 1.0], [1.0, 1.0]]));
     let step = &mut model.steps[0];
-    step.loads[0].amplitude = Some("Stepped".into());
     step.field_outputs = FieldOutput::dynamic_defaults();
     step.kind = StepKind::Dynamic(DynamicStep {
-        increments: StaticStep {
-            incrementation: Incrementation::Direct,
-            initial_increment: increment,
-            time_period: duration,
-            ..StaticStep::default()
-        },
-        damping,
+        duration,
+        frames: (duration / increment).round() as u32,
+        damping: damping.map_or(Damping::None, Damping::Rayleigh),
         ..DynamicStep::default()
     });
     (mesh, model)
@@ -2097,33 +2089,51 @@ fn a_dynamic_step_is_written() {
     let (mesh, mut model) = dynamic_cantilever(1.5e-3, 2.5e-5, Some(damping));
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
-        "*Step, Inc=100, Amplitude=Step\n*Dynamic, Direct\n0.000025, 0.0015\n\
+        "*Step, Inc=61, Amplitude=Step\n*Dynamic, Direct\n0.000025, 0.0015\n\
          *Damping, Alpha=0, Beta=0.00004\n",
-        "*Cload, op=New, Amplitude=STEPPED\n",
+        "*Cload, op=New\n",
         "*Node file\nRF, U, V\n",
-        "*El file\nS, E, ENER, NOE\n",
+        "*El file\nS, E, NOE\n",
     ] {
         assert!(text.contains(line), "missing {line:?} in\n{text}");
     }
     let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
-    settings.damping = None;
-    settings.alpha = -0.1;
-    settings.procedure = plx_model::DynamicProcedure::Explicit;
-    settings.increments.nlgeom = true;
-    settings.increments.incrementation = Incrementation::Automatic;
-    settings.increments.solver = LinearSolverChoice::Iterative;
-    let text = write_inp(&mesh, &model, "").unwrap();
+    // A 0.2 ms rise of the force: time steps of 20 us, 5 per frame of 0.1 ms. Strong
+    // numerical damping and a damping ratio of 5 % between 100 Hz and 10 kHz.
+    settings.frames = 15;
+    settings.numerical_damping = NumericalDamping::Strong;
+    settings.damping = Damping::Ratio {
+        zeta: 0.05,
+        range: DampingRange::Between(100.0, 10_000.0),
+    };
+    settings.solver = LinearSolverChoice::Iterative;
+    model
+        .amplitudes
+        .push(amplitude("Rise", vec![[0.0, 0.0], [2e-4, 1.0], [1.0, 1.0]]));
+    model.steps[0].loads[0].amplitude = Some("Rise".into());
+    let analysis = lowered(&mesh, &model);
+    let step = &analysis.steps[0];
+    assert_eq!(step.max_increments, 76);
+    let ir::step::Procedure::Dynamic(dynamic) = &step.procedure else {
+        panic!("{:?}", step.procedure)
+    };
+    assert!((dynamic.increments.initial() - 2e-5).abs() < 1e-15);
+    assert!(dynamic.increments.direct);
+    assert!((dynamic.alpha.unwrap() + 1.0 / 3.0).abs() < 1e-15);
+    let rayleigh = dynamic.rayleigh.unwrap();
+    let ratio = |f: f64| {
+        let w = 2.0 * std::f64::consts::PI * f;
+        rayleigh.alpha / (2.0 * w) + rayleigh.beta * w / 2.0
+    };
+    assert!((ratio(100.0) - 0.05).abs() < 1e-12 && (ratio(10_000.0) - 0.05).abs() < 1e-12);
+    // Every fifth increment is a frame.
     assert!(
-        text.contains(
-            "*Step, Nlgeom, Inc=100, Amplitude=Step\n\
-             *Dynamic, Solver=Iterative Cholesky, Alpha=-0.1, Explicit\n\
-             0.000025, 0.0015, 0.00001, 1e30\n"
-        ),
-        "{text}"
+        (step.outputs.node_file.iter().chain(&step.outputs.el_file)).all(|o| o.frequency == 5),
+        "{:?}",
+        step.outputs
     );
-    assert!(!text.contains("*Damping"), "{text}");
     model.steps[0].active = false;
     assert!(lowered(&mesh, &model).steps.is_empty());
 }
@@ -2200,26 +2210,22 @@ fn solver_runs_short_dynamic_steps() {
     };
     assert_eq!(tip_history(&frd).len(), 6);
 
-    let (mesh, mut model) = dynamic_cantilever(2e-4, 2.5e-5, None);
+    // Two frames, but time steps of 25 us for vibrations up to 2 kHz: the solver writes
+    // every fourth increment.
+    let (mesh, mut model) = dynamic_cantilever(2e-4, 1e-4, None);
     let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
-    settings.increments.incrementation = Incrementation::Automatic;
-    settings.increments.max_increment = 6e-5;
-    let frd = run_solver(
-        "dynamik-automatisch",
-        &write_inp(&mesh, &model, "").unwrap(),
-    )
-    .unwrap();
+    settings.frequency_limit = Some(2000.0);
+    let frd = run_solver("dynamik-frames", &write_inp(&mesh, &model, "").unwrap()).unwrap();
     let history = tip_history(&frd);
-    assert!(history.len() > 3 && history.len() < 8, "{history:?}");
+    assert_eq!(history.len(), 2, "{history:?}");
     assert!(
-        (history.last().unwrap().0 - 2e-4).abs() < 1e-9,
+        (history[0].0 - 1e-4).abs() < 1e-12 && (history[1].0 - 2e-4).abs() < 1e-12,
         "{history:?}"
     );
 
-    // The preload of a static step, released at the start of the dynamic step. Both steps
-    // ask for ENER, which CalculiX wants in the first step when a later one is dynamic.
+    // The preload of a static step, released at the start of the dynamic step.
     let (mesh, mut model) = dynamic_cantilever(1e-4, 2.5e-5, None);
     let mut release = model.steps[0].clone();
     release.name = "Release".into();
