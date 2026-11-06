@@ -3475,7 +3475,8 @@ fn step_block<'f>(
                 }]
             }
             // Gravity: the size of the acceleration and its direction.
-            LoadKind::Gravity(acceleration) => {
+            LoadKind::Gravity(_) | LoadKind::StandardGravity(_) => {
+                let acceleration = load.kind.gravity_vector().unwrap_or_default();
                 let set = sets.element_set(&load.name, &load.region)?;
                 let Some((size, direction)) = unit_vector(acceleration) else {
                     return Err(WriteError::InvalidLoad {
