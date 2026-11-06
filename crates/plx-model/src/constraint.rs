@@ -1,4 +1,4 @@
-//! The spring and support constraints, with springs also between two surfaces. Ties
+//! The spring and support constraints, with springs between ground, selections and points. Ties
 //! are in [`crate::contact`].
 //!
 //! Like everything in the model they store what the user defined. The spring and gap elements,
@@ -71,11 +71,79 @@ impl RigidBody {
     }
 }
 
-/// Springs in the global directions from the nodes of a region to ground (`SPRING1`), or to
-/// the closest points of a target surface (`SPRING2`). One spring
-/// constraint covers the point and surface springs: like a force, the stiffness is
-/// that of the whole region and spread over its nodes, on faces by area, on edges by length
-/// and on points in equal shares.
+/// One end of a spring: fixed ground, a region of the mesh or a point.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum SpringEnd {
+    /// Fixed ground.
+    World,
+    /// Nodes, edges or faces of the mesh, or a reference point ([`Region::ReferencePoint`])
+    /// or the point a boundary condition or remote force creates ([`Region::RemotePoint`]).
+    Region(Region),
+}
+
+impl SpringEnd {
+    pub fn region(&self) -> Option<&Region> {
+        match self {
+            SpringEnd::World => None,
+            SpringEnd::Region(region) => Some(region),
+        }
+    }
+
+    pub fn region_mut(&mut self) -> Option<&mut Region> {
+        match self {
+            SpringEnd::World => None,
+            SpringEnd::Region(region) => Some(region),
+        }
+    }
+
+    /// A reference point or the point of a boundary condition or remote force, which has
+    /// rotations.
+    pub fn point(&self) -> Option<&Region> {
+        self.region().filter(|r| is_point(r))
+    }
+
+    /// Nodes, edges or faces of the mesh.
+    pub fn selection(&self) -> Option<&Region> {
+        self.region().filter(|r| !is_point(r))
+    }
+}
+
+/// A reference point or the point of a boundary condition or remote force.
+pub fn is_point(region: &Region) -> bool {
+    matches!(region, Region::ReferencePoint(_) | Region::RemotePoint(_))
+}
+
+/// What a spring connects, from its two ends, which the user may give in either order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpringLayout<'a> {
+    /// Springs from the nodes of a selection to ground (`SPRING1`).
+    SelectionToWorld { selection: &'a Region },
+    /// Springs from the nodes of a selection, the first end, to the closest points of the
+    /// faces of the other selection (`SPRING2`).
+    SelectionToSurface {
+        selection: &'a Region,
+        surface: &'a Region,
+    },
+    /// Springs from the nodes of a selection to a point (`SPRING2` to its reference node).
+    SelectionToPoint {
+        selection: &'a Region,
+        point: &'a Region,
+    },
+    /// Translational and rotational springs from a point to ground.
+    PointToWorld { point: &'a Region },
+    /// Translational and rotational springs between two points.
+    PointToPoint {
+        first: &'a Region,
+        second: &'a Region,
+    },
+}
+
+/// Springs between two ends, each of them ground ("World"), a selection of the mesh or a
+/// point: a reference point or the point a boundary condition or remote force creates.
+/// They act in the global directions. Translational springs connect the nodes of a
+/// selection, like a force the stiffness is that of the whole selection and spread over
+/// its nodes, on faces by area, on edges by length and on points in equal shares. Between
+/// points and ground the springs hold the rotations too.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Spring {
     pub name: String,
@@ -84,14 +152,17 @@ pub struct Spring {
     /// Hidden constraints have no symbol in the 3D view unless selected.
     #[serde(default = "crate::active")]
     pub visible: bool,
-    /// The nodes that get springs: the slave side of a connection to a surface.
-    pub region: Region,
-    /// The surface the springs end on, the master side; `None` connects them to ground.
-    pub master: Option<Region>,
-    /// K1..K3 of the whole region in force per length, or per area of its faces (force per
-    /// volume) with `per_area`, or of every node with `each_node`; a zero adds no spring
+    /// The two ends. With a selection on both, the first gets the springs and the second
+    /// is the surface they end on.
+    pub ends: [SpringEnd; 2],
+    /// K1..K3 of the whole selection in force per length, or per area of its faces (force
+    /// per volume) with `per_area`, or of every node with `each_node`; a zero adds no spring
     /// in that direction.
     pub stiffness: [f64; 3],
+    /// Rotational stiffness about the global axes in moment per radian, for springs between
+    /// points and ground only ([`Spring::takes_rotations`]).
+    #[serde(default)]
+    pub rotational: [f64; 3],
     pub per_area: bool,
     /// The whole stiffness acts at every node instead of being spread over the nodes.
     pub each_node: bool,
@@ -103,17 +174,98 @@ impl Spring {
             name: name.into(),
             active: true,
             visible: true,
-            region: Region::Nodes(Vec::new()),
-            master: None,
+            ends: [
+                SpringEnd::Region(Region::Nodes(Vec::new())),
+                SpringEnd::World,
+            ],
             stiffness: [0.0; 3],
+            rotational: [0.0; 3],
             per_area: false,
             each_node: false,
         }
     }
 
-    /// The stiffness is per area of the faces of the region.
+    /// Springs from the nodes of `region` to ground.
+    pub fn to_world(name: impl Into<String>, region: Region, stiffness: [f64; 3]) -> Self {
+        Self {
+            ends: [SpringEnd::Region(region), SpringEnd::World],
+            stiffness,
+            ..Self::new(name)
+        }
+    }
+
+    /// What the spring connects; `None` with ground on both ends.
+    pub fn layout(&self) -> Option<SpringLayout<'_>> {
+        let [a, b] = &self.ends;
+        Some(match (a, b) {
+            (SpringEnd::World, SpringEnd::World) => return None,
+            (SpringEnd::World, SpringEnd::Region(r)) | (SpringEnd::Region(r), SpringEnd::World) => {
+                if is_point(r) {
+                    SpringLayout::PointToWorld { point: r }
+                } else {
+                    SpringLayout::SelectionToWorld { selection: r }
+                }
+            }
+            (SpringEnd::Region(a), SpringEnd::Region(b)) => match (is_point(a), is_point(b)) {
+                (false, false) => SpringLayout::SelectionToSurface {
+                    selection: a,
+                    surface: b,
+                },
+                (false, true) => SpringLayout::SelectionToPoint {
+                    selection: a,
+                    point: b,
+                },
+                (true, false) => SpringLayout::SelectionToPoint {
+                    selection: b,
+                    point: a,
+                },
+                (true, true) => SpringLayout::PointToPoint {
+                    first: a,
+                    second: b,
+                },
+            },
+        })
+    }
+
+    /// The selection whose nodes get the springs, if an end is one.
+    pub fn selection(&self) -> Option<&Region> {
+        match self.layout()? {
+            SpringLayout::SelectionToWorld { selection }
+            | SpringLayout::SelectionToSurface { selection, .. }
+            | SpringLayout::SelectionToPoint { selection, .. } => Some(selection),
+            SpringLayout::PointToWorld { .. } | SpringLayout::PointToPoint { .. } => None,
+        }
+    }
+
+    /// The springs connect points and ground only, whose rotations they hold too; nodes of
+    /// a selection have no rotations to connect.
+    pub fn takes_rotations(&self) -> bool {
+        matches!(
+            self.layout(),
+            Some(SpringLayout::PointToWorld { .. } | SpringLayout::PointToPoint { .. })
+        )
+    }
+
+    /// The stiffness is per area of the faces of the selection.
     pub fn is_per_area(&self) -> bool {
-        self.per_area && !self.each_node
+        self.per_area && !self.each_node && self.selection().is_some()
+    }
+
+    /// Target surface and selection of springs between two selections, master before slave.
+    pub fn master_slave(&self) -> Option<[&Region; 2]> {
+        match self.layout()? {
+            SpringLayout::SelectionToSurface { selection, surface } => Some([surface, selection]),
+            _ => None,
+        }
+    }
+
+    /// The rotational stiffness that acts: none where the spring takes no rotations.
+    pub fn acting_rotational(&self) -> [f64; 3] {
+        if self.takes_rotations() {
+            self.rotational
+        } else {
+            [0.0; 3]
+        }
     }
 }
 

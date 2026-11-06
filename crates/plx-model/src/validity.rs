@@ -195,6 +195,16 @@ impl FeModel {
                         Constraint::RigidBody(body) => {
                             self.missing_reference_point(&body.reference_point)
                         }
+                        Constraint::Spring(spring) => (spring.ends.iter())
+                            .filter_map(crate::SpringEnd::point)
+                            .find_map(|point| {
+                                (self.missing_region_point(point))
+                                    .or_else(|| self.missing_remote_point(mesh, point))
+                            })
+                            .or_else(|| {
+                                (spring.layout().is_none())
+                                    .then(|| "Both ends are World".to_string())
+                            }),
                         _ => None,
                     }),
             };

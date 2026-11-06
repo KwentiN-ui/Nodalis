@@ -155,10 +155,8 @@ pub fn from_solver(solved: &SolverResults) -> SolverImport {
     }
 
     // Elements ascending by id, grouped into parts by the material of their section.
-    let mut order: Vec<usize> = (0..model.elements.len()).collect();
-    order.sort_by_key(|&i| model.elements[i].id);
     let mut by_material: BTreeMap<i32, Vec<u32>> = BTreeMap::new();
-    for i in order {
+    for i in plxs_output::frd::written_elements(model) {
         let element = &model.elements[i];
         let Some((number, frd_order)) = plxs_output::frd::frd_element(element.kind) else {
             continue;

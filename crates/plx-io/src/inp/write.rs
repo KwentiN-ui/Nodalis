@@ -70,6 +70,9 @@ pub enum WriteError {
     /// A load without a direction, such as a gravity of zero.
     #[error("{item}: {reason}")]
     InvalidLoad { item: String, reason: String },
+    /// A constraint that cannot be written, such as a spring with ground on both ends.
+    #[error("{item}: {reason}")]
+    InvalidConstraint { item: String, reason: String },
     /// A remote displacement whose point cannot be placed, e.g. in a missing coordinate
     /// system, or without nodes in its pinball region.
     #[error("{item}: {reason}")]
@@ -108,6 +111,7 @@ impl WriteError {
             | E::UnknownReferencePoint { item, .. }
             | E::UnknownRemotePoint { item, .. }
             | E::InvalidLoad { item, .. }
+            | E::InvalidConstraint { item, .. }
             | E::InvalidBoundary { item, .. }
             | E::NoGlobalResults { item }
             | E::NoSymmetryPlane { item, .. }

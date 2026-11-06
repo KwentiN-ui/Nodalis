@@ -61,7 +61,7 @@ pub use connection::{
     ResolvedKind, STIFFNESS_FACTOR, SideRoles, Stiffness, TIED_STIFFNESS_FACTOR, TOLERANCE_FACTOR,
     WEAK_SPRING_FACTOR, conducts_across_contacts, mortar_supports,
 };
-pub use constraint::{CompressionOnly, NodeTie, RigidBody, Spring};
+pub use constraint::{CompressionOnly, NodeTie, RigidBody, Spring, SpringEnd, SpringLayout};
 pub use contact::{
     Constraint, ContactMethod, ContactPair, ContactScale, CyclicSymmetry, DEFAULT_SURFACE_COLOR,
     ElementYoung, Friction, GapConductance, InteractionProperty, NORMAL_STIFFNESS_FACTOR,

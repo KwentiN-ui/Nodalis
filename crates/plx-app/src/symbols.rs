@@ -75,13 +75,20 @@ impl Kind {
                 },
                 body.region.clone(),
             ),
-            Constraint::Spring(spring) => (
-                Kind::Spring {
-                    stiffness: spring.stiffness,
-                    to_surface: spring.master.is_some(),
-                },
-                spring.region.clone(),
-            ),
+            // At the selection, else at the point; an axis shows translational and
+            // rotational springs alike.
+            Constraint::Spring(spring) => {
+                let rotational = spring.acting_rotational();
+                (
+                    Kind::Spring {
+                        stiffness: std::array::from_fn(|i| spring.stiffness[i].max(rotational[i])),
+                        to_surface: spring.master_slave().is_some(),
+                    },
+                    (spring.selection())
+                        .or_else(|| spring.ends.iter().find_map(plx_model::SpringEnd::point))?
+                        .clone(),
+                )
+            }
             Constraint::CompressionOnly(support) => (
                 Kind::CompressionOnly {
                     flipped: support.flipped,
@@ -503,6 +510,13 @@ fn node_points(model: &Model, region: &Region, visible: &Visible) -> Vec<DVec3> 
     if let Region::ReferencePoint(name) = region {
         return (model.fe.reference_point(name).into_iter())
             .map(|point| DVec3::from(point.position))
+            .collect();
+    }
+    // The point of a boundary condition or remote force, at the centre of its region.
+    if let Region::RemotePoint(name) = region {
+        return (model.fe.remote_point_named(&model.mesh, name).into_iter())
+            .filter_map(|(region, _)| region.centroid(&model.mesh))
+            .map(DVec3::from)
             .collect();
     }
     let coords = model.exploded_coords();

@@ -12,7 +12,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId};
 
-use crate::{Formulation, GLOBAL, Region, SymmetryPlane, symmetry_dofs, symmetry_plane};
+use crate::{
+    Formulation, GLOBAL, Region, SpringLayout, SymmetryPlane, symmetry_dofs, symmetry_plane,
+};
 
 use crate::{
     BoundaryKind, Constraint, ContactMethod, DefinedFieldKind, FeModel, LoadKind, Material,
@@ -1392,10 +1394,12 @@ impl FeModel {
             if !(k.is_finite() && k > 0.0) || nodes.is_empty() {
                 continue;
             }
-            let mut spring = crate::Spring::new(format!("PLX_Weak_Springs_{}", part.name));
+            let mut spring = crate::Spring::to_world(
+                format!("PLX_Weak_Springs_{}", part.name),
+                Region::Nodes(nodes),
+                [k; 3],
+            );
             spring.visible = false;
-            spring.region = Region::Nodes(nodes);
-            spring.stiffness = [k; 3];
             springs.push(spring);
         }
         springs
@@ -2649,6 +2653,53 @@ impl FeModel {
         out
     }
 
+    /// The degrees of freedom (translations 0..3, rotations 3..6) that active springs to
+    /// ground hold at a point, a reference point or the point of a boundary condition or
+    /// remote force.
+    fn spring_point_dofs(&self, point: &Region) -> Vec<usize> {
+        let rotations = !self.properties.space.is_2d();
+        let mut out = Vec::new();
+        for constraint in self.constraints.iter().filter(|c| c.active()) {
+            let Constraint::Spring(spring) = constraint else {
+                continue;
+            };
+            if spring.layout() != Some(SpringLayout::PointToWorld { point }) {
+                continue;
+            }
+            out.extend((0..3).filter(|&d| spring.stiffness[d] > 0.0));
+            if rotations {
+                out.extend(
+                    (0..3)
+                        .filter(|&d| spring.rotational[d] > 0.0)
+                        .map(|d| d + 3),
+                );
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The regions of the mesh a point drives: those of the rigid bodies of a reference
+    /// point, or the region of the boundary condition or remote force a point belongs to.
+    fn point_regions(&self, mesh: &FeMesh, point: &Region) -> Vec<Region> {
+        match point {
+            Region::ReferencePoint(name) => (self.constraints.iter())
+                .filter_map(|c| match c {
+                    Constraint::RigidBody(body) if body.active && body.reference_point == *name => {
+                        Some(body.region.clone())
+                    }
+                    _ => None,
+                })
+                .collect(),
+            Region::RemotePoint(name) => (self.remote_point_named(mesh, name))
+                .map(|(region, _)| region.clone())
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Finds pieces of the model that can move as a rigid body in a static step: the rigid
     /// body motions a support at point x in direction n prevents are those with
     /// n . (t + w x (x - c)) != 0, so a piece is held when the rows [n, (x - c) x n] of its
@@ -2737,19 +2788,37 @@ impl FeModel {
         };
         for constraint in self.constraints.iter().filter(|c| c.active()) {
             match constraint {
-                Constraint::Spring(c) if c.master.is_none() => {
-                    for node in c.region.nodes(mesh) {
-                        for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
-                            support(node, axis(d), false);
+                Constraint::Spring(c) => match c.layout() {
+                    Some(SpringLayout::SelectionToWorld { selection }) => {
+                        for node in selection.nodes(mesh) {
+                            for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
+                                support(node, axis(d), false);
+                            }
                         }
                     }
-                }
+                    // Springs on a point to ground hold the point's region below.
+                    Some(SpringLayout::PointToWorld { .. }) | None => {}
+                    Some(_) => {
+                        // Two connected ends join their pieces like a tie.
+                        let [a, b] = c.ends.each_ref().map(|end| match end.region() {
+                            Some(r) if crate::constraint::is_point(r) => {
+                                (self.point_regions(mesh, r).into_iter())
+                                    .flat_map(|r| pieces(&r))
+                                    .collect()
+                            }
+                            Some(r) => pieces(r),
+                            None => Vec::new(),
+                        });
+                        join(&mut ties, &a, &b);
+                        join(&mut contacts, &a, &b);
+                    }
+                },
                 Constraint::CompressionOnly(c) => {
                     for (node, normal) in face_normals(mesh, &c.region) {
                         support(node, normal, false);
                     }
                 }
-                Constraint::Tie(_) | Constraint::Spring(_) => {
+                Constraint::Tie(_) => {
                     if let Some([master, slave]) = constraint.master_slave() {
                         let (a, b) = (pieces(master), pieces(slave));
                         join(&mut ties, &a, &b);
@@ -2774,7 +2843,13 @@ impl FeModel {
                     let Some(node) = nearest_node(mesh, &body.region, point.position) else {
                         continue;
                     };
-                    for dof in self.point_dofs(s, &body.reference_point) {
+                    let springs = self
+                        .spring_point_dofs(&Region::ReferencePoint(body.reference_point.clone()));
+                    for dof in self
+                        .point_dofs(s, &body.reference_point)
+                        .into_iter()
+                        .chain(springs)
+                    {
                         if dof < 3 {
                             support(node, axis(dof), false);
                         } else if dof < 6 && space == ModelSpace::ThreeD {
@@ -2813,16 +2888,32 @@ impl FeModel {
             for dof in (0..6).filter(|&d| held[d].is_some()) {
                 support(node, axes[dof % 3], dof >= 3);
             }
+            // Springs to ground on the point hold it in the global directions.
+            for dof in self.spring_point_dofs(&Region::RemotePoint(bc.name.clone())) {
+                support(node, axis(dof % 3), dof >= 3);
+            }
         }
         // A rigid remote force joins its selection like a rigid body, holding nothing.
-        for (_, _, region, remote) in self.remote_forces().filter(|(t, ..)| *t == s) {
+        // Springs to ground on its point hold it.
+        for (_, i, region, remote) in self.remote_forces().filter(|(t, ..)| *t == s) {
             if remote.behavior != crate::RemoteBehavior::Rigid {
                 continue;
             }
             if let Ok((point, _)) = self.remote_force_nodes(mesh, region, remote) {
-                let tied = pieces(&Region::Nodes(point.nodes));
+                let position = point.position;
+                let region = Region::Nodes(point.nodes);
+                let tied = pieces(&region);
                 join(&mut ties, &tied, &[]);
                 join(&mut contacts, &tied, &[]);
+                let name = &self.steps[s].loads[i].name;
+                let springs = self.spring_point_dofs(&Region::RemotePoint(name.clone()));
+                if let (false, Some(node)) =
+                    (springs.is_empty(), nearest_node(mesh, &region, position))
+                {
+                    for dof in springs {
+                        support(node, axis(dof % 3), dof >= 3);
+                    }
+                }
             }
         }
         for tie in self.node_ties.iter().filter(|t| t.active) {
@@ -2987,15 +3078,22 @@ impl FeModel {
             match constraint {
                 // Moved to the node ties when the project was read.
                 Constraint::NodeTie(_) => {}
-                Constraint::Spring(c) if c.master.is_none() => {
-                    for node in c.region.nodes(mesh) {
-                        for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
-                            add(&mut gram, node, axis(d));
+                Constraint::Spring(c) => match c.layout() {
+                    Some(SpringLayout::SelectionToWorld { selection }) => {
+                        for node in selection.nodes(mesh) {
+                            for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
+                                add(&mut gram, node, axis(d));
+                            }
                         }
                     }
-                }
+                    _ => {
+                        for region in c.ends.iter().filter_map(crate::SpringEnd::selection) {
+                            mark(region, &mut held_otherwise);
+                        }
+                    }
+                },
                 Constraint::CompressionOnly(c) => mark(&c.region, &mut held_otherwise),
-                Constraint::Tie(_) | Constraint::Spring(_) => {
+                Constraint::Tie(_) => {
                     for region in constraint.master_slave().into_iter().flatten() {
                         mark(region, &mut held_otherwise);
                     }
@@ -3956,6 +4054,34 @@ mod tests {
         assert!(problems(&check(&model, &mesh)).contains(&(item, Problem::SkewedSymmetryShared)));
     }
 
+    /// A hinge: a displacement on a point with the rotation about z free, held by a
+    /// torsion spring from that point to ground.
+    #[test]
+    fn a_torsion_spring_on_the_point_of_a_hinge_holds_it() {
+        let mesh = cubes(1, false);
+        let mut model = model(&mesh);
+        let free_z = [Some(0.0), Some(0.0), Some(0.0), Some(0.0), Some(0.0), None];
+        model.steps[0].boundary_conditions[0] = BoundaryCondition {
+            distribution: None,
+            name: "Hinge".into(),
+            active: true,
+            visible: true,
+            region: Region::Nodes(vec![2, 3, 6, 7]),
+            kind: BoundaryKind::Displacement(crate::Displacement::rigid(free_z)),
+            amplitude: None,
+        };
+        let detail = &check(&model, &mesh)[0].detail;
+        assert!(detail.ends_with(": rotation about Z free"), "{detail}");
+        let mut spring = crate::Spring::new("Torsion");
+        spring.ends = [
+            crate::SpringEnd::Region(Region::RemotePoint("Hinge".into())),
+            crate::SpringEnd::World,
+        ];
+        spring.rotational = [0.0, 0.0, 100.0];
+        model.constraints.push(Constraint::Spring(spring));
+        assert_eq!(check(&model, &mesh), []);
+    }
+
     #[test]
     fn missing_supports_name_the_free_motions() {
         let mesh = cubes(1, false);
@@ -3993,11 +4119,13 @@ mod tests {
         let detail = &check(&model, &mesh)[0].detail;
         assert!(detail.ends_with(": rotation about X free"), "{detail}");
         // A spring on a third corner holds it.
-        model.constraints.push(Constraint::Spring(crate::Spring {
-            region: Region::Nodes(vec![7]),
-            stiffness: [0.0, 0.0, 1.0],
-            ..crate::Spring::new("Spring-1")
-        }));
+        model
+            .constraints
+            .push(Constraint::Spring(crate::Spring::to_world(
+                "Spring-1",
+                Region::Nodes(vec![7]),
+                [0.0, 0.0, 1.0],
+            )));
         assert_eq!(check(&model, &mesh), []);
     }
 
@@ -4033,7 +4161,10 @@ mod tests {
         let springs = model.weak_springs(&mesh);
         assert_eq!(springs.len(), 1, "{springs:?}");
         assert_eq!(springs[0].name, "PLX_Weak_Springs_PART-2");
-        assert_eq!(springs[0].region, Region::Nodes((9..=16).collect()));
+        assert_eq!(
+            springs[0].selection(),
+            Some(&Region::Nodes((9..=16).collect()))
+        );
         // A unit cube of steel: 1e-6 E L.
         assert!(
             (springs[0].stiffness[2] - 0.21).abs() < 1e-12,
