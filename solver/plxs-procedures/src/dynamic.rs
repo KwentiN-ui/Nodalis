@@ -21,7 +21,8 @@
 //! **Increments**: `DIRECT` keeps the initial size; otherwise the size grows by 1.5 from the
 //! third increment on up to the maximum size, as CalculiX does for a linear step.
 //!
-//! **Explicit** (`EXPLICIT`) and `NLGEOM` are refused as not implemented yet.
+//! **Explicit** (`EXPLICIT`) is refused as not implemented yet. `NLGEOM` and nonlinear
+//! materials go to [`crate::nonlinear_dynamic`].
 //!
 //! **Damping**: Rayleigh `C = α_R M + β_R K` from `*DAMPING` in the step.
 //!
@@ -50,7 +51,7 @@ use plxs_output::StaRow;
 use rayon::prelude::*;
 
 use crate::equations::{Equations, FirstOrWarnings, in_increment};
-use crate::fields::{build_fields, internal_energy_density, nodal_average_scalar, node_order};
+use crate::fields::{internal_energy_density, nodal_average_scalar, node_order};
 use crate::static_linear::{integration_point_results, writes_increment};
 use crate::{Procedure, ProcedureContext, StepOutcome};
 
@@ -58,14 +59,14 @@ pub struct DynamicProcedure;
 
 /// Integration parameters of one increment size.
 #[derive(Clone, Copy, Debug)]
-struct Scheme {
-    alpha: f64,
-    beta: f64,
-    gamma: f64,
+pub(crate) struct Scheme {
+    pub(crate) alpha: f64,
+    pub(crate) beta: f64,
+    pub(crate) gamma: f64,
 }
 
 impl Scheme {
-    fn of(parameters: &Dynamic) -> Scheme {
+    pub(crate) fn of(parameters: &Dynamic) -> Scheme {
         Scheme::new(parameters.alpha.unwrap_or(-0.05))
     }
 
@@ -80,6 +81,7 @@ impl Scheme {
 }
 
 /// The state of the time integration at the start of an increment.
+#[derive(Clone)]
 pub(crate) struct Motion {
     pub(crate) u: Vec<f64>,
     pub(crate) v: Vec<f64>,
@@ -87,7 +89,11 @@ pub(crate) struct Motion {
 }
 
 /// Values given per node (or node set) and DOF, as `*INITIAL CONDITIONS` lists them.
-fn initial_values(model: &Model, table: &ElementTable, entries: &[(NodeRef, u8, f64)]) -> Vec<f64> {
+pub(crate) fn initial_values(
+    model: &Model,
+    table: &ElementTable,
+    entries: &[(NodeRef, u8, f64)],
+) -> Vec<f64> {
     let mut out = vec![0.0; table.dofs.len()];
     for (region, dof, value) in entries {
         let nodes: Vec<u32> = match region {
@@ -146,12 +152,6 @@ impl Procedure for DynamicProcedure {
             // identified yet (single-DOF oracles in the M3 T13 notes).
             return Err(Error::Unsupported(format!(
                 "procedure not implemented yet: *DYNAMIC, EXPLICIT (step {})",
-                step.name
-            )));
-        }
-        if step.nlgeom {
-            return Err(Error::Unsupported(format!(
-                "procedure not implemented yet: *DYNAMIC, NLGEOM (step {})",
                 step.name
             )));
         }
@@ -572,6 +572,7 @@ impl DynamicProcedure {
                     &reactions,
                     (&stresses, &strains),
                     carried_nodal.as_deref(),
+                    None,
                 );
             }
             crate::history::write_history_with_velocities(
@@ -636,20 +637,21 @@ impl DynamicProcedure {
 }
 
 /// The energies of the whole model at the end of an increment.
-struct Energies {
+#[derive(Clone)]
+pub(crate) struct Energies {
     /// `½ uᵀ K u`.
-    internal: f64,
+    pub(crate) internal: f64,
     /// `½ vᵀ M v`.
-    kinetic: f64,
+    pub(crate) kinetic: f64,
     /// The work of the loads since the start of the step (trapezoidal rule).
-    external_work: f64,
+    pub(crate) external_work: f64,
     /// The energy the Rayleigh damping dissipated since the start of the step.
-    dissipation: f64,
+    pub(crate) dissipation: f64,
 }
 
 /// The variables (`ALLIE`, `ALLKE`, `ALLWK`, `ALLVD`) of each `*EL PRINT` of the step that
 /// asks for energies of the model, with its set.
-fn energy_requests(step: &Step) -> Vec<(String, Vec<String>)> {
+pub(crate) fn energy_requests(step: &Step) -> Vec<(String, Vec<String>)> {
     (step.outputs.el_print.iter())
         .filter_map(|request| {
             let variables: Vec<String> = (request.variables.iter())
@@ -662,7 +664,7 @@ fn energy_requests(step: &Step) -> Vec<(String, Vec<String>)> {
 }
 
 /// One history block per requested energy, a single total row each.
-fn write_energies(
+pub(crate) fn write_energies(
     results: &mut plxs_core::Results,
     requests: &[(String, Vec<String>)],
     energies: &Energies,
@@ -689,7 +691,7 @@ fn write_energies(
 }
 
 /// A value to four significant digits.
-fn short(value: f64) -> String {
+pub(crate) fn short(value: f64) -> String {
     if value != 0.0 && !(1e-3..1e6).contains(&value.abs()) {
         return format!("{value:.3e}");
     }
@@ -704,7 +706,7 @@ fn short(value: f64) -> String {
 
 /// The Rayleigh damping of a damping ratio: met exactly at the lower frequency (the lowest
 /// eigenfrequency of the constrained model unless given) and the upper one.
-fn fit_damping(
+pub(crate) fn fit_damping(
     ctx: &ProcedureContext<'_>,
     set: &plxs_constraints::ConstraintSet,
     k: &SparseMatrix,
@@ -779,7 +781,7 @@ fn fit_damping(
 /// `c_m M + c_k K` with the fully integrated stiffness and mass of reduced elements (and
 /// the springs and linear blocks of the stiffness): the matrix of the initial accelerations
 /// (`system`), or with `c_m = 0, c_k = 1` the stiffness for their internal forces.
-fn initial_acceleration_matrix(
+pub(crate) fn initial_acceleration_matrix(
     table: &ElementTable,
     model: &Model,
     pattern: &std::sync::Arc<plxs_linalg::Pattern>,
@@ -841,7 +843,7 @@ fn missing_density(model: &Model, entry: &plxs_assembly::elements::ElementEntry)
 /// displacement form `A = M/(βΔt²) + (1+α)γ/(βΔt) C + (1+α) K` of the increments, in the
 /// acceleration form `A = M + (1+α)γΔt C + (1+α)βΔt² K` of the initial accelerations
 /// (`acceleration_form`); `C = α_R M + β_R K`.
-fn matrix_factors(
+pub(crate) fn matrix_factors(
     scheme: Scheme,
     rayleigh: plxs_core::step::Rayleigh,
     dt: f64,
@@ -862,7 +864,7 @@ fn matrix_factors(
 }
 
 /// `*STEP, INC=`: the largest number of increments of the step.
-fn ctx_max_increments(step: &Step) -> u32 {
+pub(crate) fn ctx_max_increments(step: &Step) -> u32 {
     if step.max_increments == 0 {
         100
     } else {
@@ -870,7 +872,7 @@ fn ctx_max_increments(step: &Step) -> u32 {
     }
 }
 
-fn numerical(e: Error, step: u32, increment: u32, equations: &Equations) -> Error {
+pub(crate) fn numerical(e: Error, step: u32, increment: u32, equations: &Equations) -> Error {
     match e {
         Error::Numerical {
             failure, message, ..
@@ -900,9 +902,10 @@ pub(crate) fn write_increment(
     reactions: &[f64],
     (stresses, strains): (&IntegrationPointField, &IntegrationPointField),
     carried: Option<&[f64]>,
+    material: Option<&IntegrationPointField>,
 ) {
-    let mut fields = build_fields(
-        ctx.table, ctx.model, step, &motion.u, reactions, stresses, strains,
+    let mut fields = crate::fields::build_fields_with(
+        ctx.table, ctx.model, step, &motion.u, reactions, stresses, strains, material,
     );
     if let (Some(carried), Some(ener)) = (carried, fields.iter_mut().find(|f| f.name == "ENER")) {
         let order = node_order(ctx.model);

@@ -3962,6 +3962,7 @@ fn dynamic_step(settings: &DynamicStep, model: &FeModel, step: &Step) -> (ir::St
     }));
     ir_step.max_increments = (integration.increments(settings) + 1).min(u32::MAX as u64) as u32;
     ir_step.default_amplitude = ir::step::DefaultAmplitude::Step;
+    ir_step.nlgeom = settings.large_deformations;
     (ir_step, integration.per_frame)
 }
 

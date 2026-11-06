@@ -761,6 +761,7 @@ impl StepKind {
             StepKind::Static(settings) => settings.nlgeom,
             StepKind::CoupledTempDisp(settings) => settings.increments.nlgeom,
             StepKind::Visco(settings) => settings.increments.nlgeom,
+            StepKind::Dynamic(settings) => settings.large_deformations,
             _ => false,
         }
     }
@@ -1031,6 +1032,10 @@ pub struct DynamicStep {
     pub frequency_limit: Option<f64>,
     pub numerical_damping: NumericalDamping,
     pub solver: LinearSolverChoice,
+    /// Large displacements and rotations (`NLGEOM`): Newton iterations in every time step,
+    /// rigid bodies turn by finite angles. Off, the motion is linear (small deformations).
+    #[serde(default)]
+    pub large_deformations: bool,
 }
 
 impl Default for DynamicStep {
@@ -1044,6 +1049,7 @@ impl Default for DynamicStep {
             frequency_limit: None,
             numerical_damping: NumericalDamping::Normal,
             solver: LinearSolverChoice::Automatic,
+            large_deformations: false,
         }
     }
 }
