@@ -75,13 +75,19 @@ const MAX_IMPACT_SPLITS: u32 = 16;
 const IMPACT_ENERGY: f64 = 1e-3;
 /// Iterations above which the following increments are computed in twice as many parts,
 /// and at or below which in half as many: large rotations per increment converge slowly
-/// and lose accuracy.
+/// and lose accuracy. (With the held tangent an iteration is cheap and a sub-increment
+/// takes a few of them; four is still fast.)
 const SLOW_ITERATIONS: u32 = 8;
-const FAST_ITERATIONS: u32 = 3;
+const FAST_ITERATIONS: u32 = 4;
 /// Largest local error of a sub-increment relative to its motion (Zienkiewicz and Xie's
-/// estimate for Newmark's method), and how many parts an increment may take for it.
+/// estimate for Newmark's method), and how many parts an increment may take for it. The
+/// error falls with the square of the sub-increment: half as many parts give four times
+/// the error, so the parts are halved below a quarter of the tolerance.
 const ACCURACY: f64 = 0.01;
 const ACCURACY_PARTS: u32 = 8;
+/// The motion of a sub-increment is measured against at least this fraction of the model's
+/// size: a body at rest (contact chatter of nanometres against no motion) is not an error.
+const MOTION_FLOOR: f64 = 1e-9;
 /// Residual tolerance relative to the largest force of the increment (external, inertial
 /// or the average element force) and correction tolerance relative to the motion of the
 /// increment.
@@ -446,6 +452,8 @@ impl Procedure for NonlinearDynamic {
             .unwrap_or(f64::INFINITY);
         let mut size = initial;
         let mut parts = 1u32;
+        // Increments in a row whose sub-increments converged fast with a small error.
+        let mut calm = 0u32;
         let mut increment = 0u32;
         while state.time < period * (1.0 - 1e-12) {
             if ctx.cancel.is_cancelled() {
@@ -512,9 +520,14 @@ impl Procedure for NonlinearDynamic {
                         (0, 0),
                     )? {
                         Ok((next, its)) => {
-                            let error = local_error(scheme, &setup.active, &current, &next);
+                            let error =
+                                local_error(scheme, &setup.active, setup.size, &current, &next);
                             largest_error = largest_error.max(error);
-                            if error > ACCURACY && parts < ACCURACY_PARTS {
+                            // Not in the first increment of the step: the accelerations of
+                            // the modes the time step does not resolve settle there (the
+                            // numerical damping takes them out of the equilibrium start),
+                            // which is no error of the motion.
+                            if error > ACCURACY && parts < ACCURACY_PARTS && increment > 1 {
                                 too_coarse = true;
                                 break;
                             }
@@ -530,6 +543,7 @@ impl Procedure for NonlinearDynamic {
                 }
                 if too_coarse {
                     parts *= 2;
+                    calm = 0;
                     progress.event(ProgressEvent::Info(format!(
                         "the motion needs a shorter time step: increment {increment} is computed in {parts} parts"
                     )));
@@ -553,12 +567,25 @@ impl Procedure for NonlinearDynamic {
                 }
                 if slowest > SLOW_ITERATIONS && parts < 1 << MAX_SPLITS {
                     parts *= 2;
+                    calm = 0;
                     progress.event(ProgressEvent::Info(format!(
                         "slow convergence: the next increments are computed in {parts} parts"
                     )));
-                } else if slowest <= FAST_ITERATIONS && largest_error < ACCURACY / 8.0 && parts > 1
-                {
-                    parts /= 2;
+                } else {
+                    // Back towards the increment the step asks for: after two calm increments
+                    // in a row (a single one may be the lull between two bounces). Parts
+                    // beyond what the accuracy ever asks for (slow convergence of an impact)
+                    // go back as soon as the convergence allows.
+                    let accurate = largest_error < ACCURACY / 4.0 || parts > ACCURACY_PARTS;
+                    if slowest <= FAST_ITERATIONS && accurate && parts > 1 {
+                        calm += 1;
+                        if calm >= 2 {
+                            parts /= 2;
+                            calm = 0;
+                        }
+                    } else {
+                        calm = 0;
+                    }
                 }
                 break (current, iterations);
             };
@@ -687,7 +714,7 @@ impl Procedure for NonlinearDynamic {
 /// the step: `|β − 1/6| Δt² max|a₁ − a₀| / max|u₁ − u₀|` (Zienkiewicz and Xie, 1991), over
 /// the DOFs of elements (`active`; not the rotations of rigid bodies, which have other
 /// units).
-fn local_error(scheme: Scheme, active: &[bool], from: &At, to: &At) -> f64 {
+fn local_error(scheme: Scheme, active: &[bool], size: f64, from: &At, to: &At) -> f64 {
     let dt = to.time - from.time;
     let largest = |a: &[f64], b: &[f64]| {
         a.iter()
@@ -697,7 +724,7 @@ fn local_error(scheme: Scheme, active: &[bool], from: &At, to: &At) -> f64 {
             .map(|((x, y), _)| (x - y).abs())
             .fold(0.0_f64, f64::max)
     };
-    let motion = largest(&to.motion.u, &from.motion.u);
+    let motion = largest(&to.motion.u, &from.motion.u).max(MOTION_FLOOR * size);
     if motion == 0.0 {
         return 0.0;
     }
