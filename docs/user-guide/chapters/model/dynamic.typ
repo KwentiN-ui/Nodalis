@@ -23,6 +23,8 @@ structure is damped; Nodalis chooses the time step and the integration from that
     the model to the highest frequency the time step resolves; #ui("Between") takes two
     frequencies. #ui("Rayleigh coefficients"): α (mass, unit of a frequency) and β
     (stiffness, unit of a time) directly.],
+  [Large deformations], [Off, the motion is linear: displacements and rotations stay
+    small. On, every time step iterates on the deformed geometry (see below).],
   [Starts from], [What the step starts from, for information: rest, the state at the end of
     the step before it, or an initial velocity (@initial-conditions).],
 )
@@ -46,12 +48,30 @@ structure is damped; Nodalis chooses the time step and the integration from that
 
 Loads act at once from the start of the step. Give a load an #ui("Amplitude")
 (@amplitudes) for a ramp, a pulse or a vibration; the automatic time step follows its
-points. Materials need a density. The integration is linear: no large deformations, no
-contact and no plasticity in a dynamic step.
+points. Materials need a density. Contact is not available in a dynamic step.
 
 The model check warns when the frequency limit is higher than the frames can show
 (#ui("Too few frames for the frequency limit")) and when all points of an amplitude the
 step follows lie after its end (#ui("Amplitude starts after the step")).
+
+=== Large deformations
+
+Without #ui("Large deformations") the step is linear, which is right for everything that
+vibrates with small amplitudes: impacts on parts, load jumps, pulses, decaying vibrations.
+A body that turns far is wrong there: a rotation is taken as a displacement along the
+tangent, so a swinging part grows longer and longer, and gravity has no lever that
+changes with the angle. A pendulum, a mechanism, a flap that folds over or a beam that
+bends far need #ui("Large deformations").
+
+With it the solver iterates in every time step on the deformed geometry, and rigid bodies
+(@rigid-body) turn by finite angles, e.g. the reference point a #ui("Displacement/Rotation")
+condition on an edge or face creates. Where the motion changes faster than the time step
+resolves, or the iterations converge slowly, the solver computes a time step in up to 64
+parts and says so in the output ("increment 3 is computed in 8 parts"); the frames stay
+where they are. Materials with plasticity (@plasticity) make the step nonlinear in the
+same way, with or without the switch.
+
+#screenshot("dynamic-pendulum.png", [A plate hinged at its left edge, swinging under its own weight with Large deformations])
 
 === What the solver reports
 
@@ -79,6 +99,9 @@ It also gets a history output #ui("Energies") of the whole model at every time s
 )
 
 #screenshot("history-energies.png", [Energies history output of a Dynamic step])
+
+With large deformations or plasticity ALLIE is the work the internal forces did, which
+includes the energy plastic deformation dissipated.
 
 ALLIE + ALLKE + ALLVD − ALLWK stays at its starting value up to the small loss of the
 numerical damping: the energy balance shows whether the time step resolves the motion.

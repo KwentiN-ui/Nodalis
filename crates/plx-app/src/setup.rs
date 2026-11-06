@@ -5725,6 +5725,18 @@ fn dynamic_form(
         }
     }
 
+    ui.label("");
+    ui.checkbox(&mut settings.large_deformations, "Large deformations")
+        .on_hover_text(
+            "Large displacements and rotations: a pendulum, a mechanism, a body that turns              or bends far. Each time step iterates; rigid bodies turn by finite angles.",
+        );
+    ui.end_row();
+    if settings.large_deformations {
+        ui.label("");
+        ui.weak("Time steps are split where needed.");
+        ui.end_row();
+    }
+
     ui.label("Starts from");
     ui.label(&context.starts_from);
     ui.end_row();

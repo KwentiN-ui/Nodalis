@@ -241,6 +241,8 @@ impl Procedure for NonlinearStatic {
             set.reduced_len()
         )));
         let discrete: Vec<&DiscreteElement> = ctx.table.discrete.iter().collect();
+        // Rigid bodies follow finite rotations under NLGEOM.
+        let large_rotations = step.nlgeom && constraints.has_rigid_bodies();
         let mut k = SparseMatrix::zeros(ctx.pattern.clone());
         // Contact: *MODEL CHANGE / *CHANGE FRICTION of the step, then a contact state per
         // slave point.
@@ -389,6 +391,7 @@ impl Procedure for NonlinearStatic {
                     direct,
                     (visco && cetol > 0.0).then_some(cetol),
                     &mut equations,
+                    large_rotations.then_some((active.as_slice(), spc_end.dofs.as_slice())),
                 )?;
                 match result {
                     Ok(converged) => break converged,
@@ -477,8 +480,12 @@ impl Procedure for NonlinearStatic {
             } = converged;
             // The forces the constraints carry to their independent nodes, for the output.
             let mut forces = output.f_int.clone();
-            ctx.constraints
-                .transfer_forces(&mut forces, &spc_end.dofs, &active);
+            let rotated = large_rotations.then(|| ctx.constraints.at_rotations(&u));
+            rotated.as_ref().unwrap_or(ctx.constraints).transfer_forces(
+                &mut forces,
+                &spc_end.dofs,
+                &active,
+            );
             ctx.state.displacements.per_node = 3;
             ctx.state.displacements.values.clear();
             ctx.state.displacements.values.extend_from_slice(&u);
@@ -572,7 +579,7 @@ impl Procedure for NonlinearStatic {
 impl NonlinearStatic {
     /// Adds the springs and the closed gaps to the tangent and their forces to `f_int`;
     /// returns which discrete elements act (springs always, gaps when closed at `u`).
-    fn add_discrete(
+    pub(crate) fn add_discrete(
         discrete: &[&DiscreteElement],
         u: &[f64],
         k: &mut SparseMatrix,
@@ -630,6 +637,7 @@ impl NonlinearStatic {
         direct: bool,
         cetol: Option<f64>,
         equations: &mut Equations,
+        large_rotations: Option<(&[bool], &[u32])>,
     ) -> Result<std::result::Result<Converged, Failure>> {
         let total_dofs = ctx.table.dofs.len();
         // Start from the converged displacements, u = T v + g_start. A change of the
@@ -715,6 +723,13 @@ impl NonlinearStatic {
             let residual_full: Vec<f64> = (0..total_dofs)
                 .map(|d| f_ext[d] - output.f_int[d] - if pending_g { k_delta[d] } else { 0.0 })
                 .collect();
+            // With rigid bodies under finite rotations, the constraints linearized at `u`.
+            let rotated = large_rotations.map(|(active, held)| {
+                ctx.constraints
+                    .at_rotations(&u)
+                    .step_set(ctx.model.nodes.len(), active, held)
+            });
+            let set = rotated.as_ref().unwrap_or(set);
             let started = Instant::now();
             let residual = set.reduce_rhs(&residual_full);
             ctx.profile.add(Phase::Reduction, started);
@@ -944,6 +959,9 @@ impl NonlinearStatic {
                     *ui += d;
                 }
                 pending_g = false;
+            }
+            if let Some((_, held)) = large_rotations {
+                ctx.constraints.project_rigid(&mut u, held);
             }
         }
     }
