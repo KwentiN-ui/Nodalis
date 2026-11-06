@@ -18,6 +18,60 @@ use std::sync::Arc;
 
 use plxs_linalg::{Pattern, SparseMatrix};
 
+/// The pattern of `Tᵀ K T` for the matrices on one pattern and where every entry of `K`
+/// lands in it (see [`ConstraintSet::reducer`]).
+pub struct ReducedPattern {
+    input: Arc<Pattern>,
+    pattern: Arc<Pattern>,
+    /// Per entry of the input: its reduced position when it lands on one reduced entry
+    /// with factor 1 (an entry between unconstrained DOFs, the usual case), else
+    /// `u32::MAX` and the entry is in `general`.
+    simple: Vec<u32>,
+    /// `(input entry, reduced position, factor · tᵢₐ, tⱼᵦ)` of the other entries, in the
+    /// order of the entries. The products are formed and summed in the same order as a
+    /// direct `Tᵀ K T` would, so the reduced matrix is the same to the last bit (a
+    /// mechanism's solution can hang on round-off of this size).
+    general: Vec<(u32, u32, f64, f64)>,
+}
+
+impl ReducedPattern {
+    /// Whether the reducer was built for `pattern`.
+    pub fn fits(&self, pattern: &Arc<Pattern>) -> bool {
+        Arc::ptr_eq(&self.input, pattern) || *self.input == **pattern
+    }
+
+    /// The reduced pattern.
+    pub fn pattern(&self) -> &Arc<Pattern> {
+        &self.pattern
+    }
+
+    /// `Tᵀ K T` of `k`, which must be on the pattern the reducer was built for.
+    pub fn apply(&self, k: &SparseMatrix) -> SparseMatrix {
+        assert!(
+            self.fits(k.pattern()),
+            "the matrix is not on the reducer's pattern"
+        );
+        let mut out = SparseMatrix::zeros(self.pattern.clone());
+        let values = k.values();
+        let out_values = out.values_mut();
+        let mut general = self.general.iter().peekable();
+        for (entry, (&pos, &v)) in self.simple.iter().zip(values).enumerate() {
+            if pos != u32::MAX {
+                out_values[pos as usize] += v;
+                continue;
+            }
+            while let Some(&&(e, pos, fa, tb)) = general.peek() {
+                if e as usize != entry {
+                    break;
+                }
+                general.next();
+                out_values[pos as usize] += fa * v * tb;
+            }
+        }
+        out
+    }
+}
+
 /// What to do when the preferred dependent DOF of a constraint is taken already.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Policy {
@@ -327,7 +381,26 @@ impl ConstraintSet {
 
     /// `Tᵀ K T` on a new pattern.
     pub fn reduce(&self, k: &SparseMatrix) -> SparseMatrix {
-        let pattern = k.pattern();
+        self.reducer(k.pattern()).apply(k)
+    }
+
+    /// [`Self::reduce`] with the reduced pattern kept in `cache` for the next matrix on
+    /// the same pattern (the tangents of Newton iterations): only the values are mapped
+    /// then, which is several times cheaper than building the pattern again.
+    pub fn reduce_cached(
+        &self,
+        k: &SparseMatrix,
+        cache: &mut Option<ReducedPattern>,
+    ) -> SparseMatrix {
+        if !cache.as_ref().is_some_and(|c| c.fits(k.pattern())) {
+            *cache = Some(self.reducer(k.pattern()));
+        }
+        cache.as_ref().expect("built").apply(k)
+    }
+
+    /// The reduced pattern of `Tᵀ K T` for matrices on `pattern`, with where every entry
+    /// of `K` lands.
+    pub fn reducer(&self, pattern: &Arc<Pattern>) -> ReducedPattern {
         assert_eq!(pattern.dimension(), self.n);
         let m = self.reduced;
         // Pass 1: the pattern.
@@ -350,22 +423,19 @@ impl ConstraintSet {
             list.dedup();
         }
         let reduced_pattern = Arc::new(Pattern::from_columns(m, rows));
-        // Pass 2: the values.
-        let mut out = SparseMatrix::zeros(reduced_pattern.clone());
-        let values = k.values();
+        // Pass 2: where each entry lands.
+        let mut simple = vec![u32::MAX; pattern.nnz()];
+        let mut general = Vec::new();
         let col_ptr = pattern.col_ptr();
-        let out_values = out.values_mut();
         for (j, &start) in col_ptr.iter().take(self.n).enumerate() {
             if self.t_ptr[j] == self.t_ptr[j + 1] {
                 continue;
             }
             let start = start as usize;
             for (offset, &i) in pattern.column(j).iter().enumerate() {
-                let v = values[start + offset];
-                if v == 0.0 {
-                    continue;
-                }
+                let entry = start + offset;
                 let diagonal = i as usize == j;
+                let mut targets: Vec<(u32, f64, f64)> = Vec::new();
                 for (a, ta) in self.t_row(i as usize) {
                     for (b, tb) in self.t_row(j) {
                         if diagonal && a > b {
@@ -376,12 +446,23 @@ impl ConstraintSet {
                         // the same reduced entry, twice on a reduced diagonal.
                         let factor = if !diagonal && a == b { 2.0 } else { 1.0 };
                         let pos = reduced_pattern.position(r, c).unwrap();
-                        out_values[pos] += factor * ta * v * tb;
+                        targets.push((pos as u32, factor * ta, tb));
+                    }
+                }
+                match targets.as_slice() {
+                    [(pos, fa, tb)] if *fa == 1.0 && *tb == 1.0 => simple[entry] = *pos,
+                    _ => {
+                        general.extend(targets.iter().map(|&(p, fa, tb)| (entry as u32, p, fa, tb)))
                     }
                 }
             }
         }
-        out
+        ReducedPattern {
+            input: pattern.clone(),
+            pattern: reduced_pattern,
+            simple,
+            general,
+        }
     }
 
     /// `Tᵀ f`.

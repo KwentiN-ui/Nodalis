@@ -426,6 +426,14 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                 | StepKind::CoupledTempDisp(h)
                 | StepKind::UncoupledTempDisp(h) => &mut h.increments,
                 StepKind::Dynamic(d) => {
+                    if matches!(field, Field::Modes) {
+                        return match &mut d.method {
+                            crate::DynamicMethod::Modal { modes } => {
+                                Some((Slot::Count(modes), ValueKind::Count))
+                            }
+                            crate::DynamicMethod::Direct => None,
+                        };
+                    }
                     return match (field, &mut d.damping) {
                         (Field::Duration, _) => real(&mut d.duration, Quantity::Time),
                         (Field::Frames, _) => Some((Slot::Count(&mut d.frames), ValueKind::Count)),

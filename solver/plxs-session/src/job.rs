@@ -314,7 +314,7 @@ fn run_continuing(
                         keys[index],
                         session.state().steps_done,
                         &session.snapshot(),
-                        session.results(),
+                        session.results_mut(),
                     );
                 }
             }

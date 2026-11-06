@@ -12,14 +12,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
     Amplitude, AmplitudeTime, BeamProfile, BeamSection, BoundaryKind, BuckleStep,
-    ComplexFrequencyStep, Constraint, ContactMethod, ContactPair, ContactScale, DefinedFieldKind,
-    DynamicStep, FeModel, FieldOutput, Formulation, FrequencyStep, GapConductance,
-    HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialConditionKind,
-    InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep, ModelItem, ModelSpace,
-    MovingFrame, NodeTie, Origins, OutputDimension, OutputKind, Quantity, RayleighFit, Region,
-    RemoteBehavior, RemoteDof, Sampler, Section, SectionKind, SectorDisplay, SensitivityStep,
-    StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, Tie,
-    Totals, UnitSystem, ViscoStep, line_tangent, symmetry_dofs, symmetry_plane,
+    ComplexFrequencyStep, Constraint, ContactMethod, ContactPair, ContactScale, Damping,
+    DefinedFieldKind, DynamicMethod, DynamicStep, FeModel, FieldOutput, Formulation, FrequencyStep,
+    GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
+    InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep,
+    ModelItem, ModelSpace, MovingFrame, NodeTie, Origins, OutputDimension, OutputKind, Quantity,
+    RayleighFit, Region, RemoteBehavior, RemoteDof, Sampler, Section, SectionKind, SectorDisplay,
+    SensitivityStep, StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior,
+    SurfaceInteraction, Tie, Totals, UnitSystem, ViscoStep, line_tangent, symmetry_dofs,
+    symmetry_plane,
 };
 use plxs_core as ir;
 use plxs_core::mesh::{ElementRef, NodeRef};
@@ -2687,6 +2688,38 @@ fn lower_step(
     {
         return complex_frequency_blocks(sets, step, settings, context, complex);
     }
+    // A Dynamic step by modal superposition superposes the eigenmodes a frequency step
+    // right before it stores; the solver computes them with the step's supports.
+    if let StepKind::Dynamic(settings) = &step.kind
+        && let DynamicMethod::Modal { modes } = settings.method
+        && let Some(dynamic) = blocks.pop()
+    {
+        if let Some(problem) = settings.problem() {
+            return Err(WriteError::InvalidLoad {
+                item: step.name.clone(),
+                reason: problem,
+            });
+        }
+        let modes = FrequencyStep {
+            num_frequencies: modes,
+            storage: true,
+            perturbation: false,
+            solver: settings.solver,
+            ..FrequencyStep::default()
+        };
+        let mut eigenmodes = frequency_step(&modes, context.cyclic);
+        eigenmodes.name = format!("{} Eigenmodes", dynamic.step.name);
+        return Ok(vec![
+            StepBlock {
+                step: eigenmodes,
+                named: dynamic.named,
+                boundaries: dynamic.boundaries.clone(),
+                cards: Vec::new(),
+                preparation: true,
+            },
+            dynamic,
+        ]);
+    }
     Ok(blocks)
 }
 
@@ -4050,6 +4083,32 @@ fn dynamic_step(settings: &DynamicStep, model: &FeModel, step: &Step) -> (ir::St
             }),
         ),
     };
+    if let DynamicMethod::Modal { .. } = settings.method {
+        // Every mode is integrated exactly; the time step only decides where the loads are
+        // sampled and the results written, so the direct step's time step serves.
+        let damping = match settings.damping {
+            Damping::None => None,
+            Damping::Ratio { zeta, .. } => {
+                Some(ir::step::ModalDamping::Direct(vec![(1, 1_000_000, zeta)]))
+            }
+            Damping::Rayleigh(r) => Some(ir::step::ModalDamping::Rayleigh {
+                alpha: r.alpha,
+                beta: r.beta,
+            }),
+        };
+        let mut ir_step = new_step(ir::step::Procedure::ModalDynamics(
+            ir::step::ModalDynamics {
+                solver: ir::step::EquationSolver::Default,
+                steady_state: false,
+                increment: integration.increment,
+                period: settings.duration,
+                damping,
+            },
+        ));
+        ir_step.max_increments = (integration.increments(settings) + 1).min(u32::MAX as u64) as u32;
+        ir_step.default_amplitude = ir::step::DefaultAmplitude::Step;
+        return (ir_step, integration.per_frame);
+    }
     let alpha = settings.numerical_damping.alpha();
     let mut ir_step = new_step(ir::step::Procedure::Dynamic(ir::step::Dynamic {
         solver: equation_solver(settings.solver),

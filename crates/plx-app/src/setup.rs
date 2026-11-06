@@ -13,15 +13,15 @@ use plx_model::{
     AXIS_LABELS, Amplitude, BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition,
     BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, CrossSection,
     CyclicSymmetry, Damping, DampingRange, DefinedField, DefinedFieldKind, Displacement,
-    Distribution, DynamicStep, Elastic, FeModel, Field, FieldOutput, Formulation, FrequencyStep,
-    GLOBAL, GravityDirection, Hardening, HeatTransferStep, HistoryKind, HistoryOutput,
-    Incrementation, InitialCondition, InitialConditionKind, ItemRef, LinearSolverChoice, Load,
-    LoadKind, Material, MeshSet, ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace,
-    MovingLoad, NodeTie, NumericalDamping, OutputDimension, OutputKind, PlasticPoint, Quantity,
-    RayleighDamping, Region, RemoteBehavior, RemoteForce, STANDARD_GRAVITY, Section, SectionKind,
-    SensitivityStep, SetKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind, StepLimit,
-    SurfaceInteraction, SymmetryError, Tie, TimeStep, UnitSystem, ViscoStep, Wheel, next_name,
-    symmetry_plane,
+    Distribution, DynamicMethod, DynamicStep, Elastic, FeModel, Field, FieldOutput, Formulation,
+    FrequencyStep, GLOBAL, GravityDirection, Hardening, HeatTransferStep, HistoryKind,
+    HistoryOutput, Incrementation, InitialCondition, InitialConditionKind, ItemRef,
+    LinearSolverChoice, Load, LoadKind, Material, MeshSet, ModalDamping, ModalDynamicsStep,
+    ModeDamping, ModelSpace, MovingLoad, NodeTie, NumericalDamping, OutputDimension, OutputKind,
+    PlasticPoint, Quantity, RayleighDamping, Region, RemoteBehavior, RemoteForce, STANDARD_GRAVITY,
+    Section, SectionKind, SensitivityStep, SetKind, StaticStep, SteadyStateDynamicsStep, Step,
+    StepKind, StepLimit, SurfaceInteraction, SymmetryError, Tie, TimeStep, UnitSystem, ViscoStep,
+    Wheel, next_name, symmetry_plane,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row, amplitude_row_with};
@@ -5656,6 +5656,45 @@ fn dynamic_form(
     ));
     ui.end_row();
 
+    ui.label("Method").on_hover_text(
+        "Direct integration solves all equations in every time step and takes contact, \
+         large deformations and plasticity. Modal superposition computes the lowest \
+         eigenmodes first and integrates them exactly: every time step then costs almost \
+         nothing, for linear models.",
+    );
+    let modal = matches!(settings.method, DynamicMethod::Modal { .. });
+    egui::ComboBox::from_id_salt("dynamic method")
+        .selected_text(settings.method.label())
+        .show_ui(ui, |ui| {
+            let mut choice = modal;
+            ui.selectable_value(&mut choice, false, DynamicMethod::Direct.label());
+            ui.selectable_value(&mut choice, true, DynamicMethod::Modal { modes: 0 }.label());
+            if choice != modal {
+                settings.method = if choice {
+                    settings.large_deformations = false;
+                    DynamicMethod::Modal {
+                        modes: DynamicMethod::DEFAULT_MODES,
+                    }
+                } else {
+                    DynamicMethod::Direct
+                };
+            }
+        });
+    ui.end_row();
+    if let DynamicMethod::Modal { modes } = &mut settings.method {
+        ui.label("    Modes").on_hover_text(
+            "The lowest eigenmodes superposed. The highest of them must lie above the \
+             frequencies the loads excite; the solver output names it.",
+        );
+        expose::field(ui, Field::Modes, |ui| {
+            ui.add(numeric::count(modes).range(1..=10_000))
+        });
+        ui.end_row();
+        ui.label("");
+        ui.weak("Linear only: no contact, no large\ndeformations, no plasticity.");
+        ui.end_row();
+    }
+
     ui.label("Damping");
     let kind = |d: &Damping| match d {
         Damping::None => 0,
@@ -5758,10 +5797,15 @@ fn dynamic_form(
     }
 
     ui.label("");
-    ui.checkbox(&mut settings.large_deformations, "Large deformations")
-        .on_hover_text(
-            "Large displacements and rotations: a pendulum, a mechanism, a body that turns              or bends far. Each time step iterates; rigid bodies turn by finite angles.",
-        );
+    ui.add_enabled(
+        !modal,
+        egui::Checkbox::new(&mut settings.large_deformations, "Large deformations"),
+    )
+    .on_hover_text(
+        "Large displacements and rotations: a pendulum, a mechanism, a body that turns \
+         or bends far. Each time step iterates; rigid bodies turn by finite angles. Not \
+         with modal superposition.",
+    );
     ui.end_row();
     if settings.large_deformations {
         ui.label("");

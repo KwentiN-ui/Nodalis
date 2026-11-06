@@ -269,6 +269,10 @@ impl Session {
         &self.results
     }
 
+    pub fn results_mut(&mut self) -> &mut Results {
+        &mut self.results
+    }
+
     /// Time per phase of the steps so far, with the symbolic analyses the direct solver
     /// reused.
     pub fn profile(&self) -> plxs_procedures::profile::Profile {

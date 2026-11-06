@@ -11,6 +11,11 @@ structure is damped; Nodalis chooses the time step and the integration from that
 #screenshot("dynamic-step.png", [Dynamic step])
 
 #fields(
+  [Method], [#ui("Direct integration") solves all equations of the model in every time step
+    and takes contact, large deformations and plasticity. #ui("Modal superposition")
+    computes the lowest eigenmodes of the supported model first and integrates each of
+    them exactly; every time step then costs almost nothing. For linear models only, see
+    below.],
   [Duration], [The time the step covers, from 0 (step time).],
   [Frames], [The number of result frames kept, evenly spaced over the duration; the last one
     at its end. The dialog shows the time between two frames. 200 frames are plenty for an
@@ -58,6 +63,34 @@ dynamic step too, see below.
 The model check warns when the frequency limit is higher than the frames can show
 (#ui("Too few frames for the frequency limit")) and when all points of an amplitude the
 step follows lie after its end (#ui("Amplitude starts after the step")).
+
+=== Modal superposition <dynamic-modal>
+
+With #ui("Modal superposition") the solver first computes the lowest #ui("Modes")
+eigenmodes of the model with the supports of the step (as a Frequency step with
+#ui("Storage") would), then follows the motion in these modes: every
+mode is a single oscillator that is integrated exactly, with the loads linear between the
+time steps. A time step costs a few microseconds instead of the solution of the whole
+equation system, so long durations, fine time steps and large linear models come cheap,
+and the memory stays that of the frames.
+
+#screenshot("dynamic-modal.png", [Dynamic step with modal superposition])
+
+The response is exact in the modes it has and misses what lies above them. Choose the
+number of modes so that the highest one lies well above the frequencies the loads excite
+(a pulse of 1 ms excites up to about 1 kHz); the solver output names the highest mode
+("the highest mode lies at 4812 Hz"). 30 modes are plenty for a part under a load jump or a
+slow pulse; a short impact or stresses near a load point need more. Local stresses right
+at a concentrated load converge slowly with the number of modes; use direct integration
+where they matter.
+
+The method is linear: contact, #ui("Large deformations") and plasticity are not
+followed (the model check warns). A #ui("Damping ratio") applies to every mode directly
+(no Rayleigh fit, no frequency range); #ui("Rayleigh coefficients") give each mode the
+ratio α/(2ω) + βω/2. Initial velocities and the state of the step before are taken
+up through the modes. The energies and the velocities, accelerations and reaction forces
+are written as with direct integration. Prescribed displacements must be zero (base
+motion is not supported yet).
 
 === Large deformations
 

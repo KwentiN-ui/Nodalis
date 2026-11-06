@@ -1019,7 +1019,8 @@ pub struct FrequencyStep {
 /// derived from it when the model is lowered for the solver.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DynamicStep {
-    /// How the response is computed. Only direct integration exists yet.
+    /// How the response is computed: direct integration of all equations, or the
+    /// superposition of a number of eigenmodes (linear models).
     #[serde(default)]
     pub method: DynamicMethod,
     /// Length of the step in time.
@@ -1082,6 +1083,18 @@ impl DynamicStep {
         {
             return Some("The frequency limit must be greater than 0.".into());
         }
+        if let DynamicMethod::Modal { modes } = self.method {
+            if modes == 0 {
+                return Some("Modal superposition needs at least one mode.".into());
+            }
+            if self.large_deformations {
+                return Some(
+                    "Modal superposition is linear: switch off Large deformations or use \
+                     Direct integration."
+                        .into(),
+                );
+            }
+        }
         match self.damping {
             Damping::None => None,
             Damping::Ratio { zeta, range } => {
@@ -1112,9 +1125,27 @@ impl DynamicStep {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DynamicMethod {
     /// Implicit direct integration of the equation of motion (HHT-alpha), unconditionally
-    /// stable.
+    /// stable; takes contact, large deformations and plasticity.
     #[default]
     Direct,
+    /// Superposition of the lowest `modes` eigenmodes, which the solver computes first:
+    /// every time step then costs almost nothing, so fine steps and long durations of
+    /// linear models (no contact, no large deformations) come cheap. The response is
+    /// exact in the modes it has; the modes must reach above the frequencies the loads
+    /// excite.
+    Modal { modes: u32 },
+}
+
+impl DynamicMethod {
+    /// The number of modes a new modal step superposes.
+    pub const DEFAULT_MODES: u32 = 30;
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            DynamicMethod::Direct => "Direct integration",
+            DynamicMethod::Modal { .. } => "Modal superposition",
+        }
+    }
 }
 
 /// The time step of a Dynamic step.

@@ -136,6 +136,9 @@ pub enum Problem {
     /// A Dynamic step with fewer frames than its frequency limit needs to show a vibration
     /// of that frequency: the solver resolves it, the results do not.
     FramesTooFew,
+    /// A Dynamic step by modal superposition in a model with contact or plasticity, which
+    /// the superposition does not follow.
+    ModalStepNonlinear,
     /// An amplitude a Dynamic step follows whose points all lie after the step's duration:
     /// the load stays at its first value.
     AmplitudeOutsideStep,
@@ -222,6 +225,7 @@ impl Problem {
             | Problem::SkewedSymmetryShared
             | Problem::VelocityIgnored
             | Problem::FramesTooFew
+            | Problem::ModalStepNonlinear
             | Problem::AmplitudeOutsideStep
             | Problem::NoLoad
             | Problem::UnusedAmplitude
@@ -299,6 +303,7 @@ impl Problem {
             Problem::InvalidCyclicSymmetry => "Invalid cyclic symmetry",
             Problem::VelocityIgnored => "Initial velocity without a Dynamic step",
             Problem::FramesTooFew => "Too few frames for the frequency limit",
+            Problem::ModalStepNonlinear => "Modal superposition is linear",
             Problem::AmplitudeOutsideStep => "Amplitude starts after the step",
             Problem::NoRotation => "No rotation",
             Problem::ContactIgnored => "Contact ignored",
@@ -608,6 +613,11 @@ impl Problem {
             Problem::VelocityIgnored => {
                 "Only a Dynamic step (time integration) starts from an initial velocity; \
                  static, frequency and thermal steps ignore it without a message."
+            }
+            Problem::ModalStepNonlinear => {
+                "A Dynamic step with Modal superposition follows the motion in the eigenmodes \
+                 of the linear model: contact pairs and regions do not act in it, and \
+                 materials stay elastic. The step runs, but without them."
             }
             Problem::FramesTooFew => {
                 "The solver resolves vibrations up to the frequency limit, but the results \
@@ -972,6 +982,10 @@ impl Problem {
                  keep the nodal diameter range within 0 to half the number of sectors."
             }
             Problem::VelocityIgnored => "Add a Dynamic step or deactivate the initial condition.",
+            Problem::ModalStepNonlinear => {
+                "Set the method of the step to Direct integration, or deactivate the contact \
+                 and the plasticity if they do not matter in it."
+            }
             Problem::FramesTooFew => {
                 "Raise the frames of the step to at least twice the frequency limit times \
                  the duration, or lower the frequency limit."
@@ -1710,6 +1724,24 @@ impl FeModel {
         settings: &crate::DynamicStep,
         findings: &mut Vec<Finding>,
     ) {
+        if let crate::DynamicMethod::Modal { .. } = settings.method {
+            let contact = (self.contact_pairs.iter()).filter(|c| c.active).count()
+                + self.contact_regions.len();
+            let plastic = (self.materials.iter())
+                .filter(|m| m.plastic.is_some())
+                .count();
+            if contact + plastic > 0 {
+                findings.push(Finding::new(
+                    ModelItem::Step(s),
+                    Problem::ModalStepNonlinear,
+                    format!(
+                        "{}: {contact} contact definition(s) and {plastic} plastic material(s) \
+                         are not followed by modal superposition",
+                        step.name
+                    ),
+                ));
+            }
+        }
         if let Some(limit) = settings.frequency_limit
             && (settings.frames as f64) < 2.0 * limit * settings.duration
         {
@@ -4002,6 +4034,41 @@ mod tests {
             problems(&check(&model, &mesh)),
             [(ModelItem::Step(0), Problem::NoLoad)]
         );
+    }
+
+    #[test]
+    fn modal_superposition_warns_about_contact_and_plasticity() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        model.steps[0].kind = StepKind::Dynamic(crate::DynamicStep {
+            method: crate::DynamicMethod::Modal { modes: 10 },
+            ..crate::DynamicStep::default()
+        });
+        assert_eq!(check(&model, &mesh), []);
+        model.materials[0].plastic = Some(crate::Plastic {
+            hardening: crate::Hardening::Isotropic,
+            points: vec![
+                crate::PlasticPoint {
+                    stress: 235.0,
+                    plastic_strain: 0.0,
+                    temperature: 0.0,
+                },
+                crate::PlasticPoint {
+                    stress: 360.0,
+                    plastic_strain: 0.2,
+                    temperature: 0.0,
+                },
+            ],
+        });
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::Step(0), Problem::ModalStepNonlinear)]
+        );
+        let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
+            unreachable!()
+        };
+        settings.method = crate::DynamicMethod::Direct;
+        assert_eq!(check(&model, &mesh), []);
     }
 
     #[test]
