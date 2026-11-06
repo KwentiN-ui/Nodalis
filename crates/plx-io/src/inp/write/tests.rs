@@ -2098,6 +2098,48 @@ fn a_dynamic_step_with_large_deformations_is_nonlinear() {
     );
 }
 
+/// Modal superposition: a frequency step that stores the eigenmodes prepares a modal
+/// dynamics step with the Dynamic step's time step, duration and damping.
+#[test]
+fn a_modal_dynamic_step_is_lowered_to_eigenmodes_and_modal_dynamics() {
+    let (mesh, mut model) = dynamic_cantilever(1.5e-3, 2.5e-5, None);
+    let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.method = plx_model::DynamicMethod::Modal { modes: 12 };
+    settings.damping = Damping::Ratio {
+        zeta: 0.03,
+        range: DampingRange::Automatic,
+    };
+    let lowered = lower_unvalidated(&mesh, &model, "").unwrap();
+    assert_eq!(lowered.analysis.steps.len(), 2);
+    assert_eq!(lowered.preparation_steps, [0]);
+    for step in 0..2 {
+        assert_eq!(
+            lowered.origins.get(&ir::ItemRef::Step(step)),
+            Some(plx_model::ModelItem::Step(0))
+        );
+    }
+    let text = lowered.text();
+    for line in [
+        "*Frequency, Storage=Yes\n12\n",
+        "*Step, Inc=61, Amplitude=Step\n*Modal dynamics\n0.000025, 0.0015\n",
+        "*Modal damping\n1, 1000000, 0.03\n",
+        "*Cload, op=New\n",
+        "*Node file\nRF, U, V, A\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in\n{text}");
+    }
+    // The supports hold in both steps.
+    assert_eq!(text.matches("\n*Boundary").count(), 2, "{text}");
+    // Large deformations do not go with the superposition.
+    let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.large_deformations = true;
+    assert!(lower_unvalidated(&mesh, &model, "").is_err());
+}
+
 #[test]
 fn a_dynamic_step_is_written() {
     let damping = plx_model::RayleighDamping {
