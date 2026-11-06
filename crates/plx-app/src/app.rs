@@ -911,7 +911,8 @@ impl AnalysisWindow {
     fn status_bar(&mut self, ui: &mut egui::Ui) -> bool {
         let mut cancel = false;
         ui.horizontal(|ui| {
-            self.workbench.output_tabs(ui);
+            let idle = self.workbench.recording.is_none();
+            ui.add_enabled_ui(idle, |ui| self.workbench.output_tabs(ui));
             ui.separator();
             // Nodalis shows the unit system of the model at the right.
             if let Some(model) = &self.workbench.model {
@@ -950,6 +951,19 @@ impl AnalysisWindow {
                         recording.file,
                         (done + 1).min(all)
                     ));
+                    let fraction = if all == 0 {
+                        0.0
+                    } else {
+                        done as f32 / all as f32
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(fraction)
+                            .desired_width(180.0)
+                            .show_percentage(),
+                    );
+                    cancel = (ui.small_button("Stop"))
+                        .on_hover_text("Stop the export and discard the file (Esc).")
+                        .clicked();
                 }
             }
             (None, _) if self.workbench.animation_encoding.is_some() => {
@@ -1426,8 +1440,13 @@ impl AnalysisWindow {
         self.workbench.play_sound(&ctx);
         let cancel = egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         if cancel.inner {
-            self.workbench.cancel_meshing();
+            match &mut self.workbench.recording {
+                Some(recording) => recording.cancel(),
+                None => self.workbench.cancel_meshing(),
+            }
         }
+        self.workbench
+            .recording_blocker(&ctx, cancel.response.rect.top());
         // The fixed layout: tree on the left over the full height, 3D view with the
         // output below it; only the separators move.
         let pane = egui::Frame::new()
@@ -1555,7 +1574,6 @@ impl AnalysisWindow {
         self.workbench.update_cyclic_preview();
         self.workbench.confirm_delete_window(&ctx);
         self.workbench.confirm_remove_results(&ctx);
-        self.workbench.recording_window(&ctx);
         self.workbench.toast(&ctx);
         self.workbench.contact_worksheet_window(&ctx);
         self.workbench.mesh_tool_window(&ctx);
@@ -3449,52 +3467,23 @@ impl Workbench {
         }
     }
 
-    /// The modal shown while an animation is recorded: it blocks all other input and shows
-    /// the progress; Cancel (or Escape) stops the export. On the frame whose screenshot is
-    /// taken it draws nothing, so the window never ends up in the file.
-    fn recording_window(&mut self, ctx: &egui::Context) {
-        let Some(recording) = &mut self.recording else {
+    /// While an animation is recorded, an invisible layer over everything above the status
+    /// bar takes all input, so nothing in or around the recorded view can change; the status
+    /// bar holds the progress and the Stop button. Nothing is drawn, so nothing of it can end
+    /// up in the frames.
+    fn recording_blocker(&mut self, ctx: &egui::Context, bottom: f32) {
+        if self.recording.is_none() {
             return;
-        };
-        let capturing = recording.capturing;
-        let (done, all) = recording.progress();
-        let file = recording.file.clone();
-        let mut cancel = false;
-        let modal = egui::Modal::new(crate::ids::window(ctx, "recording animation"));
-        let modal = if capturing {
-            modal
-                .backdrop_color(egui::Color32::TRANSPARENT)
-                .frame(egui::Frame::NONE)
-        } else {
-            modal
-        };
-        modal.show(ctx, |ui| {
-            if capturing {
-                return;
-            }
-            ui.set_width(340.0);
-            ui.label(
-                egui::RichText::new("Rendering animation")
-                    .strong()
-                    .size(15.0),
-            );
-            ui.add_space(4.0);
-            ui.label(format!("{file}: frame {} of {all}", (done + 1).min(all)));
-            ui.add_space(6.0);
-            let fraction = if all == 0 {
-                0.0
-            } else {
-                done as f32 / all as f32
-            };
-            ui.add(egui::ProgressBar::new(fraction).show_percentage());
-            ui.add_space(10.0);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                cancel = ui.button("Cancel").clicked();
-            });
-        });
-        if cancel {
-            recording.cancel();
         }
+        let screen = ctx.content_rect();
+        let rect = egui::Rect::from_min_max(screen.min, egui::pos2(screen.max.x, bottom));
+        egui::Area::new(crate::ids::window(ctx, "recording blocker"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.min)
+            .interactable(true)
+            .show(ctx, |ui| {
+                ui.allocate_rect(rect, egui::Sense::click_and_drag());
+            });
     }
 
     /// Asks before Remove Results, which Undo cannot take back.
