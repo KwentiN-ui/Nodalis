@@ -716,6 +716,7 @@ pub(crate) fn fit_damping(
     progress: &mut dyn Progress,
 ) -> Result<plxs_core::step::Rayleigh> {
     let upper = damping.upper;
+    let mut zero_modes = 0;
     let lower = match damping.lower {
         Some(lower) => lower,
         None => {
@@ -739,7 +740,12 @@ pub(crate) fn fit_damping(
             let frequencies: Vec<f64> = (pairs.values.iter())
                 .map(|l| l.max(0.0).sqrt() / std::f64::consts::TAU)
                 .collect();
-            let lowest = frequencies.iter().copied().find(|f| *f > 1e-4 * upper);
+            // Zero modes (rigid bodies, mechanisms such as a pendulum on a joint) come out
+            // as numerical noise far below the elastic ones.
+            let largest = frequencies.iter().copied().fold(0.0_f64, f64::max);
+            let zero = 1e-4 * upper.max(10.0 * largest);
+            zero_modes = frequencies.iter().filter(|f| **f <= zero).count();
+            let lowest = frequencies.iter().copied().find(|f| *f > zero);
             match lowest {
                 Some(f) => {
                     progress.event(ProgressEvent::Info(format!(
@@ -766,7 +772,15 @@ pub(crate) fn fit_damping(
         )));
         upper / 10.0
     };
-    let rayleigh = plxs_core::step::Rayleigh::from_ratio(damping.ratio, lower, upper);
+    let mut rayleigh = plxs_core::step::Rayleigh::from_ratio(damping.ratio, lower, upper);
+    if zero_modes > 0 {
+        // Mass-proportional damping acts on the absolute velocities and would brake the
+        // free motion of the zero modes (a swinging pendulum) like a viscous fluid.
+        rayleigh.alpha = 0.0;
+        progress.event(ProgressEvent::Info(format!(
+            "{zero_modes} rigid body or mechanism mode(s): stiffness-proportional damping only"
+        )));
+    }
     progress.event(ProgressEvent::Info(format!(
         "damping {} % fitted between {} and {} Hz (alpha = {}, beta = {})",
         short(damping.ratio * 100.0),

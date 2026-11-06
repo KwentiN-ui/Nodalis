@@ -12,7 +12,9 @@
 //! `a₁ = (u₁ − ũ)/(βΔt²)`, `v₁ = ṽ + γΔt a₁` from the predictors `ũ`, `ṽ`. Newton solves
 //! for `u₁` with the tangent `M/(βΔt²) + (1+α)(γ/(βΔt) C + K_T(u₁))`. The mass matrix
 //! belongs to the undeformed configuration (constant under total Lagrange); Rayleigh
-//! damping `C = α_R M + β_R K₀` takes the initial stiffness.
+//! damping `C = α_R M + β_R K_T` takes the tangent at the current state: with the initial
+//! stiffness `K₀` a finite rigid rotation (a pendulum swinging about a joint) would be a
+//! deformation to the damping and be braked like a viscous fluid.
 //!
 //! Rigid bodies follow finite rotations: their constraints are linearized at the current
 //! rotation in every iteration and their members put where the rotation takes them (see
@@ -75,6 +77,8 @@ struct At {
     /// External loads and internal forces.
     load: Vec<f64>,
     internal: Vec<f64>,
+    /// The damping forces `C v`.
+    damping: Vec<f64>,
     stresses: IntegrationPointField,
     strains: IntegrationPointField,
     material: IntegrationPointField,
@@ -259,12 +263,13 @@ impl Procedure for NonlinearDynamic {
         let mut internal = at_start.f_int;
         NonlinearStatic::add_discrete(&setup.discrete, &motion.u, &mut setup.k, &mut internal);
 
+        // The initial velocities are damped with the initial stiffness.
+        let cv_start = damping(&setup, &setup.k0, &motion.v);
         // Initial accelerations from the equilibrium at the start, with the matrix the
         // linear procedure takes (a tenth of the first increment keeps it regular where the
         // mass alone is singular).
         {
-            let cv = damping(&setup, &motion.v);
-            let r = combine(&[(1.0, &load), (-1.0, &internal), (-1.0, &cv)], n);
+            let r = combine(&[(1.0, &load), (-1.0, &internal), (-1.0, &cv_start)], n);
             let (c_m, c_k) = matrix_factors(scheme, Rayleigh::default(), initial / 10.0, true);
             let matrix =
                 initial_acceleration_matrix(ctx.table, ctx.model, &ctx.pattern, c_m, c_k, true)?;
@@ -292,6 +297,7 @@ impl Procedure for NonlinearDynamic {
         let mut state = At {
             time: 0.0,
             internal: internal.clone(),
+            damping: cv_start,
             energies: Energies {
                 internal: 0.5 * dot(&motion.u, &internal),
                 kinetic,
@@ -574,13 +580,14 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
-fn damping(setup: &Setup<'_>, x: &[f64]) -> Vec<f64> {
+/// The damping forces `C v` with the stiffness `k` (the tangent at the state of `v`).
+fn damping(setup: &Setup<'_>, k: &SparseMatrix, x: &[f64]) -> Vec<f64> {
     let Rayleigh { alpha, beta } = setup.rayleigh;
     if alpha == 0.0 && beta == 0.0 {
         return vec![0.0; x.len()];
     }
     let mx = multiply(&setup.m, x);
-    let kx = multiply(&setup.k0, x);
+    let kx = multiply(k, x);
     combine(&[(alpha, &mx), (beta, &kx)], x.len())
 }
 
@@ -727,19 +734,19 @@ fn attempt(
     );
     let v_tilde = combine(&[(1.0, &m0.v), (dt * (1.0 - gamma), &m0.a)], n);
     // The part of the residual that does not change in the iterations.
-    let cv0 = damping(setup, &m0.v);
+    let cv0 = &from.damping;
     let fixed = combine(
         &[
             (1.0 + alpha, &load),
             (-alpha, &from.load),
-            (alpha, &cv0),
+            (alpha, cv0),
             (alpha, &from.internal),
         ],
         n,
     );
     let (c_m, c_k) = matrix_factors(setup.scheme, setup.rayleigh, dt, false);
     // Damping and mass part of the tangent; the stiffness part is (1+α) K_T plus the
-    // stiffness-proportional damping, which takes K₀.
+    // stiffness-proportional damping, which takes K_T as well.
     let damping_k = (c_k - (1.0 + alpha)).max(0.0);
 
     // From the start of the increment; the change of the prescribed values enters the
@@ -767,12 +774,10 @@ fn attempt(
         let a1 = combine(&[(c1, &u), (-c1, &u_tilde)], n);
         let v1 = combine(&[(1.0, &v_tilde), (gamma * dt, &a1)], n);
         let ma = multiply(&setup.m, &a1);
-        let cv1 = damping(setup, &v1);
-        // The tangent: c_m M + (1+α) K_T + (damping) K₀.
-        let mut tangent = SparseMatrix::linear_combination(&setup.m, c_m, &setup.k, 1.0 + alpha);
-        if damping_k != 0.0 {
-            tangent = SparseMatrix::linear_combination(&tangent, 1.0, &setup.k0, damping_k);
-        }
+        let cv1 = damping(setup, &setup.k, &v1);
+        // The tangent: c_m M + (1+α) K_T + (damping) K_T.
+        let tangent =
+            SparseMatrix::linear_combination(&setup.m, c_m, &setup.k, 1.0 + alpha + damping_k);
         let mut residual_full = combine(
             &[
                 (1.0, &fixed),
@@ -836,7 +841,7 @@ fn attempt(
                 energies.external_work += dot(&mean_load, &du);
                 if setup.energies_wanted {
                     energies.kinetic = 0.5 * dot(&v1, &multiply(&setup.m, &v1));
-                    energies.dissipation += 0.5 * dt * (dot(&m0.v, &cv0) + dot(&v1, &cv1));
+                    energies.dissipation += 0.5 * dt * (dot(&m0.v, cv0) + dot(&v1, &cv1));
                 }
                 return Ok(Ok((
                     At {
@@ -844,6 +849,7 @@ fn attempt(
                         motion: Motion { u, v: v1, a: a1 },
                         load,
                         internal: output.f_int,
+                        damping: cv1,
                         stresses: output.stresses,
                         strains: output.strains,
                         material: output.material,
