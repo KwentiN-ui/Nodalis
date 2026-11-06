@@ -3477,8 +3477,7 @@ impl Workbench {
         }
         let screen = ctx.content_rect();
         let rect = egui::Rect::from_min_max(screen.min, egui::pos2(screen.max.x, bottom));
-        let id = crate::ids::window(ctx, "recording blocker");
-        egui::Area::new(id)
+        egui::Area::new(crate::ids::window(ctx, "recording blocker"))
             .order(egui::Order::Foreground)
             .fixed_pos(rect.min)
             .interactable(true)
