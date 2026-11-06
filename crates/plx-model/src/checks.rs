@@ -2660,7 +2660,12 @@ impl FeModel {
     /// ground hold at a point, a reference point or the point of a boundary condition or
     /// remote force.
     fn spring_point_dofs(&self, point: &Region) -> Vec<usize> {
-        let rotations = !self.properties.space.is_2d();
+        // A plane model turns about z only, an axisymmetric one not at all.
+        let rotations: &[usize] = match self.properties.space {
+            ModelSpace::ThreeD => &[0, 1, 2],
+            ModelSpace::PlaneStress | ModelSpace::PlaneStrain => &[2],
+            ModelSpace::Axisymmetric => &[],
+        };
         let mut out = Vec::new();
         for constraint in self.constraints.iter().filter(|c| c.active()) {
             let Constraint::Spring(spring) = constraint else {
@@ -2670,13 +2675,11 @@ impl FeModel {
                 continue;
             }
             out.extend((0..3).filter(|&d| spring.stiffness[d] > 0.0));
-            if rotations {
-                out.extend(
-                    (0..3)
-                        .filter(|&d| spring.rotational[d] > 0.0)
-                        .map(|d| d + 3),
-                );
-            }
+            out.extend(
+                (rotations.iter())
+                    .filter(|&&d| spring.rotational[d] > 0.0)
+                    .map(|d| d + 3),
+            );
         }
         out.sort_unstable();
         out.dedup();

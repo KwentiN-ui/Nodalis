@@ -52,7 +52,8 @@ selection on both ends.
 - *Point and World* or *point and point*: springs on the translations of the point and, with
   #ui("KR1"), #ui("KR2"), #ui("KR3"), rotational springs about the global axes in moment per
   radian. Nodes of a selection have no rotations, so only these two combinations offer
-  rotational stiffness; a plane model has none.
+  rotational stiffness. A plane model turns about z only and offers #ui("KR3") alone; an
+  axisymmetric model has no rotational springs.
 
 A hinge with a torsion spring, for example in a Dynamic step: hold the faces of the bore with
 a Displacement/Rotation condition that fixes the translations and leaves the rotation about

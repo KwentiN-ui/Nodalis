@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 
 use plx_mesh::{ElementId, FeMesh, NodeId};
 use plx_model::{
-    CompressionOnly, Constraint, ContactBehavior, ContactRegion, FeModel, Region, SideRoles,
-    Spring, SpringLayout,
+    CompressionOnly, Constraint, ContactBehavior, ContactRegion, FeModel, ModelSpace, Region,
+    SideRoles, Spring, SpringLayout,
 };
 
 use super::{Members, Sets, WriteError, empty, number};
@@ -86,6 +86,7 @@ pub(super) fn springs(
         gaps: Vec::new(),
         ground: Vec::new(),
         dofs: if model.properties.space.is_2d() { 2 } else { 3 },
+        space: model.properties.space,
     };
     let mut nonlinear = false;
     // The lowered model keeps the active regions of no separation only.
@@ -144,6 +145,7 @@ struct Writer {
     ground: Vec<NodeId>,
     /// Translational degrees of freedom of the model: ccx crashes on more than two in 2D.
     dofs: usize,
+    space: ModelSpace,
 }
 
 impl Writer {
@@ -169,16 +171,23 @@ impl Writer {
         name: &str,
         groups: Vec<(String, Vec<Vec<NodeId>>, [f64; 3])>,
     ) {
+        self.springs_in(sets, name, groups, self.dofs);
+    }
+
+    /// [`Writer::springs`] in the first `dofs` degrees of freedom.
+    fn springs_in(
+        &mut self,
+        sets: &mut Sets,
+        name: &str,
+        groups: Vec<(String, Vec<Vec<NodeId>>, [f64; 3])>,
+        dofs: usize,
+    ) {
         let two_nodes = (groups.first())
             .and_then(|(_, springs, _)| springs.first())
             .is_some_and(|nodes| nodes.len() == 2);
         let mut block = Vec::new();
         for (group, springs, stiffness) in groups {
-            for (dof, k) in (1..)
-                .zip(stiffness)
-                .take(self.dofs)
-                .filter(|(_, k)| *k != 0.0)
-            {
+            for (dof, k) in (1..).zip(stiffness).take(dofs).filter(|(_, k)| *k != 0.0) {
                 let mut elements = Vec::new();
                 for nodes in &springs {
                     let element = self.element();
@@ -313,8 +322,9 @@ impl Writer {
 
     /// Springs of a point to ground (one node each) or between two points (two nodes each):
     /// the translational ones on the reference nodes, the rotational ones on the rotation
-    /// nodes, whose displacements are the point's rotations. A plane model has no
-    /// rotations at points.
+    /// nodes, whose displacements are the point's rotations. A plane model turns about z
+    /// only, the third degree of freedom of the rotation node; an axisymmetric one not at
+    /// all.
     fn point_springs(
         &mut self,
         sets: &mut Sets,
@@ -322,16 +332,16 @@ impl Writer {
         spring: &Spring,
         [reference, rotation]: [Vec<NodeId>; 2],
     ) {
-        let rotational = if self.dofs == 3 {
-            spring.acting_rotational()
-        } else {
-            [0.0; 3]
+        let [r1, r2, r3] = spring.acting_rotational();
+        let rotational = match self.space {
+            ModelSpace::ThreeD => [r1, r2, r3],
+            ModelSpace::PlaneStress | ModelSpace::PlaneStrain => [0.0, 0.0, r3],
+            ModelSpace::Axisymmetric => [0.0; 3],
         };
-        let springs = vec![
-            (name.to_string(), vec![reference], spring.stiffness),
-            (format!("{name}_Rotation"), vec![rotation], rotational),
-        ];
+        let springs = vec![(name.to_string(), vec![reference], spring.stiffness)];
         self.springs(sets, name, springs);
+        let rotations = vec![(format!("{name}_Rotation"), vec![rotation], rotational)];
+        self.springs_in(sets, &format!("{name}_Rotation"), rotations, 3);
     }
 
     /// One equation per slave node within the tolerance of the master side: the slave node
