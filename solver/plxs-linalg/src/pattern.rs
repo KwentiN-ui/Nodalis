@@ -351,6 +351,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_matrix_embedded_in_a_larger_pattern_keeps_its_entries() {
+        let small = Arc::new(Pattern::from_blocks(4, [[0u32, 1].as_slice(), &[2, 3]]));
+        let large = Arc::new(Pattern::from_blocks(4, [[0u32, 1, 2, 3].as_slice()]));
+        let mut a = SparseMatrix::zeros(small);
+        a.add_block(&[0, 1], &[4.0, 1.0, 1.0, 3.0]);
+        a.add_block(&[2, 3], &[2.0, -1.0, -1.0, 5.0]);
+        let b = a.embed(large.clone());
+        assert!(Arc::ptr_eq(b.pattern(), &large));
+        for i in 0..4 {
+            for j in 0..4 {
+                assert_eq!(a.get(i, j), b.get(i, j), "({i}, {j})");
+            }
+        }
+        assert_eq!(b.values().iter().filter(|v| **v != 0.0).count(), 6);
+    }
+
+    #[test]
     fn the_parallel_product_equals_the_sequential_one() {
         // A banded matrix large enough for the parallel product.
         let n = 20_000;

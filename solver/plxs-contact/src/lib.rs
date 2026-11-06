@@ -1352,8 +1352,8 @@ impl Pair {
             {
                 let mut rate = 0.0;
                 for (&node, &c) in kin.nodes.iter().zip(&kin.coefficients) {
-                    for d in 0..3 {
-                        rate -= c * damping.velocities[node as usize * 3 + d] * n[d];
+                    for (d, nd) in n.iter().enumerate() {
+                        rate -= c * damping.velocities[node as usize * 3 + d] * nd;
                     }
                 }
                 let c = damping.coefficient * dp;

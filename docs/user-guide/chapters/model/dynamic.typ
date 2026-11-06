@@ -52,7 +52,7 @@ structure is damped; Nodalis chooses the time step and the integration from that
 
 Loads act at once from the start of the step. Give a load an #ui("Amplitude")
 (@amplitudes) for a ramp, a pulse or a vibration; the automatic time step follows its
-points. Materials need a density. Contact regions and contact pairs (@interactions) act in a
+points. Materials need a density. Contact regions and contact pairs (@contacts) act in a
 dynamic step too, see below.
 
 The model check warns when the frequency limit is higher than the frames can show
@@ -100,9 +100,11 @@ The time integration treats the contact so that impacts stay physical:
 - Contact carries pressure only: node to surface contact has no tension before the parts
   touch (unlike in a static step, where it follows CalculiX).
 
-#screenshot("dynamic-contact.png", [A steel block dropped from 1 mm onto a plate: the history
-  of its height (top) and of the contact force on the plate (bottom); time steps of 1 ms,
-  the impact of a few microseconds refined by the solver])
+#screenshot("dynamic-contact.svg", [Left: a steel block dropped from 1 mm onto a plate with
+  time steps of 1 ms; the solver refines the impact of a few microseconds, and the block
+  bounces without gaining energy (part of it stays in the vibrations of the block). Right: a
+  steel bar hitting a wall at 1 m/s presses with ρ c v₀ A for the time 2L/c a wave takes
+  through the bar and back, then leaves at 1 m/s])
 
 === What the solver reports
 
@@ -132,7 +134,8 @@ It also gets a history output #ui("Energies") of the whole model at every time s
 #screenshot("history-energies.png", [Energies history output of a Dynamic step])
 
 With large deformations or plasticity ALLIE is the work the internal forces did, which
-includes the energy plastic deformation dissipated.
+includes the energy plastic deformation dissipated. With contact it also holds the energy of the contact
+springs and the work of the friction; the damping of the contact springs is part of ALLVD.
 
 ALLIE + ALLKE + ALLVD − ALLWK stays at its starting value up to the small loss of the
 numerical damping: the energy balance shows whether the time step resolves the motion.
