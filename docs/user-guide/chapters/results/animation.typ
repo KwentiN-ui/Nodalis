@@ -45,8 +45,12 @@ with the choices #ui("GIF …"), #ui("MP4 …") and #ui("MKV …").
 
 Nodalis then plays the animation once frame by frame and records the 3D view as it is shown,
 with legend, labels and status block, at the size of the view on screen. The animation window is
-hidden meanwhile; the status bar counts the frames and #key("Esc") cancels. The file follows the
-settings of the window:
+hidden meanwhile. A progress window blocks all other input, so the camera, menus and panels
+cannot change the view while the frames are taken; #ui("Cancel") or #key("Esc") stops the export
+and removes the partial file. The progress window and the floating camera bar are not part of
+the recorded frames. The file follows the settings of the window:
+
+#screenshot("animation-export-progress.png", [Progress window while the frames are recorded])
 
 - #ui("Frames") and #ui("Frames per second") give the number of frames and the playing speed.
 - #ui("Once") and #ui("Loop") record every frame once, #ui("Swing") records there and back, so a
