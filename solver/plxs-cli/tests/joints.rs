@@ -203,13 +203,14 @@ fn a_revolute_joint_turns_the_second_plate_as_a_whole() {
 #[test]
 fn a_damped_pendulum_on_a_joint_swings_freely() {
     let dir = work_dir("pendulum");
-    let step = |damping: &str| {
+    let step_of = |dt: f64, damping: &str| {
         format!(
-            "*Step, Nlgeom, Inc=10000\n*Dynamic, Direct\n0.002, 0.3\n{damping}*Boundary\n\
+            "*Step, Nlgeom, Inc=10000\n*Dynamic, Direct\n{dt}, 0.3\n{damping}*Boundary\n\
              CLAMP, 1, 2, 0\n*Dload\nEALL, GRAV, 9.81, 0, -1, 0\n\
              *Node print, Nset=TIPNODE\nU\n*End step\n"
         )
     };
+    let step = |damping: &str| step_of(0.002, damping);
     let free = run(
         &dir,
         "free",
@@ -234,18 +235,36 @@ fn a_damped_pendulum_on_a_joint_swings_freely() {
             step("*Damping, Ratio=0.02, Upper=50\n")
         )),
     );
+    // Damping as strong as the automatic fit gives for a time step of the swing, the time
+    // step as long (β_R about a tenth of Δt): with the damping force K_T(u) v the Newton
+    // iterations stalled, and the swing fell behind by half a plate length.
+    let strong = run(
+        &dir,
+        "strong",
+        &plates(&format!(
+            "{}{}",
+            joined("1, 2"),
+            step_of(0.03, "*Damping, Beta=2e-3\n")
+        )),
+    );
     let _ = std::fs::remove_dir_all(&dir);
     // Plate B falls from the horizontal about the joint; after 0.3 s it hangs down, its tip
     // a plate length left of where it started.
     let end = free.last().unwrap().1;
     assert!(end[0] < -0.9 * LENGTH * 2.0, "the pendulum swings: {end:?}");
     // Damping that acted on the rigid rotation (the initial stiffness, or mass-proportional
-    // damping) let it creep down by millimetres instead.
-    for (name, rows) in [("given", &given), ("fitted", &fitted)] {
+    // damping) let it creep down by millimetres instead. The stiffness-proportional damping
+    // still acts on the pendulum's own restoring stiffness (the weight turning with it),
+    // little when weak and a few percent of the swing when strong.
+    for (name, rows, tolerance) in [
+        ("given", &given, 0.02),
+        ("fitted", &fitted, 0.02),
+        ("strong", &strong, 0.25),
+    ] {
         let u = rows.last().unwrap().1;
         for d in 0..2 {
             assert!(
-                (u[d] - end[d]).abs() < 0.01 * LENGTH,
+                (u[d] - end[d]).abs() < tolerance * LENGTH,
                 "{name}: {u:?} vs undamped {end:?}"
             );
         }

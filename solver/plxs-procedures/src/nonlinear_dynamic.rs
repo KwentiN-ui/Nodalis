@@ -12,9 +12,11 @@
 //! `a₁ = (u₁ − ũ)/(βΔt²)`, `v₁ = ṽ + γΔt a₁` from the predictors `ũ`, `ṽ`. Newton solves
 //! for `u₁` with the tangent `M/(βΔt²) + (1+α)(γ/(βΔt) C + K_T(u₁))`. The mass matrix
 //! belongs to the undeformed configuration (constant under total Lagrange); Rayleigh
-//! damping `C = α_R M + β_R K_T` takes the tangent at the current state: with the initial
-//! stiffness `K₀` a finite rigid rotation (a pendulum swinging about a joint) would be a
-//! deformation to the damping and be braked like a viscous fluid.
+//! damping `α_R M v + β_R ḟ` damps the rate of the internal forces, `(f(u₁) − f(u₀))/Δt`
+//! over the increment (`β_R K v` for small motions). A finite rigid rotation (a pendulum
+//! swinging about a joint) does not change the internal forces and is not braked, which it
+//! would be by `K₀ v` like by a viscous fluid; and unlike `K_T(u) v` the force has the
+//! exact Newton tangent `β_R K_T/Δt`.
 //!
 //! Rigid bodies follow finite rotations: their constraints are linearized at the current
 //! rotation in every iteration and their members put where the rotation takes them (see
@@ -77,7 +79,7 @@ struct At {
     /// External loads and internal forces.
     load: Vec<f64>,
     internal: Vec<f64>,
-    /// The damping forces `C v`.
+    /// The damping forces (mass part `α_R M v`, stiffness part `β_R ḟ`).
     damping: Vec<f64>,
     stresses: IntegrationPointField,
     strains: IntegrationPointField,
@@ -263,7 +265,7 @@ impl Procedure for NonlinearDynamic {
         let mut internal = at_start.f_int;
         NonlinearStatic::add_discrete(&setup.discrete, &motion.u, &mut setup.k, &mut internal);
 
-        // The initial velocities are damped with the initial stiffness.
+        // The initial velocities are damped with the initial stiffness (`ḟ = K₀ v`).
         let cv_start = damping(&setup, &setup.k0, &motion.v);
         // Initial accelerations from the equilibrium at the start, with the matrix the
         // linear procedure takes (a tenth of the first increment keeps it regular where the
@@ -580,7 +582,7 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
-/// The damping forces `C v` with the stiffness `k` (the tangent at the state of `v`).
+/// The damping forces `C v` with the stiffness `k`: at the start of the step.
 fn damping(setup: &Setup<'_>, k: &SparseMatrix, x: &[f64]) -> Vec<f64> {
     let Rayleigh { alpha, beta } = setup.rayleigh;
     if alpha == 0.0 && beta == 0.0 {
@@ -744,10 +746,13 @@ fn attempt(
         ],
         n,
     );
-    let (c_m, c_k) = matrix_factors(setup.scheme, setup.rayleigh, dt, false);
-    // Damping and mass part of the tangent; the stiffness part is (1+α) K_T plus the
-    // stiffness-proportional damping, which takes K_T as well.
-    let damping_k = (c_k - (1.0 + alpha)).max(0.0);
+    let (c_m, _) = matrix_factors(setup.scheme, setup.rayleigh, dt, false);
+    // Damping and mass part of the tangent (c_m); the stiffness part is (1+α) K_T plus the
+    // stiffness-proportional damping (1+α) β_R K_T/Δt.
+    let Rayleigh {
+        alpha: alpha_r,
+        beta: beta_r,
+    } = setup.rayleigh;
 
     // From the start of the increment; the change of the prescribed values enters the
     // first iteration as a linear prediction (as in the static procedure).
@@ -774,10 +779,26 @@ fn attempt(
         let a1 = combine(&[(c1, &u), (-c1, &u_tilde)], n);
         let v1 = combine(&[(1.0, &v_tilde), (gamma * dt, &a1)], n);
         let ma = multiply(&setup.m, &a1);
-        let cv1 = damping(setup, &setup.k, &v1);
-        // The tangent: c_m M + (1+α) K_T + (damping) K_T.
-        let tangent =
-            SparseMatrix::linear_combination(&setup.m, c_m, &setup.k, 1.0 + alpha + damping_k);
+        let cv1 = if alpha_r == 0.0 && beta_r == 0.0 {
+            vec![0.0; n]
+        } else {
+            let mv = multiply(&setup.m, &v1);
+            combine(
+                &[
+                    (alpha_r, &mv),
+                    (beta_r / dt, &output.f_int),
+                    (-beta_r / dt, &from.internal),
+                ],
+                n,
+            )
+        };
+        // The tangent: c_m M + (1+α)(1 + β_R/Δt) K_T.
+        let tangent = SparseMatrix::linear_combination(
+            &setup.m,
+            c_m,
+            &setup.k,
+            (1.0 + alpha) * (1.0 + beta_r / dt),
+        );
         let mut residual_full = combine(
             &[
                 (1.0, &fixed),
