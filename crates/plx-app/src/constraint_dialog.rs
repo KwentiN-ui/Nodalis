@@ -478,19 +478,17 @@ fn spring_rows(
 
 /// Rotational stiffness about the global axes, in moment per radian.
 fn rotational_rows(ui: &mut Ui, rotational: &mut [f64; 3], units: UnitSystem, axes: &[usize]) {
-    let unit = format!("{}/rad", units.unit(Quantity::Moment));
+    let unit = format!(" {}/rad", units.unit(Quantity::Moment));
     for &axis in axes {
         let (value, label) = (&mut rotational[axis], ["KR1", "KR2", "KR3"][axis]);
         ui.label(label)
             .on_hover_text("Rotational stiffness about the global axis.");
-        ui.horizontal(|ui| {
-            ui.add(
-                numeric::without_unit(value, units, Quantity::Moment)
-                    .speed(1.0)
-                    .range(0.0..=f64::MAX),
-            );
-            ui.label(unit.as_str());
-        });
+        ui.add(
+            numeric::without_unit(value, units, Quantity::Moment)
+                .suffix(unit.as_str())
+                .speed(1.0)
+                .range(0.0..=f64::MAX),
+        );
         ui.end_row();
     }
 }
