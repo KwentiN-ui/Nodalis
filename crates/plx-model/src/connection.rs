@@ -626,7 +626,7 @@ impl FeModel {
 
     /// Young's modulus of each element with a section whose material has one.
     pub(crate) fn young_of_elements(&self, mesh: &FeMesh) -> HashMap<ElementId, f64> {
-        self.material_of_elements(mesh, |m| m.elastic.map(|e| e.young))
+        self.material_of_elements(mesh, |m| m.small_strain_elastic().map(|e| e.young))
     }
 
     /// A property of the material of each element with a section whose material has it.
@@ -721,7 +721,7 @@ impl FeModel {
         formulation: ContactMethod,
     ) -> Resolved {
         let active = self.steps.iter().filter(|s| s.active);
-        let nlgeom = active.clone().any(|s| s.kind.nlgeom());
+        let nlgeom = active.clone().any(|s| self.step_nlgeom(&s.kind));
         let thermal = active.clone().any(|s| conducts_across_contacts(&s.kind));
         let a = Side::new(&region.side_a, mesh, properties);
         let b = Side::new(&region.side_b, mesh, properties);

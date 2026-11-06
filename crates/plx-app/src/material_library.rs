@@ -662,6 +662,22 @@ fn material_models(
             ],
         ));
     }
+    if let Some(hyper) = &material.hyperelastic {
+        let mut rows = vec![("Model", hyper.model.label().to_string())];
+        for (parameter, value) in hyper.model.parameters().iter().zip(&hyper.constants) {
+            rows.push((
+                parameter.name,
+                match parameter.kind {
+                    plx_model::hyperelastic::ParameterKind::Stress => {
+                        with_unit(*value, Quantity::Pressure)
+                    }
+                    plx_model::hyperelastic::ParameterKind::Number => format_value(*value),
+                },
+            ));
+        }
+        rows.push(("Poisson's ratio", format_value(hyper.poisson)));
+        models.push(("Hyperelastic", rows));
+    }
     if let Some(plastic) = &material.plastic {
         let mut rows = vec![("Hardening", plastic.hardening.keyword().to_string())];
         let unit = units.unit(Quantity::Pressure);

@@ -541,3 +541,53 @@ fn numbers_render_exactly_and_short() {
     assert_eq!(number(210000.0), "210000");
     assert_eq!(number(7.85e-9), "7.85e-9");
 }
+
+#[test]
+fn hyperelastic_models_are_read_and_rendered_back() {
+    use plxs_core::material::HyperelasticModel as H;
+    for (card, model, count) in [
+        ("*Hyperelastic, Neo Hooke\n0.5, 0.01\n", H::NeoHooke, 2),
+        (
+            "*Hyperelastic, Mooney-Rivlin\n0.4, 0.1, 0.01, 20\n",
+            H::MooneyRivlin,
+            3,
+        ),
+        (
+            "*Hyperelastic, Yeoh\n0.5, -0.01, 0.001, 0.01, 0, 0\n",
+            H::Yeoh,
+            6,
+        ),
+        (
+            "*Hyperelastic, Polynomial, N=2\n0.4, 0.1, 0.01, 0, 0.002, 0.01, 0\n",
+            H::Polynomial(2),
+            7,
+        ),
+        (
+            "*Hyperelastic, Ogden, N=3\n0.6, 1.3, 0.002, 5, -0.01, -2, 0.01, 0\n0\n",
+            H::Ogden(3),
+            9,
+        ),
+        (
+            "*Hyperelastic, Arruda-Boyce\n0.5, 7, 0.01\n",
+            H::ArrudaBoyce,
+            3,
+        ),
+    ] {
+        let text = cube("*Step\n*Static\n*Boundary\nFIX, 1, 3\n*End step\n")
+            .replace("*Elastic\n210000, 0.3\n", card);
+        let analysis = read(&text).unwrap_or_else(|e| panic!("{card}: {e:?}"));
+        let hyper = analysis.model.materials[0].hyperelastic.clone().unwrap();
+        assert_eq!(hyper.model, model, "{card}");
+        assert_eq!(hyper.constants.len(), count, "{card}");
+        let again = read(&super::render(&analysis)).unwrap();
+        assert_eq!(again.model.materials, analysis.model.materials, "{card}");
+    }
+    let missing = cube("*Step\n*Static\n*End step\n")
+        .replace("*Elastic\n210000, 0.3\n", "*Hyperelastic\n0.5, 0.01\n");
+    assert!(read(&missing).is_err());
+    let temperatures = cube("*Step\n*Static\n*End step\n").replace(
+        "*Elastic\n210000, 0.3\n",
+        "*Hyperelastic, Neo Hooke\n0.5, 0.01, 20\n0.4, 0.01, 80\n",
+    );
+    assert!(read(&temperatures).is_err());
+}

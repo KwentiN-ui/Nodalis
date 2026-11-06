@@ -371,6 +371,14 @@ impl Material {
         if let Some(elastic) = &mut self.elastic {
             c.value(&mut elastic.young, Quantity::Pressure);
         }
+        if let Some(hyper) = &mut self.hyperelastic {
+            let kinds = hyper.model.parameters();
+            for (value, parameter) in hyper.constants.iter_mut().zip(kinds) {
+                if parameter.kind == crate::hyperelastic::ParameterKind::Stress {
+                    c.value(value, Quantity::Pressure);
+                }
+            }
+        }
         c.option(&mut self.conductivity, Quantity::ThermalConductivity);
         c.option(&mut self.specific_heat, Quantity::SpecificHeat);
         if let Some(expansion) = &mut self.expansion {

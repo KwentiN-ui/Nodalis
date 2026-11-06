@@ -15,13 +15,13 @@ use plx_model::{
     CyclicSymmetry, Damping, DampingRange, DefinedField, DefinedFieldKind, Displacement,
     Distribution, DynamicMethod, DynamicStep, Elastic, FeModel, Field, FieldOutput, Formulation,
     FrequencyStep, GLOBAL, GravityDirection, Hardening, HeatTransferStep, HistoryKind,
-    HistoryOutput, Incrementation, InitialCondition, InitialConditionKind, ItemRef,
-    LinearSolverChoice, Load, LoadKind, Material, MeshSet, ModalDamping, ModalDynamicsStep,
-    ModeDamping, ModelSpace, MovingLoad, NodeTie, NumericalDamping, OutputDimension, OutputKind,
-    PlasticPoint, Quantity, RayleighDamping, Region, RemoteBehavior, RemoteForce, STANDARD_GRAVITY,
-    Section, SectionKind, SensitivityStep, SetKind, StaticStep, SteadyStateDynamicsStep, Step,
-    StepKind, StepLimit, SurfaceInteraction, SymmetryError, Tie, TimeStep, UnitSystem, ViscoStep,
-    Wheel, next_name, symmetry_plane,
+    HistoryOutput, Hyperelastic, HyperelasticModel, Incrementation, InitialCondition,
+    InitialConditionKind, ItemRef, LinearSolverChoice, Load, LoadKind, Material, MeshSet,
+    ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad, NodeTie,
+    NumericalDamping, OutputDimension, OutputKind, PlasticPoint, Quantity, RayleighDamping, Region,
+    RemoteBehavior, RemoteForce, STANDARD_GRAVITY, Section, SectionKind, SensitivityStep, SetKind,
+    StaticStep, SteadyStateDynamicsStep, Step, StepKind, StepLimit, SurfaceInteraction,
+    SymmetryError, Tie, TimeStep, UnitSystem, ViscoStep, Wheel, next_name, symmetry_plane,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row, amplitude_row_with};
@@ -3758,6 +3758,16 @@ impl Editor {
                 if let Some(problem) = material.creep.as_ref().and_then(|c| c.problem()) {
                     return Err(problem.into());
                 }
+                if let Some(hyper) = &material.hyperelastic {
+                    if let Some(problem) = hyper.problem() {
+                        return Err(problem);
+                    }
+                    if material.plastic.is_some() || material.creep.is_some() {
+                        return Err("A hyperelastic material cannot be plastic or creep: \
+                                    untick Plasticity and Creep."
+                            .into());
+                    }
+                }
             }
             Draft::CrossSection(cross_section) => {
                 if !cross_section.profile.is_valid() {
@@ -5039,33 +5049,7 @@ fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     });
     material.density = has_density.then_some(density);
     ui.end_row();
-    let mut elastic = material.elastic.is_some();
-    ui.checkbox(&mut elastic, "Elasticity");
-    ui.end_row();
-    let mut values = material.elastic.unwrap_or(Elastic {
-        young: 0.0,
-        poisson: 0.0,
-    });
-    ui.label("    Young's modulus");
-    expose::field(ui, Field::Young, |ui| {
-        ui.add_enabled(
-            elastic,
-            numeric::physical(&mut values.young, units, Quantity::Pressure),
-        )
-    });
-    ui.end_row();
-    ui.label("    Poisson's ratio");
-    expose::field(ui, Field::Poisson, |ui| {
-        ui.add_enabled(
-            elastic,
-            numeric::drag_value(&mut values.poisson)
-                .range(0.0..=0.5)
-                .speed(0.01)
-                .max_decimals(4),
-        )
-    });
-    ui.end_row();
-    material.elastic = elastic.then_some(values);
+    elastic_rows(ui, material, units);
     plastic_rows(ui, material, units);
     creep_rows(ui, material, units);
     for (label, value, quantity, field) in [
@@ -5118,6 +5102,216 @@ fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     );
     ui.end_row();
     material.expansion = expands.then_some(expansion);
+}
+
+/// The elasticity of the material form: linear (Hooke) or one of the hyperelastic models.
+/// Switching between them keeps the stiffness at small strains.
+fn elastic_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
+    let mut elastic = material.elastic.is_some() || material.hyperelastic.is_some();
+    let was_elastic = elastic;
+    ui.checkbox(&mut elastic, "Elasticity");
+    ui.end_row();
+    if !elastic {
+        material.elastic = None;
+        material.hyperelastic = None;
+    } else if !was_elastic {
+        material.elastic = Some(Elastic {
+            young: 0.0,
+            poisson: 0.0,
+        });
+    }
+    let model = material.hyperelastic.as_ref().map(|h| h.model);
+    ui.label("    Model");
+    ui.add_enabled_ui(elastic, |ui| {
+        egui::ComboBox::from_id_salt("elastic model")
+            .selected_text(model.map_or("Linear elastic", HyperelasticModel::label))
+            .width(crate::dock::fit_width(ui, 200.0))
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(model.is_none(), "Linear elastic")
+                    .clicked()
+                    && let Some(hyper) = material.hyperelastic.take()
+                {
+                    material.elastic = Some(hyper.small_strain());
+                }
+                ui.separator();
+                ui.weak("Hyperelastic (rubber)");
+                for choice in HyperelasticModel::ALL {
+                    if ui
+                        .selectable_label(model == Some(choice), choice.label())
+                        .clicked()
+                    {
+                        let base = material.hyperelastic.clone().unwrap_or_else(|| {
+                            // From linear elasticity: the same shear modulus, at most
+                            // nearly incompressible.
+                            let e = material.elastic.unwrap_or(Elastic {
+                                young: 0.0,
+                                poisson: 0.0,
+                            });
+                            let poisson = if e.young > 0.0 {
+                                e.poisson.clamp(0.0, 0.499)
+                            } else {
+                                0.49
+                            };
+                            let mu = e.young / (2.0 * (1.0 + e.poisson));
+                            if mu > 0.0 {
+                                Hyperelastic::neo_hooke(mu, poisson)
+                            } else {
+                                Hyperelastic::default()
+                            }
+                        });
+                        material.hyperelastic = Some(base.with_model(choice));
+                        material.elastic = None;
+                    }
+                }
+            });
+    });
+    ui.end_row();
+    match &mut material.hyperelastic {
+        Some(hyper) => hyperelastic_rows(ui, hyper, units),
+        None => {
+            let mut values = material.elastic.unwrap_or(Elastic {
+                young: 0.0,
+                poisson: 0.0,
+            });
+            ui.label("    Young's modulus");
+            expose::field(ui, Field::Young, |ui| {
+                ui.add_enabled(
+                    elastic,
+                    numeric::physical(&mut values.young, units, Quantity::Pressure),
+                )
+            });
+            ui.end_row();
+            ui.label("    Poisson's ratio");
+            expose::field(ui, Field::Poisson, |ui| {
+                ui.add_enabled(
+                    elastic,
+                    numeric::drag_value(&mut values.poisson)
+                        .range(0.0..=0.5)
+                        .speed(0.01)
+                        .max_decimals(4),
+                )
+            });
+            ui.end_row();
+            material.elastic = elastic.then_some(values);
+        }
+    }
+}
+
+/// The constants of a hyperelastic material, its compressibility, what follows for small
+/// strains and an estimate from the Shore A hardness.
+fn hyperelastic_rows(ui: &mut Ui, hyper: &mut Hyperelastic, units: UnitSystem) {
+    use plx_model::hyperelastic::ParameterKind;
+    ui.label("");
+    ui.label(
+        egui::RichText::new(hyper.model.description())
+            .small()
+            .weak(),
+    );
+    ui.end_row();
+    let parameters = hyper.model.parameters();
+    hyper.constants.resize(parameters.len(), 0.0);
+    for (parameter, value) in parameters.iter().zip(hyper.constants.iter_mut()) {
+        ui.label(format!("    {}", parameter.name));
+        match parameter.kind {
+            ParameterKind::Stress => {
+                ui.add(numeric::physical(value, units, Quantity::Pressure));
+            }
+            ParameterKind::Number => {
+                ui.add(numeric::drag_value(value).speed(0.0));
+            }
+        }
+        ui.end_row();
+    }
+    ui.label("    Poisson's ratio");
+    ui.add(
+        numeric::drag_value(&mut hyper.poisson)
+            .range(0.0..=0.4999)
+            .speed(0.001)
+            .max_decimals(4),
+    )
+    .on_hover_text(
+        "How compressible the material is at small strains. Rubber is nearly \
+         incompressible: 0.49 to 0.499. Values close to 0.5 make linear elements stiff \
+         (locking); prefer quadratic elements.",
+    );
+    ui.end_row();
+    let pressure = |value: f64| {
+        let factor = plx_model::STORED.factor_to(Quantity::Pressure, units);
+        let unit = units.unit(Quantity::Pressure);
+        format!(
+            "{} {unit}",
+            numeric::format_physical(fit_digits(value * factor))
+        )
+    };
+    let small = hyper.small_strain();
+    ui.label("");
+    ui.label(
+        egui::RichText::new(format!(
+            "Small strains: shear modulus {}, Young's modulus {}, bulk modulus {}.",
+            pressure(hyper.initial_shear_modulus()),
+            pressure(small.young),
+            pressure(hyper.initial_bulk_modulus()),
+        ))
+        .small()
+        .weak(),
+    );
+    ui.end_row();
+    ui.label("    Shore A hardness");
+    ui.horizontal(|ui| {
+        let id = ui.id().with("shore a");
+        let mut hardness: f64 = ui.data(|d| d.get_temp(id)).unwrap_or(50.0);
+        ui.add(
+            numeric::drag_value(&mut hardness)
+                .range(10.0..=90.0)
+                .speed(0.5),
+        );
+        ui.data_mut(|d| d.insert_temp(id, hardness));
+        if ui
+            .button("Estimate")
+            .on_hover_text(
+                "Sets the constants from Young's modulus after Gent: \
+                 E = 0.0981 (56 + 7.62 H) / (0.1375 (254 - 2.54 H)) MPa. A rough estimate \
+                 for small strains; test data are better.",
+            )
+            .clicked()
+        {
+            let young = Hyperelastic::shore_a_young_mpa(hardness) * 1e6;
+            let mu = young / (2.0 * (1.0 + hyper.poisson));
+            hyper.constants = hyper.model.equivalent(mu);
+        }
+    });
+    ui.end_row();
+    if let Some(problem) = hyper.problem() {
+        ui.label("");
+        ui.colored_label(ui.visuals().warn_fg_color, problem);
+        ui.end_row();
+    } else if let Some((mode, stretch)) = hyper.unstable_stretch() {
+        ui.label("");
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!(
+                "Unstable in {} {} beyond a stretch of {stretch:.2}.",
+                mode.label().to_lowercase(),
+                if stretch < 1.0 {
+                    "compression"
+                } else {
+                    "tension"
+                }
+            ),
+        );
+        ui.end_row();
+    }
+}
+
+/// A value rounded to six significant digits for display.
+fn fit_digits(value: f64) -> f64 {
+    if value == 0.0 || !value.is_finite() {
+        return value;
+    }
+    let digits = 6 - value.abs().log10().ceil() as i32;
+    let scale = 10f64.powi(digits);
+    (value * scale).round() / scale
 }
 
 /// The plasticity of the material form: the hardening rule and the hardening curve as an
@@ -5474,6 +5668,15 @@ fn step_form(
         StepKind::UncoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, false),
         StepKind::Sensitivity(settings) => sensitivity_form(ui, settings, units),
         StepKind::Visco(settings) => visco_form(ui, settings, units),
+    }
+    // Hyperelastic materials switch large deformations on in the steps that deform them.
+    if !step.kind.nlgeom()
+        && plx_model::hyperelastic::switched_on_by_hyperelasticity(&step.kind)
+        && fe.has_hyperelastic()
+    {
+        ui.label("");
+        ui.weak("Nonlinear geometry is on: the model has hyperelastic materials.");
+        ui.end_row();
     }
 }
 

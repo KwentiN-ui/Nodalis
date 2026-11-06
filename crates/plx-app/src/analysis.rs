@@ -291,6 +291,8 @@ pub fn step_records(
             None => {
                 let mut record =
                     plx_results::steps::StepRecord::new(&step.name, &step.kind, vec![number]);
+                // Hyperelastic materials switch NLGEOM on.
+                record.nlgeom |= lowered.analysis.steps[index].nlgeom;
                 record.inherited_from = (inherited.iter())
                     .find(|(name, _)| *name == step.name)
                     .map(|(_, source)| source.clone());

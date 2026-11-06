@@ -636,7 +636,7 @@ impl ContactScale {
         for section in &model.sections {
             let Some(e) = (model.materials.iter())
                 .find(|m| m.name == section.material)
-                .and_then(|m| m.elastic)
+                .and_then(|m| m.small_strain_elastic())
                 .map(|elastic| elastic.young)
                 .filter(|&e| e > 0.0)
             else {

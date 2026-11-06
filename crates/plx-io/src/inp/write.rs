@@ -1308,12 +1308,28 @@ fn materials(model: &FeModel) -> Vec<ir::material::Material> {
         out.density = (material.density).map(|rho| m::Density {
             rows: constant(rho),
         });
-        out.elastic = material.elastic.map(|elastic| m::Elastic {
-            rows: vec![m::ElasticRow {
-                young: elastic.young,
-                poisson: elastic.poisson,
-                temperature: 0.0,
-            }],
+        // A hyperelastic material replaces the linear elasticity.
+        out.elastic = (material.elastic)
+            .filter(|_| material.hyperelastic.is_none())
+            .map(|elastic| m::Elastic {
+                rows: vec![m::ElasticRow {
+                    young: elastic.young,
+                    poisson: elastic.poisson,
+                    temperature: 0.0,
+                }],
+            });
+        out.hyperelastic = material.hyperelastic.as_ref().map(|hyper| m::Hyperelastic {
+            model: match hyper.model {
+                plx_model::HyperelasticModel::NeoHooke => m::HyperelasticModel::NeoHooke,
+                plx_model::HyperelasticModel::MooneyRivlin => m::HyperelasticModel::MooneyRivlin,
+                plx_model::HyperelasticModel::Yeoh => m::HyperelasticModel::Yeoh,
+                plx_model::HyperelasticModel::Polynomial2 => m::HyperelasticModel::Polynomial(2),
+                plx_model::HyperelasticModel::Ogden(n) => {
+                    m::HyperelasticModel::Ogden(n.clamp(1, 3))
+                }
+                plx_model::HyperelasticModel::ArrudaBoyce => m::HyperelasticModel::ArrudaBoyce,
+            },
+            constants: hyper.solver_constants(),
         });
         out.plastic = material.plastic.as_ref().map(|plastic| m::Plastic {
             hardening: match plastic.hardening {
@@ -2450,7 +2466,7 @@ impl InteractionDefaults {
         let stick_slope = match normal {
             Some(k) => Some(plx_model::default_stick_slope(k, interaction.is_tied())),
             None => (model.materials.first())
-                .and_then(|m| m.elastic)
+                .and_then(|m| m.small_strain_elastic())
                 .map(|e| e.young / 2.0),
         };
         Self {
@@ -3089,6 +3105,17 @@ fn step_block<'f>(
         StepKind::SteadyStateDynamics(settings) => steady_state_dynamics_step(settings),
         StepKind::Sensitivity(settings) => sensitivity_step(sets, &step.name, settings)?,
     };
+    // Hyperelastic materials deform with large strains: steps that deform them take NLGEOM.
+    if model.step_nlgeom(&step.kind)
+        && matches!(
+            ir_step.procedure,
+            ir::step::Procedure::Static(_)
+                | ir::step::Procedure::Visco(_)
+                | ir::step::Procedure::Dynamic(_)
+        )
+    {
+        ir_step.nlgeom = true;
+    }
     ir_step.contact_changes = contact_changes(step, model, pair_surfaces);
     // A modal step keeps the supports of the frequency step that stored the modes;
     // The solver refuses new ones ("in a modal dynamic step new SPCs are not allowed"), and
@@ -3717,7 +3744,7 @@ fn contact_changes(
             });
         if let (Some(mu), Some((interaction, friction))) = (change.friction, friction) {
             let default = (model.materials.first())
-                .and_then(|m| m.elastic)
+                .and_then(|m| m.small_strain_elastic())
                 .map(|e| e.young / 2.0);
             changes.push(ir::step::ContactChange::Friction {
                 interaction: ir_name(&name(&interaction.name)),

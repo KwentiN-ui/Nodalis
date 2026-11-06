@@ -79,6 +79,9 @@ pub struct ElementTable {
     /// A material without `*ELASTIC`: allowed for pure heat transfer, where it gets zero
     /// elastic constants; [`Self::require_elastic`] refuses it for mechanical steps.
     pub missing_elastic: Option<String>,
+    /// Whether a continuum element has a hyperelastic material: steps that deform the
+    /// model then work with NLGEOM.
+    pub hyperelastic: bool,
 }
 
 /// A native membrane (`M3D3`, `M3D4`; `plxs_elements::membrane`).
@@ -151,6 +154,7 @@ impl ElementTable {
         let mut laws: Vec<Box<dyn MaterialLaw>> = Vec::new();
         let mut laws_finite: Vec<Box<dyn MaterialLaw>> = Vec::new();
         let mut missing_elastic: Option<String> = None;
+        let mut hyperelastic = false;
         let mut entries = Vec::with_capacity(model.elements.len());
         let mut offsets = Vec::with_capacity(model.elements.len() + 1);
         offsets.push(0u32);
@@ -288,7 +292,8 @@ impl ElementTable {
                     let mat = model
                         .material(name)
                         .ok_or_else(|| Error::undefined("*SOLID SECTION", "material", name))?;
-                    let elastic = if mat.elastic.is_none() {
+                    let no_elasticity = mat.elastic.is_none() && mat.hyperelastic.is_none();
+                    let elastic = if no_elasticity {
                         missing_elastic.get_or_insert_with(|| mat.name.clone());
                         LinearElastic {
                             young: 0.0,
@@ -298,7 +303,8 @@ impl ElementTable {
                         LinearElastic::of(mat, temperature)?
                     };
                     materials.push((elastic, elastic.matrix()));
-                    if mat.elastic.is_none() {
+                    hyperelastic |= mat.hyperelastic.is_some();
+                    if no_elasticity {
                         laws.push(Box::new(elastic));
                         laws_finite.push(Box::new(elastic));
                     } else {
@@ -375,6 +381,7 @@ impl ElementTable {
             membranes,
             membrane_of,
             missing_elastic,
+            hyperelastic,
         })
     }
 

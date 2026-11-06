@@ -14,12 +14,14 @@
 //! components), stresses `[xx, yy, zz, xy, yz, zx]`; tangents act on engineering strains.
 
 pub mod finite;
+pub mod hyper;
 pub mod plastic;
 
 use plxs_core::material::{Material, interpolate};
 use plxs_core::{Error, Result};
 
 pub use finite::FiniteStrainJ2;
+pub use hyper::Hyperelastic;
 pub use plastic::{J2Plastic, STATE_SIZE};
 
 /// The 6 × 6 matrix of isotropic linear elasticity acting on engineering strains
@@ -45,8 +47,12 @@ pub struct LinearElastic {
 
 impl LinearElastic {
     /// The elastic constants of a material at `temperature`, interpolated in its
-    /// `*ELASTIC` table.
+    /// `*ELASTIC` table; for a hyperelastic material the initial moduli of its strain
+    /// energy (what linear steps and small vibrations see).
     pub fn of(material: &Material, temperature: f64) -> Result<Self> {
+        if let Some(hyper) = Hyperelastic::of(material)? {
+            return Ok(hyper.initial());
+        }
         let elastic = material.elastic.as_ref().ok_or_else(|| {
             Error::input(
                 "*MATERIAL",
@@ -134,7 +140,8 @@ pub struct MaterialOutput {
 pub trait MaterialLaw: Send + Sync {
     /// Number of state variables per integration point.
     fn state_size(&self) -> usize;
-    /// Whether the law is nonlinear (plastic or creeping); linear laws never iterate.
+    /// Whether the law is nonlinear (plastic, creeping or hyperelastic); linear laws never
+    /// iterate.
     fn is_nonlinear(&self) -> bool;
     fn stress(&self, input: &MaterialInput, state: &mut [f64]) -> MaterialOutput;
     /// The elastic matrix (for hourglass control and incompatible modes).
@@ -164,7 +171,8 @@ impl MaterialLaw for LinearElastic {
     }
 }
 
-/// The law of a material at a temperature: elastic, or J2 plastic / creeping when the
+/// The law of a material at a temperature: hyperelastic with a `*HYPERELASTIC`
+/// definition, else elastic, or J2 plastic / creeping when the
 /// material has a `*PLASTIC` or `*CREEP` definition. With `finite_strain` (NLGEOM steps)
 /// the plastic law works on logarithmic strains in the multiplicative framework
 /// ([`FiniteStrainJ2`]) and the elastic law is Saint Venant-Kirchhoff on the
@@ -174,6 +182,18 @@ pub fn law_of(
     temperature: f64,
     finite_strain: bool,
 ) -> Result<Box<dyn MaterialLaw>> {
+    if let Some(hyper) = Hyperelastic::of(material)? {
+        if material.plastic.is_some() || material.creep.is_some() {
+            return Err(Error::input(
+                "*HYPERELASTIC",
+                format!(
+                    "material {}: hyperelasticity cannot be combined with *PLASTIC or *CREEP",
+                    material.name
+                ),
+            ));
+        }
+        return Ok(Box::new(hyper));
+    }
     let elastic = LinearElastic::of(material, temperature)?;
     if material.plastic.is_some() || material.creep.is_some() {
         let plastic = J2Plastic::of(material, elastic, temperature)?;
