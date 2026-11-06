@@ -80,12 +80,6 @@ pub fn region_form(
     behavior_rows(ui, "contact region type", "Type", &mut region.behavior);
     sides.ui_named(ui, model, ["Side A", "Side B"]);
     (region.side_a, region.side_b) = sides.regions();
-    ui.label("Side A color");
-    ui.color_edit_button_srgb(&mut region.color_a);
-    ui.end_row();
-    ui.label("Side B color");
-    ui.color_edit_button_srgb(&mut region.color_b);
-    ui.end_row();
     let resolved = view.resolved(model, region).clone();
     ui.label("");
     ui.toggle_value(&mut view.advanced, "Advanced settings")
