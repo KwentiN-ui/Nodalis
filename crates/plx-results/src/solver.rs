@@ -8,6 +8,7 @@
 //! Only the coordinates and values are exact rather than rounded to the file's five digits.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::Path;
 
 use plx_mesh::{Element, FeMesh, Part};
@@ -24,7 +25,7 @@ pub const EXTENSION: &str = "ndlr";
 
 /// The first bytes of a `.ndlr` file; the last two count the format, which is not converted:
 /// results of another format are solved again.
-const MAGIC: &[u8; 8] = b"PLXRES\x00\x04";
+const MAGIC: &[u8; 8] = b"PLXRES\x00\x05";
 
 /// What a run of the built-in solver computed, as Nodalis keeps it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -77,9 +78,10 @@ impl SolverResults {
         }
     }
 
-    /// The results as the bytes of a `.ndlr` file.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        packed::pack(MAGIC, self.clone())
+    /// The results as the bytes of a `.ndlr` file. The arrays are packed in place, without
+    /// a copy of the results (hundreds of frames of a dynamic step are gigabytes).
+    pub fn to_bytes(&mut self) -> Vec<u8> {
+        packed::pack_in_place(MAGIC, self)
     }
 
     /// Reads the bytes of a `.ndlr` file.
@@ -90,8 +92,14 @@ impl SolverResults {
         Ok(results)
     }
 
-    pub fn write(&self, path: &Path) -> std::io::Result<()> {
-        std::fs::write(path, self.to_bytes())
+    /// Writes the `.ndlr` file, streaming the arrays as they are packed (the memory beyond
+    /// the results is one array and its compressed chunks).
+    pub fn write(&mut self, path: &Path) -> std::io::Result<()> {
+        let file = std::fs::File::create(path)?;
+        let mut out = std::io::BufWriter::new(file);
+        packed::pack_to(MAGIC, self, &mut out)?;
+        out.flush()?;
+        out.into_inner()?.sync_all()
     }
 
     pub fn read(path: &Path) -> Result<Self, ReadError> {
