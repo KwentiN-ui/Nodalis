@@ -174,6 +174,9 @@ struct Factored {
     /// operator of GMRES with sliding friction).
     tangent: SparseMatrix,
     reduced: SparseMatrix,
+    /// The primary DOFs behind the unknowns of `reduced` (the reduction stays valid while
+    /// the constraint set of an iteration keeps them).
+    free: Vec<u32>,
     /// Convergence with it slowed down: the next iteration assembles afresh.
     stale: bool,
 }
@@ -1049,7 +1052,7 @@ fn attempt(
     let mut status: Option<Vec<u8>> = None;
     let mut last_change: Option<u32> = None;
     // Discrete elements (gaps, springs) switch inside the tangent: no reuse with them.
-    let reusable = setup.discrete.is_empty();
+    let reusable = setup.discrete.is_empty() && !setup.large_rotations;
     loop {
         // Contact springs at `u` from the states at the start of the sub-increment. Their
         // stiffness enters the tangent with (1 + α) only (no stiffness-proportional
@@ -1079,12 +1082,18 @@ fn attempt(
         let started = std::time::Instant::now();
         // Whether the tangent is assembled and factorized in this iteration, or the one
         // the solver holds serves (see `Factored`).
+        // Rigid bodies under finite rotations give a constraint set per iteration: its
+        // unknowns must be those of the held reduction, else a re-pivoted constraint (a
+        // DOF held otherwise at the new rotation) leaves the residual and the factor of
+        // different sizes or orders.
+        let set = constraint_set(ctx, setup, &u);
         let fresh = !reusable
             || setup.factored.as_ref().is_none_or(|f| {
                 f.stale
                     || (f.dt - dt).abs() > 1e-12 * dt
                     || f.key != key
                     || !std::sync::Arc::ptr_eq(f.tangent.pattern(), setup.k.pattern())
+                    || f.free != set.free
             });
         let (mut f_int, stresses, strains, material, flux) = if setup.linear_elastic {
             // `f(u) = K₀ u`; the stresses follow at convergence. The flux of the element
@@ -1197,7 +1206,6 @@ fn attempt(
                 *r -= t;
             }
         }
-        let set = constraint_set(ctx, setup, &u);
         let residual = set.reduce_rhs(&residual_full);
         ctx.profile.add(Phase::Vectors, started);
         let r_max = residual.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
@@ -1371,6 +1379,7 @@ fn attempt(
                 key,
                 tangent,
                 reduced,
+                free: set.free.clone(),
                 stale: false,
             });
             let factored = setup.factored.as_ref().expect("just set");
