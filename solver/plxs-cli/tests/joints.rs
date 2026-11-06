@@ -270,3 +270,31 @@ fn a_damped_pendulum_on_a_joint_swings_freely() {
         }
     }
 }
+
+#[test]
+fn a_double_pendulum_with_a_long_time_step_runs_through() {
+    // Plate A hangs on a third rigid body at its left edge, held at its reference point and
+    // free to turn, so the plates make a double pendulum. With a time step of the swing
+    // and the damping fitted to it, the iterations of an increment wander, and the
+    // constraints linearized at the wandering rotations pivot on other DOFs from one
+    // iteration to the next (a rotation of a rigid body's point becomes the dependent DOF
+    // of a row). A tangent held from an earlier iteration (modified Newton) then does not
+    // fit the unknowns of the residual: the solver panicked at the substitution with a
+    // right-hand side of the wrong size.
+    let dir = work_dir("double");
+    let step = "*Step, Nlgeom, Inc=101\n*Dynamic, Direct\n0.03, 0.3\n\
+                *Damping, Ratio=0.02, Upper=3.3333333333333335\n*Boundary\n304, 1, 2, 0\n\
+                *Dload\nEALL, GRAV, 9.81, 0, -1, 0\n*Node print, Nset=TIPNODE\nU\n*End step\n";
+    let input = plates(&format!(
+        "*Node\n304, 0, {h}, 0\n305, 0, {h}, 0\n\
+         *Rigid body, Nset=CLAMP, Ref node=304, Rot node=305\n{}{step}",
+        joined("1, 2"),
+        h = HEIGHT / 2.0
+    ));
+    let rows = run(&dir, "double", &input);
+    let _ = std::fs::remove_dir_all(&dir);
+    // Both plates fall: after 0.3 s the tip is well below where it started.
+    let end = rows.last().unwrap();
+    assert!((end.0 - 0.3).abs() < 1e-9, "ends at {} s", end.0);
+    assert!(end.1[1] < -0.5 * LENGTH, "the pendulum falls: {:?}", end.1);
+}
