@@ -306,6 +306,7 @@ pub enum Constraint {
     /// them to the model's ties, listed with the contact pairs.
     Tie(Tie),
     RigidBody(RigidBody),
+    Joint(crate::Joint),
     /// Only in projects saved while node ties were constraints; [`crate::FeModel::migrate`]
     /// moves them to the model's node ties, where they belong with the contact pairs.
     NodeTie(NodeTie),
@@ -318,6 +319,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => &c.name,
             Constraint::Tie(tie) => &tie.name,
             Constraint::RigidBody(c) => &c.name,
+            Constraint::Joint(c) => &c.name,
             Constraint::NodeTie(c) => &c.name,
         }
     }
@@ -328,6 +330,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => c.active,
             Constraint::Tie(tie) => tie.active,
             Constraint::RigidBody(c) => c.active,
+            Constraint::Joint(c) => c.active,
             Constraint::NodeTie(c) => c.active,
         }
     }
@@ -338,6 +341,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => &mut c.active,
             Constraint::Tie(tie) => &mut tie.active,
             Constraint::RigidBody(c) => &mut c.active,
+            Constraint::Joint(c) => &mut c.active,
             Constraint::NodeTie(c) => &mut c.active,
         }
     }
@@ -348,6 +352,7 @@ impl Constraint {
             Constraint::Spring(c) => c.visible,
             Constraint::CompressionOnly(c) => c.visible,
             Constraint::RigidBody(c) => c.visible,
+            Constraint::Joint(c) => c.visible,
             Constraint::Tie(_) | Constraint::NodeTie(_) => true,
         }
     }
@@ -358,6 +363,7 @@ impl Constraint {
             Constraint::Spring(c) => Some(&mut c.visible),
             Constraint::CompressionOnly(c) => Some(&mut c.visible),
             Constraint::RigidBody(c) => Some(&mut c.visible),
+            Constraint::Joint(c) => Some(&mut c.visible),
             Constraint::Tie(_) | Constraint::NodeTie(_) => None,
         }
     }
@@ -368,6 +374,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => &mut c.name,
             Constraint::Tie(tie) => &mut tie.name,
             Constraint::RigidBody(c) => &mut c.name,
+            Constraint::Joint(c) => &mut c.name,
             Constraint::NodeTie(c) => &mut c.name,
         }
     }
@@ -405,6 +412,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => vec![&c.region],
             Constraint::Tie(tie) => vec![&tie.master, &tie.slave],
             Constraint::RigidBody(c) => vec![&c.region],
+            Constraint::Joint(c) => c.ends.iter().rev().filter_map(SpringEnd::region).collect(),
             Constraint::NodeTie(c) => vec![&c.region],
         }
     }
@@ -417,6 +425,9 @@ impl Constraint {
             Constraint::CompressionOnly(c) => vec![&mut c.region],
             Constraint::Tie(tie) => vec![&mut tie.master, &mut tie.slave],
             Constraint::RigidBody(c) => vec![&mut c.region],
+            Constraint::Joint(c) => (c.ends.iter_mut().rev())
+                .filter_map(SpringEnd::region_mut)
+                .collect(),
             Constraint::NodeTie(c) => vec![&mut c.region],
         }
     }

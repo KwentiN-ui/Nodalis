@@ -205,6 +205,21 @@ impl FeModel {
                                 (spring.layout().is_none())
                                     .then(|| "Both ends are World".to_string())
                             }),
+                        Constraint::Joint(joint) => (joint.ends.iter())
+                            .filter_map(crate::SpringEnd::point)
+                            .find_map(|point| {
+                                (self.missing_region_point(point))
+                                    .or_else(|| self.missing_remote_point(mesh, point))
+                            })
+                            .or_else(|| {
+                                (joint.locating_end().is_none())
+                                    .then(|| "Both ends are World".to_string())
+                            })
+                            .or_else(|| {
+                                (self.coordinate_system_or_global(&joint.system).is_none()).then(
+                                    || format!("Coordinate System {} does not exist", joint.system),
+                                )
+                            }),
                         _ => None,
                     }),
             };

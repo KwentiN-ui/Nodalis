@@ -11,6 +11,7 @@ use plxs_core::{ElementFamily, Model};
 
 use crate::cyclic::CyclicSymmetry;
 use crate::elimination::{Added, ConstraintSet, Eliminator, LinearConstraint, Policy};
+use crate::joint::{End, JointData, JointRow};
 use crate::tie;
 use crate::transform::{Rotation, node_rotations};
 
@@ -44,6 +45,9 @@ pub struct ModelConstraints {
     /// The rows of the rigid bodies in `constraints`, for large rotations (see
     /// [`ModelConstraints::at_rotations`]).
     pub rigid: Vec<RigidRow>,
+    /// The joints of the model and their held rows in `constraints`.
+    pub joints: Vec<JointData>,
+    pub joint_rows: Vec<JointRow>,
 }
 
 /// One row `u_i,d - u_ref,d - (R(θ) r - r)_d = 0` of a rigid body; linear in `θ` it is the
@@ -229,6 +233,54 @@ impl ModelConstraints {
             }
         }
 
+        // Joints: rows on global DOFs, solved for the second end.
+        for joint in &model.constraints.joints {
+            let origin = mc.label(format!("*JOINT {}", joint.name));
+            let mut ends = [None; 2];
+            for (slot, end) in ends.iter_mut().zip(&joint.ends) {
+                let Some([reference, rotation]) = *end else {
+                    continue;
+                };
+                let (Some(r), Some(q)) =
+                    (model.nodes.index(reference), model.nodes.index(rotation))
+                else {
+                    return Err(plxs_core::Error::undefined(
+                        "*JOINT",
+                        "node",
+                        format!("{reference} or {rotation}"),
+                    ));
+                };
+                *slot = Some(End {
+                    reference: r,
+                    rotation: q,
+                    position: model.nodes.coordinates[r as usize],
+                });
+            }
+            let data = JointData {
+                ends,
+                origin: joint.origin,
+                axes: joint.axes,
+                fixed: joint.fixed,
+            };
+            let rows = data.linear_rows();
+            let index = mc.joints.len();
+            for (dof, row) in rows.iter().enumerate() {
+                if !data.fixed[dof] || row.is_empty() {
+                    continue;
+                }
+                let Some(preferred) = data.preferred(dof) else {
+                    continue;
+                };
+                mc.joint_rows.push(JointRow {
+                    constraint: mc.constraints.len(),
+                    joint: index,
+                    dof,
+                });
+                mc.push_global(row, preferred, Policy::Repivot, origin);
+            }
+            mc.joints.push(data);
+        }
+
         // Equations: terms refer to local directions at transformed nodes.
         for (k, equation) in model.constraints.equations.iter().enumerate() {
             let origin = mc.label(format!("*EQUATION {}", k + 1));
@@ -328,10 +380,10 @@ impl ModelConstraints {
         self.rotations.get(&node)
     }
 
-    /// Whether the model has rigid bodies, whose constraints are nonlinear in large
-    /// rotations.
-    pub fn has_rigid_bodies(&self) -> bool {
-        !self.rigid.is_empty()
+    /// Whether the model has rigid bodies or joints, whose constraints are nonlinear in
+    /// large rotations.
+    pub fn has_finite_rotations(&self) -> bool {
+        !self.rigid.is_empty() || !self.joint_rows.is_empty()
     }
 
     /// The constraints linearized at the displacements `u` (all DOFs, global directions,
@@ -367,6 +419,23 @@ impl ModelConstraints {
             // `primary` maps the preferred DOF once more; keep the one of the model.
             out.constraints[row.constraint].preferred = old.preferred;
         }
+        let linearized: Vec<_> = self.joints.iter().map(|j| j.rows_at(u)).collect();
+        for row in &self.joint_rows {
+            let old = &self.constraints[row.constraint];
+            let terms = &linearized[row.joint][row.dof];
+            if terms.is_empty() {
+                continue;
+            }
+            out.constraints[row.constraint] = primary(
+                &self.rotations,
+                u32::MAX,
+                terms,
+                old.preferred,
+                old.policy,
+                old.origin,
+            );
+            out.constraints[row.constraint].preferred = old.preferred;
+        }
         out
     }
 
@@ -374,6 +443,7 @@ impl ModelConstraints {
     /// rotation `θ` of the rotation node gives them. Members with a DOF in `held` (primary
     /// DOFs prescribed in the step) or at a transformed node keep their displacements.
     pub fn project_rigid(&self, u: &mut [f64], held: &[u32]) {
+        self.project_joints(u, held);
         for row in &self.rigid {
             let Some(member) = row.member else {
                 continue;
@@ -391,6 +461,38 @@ impl ModelConstraints {
             let d = row.d as usize;
             if let Some(value) = u.get_mut(dof as usize) {
                 *value = reference[d] + rotated[d] - row.r[d];
+            }
+        }
+    }
+
+    /// Puts the second ends of the joints back on to their joints (a chain of joints in
+    /// any order after a few passes). Rows whose dependent DOF is held in the step or lies
+    /// at a transformed node keep their values.
+    fn project_joints(&self, u: &mut [f64], held: &[u32]) {
+        if self.joint_rows.is_empty() {
+            return;
+        }
+        for _ in 0..3 {
+            for (index, joint) in self.joints.iter().enumerate() {
+                let transformed = (joint.ends.iter().flatten()).any(|e| {
+                    [e.reference, e.rotation]
+                        .iter()
+                        .any(|n| self.rotations.contains_key(n))
+                });
+                if transformed {
+                    continue;
+                }
+                let mut rows = Vec::new();
+                let mut dependent = Vec::new();
+                for row in self.joint_rows.iter().filter(|r| r.joint == index) {
+                    let p = self.constraints[row.constraint].preferred;
+                    if held.contains(&p) || dependent.contains(&p) {
+                        continue;
+                    }
+                    rows.push(row.dof);
+                    dependent.push(p);
+                }
+                joint.project(u, &rows, &dependent);
             }
         }
     }
@@ -583,7 +685,7 @@ fn node_vector(u: &[f64], node: u32) -> [f64; 3] {
     }
 }
 
-fn norm(v: [f64; 3]) -> f64 {
+pub(crate) fn norm(v: [f64; 3]) -> f64 {
     (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
 }
 

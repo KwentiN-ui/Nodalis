@@ -10402,3 +10402,135 @@ fn solver_fits_a_damping_ratio_and_prints_the_energies() {
     }
     assert!(dissipation[59] > 0.0);
 }
+
+/// A plane stress strip held at its left edge, either by a rigid Displacement/Rotation
+/// or by a joint; `held` adds the hold, the force pulls the tip down.
+fn strip_held(held: impl FnOnce(&FeMesh, &mut FeModel)) -> (FeMesh, FeModel) {
+    let (force, length) = (100.0, 10.0);
+    let mesh = rectangle(0.0, length, 2.0, 5, 2);
+    let tip = Region::Nodes(nodes_at(&mesh, 0, length));
+    let load = LoadKind::force([0.0, -force, 0.0]);
+    let mut model = plane_model(ModelSpace::PlaneStress, 1.0, vec![], load, tip);
+    held(&mesh, &mut model);
+    (mesh, model)
+}
+
+fn clamp(name: &str, region: Region) -> BoundaryCondition {
+    BoundaryCondition {
+        distribution: None,
+        name: name.into(),
+        active: true,
+        visible: true,
+        region,
+        kind: BoundaryKind::Displacement(Displacement::rigid([Some(0.0); 6])),
+        amplitude: None,
+    }
+}
+
+/// A fixed joint from an edge to ground holds the edge like a rigid clamp; the joint is a
+/// `*Joint` between the edge's own point and ground.
+#[test]
+fn solver_holds_an_edge_by_a_fixed_joint_to_ground_like_a_clamp() {
+    let left = |mesh: &FeMesh| Region::Faces(edges_at(mesh, 0, 0.0));
+    let (mesh, clamped) = strip_held(|mesh, model| {
+        model.steps[0]
+            .boundary_conditions
+            .push(clamp("Clamp", left(mesh)));
+    });
+    let (_, jointed) = strip_held(|mesh, model| {
+        let joint = plx_model::Joint {
+            ends: [
+                plx_model::SpringEnd::Region(left(mesh)),
+                plx_model::SpringEnd::World,
+            ],
+            kind: plx_model::JointKind::Fixed,
+            ..plx_model::Joint::new("Joint-1")
+        };
+        model.constraints.push(Constraint::Joint(joint));
+    });
+    let text = write_inp(&mesh, &jointed, "").unwrap();
+    assert!(text.contains("*Joint, Name=JOINT-1\n"), "{text}");
+    // Plane models hold Ux, Uy and URz only.
+    assert!(text.contains("\n1, 2, 6\n"), "{text}");
+    let analysis = lowered(&mesh, &jointed);
+    let joint = &analysis.model.constraints.joints[0];
+    assert!(joint.ends[0].is_some() && joint.ends[1].is_none());
+    assert_eq!(joint.origin, [0.0, 1.0, 0.0]);
+    let (Some(a), Some(b)) = (
+        run_solver("gelenk-fest-welt", &text),
+        run_solver(
+            "gelenk-einspannung",
+            &write_inp(&mesh, &clamped, "").unwrap(),
+        ),
+    ) else {
+        return;
+    };
+    let corner = nodes_at(&mesh, 0, 10.0)[0];
+    let (ua, ub) = (
+        node_value(&a, "DISP", "U2", corner),
+        node_value(&b, "DISP", "U2", corner),
+    );
+    assert!(ub < -1e-4, "{ub}");
+    assert!((ua - ub).abs() < 1e-6 * ub.abs(), "{ua} != {ub}");
+}
+
+/// A fixed joint from the point of a clamp on the left edge to the right edge clamps the
+/// right edge too: its own point sits at the joint, the centre of the left edge, a strip
+/// length away.
+#[test]
+fn solver_clamps_an_edge_by_a_fixed_joint_to_the_point_of_another_clamp() {
+    let left = |mesh: &FeMesh| Region::Faces(edges_at(mesh, 0, 0.0));
+    let right = |mesh: &FeMesh| Region::Faces(edges_at(mesh, 0, 10.0));
+    let middle = |mesh: &FeMesh| Region::Nodes(nodes_at(mesh, 0, 5.0));
+    let both = |mesh: &FeMesh, model: &mut FeModel| {
+        model.steps[0].loads[0].region = middle(mesh);
+        model.steps[0]
+            .boundary_conditions
+            .push(clamp("Clamp", left(mesh)));
+    };
+    let (mesh, clamped) = strip_held(|mesh, model| {
+        both(mesh, model);
+        (model.steps[0].boundary_conditions).push(clamp("Clamp-2", right(mesh)));
+    });
+    let (_, jointed) = strip_held(|mesh, model| {
+        both(mesh, model);
+        let joint = plx_model::Joint {
+            ends: [
+                plx_model::SpringEnd::Region(Region::RemotePoint("Clamp".into())),
+                plx_model::SpringEnd::Region(right(mesh)),
+            ],
+            kind: plx_model::JointKind::Fixed,
+            ..plx_model::Joint::new("Joint-1")
+        };
+        model.constraints.push(Constraint::Joint(joint));
+    });
+    let analysis = lowered(&mesh, &jointed);
+    let joint = &analysis.model.constraints.joints[0];
+    assert_eq!(joint.origin, [0.0, 1.0, 0.0]);
+    let [Some(first), Some(second)] = joint.ends else {
+        panic!("{joint:?}");
+    };
+    // Both ends have a rigid body; the right edge's point sits at the joint.
+    let bodies = &analysis.model.constraints.rigid_bodies;
+    assert_eq!(bodies.len(), 2);
+    assert!(bodies.iter().any(|b| b.reference_node == first[0]));
+    assert!(bodies.iter().any(|b| b.reference_node == second[0]));
+    assert_eq!(coordinates(&analysis, second[0]), [0.0, 1.0, 0.0]);
+    let text = write_inp(&mesh, &jointed, "").unwrap();
+    let (Some(a), Some(b)) = (
+        run_solver("gelenk-fest-punkt", &text),
+        run_solver(
+            "gelenk-zwei-einspannungen",
+            &write_inp(&mesh, &clamped, "").unwrap(),
+        ),
+    ) else {
+        return;
+    };
+    let node = middle(&mesh).nodes(&mesh)[0];
+    let (ua, ub) = (
+        node_value(&a, "DISP", "U2", node),
+        node_value(&b, "DISP", "U2", node),
+    );
+    assert!(ub < -1e-5, "{ub}");
+    assert!((ua - ub).abs() < 1e-6 * ub.abs(), "{ua} != {ub}");
+}

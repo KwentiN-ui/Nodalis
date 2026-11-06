@@ -63,6 +63,9 @@ pub enum Kind {
     CompressionOnly {
         flipped: bool,
     },
+    /// A joint: lines from both ends to the joint, a ball at it and arrows for its free
+    /// degrees of freedom.
+    Joint(Box<plx_model::Joint>),
 }
 
 impl Kind {
@@ -94,6 +97,10 @@ impl Kind {
                     flipped: support.flipped,
                 },
                 support.region.clone(),
+            ),
+            Constraint::Joint(joint) => (
+                Kind::Joint(Box::new(joint.clone())),
+                joint.locating_end()?.clone(),
             ),
             Constraint::Tie(_) | Constraint::NodeTie(_) => return None,
         })
@@ -211,6 +218,47 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                 for point in points {
                     for axis in acting(stiffness) {
                         add(point, axis, SymbolShape::Spring);
+                    }
+                }
+            }
+            // Lines from nodes spread over each selection end, or from a point end, to the
+            // joint, a ball at it, and arrows along the frame axes for free translations
+            // and moment arrows about them for free rotations.
+            Kind::Joint(ref joint) => {
+                let Ok((origin, axes)) = model.fe.joint_frame(&model.mesh, joint) else {
+                    continue;
+                };
+                let origin = DVec3::from(origin);
+                add(origin, DVec3::Z, SymbolShape::Ball);
+                let free = joint.free_dofs();
+                for &d in model.fe.properties.space.remote_dofs() {
+                    if free[d] {
+                        let shape = if d < 3 {
+                            SymbolShape::Arrow
+                        } else {
+                            SymbolShape::MomentArrow
+                        };
+                        add(origin, DVec3::from(axes[d % 3]), shape);
+                    }
+                }
+                let to = (origin - model.origin()).as_vec3();
+                for end in &joint.ends {
+                    let Some(region) = end.region() else {
+                        continue;
+                    };
+                    let points = match model.fe.point_position(&model.mesh, region) {
+                        Some(point) => vec![DVec3::from(point)],
+                        None => node_points(model, region, &visible),
+                    };
+                    for index in sample(&points, DIVISIONS / 2.0) {
+                        if points[index].distance(origin) > 0.0 {
+                            symbols.push(Symbol {
+                                position: (points[index] - model.origin()).as_vec3(),
+                                direction: Vec3::ZERO,
+                                shape: SymbolShape::LineTo(to),
+                                color,
+                            });
+                        }
                     }
                 }
             }

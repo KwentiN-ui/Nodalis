@@ -415,6 +415,32 @@ fn equations_and_generated_sets_are_read() {
 }
 
 #[test]
+fn joints_read_and_render_back() {
+    let text = cube(
+        "*Node\n9, 0.5, 0.5, 1\n10, 0.5, 0.5, 1\n*Joint, Name=Hinge\n9, 10, 0, 0\n\
+0.5, 0.5, 1, 0, 2, 0, -1, 0, 0\n1, 2, 3, 4, 5\n\
+*Step\n*Static\n*Boundary\nFIX, 1, 3\n*End step\n",
+    );
+    let analysis = read(&text).unwrap();
+    let joint = &analysis.model.constraints.joints[0];
+    assert_eq!(joint.name, "HINGE");
+    assert_eq!(joint.ends, [Some([9, 10]), None]);
+    // The directions are normalized; z follows from x and y.
+    assert_eq!(
+        joint.axes,
+        [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+    );
+    assert_eq!(joint.fixed, [true, true, true, true, true, false]);
+    let again = read(&super::render(&analysis)).unwrap();
+    assert_eq!(
+        again.model.constraints.joints,
+        analysis.model.constraints.joints
+    );
+    let parallel = text.replace("-1, 0, 0\n1, 2", "0, 3, 0\n1, 2");
+    assert!(read(&parallel).is_err());
+}
+
+#[test]
 fn a_no_analysis_step_reads_the_model_only() {
     let analysis = read(&cube("*Step\n*No analysis\n*End step\n")).unwrap();
     assert!(matches!(analysis.steps[0].procedure, Procedure::NoAnalysis));

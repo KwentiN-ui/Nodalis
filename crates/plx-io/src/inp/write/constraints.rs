@@ -104,7 +104,7 @@ pub(super) fn springs(
                 nonlinear |= support.nonlinear;
             }
             // Written as `*Rigid body` by the caller.
-            Constraint::RigidBody(_) => {}
+            Constraint::RigidBody(_) | Constraint::Joint(_) => {}
             Constraint::Tie(_) | Constraint::NodeTie(_) => {}
         }
     }

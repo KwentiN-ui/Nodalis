@@ -1816,6 +1816,29 @@ impl FeModel {
                 bodies.push((ModelItem::Load(s, i), name, nodes));
             }
         }
+        // A rigid joint couples each selection end to a point of its own.
+        let all = self.directly_held_nodes_in(mesh, |_| true);
+        for (i, constraint) in self.constraints.iter().enumerate() {
+            let Constraint::Joint(joint) = constraint else {
+                continue;
+            };
+            if !joint.active || joint.behavior != crate::RemoteBehavior::Rigid {
+                continue;
+            }
+            let Ok(origin) = self.joint_origin(mesh, joint) else {
+                continue;
+            };
+            for region in joint.ends.iter().filter_map(crate::SpringEnd::selection) {
+                let spec = crate::Displacement {
+                    location: Some(origin),
+                    ..crate::Displacement::rigid([None; 6])
+                };
+                if let Ok(point) = spec.resolve(self, mesh, region, &all) {
+                    let nodes = point.nodes.into_iter().collect();
+                    bodies.push((ModelItem::Constraint(i), &joint.name, nodes));
+                }
+            }
+        }
         if let Some(step) = (self.steps.iter()).find(|s| s.active && s.kind.nlgeom()) {
             let expanded = crate::expanded_nodes(mesh);
             for (item, name, nodes) in &bodies {
@@ -2836,6 +2859,47 @@ impl FeModel {
                     join(&mut ties, &tied, &[]);
                     join(&mut contacts, &tied, &[]);
                 }
+                Constraint::Joint(joint) => {
+                    let regions = |end: &crate::SpringEnd| -> Vec<Region> {
+                        match end.region() {
+                            Some(r) if crate::constraint::is_point(r) => {
+                                self.point_regions(mesh, r)
+                            }
+                            Some(r) => vec![r.clone()],
+                            None => Vec::new(),
+                        }
+                    };
+                    let [a, b] = joint.ends.each_ref().map(regions);
+                    if a.is_empty() || b.is_empty() {
+                        // A joint to ground holds its end in the held directions of its
+                        // frame like a displacement on a point.
+                        let free = joint.free_dofs();
+                        for region in a.iter().chain(&b) {
+                            let Some(centre) = region.centroid(mesh) else {
+                                continue;
+                            };
+                            let Some(node) = nearest_node(mesh, region, centre) else {
+                                continue;
+                            };
+                            let axes = (self.coordinate_system_or_global(&joint.system))
+                                .and_then(|system| system.directions_at(centre).ok())
+                                .unwrap_or([axis(0), axis(1), axis(2)]);
+                            for dof in (0..6).filter(|&d| !free[d]) {
+                                if dof < 3 || space == ModelSpace::ThreeD {
+                                    support(node, axes[dof % 3], dof >= 3);
+                                }
+                            }
+                        }
+                    } else {
+                        // Two connected ends join their pieces like a tie.
+                        let pieces_of = |regions: &[Region]| -> Vec<usize> {
+                            regions.iter().flat_map(&pieces).collect()
+                        };
+                        let (a, b) = (pieces_of(&a), pieces_of(&b));
+                        join(&mut ties, &a, &b);
+                        join(&mut contacts, &a, &b);
+                    }
+                }
                 Constraint::RigidBody(body) => {
                     let tied = pieces(&body.region);
                     join(&mut ties, &tied, &[]);
@@ -3107,6 +3171,11 @@ impl FeModel {
                 Constraint::RigidBody(body) => {
                     if !self.point_dofs(s, &body.reference_point).is_empty() {
                         mark(&body.region, &mut held_otherwise);
+                    }
+                }
+                Constraint::Joint(joint) => {
+                    for region in joint.ends.iter().filter_map(crate::SpringEnd::selection) {
+                        mark(region, &mut held_otherwise);
                     }
                 }
             }

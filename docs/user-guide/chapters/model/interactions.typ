@@ -20,6 +20,9 @@ Create them with #ui("Constraint") on the #ui("Connections") tab of the ribbon.
     stiffness. A single node or point is a point spring. In a 2D model (plane stress, plane
     strain, axisymmetric) there is no #ui("K3"): the dialog offers the first two directions
     only (@spring-2d).],
+  [Joint], [A kinematic joint between #ui("End 1") and #ui("End 2"), such as a hinge or a
+    slider: like a Displacement/Rotation condition, but relative to another body instead of
+    to ground (@joints).],
   [Compression Only], [A support that only takes pressure, like a part resting on a rigid floor.
     By default it pushes onto the surface from outside; #ui("Flip") under #ui("Direction")
     makes it push the surface outward from inside the material. #ui("Clearance") is the
@@ -101,6 +104,49 @@ constraint out of the input file.
 #screenshot("constraint-hide.png", [Hidden spring and the context menu of Constraints])
 
 #limitation[User-defined equations are not available yet.]
+
+=== Joints <joints>
+
+A joint holds the motion of #ui("End 2") relative to #ui("End 1") in some directions and
+leaves the others free, like a Displacement/Rotation condition that holds a part against
+another part instead of against ground. The ends are the same as for a spring: #ui("World"),
+a selection, a node set or surface, or a point (a reference point of a rigid body, or the
+point of a Displacement/Rotation condition or Remote Force). A selection follows a point of
+its own at the joint, rigidly (#ui("Rigid"), the selection keeps its shape) or on average
+(#ui("Deformable")), chosen under #ui("Behavior").
+
+#screenshot("constraint-joint.png", [A revolute joint from the side face of a cantilever to ground:
+  the ball marks the joint at the centre of the face, the double arrow its free rotation about z])
+
+#ui("Joint type") chooses the free relative degrees of freedom in the joint frame:
+
+#fields(
+  [Fixed], [Nothing is free: the two ends move as one, a rigid connection.],
+  [Revolute], [A hinge: the ends turn against each other about z.],
+  [Cylindrical], [Turning about and sliding along z.],
+  [Slider], [Sliding along z without turning.],
+  [Spherical], [A ball joint: all rotations free, no sliding.],
+  [Planar], [Sliding in the x-y plane and turning about z.],
+  [General], [Each of #ui("Ux"), #ui("Uy"), #ui("Uz"), #ui("URx"), #ui("URy"), #ui("URz")
+    #ui("Fixed") or #ui("Free").],
+)
+
+The joint frame is the #ui("Coordinate system") at the joint's #ui("Location"): by default
+the centre of #ui("End 1") (of #ui("End 2") when #ui("End 1") is #ui("World")), or given
+coordinates. Its z axis is the axis of a revolute, cylindrical or slider joint and the normal
+of a planar joint, so a hinge about another axis needs a coordinate system whose z axis points
+along it. The frame turns with #ui("End 1"): with #ui("Large deformations") in a Static or
+Dynamic step a hinge stays a hinge however far its parts turn, as in a mechanism. In a plane
+model a joint holds #ui("Ux"), #ui("Uy") and #ui("URz") only, so a revolute joint is a hinge
+normal to the model plane.
+
+The 3D view draws a joint as lines from both ends to a ball at the joint, with an arrow for
+each free translation and a double arrow for each free rotation along the axes of the joint
+frame.
+
+A joint fixes the relative motion only; a revolute joint between two parts and nothing else
+leaves the second part free to turn, which a static step rejects as a mechanism. Hold it with
+a boundary condition, a load in a Dynamic step or a rotational spring on a point.
 
 == Contacts <contacts>
 

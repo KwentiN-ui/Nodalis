@@ -1415,7 +1415,7 @@ fn displacement_rows(
 }
 
 /// The coordinate system of a remote displacement or remote force.
-fn system_row(ui: &mut Ui, system: &mut String, fe: &FeModel) {
+pub(crate) fn system_row(ui: &mut Ui, system: &mut String, fe: &FeModel) {
     ui.label("Coordinate system");
     egui::ComboBox::from_id_salt("remote system")
         .selected_text(system.as_str())

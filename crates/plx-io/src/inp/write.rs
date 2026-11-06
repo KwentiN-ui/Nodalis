@@ -678,6 +678,12 @@ fn lower_model_named(
                 }
                 constraint_list.rigid_bodies.push(body);
             }
+            ConstraintItem::Joint(joint) => {
+                if let Some(item) = owner.and_then(origin) {
+                    origins.insert(ir::ItemRef::Joint(joint.name.clone()), item);
+                }
+                constraint_list.joints.push(joint);
+            }
             ConstraintItem::Tie(tie, cyclic) => {
                 constraint_list.ties.push(tie);
                 if cyclic.is_some() {
@@ -734,6 +740,7 @@ fn lower_model_named(
 enum ConstraintItem {
     Equation(ir::constraints::Equation),
     RigidBody(ir::constraints::RigidBody),
+    Joint(ir::constraints::Joint),
     Tie(
         ir::constraints::Tie,
         Option<ir::constraints::CyclicSymmetryModel>,
@@ -1827,7 +1834,7 @@ fn constraints(
             continue;
         }
         match constraint {
-            Constraint::Spring(_) | Constraint::CompressionOnly(_) => {}
+            Constraint::Spring(_) | Constraint::CompressionOnly(_) | Constraint::Joint(_) => {}
             // Moved to the model's node ties when the project was read.
             Constraint::NodeTie(_) => {}
             Constraint::RigidBody(body) => {
@@ -1965,11 +1972,103 @@ fn constraints(
         (sets.remote_names.entry(load.name.clone())).or_insert((nodes, force.behavior));
     }
     *lowering = None;
+    // Joints, after the points of boundary conditions and remote forces they may connect.
+    for (index, constraint) in model.constraints.iter().enumerate() {
+        let Constraint::Joint(joint) = constraint else {
+            continue;
+        };
+        if !joint.active {
+            continue;
+        }
+        let item = joint_item(
+            index,
+            joint,
+            &mut next_node,
+            (&mut items, &mut owners),
+            sets,
+            model,
+            generated,
+        )?;
+        owners.resize(items.len(), None);
+        items.push(item);
+        owners.push(Some(ModelItem::Constraint(index)));
+    }
     for t in model.ties.iter().filter(|t| t.active) {
         items.push(tie(sets, t)?);
     }
     owners.resize(items.len(), None);
     Ok((items, owners))
+}
+
+/// A joint between two ends. A selection end follows a point of its own at the joint, a
+/// point end is the point's reference and rotation node, a ground end has none.
+fn joint_item(
+    index: usize,
+    joint: &plx_model::Joint,
+    next_node: &mut NodeId,
+    (items, owners): (&mut Vec<ConstraintItem>, &mut Vec<Option<ModelItem>>),
+    sets: &mut Sets,
+    model: &FeModel,
+    generated: &mut constraints::Generated,
+) -> Result<ConstraintItem, WriteError> {
+    let invalid = |reason: String| WriteError::InvalidConstraint {
+        item: joint.name.clone(),
+        reason,
+    };
+    let (origin, axes) = model.joint_frame(sets.mesh, joint).map_err(invalid)?;
+    let mut ends = [None; 2];
+    for (slot, end) in ends.iter_mut().zip(&joint.ends) {
+        let Some(region) = end.region() else {
+            continue;
+        };
+        if matches!(region, Region::ReferencePoint(_) | Region::RemotePoint(_)) {
+            *slot = Some(point_nodes(sets, &joint.name, region)?.0);
+            continue;
+        }
+        // The selection follows a point of its own at the joint.
+        let spec = plx_model::Displacement {
+            values: [None; 6],
+            behavior: match joint.behavior {
+                RemoteBehavior::Rigid => plx_model::Behavior::Rigid,
+                RemoteBehavior::Deformable => plx_model::Behavior::Deformable,
+            },
+            system: plx_model::GLOBAL.to_string(),
+            location: Some(origin),
+            pinball: None,
+        };
+        let excluded = model.directly_held_nodes_in(sets.mesh, |_| true);
+        let held = model.held_translations(sets.mesh);
+        let point = (spec.resolve(model, sets.mesh, region, &excluded)).map_err(invalid)?;
+        let nodes = remote_point(
+            RemoteSource {
+                item: &joint.name,
+                region,
+                spec: &spec,
+                behavior: joint.behavior,
+                owner: ModelItem::Constraint(index),
+            },
+            point,
+            held,
+            next_node,
+            (items, owners),
+            sets,
+            model,
+            generated,
+        )?;
+        *slot = Some(nodes);
+    }
+    let free = joint.free_dofs();
+    let mut fixed = [false; 6];
+    for &d in model.properties.space.remote_dofs() {
+        fixed[d] = !free[d];
+    }
+    Ok(ConstraintItem::Joint(ir::constraints::Joint {
+        name: ir_name(&name(&joint.name)),
+        ends,
+        origin,
+        axes,
+        fixed,
+    }))
 }
 
 /// What a point of a remote displacement or remote force comes from: the item, its region,

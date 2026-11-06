@@ -242,7 +242,7 @@ impl Procedure for NonlinearStatic {
         )));
         let discrete: Vec<&DiscreteElement> = ctx.table.discrete.iter().collect();
         // Rigid bodies follow finite rotations under NLGEOM.
-        let large_rotations = step.nlgeom && constraints.has_rigid_bodies();
+        let large_rotations = step.nlgeom && constraints.has_finite_rotations();
         let mut k = SparseMatrix::zeros(ctx.pattern.clone());
         // Contact: *MODEL CHANGE / *CHANGE FRICTION of the step, then a contact state per
         // slave point.

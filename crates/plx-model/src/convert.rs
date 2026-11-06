@@ -78,6 +78,17 @@ impl FeModel {
         self.convert_features(&c);
         for constraint in &mut self.constraints {
             constraint.convert_units(&c);
+            if let Constraint::Joint(joint) = constraint
+                && let Some(location) = &mut joint.location
+            {
+                // The angle of cylindrical coordinates stays.
+                if cylindrical.contains(&joint.system) {
+                    c.value(&mut location[0], Quantity::Length);
+                    c.value(&mut location[2], Quantity::Length);
+                } else {
+                    c.all(location, Quantity::Length);
+                }
+            }
         }
         for interaction in &mut self.surface_interactions {
             for property in &mut interaction.properties {
@@ -405,7 +416,7 @@ impl Constraint {
                 c.option(&mut s.tensile_force, Quantity::Force);
             }
             Constraint::Tie(t) => c.option(&mut t.position_tolerance, Quantity::Length),
-            Constraint::NodeTie(_) | Constraint::RigidBody(_) => {}
+            Constraint::NodeTie(_) | Constraint::RigidBody(_) | Constraint::Joint(_) => {}
         }
     }
 }
