@@ -21,7 +21,11 @@ structure is damped; Nodalis chooses the time step and the integration from that
     C = α M + β K that meets the ratio exactly at both ends of a #ui("Frequency range")
     and is lower between them. #ui("Automatic") fits it from the lowest eigenfrequency of
     the model to the highest frequency the time step resolves; #ui("Between") takes two
-    frequencies. #ui("Rayleigh coefficients"): α (mass, unit of a frequency) and β
+    frequencies. A model that can move freely as a whole or in parts (a pendulum on a
+    joint, a free body) gets no mass-proportional part from #ui("Automatic"), since that
+    would brake the free motion like a viscous fluid. With #ui("Large deformations") the
+    stiffness part takes the current stiffness, so a part that turns far is damped only
+    where it deforms. #ui("Rayleigh coefficients"): α (mass, unit of a frequency) and β
     (stiffness, unit of a time) directly.],
   [Large deformations], [Off, the motion is linear: displacements and rotations stay
     small. On, every time step iterates on the deformed geometry (see below).],
