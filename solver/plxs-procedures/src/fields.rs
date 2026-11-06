@@ -489,8 +489,8 @@ pub fn unsupported_outputs(step: &Step) -> Vec<String> {
     // `V` only means something in dynamic steps, `PU`/`PHS` in steady state and complex
     // frequency steps; CalculiX ignores them in the others.
     let known = [
-        "U", "V", "S", "E", "RF", "ERR", "NOE", "PEEQ", "ENER", "NT", "HFL", "RFL", "PU", "PHS",
-        "SEN", "CDIS", "CSTR", "CELS", "EVOL",
+        "U", "V", "A", "S", "E", "RF", "ERR", "NOE", "PEEQ", "ENER", "NT", "HFL", "RFL", "PU",
+        "PHS", "SEN", "CDIS", "CSTR", "CELS", "EVOL",
     ];
     let mut out = Vec::new();
     for v in requested(step) {

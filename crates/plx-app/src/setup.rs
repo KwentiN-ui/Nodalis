@@ -4512,7 +4512,7 @@ fn history_output_form(
 ) {
     name_row(ui, &mut output.name);
     ui.label("Type");
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let current = output.kind.prefix();
         let pair = (model.fe.contact_pairs.first()).map_or(String::new(), |c| c.name.clone());
         let kinds = [
@@ -4523,6 +4523,7 @@ fn history_output_form(
                 region: Region::Parts(Vec::new()),
             },
             HistoryKind::Contact { pair },
+            HistoryKind::Energies,
         ];
         for kind in kinds {
             let selected = kind.prefix() == current;
@@ -4535,6 +4536,7 @@ fn history_output_form(
                     HistoryKind::Node { region } => HistoryOutput::node("", region.clone()),
                     HistoryKind::Element { region } => HistoryOutput::element("", region.clone()),
                     HistoryKind::Contact { pair } => HistoryOutput::contact("", pair.clone()),
+                    HistoryKind::Energies => HistoryOutput::energies(""),
                 };
                 output.variables = defaults.variables;
                 rename_default(&mut output.name, current, kind.prefix(), taken);
@@ -4552,7 +4554,13 @@ fn history_output_form(
     egui::Grid::new("history variables")
         .spacing([10.0, 2.0])
         .show(ui, |ui| {
-            for row in choices.chunks(5) {
+            // The energies' names are long: two per row.
+            let per_row = if output.kind == HistoryKind::Energies {
+                2
+            } else {
+                5
+            };
+            for row in choices.chunks(per_row) {
                 for &variable in row {
                     let mut on = output.variables.iter().any(|v| v == variable);
                     let checkbox = ui
@@ -4573,17 +4581,31 @@ fn history_output_form(
         output.normalize_variables();
     }
     ui.end_row();
-    ui.label("Totals");
-    egui::ComboBox::from_id_salt("history totals")
-        .selected_text(output.totals.label())
-        .width(crate::dock::fit_width(ui, 200.0))
-        .show_ui(ui, |ui| {
-            for totals in plx_model::Totals::ALL {
-                ui.selectable_value(&mut output.totals, totals, totals.label());
-            }
-        });
-    ui.end_row();
+    let energies = output.kind == HistoryKind::Energies;
+    if !energies {
+        ui.label("Totals");
+        egui::ComboBox::from_id_salt("history totals")
+            .selected_text(output.totals.label())
+            .width(crate::dock::fit_width(ui, 200.0))
+            .show_ui(ui, |ui| {
+                for totals in plx_model::Totals::ALL {
+                    ui.selectable_value(&mut output.totals, totals, totals.label());
+                }
+            });
+        ui.end_row();
+    }
     match &mut output.kind {
+        HistoryKind::Energies => {
+            ui.label("");
+            ui.weak(
+                "Sums over the whole model at every time\n\
+                 step of a Dynamic step; other steps do\n\
+                 not print them. Internal + kinetic energy\n\
+                 + dissipation = external work + energy at\n\
+                 the start, up to the numerical damping.",
+            );
+            ui.end_row();
+        }
         HistoryKind::Contact { pair } => {
             ui.label("Contact Pair");
             egui::ComboBox::from_id_salt("history contact pair")
@@ -4743,6 +4765,7 @@ fn validate_history_output(
         return Err("Please select at least one variable.".into());
     }
     match &output.kind {
+        HistoryKind::Energies => {}
         HistoryKind::Contact { pair } => {
             if !fe.contact_pair_names().contains(&pair.as_str()) {
                 return Err(
@@ -5188,7 +5211,7 @@ fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 12] 
         (
             MODAL_DYNAMICS_LABEL,
             StepKind::ModalDynamics(ModalDynamicsStep::default()),
-            FieldOutput::dynamic_defaults(),
+            FieldOutput::modal_dynamics_defaults(),
         ),
         (
             STEADY_STATE_LABEL,
@@ -5294,6 +5317,13 @@ fn step_form(
             .show_ui(ui, |ui| {
                 for (label, kind, outputs) in step_kinds(fe) {
                     if ui.selectable_label(current == label, label).clicked() && current != label {
+                        // A Dynamic step prints the energies of the model by default.
+                        step.history_outputs
+                            .retain(|h| h.kind != HistoryKind::Energies);
+                        if matches!(kind, StepKind::Dynamic(_)) {
+                            step.history_outputs
+                                .push(HistoryOutput::energies("Energies"));
+                        }
                         step.kind = kind;
                         step.field_outputs = outputs;
                     }

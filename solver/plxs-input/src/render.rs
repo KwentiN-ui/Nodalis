@@ -912,6 +912,14 @@ fn procedure(out: &mut Out, procedure: &Procedure) {
                     number(rayleigh.beta)
                 ));
             }
+            if let Some(damping) = &settings.damping_ratio {
+                let mut line = format!("*Damping, Ratio={}", number(damping.ratio));
+                if let Some(lower) = damping.lower {
+                    let _ = write!(line, ", Lower={}", number(lower));
+                }
+                let _ = write!(line, ", Upper={}", number(damping.upper));
+                out.keyword(&line);
+            }
         }
         Procedure::ModalDynamics(settings) => {
             let mut header = String::from("*Modal dynamics");

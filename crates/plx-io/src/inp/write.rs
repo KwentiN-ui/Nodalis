@@ -3516,7 +3516,11 @@ fn step_block<'f>(
         loads.push((Some(index), cards));
     }
     let mut rest = defined_fields(sets, step, amplitudes, model)?;
-    for output in step.history_outputs.iter().filter(|o| o.active) {
+    // Only the time integration computes the energies.
+    let dynamic = matches!(step.kind, StepKind::Dynamic(_));
+    for output in (step.history_outputs.iter())
+        .filter(|o| o.active && (dynamic || o.kind != HistoryKind::Energies))
+    {
         rest.extend(history_output(sets, output, pair_surfaces)?);
     }
     // The force of a bolt is the reaction of its pre-tension node, also while it is locked,
@@ -3923,23 +3927,25 @@ fn heat_transfer_step(settings: &HeatTransferStep, kind: HeatKind) -> ir::Step {
 fn dynamic_step(settings: &DynamicStep, model: &FeModel, step: &Step) -> (ir::Step, u32) {
     let amplitude_interval = model.amplitude_interval(step, settings.duration);
     let integration = settings.integration(amplitude_interval);
-    let rayleigh = settings
-        .rayleigh(integration.increment)
-        .map(|fit| match fit {
-            RayleighFit::Coefficients(r) => ir::step::Rayleigh {
+    let (rayleigh, damping_ratio) = match settings.rayleigh(integration.increment) {
+        None => (None, None),
+        Some(RayleighFit::Coefficients(r)) => (
+            Some(ir::step::Rayleigh {
                 alpha: r.alpha,
                 beta: r.beta,
-            },
-            // Until the solver finds the lowest eigenfrequency itself: a decade below the
-            // highest resolved frequency.
-            RayleighFit::FromRatio { zeta, upper } => {
-                let r = plx_model::RayleighDamping::from_ratio(zeta, upper / 10.0, upper);
-                ir::step::Rayleigh {
-                    alpha: r.alpha,
-                    beta: r.beta,
-                }
-            }
-        });
+            }),
+            None,
+        ),
+        // The solver fits it from the lowest eigenfrequency, which it computes first.
+        Some(RayleighFit::FromRatio { zeta, upper }) => (
+            None,
+            Some(ir::step::DampingRatio {
+                ratio: zeta,
+                lower: None,
+                upper,
+            }),
+        ),
+    };
     let alpha = settings.numerical_damping.alpha();
     let mut ir_step = new_step(ir::step::Procedure::Dynamic(ir::step::Dynamic {
         solver: equation_solver(settings.solver),
@@ -3952,6 +3958,7 @@ fn dynamic_step(settings: &DynamicStep, model: &FeModel, step: &Step) -> (ir::St
             ..ir::step::Incrementation::default()
         },
         rayleigh,
+        damping_ratio,
     }));
     ir_step.max_increments = (integration.increments(settings) + 1).min(u32::MAX as u64) as u32;
     ir_step.default_amplitude = ir::step::DefaultAmplitude::Step;
@@ -4195,6 +4202,14 @@ fn history_output(
         HistoryKind::Node { region } => {
             let set = sets.node_set(&output.name, region)?;
             Card::NodePrint(node_print(&set, &names, output.totals))
+        }
+        HistoryKind::Energies => {
+            // Sums over the whole model, printed under a set of all elements.
+            let parts = sets.mesh.parts.iter().map(|p| p.name.clone()).collect();
+            let set = sets.element_set(&output.name, &Region::Parts(parts))?;
+            let mut request = node_print(&set, &names, Totals::Only);
+            request.set = Some(ir_name(&set));
+            Card::ElPrint(request)
         }
         HistoryKind::Element { region } => {
             let set = sets.element_set(&output.name, region)?;

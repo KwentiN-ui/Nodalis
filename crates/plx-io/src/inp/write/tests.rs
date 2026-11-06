@@ -2092,7 +2092,7 @@ fn a_dynamic_step_is_written() {
         "*Step, Inc=61, Amplitude=Step\n*Dynamic, Direct\n0.000025, 0.0015\n\
          *Damping, Alpha=0, Beta=0.00004\n",
         "*Cload, op=New\n",
-        "*Node file\nRF, U, V\n",
+        "*Node file\nRF, U, V, A\n",
         "*El file\nS, E, NOE\n",
     ] {
         assert!(text.contains(line), "missing {line:?} in\n{text}");
@@ -10128,4 +10128,74 @@ fn an_error_of_a_point_names_the_boundary_condition_of_its_step() {
         "{error}"
     );
     assert_eq!(error.item, Some(ModelItem::BoundaryCondition(1, 1)));
+}
+
+/// A damping ratio over the automatic range: the solver fits it from the lowest
+/// eigenfrequency (the 810 Hz bending mode) up to the resolved frequency, writes the
+/// accelerations and the energies of the model, which balance the work of the tip force.
+#[test]
+fn solver_fits_a_damping_ratio_and_prints_the_energies() {
+    let (mesh, mut model) = dynamic_cantilever(1.5e-3, 2.5e-5, None);
+    let step = &mut model.steps[0];
+    step.history_outputs
+        .push(plx_model::HistoryOutput::energies("Energies"));
+    let StepKind::Dynamic(settings) = &mut step.kind else {
+        unreachable!()
+    };
+    settings.damping = Damping::Ratio {
+        zeta: 0.05,
+        range: DampingRange::Automatic,
+    };
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Damping, Ratio=0.05, Upper=4000\n",
+        "*El print, Elset=INTERNAL_SELECTION-1_ENERGIES, Totals=Only\nALLIE, ALLKE, ALLWK, ALLVD\n",
+        "*Node file\nRF, U, V, A\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in\n{text}");
+    }
+    let name = "dynamik-daempfungsgrad";
+    dump_fixture(name, &text);
+    let Some(dir) = run_dir(name) else {
+        return;
+    };
+    let (log, finished) = solve_in(&dir, name, &text);
+    assert!(finished, "{}", log.join("\n"));
+    let log = log.join("\n");
+    let lowest = (log.lines())
+        .find_map(|l| l.split("lowest eigenfrequency ").nth(1))
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|f| f.parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("{log}"));
+    assert!((780.0..840.0).contains(&lowest), "{lowest} Hz\n{log}");
+    assert!(log.contains("damping 5 % fitted between"), "{log}");
+    let frd = read_frd(&dir.join(format!("{name}.frd"))).unwrap();
+    let dat = crate::dat::read_dat(&dir.join(format!("{name}.dat"))).unwrap();
+    remove_run_dir(&dir);
+    let last = frd.increments.last().unwrap();
+    assert!(last.field("ACCE").is_some(), "{:?}", last.fields);
+    let set = (dat.sets.iter())
+        .find(|s| s.name.ends_with("ENERGIES"))
+        .unwrap_or_else(|| panic!("{:?}", dat.sets.iter().map(|s| &s.name).collect::<Vec<_>>()));
+    let series = |field: &str| -> Vec<f64> {
+        set.field(field).unwrap().components[0].entries[0]
+            .values
+            .clone()
+    };
+    let (internal, kinetic, work, dissipation) = (
+        series("MODEL_INTERNAL_ENERGY"),
+        series("MODEL_KINETIC_ENERGY"),
+        series("MODEL_EXTERNAL_WORK"),
+        series("MODEL_DAMPING_DISSIPATION"),
+    );
+    assert_eq!(internal.len(), 60);
+    for i in [10, 30, 59] {
+        let stored = internal[i] + kinetic[i] + dissipation[i];
+        assert!(
+            (0.9 * work[i]..1.02 * work[i]).contains(&stored),
+            "increment {i}: {stored} stored and dissipated, work {}",
+            work[i]
+        );
+    }
+    assert!(dissipation[59] > 0.0);
 }

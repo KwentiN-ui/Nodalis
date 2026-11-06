@@ -1649,7 +1649,7 @@ impl Step {
             kind: StepKind::Dynamic(DynamicStep::default()),
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
-            history_outputs: Vec::new(),
+            history_outputs: vec![HistoryOutput::energies("Energies")],
             field_outputs: FieldOutput::dynamic_defaults(),
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),
@@ -1661,6 +1661,8 @@ impl Step {
     pub fn new_modal_dynamics(name: impl Into<String>) -> Self {
         Self {
             kind: StepKind::ModalDynamics(ModalDynamicsStep::default()),
+            field_outputs: FieldOutput::modal_dynamics_defaults(),
+            history_outputs: Vec::new(),
             ..Self::new_dynamic(name)
         }
     }
@@ -1670,6 +1672,7 @@ impl Step {
         Self {
             kind: StepKind::SteadyStateDynamics(SteadyStateDynamicsStep::default()),
             field_outputs: FieldOutput::defaults(),
+            history_outputs: Vec::new(),
             ..Self::new_dynamic(name)
         }
     }

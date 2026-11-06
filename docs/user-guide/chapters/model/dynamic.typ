@@ -53,6 +53,34 @@ The model check warns when the frequency limit is higher than the frames can sho
 (#ui("Too few frames for the frequency limit")) and when all points of an amplitude the
 step follows lie after its end (#ui("Amplitude starts after the step")).
 
-The results have one increment per frame; the #ui("Step") animation (@animation) plays
-them, and history outputs (@history-outputs) show the motion of selected nodes at every
-time step.
+=== What the solver reports
+
+At the start of the step the solver output shows the time step and the highest frequency it
+resolves ("time step 2.5e-5 s resolves vibrations up to 4000 Hz"). With a damping ratio over
+the automatic range it first computes the lowest eigenfrequency of the supported model and
+reports the fit: "damping 2 % fitted between 812 and 4000 Hz (alpha = ..., beta = ...)". A
+free structure is fitted at its first elastic mode. If the lowest eigenfrequency is not below
+the resolved frequency (a very stiff model or a coarse time step), the range starts a decade
+below it and the output warns.
+
+=== Results
+
+The results have one increment per frame; the #ui("Step") animation (@animation) plays them.
+A new Dynamic step writes the displacements, velocities `V`, accelerations `A` and reaction
+forces at the nodes and stresses and strains in the elements.
+
+It also gets a history output #ui("Energies") of the whole model at every time step:
+
+#fields(
+  [ALLIE], [Internal (strain) energy ½ uᵀKu, including a preload of earlier steps.],
+  [ALLKE], [Kinetic energy ½ vᵀMv.],
+  [ALLWK], [Work of the loads since the start of the step.],
+  [ALLVD], [Energy the damping dissipated since the start of the step.],
+)
+
+#screenshot("history-energies.png", [Energies history output of a Dynamic step])
+
+ALLIE + ALLKE + ALLVD − ALLWK stays at its starting value up to the small loss of the
+numerical damping: the energy balance shows whether the time step resolves the motion.
+Prescribed displacements that change over time do work that ALLWK does not count. Other
+history outputs (@history-outputs) show the motion of selected nodes at every time step.

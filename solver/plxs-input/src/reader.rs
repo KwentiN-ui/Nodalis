@@ -21,11 +21,11 @@ use plxs_core::model::{Analysis, DesignVariables, RestartRead};
 use plxs_core::section::{BeamProfile, Gap, Section, SectionKind, Spring, SpringStiffness};
 use plxs_core::step::{
     Boundary, Buckle, ComplexFrequency, ConcentratedFlux, ConcentratedLoad, ContactChange,
-    Controls, CyclicModes, DefaultAmplitude, DefinedField, DefinedFieldKind, DesignResponse,
-    DistributedFlux, DistributedLoad, DistributedLoadKind, Dynamic, EquationSolver, FieldOutput,
-    Film, Filter, FluxKind, Frequency, HeatTransfer, HistoryOutput, Incrementation, ModalDamping,
-    ModalDynamics, OutputDimension, Procedure, Radiate, Rayleigh, RestartWrite, Sensitivity,
-    Static, SteadyStateDynamics, Step, Totals, Visco,
+    Controls, CyclicModes, DampingRatio, DefaultAmplitude, DefinedField, DefinedFieldKind,
+    DesignResponse, DistributedFlux, DistributedLoad, DistributedLoadKind, Dynamic, EquationSolver,
+    FieldOutput, Film, Filter, FluxKind, Frequency, HeatTransfer, HistoryOutput, Incrementation,
+    ModalDamping, ModalDynamics, OutputDimension, Procedure, Radiate, Rayleigh, RestartWrite,
+    Sensitivity, Static, SteadyStateDynamics, Step, Totals, Visco,
 };
 use plxs_core::{Error, normalized_name};
 
@@ -1719,6 +1719,7 @@ impl Reader {
             explicit: k.has("EXPLICIT"),
             increments: incrementation(k, data)?,
             rayleigh: None,
+            damping_ratio: None,
         });
         // CalculiX applies the loads of a dynamic step at once unless the step asks for a
         // ramp (observed with ccx 2.21: `*STEP` without `AMPLITUDE=` gives the same
@@ -1730,7 +1731,20 @@ impl Reader {
     }
 
     fn damping(&mut self, k: &Keyword) -> Result<(), Error> {
-        k.check_parameters(&["ALPHA", "BETA", "STRUCTURAL"])?;
+        k.check_parameters(&["ALPHA", "BETA", "STRUCTURAL", "RATIO", "LOWER", "UPPER"])?;
+        if let Some(ratio) = k.number("RATIO")? {
+            let upper = (k.number("UPPER")?).ok_or_else(|| k.error("RATIO needs UPPER"))?;
+            let damping = DampingRatio {
+                ratio,
+                lower: k.number("LOWER")?,
+                upper,
+            };
+            match &mut self.current_step(k)?.procedure {
+                Procedure::Dynamic(d) => d.damping_ratio = Some(damping),
+                _ => self.warn("*DAMPING outside of a *DYNAMIC step is ignored".to_string()),
+            }
+            return Ok(());
+        }
         let rayleigh = Rayleigh {
             alpha: k.number("ALPHA")?.unwrap_or(0.0),
             beta: k.number("BETA")?.unwrap_or(0.0),
