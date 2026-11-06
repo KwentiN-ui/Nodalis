@@ -65,10 +65,9 @@ pub use constraint::{
     CompressionOnly, Joint, JointKind, NodeTie, RigidBody, Spring, SpringEnd, SpringLayout,
 };
 pub use contact::{
-    Constraint, ContactMethod, ContactPair, ContactScale, CyclicSymmetry, DEFAULT_SURFACE_COLOR,
-    ElementYoung, Friction, GapConductance, InteractionProperty, NORMAL_STIFFNESS_FACTOR,
-    STICK_SLOPE_RATIO, SectorDisplay, SurfaceBehavior, SurfaceInteraction, Tie,
-    default_stick_slope,
+    Constraint, ContactMethod, ContactPair, ContactScale, CyclicSymmetry, ElementYoung, Friction,
+    GapConductance, InteractionProperty, NORMAL_STIFFNESS_FACTOR, STICK_SLOPE_RATIO, SectorDisplay,
+    SurfaceBehavior, SurfaceInteraction, Tie, default_stick_slope,
 };
 pub use contact_check::{ContactCheck, ContactStatus};
 pub use contact_steps::{ContactChange, ContactState};

@@ -117,12 +117,6 @@ pub fn master_slave_highlight(model: &Model, master: &Region, slave: &Region) ->
     highlight
 }
 
-fn color_row(ui: &mut Ui, label: &str, color: &mut [u8; 3]) {
-    ui.label(label);
-    ui.color_edit_button_srgb(color);
-    ui.end_row();
-}
-
 const ADJUST_HELP: &str = "Moves slave nodes onto the master surface before the analysis, so \
     that small gaps and overlaps from meshing do not start the contact with a jump or a \
     force. Only the start geometry changes. Without an adjust distance only nodes that \
@@ -168,8 +162,6 @@ pub fn tie_form(
         .on_hover_text(ADJUST_HELP);
     ui.end_row();
     regions.ui(ui, model);
-    color_row(ui, "Master color", &mut tie.master_color);
-    color_row(ui, "Slave color", &mut tie.slave_color);
     if !model.fe.properties.space.is_2d() || tie.cyclic.is_some() {
         cyclic_symmetry_rows(ui, model, &mut tie.cyclic);
         if tie.cyclic.is_some() {
@@ -366,8 +358,6 @@ pub fn contact_pair_form(
         );
     }
     regions.ui(ui, model);
-    color_row(ui, "Master color", &mut pair.master_color);
-    color_row(ui, "Slave color", &mut pair.slave_color);
 }
 
 pub fn validate_contact_pair(pair: &ContactPair, fe: &FeModel) -> Result<(), String> {

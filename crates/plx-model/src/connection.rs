@@ -30,8 +30,6 @@ pub struct ContactRegion {
     pub behavior: ContactBehavior,
     #[serde(default)]
     pub settings: ContactSettings,
-    pub color_a: [u8; 3],
-    pub color_b: [u8; 3],
     /// The contact detection that found the region; `None` for a region made by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detected_by: Option<String>,
@@ -49,8 +47,6 @@ impl ContactRegion {
             side_b: Region::Faces(Vec::new()),
             behavior,
             settings: ContactSettings::default(),
-            color_a: [255, 0, 0],
-            color_b: [0, 0, 255],
             detected_by: None,
             edited: false,
         }
@@ -99,7 +95,6 @@ impl ContactRegion {
     /// Swaps side A and side B, together with a master side chosen by hand.
     pub fn flip(&mut self) {
         std::mem::swap(&mut self.side_a, &mut self.side_b);
-        std::mem::swap(&mut self.color_a, &mut self.color_b);
         self.settings.sides = self.settings.sides.map(SideRoles::flipped);
     }
 }
@@ -767,20 +762,10 @@ impl FeModel {
         // Interactions of one region each, whose friction a step changes.
         let mut private: Vec<String> = Vec::new();
         for (r, (region, item)) in self.contact_regions.iter().zip(&resolved.items).enumerate() {
-            let (master, slave, master_color, slave_color) = if item.a_is_master {
-                (
-                    &region.side_a,
-                    &region.side_b,
-                    region.color_a,
-                    region.color_b,
-                )
+            let (master, slave) = if item.a_is_master {
+                (&region.side_a, &region.side_b)
             } else {
-                (
-                    &region.side_b,
-                    &region.side_a,
-                    region.color_b,
-                    region.color_a,
-                )
+                (&region.side_b, &region.side_a)
             };
             match &item.kind {
                 ResolvedKind::Tie { tolerance, adjust } => {
@@ -792,8 +777,6 @@ impl FeModel {
                     tie.adjust = *adjust;
                     tie.master = master.clone();
                     tie.slave = slave.clone();
-                    tie.master_color = master_color;
-                    tie.slave_color = slave_color;
                     let nodes: BTreeSet<NodeId> = if region.active {
                         slave.nodes(mesh).into_iter().collect()
                     } else {
@@ -873,8 +856,6 @@ impl FeModel {
                     pair.clearance = *clearance;
                     pair.master = master.clone();
                     pair.slave = slave.clone();
-                    pair.master_color = master_color;
-                    pair.slave_color = slave_color;
                     lowered.contact_pairs.push(pair);
                     origin.pair_regions.push(r);
                 }

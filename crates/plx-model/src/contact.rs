@@ -6,9 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{CompressionOnly, NodeTie, Region, RigidBody, Spring, SpringEnd};
 
-/// The default colour of contact and constraint surfaces, yellow.
-pub const DEFAULT_SURFACE_COLOR: [u8; 3] = [255, 255, 0];
-
 /// Mechanical and thermal behaviour of touching surfaces (`*SURFACE INTERACTION`), referred to
 /// by contact pairs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -259,8 +256,6 @@ pub struct ContactPair {
     pub clearance: Option<f64>,
     pub master: Region,
     pub slave: Region,
-    pub master_color: [u8; 3],
-    pub slave_color: [u8; 3],
 }
 
 /// The name of a swapped pair: `<slave>_to_<master>` for `<master>_to_<slave>`, other
@@ -291,8 +286,6 @@ impl ContactPair {
             clearance: None,
             master: Region::Faces(Vec::new()),
             slave: Region::Faces(Vec::new()),
-            master_color: DEFAULT_SURFACE_COLOR,
-            slave_color: DEFAULT_SURFACE_COLOR,
         }
     }
 }
@@ -445,8 +438,6 @@ pub struct Tie {
     pub adjust: bool,
     pub master: Region,
     pub slave: Region,
-    pub master_color: [u8; 3],
-    pub slave_color: [u8; 3],
     /// Makes the tie the cyclic symmetry of a sector: the slave side is the master side
     /// rotated by one sector about the axis (`*TIE, CYCLIC SYMMETRY`).
     #[serde(default)]
@@ -598,8 +589,6 @@ impl Tie {
             adjust: true,
             master: Region::Faces(Vec::new()),
             slave: Region::Faces(Vec::new()),
-            master_color: DEFAULT_SURFACE_COLOR,
-            slave_color: DEFAULT_SURFACE_COLOR,
             cyclic: None,
         }
     }
