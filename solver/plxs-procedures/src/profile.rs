@@ -22,10 +22,14 @@ pub enum Phase {
     Vectors,
     /// Stresses, strains, reaction forces and the result fields of an increment.
     Results,
+    /// Loads and prescribed displacements of an increment.
+    Loads,
+    /// Contact search and evaluation of the springs.
+    Contact,
 }
 
 impl Phase {
-    pub const ALL: [Phase; 7] = [
+    pub const ALL: [Phase; 9] = [
         Phase::Assembly,
         Phase::Reduction,
         Phase::Analysis,
@@ -33,6 +37,8 @@ impl Phase {
         Phase::Solve,
         Phase::Vectors,
         Phase::Results,
+        Phase::Loads,
+        Phase::Contact,
     ];
 
     fn index(self) -> usize {
@@ -48,6 +54,8 @@ impl Phase {
             Phase::Solve => "solve",
             Phase::Vectors => "vector arithmetic",
             Phase::Results => "results",
+            Phase::Loads => "loads and constraints",
+            Phase::Contact => "contact",
         }
     }
 }
@@ -55,8 +63,8 @@ impl Phase {
 /// Time and count per phase, plus how often a symbolic analysis was reused.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Profile {
-    time: [Duration; 7],
-    count: [u32; 7],
+    time: [Duration; 9],
+    count: [u32; 9],
     /// Symbolic analyses skipped because the pattern was the one analyzed before.
     pub analyses_reused: u32,
 }
