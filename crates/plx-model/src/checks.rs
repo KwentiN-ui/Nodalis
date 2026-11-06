@@ -2541,7 +2541,10 @@ impl FeModel {
                     LoadKind::Pressure(_) | LoadKind::Centrifugal { .. } => {
                         (0..dofs.min(3)).collect()
                     }
-                    LoadKind::Gravity(g) => (0..3).filter(|&d| g[d] != 0.0 && d < dofs).collect(),
+                    LoadKind::Gravity(_) | LoadKind::StandardGravity(_) => {
+                        let g = load.kind.gravity_vector().unwrap_or_default();
+                        (0..3).filter(|&d| g[d] != 0.0 && d < dofs).collect()
+                    }
                     // Heat flows go into temperatures, which nothing but a temperature holds.
                     _ => Vec::new(),
                 };

@@ -6424,6 +6424,15 @@ fn gravity_and_centrifugal_loads_are_written() {
         text.contains("*Dload, op=New\nINTERNAL_SELECTION-1_BODY-1, GRAV, 9810, 0, 0, -1\n"),
         "{text}"
     );
+    // Standard gravity is lowered to the vector of the standard acceleration.
+    let (mesh, model) = cantilever(body_load(LoadKind::StandardGravity(
+        plx_model::GravityDirection::MinusZ,
+    )));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("INTERNAL_SELECTION-1_BODY-1, GRAV, 9.80665, 0, 0, -1\n"),
+        "{text}"
+    );
     let (mesh, model) = cantilever(body_load(LoadKind::Centrifugal {
         point: [0.0, 5.0, 5.0],
         axis: [0.0, 0.0, 2.0],

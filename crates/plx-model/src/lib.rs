@@ -1836,6 +1836,10 @@ pub enum LoadKind {
     /// Gravity, as the acceleration vector acting on the elements of the region
     /// (`*DLOAD`, `GRAV`). Needs the density of the materials.
     Gravity([f64; 3]),
+    /// Standard gravity along one axis of the global system (`*DLOAD`, `GRAV`): the user
+    /// picks the direction, the size is [`STANDARD_GRAVITY`]. Lowered to the same
+    /// acceleration vector as [`LoadKind::Gravity`] when the model is exported.
+    StandardGravity(GravityDirection),
     /// Rotation of the elements of the region about an axis through `point` along `axis`
     /// at `speed` radians per time (`*DLOAD`, `CENTRIF`).
     /// The solver takes the square of the speed; the model keeps the speed the user entered.
@@ -1877,6 +1881,7 @@ impl LoadKind {
                 | LoadKind::RemoteForce(_)
                 | LoadKind::PreTension { .. }
                 | LoadKind::Gravity(_)
+                | LoadKind::StandardGravity(_)
                 | LoadKind::Centrifugal { .. }
                 | LoadKind::Moving(_)
         )
@@ -1885,7 +1890,83 @@ impl LoadKind {
     /// Whether the load acts on the mass of the elements (gravity, centrifugal), so the
     /// materials need a density.
     pub fn is_body_force(&self) -> bool {
-        matches!(self, LoadKind::Gravity(_) | LoadKind::Centrifugal { .. })
+        matches!(
+            self,
+            LoadKind::Gravity(_) | LoadKind::StandardGravity(_) | LoadKind::Centrifugal { .. }
+        )
+    }
+
+    /// The acceleration vector of a gravity load, in the stored units (m/s²): what the user
+    /// typed for [`LoadKind::Gravity`], the standard acceleration along the picked axis for
+    /// [`LoadKind::StandardGravity`].
+    pub fn gravity_vector(&self) -> Option<[f64; 3]> {
+        match self {
+            LoadKind::Gravity(g) => Some(*g),
+            LoadKind::StandardGravity(direction) => Some(direction.vector()),
+            _ => None,
+        }
+    }
+}
+
+/// The standard acceleration of gravity in m/s², the unit the model stores accelerations in.
+pub const STANDARD_GRAVITY: f64 = 9.80665;
+
+/// The axis of the global system a standard gravity acts along, with its sign.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GravityDirection {
+    PlusX,
+    MinusX,
+    PlusY,
+    MinusY,
+    PlusZ,
+    #[default]
+    MinusZ,
+}
+
+impl GravityDirection {
+    pub const ALL: [GravityDirection; 6] = [
+        GravityDirection::PlusX,
+        GravityDirection::MinusX,
+        GravityDirection::PlusY,
+        GravityDirection::MinusY,
+        GravityDirection::PlusZ,
+        GravityDirection::MinusZ,
+    ];
+
+    /// The directions of a 2D model, which lies in the X-Y plane.
+    pub const PLANAR: [GravityDirection; 4] = [
+        GravityDirection::PlusX,
+        GravityDirection::MinusX,
+        GravityDirection::PlusY,
+        GravityDirection::MinusY,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GravityDirection::PlusX => "+X",
+            GravityDirection::MinusX => "-X",
+            GravityDirection::PlusY => "+Y",
+            GravityDirection::MinusY => "-Y",
+            GravityDirection::PlusZ => "+Z",
+            GravityDirection::MinusZ => "-Z",
+        }
+    }
+
+    /// The unit vector of the direction.
+    pub fn unit(self) -> [f64; 3] {
+        match self {
+            GravityDirection::PlusX => [1.0, 0.0, 0.0],
+            GravityDirection::MinusX => [-1.0, 0.0, 0.0],
+            GravityDirection::PlusY => [0.0, 1.0, 0.0],
+            GravityDirection::MinusY => [0.0, -1.0, 0.0],
+            GravityDirection::PlusZ => [0.0, 0.0, 1.0],
+            GravityDirection::MinusZ => [0.0, 0.0, -1.0],
+        }
+    }
+
+    /// The standard acceleration along the direction.
+    pub fn vector(self) -> [f64; 3] {
+        self.unit().map(|c| c * STANDARD_GRAVITY)
     }
 }
 
@@ -2134,5 +2215,29 @@ mod tests {
             next_name("Material", ["Material-1", "MATERIAL-2", "Steel"]),
             "Material-3"
         );
+    }
+}
+
+#[cfg(test)]
+mod standard_gravity_tests {
+    use super::*;
+
+    #[test]
+    fn standard_gravity_is_the_standard_acceleration_along_its_axis() {
+        for direction in GravityDirection::ALL {
+            let vector = direction.vector();
+            let size = vector.iter().map(|c| c * c).sum::<f64>().sqrt();
+            assert!((size - STANDARD_GRAVITY).abs() < 1e-12);
+            assert_eq!(
+                LoadKind::StandardGravity(direction).gravity_vector(),
+                Some(vector)
+            );
+        }
+        assert_eq!(
+            LoadKind::StandardGravity(GravityDirection::MinusY).gravity_vector(),
+            Some([0.0, -STANDARD_GRAVITY, 0.0])
+        );
+        assert_eq!(LoadKind::Pressure(1.0).gravity_vector(), None);
+        assert!(LoadKind::StandardGravity(GravityDirection::MinusZ).is_body_force());
     }
 }
