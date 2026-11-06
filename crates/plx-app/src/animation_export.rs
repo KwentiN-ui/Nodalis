@@ -118,6 +118,11 @@ pub struct Recording {
     pub file: String,
     /// Animation frame and playing state from before, restored at the end.
     pub restore: (usize, bool),
+    /// The frame drawn now is captured: the progress window stays out of it.
+    pub capturing: bool,
+    cancelled: bool,
+    /// A capture was requested in the last frame.
+    requested: bool,
 }
 
 /// What the app does next for a recording.
@@ -147,7 +152,15 @@ impl Recording {
             encoder,
             file,
             restore,
+            capturing: false,
+            cancelled: false,
+            requested: false,
         }
+    }
+
+    /// Stops the recording at the next update.
+    pub fn cancel(&mut self) {
+        self.cancelled = true;
     }
 
     pub fn first_frame(&self) -> usize {
@@ -162,9 +175,11 @@ impl Recording {
     /// Takes the capture of the frame on screen if it arrived, or requests it; `view` is the
     /// 3D view in points.
     pub fn update(mut self, ctx: &Context, view: Rect) -> (Option<Self>, Step) {
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if self.cancelled || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             return (None, Step::Cancelled);
         }
+        // The screenshot requested last frame is of the frame drawn now.
+        self.capturing = std::mem::take(&mut self.requested);
         ctx.request_repaint();
         let position = self.position;
         let captured = ctx.input(|i| {
@@ -205,6 +220,7 @@ impl Recording {
                     position,
                 ))));
                 self.waiting = Some(0);
+                self.requested = true;
             }
         }
         (Some(self), Step::Wait)

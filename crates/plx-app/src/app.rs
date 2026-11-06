@@ -946,7 +946,7 @@ impl AnalysisWindow {
                     let (done, all) = recording.progress();
                     ui.spinner();
                     ui.label(format!(
-                        "Recording {}: frame {} of {all} (Esc cancels)",
+                        "Recording {}: frame {} of {all}",
                         recording.file,
                         (done + 1).min(all)
                     ));
@@ -1355,15 +1355,19 @@ impl AnalysisWindow {
         // Under the System theme, the operating system may switch between light and dark.
         crate::style::sync(&ctx);
         let shift_command = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
-        if ctx.input_mut(|i| i.consume_key(shift_command, egui::Key::S)) {
+        // While frames of an animation are recorded, the progress window takes all input.
+        let recording = self.workbench.recording.is_some();
+        if !recording && ctx.input_mut(|i| i.consume_key(shift_command, egui::Key::S)) {
             self.workbench.requests.push(Request::Save(true));
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
+        if !recording && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
             self.workbench.requests.push(Request::Save(false));
         }
-        self.workbench.results_keys(&ctx);
+        if !recording {
+            self.workbench.results_keys(&ctx);
+        }
         // A focused text field undoes its own typing.
-        if !ctx.egui_wants_keyboard_input() {
+        if !recording && !ctx.egui_wants_keyboard_input() {
             // Ctrl+Z matches with Shift held too, so Redo is checked first.
             if ctx.input_mut(|i| i.consume_key(shift_command, egui::Key::Z)) {
                 self.workbench.redo();
@@ -1374,6 +1378,7 @@ impl AnalysisWindow {
         }
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             (i.raw.dropped_files.iter())
+                .filter(|_| !recording)
                 .map(|f| f.path().to_path_buf())
                 .filter(|p| !p.as_os_str().is_empty())
                 .collect()
@@ -1524,8 +1529,11 @@ impl AnalysisWindow {
         });
         let view = self.workbench.viewport.rect;
         // The floating bar, at the bottom of what the properties panel leaves of the view;
-        // not in a screenshot.
-        if self.workbench.shown().is_some() && !self.workbench.screenshot.capturing(&ctx) {
+        // not in a screenshot or in the frames of a recorded animation.
+        if self.workbench.shown().is_some()
+            && !self.workbench.screenshot.capturing(&ctx)
+            && self.workbench.recording.is_none()
+        {
             let mut free = view;
             if let Some(panel) = crate::dock::over_view(&ctx) {
                 free.max.x = free.max.x.min(panel.left());
@@ -1547,6 +1555,7 @@ impl AnalysisWindow {
         self.workbench.update_cyclic_preview();
         self.workbench.confirm_delete_window(&ctx);
         self.workbench.confirm_remove_results(&ctx);
+        self.workbench.recording_window(&ctx);
         self.workbench.toast(&ctx);
         self.workbench.contact_worksheet_window(&ctx);
         self.workbench.mesh_tool_window(&ctx);
@@ -3440,6 +3449,54 @@ impl Workbench {
         }
     }
 
+    /// The modal shown while an animation is recorded: it blocks all other input and shows
+    /// the progress; Cancel (or Escape) stops the export. On the frame whose screenshot is
+    /// taken it draws nothing, so the window never ends up in the file.
+    fn recording_window(&mut self, ctx: &egui::Context) {
+        let Some(recording) = &mut self.recording else {
+            return;
+        };
+        let capturing = recording.capturing;
+        let (done, all) = recording.progress();
+        let file = recording.file.clone();
+        let mut cancel = false;
+        let modal = egui::Modal::new(crate::ids::window(ctx, "recording animation"));
+        let modal = if capturing {
+            modal
+                .backdrop_color(egui::Color32::TRANSPARENT)
+                .frame(egui::Frame::NONE)
+        } else {
+            modal
+        };
+        modal.show(ctx, |ui| {
+            if capturing {
+                return;
+            }
+            ui.set_width(340.0);
+            ui.label(
+                egui::RichText::new("Rendering animation")
+                    .strong()
+                    .size(15.0),
+            );
+            ui.add_space(4.0);
+            ui.label(format!("{file}: frame {} of {all}", (done + 1).min(all)));
+            ui.add_space(6.0);
+            let fraction = if all == 0 {
+                0.0
+            } else {
+                done as f32 / all as f32
+            };
+            ui.add(egui::ProgressBar::new(fraction).show_percentage());
+            ui.add_space(10.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                cancel = ui.button("Cancel").clicked();
+            });
+        });
+        if cancel {
+            recording.cancel();
+        }
+    }
+
     /// Asks before Remove Results, which Undo cannot take back.
     fn confirm_remove_results(&mut self, ctx: &egui::Context) {
         if !self.confirm_remove_results {
@@ -5219,6 +5276,9 @@ impl Workbench {
     fn undo_blocked(&self) -> Option<&'static str> {
         if self.tree_view == TreeView::Results {
             return Some("Undo and Redo work on the Geometry and FE Model tabs.");
+        }
+        if self.recording.is_some() {
+            return Some("Wait until the animation is recorded.");
         }
         if self.meshing.is_some() {
             return Some("Wait until meshing has finished.");
