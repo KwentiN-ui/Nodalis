@@ -192,6 +192,9 @@ pub struct Hyperelastic {
     /// Poisson's ratio at small strains: how compressible the material is. Rubber is
     /// nearly incompressible (0.49 to 0.499).
     pub poisson: f64,
+    /// Test data the constants were or can be fitted to.
+    #[serde(default)]
+    pub test_data: Vec<crate::hyperelastic_fit::TestPoint>,
 }
 
 impl Default for Hyperelastic {
@@ -232,6 +235,7 @@ impl Hyperelastic {
             model: HyperelasticModel::NeoHooke,
             constants: vec![mu / 2.0],
             poisson,
+            test_data: Vec::new(),
         }
     }
 
@@ -245,6 +249,7 @@ impl Hyperelastic {
             model,
             constants: model.equivalent(if mu > 0.0 { mu } else { 1e6 }),
             poisson: self.poisson,
+            test_data: self.test_data.clone(),
         }
     }
 
@@ -528,6 +533,7 @@ mod tests {
             model: HyperelasticModel::MooneyRivlin,
             constants: vec![-0.2, 0.7],
             poisson: 0.49,
+            test_data: Vec::new(),
         };
         assert!(unstable.unstable_stretch().is_some());
     }

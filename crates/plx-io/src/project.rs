@@ -1190,9 +1190,37 @@ mod tests {
                 model: plx_model::HyperelasticModel::Yeoh,
                 constants: vec![0.55e6, -0.02e6, 0.004e6],
                 poisson: 0.49,
+                test_data: Vec::new(),
             }),
             ..Default::default()
         });
+        // Test data from Ogden's classic fit to Treloar's natural rubber (in the CalculiX form).
+        if std::env::var_os("PLX_RUBBER_DEMO_DATA").is_some() {
+            let ogden = plx_model::Hyperelastic {
+                model: plx_model::HyperelasticModel::Ogden(3),
+                constants: vec![0.41e6, 1.3, 0.003e6, 5.0, 0.01e6, -2.0],
+                poisson: 0.49,
+                test_data: Vec::new(),
+            };
+            let hyper = model.materials[0].hyperelastic.as_mut().unwrap();
+            *hyper = hyper.with_model(plx_model::HyperelasticModel::Ogden(3));
+            for (mode, largest) in [
+                (plx_model::TestMode::Uniaxial, 6.0),
+                (plx_model::TestMode::Biaxial, 3.0),
+            ] {
+                for i in 1..=10 {
+                    let strain = largest * f64::from(i) / 10.0;
+                    hyper
+                        .test_data
+                        .push(plx_model::hyperelastic_fit::TestPoint {
+                            mode,
+                            strain,
+                            // Four digits, as measured.
+                            stress: (ogden.nominal_stress(mode, 1.0 + strain) / 1e3).round() * 1e3,
+                        });
+                }
+            }
+        }
         model.sections.push(plx_model::Section {
             name: "Solid_Section-1".into(),
             material: "Rubber".into(),

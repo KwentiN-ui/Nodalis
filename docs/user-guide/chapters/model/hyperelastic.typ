@@ -48,6 +48,35 @@ strains. Switching the model keeps the initial shear modulus; switching back to
 The library (@material-library) has generic rubbers of 40, 60 and 70 Shore A in the category
 #ui("Elastomers") (Neo-Hooke from the hardness, density 1100 kg/m³).
 
+==== Fit to test data <hyperelastic-fit>
+
+The best constants come from tests of the rubber. #ui("Fit to Test Data...") in the material
+dialog opens a window for the test curves: nominal stress (force per original cross-section)
+over nominal strain (change of length per original length) of uniaxial tension or compression,
+equibiaxial tension and planar tension (pure shear).
+
+#screenshot("hyperelastic-fit.png", [Ogden model fitted to uniaxial and equibiaxial test data])
+
+- Pick the test in the combo box, paste two columns (strain and stress in the unit shown, one
+  point per line, separated by blanks, tabs, commas or semicolons, e.g. copied from a
+  spreadsheet) and press #ui("Add points"). Lines that are not two numbers, such as a header,
+  are skipped. The table below lists all points; each can be edited, moved to another test or
+  removed, #ui("Add row") adds one.
+- #ui("Fit") (with the name of the model) sets the constants of the selected model to those that match the points best:
+  least squares of the relative stress error, with the material taken as incompressible.
+  Poisson's ratio stays. The constants of the polynomial models follow directly; the Ogden
+  exponents and the locking stretch of Arruda-Boyce are searched from several starting values,
+  and a stable fit is preferred. The window shows the remaining error (RMS of the relative
+  error) and warns if the fitted material is unstable somewhere.
+- The plot shows the nominal stress of the model in each test against the points, and
+  updates while you edit constants or points. Without points it shows the three tests of the
+  current constants.
+
+Data of one test only (usually uniaxial) can be met by many constants, which may behave
+badly in the other directions: prefer Neo-Hooke, Yeoh or Arruda-Boyce then, and add
+equibiaxial or planar data for Mooney-Rivlin, the polynomial or Ogden. The points are saved
+with the material.
+
 ==== Steps with hyperelastic materials
 
 - #ui("Static"), #ui("Visco") and #ui("Dynamic") steps (direct integration, also with contact)

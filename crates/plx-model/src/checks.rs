@@ -4116,6 +4116,7 @@ mod tests {
             model: crate::HyperelasticModel::MooneyRivlin,
             constants: vec![-0.2e6, 0.7e6],
             poisson: 0.49,
+            test_data: Vec::new(),
         });
         assert_eq!(
             problems(&check(&model, &mesh)),

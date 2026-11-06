@@ -378,6 +378,9 @@ impl Material {
                     c.value(value, Quantity::Pressure);
                 }
             }
+            for point in hyper.test_data.iter_mut() {
+                c.value(&mut point.stress, Quantity::Pressure);
+            }
         }
         c.option(&mut self.conductivity, Quantity::ThermalConductivity);
         c.option(&mut self.specific_heat, Quantity::SpecificHeat);

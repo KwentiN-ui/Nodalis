@@ -30,6 +30,7 @@ pub mod fingerprint;
 mod geometry;
 mod history;
 pub mod hyperelastic;
+pub mod hyperelastic_fit;
 pub mod library;
 mod measure;
 mod mesh_set;
