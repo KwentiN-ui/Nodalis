@@ -1835,15 +1835,17 @@ fn load_region(
 /// shows it for a few seconds.
 pub(crate) fn dropped_note(ui: &Ui, dropped: bool) {
     let until = dropped.then(|| ui.input(|i| i.time) + DROPPED_NOTE_SECONDS);
-    ui.data_mut(|d| d.insert_temp(crate::ids::window(ui.ctx(), "dropped note"), until));
+    // The id outside the closure: the context is locked while it runs.
+    let id = crate::ids::window(ui.ctx(), "dropped note");
+    ui.data_mut(|d| d.insert_temp(id, until));
 }
 
 const DROPPED_NOTE_SECONDS: f64 = 6.0;
 
 /// The hint row left by [`dropped_note`].
 pub(crate) fn show_dropped_note(ui: &mut Ui) {
-    let until =
-        ui.data(|d| d.get_temp::<Option<f64>>(crate::ids::window(ui.ctx(), "dropped note")));
+    let id = crate::ids::window(ui.ctx(), "dropped note");
+    let until = ui.data(|d| d.get_temp::<Option<f64>>(id));
     if let Some(Some(until)) = until
         && ui.input(|i| i.time) < until
     {
@@ -6308,6 +6310,31 @@ mod tests {
         );
         assert!(delete(&mut fe, &item));
         assert!(fe.contact_regions.is_empty());
+    }
+
+    #[test]
+    fn the_dropped_note_does_not_lock_up_the_ui() {
+        // Changing the type of a load whose picks do not fit used to deadlock on the egui
+        // context lock. Run a frame on its own thread so a deadlock fails instead of hangs.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let ctx = egui::Context::default();
+            let mut shown = false;
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                egui::Grid::new("grid").show(ui, |ui| {
+                    dropped_note(ui, true);
+                    let before = ui.min_rect().height();
+                    show_dropped_note(ui);
+                    shown = ui.min_rect().height() > before;
+                });
+            });
+            output.textures_delta.clear();
+            let _ = sender.send(shown);
+        });
+        let shown = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the dropped note deadlocked");
+        assert!(shown);
     }
 
     #[test]
