@@ -14,13 +14,14 @@ use plx_model::{
     BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, CrossSection,
     CyclicSymmetry, Damping, DampingRange, DefinedField, DefinedFieldKind, Displacement,
     Distribution, DynamicStep, Elastic, FeModel, Field, FieldOutput, Formulation, FrequencyStep,
-    GLOBAL, Hardening, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
-    InitialCondition, InitialConditionKind, ItemRef, LinearSolverChoice, Load, LoadKind, Material,
-    MeshSet, ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad, NodeTie,
-    NumericalDamping, OutputDimension, OutputKind, PlasticPoint, Quantity, RayleighDamping, Region,
-    RemoteBehavior, RemoteForce, Section, SectionKind, SensitivityStep, SetKind, StaticStep,
-    SteadyStateDynamicsStep, Step, StepKind, StepLimit, SurfaceInteraction, SymmetryError, Tie,
-    TimeStep, UnitSystem, ViscoStep, Wheel, next_name, symmetry_plane,
+    GLOBAL, GravityDirection, Hardening, HeatTransferStep, HistoryKind, HistoryOutput,
+    Incrementation, InitialCondition, InitialConditionKind, ItemRef, LinearSolverChoice, Load,
+    LoadKind, Material, MeshSet, ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace,
+    MovingLoad, NodeTie, NumericalDamping, OutputDimension, OutputKind, PlasticPoint, Quantity,
+    RayleighDamping, Region, RemoteBehavior, RemoteForce, STANDARD_GRAVITY, Section, SectionKind,
+    SensitivityStep, SetKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind, StepLimit,
+    SurfaceInteraction, SymmetryError, Tie, TimeStep, UnitSystem, ViscoStep, Wheel, next_name,
+    symmetry_plane,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row, amplitude_row_with};
@@ -1655,6 +1656,21 @@ const DOF_LABELS: [&str; 6] = ["U1", "U2", "U3", "UR1", "UR2", "UR3"];
 
 /// The load kinds of the dialog, the force first: label, default name and the kind with zero
 /// values.
+/// The axis direction closest to an acceleration vector, the one it points along most.
+fn nearest_direction(vector: [f64; 3]) -> GravityDirection {
+    let axis = (0..3)
+        .max_by(|&a, &b| vector[a].abs().total_cmp(&vector[b].abs()))
+        .unwrap_or(2);
+    match (axis, vector[axis] >= 0.0) {
+        (0, true) => GravityDirection::PlusX,
+        (0, false) => GravityDirection::MinusX,
+        (1, true) => GravityDirection::PlusY,
+        (1, false) => GravityDirection::MinusY,
+        (_, true) if vector[2] != 0.0 => GravityDirection::PlusZ,
+        _ => GravityDirection::MinusZ,
+    }
+}
+
 fn load_kinds() -> [(&'static str, &'static str, LoadKind); 13] {
     [
         ("Force", FORCE, LoadKind::force([0.0; 3])),
@@ -1665,7 +1681,11 @@ fn load_kinds() -> [(&'static str, &'static str, LoadKind); 13] {
         ),
         ("Moment", MOMENT, LoadKind::Moment([0.0; 3])),
         ("Pressure", PRESSURE, LoadKind::Pressure(0.0)),
-        ("Gravity", GRAVITY, LoadKind::Gravity([0.0, 0.0, -9.81])),
+        (
+            "Gravity",
+            GRAVITY,
+            LoadKind::StandardGravity(GravityDirection::MinusZ),
+        ),
         (
             "Centrifugal load",
             CENTRIFUGAL,
@@ -1778,7 +1798,7 @@ fn load_kind_name(kind: &LoadKind) -> &'static str {
         LoadKind::BodyFlux(_) => BODY_FLUX,
         LoadKind::Film { .. } => FILM,
         LoadKind::Radiation { .. } => RADIATION,
-        LoadKind::Gravity(_) => GRAVITY,
+        LoadKind::Gravity(_) | LoadKind::StandardGravity(_) => GRAVITY,
         LoadKind::Centrifugal { .. } => CENTRIFUGAL,
         LoadKind::Moving(_) => MOVING,
     }
@@ -1798,9 +1818,10 @@ fn load_target(kind: &LoadKind) -> LoadTarget {
         | LoadKind::RemoteForce(_)
         | LoadKind::Moment(_)
         | LoadKind::ConcentratedFlux(_) => LoadTarget::Nodes,
-        LoadKind::BodyFlux(_) | LoadKind::Gravity(_) | LoadKind::Centrifugal { .. } => {
-            LoadTarget::Elements
-        }
+        LoadKind::BodyFlux(_)
+        | LoadKind::Gravity(_)
+        | LoadKind::StandardGravity(_)
+        | LoadKind::Centrifugal { .. } => LoadTarget::Elements,
         _ => LoadTarget::Faces,
     }
 }
@@ -3130,24 +3151,92 @@ impl Editor {
                         });
                         ui.end_row();
                     }
-                    LoadKind::Gravity(acceleration) => {
-                        let count = if two_d { 2 } else { 3 };
-                        let labels = ["g1", "g2", "g3"].into_iter().zip(Field::VECTOR);
-                        for (value, (label, field)) in
-                            acceleration.iter_mut().zip(labels).take(count)
-                        {
-                            ui.label(label);
-                            expose::field(ui, field, |ui| {
-                                ui.add(
-                                    numeric::quantity(value, units, Quantity::Acceleration)
-                                        .speed(0.1),
-                                )
+                    LoadKind::Gravity(_) | LoadKind::StandardGravity(_) => {
+                        // Standard gravity along an axis, or an acceleration vector.
+                        let standard = matches!(load.kind, LoadKind::StandardGravity(_));
+                        ui.label("Definition");
+                        let mut to_standard = standard;
+                        egui::ComboBox::from_id_salt("gravity definition")
+                            .selected_text(if standard {
+                                "Standard Gravity"
+                            } else {
+                                "User Defined"
+                            })
+                            .width(crate::dock::fit_width(ui, 200.0))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut to_standard, true, "Standard Gravity");
+                                ui.selectable_value(&mut to_standard, false, "User Defined");
                             });
-                            ui.end_row();
-                        }
-                        ui.label("");
-                        ui.weak("Acceleration vector; the materials need a density.");
                         ui.end_row();
+                        if to_standard != standard {
+                            // Switching keeps what the user sees: the standard gravity takes
+                            // over the nearest axis of the vector, the vector the standard one.
+                            load.kind = if to_standard {
+                                LoadKind::StandardGravity(
+                                    load.kind
+                                        .gravity_vector()
+                                        .map_or(GravityDirection::MinusZ, nearest_direction),
+                                )
+                            } else {
+                                LoadKind::Gravity(load.kind.gravity_vector().unwrap_or_default())
+                            };
+                        }
+                        match &mut load.kind {
+                            LoadKind::StandardGravity(direction) => {
+                                let directions: &[GravityDirection] = if two_d {
+                                    &GravityDirection::PLANAR
+                                } else {
+                                    &GravityDirection::ALL
+                                };
+                                // A 2D model has no Z direction.
+                                if !directions.contains(direction) {
+                                    *direction = GravityDirection::MinusY;
+                                }
+                                ui.label("Direction");
+                                egui::ComboBox::from_id_salt("gravity direction")
+                                    .selected_text(direction.label())
+                                    .width(crate::dock::fit_width(ui, 200.0))
+                                    .show_ui(ui, |ui| {
+                                        for d in directions {
+                                            ui.selectable_value(direction, *d, d.label());
+                                        }
+                                    });
+                                ui.end_row();
+                                ui.label("");
+                                ui.weak(format!(
+                                    "g = {} {}; the materials need a density.",
+                                    numeric::format_physical(
+                                        units.shown(STANDARD_GRAVITY, Quantity::Acceleration)
+                                    ),
+                                    units.unit(Quantity::Acceleration)
+                                ));
+                                ui.end_row();
+                            }
+                            LoadKind::Gravity(acceleration) => {
+                                let count = if two_d { 2 } else { 3 };
+                                // A 2D model has no Z component.
+                                if two_d {
+                                    acceleration[2] = 0.0;
+                                }
+                                let labels = ["g1", "g2", "g3"].into_iter().zip(Field::VECTOR);
+                                for (value, (label, field)) in
+                                    acceleration.iter_mut().zip(labels).take(count)
+                                {
+                                    ui.label(label);
+                                    expose::field(ui, field, |ui| {
+                                        ui.add(
+                                            numeric::quantity(value, units, Quantity::Acceleration)
+                                                .speed(0.1),
+                                        )
+                                    });
+                                    ui.end_row();
+                                }
+                                ui.label("");
+                                ui.weak("Acceleration vector; the materials need a density.");
+                                ui.end_row();
+                            }
+                            _ => {}
+                        }
                     }
                     LoadKind::Centrifugal { point, axis, speed } => {
                         ui.label("Rotational speed");

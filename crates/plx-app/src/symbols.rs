@@ -306,7 +306,8 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                 }
             }
             // Gravity as an arrow at the centre of the loaded elements.
-            Kind::Load(LoadKind::Gravity(acceleration)) => {
+            Kind::Load(ref kind @ (LoadKind::Gravity(_) | LoadKind::StandardGravity(_))) => {
+                let acceleration = kind.gravity_vector().unwrap_or_default();
                 if let Some(center) = region_center(model, &item.region, &visible) {
                     add(center, DVec3::from(acceleration), SymbolShape::Arrow);
                 }
