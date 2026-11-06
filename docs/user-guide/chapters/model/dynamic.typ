@@ -35,7 +35,7 @@ structure is damped; Nodalis chooses the time step and the integration from that
     frequency limit below. #ui("At most") takes your value. Either way the time step is
     shortened so that the frames fall exactly on time steps; the line under the settings
     shows the time step used and the number of increments.],
-  [Resolve frequencies up to], [The highest frequency the integration must follow, with 20
+  [Max. frequency], [The highest frequency the integration must follow, with 20
     time steps per period. Set it when the structure vibrates faster than the frames show,
     e.g. to see the stresses of an impact correctly in each frame.],
   [Numerical damping], [Damping of the time integration (Hilber-Hughes-Taylor) that removes

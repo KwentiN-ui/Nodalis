@@ -1054,7 +1054,7 @@ impl DynamicStep {
 
     /// What is wrong with the settings, if anything.
     pub fn problem(&self) -> Option<String> {
-        if !(self.duration > 0.0) {
+        if self.duration.is_nan() || self.duration <= 0.0 {
             return Some("The duration must be greater than 0.".into());
         }
         if !(1..=Self::MAX_FRAMES).contains(&self.frames) {
@@ -1071,7 +1071,7 @@ impl DynamicStep {
             );
         }
         if let Some(f) = self.frequency_limit
-            && !(f > 0.0)
+            && (f.is_nan() || f <= 0.0)
         {
             return Some("The frequency limit must be greater than 0.".into());
         }

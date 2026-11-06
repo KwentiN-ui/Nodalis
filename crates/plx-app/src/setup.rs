@@ -5581,7 +5581,7 @@ fn dynamic_form(
             } else {
                 ui.label("");
                 ui.weak(format!(
-                    "Up to {}",
+                    "Lowest eigenfrequency to {}",
                     shown(integration.resolved_frequency(), units, Quantity::Frequency)
                 ));
                 ui.end_row();
@@ -5643,7 +5643,7 @@ fn dynamic_form(
             ui.add(numeric::physical(dt, units, Quantity::Time));
             ui.end_row();
         }
-        ui.label("Resolve frequencies up to").on_hover_text(
+        ui.label("Max. frequency").on_hover_text(
             "The time step resolves vibrations up to this frequency with 20 steps per period. \
              Higher ones are damped out by the numerical damping.",
         );
@@ -5683,15 +5683,15 @@ fn dynamic_form(
     };
     ui.label("");
     ui.weak(format!(
-        "Time step {} ({reason}), {} increments",
+        "Time step {} ({reason}),\n{} increments",
         shown(integration.increment, units, Quantity::Time),
         integration.increments(settings)
     ));
     ui.end_row();
     ui.label("");
     ui.weak(
-        "Loads act at once; give a load an amplitude\nfor a ramp, pulse or vibration. \
-         Materials\nneed a density.",
+        "Loads act at once; give a load an\namplitude for a ramp, pulse or\nvibration. \
+         Materials need a density.",
     );
     ui.end_row();
 }
