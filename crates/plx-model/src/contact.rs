@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CompressionOnly, NodeTie, Region, RigidBody, Spring};
+use crate::{CompressionOnly, NodeTie, Region, RigidBody, Spring, SpringEnd};
 
 /// The default colour of contact and constraint surfaces, yellow.
 pub const DEFAULT_SURFACE_COLOR: [u8; 3] = [255, 255, 0];
@@ -377,12 +377,11 @@ impl Constraint {
     pub fn swap_master_slave(&mut self) -> bool {
         let (name, master, slave) = match self {
             Constraint::Tie(tie) => (&mut tie.name, &mut tie.master, &mut tie.slave),
-            Constraint::Spring(Spring {
-                name,
-                master: Some(master),
-                region,
-                ..
-            }) => (name, master, region),
+            Constraint::Spring(spring) if spring.master_slave().is_some() => {
+                spring.ends.swap(0, 1);
+                spring.name = swapped_name(&spring.name);
+                return true;
+            }
             _ => return false,
         };
         std::mem::swap(master, slave);
@@ -394,7 +393,7 @@ impl Constraint {
     pub fn master_slave(&self) -> Option<[&Region; 2]> {
         match self {
             Constraint::Tie(tie) => Some([&tie.master, &tie.slave]),
-            Constraint::Spring(c) => Some([c.master.as_ref()?, &c.region]),
+            Constraint::Spring(c) => c.master_slave(),
             _ => None,
         }
     }
@@ -402,7 +401,7 @@ impl Constraint {
     /// The regions the constraint is defined on, master before slave.
     pub fn regions(&self) -> Vec<&Region> {
         match self {
-            Constraint::Spring(c) => c.master.iter().chain([&c.region]).collect(),
+            Constraint::Spring(c) => c.ends.iter().rev().filter_map(SpringEnd::region).collect(),
             Constraint::CompressionOnly(c) => vec![&c.region],
             Constraint::Tie(tie) => vec![&tie.master, &tie.slave],
             Constraint::RigidBody(c) => vec![&c.region],
@@ -412,7 +411,9 @@ impl Constraint {
 
     pub fn regions_mut(&mut self) -> Vec<&mut Region> {
         match self {
-            Constraint::Spring(c) => c.master.iter_mut().chain([&mut c.region]).collect(),
+            Constraint::Spring(c) => (c.ends.iter_mut().rev())
+                .filter_map(SpringEnd::region_mut)
+                .collect(),
             Constraint::CompressionOnly(c) => vec![&mut c.region],
             Constraint::Tie(tie) => vec![&mut tie.master, &mut tie.slave],
             Constraint::RigidBody(c) => vec![&mut c.region],

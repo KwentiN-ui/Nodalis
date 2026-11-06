@@ -8,15 +8,18 @@ Create them with #ui("Constraint") on the #ui("Connections") tab of the ribbon.
 #screenshot("constraint.png", [Spring dialog: springs from a surface to ground])
 
 #fields(
-  [Spring], [Springs in the global directions on the nodes of the region. #ui("K1"),
-    #ui("K2"), #ui("K3") are the stiffnesses; 0 means no spring in that direction. Like a
-    force, the stiffness is that of the whole region and is spread over its nodes: on faces
-    by area, on edges by length, on points in equal shares. #ui("Per area") gives a
-    stiffness per area of the faces instead (force per volume, a bedding modulus). With
-    #ui("Apply to all nodes individually") every node gets the whole stiffness. A single
-    node or point is a point spring. In a 2D model (plane stress, plane strain,
-    axisymmetric) there is no #ui("K3"): the dialog offers the first two directions only
-    (@spring-2d).],
+  [Spring], [Springs in the global directions between #ui("End 1") and #ui("End 2"). Each end
+    is #ui("World") (fixed ground), a #ui("Selection in the 3D view"), a #ui("Node Set") or
+    #ui("Surface"), or a #ui("Reference Point"): a reference point of a rigid body, or the
+    point that a Displacement/Rotation condition or a Remote Force creates on faces.
+    #ui("K1"), #ui("K2"), #ui("K3") are the stiffnesses; 0 means no spring
+    in that direction. Like a force, the stiffness is that of the whole selection and is
+    spread over its nodes: on faces by area, on edges by length, on points in equal shares.
+    #ui("Per area") gives a stiffness per area of the faces instead (force per volume, a
+    bedding modulus). With #ui("Apply to all nodes individually") every node gets the whole
+    stiffness. A single node or point is a point spring. In a 2D model (plane stress, plane
+    strain, axisymmetric) there is no #ui("K3"): the dialog offers the first two directions
+    only (@spring-2d).],
   [Compression Only], [A support that only takes pressure, like a part resting on a rigid floor.
     By default it pushes onto the surface from outside; #ui("Flip") under #ui("Direction")
     makes it push the surface outward from inside the material. #ui("Clearance") is the
@@ -35,15 +38,35 @@ outputs behave the same when you change their type.
 
 #screenshot("constraint-type-switch.png", [The faces picked for a spring are still selected after switching to Compression Only])
 
-#ui("Connection") at the bottom of the spring dialog decides where the springs end.
-#ui("Surface to World") connects them to ground (`SPRING1` elements). #ui("Surface to Surface")
-adds a #ui("Target surface"): every node of the region is connected to the closest point of
-the target surface (`SPRING2` elements and `*EQUATION`s), for example an elastic bearing
-between two parts. The region is the slave and the target surface the master side: choose the
-finer mesh as region. #ui("Swap Master/Slave") in the context menu exchanges the two.
+The two ends decide what the springs connect; the order does not matter, except with a
+selection on both ends.
 
-#screenshot("constraint-spring-surface.png", [Spring between two surfaces: the target surface
-  in red, the region in purple])
+- *Selection and World*: every node of the selection gets springs to ground (`SPRING1`
+  elements).
+- *Selection and selection*: every node of #ui("End 1") is connected to the closest point of
+  the faces of #ui("End 2") (`SPRING2` elements and `*EQUATION`s), for example an elastic
+  bearing between two parts. #ui("End 1") is the slave and #ui("End 2") the master side:
+  choose the finer mesh for #ui("End 1"). #ui("Swap Master/Slave") in the context menu
+  exchanges the two.
+- *Selection and point*: every node of the selection gets springs to the point.
+- *Point and World* or *point and point*: springs on the translations of the point and, with
+  #ui("KR1"), #ui("KR2"), #ui("KR3"), rotational springs about the global axes in moment per
+  radian. Nodes of a selection have no rotations, so only these two combinations offer
+  rotational stiffness; a plane model has none.
+
+A hinge with a torsion spring, for example in a Dynamic step: hold the faces of the bore with
+a Displacement/Rotation condition that fixes the translations and leaves the rotation about
+the hinge axis free. Its point then appears under #ui("Reference Point") of the spring dialog
+(listed under "Displacements on a point"); choose it as #ui("End 1"), #ui("World") as
+#ui("End 2") and give #ui("KR3") (for a hinge about z). Between two such points the spring
+couples two parts instead. A reference point needs a rigid body that it drives, as for
+boundary conditions on it.
+
+#screenshot("constraint-spring-hinge.png", [Torsion spring on the point of a Displacement/Rotation
+  condition with the rotation about z free])
+
+#screenshot("constraint-spring-surface.png", [Spring between two surfaces: #ui("End 2") in red,
+  #ui("End 1") in purple])
 
 #screenshot("constraint-spring-2d.png", [Spring in a plane stress model: only #ui("K1") and
   #ui("K2")]) <spring-2d>
@@ -51,7 +74,8 @@ finer mesh as region. #ui("Swap Master/Slave") in the context menu exchanges the
 The 3D view of the FE model shows active constraints in yellow, together with
 the symbols of any step: a coil spring for each direction with stiffness, at the centre of
 the faces of a spring to ground or at each of its nodes (at their centre for ten nodes or
-more), and at points spread over the region of a spring to a surface; cones with a ground plate
+more), at points spread over the selection of a spring to a surface, and at the point of a
+spring between points and ground; cones with a ground plate
 on the side a compression only support pushes from (@compression-only); and lines to the
 reference point of a rigid body (@rigid-body). The selected or edited constraint is red. Ties
 have no symbol.

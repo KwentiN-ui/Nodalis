@@ -4090,25 +4090,21 @@ fn mean_top(blocks: &Blocks, frd: &FrdImport, component: &str) -> f64 {
 
 /// A spring constraint on the region with the stiffness of the whole region.
 fn spring(name: &str, region: Region, stiffness: [f64; 3]) -> plx_model::Spring {
-    plx_model::Spring {
-        region,
-        stiffness,
-        ..plx_model::Spring::new(name)
-    }
+    plx_model::Spring::to_world(name, region, stiffness)
 }
 
 #[test]
 fn solver_carries_a_block_on_springs_between_two_surfaces() {
     // Different meshes on the two sides: the springs end on points between nodes.
     let blocks = blocks(2, 3);
-    let bearing = plx_model::Spring {
-        master: Some(Region::Faces(blocks.a_top.clone())),
+    let mut bearing = plx_model::Spring {
         ..spring(
             "Bearing-1",
             Region::Faces(blocks.b_bottom.clone()),
             [1000.0, 1000.0, 2000.0],
         )
     };
+    bearing.ends[1] = plx_model::SpringEnd::Region(Region::Faces(blocks.a_top.clone()));
     let load = [0.0, 0.0, 100.0];
     let model = blocks_model(&blocks, vec![Constraint::Spring(bearing.clone())], load);
     let text = write_inp(&blocks.mesh, &model, "").unwrap();
@@ -4174,6 +4170,133 @@ fn solver_carries_a_block_on_springs_to_ground() {
     );
     let lift = mean_top(&blocks, &run_solver("federn-knoten", &text).unwrap(), "U3");
     assert!((lift - 0.1).abs() < 0.001, "{lift}");
+}
+
+/// A hinge: the tip face of the cantilever turns freely about z on the point of a
+/// displacement, held only by a rotational spring to ground on that point. A moment on the
+/// same point turns the whole beam rigidly by M / k about the face's centre.
+#[test]
+fn solver_turns_a_hinge_against_a_rotational_spring_on_its_point() {
+    let (m, k) = (1000.0, 1.0e6);
+    let (mesh, mut model) = cantilever(remote_force(|r| r.moment = [0.0, 0.0, m]));
+    model.steps[0].boundary_conditions[0] = remote(
+        "Hinge",
+        [Some(0.0), Some(0.0), Some(0.0), Some(0.0), Some(0.0), None],
+    );
+    let hinge = plx_model::Spring {
+        ends: [
+            plx_model::SpringEnd::Region(Region::RemotePoint("Hinge".into())),
+            plx_model::SpringEnd::World,
+        ],
+        // Translations of the point are held by the boundary condition already.
+        stiffness: [0.0; 3],
+        rotational: [0.0, 0.0, k],
+        ..plx_model::Spring::new("Torsion")
+    };
+    model.constraints.push(Constraint::Spring(hinge.clone()));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    // The spring sits on the rotation node of the point the force shares.
+    assert!(
+        text.contains("*Rigid body, Nset=INTERNAL-1_TIP, Ref node=100, Rot node=101\n"),
+        "{text}"
+    );
+    assert!(text.contains("*Element, Type=SPRING1\n"), "{text}");
+    assert!(
+        text.contains("*Spring, Elset=TORSION_ROTATION_DOF_3\n3\n"),
+        "{text}"
+    );
+    assert!(!text.contains("TORSION_DOF_"), "{text}");
+    // Nodes of a selection have no rotations to hold.
+    let mut on_nodes = hinge.clone();
+    on_nodes.ends[0] = plx_model::SpringEnd::Region(Region::NodeSet("FIX".into()));
+    assert!(!on_nodes.takes_rotations());
+    // The same in metres: the stiffness is a moment per radian.
+    model.properties.units = UnitSystem::MmTonSC;
+    let mut model_m = model.clone();
+    let mut mesh_m = mesh.clone();
+    model_m.convert_units(UnitSystem::MKgSC);
+    mesh_m.scale(1e-3);
+    if let Constraint::Spring(s) = &model_m.constraints[0] {
+        assert_eq!(s.rotational[2], k * 1e-3);
+    }
+    let text_m = write_inp(&mesh_m, &model_m, "").unwrap();
+    let Some(frd_m) = run_solver("drehfeder-gelenk-m", &text_m) else {
+        return;
+    };
+    let u1_m = node_value(&frd_m, "DISP", "U1", 99) * 1e3;
+    let Some(frd) = run_solver("drehfeder-gelenk", &text) else {
+        return;
+    };
+    let u1 = node_value(&frd, "DISP", "U1", 99);
+    assert!((u1_m - u1).abs() < 1e-3 * u1.abs(), "{u1_m} mm != {u1} mm");
+    // The rotation node carries the rotation, no displacement: the results leave it out.
+    assert!(frd.mesh.node(101).is_none());
+    let angle = m / k;
+    let tip: Vec<_> = (1..=99)
+        .filter(|&id| mesh.node(id).is_some_and(|c| c[0] == 100.0))
+        .collect();
+    for id in tip {
+        let y = mesh.node(id).unwrap()[1];
+        let u1 = node_value(&frd, "DISP", "U1", id);
+        let expected = -angle * (y - 5.0);
+        assert!((u1 - expected).abs() < 1e-6, "{u1} != {expected}");
+    }
+    // The other end turns with it, rigidly about the hinge.
+    let x = mesh.node(1).unwrap()[0];
+    let u2 = node_value(&frd, "DISP", "U2", 1);
+    assert!((u2 - angle * (x - 100.0)).abs() < 1e-6, "{u2}");
+}
+
+/// Springs between two points connect their reference and their rotation nodes; springs
+/// from a selection to a point end on its reference node.
+#[test]
+fn springs_between_points_connect_their_nodes() {
+    let (mesh, mut model) = cantilever(remote_force(|r| r.moment = [0.0, 0.0, 1.0]));
+    // A hinge with a point of its own at the root instead of the clamp.
+    model.steps[0].boundary_conditions[0] = remote(
+        "Hinge",
+        [Some(0.0), Some(0.0), Some(0.0), Some(0.0), Some(0.0), None],
+    );
+    model.steps[0].boundary_conditions[0].region = Region::NodeSet("FIX".into());
+    let point = |name: &str| plx_model::SpringEnd::Region(Region::RemotePoint(name.into()));
+    model
+        .constraints
+        .push(Constraint::Spring(plx_model::Spring {
+            ends: [point("Remote_Force-1"), point("Hinge")],
+            stiffness: [10.0, 0.0, 0.0],
+            rotational: [0.0, 0.0, 5.0],
+            ..plx_model::Spring::new("Coupling")
+        }));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Element, Type=SPRING2\n"), "{text}");
+    assert!(
+        text.contains("*Spring, Elset=COUPLING_DOF_1\n1, 1\n10, 0\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("*Spring, Elset=COUPLING_ROTATION_DOF_3\n3, 3\n5, 0\n"),
+        "{text}"
+    );
+    // The same point on both ends is no spring.
+    if let Constraint::Spring(s) = &mut model.constraints[0] {
+        s.ends[1] = point("Remote_Force-1");
+    }
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::InvalidConstraint { .. })
+    ));
+    // Nodes of a selection get springs to the point's reference node, sharing the
+    // stiffness; rotational springs are left out.
+    if let Constraint::Spring(s) = &mut model.constraints[0] {
+        s.ends[1] = plx_model::SpringEnd::Region(Region::Nodes(vec![1, 2]));
+    }
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Element, Type=SPRING2\n"), "{text}");
+    assert!(!text.contains("ROTATION_DOF"), "{text}");
+    for node in [1, 2] {
+        let section = format!("*Spring, Elset=COUPLING_{node}_DOF_1\n1, 1\n5, 0\n");
+        assert!(text.contains(&section), "{text}");
+    }
 }
 
 #[test]

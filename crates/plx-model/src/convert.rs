@@ -394,7 +394,9 @@ impl Constraint {
         match self {
             Constraint::Spring(s) => {
                 let quantity = stiffness(s.is_per_area());
-                c.all(&mut s.stiffness, quantity)
+                c.all(&mut s.stiffness, quantity);
+                // Moment per radian.
+                c.all(&mut s.rotational, Quantity::Moment)
             }
             Constraint::CompressionOnly(s) => {
                 c.value(&mut s.clearance, Quantity::Length);

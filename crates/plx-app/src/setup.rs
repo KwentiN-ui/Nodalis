@@ -114,6 +114,9 @@ pub(crate) enum Source {
     /// The point of a remote displacement boundary condition, offered among the reference
     /// points.
     RemotePoint,
+    /// Fixed ground, the end of a spring that has no region. A draft with it stands for no
+    /// region: its [`RegionDraft::region`] is empty, callers ask [`RegionDraft::is_world`].
+    World,
 }
 
 impl Source {
@@ -125,6 +128,7 @@ impl Source {
             Source::ElementSet => "Element Set",
             Source::Surface => "Surface",
             Source::ReferencePoint | Source::RemotePoint => "Reference Point",
+            Source::World => "World",
         }
     }
 }
@@ -159,6 +163,16 @@ pub(crate) const SUPPORT_SOURCES: &[Source] = &[
 /// Nodes, or the point of a rigid body or a remote displacement: for nodal history outputs,
 /// which print the forces and moments of a point too.
 pub(crate) const HISTORY_NODE_SOURCES: &[Source] = &[
+    Source::Selection,
+    Source::NodeSet,
+    Source::Surface,
+    Source::ReferencePoint,
+    Source::RemotePoint,
+];
+/// An end of a spring: ground, nodes, or a point of a rigid body, a displacement or a
+/// remote force.
+pub(crate) const SPRING_END_SOURCES: &[Source] = &[
+    Source::World,
     Source::Selection,
     Source::NodeSet,
     Source::Surface,
@@ -302,7 +316,18 @@ impl RegionDraft {
             Source::Surface => Region::Surface(self.set.clone()),
             Source::ReferencePoint => Region::ReferencePoint(self.set.clone()),
             Source::RemotePoint => Region::RemotePoint(self.set.clone()),
+            Source::World => Region::Nodes(Vec::new()),
         }
+    }
+
+    /// Fixed ground, the end of a spring.
+    pub(crate) fn is_world(&self) -> bool {
+        self.source == Source::World
+    }
+
+    /// A reference point or the point of a displacement or remote force.
+    pub(crate) fn is_point(&self) -> bool {
+        matches!(self.source, Source::ReferencePoint | Source::RemotePoint)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -314,6 +339,7 @@ impl RegionDraft {
                 Target::Lines => self.edges.items().is_empty(),
             },
             Source::Parts => self.parts.is_empty(),
+            Source::World => false,
             _ => self.set.is_empty(),
         }
     }
@@ -605,6 +631,9 @@ impl RegionDraft {
                 }
                 Source::Parts => wanted |= self.parts.ui(ui, active),
                 Source::ReferencePoint | Source::RemotePoint => self.point_ui(ui, model),
+                Source::World => {
+                    ui.weak("Fixed ground.");
+                }
                 Source::NodeSet | Source::ElementSet | Source::Surface => {
                     let names: Vec<&String> = match self.source {
                         Source::NodeSet => model.mesh.node_sets.keys().collect(),

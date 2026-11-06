@@ -4,8 +4,8 @@
 use egui::Ui;
 use plx_mesh::FeMesh;
 use plx_model::{
-    CompressionOnly, Constraint, FeModel, Quantity, Region, RigidBody, Spring, UnitSystem,
-    next_name,
+    CompressionOnly, Constraint, FeModel, Quantity, Region, RigidBody, Spring, SpringEnd,
+    SpringLayout, UnitSystem, next_name,
 };
 
 use crate::contacts::{MasterSlave, Side};
@@ -13,7 +13,8 @@ use crate::model::{Highlight, Model};
 use crate::numeric;
 use crate::selection::Target;
 use crate::setup::{
-    FACE_SOURCES, NODE_SOURCES, RegionDraft, dropped_note, face_target, show_dropped_note,
+    FACE_SOURCES, RegionDraft, SPRING_END_SOURCES, Source, dropped_note, face_target,
+    show_dropped_note,
 };
 
 /// The fixed width of the dialog's content, so it does not change with the type.
@@ -78,30 +79,43 @@ impl Type {
     }
 }
 
-/// The regions of a spring: the nodes that get springs, like a force's region the points,
-/// edges or faces they are on, as slave, and the target surface as master.
-fn spring_regions(faces: Target, mesh: &FeMesh, spring: Option<&Spring>) -> MasterSlave {
-    let (slave, master) = match spring {
-        // Element faces stay faces, e.g. the master side of a swapped connection.
-        Some(s) => (
-            match &s.region {
-                Region::Faces(_) => RegionDraft::from_region(&s.region, NODE_SOURCES, faces, mesh),
-                region => RegionDraft::from_region(region, NODE_SOURCES, Target::Nodes, mesh),
-            },
-            match &s.master {
-                Some(m) => RegionDraft::from_region(m, FACE_SOURCES, faces, mesh),
-                None => RegionDraft::new(FACE_SOURCES, faces),
-            },
-        ),
-        None => (
-            RegionDraft::new(NODE_SOURCES, Target::Nodes),
-            RegionDraft::new(FACE_SOURCES, faces),
-        ),
+/// The two ends of a spring, the first as the slave and the second as the master side of
+/// the pair: picks in the 3D view go to the one whose "..." button was pressed. The first
+/// end picks nodes, the second element faces, as with selections on both ends the second
+/// is the surface the springs end on; picked faces and nodes stay what they are.
+fn spring_ends(faces: Target, mesh: &FeMesh, spring: Option<&Spring>) -> MasterSlave {
+    let draft = |end: &SpringEnd, target: Target| match end {
+        SpringEnd::World => RegionDraft::new(SPRING_END_SOURCES, target),
+        SpringEnd::Region(region) => {
+            let target = match region {
+                Region::Faces(_) => faces,
+                Region::Nodes(_) => Target::Nodes,
+                _ => target,
+            };
+            RegionDraft::from_region(region, SPRING_END_SOURCES, target, mesh)
+        }
+    };
+    let (first, second) = match spring {
+        Some(s) => (draft(&s.ends[0], Target::Nodes), draft(&s.ends[1], faces)),
+        None => {
+            let mut first = RegionDraft::new(SPRING_END_SOURCES, Target::Nodes);
+            first.source = Source::Selection;
+            (first, RegionDraft::new(SPRING_END_SOURCES, faces))
+        }
     };
     MasterSlave {
-        master,
-        slave,
+        master: second,
+        slave: first,
         side: Side::Slave,
+    }
+}
+
+/// The end of a spring a draft stands for.
+fn spring_end(draft: &RegionDraft) -> SpringEnd {
+    if draft.is_world() {
+        SpringEnd::World
+    } else {
+        SpringEnd::Region(draft.region())
     }
 }
 
@@ -110,7 +124,7 @@ pub(crate) struct ConstraintDraft {
     pub(crate) constraint: Constraint,
     /// The region of a support or rigid body.
     region: RegionDraft,
-    /// The region (slave) and target surface (master) of a spring.
+    /// The first (slave) and second end (master) of a spring.
     pair: MasterSlave,
 }
 
@@ -121,7 +135,7 @@ impl ConstraintDraft {
         Self {
             constraint: kind.create(next_name(kind.prefix(), names(fe))),
             region: RegionDraft::new(FACE_SOURCES, faces),
-            pair: spring_regions(faces, &FeMesh::default(), None),
+            pair: spring_ends(faces, &FeMesh::default(), None),
         }
     }
 
@@ -130,11 +144,11 @@ impl ConstraintDraft {
         let (region, pair) = match constraint {
             Constraint::Spring(spring) => (
                 RegionDraft::new(FACE_SOURCES, faces),
-                spring_regions(faces, mesh, Some(spring)),
+                spring_ends(faces, mesh, Some(spring)),
             ),
             _ => (
                 RegionDraft::from_region(constraint.regions()[0], FACE_SOURCES, faces, mesh),
-                spring_regions(faces, mesh, None),
+                spring_ends(faces, mesh, None),
             ),
         };
         Self {
@@ -146,11 +160,6 @@ impl ConstraintDraft {
 
     fn kind(&self) -> Type {
         Type::of(&self.constraint)
-    }
-
-    /// A spring to a surface, whose target surface can be picked too.
-    fn to_surface(&self) -> bool {
-        matches!(&self.constraint, Constraint::Spring(s) if s.master.is_some())
     }
 
     /// The picks of a constraint of the type, which stay when another type is chosen.
@@ -184,15 +193,11 @@ impl ConstraintDraft {
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
-        let region = if self.kind() == Type::Spring {
-            &self.pair.slave
-        } else {
-            &self.region
-        };
-        if region.is_empty() {
+        if self.kind() == Type::Spring {
+            return self.validate_spring();
+        }
+        if self.region.is_empty() {
             Err("The region is empty.".into())
-        } else if self.to_surface() && self.pair.master.is_empty() {
-            Err("The target surface is empty.".into())
         } else if matches!(&self.constraint, Constraint::RigidBody(b) if b.reference_point.is_empty())
         {
             Err("Choose the reference point that drives the rigid body.".into())
@@ -201,12 +206,28 @@ impl ConstraintDraft {
         }
     }
 
-    /// The region in the primary highlight colour; for a spring to a surface the target
-    /// surface in the primary and the springs' region in the secondary colour.
+    fn validate_spring(&self) -> Result<(), String> {
+        let ends = [&self.pair.slave, &self.pair.master];
+        if ends.iter().all(|end| end.is_world()) {
+            return Err("Choose a selection or a point for at least one end.".into());
+        }
+        for (number, end) in (1..).zip(ends) {
+            if end.is_empty() {
+                return Err(format!("End {number} is empty."));
+            }
+        }
+        let [first, second] = ends.map(RegionDraft::region);
+        if self.pair.slave.is_point() && self.pair.master.is_point() && first == second {
+            return Err("Both ends are the same point.".into());
+        }
+        Ok(())
+    }
+
+    /// The region in the primary highlight colour; for a spring its second end in the
+    /// primary and its first end in the secondary colour.
     pub(crate) fn highlight(&self, model: &Model) -> Highlight {
         match self.kind() {
-            Type::Spring if self.to_surface() => self.pair.highlight(model),
-            Type::Spring => self.pair.slave.highlight(model),
+            Type::Spring => self.pair.highlight(model),
             _ => self.region.highlight(model),
         }
     }
@@ -230,10 +251,7 @@ impl ConstraintDraft {
         let mut constraint = self.constraint.clone();
         match &mut constraint {
             Constraint::Spring(spring) => {
-                spring.region = self.pair.slave.region();
-                if spring.master.is_some() {
-                    spring.master = Some(self.pair.master.region());
-                }
+                spring.ends = [spring_end(&self.pair.slave), spring_end(&self.pair.master)];
             }
             _ => {
                 for slot in constraint.regions_mut() {
@@ -341,17 +359,22 @@ impl ConstraintDraft {
         };
         self.constraint = kind.create(name);
         let picks = self.region_of(old).clone();
-        if picks.is_empty() {
+        if picks.is_empty() || picks.is_world() {
             return false;
         }
         let mesh = &model.mesh;
         let faces = face_target(&model.fe);
         let (draft, dropped) = if kind == Type::Spring {
-            // A spring takes nodes, or faces where the picks are some.
-            match picks.converted(NODE_SOURCES, Target::Nodes, mesh) {
-                (_, true) => picks.converted(NODE_SOURCES, faces, mesh),
-                kept => kept,
+            // A spring's first end takes nodes, or faces where the picks are some.
+            let (mut draft, dropped) =
+                match picks.converted(SPRING_END_SOURCES, Target::Nodes, mesh) {
+                    (_, true) => picks.converted(SPRING_END_SOURCES, faces, mesh),
+                    kept => kept,
+                };
+            if draft.is_world() {
+                draft.source = Source::Selection;
             }
+            (draft, dropped)
         } else {
             picks.converted(FACE_SOURCES, faces, mesh)
         };
@@ -364,8 +387,9 @@ impl ConstraintDraft {
     }
 }
 
-/// The region, stiffness and connection of a spring: to ground ("Surface to World") or to
-/// the closest points of a target surface ("Surface to Surface").
+/// The two ends of a spring, each ground ("World"), a selection or a point, and its
+/// stiffness: translational between selections, translational and rotational between
+/// points and ground.
 fn spring_rows(
     ui: &mut Ui,
     model: &Model,
@@ -374,60 +398,95 @@ fn spring_rows(
     dofs: usize,
 ) {
     let units = model.fe.properties.units;
-    let to_surface = spring.master.is_some();
-    let slave = !to_surface || pair.side == Side::Slave;
-    if pair.slave.ui_labeled(ui, model, "Region", "slave", slave) {
+    let first = pair.side == Side::Slave;
+    if pair.slave.ui_labeled(ui, model, "End 1", "slave", first) {
         pair.side = Side::Slave;
     }
-    ui.label("Stiffness");
-    ui.add_enabled_ui(!spring.each_node, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.radio_value(&mut spring.per_area, false, "Total");
-            ui.radio_value(&mut spring.per_area, true, "Per area")
-                .on_hover_text("Stiffness per area of the faces of the region.");
-        });
+    if pair.master.ui_labeled(ui, model, "End 2", "master", !first) {
+        pair.side = Side::Master;
+    }
+    spring.ends = [spring_end(&pair.slave), spring_end(&pair.master)];
+    // Which hint applies, without holding on to the spring.
+    let shape = spring.layout().map(|layout| match layout {
+        SpringLayout::SelectionToWorld { .. } => 0,
+        SpringLayout::SelectionToSurface { .. } => 1,
+        SpringLayout::SelectionToPoint { .. } => 2,
+        SpringLayout::PointToWorld { .. } => 3,
+        SpringLayout::PointToPoint { .. } => 4,
     });
-    ui.end_row();
+    let selection = spring.selection().is_some();
+    if selection {
+        ui.label("Stiffness");
+        ui.add_enabled_ui(!spring.each_node, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.radio_value(&mut spring.per_area, false, "Total");
+                ui.radio_value(&mut spring.per_area, true, "Per area")
+                    .on_hover_text("Stiffness per area of the faces of the selection.");
+            });
+        });
+        ui.end_row();
+    }
     let quantity = stiffness(spring.is_per_area());
     stiffness_rows(ui, &mut spring.stiffness, units, quantity, dofs);
-    ui.label("");
-    ui.checkbox(&mut spring.each_node, "Apply to all nodes individually");
-    ui.end_row();
-    ui.label("Connection");
-    let mut surface = to_surface;
-    ui.horizontal_wrapped(|ui| {
-        ui.radio_value(&mut surface, false, "Surface to World");
-        ui.radio_value(&mut surface, true, "Surface to Surface");
-    });
-    ui.end_row();
-    if surface != to_surface {
-        spring.master = surface.then(|| pair.master.region());
-        pair.side = if surface { Side::Master } else { Side::Slave };
+    // A plane model has no rotations at points.
+    if spring.takes_rotations() && dofs == 3 {
+        rotational_rows(ui, &mut spring.rotational, units);
     }
-    if surface {
-        let master = pair.side == Side::Master;
-        if pair
-            .master
-            .ui_labeled(ui, model, "Target surface", "master", master)
-        {
-            pair.side = Side::Master;
-        }
+    if selection {
+        ui.label("");
+        ui.checkbox(&mut spring.each_node, "Apply to all nodes individually");
+        ui.end_row();
     }
     let distribution = if spring.each_node {
-        "Every node of the region gets the whole stiffness."
+        "Every node of the selection gets the whole stiffness."
     } else if spring.is_per_area() {
         "The stiffness per area is spread over the nodes of the faces by area."
     } else {
-        "The stiffness of the whole region is spread over its nodes like a force: on faces \
-         by area, on edges by length, on points in equal shares."
+        "The stiffness of the whole selection is spread over its nodes like a force: on \
+         faces by area, on edges by length, on points in equal shares."
     };
-    let connection = if surface {
-        " Each node is connected by springs in the global directions to the closest point \
-         of the target surface."
-    } else {
-        " The springs act in the global directions to ground."
+    let text = match shape {
+        None => "Choose a selection or a point for at least one end.".to_string(),
+        Some(0) => {
+            format!("{distribution} The springs act in the global directions to ground.")
+        }
+        Some(1) => format!(
+            "{distribution} Each node of End 1 is connected by springs in the global \
+             directions to the closest point of the faces of End 2."
+        ),
+        Some(2) => format!(
+            "{distribution} Each node is connected by springs in the global directions to \
+             the point. Rotational springs need a point or World on both ends."
+        ),
+        Some(3) => "Springs in the global directions hold \
+             the translations (K) and rotations (KR) of the point to ground. Points are \
+             reference points of rigid bodies and the points of Displacement/Rotation \
+             conditions and Remote Forces on faces: with a rotation left free such a \
+             condition and this spring make a hinge with a torsion spring."
+            .to_string(),
+        Some(_) => "Springs in the global directions connect the translations (K) and \
+             rotations (KR) of the two points."
+            .to_string(),
     };
-    hint(ui, &format!("{distribution}{connection}"));
+    hint(ui, &text);
+}
+
+/// Rotational stiffness about the global axes, in moment per radian.
+fn rotational_rows(ui: &mut Ui, rotational: &mut [f64; 3], units: UnitSystem) {
+    let unit = format!("{}/rad", units.unit(Quantity::Moment));
+    for (value, label) in rotational.iter_mut().zip(["KR1", "KR2", "KR3"]) {
+        ui.label(label)
+            .on_hover_text("Rotational stiffness about the global axis.");
+        ui.horizontal(|ui| {
+            ui.add(
+                numeric::without_unit(value, units, Quantity::Moment)
+                    .speed(1.0)
+                    .range(0.0..=f64::MAX),
+            );
+            ui.label(unit.as_str());
+        });
+        ui.end_row();
+    }
 }
 
 fn names(fe: &FeModel) -> impl Iterator<Item = &str> {
@@ -627,21 +686,32 @@ mod tests {
         let mesh = FeMesh::default();
         let connection = Constraint::Spring(Spring {
             active: false,
-            region: Region::Faces(vec![(1, 2)]),
-            master: Some(Region::Surface("BORE".into())),
+            ends: [
+                SpringEnd::Region(Region::Faces(vec![(1, 2)])),
+                SpringEnd::Region(Region::Surface("BORE".into())),
+            ],
             stiffness: [1.0, 2.0, 3.0],
             per_area: true,
             ..Spring::new("Lager")
         });
         let spring = Constraint::Spring(Spring {
-            region: Region::NodeSet("FIX".into()),
             stiffness: [1.0, 0.0, 0.0],
             each_node: true,
-            ..Spring::new("Spring-1")
+            ..Spring::to_world("Spring-1", Region::NodeSet("FIX".into()), [0.0; 3])
+        });
+        // A torsion spring from the point of a boundary condition to ground, given with
+        // World first.
+        let torsion = Constraint::Spring(Spring {
+            ends: [
+                SpringEnd::World,
+                SpringEnd::Region(Region::RemotePoint("Hinge".into())),
+            ],
+            rotational: [0.0, 0.0, 5.0],
+            ..Spring::new("Torsion")
         });
         let mut support = Type::CompressionOnly.create("Compression_Only-1".into());
         *support.regions_mut().remove(0) = Region::Surface("FLOOR".into());
-        for constraint in [connection, spring, support] {
+        for constraint in [connection, spring, torsion, support] {
             let draft = ConstraintDraft::edit(&constraint, Target::Faces, &mesh);
             assert_eq!(draft.validate(), Ok(()));
             assert_eq!(draft.finish(), constraint);
