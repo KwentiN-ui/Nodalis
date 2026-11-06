@@ -13,9 +13,19 @@ free or turned rotations (@displacement-behavior) needs no reference point.
 #fields(
   [Region], [The nodes that form the rigid body: a selection of faces, edges or nodes, parts, a
     node set or a surface.],
-  [Reference point], [One of the reference points under #ui("Features") (@features). It is the
-    point the body is driven at; create it first.],
+  [Reference point], [The point the body is driven at: #ui("New point") creates it with the
+    constraint, or choose one of the reference points under #ui("Features") (@features).],
+  [Point name], [Name of the new point, by default the next free #ui("RP-n").],
+  [Location], [Where the new point lies: #ui("Centroid of the region") (the area-weighted
+    centre of its faces, of its edges in 2D, e.g. the centre of a hole),
+    #ui("Center of the bounding box") of the region, or global #ui("Coordinates").
+    #ui("Position") shows where it ends up.],
 )
+
+A new point is added under #ui("Features") > #ui("Reference Points") when you click
+#ui("OK"), and one undo removes it together with the constraint. A point at the centroid or the
+bounding box centre keeps that definition: it follows the mesh after remeshing. Edit it there to
+move it; changing the region of the rigid body later does not move the point.
 
 In the 3D view of the FE model, a rigid body is drawn as yellow lines from nodes spread over its
 region to its reference point, with the symbols of any step. A selected or edited
