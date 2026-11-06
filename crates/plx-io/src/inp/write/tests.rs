@@ -4269,17 +4269,22 @@ fn solver_turns_a_plane_hinge_against_a_torsion_spring() {
             kind: BoundaryKind::Displacement(Displacement::rigid(free_z)),
             amplitude: None,
         });
-        model.constraints.push(Constraint::Spring(plx_model::Spring {
-            ends: [
-                plx_model::SpringEnd::Region(Region::RemotePoint("Hinge".into())),
-                plx_model::SpringEnd::World,
-            ],
-            // Only KR3 acts in a plane model.
-            rotational: [5.0, 5.0, stiffness],
-            ..plx_model::Spring::new("Torsion")
-        }));
+        model
+            .constraints
+            .push(Constraint::Spring(plx_model::Spring {
+                ends: [
+                    plx_model::SpringEnd::Region(Region::RemotePoint("Hinge".into())),
+                    plx_model::SpringEnd::World,
+                ],
+                // Only KR3 acts in a plane model.
+                rotational: [5.0, 5.0, stiffness],
+                ..plx_model::Spring::new("Torsion")
+            }));
         let text = write_inp(&mesh, &model, "").unwrap();
-        assert!(text.contains("*Spring, Elset=TORSION_ROTATION_DOF_3\n3\n"), "{text}");
+        assert!(
+            text.contains("*Spring, Elset=TORSION_ROTATION_DOF_3\n3\n"),
+            "{text}"
+        );
         assert!(!text.contains("TORSION_ROTATION_DOF_1"), "{text}");
         let Some(frd) = run_solver(&format!("drehfeder-scheibe-{name}"), &text) else {
             return;
@@ -4289,7 +4294,10 @@ fn solver_turns_a_plane_hinge_against_a_torsion_spring() {
     }
     let extra = tips[1] - tips[0];
     let expected = force * length / k * length;
-    assert!((extra - expected).abs() < 0.02 * expected, "{extra} != {expected}");
+    assert!(
+        (extra - expected).abs() < 0.02 * expected,
+        "{extra} != {expected}"
+    );
 }
 
 /// Springs between two points connect their reference and their rotation nodes; springs
