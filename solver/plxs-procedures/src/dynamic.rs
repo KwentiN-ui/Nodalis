@@ -339,7 +339,11 @@ impl DynamicProcedure {
             let started = std::time::Instant::now();
             // The internal forces of the start state with the same full integration
             // (a static preload: ten times closer to ccx than with K u₀).
-            let ku = if motion.u.iter().any(|v| *v != 0.0) {
+            let ku = if motion.u.iter().all(|v| *v == 0.0) {
+                vec![0.0; n]
+            } else if full_matrices(ctx.table) {
+                multiply(k, &motion.u)
+            } else {
                 let k_full = initial_acceleration_matrix(
                     ctx.table,
                     ctx.model,
@@ -349,8 +353,6 @@ impl DynamicProcedure {
                     false,
                 )?;
                 multiply(&k_full, &motion.u)
-            } else {
-                vec![0.0; n]
             };
             let cv = damping(&motion.v);
             let r = combine(&[(1.0, &f0), (-1.0, &ku), (-1.0, &cv)], n);
@@ -358,8 +360,13 @@ impl DynamicProcedure {
             // stiffness-proportional damping).
             let undamped = plxs_core::step::Rayleigh::default();
             let (c_m, c_k) = matrix_factors(scheme, undamped, initial / 10.0, true);
-            let a0_matrix =
-                initial_acceleration_matrix(ctx.table, ctx.model, &ctx.pattern, c_m, c_k, true)?;
+            // Where no element differs (no reduced integration, no C3D4, no membranes),
+            // the matrix is the combination of K and M of the step.
+            let a0_matrix = if full_matrices(ctx.table) {
+                SparseMatrix::linear_combination(m, c_m, k, c_k)
+            } else {
+                initial_acceleration_matrix(ctx.table, ctx.model, &ctx.pattern, c_m, c_k, true)?
+            };
             let a_red = set.reduce(&a0_matrix);
             let coordinates = || Unknowns::from_free(&set.free, 3, &ctx.model.nodes.coordinates);
             equations
@@ -402,6 +409,21 @@ impl DynamicProcedure {
             .as_ref()
             .map(|e| nodal_average_scalar(ctx.table, ctx.model, e));
         let mut factored_dt: Option<f64> = None;
+        // The effective matrix of the factorized increment size.
+        let mut a_matrix: Option<SparseMatrix> = None;
+        // `K u` and `C v` of the state an increment starts from, carried from the one before.
+        let mut ku0 = multiply(k, &motion.u);
+        let mut cv0 = damping(&motion.v);
+        let damped = rayleigh.alpha != 0.0 || rayleigh.beta != 0.0;
+        // Stresses are evaluated for the increments whose fields are written and for
+        // every increment when a history output prints them.
+        let history_stresses = step.outputs.el_print.iter().any(|request| {
+            request.set.is_some()
+                && request
+                    .variables
+                    .iter()
+                    .any(|v| matches!(v.trim().to_ascii_uppercase().as_str(), "S" | "E" | "ENER"))
+        });
         let mut f_prev = f0;
         // Energies of the whole model, when a history output asks for them.
         let energy_requests = energy_requests(step);
@@ -456,12 +478,12 @@ impl DynamicProcedure {
             // Effective matrix A = c_m M + c_k K (Rayleigh damping folded in).
             let c1 = 1.0 / (beta * dt * dt);
             let (c_m, c_k) = matrix_factors(scheme, rayleigh, dt, false);
-            let started = std::time::Instant::now();
-            let a_matrix = SparseMatrix::linear_combination(m, c_m, k, c_k);
-            ctx.profile.add(Phase::Assembly, started);
             if factored_dt.is_none_or(|d| (d - dt).abs() > 1e-12 * dt) {
                 let started = std::time::Instant::now();
-                let a_red = set.reduce(&a_matrix);
+                let a = a_matrix.insert(SparseMatrix::linear_combination(m, c_m, k, c_k));
+                ctx.profile.add(Phase::Assembly, started);
+                let started = std::time::Instant::now();
+                let a_red = set.reduce(a);
                 ctx.profile.add(Phase::Reduction, started);
                 let started = std::time::Instant::now();
                 let coordinates =
@@ -499,8 +521,6 @@ impl DynamicProcedure {
                 n,
             );
             let v_tilde = combine(&[(1.0, &motion.v), (dt * (1.0 - gamma), &motion.a)], n);
-            let ku0 = multiply(k, &motion.u);
-            let cv0 = damping(&motion.v);
             let f_eff = combine(
                 &[
                     (1.0 + alpha, &f1),
@@ -514,9 +534,13 @@ impl DynamicProcedure {
             let mu = multiply(m, &u_tilde);
             let damp_arg = combine(&[(1.0, &v_tilde), (-gamma * dt * c1, &u_tilde)], n);
             let cd = damping(&damp_arg);
-            let r = combine(&[(1.0, &f_eff), (c1, &mu), (-(1.0 + alpha), &cd)], n);
-            let ag = multiply(&a_matrix, &g1);
-            let mut x = set.reduce_rhs(&combine(&[(1.0, &r), (-1.0, &ag)], n));
+            let mut r = combine(&[(1.0, &f_eff), (c1, &mu), (-(1.0 + alpha), &cd)], n);
+            // Prescribed motion enters through `A g`; nothing to do while it is zero.
+            if g1.iter().any(|v| *v != 0.0) {
+                let ag = multiply(a_matrix.as_ref().expect("factorized"), &g1);
+                r = combine(&[(1.0, &r), (-1.0, &ag)], n);
+            }
+            let mut x = set.reduce_rhs(&r);
             ctx.profile.add(Phase::Vectors, started);
             let started = std::time::Instant::now();
             equations
@@ -536,15 +560,26 @@ impl DynamicProcedure {
             let v1 = combine(&[(1.0, &v_tilde), (gamma * dt, &a1)], n);
 
             k.multiply(&u1, &mut reactions);
+            let ku1 = reactions.clone();
+            // `C v₁` (and `M v₁`, which it shares with the kinetic energy) for the next
+            // increment and the energies.
+            let mv1 = (damped || !energy_requests.is_empty()).then(|| multiply(m, &v1));
+            let cv1 = match &mv1 {
+                Some(mv1) if damped => {
+                    let kv1 = multiply(k, &v1);
+                    combine(&[(rayleigh.alpha, mv1), (rayleigh.beta, &kv1)], n)
+                }
+                _ => vec![0.0; n],
+            };
             if !energy_requests.is_empty() {
                 let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
                 let du = combine(&[(1.0, &u1), (-1.0, &motion.u)], n);
                 let f_mean = combine(&[(0.5, &f_prev), (0.5, &f1)], n);
                 external_work += dot(&f_mean, &du);
-                dissipation += 0.5 * dt * (dot(&motion.v, &cv0) + dot(&v1, &damping(&v1)));
+                dissipation += 0.5 * dt * (dot(&motion.v, &cv0) + dot(&v1, &cv1));
                 let energies = Energies {
                     internal: 0.5 * dot(&u1, &reactions),
-                    kinetic: 0.5 * dot(&v1, &multiply(m, &v1)),
+                    kinetic: 0.5 * dot(&v1, mv1.as_deref().expect("mass product")),
                     external_work,
                     dissipation,
                 };
@@ -559,12 +594,17 @@ impl DynamicProcedure {
                 .transfer_forces(&mut reactions, &spc0.dofs, &active);
             ctx.profile.add(Phase::Vectors, started);
             let started = std::time::Instant::now();
-            integration_point_results(ctx.table, ctx.model, &u1, &mut strains, &mut stresses);
+            let writes = writes_increment(step, increment, if last { increment } else { u32::MAX });
+            if writes || last || history_stresses {
+                integration_point_results(ctx.table, ctx.model, &u1, &mut strains, &mut stresses);
+            }
             motion = Motion {
                 u: u1,
                 v: v1,
                 a: a1,
             };
+            ku0 = ku1;
+            cv0 = cv1;
             f_prev = f1;
             time = t1;
 
@@ -576,7 +616,7 @@ impl DynamicProcedure {
                 correction: 0.0,
                 converged: true,
             });
-            if writes_increment(step, increment, if last { increment } else { u32::MAX }) {
+            if writes {
                 write_increment(
                     ctx,
                     step,
@@ -856,6 +896,17 @@ pub(crate) fn initial_acceleration_matrix(
         }
     }
     Ok(out)
+}
+
+/// Whether the matrix of the initial accelerations equals the combination of the step's
+/// K and M: no element is integrated differently there (reduced integration, C3D4), and no
+/// native membrane (which [`initial_acceleration_matrix`] leaves out).
+fn full_matrices(table: &ElementTable) -> bool {
+    table.membranes.is_empty()
+        && table.formulations.iter().all(|formulation| {
+            formulation.fully_integrated().is_none()
+                && formulation.family != plxs_elements::Family::Tet4
+        })
 }
 
 fn missing_density(model: &Model, entry: &plxs_assembly::elements::ElementEntry) -> Error {

@@ -78,7 +78,16 @@ pub fn write_history_with_velocities(
             offsets: m.offsets.clone(),
             values: m.values.chunks(m.per_point).map(|p| p[0]).collect(),
         });
-    let energy = crate::fields::internal_energy_density(stresses, strains);
+    // The energy density only when an element print asks for it (it costs a pass over
+    // every integration point, which a dynamic step takes per increment).
+    let wants_energy = step.outputs.el_print.iter().any(|request| {
+        request.set.is_some()
+            && request
+                .variables
+                .iter()
+                .any(|v| v.trim().eq_ignore_ascii_case("ENER"))
+    });
+    let energy = wants_energy.then(|| crate::fields::internal_energy_density(stresses, strains));
     // The Nodalis writer puts `*EL PRINT` before `*NODE PRINT`, and CalculiX prints the
     // blocks in request order; the element blocks come first here as well.
     for request in &step.outputs.el_print {
@@ -117,11 +126,14 @@ pub fn write_history_with_velocities(
                         Some(p) => ("equivalent plastic strain (elem, integ.pnt.,pe)", p, false),
                         None => continue,
                     },
-                    "ENER" => (
-                        "internal energy density (elem, integ.pnt.,energy)",
-                        &energy,
-                        false,
-                    ),
+                    "ENER" => match &energy {
+                        Some(e) => (
+                            "internal energy density (elem, integ.pnt.,energy)",
+                            e,
+                            false,
+                        ),
+                        None => continue,
+                    },
                     _ => continue,
                 };
             let rows = integration_point_rows(model, table, elements, field, reorder);
