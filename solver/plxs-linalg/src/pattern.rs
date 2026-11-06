@@ -258,6 +258,31 @@ impl SparseMatrix {
         }
     }
 
+    /// The same matrix on a larger pattern that holds every entry of this one (a pattern
+    /// with extra contact springs); the new entries are zero. Returns a clone when the
+    /// pattern is the same.
+    pub fn embed(&self, pattern: Arc<Pattern>) -> SparseMatrix {
+        if Arc::ptr_eq(&self.pattern, &pattern) || *self.pattern == *pattern {
+            return SparseMatrix {
+                pattern,
+                values: self.values.clone(),
+            };
+        }
+        assert_eq!(self.pattern.n, pattern.n, "embed needs the same dimension");
+        let mut out = SparseMatrix::zeros(pattern);
+        for col in 0..self.pattern.n {
+            let start = self.pattern.col_ptr[col] as usize;
+            for (k, &row) in self.pattern.column(col).iter().enumerate() {
+                let at = out
+                    .pattern
+                    .position(row, col as u32)
+                    .unwrap_or_else(|| panic!("entry ({row}, {col}) is not in the larger pattern"));
+                out.values[at] = self.values[start + k];
+            }
+        }
+        out
+    }
+
     /// `alpha · a + beta · b` on the pattern of `a` (`b` must share it).
     pub fn linear_combination(
         a: &SparseMatrix,
@@ -324,6 +349,23 @@ impl SparseMatrix {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_matrix_embedded_in_a_larger_pattern_keeps_its_entries() {
+        let small = Arc::new(Pattern::from_blocks(4, [[0u32, 1].as_slice(), &[2, 3]]));
+        let large = Arc::new(Pattern::from_blocks(4, [[0u32, 1, 2, 3].as_slice()]));
+        let mut a = SparseMatrix::zeros(small);
+        a.add_block(&[0, 1], &[4.0, 1.0, 1.0, 3.0]);
+        a.add_block(&[2, 3], &[2.0, -1.0, -1.0, 5.0]);
+        let b = a.embed(large.clone());
+        assert!(Arc::ptr_eq(b.pattern(), &large));
+        for i in 0..4 {
+            for j in 0..4 {
+                assert_eq!(a.get(i, j), b.get(i, j), "({i}, {j})");
+            }
+        }
+        assert_eq!(b.values().iter().filter(|v| **v != 0.0).count(), 6);
+    }
 
     #[test]
     fn the_parallel_product_equals_the_sequential_one() {

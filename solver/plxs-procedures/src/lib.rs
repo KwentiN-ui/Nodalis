@@ -2,7 +2,7 @@
 //! (`*STATIC` without `NLGEOM`). M2: heat transfer and temperature-displacement steps
 //! ([`heat`], [`thermal`]), nonlinear static (`NLGEOM`, plastic and creeping materials,
 //! [`nonlinear`]) and `*VISCO`, `*FREQUENCY` and `*BUCKLE` ([`eigen`]), `*DYNAMIC`
-//! ([`dynamic`]), modal dynamics, steady state dynamics and complex frequency ([`modal`],
+//! ([`dynamic`]; with `NLGEOM`, nonlinear materials or contact [`nonlinear_dynamic`]), modal dynamics, steady state dynamics and complex frequency ([`modal`],
 //! [`complex`]), `*SENSITIVITY` ([`sensitivity`], T17). The remaining procedures follow in
 //! M3 (concept section 4.5).
 //!
@@ -121,7 +121,6 @@ pub fn run_step(
         }
         ProcedureKind::Frequency(_)
         | ProcedureKind::Buckle(_)
-        | ProcedureKind::Dynamic(_)
         | ProcedureKind::Sensitivity(_)
         | ProcedureKind::ComplexFrequency(_)
         | ProcedureKind::ModalDynamics(_)
@@ -136,7 +135,11 @@ pub fn run_step(
         }
         ProcedureKind::Frequency(_) => eigen::FrequencyProcedure.run(ctx, step, progress),
         ProcedureKind::Buckle(_) => eigen::BuckleProcedure.run(ctx, step, progress),
-        ProcedureKind::Dynamic(_) if step.nlgeom || ctx.table.has_nonlinear_material() => {
+        // Contact makes a dynamic step nonlinear as well: Newton iterations on the contact
+        // status in every increment.
+        ProcedureKind::Dynamic(_)
+            if step.nlgeom || ctx.table.has_nonlinear_material() || !ctx.contact.is_empty() =>
+        {
             nonlinear_dynamic::NonlinearDynamic.run(ctx, step, progress)
         }
         ProcedureKind::Dynamic(_) => dynamic::DynamicProcedure.run(ctx, step, progress),

@@ -296,7 +296,7 @@ all contact regions share. CalculiX allows only one contact #ui("Formulation") p
 "Which method?" below). Auto takes surface to surface, or the method of your manual contact
 pairs if you have any. The #ui("Stiffness factor") replaces the 10 of the normal stiffness.
 The model check reports a manual contact pair whose method differs from the formulation, and
-mortar contact in a step other than static.
+mortar contact in a step that is neither static nor dynamic.
 
 #screenshot("connection-settings-weak-springs.png", [Connection settings with weak springs for
   parts held only by contact])
@@ -592,8 +592,8 @@ the shell (S3 and up). For a contact on a shell edge use #ui("Surface to surface
     Slower per iteration. A good choice for static contact.],
   [Mortar], [Face-to-face mortar contact. The most accurate contact pressure and little
     dependence on which side is master, which matters when you read contact pressures. Static
-    steps only, element-face surfaces required, and the slowest method. Try it if surface to
-    surface gives oscillating pressures; it is not meant for dynamics.],
+    and Dynamic steps only, element-face surfaces required, and the slowest method. Try it if
+    surface to surface gives oscillating pressures.],
   [Massless], [Massless node-to-face contact for explicit dynamics. Use it only in explicit
     dynamic steps.],
 )

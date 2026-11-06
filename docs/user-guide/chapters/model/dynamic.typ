@@ -52,7 +52,8 @@ structure is damped; Nodalis chooses the time step and the integration from that
 
 Loads act at once from the start of the step. Give a load an #ui("Amplitude")
 (@amplitudes) for a ramp, a pulse or a vibration; the automatic time step follows its
-points. Materials need a density. Contact is not available in a dynamic step.
+points. Materials need a density. Contact regions and contact pairs (@contacts) act in a
+dynamic step too, see below.
 
 The model check warns when the frequency limit is higher than the frames can show
 (#ui("Too few frames for the frequency limit")) and when all points of an amplitude the
@@ -76,6 +77,34 @@ where they are. Materials with plasticity (@plasticity) make the step nonlinear 
 same way, with or without the switch.
 
 #screenshot("dynamic-pendulum.png", [A plate hinged at its left edge, swinging under its own weight with Large deformations])
+
+=== Contact <dynamic-contact>
+
+Contact (node to surface, surface to surface or mortar, frictionless or with friction, in 3D
+and in 2D) works in a Dynamic step as in a static one: a part that falls onto another, a bar that
+hits a wall, a block that slides on a plate and stops by friction. Like #ui("Large
+deformations"), contact makes the step iterate in every time step.
+
+The time integration treats the contact so that impacts stay physical:
+
+- An impact lasts far shorter than a usual time step (a steel part bouncing off a plate stays
+  in contact for microseconds). When a contact closes or opens within a time step, the solver
+  checks the energy the contact springs take and return; if the time step is too coarse for
+  the impact it is halved around the impact, down to a few nanoseconds where needed, and
+  the frames stay where they are. A dropped part therefore never bounces higher than it
+  fell from.
+- The contact springs are damped with a fraction of the time step. This removes the
+  chatter of the nodes on the stiff contact springs (the contact force jumping between zero
+  and several times its value from one time step to the next) and leaves the slower motion
+  alone; the energy it takes is part of ALLVD and stays at a few percent of an impact.
+- Contact carries pressure only: node to surface contact has no tension before the parts
+  touch (unlike in a static step, where it follows CalculiX).
+
+#screenshot("dynamic-contact.svg", [Left: a steel block dropped from 1 mm onto a plate with
+  time steps of 1 ms; the solver refines the impact of a few microseconds, and the block
+  bounces without gaining energy (part of it stays in the vibrations of the block). Right: a
+  steel bar hitting a wall at 1 m/s presses with ρ c v₀ A for the time 2L/c a wave takes
+  through the bar and back, then leaves at 1 m/s])
 
 === What the solver reports
 
@@ -105,7 +134,8 @@ It also gets a history output #ui("Energies") of the whole model at every time s
 #screenshot("history-energies.png", [Energies history output of a Dynamic step])
 
 With large deformations or plasticity ALLIE is the work the internal forces did, which
-includes the energy plastic deformation dissipated.
+includes the energy plastic deformation dissipated. With contact it also holds the energy of the contact
+springs and the work of the friction; the damping of the contact springs is part of ALLVD.
 
 ALLIE + ALLKE + ALLVD − ALLWK stays at its starting value up to the small loss of the
 numerical damping: the energy balance shows whether the time step resolves the motion.
