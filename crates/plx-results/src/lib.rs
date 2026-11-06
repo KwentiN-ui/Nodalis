@@ -208,7 +208,7 @@ impl FieldRank {
     /// number of raw components.
     pub fn of_calculix(name: &str, raw_components: usize) -> Self {
         match (name, raw_components) {
-            ("DISP" | "MODE" | "VELO" | "FORC" | "FLUX" | "NORM", 3) => FieldRank::Vector,
+            ("DISP" | "MODE" | "VELO" | "ACCE" | "FORC" | "FLUX" | "NORM", 3) => FieldRank::Vector,
             ("STRESS" | "ZZSTR", 6) => FieldRank::Tensor(TensorKind::Stress),
             ("TOSTRAIN" | "MESTRAIN", 6) => FieldRank::Tensor(TensorKind::Strain),
             _ => FieldRank::Scalar,

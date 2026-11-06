@@ -12,15 +12,15 @@ use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
 use plx_model::{
     AXIS_LABELS, Amplitude, BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition,
     BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, CrossSection,
-    CyclicSymmetry, DefinedField, DefinedFieldKind, Displacement, Distribution, DynamicProcedure,
-    DynamicStep, Elastic, FeModel, Field, FieldOutput, Formulation, FrequencyStep, GLOBAL,
-    Hardening, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialCondition,
-    InitialConditionKind, ItemRef, LinearSolverChoice, Load, LoadKind, Material, MeshSet,
-    ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad, NodeTie, OutputDimension,
-    OutputKind, PlasticPoint, Quantity, Region, RemoteBehavior, RemoteForce, Section, SectionKind,
-    SensitivityStep, SetKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind,
-    SurfaceInteraction, SymmetryError, Tie, UnitSystem, ViscoStep, Wheel, next_name,
-    symmetry_plane,
+    CyclicSymmetry, Damping, DampingRange, DefinedField, DefinedFieldKind, Displacement,
+    Distribution, DynamicStep, Elastic, FeModel, Field, FieldOutput, Formulation, FrequencyStep,
+    GLOBAL, Hardening, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
+    InitialCondition, InitialConditionKind, ItemRef, LinearSolverChoice, Load, LoadKind, Material,
+    MeshSet, ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad, NodeTie,
+    NumericalDamping, OutputDimension, OutputKind, PlasticPoint, Quantity, RayleighDamping, Region,
+    RemoteBehavior, RemoteForce, Section, SectionKind, SensitivityStep, SetKind, StaticStep,
+    SteadyStateDynamicsStep, Step, StepKind, StepLimit, SurfaceInteraction, SymmetryError, Tie,
+    TimeStep, UnitSystem, ViscoStep, Wheel, next_name, symmetry_plane,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row, amplitude_row_with};
@@ -2780,7 +2780,7 @@ impl Editor {
                 let sectors = (model.fe.cyclic_tie())
                     .and_then(|t| t.cyclic_sectors(&model.mesh))
                     .and_then(Result::ok);
-                step_form(ui, step, self.index.is_none(), &model.fe, sectors);
+                step_form(ui, step, self.index, &model.fe, sectors);
                 crate::connections::step_contacts(ui, &model.fe, step, self.index);
                 if step.kind.design_region().is_some() {
                     region.ui_labeled(ui, model, "Design region", "design region", true);
@@ -4512,7 +4512,7 @@ fn history_output_form(
 ) {
     name_row(ui, &mut output.name);
     ui.label("Type");
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let current = output.kind.prefix();
         let pair = (model.fe.contact_pairs.first()).map_or(String::new(), |c| c.name.clone());
         let kinds = [
@@ -4523,6 +4523,7 @@ fn history_output_form(
                 region: Region::Parts(Vec::new()),
             },
             HistoryKind::Contact { pair },
+            HistoryKind::Energies,
         ];
         for kind in kinds {
             let selected = kind.prefix() == current;
@@ -4535,6 +4536,7 @@ fn history_output_form(
                     HistoryKind::Node { region } => HistoryOutput::node("", region.clone()),
                     HistoryKind::Element { region } => HistoryOutput::element("", region.clone()),
                     HistoryKind::Contact { pair } => HistoryOutput::contact("", pair.clone()),
+                    HistoryKind::Energies => HistoryOutput::energies(""),
                 };
                 output.variables = defaults.variables;
                 rename_default(&mut output.name, current, kind.prefix(), taken);
@@ -4552,7 +4554,13 @@ fn history_output_form(
     egui::Grid::new("history variables")
         .spacing([10.0, 2.0])
         .show(ui, |ui| {
-            for row in choices.chunks(5) {
+            // The energies' names are long: two per row.
+            let per_row = if output.kind == HistoryKind::Energies {
+                2
+            } else {
+                5
+            };
+            for row in choices.chunks(per_row) {
                 for &variable in row {
                     let mut on = output.variables.iter().any(|v| v == variable);
                     let checkbox = ui
@@ -4573,17 +4581,31 @@ fn history_output_form(
         output.normalize_variables();
     }
     ui.end_row();
-    ui.label("Totals");
-    egui::ComboBox::from_id_salt("history totals")
-        .selected_text(output.totals.label())
-        .width(crate::dock::fit_width(ui, 200.0))
-        .show_ui(ui, |ui| {
-            for totals in plx_model::Totals::ALL {
-                ui.selectable_value(&mut output.totals, totals, totals.label());
-            }
-        });
-    ui.end_row();
+    let energies = output.kind == HistoryKind::Energies;
+    if !energies {
+        ui.label("Totals");
+        egui::ComboBox::from_id_salt("history totals")
+            .selected_text(output.totals.label())
+            .width(crate::dock::fit_width(ui, 200.0))
+            .show_ui(ui, |ui| {
+                for totals in plx_model::Totals::ALL {
+                    ui.selectable_value(&mut output.totals, totals, totals.label());
+                }
+            });
+        ui.end_row();
+    }
     match &mut output.kind {
+        HistoryKind::Energies => {
+            ui.label("");
+            ui.weak(
+                "Sums over the whole model at every time\n\
+                 step of a Dynamic step; other steps do\n\
+                 not print them. Internal + kinetic energy\n\
+                 + dissipation = external work + energy at\n\
+                 the start, up to the numerical damping.",
+            );
+            ui.end_row();
+        }
         HistoryKind::Contact { pair } => {
             ui.label("Contact Pair");
             egui::ComboBox::from_id_salt("history contact pair")
@@ -4743,6 +4765,7 @@ fn validate_history_output(
         return Err("Please select at least one variable.".into());
     }
     match &output.kind {
+        HistoryKind::Energies => {}
         HistoryKind::Contact { pair } => {
             if !fe.contact_pair_names().contains(&pair.as_str()) {
                 return Err(
@@ -5188,7 +5211,7 @@ fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 12] 
         (
             MODAL_DYNAMICS_LABEL,
             StepKind::ModalDynamics(ModalDynamicsStep::default()),
-            FieldOutput::dynamic_defaults(),
+            FieldOutput::modal_dynamics_defaults(),
         ),
         (
             STEADY_STATE_LABEL,
@@ -5266,13 +5289,24 @@ fn step_kind_label(kind: &StepKind) -> &'static str {
 /// The step dialog. The kind is chosen when the step is created, from the list of
 /// step types; switching it starts with that kind's default field outputs.
 /// `cyclic_sectors` is the number of sectors of a cyclic symmetric model.
+/// `index` is that of the step edited, `None` for a new one.
 fn step_form(
     ui: &mut Ui,
     step: &mut Step,
-    creating: bool,
+    index: Option<usize>,
     fe: &FeModel,
     cyclic_sectors: Option<u32>,
 ) {
+    let creating = index.is_none();
+    // What a Dynamic step derives from the rest of the model: the shortest amplitude
+    // segment its loads follow, and the state it starts from.
+    let dynamic = match &step.kind {
+        StepKind::Dynamic(settings) => Some(DynamicContext {
+            amplitude_interval: fe.amplitude_interval(step, settings.duration),
+            starts_from: dynamic_start(fe, index),
+        }),
+        _ => None,
+    };
     name_row(ui, &mut step.name);
     ui.label("Type");
     if creating {
@@ -5283,6 +5317,13 @@ fn step_form(
             .show_ui(ui, |ui| {
                 for (label, kind, outputs) in step_kinds(fe) {
                     if ui.selectable_label(current == label, label).clicked() && current != label {
+                        // A Dynamic step prints the energies of the model by default.
+                        step.history_outputs
+                            .retain(|h| h.kind != HistoryKind::Energies);
+                        if matches!(kind, StepKind::Dynamic(_)) {
+                            step.history_outputs
+                                .push(HistoryOutput::energies("Energies"));
+                        }
                         step.kind = kind;
                         step.field_outputs = outputs;
                     }
@@ -5296,7 +5337,10 @@ fn step_form(
     match &mut step.kind {
         StepKind::Static(settings) => static_form(ui, settings, units),
         StepKind::Frequency(settings) => frequency_form(ui, settings, units, cyclic_sectors),
-        StepKind::Dynamic(settings) => dynamic_form(ui, settings, units),
+        StepKind::Dynamic(settings) => {
+            let context = dynamic.unwrap_or_default();
+            dynamic_form(ui, settings, units, &context)
+        }
         StepKind::ModalDynamics(settings) => modal_dynamics_form(ui, settings, units),
         StepKind::SteadyStateDynamics(settings) => steady_state_form(ui, settings, units),
         StepKind::ComplexFrequency(settings) => complex_frequency_form(ui, settings, units),
@@ -5409,55 +5453,277 @@ fn heat_transfer_form(
     }
 }
 
-/// Settings of a dynamic step: the time integration, then the increments as in a static
-/// step, then the Rayleigh damping.
-fn dynamic_form(ui: &mut Ui, settings: &mut DynamicStep, units: UnitSystem) {
-    ui.label("Procedure");
-    egui::ComboBox::from_id_salt("dynamic procedure")
-        .selected_text(settings.procedure.label())
+/// What the dialog of a Dynamic step shows besides its settings.
+#[derive(Default)]
+struct DynamicContext {
+    /// The shortest segment of the amplitudes its loads follow.
+    amplitude_interval: Option<f64>,
+    /// "rest", "the state at the end of step Preload", ...
+    starts_from: String,
+}
+
+/// What a Dynamic step at `index` (`None`: a new one at the end) starts from: the state the
+/// active steps before it leave, and the initial velocities until a Dynamic step took them
+/// up.
+fn dynamic_start(fe: &FeModel, index: Option<usize>) -> String {
+    let before = &fe.steps[..index.unwrap_or(fe.steps.len()).min(fe.steps.len())];
+    let previous = before
+        .iter()
+        .rev()
+        .find(|s| s.active && s.kind.is_mechanical());
+    let dynamic_before =
+        (before.iter()).any(|s| s.active && matches!(s.kind, StepKind::Dynamic(_)));
+    let velocities: Vec<&str> = (fe.initial_conditions.iter())
+        .filter(|c| c.active && c.kind.is_velocity())
+        .map(|c| c.name.as_str())
+        .collect();
+    let mut parts = Vec::new();
+    if let Some(previous) = previous {
+        parts.push(format!("the state at the end of {}", previous.name));
+    }
+    if !dynamic_before && !velocities.is_empty() {
+        parts.push(format!("initial velocity {}", velocities.join(", ")));
+    }
+    if parts.is_empty() {
+        "rest".into()
+    } else {
+        parts.join(" with ")
+    }
+}
+
+/// A time or frequency with its unit, to four significant digits.
+fn shown(value: f64, units: UnitSystem, quantity: Quantity) -> String {
+    let value = plx_model::STORED.convert(value, quantity, units);
+    let text = numeric::fit(value, |t| t.len() <= 7);
+    match units.unit(quantity) {
+        "" => text,
+        unit => format!("{text} {unit}"),
+    }
+}
+
+/// Settings of a Dynamic step: how long, how many result frames and how damped; the time
+/// step and the integration under Advanced.
+fn dynamic_form(
+    ui: &mut Ui,
+    settings: &mut DynamicStep,
+    units: UnitSystem,
+    context: &DynamicContext,
+) {
+    ui.label("Duration");
+    expose::field(ui, Field::Duration, |ui| {
+        ui.add(numeric::physical(
+            &mut settings.duration,
+            units,
+            Quantity::Time,
+        ))
+    });
+    ui.end_row();
+    ui.label("Frames").on_hover_text(
+        "Result frames kept over the duration, evenly spaced; the last one at the end.",
+    );
+    expose::field(ui, Field::Frames, |ui| {
+        ui.add(numeric::count(&mut settings.frames).range(1..=DynamicStep::MAX_FRAMES))
+    });
+    ui.end_row();
+    let integration = settings.integration(context.amplitude_interval);
+    ui.label("");
+    ui.weak(format!(
+        "A frame every {}",
+        shown(settings.frame_interval(), units, Quantity::Time)
+    ));
+    ui.end_row();
+
+    ui.label("Damping");
+    let kind = |d: &Damping| match d {
+        Damping::None => 0,
+        Damping::Ratio { .. } => 1,
+        Damping::Rayleigh(_) => 2,
+    };
+    let labels = ["None", "Damping ratio", "Rayleigh coefficients"];
+    let mut chosen = kind(&settings.damping);
+    egui::ComboBox::from_id_salt("dynamic damping")
+        .selected_text(labels[chosen])
         .show_ui(ui, |ui| {
-            for choice in DynamicProcedure::ALL {
-                ui.selectable_value(&mut settings.procedure, choice, choice.label());
+            for (i, label) in labels.iter().enumerate() {
+                ui.selectable_value(&mut chosen, i, *label);
             }
         });
     ui.end_row();
-    ui.label("Alpha (HHT)");
-    ui.add(
-        numeric::drag_value(&mut settings.alpha)
-            .range(-1.0 / 3.0..=0.0)
-            .speed(0.01)
-            .max_decimals(4),
+    if chosen != kind(&settings.damping) {
+        settings.damping = match chosen {
+            0 => Damping::None,
+            1 => Damping::Ratio {
+                zeta: 0.02,
+                range: DampingRange::Automatic,
+            },
+            _ => Damping::Rayleigh(RayleighDamping::default()),
+        };
+    }
+    match &mut settings.damping {
+        Damping::None => {}
+        Damping::Ratio { zeta, range } => {
+            ui.label("    Ratio");
+            expose::field(ui, Field::DampingRatio, |ui| {
+                ui.add(
+                    numeric::drag_value(zeta)
+                        .range(0.0..=1.0)
+                        .speed(0.001)
+                        .max_decimals(6),
+                )
+            });
+            ui.end_row();
+            ui.label("");
+            ui.weak(format!(
+                "= {} % of critical damping",
+                numeric::fit(*zeta * 100.0, |t| t.len() <= 6)
+            ));
+            ui.end_row();
+            ui.label("    Frequency range").on_hover_text(
+                "The ratio is met exactly at both ends of the range and is lower between \
+                 them; outside it rises.",
+            );
+            let mut between = matches!(range, DampingRange::Between(..));
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut between, false, "Automatic")
+                    .on_hover_text(
+                        "From the lowest eigenfrequency of the model, which the solver computes \
+                     at the start of the step, to the highest frequency the time step \
+                     resolves.",
+                    );
+                ui.radio_value(&mut between, true, "Between");
+            });
+            ui.end_row();
+            match (between, *range) {
+                (true, DampingRange::Automatic) => {
+                    let upper = integration.resolved_frequency();
+                    *range = DampingRange::Between(upper / 10.0, upper);
+                }
+                (false, DampingRange::Between(..)) => *range = DampingRange::Automatic,
+                _ => {}
+            }
+            if let DampingRange::Between(f1, f2) = range {
+                ui.label("        Lower frequency");
+                ui.add(numeric::physical(f1, units, Quantity::Frequency));
+                ui.end_row();
+                ui.label("        Upper frequency");
+                ui.add(numeric::physical(f2, units, Quantity::Frequency));
+                ui.end_row();
+            } else {
+                ui.label("");
+                ui.weak(format!(
+                    "Lowest eigenfrequency to {}",
+                    shown(integration.resolved_frequency(), units, Quantity::Frequency)
+                ));
+                ui.end_row();
+            }
+        }
+        Damping::Rayleigh(damping) => {
+            ui.label("    Alpha (mass)");
+            ui.add(numeric::physical(
+                &mut damping.alpha,
+                units,
+                Quantity::Frequency,
+            ));
+            ui.end_row();
+            ui.label("    Beta (stiffness)");
+            ui.add(numeric::physical(&mut damping.beta, units, Quantity::Time));
+            ui.end_row();
+            ui.label("");
+            ui.weak("C = alpha M + beta K");
+            ui.end_row();
+        }
+    }
+
+    ui.label("Starts from");
+    ui.label(&context.starts_from);
+    ui.end_row();
+
+    // Advanced: open while something in it differs from the defaults.
+    let id = ui.id().with("dynamic advanced");
+    let custom = settings.time_step != TimeStep::Automatic
+        || settings.frequency_limit.is_some()
+        || settings.numerical_damping != NumericalDamping::Normal
+        || settings.solver != LinearSolverChoice::Automatic;
+    let mut advanced = ui.data(|d| d.get_temp(id)).unwrap_or(custom);
+    ui.label("");
+    ui.checkbox(&mut advanced, "Advanced settings");
+    ui.end_row();
+    ui.data_mut(|d| d.insert_temp(id, advanced));
+    if advanced {
+        ui.label("Time step");
+        let mut fixed = matches!(settings.time_step, TimeStep::Fixed(_));
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut fixed, false, "Automatic")
+                .on_hover_text(
+                    "Short enough for the frames, a tenth of the shortest segment of the \
+                 amplitudes the loads follow, and the frequency limit.",
+                );
+            ui.radio_value(&mut fixed, true, "At most");
+        });
+        ui.end_row();
+        match (fixed, settings.time_step) {
+            (true, TimeStep::Automatic) => {
+                settings.time_step = TimeStep::Fixed(integration.increment)
+            }
+            (false, TimeStep::Fixed(_)) => settings.time_step = TimeStep::Automatic,
+            _ => {}
+        }
+        if let TimeStep::Fixed(dt) = &mut settings.time_step {
+            ui.label("");
+            ui.add(numeric::physical(dt, units, Quantity::Time));
+            ui.end_row();
+        }
+        ui.label("Max. frequency").on_hover_text(
+            "The time step resolves vibrations up to this frequency with 20 steps per period. \
+             Higher ones are damped out by the numerical damping.",
+        );
+        let mut limited = settings.frequency_limit.is_some();
+        let mut limit =
+            (settings.frequency_limit).unwrap_or_else(|| integration.resolved_frequency());
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut limited, "");
+            ui.add_enabled(
+                limited,
+                numeric::physical(&mut limit, units, Quantity::Frequency),
+            );
+        });
+        ui.end_row();
+        settings.frequency_limit = limited.then_some(limit);
+        ui.label("Numerical damping").on_hover_text(
+            "Removes the high frequencies the time step cannot resolve. Normal damps them \
+             slightly, None conserves the energy, Strong damps them as much as possible.",
+        );
+        egui::ComboBox::from_id_salt("numerical damping")
+            .selected_text(settings.numerical_damping.label())
+            .show_ui(ui, |ui| {
+                for choice in NumericalDamping::ALL {
+                    ui.selectable_value(&mut settings.numerical_damping, choice, choice.label());
+                }
+            });
+        ui.end_row();
+        solver_row(ui, &mut settings.solver);
+    }
+    // Recomputed: the settings may have changed above.
+    let integration = settings.integration(context.amplitude_interval);
+    let reason = match integration.limited_by {
+        StepLimit::Frames => "one per frame",
+        StepLimit::Amplitude => "for the amplitudes of the loads",
+        StepLimit::Frequency => "for the frequency limit",
+        StepLimit::Fixed => "as set",
+    };
+    ui.label("");
+    ui.weak(format!(
+        "Time step {} ({reason}),\n{} increments",
+        shown(integration.increment, units, Quantity::Time),
+        integration.increments(settings)
+    ));
+    ui.end_row();
+    ui.label("");
+    ui.weak(
+        "Loads act at once; give a load an\namplitude for a ramp, pulse or\nvibration. \
+         Materials need a density.",
     );
     ui.end_row();
-    ui.label("");
-    ui.weak("Numerical damping of the time integration, -1/3 to 0; -0.05 is the default.");
-    ui.end_row();
-    increments_form(ui, &mut settings.increments, units, true);
-    solver_row(ui, &mut settings.increments.solver);
-    let mut damped = settings.damping.is_some();
-    ui.label("");
-    ui.checkbox(&mut damped, "Rayleigh damping");
-    ui.end_row();
-    let mut damping = settings.damping.unwrap_or_default();
-    ui.label("    Alpha (mass)");
-    ui.add_enabled(
-        damped,
-        numeric::physical(&mut damping.alpha, units, Quantity::Frequency),
-    );
-    ui.end_row();
-    ui.label("    Beta (stiffness)");
-    ui.add_enabled(
-        damped,
-        numeric::physical(&mut damping.beta, units, Quantity::Time),
-    );
-    ui.end_row();
-    ui.label("");
-    ui.weak("Damping ratio zeta at circular frequency omega: alpha = 2 zeta omega,");
-    ui.end_row();
-    ui.label("");
-    ui.weak("beta = 2 zeta / omega. Loads need a stepped amplitude to act at once.");
-    ui.end_row();
-    settings.damping = damped.then_some(damping);
 }
 
 /// Settings of a modal dynamics step: the time increments, then the modal damping.

@@ -70,7 +70,7 @@ impl OutputKind {
     /// Variables the kind can write, in a fixed order.
     pub fn choices(self) -> &'static [&'static str] {
         match self {
-            Self::Node => &["RF", "U", "PU", "V", "NT", "PNT", "RFL", "SEN"],
+            Self::Node => &["RF", "U", "PU", "V", "A", "NT", "PNT", "RFL", "SEN"],
             Self::Element => &[
                 "S", "PHS", "E", "ME", "PEEQ", "ENER", "HFL", "ERR", "HER", "ZZS", "SDV",
             ],
@@ -114,6 +114,11 @@ pub fn output_variable_description(variable: &str) -> &'static str {
         "U" => "Displacements.",
         "PU" => "Displacements magnitude and phase.",
         "V" => "Velocities.",
+        "A" => "Accelerations (Dynamic steps).",
+        "ALLIE" => "Internal (strain) energy of the whole model.",
+        "ALLKE" => "Kinetic energy of the whole model.",
+        "ALLWK" => "Work of the external loads since the start of the step.",
+        "ALLVD" => "Energy dissipated by the damping since the start of the step.",
         "NT" => "Temperatures.",
         "PNT" => "Temperatures magnitude and phase.",
         "RFL" => "External concentrated heat sources.",
@@ -206,11 +211,18 @@ impl FieldOutput {
         outputs
     }
 
-    /// Field outputs added to a new dynamic step: velocities and energies too.
+    /// Field outputs added to a new dynamic step: velocities and accelerations too.
     pub fn dynamic_defaults() -> Vec<Self> {
         let mut outputs = Self::defaults();
+        outputs[0].variables = ["RF", "U", "V", "A"].map(String::from).to_vec();
+        outputs[1].variables = ["S", "E"].map(String::from).to_vec();
+        outputs
+    }
+
+    /// Field outputs added to a new modal dynamics step: velocities too.
+    pub fn modal_dynamics_defaults() -> Vec<Self> {
+        let mut outputs = Self::dynamic_defaults();
         outputs[0].variables = ["RF", "U", "V"].map(String::from).to_vec();
-        outputs[1].variables = ["S", "E", "ENER"].map(String::from).to_vec();
         outputs
     }
 

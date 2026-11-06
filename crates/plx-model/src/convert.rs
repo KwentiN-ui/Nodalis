@@ -134,10 +134,23 @@ impl FeModel {
                 }
                 StepKind::Visco(v) => v.increments.convert_units(&c),
                 StepKind::Dynamic(d) => {
-                    d.increments.convert_units(&c);
-                    if let Some(damping) = &mut d.damping {
-                        c.value(&mut damping.alpha, Quantity::Frequency);
-                        c.value(&mut damping.beta, Quantity::Time);
+                    c.value(&mut d.duration, Quantity::Time);
+                    if let crate::TimeStep::Fixed(dt) = &mut d.time_step {
+                        c.value(dt, Quantity::Time);
+                    }
+                    c.option(&mut d.frequency_limit, Quantity::Frequency);
+                    match &mut d.damping {
+                        crate::Damping::None => {}
+                        crate::Damping::Ratio { range, .. } => {
+                            if let crate::DampingRange::Between(f1, f2) = range {
+                                c.value(f1, Quantity::Frequency);
+                                c.value(f2, Quantity::Frequency);
+                            }
+                        }
+                        crate::Damping::Rayleigh(damping) => {
+                            c.value(&mut damping.alpha, Quantity::Frequency);
+                            c.value(&mut damping.beta, Quantity::Time);
+                        }
                     }
                 }
                 StepKind::ModalDynamics(m) => {

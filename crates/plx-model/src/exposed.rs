@@ -145,6 +145,12 @@ pub enum Field {
     ShearFactor,
     TimePeriod,
     InitialIncrement,
+    /// The duration of a Dynamic step.
+    Duration,
+    /// The result frames of a Dynamic step.
+    Frames,
+    /// The damping ratio of a Dynamic step.
+    DampingRatio,
     /// The number of eigenfrequencies of a frequency step.
     Modes,
     /// The coordinates of the point of a remote displacement, in its coordinate system.
@@ -198,6 +204,9 @@ impl Field {
             Self::ShearFactor => "k",
             Self::TimePeriod => "Time period",
             Self::InitialIncrement => "Initial increment",
+            Self::Duration => "Duration",
+            Self::Frames => "Frames",
+            Self::DampingRatio => "Damping ratio",
             Self::Modes => "Modes",
             Self::LocationX => "Location X",
             Self::LocationY => "Location Y",
@@ -213,7 +222,7 @@ impl Field {
     pub const ROTATION: [Self; 3] = [Self::RotationX, Self::RotationY, Self::RotationZ];
     pub const LOCATION: [Self; 3] = [Self::LocationX, Self::LocationY, Self::LocationZ];
     pub const AXIS: [Self; 3] = [Self::AxisX, Self::AxisY, Self::AxisZ];
-    pub const ALL: [Self; 43] = [
+    pub const ALL: [Self; 46] = [
         Self::Value,
         Self::X,
         Self::Y,
@@ -249,6 +258,9 @@ impl Field {
         Self::ShearFactor,
         Self::TimePeriod,
         Self::InitialIncrement,
+        Self::Duration,
+        Self::Frames,
+        Self::DampingRatio,
         Self::Modes,
         Self::LocationX,
         Self::LocationY,
@@ -413,7 +425,16 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                 StepKind::HeatTransfer(h)
                 | StepKind::CoupledTempDisp(h)
                 | StepKind::UncoupledTempDisp(h) => &mut h.increments,
-                StepKind::Dynamic(d) => &mut d.increments,
+                StepKind::Dynamic(d) => {
+                    return match (field, &mut d.damping) {
+                        (Field::Duration, _) => real(&mut d.duration, Quantity::Time),
+                        (Field::Frames, _) => Some((Slot::Count(&mut d.frames), ValueKind::Count)),
+                        (Field::DampingRatio, crate::Damping::Ratio { zeta, .. }) => {
+                            Some((Slot::Real(zeta), ValueKind::Factor))
+                        }
+                        _ => None,
+                    };
+                }
                 _ => return None,
             };
             match field {

@@ -16,10 +16,10 @@ use plx_model::{
     DynamicStep, FeModel, FieldOutput, Formulation, FrequencyStep, GapConductance,
     HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialConditionKind,
     InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep, ModelItem, ModelSpace,
-    MovingFrame, NodeTie, Origins, OutputDimension, OutputKind, Quantity, Region, RemoteBehavior,
-    RemoteDof, Sampler, Section, SectionKind, SectorDisplay, SensitivityStep, StaticStep,
-    SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, Tie, Totals,
-    UnitSystem, ViscoStep, line_tangent, symmetry_dofs, symmetry_plane,
+    MovingFrame, NodeTie, Origins, OutputDimension, OutputKind, Quantity, RayleighFit, Region,
+    RemoteBehavior, RemoteDof, Sampler, Section, SectionKind, SectorDisplay, SensitivityStep,
+    StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, Tie,
+    Totals, UnitSystem, ViscoStep, line_tangent, symmetry_dofs, symmetry_plane,
 };
 use plxs_core as ir;
 use plxs_core::mesh::{ElementRef, NodeRef};
@@ -2933,6 +2933,8 @@ fn step_block<'f>(
     } = context;
     // Nodes of 2D models move in the x-y plane only; the solver fails on rotations there.
     let dofs = if space.is_2d() { 2 } else { 6 };
+    // Every how many increments the field outputs are written.
+    let mut frame_every = 1;
     let mut ir_step = match &step.kind {
         StepKind::Static(settings) => static_step(settings),
         StepKind::Frequency(settings) => frequency_step(settings, cyclic),
@@ -2941,7 +2943,11 @@ fn step_block<'f>(
         StepKind::HeatTransfer(settings) => heat_transfer_step(settings, HeatKind::Heat),
         StepKind::CoupledTempDisp(settings) => heat_transfer_step(settings, HeatKind::Coupled),
         StepKind::UncoupledTempDisp(settings) => heat_transfer_step(settings, HeatKind::Uncoupled),
-        StepKind::Dynamic(settings) => dynamic_step(settings),
+        StepKind::Dynamic(settings) => {
+            let (ir_step, per_frame) = dynamic_step(settings, model, step);
+            frame_every = per_frame;
+            ir_step
+        }
         StepKind::Visco(settings) => visco_step(settings),
         StepKind::ModalDynamics(settings) => modal_dynamics_step(settings),
         StepKind::SteadyStateDynamics(settings) => steady_state_dynamics_step(settings),
@@ -3510,7 +3516,11 @@ fn step_block<'f>(
         loads.push((Some(index), cards));
     }
     let mut rest = defined_fields(sets, step, amplitudes, model)?;
-    for output in step.history_outputs.iter().filter(|o| o.active) {
+    // Only the time integration computes the energies.
+    let dynamic = matches!(step.kind, StepKind::Dynamic(_));
+    for output in (step.history_outputs.iter())
+        .filter(|o| o.active && (dynamic || o.kind != HistoryKind::Energies))
+    {
         rest.extend(history_output(sets, output, pair_surfaces)?);
     }
     // The force of a bolt is the reaction of its pre-tension node, also while it is locked,
@@ -3527,7 +3537,10 @@ fn step_block<'f>(
         .map(|o| o.dimension)
         .find(|&d| d != OutputDimension::Default)
         .unwrap_or_default();
-    rest.extend((step.field_outputs.iter()).filter_map(|output| field_output(output, dimension)));
+    rest.extend(
+        (step.field_outputs.iter())
+            .filter_map(|output| field_output(output, dimension, frame_every)),
+    );
     Ok(StepParts {
         step: ir_step,
         boundaries,
@@ -3907,26 +3920,49 @@ fn heat_transfer_step(settings: &HeatTransferStep, kind: HeatKind) -> ir::Step {
     incremented_step(increments, procedure, nlgeom)
 }
 
-/// A dynamic step: the Rayleigh
-/// damping belongs to the step. Its loads act at once, as in CalculiX.
-fn dynamic_step(settings: &DynamicStep) -> ir::Step {
-    let increments = &settings.increments;
-    let mut step = incremented_step(
-        increments,
-        ir::step::Procedure::Dynamic(ir::step::Dynamic {
-            solver: equation_solver(increments.solver),
-            alpha: (settings.alpha != -0.05).then_some(settings.alpha),
-            explicit: settings.procedure.keyword().is_some(),
-            increments: incrementation(increments),
-            rayleigh: (settings.damping.as_ref()).map(|d| ir::step::Rayleigh {
-                alpha: d.alpha,
-                beta: d.beta,
+/// A Dynamic step: fixed time steps that put the result frames exactly on time steps
+/// (every `per_frame`-th increment is written, see [`DynamicStep::integration`]), the
+/// numerical damping as the HHT alpha and the damping as Rayleigh coefficients. Its loads
+/// act at once; an amplitude shapes them over time. Returns the time steps per frame.
+fn dynamic_step(settings: &DynamicStep, model: &FeModel, step: &Step) -> (ir::Step, u32) {
+    let amplitude_interval = model.amplitude_interval(step, settings.duration);
+    let integration = settings.integration(amplitude_interval);
+    let (rayleigh, damping_ratio) = match settings.rayleigh(integration.increment) {
+        None => (None, None),
+        Some(RayleighFit::Coefficients(r)) => (
+            Some(ir::step::Rayleigh {
+                alpha: r.alpha,
+                beta: r.beta,
             }),
-        }),
-        increments.nlgeom,
-    );
-    step.default_amplitude = ir::step::DefaultAmplitude::Step;
-    step
+            None,
+        ),
+        // The solver fits it from the lowest eigenfrequency, which it computes first.
+        Some(RayleighFit::FromRatio { zeta, upper }) => (
+            None,
+            Some(ir::step::DampingRatio {
+                ratio: zeta,
+                lower: None,
+                upper,
+            }),
+        ),
+    };
+    let alpha = settings.numerical_damping.alpha();
+    let mut ir_step = new_step(ir::step::Procedure::Dynamic(ir::step::Dynamic {
+        solver: equation_solver(settings.solver),
+        alpha: (alpha != -0.05).then_some(alpha),
+        explicit: false,
+        increments: ir::step::Incrementation {
+            initial: Some(integration.increment),
+            period: Some(settings.duration),
+            direct: true,
+            ..ir::step::Incrementation::default()
+        },
+        rayleigh,
+        damping_ratio,
+    }));
+    ir_step.max_increments = (integration.increments(settings) + 1).min(u32::MAX as u64) as u32;
+    ir_step.default_amplitude = ir::step::DefaultAmplitude::Step;
+    (ir_step, integration.per_frame)
 }
 
 /// A modal dynamics step, with the modal
@@ -4082,7 +4118,7 @@ fn variables<'a>(variables: impl IntoIterator<Item = &'a str>) -> Vec<String> {
 
 /// The field output request of a field output; none without variables. Node outputs take the form
 /// `dimension` of the step's element outputs.
-fn field_output(output: &FieldOutput, dimension: OutputDimension) -> Option<Card> {
+fn field_output(output: &FieldOutput, dimension: OutputDimension, every: u32) -> Option<Card> {
     if !output.active || output.variables.is_empty() {
         return None;
     }
@@ -4102,7 +4138,7 @@ fn field_output(output: &FieldOutput, dimension: OutputDimension) -> Option<Card
     };
     let request = ir::step::FieldOutput {
         variables: names,
-        frequency: 1,
+        frequency: every,
         nset: None,
         last_iterations: output.last_iterations,
         contact_elements: output.contact_elements,
@@ -4166,6 +4202,14 @@ fn history_output(
         HistoryKind::Node { region } => {
             let set = sets.node_set(&output.name, region)?;
             Card::NodePrint(node_print(&set, &names, output.totals))
+        }
+        HistoryKind::Energies => {
+            // Sums over the whole model, printed under a set of all elements.
+            let parts = sets.mesh.parts.iter().map(|p| p.name.clone()).collect();
+            let set = sets.element_set(&output.name, &Region::Parts(parts))?;
+            let mut request = node_print(&set, &names, Totals::Only);
+            request.set = Some(ir_name(&set));
+            Card::ElPrint(request)
         }
         HistoryKind::Element { region } => {
             let set = sets.element_set(&output.name, region)?;

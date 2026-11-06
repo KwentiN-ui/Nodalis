@@ -1464,12 +1464,17 @@ fn field_measure(field: &str, component: &str) -> Option<Measure> {
         "MOMENTS" | "TOTAL_MOMENT" => Some(Of(Moment)),
         "ANGULAR_VELOCITIES" => Some(Of(RotationalSpeed)),
         "VELO" | "VELOCITIES" => Some(Of(Velocity)),
+        "ACCE" => Some(Of(Acceleration)),
         "ENER" | "INTERNAL_ENERGY_DENSITY" => Some(Per(Energy, Volume)),
         "CELS"
         | "INTERNAL_ENERGY"
         | "TOTAL_INTERNAL_ENERGY"
         | "KINETIC_ENERGY"
         | "TOTAL_KINETIC_ENERGY"
+        | "MODEL_INTERNAL_ENERGY"
+        | "MODEL_KINETIC_ENERGY"
+        | "MODEL_EXTERNAL_WORK"
+        | "MODEL_DAMPING_DISSIPATION"
         | "CONTACT_PRINT_ENERGY"
         | "CONTACT_SPRING_ENERGY"
         | "TOTAL_CONTACT_SPRING_ENERGY" => Some(Of(Energy)),

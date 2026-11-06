@@ -20,6 +20,7 @@ pub mod convert;
 mod cross_section;
 mod detection;
 mod distribution;
+mod dynamic;
 mod element_type;
 pub mod equation;
 mod exposed;
@@ -78,6 +79,7 @@ pub use detection::{
     auto_detection_tolerance, auto_geometry_detection_tolerance,
 };
 pub use distribution::{Distribution, DistributionKind, Interpolation, Sampler, parse_points};
+pub use dynamic::{Integration, RayleighFit, StepLimit};
 pub use element_type::{PartElementType, element_type_options};
 pub use exposed::{Exposed, Field, ItemRef, ValuePath};
 pub use features::{
@@ -758,7 +760,6 @@ impl StepKind {
         match self {
             StepKind::Static(settings) => settings.nlgeom,
             StepKind::CoupledTempDisp(settings) => settings.increments.nlgeom,
-            StepKind::Dynamic(settings) => settings.increments.nlgeom,
             StepKind::Visco(settings) => settings.increments.nlgeom,
             _ => false,
         }
@@ -1010,57 +1011,174 @@ pub struct FrequencyStep {
     pub solver: LinearSolverChoice,
 }
 
-/// Settings of a `*DYNAMIC` step, with the default values; it
-/// extends the static step by the time integration and the damping.
+/// Settings of a Dynamic step (direct time integration): what the user decides, how long
+/// the step lasts, how many result frames it keeps and how the structure is damped. The
+/// time step, the numerical damping of the integration and the Rayleigh coefficients are
+/// derived from it when the model is lowered for the solver.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DynamicStep {
-    /// Increments, time period, geometric nonlinearity and solver as in a static step.
-    pub increments: StaticStep,
-    /// Numerical damping of the Hilber-Hughes-Taylor integration (`ALPHA=`), between -1/3
-    /// and 0; CalculiX's default is -0.05.
-    pub alpha: f64,
-    /// Implicit or explicit integration of the structure and the fluid (`EXPLICIT=`).
-    pub procedure: DynamicProcedure,
-    /// Rayleigh damping of the whole model, written as `*DAMPING` in the step
-    /// does; `None` leaves the model undamped.
-    pub damping: Option<RayleighDamping>,
+    /// How the response is computed. Only direct integration exists yet.
+    #[serde(default)]
+    pub method: DynamicMethod,
+    /// Length of the step in time.
+    pub duration: f64,
+    /// Result frames written over the duration, evenly spaced, the last one at the end.
+    pub frames: u32,
+    pub damping: Damping,
+    pub time_step: TimeStep,
+    /// Highest frequency the integration must resolve: the time step is at most
+    /// `1 / (20 f)`. `None` leaves it to the frames and the amplitudes.
+    pub frequency_limit: Option<f64>,
+    pub numerical_damping: NumericalDamping,
+    pub solver: LinearSolverChoice,
 }
 
 impl Default for DynamicStep {
     fn default() -> Self {
         Self {
-            increments: StaticStep {
-                incrementation: Incrementation::Automatic,
-                initial_increment: 0.01,
-                ..StaticStep::default()
-            },
-            alpha: -0.05,
-            procedure: DynamicProcedure::Implicit,
-            damping: None,
+            method: DynamicMethod::Direct,
+            duration: 1.0,
+            frames: 200,
+            damping: Damping::None,
+            time_step: TimeStep::Automatic,
+            frequency_limit: None,
+            numerical_damping: NumericalDamping::Normal,
+            solver: LinearSolverChoice::Automatic,
         }
     }
 }
 
 impl DynamicStep {
+    /// The most frames a step may keep.
+    pub const MAX_FRAMES: u32 = 100_000;
+
     /// What is wrong with the settings, if anything.
     pub fn problem(&self) -> Option<String> {
-        if !(-1.0 / 3.0..=0.0).contains(&self.alpha) {
-            return Some("Alpha must lie between -1/3 and 0.".into());
+        if self.duration.is_nan() || self.duration <= 0.0 {
+            return Some("The duration must be greater than 0.".into());
         }
-        if self.increments.incrementation == Incrementation::Default {
-            return Some("A dynamic step needs its time period and increments.".into());
+        if !(1..=Self::MAX_FRAMES).contains(&self.frames) {
+            return Some(format!(
+                "The number of frames must lie between 1 and {}.",
+                Self::MAX_FRAMES
+            ));
         }
-        if self.increments.time_period <= 0.0 || self.increments.initial_increment <= 0.0 {
+        if let TimeStep::Fixed(dt) = self.time_step
+            && !(dt > 0.0 && dt <= self.duration)
+        {
             return Some(
-                "The time period and the initial increment must be greater than 0.".into(),
+                "A fixed time step must be greater than 0 and no longer than the duration.".into(),
             );
         }
-        if let Some(damping) = &self.damping
-            && (damping.alpha < 0.0 || damping.beta < 0.0)
+        if let Some(f) = self.frequency_limit
+            && (f.is_nan() || f <= 0.0)
         {
-            return Some("The damping coefficients cannot be negative.".into());
+            return Some("The frequency limit must be greater than 0.".into());
         }
-        None
+        match self.damping {
+            Damping::None => None,
+            Damping::Ratio { zeta, range } => {
+                if !(zeta > 0.0 && zeta <= 1.0) {
+                    return Some("The damping ratio must lie between 0 and 1 (100 %).".into());
+                }
+                match range {
+                    DampingRange::Between(f1, f2) if !(f1 > 0.0 && f2 > f1) => Some(
+                        "The damping range needs 0 < lower frequency < upper frequency.".into(),
+                    ),
+                    _ => None,
+                }
+            }
+            Damping::Rayleigh(r) if r.alpha < 0.0 || r.beta < 0.0 => {
+                Some("The damping coefficients cannot be negative.".into())
+            }
+            Damping::Rayleigh(_) => None,
+        }
+    }
+
+    /// Time between two result frames.
+    pub fn frame_interval(&self) -> f64 {
+        self.duration / self.frames.max(1) as f64
+    }
+}
+
+/// How a Dynamic step computes the response over time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DynamicMethod {
+    /// Implicit direct integration of the equation of motion (HHT-alpha), unconditionally
+    /// stable.
+    #[default]
+    Direct,
+}
+
+/// The time step of a Dynamic step.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum TimeStep {
+    /// Fine enough for the frames, the amplitudes of the loads and the frequency limit.
+    #[default]
+    Automatic,
+    /// At most this long; shortened so the frames fall on time steps.
+    Fixed(f64),
+}
+
+/// The structural damping of a Dynamic step.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum Damping {
+    /// Undamped; only the numerical damping of the integration removes energy.
+    #[default]
+    None,
+    /// Viscous damping ratio (1 = critical), applied as Rayleigh damping that has exactly
+    /// this ratio at both ends of `range` and less between them.
+    Ratio { zeta: f64, range: DampingRange },
+    /// Mass and stiffness proportional coefficients given directly.
+    Rayleigh(RayleighDamping),
+}
+
+/// The frequencies at which a damping ratio is met exactly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum DampingRange {
+    /// From the lowest eigenfrequency of the model to the highest frequency the time step
+    /// resolves.
+    #[default]
+    Automatic,
+    /// Between two frequencies, in cycles per time unit.
+    Between(f64, f64),
+}
+
+/// The numerical damping of the time integration: it removes the high frequencies the time
+/// step cannot resolve.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NumericalDamping {
+    /// Slight (HHT alpha -0.05).
+    #[default]
+    Normal,
+    /// None (alpha 0, the trapezoidal rule): energy is conserved.
+    None,
+    /// The most the scheme allows (alpha -1/3).
+    Strong,
+}
+
+impl NumericalDamping {
+    pub const ALL: [NumericalDamping; 3] = [
+        NumericalDamping::Normal,
+        NumericalDamping::None,
+        NumericalDamping::Strong,
+    ];
+
+    /// The alpha of the Hilber-Hughes-Taylor integration.
+    pub fn alpha(self) -> f64 {
+        match self {
+            NumericalDamping::Normal => -0.05,
+            NumericalDamping::None => 0.0,
+            NumericalDamping::Strong => -1.0 / 3.0,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            NumericalDamping::Normal => "Normal",
+            NumericalDamping::None => "None",
+            NumericalDamping::Strong => "Strong",
+        }
     }
 }
 
@@ -1219,50 +1337,6 @@ pub struct ModeDamping {
     pub lowest: u32,
     pub highest: u32,
     pub ratio: f64,
-}
-
-/// How a dynamic step integrates over time, CalculiX's `EXPLICIT` parameter of `*DYNAMIC`:
-/// the structure and, with fluids, the fluid.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DynamicProcedure {
-    /// Implicit for both, the default; unconditionally stable.
-    #[default]
-    Implicit,
-    /// Implicit structure, explicit fluid (`EXPLICIT=1`).
-    ImplicitExplicit,
-    /// Explicit structure, implicit fluid (`EXPLICIT=2`).
-    ExplicitImplicit,
-    /// Explicit for both (`EXPLICIT=3`); needs increments below the stability limit.
-    Explicit,
-}
-
-impl DynamicProcedure {
-    pub const ALL: [DynamicProcedure; 4] = [
-        DynamicProcedure::Implicit,
-        DynamicProcedure::ImplicitExplicit,
-        DynamicProcedure::ExplicitImplicit,
-        DynamicProcedure::Explicit,
-    ];
-
-    /// The value of `EXPLICIT=`; `None` for the implicit default.
-    pub fn keyword(self) -> Option<u8> {
-        match self {
-            DynamicProcedure::Implicit => None,
-            DynamicProcedure::ImplicitExplicit => Some(1),
-            DynamicProcedure::ExplicitImplicit => Some(2),
-            DynamicProcedure::Explicit => Some(3),
-        }
-    }
-
-    /// Name of the procedure in the GUI.
-    pub fn label(self) -> &'static str {
-        match self {
-            DynamicProcedure::Implicit => "Implicit / Implicit",
-            DynamicProcedure::ImplicitExplicit => "Implicit / Explicit",
-            DynamicProcedure::ExplicitImplicit => "Explicit / Implicit",
-            DynamicProcedure::Explicit => "Explicit / Explicit",
-        }
-    }
 }
 
 /// Rayleigh damping: the damping matrix is `alpha` times the mass plus `beta` times the
@@ -1575,7 +1649,7 @@ impl Step {
             kind: StepKind::Dynamic(DynamicStep::default()),
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
-            history_outputs: Vec::new(),
+            history_outputs: vec![HistoryOutput::energies("Energies")],
             field_outputs: FieldOutput::dynamic_defaults(),
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),
@@ -1587,6 +1661,8 @@ impl Step {
     pub fn new_modal_dynamics(name: impl Into<String>) -> Self {
         Self {
             kind: StepKind::ModalDynamics(ModalDynamicsStep::default()),
+            field_outputs: FieldOutput::modal_dynamics_defaults(),
+            history_outputs: Vec::new(),
             ..Self::new_dynamic(name)
         }
     }
@@ -1596,6 +1672,7 @@ impl Step {
         Self {
             kind: StepKind::SteadyStateDynamics(SteadyStateDynamicsStep::default()),
             field_outputs: FieldOutput::defaults(),
+            history_outputs: Vec::new(),
             ..Self::new_dynamic(name)
         }
     }

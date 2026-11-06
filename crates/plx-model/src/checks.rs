@@ -131,6 +131,12 @@ pub enum Problem {
     InvalidCyclicSymmetry,
     /// An initial velocity in a model without a Dynamic step.
     VelocityIgnored,
+    /// A Dynamic step with fewer frames than its frequency limit needs to show a vibration
+    /// of that frequency: the solver resolves it, the results do not.
+    FramesTooFew,
+    /// An amplitude a Dynamic step follows whose points all lie after the step's duration:
+    /// the load stays at its first value.
+    AmplitudeOutsideStep,
     /// A Coriolis complex frequency step without a centrifugal load before it.
     NoRotation,
     /// Contact pairs in a frequency step without perturbation: the solver ignores them.
@@ -213,6 +219,8 @@ impl Problem {
             | Problem::SymmetryOffAxis
             | Problem::SkewedSymmetryShared
             | Problem::VelocityIgnored
+            | Problem::FramesTooFew
+            | Problem::AmplitudeOutsideStep
             | Problem::NoLoad
             | Problem::UnusedAmplitude
             | Problem::UnusedDistribution
@@ -288,6 +296,8 @@ impl Problem {
             Problem::BoltHeldAtCut => "Bolt held at its cut",
             Problem::InvalidCyclicSymmetry => "Invalid cyclic symmetry",
             Problem::VelocityIgnored => "Initial velocity without a Dynamic step",
+            Problem::FramesTooFew => "Too few frames for the frequency limit",
+            Problem::AmplitudeOutsideStep => "Amplitude starts after the step",
             Problem::NoRotation => "No rotation",
             Problem::ContactIgnored => "Contact ignored",
             Problem::ContactWithCoriolis => "Contact with Coriolis",
@@ -596,6 +606,17 @@ impl Problem {
             Problem::VelocityIgnored => {
                 "Only a Dynamic step (time integration) starts from an initial velocity; \
                  static, frequency and thermal steps ignore it without a message."
+            }
+            Problem::FramesTooFew => {
+                "The solver resolves vibrations up to the frequency limit, but the results \
+                 keep only the frames: a vibration needs at least two frames per period to \
+                 be seen in them. The computation is still correct, the animation and the \
+                 history of the frames miss the fast part."
+            }
+            Problem::AmplitudeOutsideStep => {
+                "All points of the amplitude lie after the end of the step. Within the step \
+                 the load stays at the factor of the first point, and the change the \
+                 amplitude describes never happens."
             }
             Problem::NoRotation => {
                 "The Coriolis forces of a Complex Frequency step come from its rotational \
@@ -949,6 +970,14 @@ impl Problem {
                  keep the nodal diameter range within 0 to half the number of sectors."
             }
             Problem::VelocityIgnored => "Add a Dynamic step or deactivate the initial condition.",
+            Problem::FramesTooFew => {
+                "Raise the frames of the step to at least twice the frequency limit times \
+                 the duration, or lower the frequency limit."
+            }
+            Problem::AmplitudeOutsideStep => {
+                "Move the points of the amplitude into the duration of the step (step time \
+                 starts at 0), or lengthen the step."
+            }
             Problem::InvalidBolt => {
                 "Pick the two faces of the cut on the geometry, or element faces of solid \
                  elements."
@@ -1641,6 +1670,9 @@ impl FeModel {
                     format!("{} prescribes temperatures (Defined Field)", step.name),
                 ));
             }
+            if let StepKind::Dynamic(settings) = &step.kind {
+                self.check_dynamic_step(s, step, settings, &mut findings);
+            }
             if let StepKind::Static(settings)
             | StepKind::Visco(crate::ViscoStep {
                 increments: settings,
@@ -1661,6 +1693,55 @@ impl FeModel {
         }
         findings.sort_by_key(|f| f.severity());
         findings
+    }
+
+    /// Settings of a Dynamic step that run but show less than intended.
+    fn check_dynamic_step(
+        &self,
+        s: usize,
+        step: &crate::Step,
+        settings: &crate::DynamicStep,
+        findings: &mut Vec<Finding>,
+    ) {
+        if let Some(limit) = settings.frequency_limit
+            && (settings.frames as f64) < 2.0 * limit * settings.duration
+        {
+            findings.push(Finding::new(
+                ModelItem::Step(s),
+                Problem::FramesTooFew,
+                format!(
+                    "{}: {} frames over {} show vibrations up to {:.4} only, the limit is {}",
+                    step.name,
+                    settings.frames,
+                    settings.duration,
+                    settings.frames as f64 / (2.0 * settings.duration),
+                    limit
+                ),
+            ));
+        }
+        for (i, amplitude) in self.amplitudes.iter().enumerate() {
+            let after = |t: f64| t + amplitude.shift_time >= settings.duration;
+            if amplitude.time_span == crate::AmplitudeTime::Step
+                && !amplitude.points.is_empty()
+                && amplitude.points.iter().all(|p| after(p[0]))
+                && self
+                    .step_amplitudes(step)
+                    .iter()
+                    .any(|a| a.name == amplitude.name)
+            {
+                findings.push(Finding::new(
+                    ModelItem::Amplitude(i),
+                    Problem::AmplitudeOutsideStep,
+                    format!(
+                        "{} starts at {} after the end of {} at {}",
+                        amplitude.name,
+                        amplitude.points[0][0] + amplitude.shift_time,
+                        step.name,
+                        settings.duration
+                    ),
+                ));
+            }
+        }
     }
 
     /// Contact pairs with tied surface behavior the solver rejects.

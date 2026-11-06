@@ -441,7 +441,9 @@ fn write_block(
     )?;
     let components = field.components.len();
     let (declared, trailer) = match field.name.as_str() {
-        "DISP" | "FORC" | "VELO" | "FLUX" | "NORM" | "DISPI" | "FORCI" => (components + 1, true),
+        "DISP" | "FORC" | "VELO" | "ACCE" | "FLUX" | "NORM" | "DISPI" | "FORCI" => {
+            (components + 1, true)
+        }
         _ => (components, false),
     };
     writeln!(out, " -4  {:<8}{:>5}{:>5}", field.name, declared, 1)?;

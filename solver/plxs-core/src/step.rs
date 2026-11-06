@@ -261,6 +261,37 @@ pub struct Dynamic {
     pub increments: Incrementation,
     /// `*DAMPING, ALPHA=, BETA=` in the step: Rayleigh damping.
     pub rayleigh: Option<Rayleigh>,
+    /// `*DAMPING, RATIO=, LOWER=, UPPER=` (Nodalis): a viscous damping ratio, applied as
+    /// the Rayleigh damping that meets it at the lower and upper frequency. Without a lower
+    /// frequency the solver takes the lowest eigenfrequency of the model.
+    #[serde(default)]
+    pub damping_ratio: Option<DampingRatio>,
+}
+
+/// A damping ratio fitted as Rayleigh damping between two frequencies (cycles per time).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DampingRatio {
+    pub ratio: f64,
+    pub lower: Option<f64>,
+    pub upper: f64,
+}
+
+impl Rayleigh {
+    /// The coefficients that meet the damping ratio `zeta` exactly at `f1` and `f2`:
+    /// `alpha = 2 zeta w1 w2 / (w1 + w2)`, `beta = 2 zeta / (w1 + w2)`.
+    pub fn from_ratio(zeta: f64, f1: f64, f2: f64) -> Self {
+        let (w1, w2) = (std::f64::consts::TAU * f1, std::f64::consts::TAU * f2);
+        Self {
+            alpha: 2.0 * zeta * w1 * w2 / (w1 + w2),
+            beta: 2.0 * zeta / (w1 + w2),
+        }
+    }
+
+    /// The damping ratio at the frequency `f`.
+    pub fn ratio_at(&self, f: f64) -> f64 {
+        let w = std::f64::consts::TAU * f;
+        self.alpha / (2.0 * w) + self.beta * w / 2.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]

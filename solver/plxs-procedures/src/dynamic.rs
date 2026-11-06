@@ -192,6 +192,7 @@ impl Procedure for DynamicProcedure {
             rayleigh,
             &parameters.increments,
             parameters.solver,
+            parameters.damping_ratio,
         );
         ctx.stiffness = Some(k);
         outcome
@@ -211,6 +212,7 @@ impl DynamicProcedure {
         rayleigh: plxs_core::step::Rayleigh,
         increments: &plxs_core::step::Incrementation,
         solver: plxs_core::step::EquationSolver,
+        damping_ratio: Option<plxs_core::step::DampingRatio>,
     ) -> Result<StepOutcome> {
         let n = ctx.table.dofs.len();
         // `K + c M` (and the matrix of the initial accelerations) is positive definite: the
@@ -225,6 +227,31 @@ impl DynamicProcedure {
             .unwrap_or(f64::INFINITY);
         let start_total = ctx.state.total_time;
         let Scheme { alpha, beta, gamma } = scheme;
+        progress.event(ProgressEvent::Info(format!(
+            "time step {} s resolves vibrations up to {} Hz (10 steps per period)",
+            short(initial),
+            short(1.0 / (10.0 * initial))
+        )));
+        // The constraints are needed for the eigenfrequency of a damping ratio, before the
+        // damping is known.
+        let spc0 = Spc::of_step(ctx.model, step, &ctx.table.dofs, 0.0, start_total, period)?;
+        let active = ctx.table.active_dofs();
+        let set = ctx
+            .constraints
+            .step_set(ctx.model.nodes.len(), &active, &spc0.dofs);
+        let rayleigh = match damping_ratio {
+            Some(ratio) => fit_damping(ctx, &set, k, m, ratio, solver, progress)?,
+            None => {
+                if rayleigh.alpha != 0.0 || rayleigh.beta != 0.0 {
+                    progress.event(ProgressEvent::Info(format!(
+                        "Rayleigh damping alpha = {}, beta = {}",
+                        short(rayleigh.alpha),
+                        short(rayleigh.beta)
+                    )));
+                }
+                rayleigh
+            }
+        };
         let damping = |x: &[f64]| -> Vec<f64> {
             if rayleigh.alpha == 0.0 && rayleigh.beta == 0.0 {
                 return vec![0.0; x.len()];
@@ -235,11 +262,6 @@ impl DynamicProcedure {
         };
 
         // Constraints: the DOFs prescribed in this step do not change; their values may.
-        let spc0 = Spc::of_step(ctx.model, step, &ctx.table.dofs, 0.0, start_total, period)?;
-        let active = ctx.table.active_dofs();
-        let set = ctx
-            .constraints
-            .step_set(ctx.model.nodes.len(), &active, &spc0.dofs);
         for warning in &set.warnings {
             progress.event(ProgressEvent::Warning(warning.clone()));
         }
@@ -379,6 +401,9 @@ impl DynamicProcedure {
             .map(|e| nodal_average_scalar(ctx.table, ctx.model, e));
         let mut factored_dt: Option<f64> = None;
         let mut f_prev = f0;
+        // Energies of the whole model, when a history output asks for them.
+        let energy_requests = energy_requests(step);
+        let (mut external_work, mut dissipation) = (0.0, 0.0);
         let mut stresses = ctx.table.layout.field(6);
         let mut strains = ctx.table.layout.field(6);
         let mut reactions = vec![0.0; n];
@@ -405,9 +430,17 @@ impl DynamicProcedure {
                 size = (size * 1.5).min(maximum);
             }
             let remaining = period - time;
-            let last = size >= remaining * (1.0 - 1e-9);
-            let dt = if last { remaining } else { size };
-            let t1 = time + dt;
+            // Fixed increments are counted rather than summed, so that the n-th one ends
+            // exactly at n times the size (the frames a Dynamic step writes lie there).
+            let (last, t1) = if increments.direct {
+                let end = increment as f64 * size;
+                let last = end >= period * (1.0 - 1e-9);
+                (last, if last { period } else { end })
+            } else {
+                let last = size >= remaining * (1.0 - 1e-9);
+                (last, if last { period } else { time + size })
+            };
+            let dt = t1 - time;
             let total = start_total + t1;
             progress.event(ProgressEvent::Increment {
                 step: ctx.step_number,
@@ -491,6 +524,25 @@ impl DynamicProcedure {
             let v1 = combine(&[(1.0, &v_tilde), (gamma * dt, &a1)], n);
 
             k.multiply(&u1, &mut reactions);
+            if !energy_requests.is_empty() {
+                let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
+                let du = combine(&[(1.0, &u1), (-1.0, &motion.u)], n);
+                let f_mean = combine(&[(0.5, &f_prev), (0.5, &f1)], n);
+                external_work += dot(&f_mean, &du);
+                dissipation += 0.5 * dt * (dot(&motion.v, &cv0) + dot(&v1, &damping(&v1)));
+                let energies = Energies {
+                    internal: 0.5 * dot(&u1, &reactions),
+                    kinetic: 0.5 * dot(&v1, &multiply(m, &v1)),
+                    external_work,
+                    dissipation,
+                };
+                write_energies(
+                    ctx.results,
+                    &energy_requests,
+                    &energies,
+                    (ctx.step_number, increment, total),
+                );
+            }
             ctx.constraints
                 .transfer_forces(&mut reactions, &spc0.dofs, &active);
             integration_point_results(ctx.table, ctx.model, &u1, &mut strains, &mut stresses);
@@ -581,6 +633,147 @@ impl DynamicProcedure {
         ctx.state.steps_done = ctx.step_number;
         Ok(StepOutcome::Converged)
     }
+}
+
+/// The energies of the whole model at the end of an increment.
+struct Energies {
+    /// `½ uᵀ K u`.
+    internal: f64,
+    /// `½ vᵀ M v`.
+    kinetic: f64,
+    /// The work of the loads since the start of the step (trapezoidal rule).
+    external_work: f64,
+    /// The energy the Rayleigh damping dissipated since the start of the step.
+    dissipation: f64,
+}
+
+/// The variables (`ALLIE`, `ALLKE`, `ALLWK`, `ALLVD`) of each `*EL PRINT` of the step that
+/// asks for energies of the model, with its set.
+fn energy_requests(step: &Step) -> Vec<(String, Vec<String>)> {
+    (step.outputs.el_print.iter())
+        .filter_map(|request| {
+            let variables: Vec<String> = (request.variables.iter())
+                .map(|v| v.trim().to_ascii_uppercase())
+                .filter(|v| ["ALLIE", "ALLKE", "ALLWK", "ALLVD"].contains(&v.as_str()))
+                .collect();
+            (!variables.is_empty()).then(|| (request.set.clone().unwrap_or_default(), variables))
+        })
+        .collect()
+}
+
+/// One history block per requested energy, a single total row each.
+fn write_energies(
+    results: &mut plxs_core::Results,
+    requests: &[(String, Vec<String>)],
+    energies: &Energies,
+    (step, increment, time): (u32, u32, f64),
+) {
+    for (set, variables) in requests {
+        for variable in variables {
+            let (quantity, value) = match variable.as_str() {
+                "ALLIE" => ("total model internal energy", energies.internal),
+                "ALLKE" => ("total model kinetic energy", energies.kinetic),
+                "ALLWK" => ("total model external work", energies.external_work),
+                _ => ("total model damping dissipation", energies.dissipation),
+            };
+            results.history.push(plxs_core::results::HistoryBlock {
+                step,
+                increment,
+                quantity: quantity.into(),
+                set: set.clone(),
+                time,
+                rows: vec![(0, vec![value])],
+            });
+        }
+    }
+}
+
+/// A value to four significant digits.
+fn short(value: f64) -> String {
+    if value != 0.0 && !(1e-3..1e6).contains(&value.abs()) {
+        return format!("{value:.3e}");
+    }
+    let digits = (3 - value.abs().max(1e-3).log10().floor() as i32).max(0) as usize;
+    let text = format!("{value:.digits$}");
+    if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        text
+    }
+}
+
+/// The Rayleigh damping of a damping ratio: met exactly at the lower frequency (the lowest
+/// eigenfrequency of the constrained model unless given) and the upper one.
+fn fit_damping(
+    ctx: &ProcedureContext<'_>,
+    set: &plxs_constraints::ConstraintSet,
+    k: &SparseMatrix,
+    m: &SparseMatrix,
+    damping: plxs_core::step::DampingRatio,
+    solver: plxs_core::step::EquationSolver,
+    progress: &mut dyn Progress,
+) -> Result<plxs_core::step::Rayleigh> {
+    let upper = damping.upper;
+    let lower = match damping.lower {
+        Some(lower) => lower,
+        None => {
+            let started = std::time::Instant::now();
+            let k_free = set.reduce(k);
+            let m_free = set.reduce(m);
+            let coordinates =
+                Unknowns::from_free(&set.free, 3, &ctx.model.nodes.coordinates).coordinates;
+            // Rigid body modes of a free structure come first; the damping is fitted at the
+            // first elastic one.
+            let pairs = crate::eigen::lanczos_modes(
+                ctx,
+                &k_free,
+                &m_free,
+                7,
+                None,
+                solver,
+                coordinates,
+                progress,
+            )?;
+            let frequencies: Vec<f64> = (pairs.values.iter())
+                .map(|l| l.max(0.0).sqrt() / std::f64::consts::TAU)
+                .collect();
+            let lowest = frequencies.iter().copied().find(|f| *f > 1e-4 * upper);
+            match lowest {
+                Some(f) => {
+                    progress.event(ProgressEvent::Info(format!(
+                        "lowest eigenfrequency {} Hz in {:.2} s",
+                        short(f),
+                        started.elapsed().as_secs_f64()
+                    )));
+                    f
+                }
+                None => 0.0,
+            }
+        }
+    };
+    let lower = if lower > 0.0 && lower < upper {
+        lower
+    } else {
+        progress.event(ProgressEvent::Warning(format!(
+            "the lowest eigenfrequency {} Hz is not below the highest resolved frequency \
+             {} Hz; the damping is fitted between {} and {} Hz",
+            short(lower),
+            short(upper),
+            short(upper / 10.0),
+            short(upper)
+        )));
+        upper / 10.0
+    };
+    let rayleigh = plxs_core::step::Rayleigh::from_ratio(damping.ratio, lower, upper);
+    progress.event(ProgressEvent::Info(format!(
+        "damping {} % fitted between {} and {} Hz (alpha = {}, beta = {})",
+        short(damping.ratio * 100.0),
+        short(lower),
+        short(upper),
+        short(rayleigh.alpha),
+        short(rayleigh.beta)
+    )));
+    Ok(rayleigh)
 }
 
 /// `c_m M + c_k K` with the fully integrated stiffness and mass of reduced elements (and
@@ -737,6 +930,23 @@ pub(crate) fn write_increment(
             .map_or(0, |p| p + 1);
         fields.insert(at, field);
     }
+    if has("A") {
+        let zero = vec![0.0; motion.a.len()];
+        let (a, _) = ctx.table.reported(ctx.model, &motion.a, &zero);
+        let field = ResultField {
+            name: "ACCE".into(),
+            components: vec!["A1".into(), "A2".into(), "A3".into()],
+            nodes: order.iter().map(|&(id, _)| id).collect(),
+            values: (0..3)
+                .map(|k| order.iter().map(|&(_, i)| a[i as usize * 3 + k]).collect())
+                .collect(),
+        };
+        let at = fields
+            .iter()
+            .position(|f| f.name == "VELO" || f.name == "DISP")
+            .map_or(0, |p| p + 1);
+        fields.insert(at, field);
+    }
     ctx.results.increments.push(ResultsIncrement {
         step: ctx.step_number,
         increment,
@@ -774,6 +984,14 @@ mod tests {
         let (c_m, c_k) = matrix_factors(s, undamped, dt, true);
         assert_eq!(c_m, 1.0);
         assert!((c_k - 0.9 * s.beta * dt * dt).abs() < 1e-18);
+    }
+
+    #[test]
+    fn short_values_keep_four_digits() {
+        assert_eq!(short(48.2345), "48.23");
+        assert_eq!(short(2.0), "2");
+        assert_eq!(short(0.00025), "2.500e-4");
+        assert_eq!(short(1000.0), "1000");
     }
 
     #[test]
