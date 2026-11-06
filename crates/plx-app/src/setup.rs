@@ -3735,7 +3735,7 @@ impl Editor {
             }
         }
         match &self.draft {
-            Draft::Constraint(c) => c.validate()?,
+            Draft::Constraint(c) => c.validate(fe)?,
             Draft::ContactPair(pair, regions) => {
                 contacts::validate_contact_pair(pair, fe)?;
                 regions.validate()?;
@@ -4160,6 +4160,7 @@ impl Editor {
                 put(list, index, output);
             }
             Draft::Constraint(draft) => {
+                fe.reference_points.extend(draft.new_point());
                 let mut constraint = draft.finish();
                 if let Some(existing) = index.and_then(|i| fe.constraints.get(i)) {
                     *constraint.active_mut() = existing.active();

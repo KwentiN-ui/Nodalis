@@ -530,6 +530,13 @@ impl FeModel {
                 body.reference_point = new.to_string();
             }
         }
+        // The ends of springs on the point.
+        let constraints = self.constraints.iter_mut().flat_map(|c| c.regions_mut());
+        for region in constraints {
+            if matches!(region, crate::Region::ReferencePoint(n) if n == old) {
+                *region = crate::Region::ReferencePoint(new.to_string());
+            }
+        }
         for step in &mut self.steps {
             let regions = (step.boundary_conditions.iter_mut().map(|bc| &mut bc.region))
                 .chain(step.loads.iter_mut().map(|load| &mut load.region));
@@ -695,6 +702,28 @@ mod tests {
             PointRef::ReferencePoint("Top".into())
         );
         assert!(model.result_paths[0].samples(&model).is_err());
+    }
+
+    #[test]
+    fn springs_on_a_renamed_point_follow_it() {
+        let mut model = FeModel::default();
+        model
+            .reference_points
+            .push(ReferencePoint::new("RP-1", [0.0; 3]));
+        let mut spring = crate::Spring::new("Spring-1");
+        spring.ends = [
+            crate::SpringEnd::Region(crate::Region::ReferencePoint("RP-1".into())),
+            crate::SpringEnd::World,
+        ];
+        model.constraints.push(crate::Constraint::Spring(spring));
+        model.rename_reference_point("RP-1", "Hub");
+        let crate::Constraint::Spring(spring) = &model.constraints[0] else {
+            unreachable!()
+        };
+        assert_eq!(
+            spring.ends[0],
+            crate::SpringEnd::Region(crate::Region::ReferencePoint("Hub".into()))
+        );
     }
 
     #[test]
