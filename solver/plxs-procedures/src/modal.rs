@@ -371,6 +371,7 @@ impl Procedure for ModalDynamicsProcedure {
                     &reactions,
                     (&stresses, &strains),
                     None,
+                    None,
                 );
             }
             crate::history::write_history_with_velocities(

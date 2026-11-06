@@ -236,6 +236,8 @@ impl FeModel {
                     }
                     LoadKind::Radiation { sink, .. } => c.value(sink, Quantity::Temperature),
                     LoadKind::Gravity(acceleration) => c.all(acceleration, Quantity::Acceleration),
+                    // Standard gravity has no unit of its own.
+                    LoadKind::StandardGravity(_) => {}
                     LoadKind::Centrifugal { point, speed, .. } => {
                         c.all(point, Quantity::Length);
                         c.value(speed, Quantity::RotationalSpeed);

@@ -24,6 +24,7 @@ pub mod heat;
 pub mod history;
 pub mod modal;
 pub mod nonlinear;
+pub mod nonlinear_dynamic;
 pub mod profile;
 pub mod sensitivity;
 pub mod static_linear;
@@ -135,6 +136,9 @@ pub fn run_step(
         }
         ProcedureKind::Frequency(_) => eigen::FrequencyProcedure.run(ctx, step, progress),
         ProcedureKind::Buckle(_) => eigen::BuckleProcedure.run(ctx, step, progress),
+        ProcedureKind::Dynamic(_) if step.nlgeom || ctx.table.has_nonlinear_material() => {
+            nonlinear_dynamic::NonlinearDynamic.run(ctx, step, progress)
+        }
         ProcedureKind::Dynamic(_) => dynamic::DynamicProcedure.run(ctx, step, progress),
         ProcedureKind::ComplexFrequency(_) => {
             complex::ComplexFrequencyProcedure.run(ctx, step, progress)

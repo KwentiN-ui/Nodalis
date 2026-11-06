@@ -3479,7 +3479,8 @@ fn step_block<'f>(
                 }]
             }
             // Gravity: the size of the acceleration and its direction.
-            LoadKind::Gravity(acceleration) => {
+            LoadKind::Gravity(_) | LoadKind::StandardGravity(_) => {
+                let acceleration = load.kind.gravity_vector().unwrap_or_default();
                 let set = sets.element_set(&load.name, &load.region)?;
                 let Some((size, direction)) = unit_vector(acceleration) else {
                     return Err(WriteError::InvalidLoad {
@@ -3966,6 +3967,7 @@ fn dynamic_step(settings: &DynamicStep, model: &FeModel, step: &Step) -> (ir::St
     }));
     ir_step.max_increments = (integration.increments(settings) + 1).min(u32::MAX as u64) as u32;
     ir_step.default_amplitude = ir::step::DefaultAmplitude::Step;
+    ir_step.nlgeom = settings.large_deformations;
     (ir_step, integration.per_frame)
 }
 

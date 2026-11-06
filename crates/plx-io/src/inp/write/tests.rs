@@ -2080,6 +2080,24 @@ fn dynamic_cantilever(
     (mesh, model)
 }
 
+/// Large deformations make the step geometrically nonlinear.
+#[test]
+fn a_dynamic_step_with_large_deformations_is_nonlinear() {
+    let (mesh, mut model) = dynamic_cantilever(1.5e-3, 2.5e-5, None);
+    assert!(!lowered(&mesh, &model).steps[0].nlgeom);
+    let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.large_deformations = true;
+    assert!(model.steps[0].kind.nlgeom());
+    assert!(lowered(&mesh, &model).steps[0].nlgeom);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Step, Nlgeom, Inc=61, Amplitude=Step\n*Dynamic, Direct\n"),
+        "{text}"
+    );
+}
+
 #[test]
 fn a_dynamic_step_is_written() {
     let damping = plx_model::RayleighDamping {
@@ -6527,6 +6545,15 @@ fn gravity_and_centrifugal_loads_are_written() {
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
         text.contains("*Dload, op=New\nINTERNAL_SELECTION-1_BODY-1, GRAV, 9810, 0, 0, -1\n"),
+        "{text}"
+    );
+    // Standard gravity is lowered to the vector of the standard acceleration.
+    let (mesh, model) = cantilever(body_load(LoadKind::StandardGravity(
+        plx_model::GravityDirection::MinusZ,
+    )));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("INTERNAL_SELECTION-1_BODY-1, GRAV, 9.80665, 0, 0, -1\n"),
         "{text}"
     );
     let (mesh, model) = cantilever(body_load(LoadKind::Centrifugal {
