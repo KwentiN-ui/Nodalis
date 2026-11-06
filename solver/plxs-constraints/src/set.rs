@@ -18,10 +18,6 @@ use crate::transform::{Rotation, node_rotations};
 /// Degrees of freedom per node of the primary numbering (`node * 3 + d`).
 const PER_NODE: u32 = 3;
 
-/// Offset of the two expanded layers of a plane node in a rigid body (any positive value
-/// gives the same constraints).
-const PLANE_HALF_THICKNESS: f64 = 0.5;
-
 /// The model-level constraints, independent of the step.
 #[derive(Clone, Debug, Default)]
 pub struct ModelConstraints {
@@ -56,9 +52,8 @@ pub struct ModelConstraints {
 pub struct RigidRow {
     /// Index into [`ModelConstraints::constraints`].
     pub constraint: usize,
-    /// Dense node indices of the member (or `None` for a row that holds the plane of a
-    /// plane member only), the reference node and the rotation node.
-    pub member: Option<u32>,
+    /// Dense node indices of the member, the reference node and the rotation node.
+    pub member: u32,
     pub reference: u32,
     pub rotation: u32,
     /// Position of the member relative to the reference node, undeformed.
@@ -177,58 +172,62 @@ impl ModelConstraints {
                 ));
             };
             let x_ref = model.nodes.coordinates[reference as usize];
-            for member in rigid_body_nodes(model, &body.nodes) {
-                if member == reference || member == rot {
-                    continue;
-                }
+            let members: Vec<u32> = rigid_body_nodes(model, &body.nodes)
+                .into_iter()
+                .filter(|&member| member != reference && member != rot)
+                .collect();
+            let any_plane = members.iter().any(|&member| plane[member as usize]);
+            for member in members {
                 let x = model.nodes.coordinates[member as usize];
                 let r = [x[0] - x_ref[0], x[1] - x_ref[1], x[2] - x_ref[2]];
                 // A plane stress or plane strain node joins the rigid body in its plane
                 // only: its out-of-plane DOF (the thickness change of plane stress) stays
-                // out, as the ccx results show. The node is taken at z = ±t/2 so that the
-                // body cannot rotate about x or y and its reference node does not move out
-                // of plane (any positive t gives the same constraints).
+                // out, as the ccx results show.
                 let in_plane = plane[member as usize];
-                let layers: &[f64] = if in_plane {
-                    &[PLANE_HALF_THICKNESS, -PLANE_HALF_THICKNESS]
-                } else {
-                    &[0.0]
-                };
-                for &offset in layers {
-                    let r = [r[0], r[1], r[2] + offset];
-                    // u_i - u_ref - θ × r = 0, θ the "translations" of the rotation node.
-                    let rows: [[(u32, f64); 2]; 3] = [
-                        [(1, -r[2]), (2, r[1])],
-                        [(2, -r[0]), (0, r[2])],
-                        [(0, -r[1]), (1, r[0])],
-                    ];
-                    for (d, theta) in rows.iter().enumerate() {
-                        let own = d < 2 || !in_plane;
-                        mc.rigid.push(RigidRow {
-                            constraint: mc.constraints.len(),
-                            member: own.then_some(member),
-                            reference,
-                            rotation: rot,
-                            r,
-                            d: d as u32,
-                        });
-                        let mut global = vec![(reference * PER_NODE + d as u32, -1.0)];
-                        if own {
-                            global.insert(0, (member * PER_NODE + d as u32, 1.0));
-                        }
-                        for &(k, a) in theta {
-                            if a != 0.0 {
-                                global.push((rot * PER_NODE + k, a));
-                            }
-                        }
-                        let preferred = if own { member } else { reference };
-                        mc.push_global(
-                            &global,
-                            preferred * PER_NODE + d as u32,
-                            Policy::Repivot,
-                            origin,
-                        );
+                // u_i - u_ref - θ × r = 0, θ the "translations" of the rotation node.
+                let rows: [[(u32, f64); 2]; 3] = [
+                    [(1, -r[2]), (2, r[1])],
+                    [(2, -r[0]), (0, r[2])],
+                    [(0, -r[1]), (1, r[0])],
+                ];
+                for (d, theta) in rows.iter().enumerate() {
+                    if in_plane && d == 2 {
+                        continue;
                     }
+                    mc.rigid.push(RigidRow {
+                        constraint: mc.constraints.len(),
+                        member,
+                        reference,
+                        rotation: rot,
+                        r,
+                        d: d as u32,
+                    });
+                    let mut global = vec![
+                        (member * PER_NODE + d as u32, 1.0),
+                        (reference * PER_NODE + d as u32, -1.0),
+                    ];
+                    for &(k, a) in theta {
+                        if a != 0.0 {
+                            global.push((rot * PER_NODE + k, a));
+                        }
+                    }
+                    mc.push_global(
+                        &global,
+                        member * PER_NODE + d as u32,
+                        Policy::Repivot,
+                        origin,
+                    );
+                }
+            }
+            // A body with plane members stays in their plane: it does not rotate about x
+            // or y, and its reference node does not move out of plane. The rows hold these
+            // DOFs themselves, so that they stay the dependent ones at every rotation
+            // (rows holding the plane through a second layer of every plane node pivot on
+            // one rotation or the other as the body turns, and the set of unknowns changes
+            // from one Newton iteration to the next).
+            if any_plane {
+                for dof in [rot * PER_NODE, rot * PER_NODE + 1, reference * PER_NODE + 2] {
+                    mc.push_global(&[(dof, 1.0)], dof, Policy::Repivot, origin);
                 }
             }
         }
@@ -398,10 +397,10 @@ impl ModelConstraints {
             let theta = node_vector(u, row.rotation);
             let w = rotated_derivative(theta, row.r);
             let d = row.d;
-            let mut global = vec![(row.reference * PER_NODE + d, -1.0)];
-            if let Some(member) = row.member {
-                global.insert(0, (member * PER_NODE + d, 1.0));
-            }
+            let mut global = vec![
+                (row.member * PER_NODE + d, 1.0),
+                (row.reference * PER_NODE + d, -1.0),
+            ];
             for (k, &w) in w[d as usize].iter().enumerate() {
                 if w.abs() > 1e-14 * norm(row.r).max(1e-300) {
                     global.push((row.rotation * PER_NODE + k as u32, -w));
@@ -445,9 +444,7 @@ impl ModelConstraints {
     pub fn project_rigid(&self, u: &mut [f64], held: &[u32]) {
         self.project_joints(u, held);
         for row in &self.rigid {
-            let Some(member) = row.member else {
-                continue;
-            };
+            let member = row.member;
             let dof = member * PER_NODE + row.d;
             if self.rotations.contains_key(&member)
                 || self.rotations.contains_key(&row.reference)
@@ -715,17 +712,65 @@ pub fn rotate(theta: [f64; 3], r: [f64; 3]) -> [f64; 3] {
     ]
 }
 
-/// `∂(R(θ) r)/∂θ` (row `d`, column `k`), by central differences of [`rotate`].
-fn rotated_derivative(theta: [f64; 3], r: [f64; 3]) -> [[f64; 3]; 3] {
-    let h = 1e-6 * (1.0 + norm(theta));
-    let mut w = [[0.0; 3]; 3];
-    for k in 0..3 {
-        let (mut plus, mut minus) = (theta, theta);
-        plus[k] += h;
-        minus[k] -= h;
-        let (p, m) = (rotate(plus, r), rotate(minus, r));
+/// The matrix of the rotation `θ` (columns `R e_k`).
+fn rotation_matrix(theta: [f64; 3]) -> [[f64; 3]; 3] {
+    let mut m = [[0.0; 3]; 3];
+    for (k, column) in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        .into_iter()
+        .enumerate()
+    {
+        let c = rotate(theta, column);
         for d in 0..3 {
-            w[d][k] = (p[d] - m[d]) / (2.0 * h);
+            m[d][k] = c[d];
+        }
+    }
+    m
+}
+
+fn skew(v: [f64; 3]) -> [[f64; 3]; 3] {
+    [[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]]
+}
+
+fn matrix_product(a: [[f64; 3]; 3], b: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let mut m = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            m[i][j] = (0..3).map(|k| a[i][k] * b[k][j]).sum();
+        }
+    }
+    m
+}
+
+/// `∂(R(θ) r)/∂θ` (row `d`, column `k`): `-[R r]× R T(θ)` with the tangent map
+/// `T(θ) = I - b [θ]× + c [θ]×²` of the rotation vector, `b = (1 - cos φ)/φ²`,
+/// `c = (φ - sin φ)/φ³` (`R(θ + δ) = R(θ) R(T δ)` to first order).
+fn rotated_derivative(theta: [f64; 3], r: [f64; 3]) -> [[f64; 3]; 3] {
+    let phi = norm(theta);
+    let (b, c) = if phi < 1e-4 {
+        let p2 = phi * phi;
+        (0.5 - p2 / 24.0, 1.0 / 6.0 - p2 / 120.0)
+    } else {
+        (
+            (1.0 - phi.cos()) / (phi * phi),
+            (phi - phi.sin()) / (phi * phi * phi),
+        )
+    };
+    let st = skew(theta);
+    let st2 = matrix_product(st, st);
+    let mut t = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            t[i][j] = f64::from(u8::from(i == j)) - b * st[i][j] + c * st2[i][j];
+        }
+    }
+    let m = matrix_product(
+        matrix_product(skew(rotate(theta, r)), rotation_matrix(theta)),
+        t,
+    );
+    let mut w = [[0.0; 3]; 3];
+    for d in 0..3 {
+        for k in 0..3 {
+            w[d][k] = -m[d][k];
         }
     }
     w
@@ -839,6 +884,28 @@ mod tests {
         for d in 0..3 {
             for k in 0..3 {
                 assert!((w[d][k] - cross[d][k]).abs() < 1e-8, "{d} {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_derivative_of_a_rotated_point_matches_central_differences() {
+        let theta = [0.3, -0.5, 0.8];
+        let r = [1.0, 2.0, -0.5];
+        let w = rotated_derivative(theta, r);
+        let h = 1e-6;
+        for k in 0..3 {
+            let (mut plus, mut minus) = (theta, theta);
+            plus[k] += h;
+            minus[k] -= h;
+            let (p, m) = (rotate(plus, r), rotate(minus, r));
+            for d in 0..3 {
+                let numeric = (p[d] - m[d]) / (2.0 * h);
+                assert!(
+                    (w[d][k] - numeric).abs() < 1e-7,
+                    "{d} {k}: {} vs {numeric}",
+                    w[d][k]
+                );
             }
         }
     }
