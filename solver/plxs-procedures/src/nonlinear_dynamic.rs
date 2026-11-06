@@ -58,6 +58,7 @@ use crate::dynamic::{
 use crate::equations::{Equations, FirstOrWarnings, in_increment};
 use crate::fields::{internal_energy_density, nodal_average_scalar};
 use crate::nonlinear::NonlinearStatic;
+use crate::profile::Phase;
 use crate::{Procedure, ProcedureContext, StepOutcome};
 
 pub struct NonlinearDynamic;
@@ -194,6 +195,7 @@ impl Procedure for NonlinearDynamic {
         let k0 = ctx.stiffness.clone().unwrap();
         let mut m = SparseMatrix::zeros(ctx.pattern.clone());
         assemble_mass_with(ctx.table, ctx.model, MassRule::Full, &mut m)?;
+        ctx.profile.add(Phase::Assembly, started);
         progress.event(ProgressEvent::Info(format!(
             "stiffness and mass assembled in {:.2} s",
             started.elapsed().as_secs_f64()
@@ -533,6 +535,7 @@ impl Procedure for NonlinearDynamic {
                 ctx.contact.last = Some(evaluation.clone());
             }
             // Outputs: the internal and contact forces carried to the reference points.
+            let started = std::time::Instant::now();
             let mut reactions = state.internal.clone();
             if setup.has_contact {
                 for (r, c) in reactions.iter_mut().zip(&state.contact) {
@@ -595,6 +598,7 @@ impl Procedure for NonlinearDynamic {
                     ctx.results.history.extend(blocks);
                 }
             }
+            ctx.profile.add(Phase::Results, started);
             ctx.sta.push(StaRow {
                 step: ctx.step_number,
                 increment,
@@ -1022,7 +1026,8 @@ fn attempt(
             last_change = Some(iteration);
         }
         let changing = last_change.is_some_and(|i| iteration - i <= 2);
-        ctx.profile.add(crate::profile::Phase::Assembly, started);
+        ctx.profile.add(Phase::Assembly, started);
+        let started = std::time::Instant::now();
         let ma = multiply(&setup.m, &a1);
         let cv1 = if alpha_r == 0.0 && beta_r == 0.0 {
             vec![0.0; n]
@@ -1064,6 +1069,7 @@ fn attempt(
         }
         let set = constraint_set(ctx, setup, &u);
         let residual = set.reduce_rhs(&residual_full);
+        ctx.profile.add(Phase::Vectors, started);
         let r_max = residual.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
         let largest = |x: &[f64]| x.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
         let flux = if output.flux_count > 0 {
@@ -1205,6 +1211,8 @@ fn attempt(
         iteration += 1;
         let started = std::time::Instant::now();
         let reduced = set.reduce(&tangent);
+        ctx.profile.add(Phase::Reduction, started);
+        let started = std::time::Instant::now();
         let coordinates = || Unknowns::from_free(&set.free, 3, &ctx.model.nodes.coordinates);
         let mut sink = FirstOrWarnings {
             inner: &mut *progress,
@@ -1213,8 +1221,7 @@ fn attempt(
         equations
             .prepare(&mut ctx.solver, &reduced, coordinates, true, &mut sink)
             .map_err(|e| numerical(e, ctx.step_number, increment, equations))?;
-        ctx.profile
-            .add(crate::profile::Phase::Factorization, started);
+        ctx.profile.add(Phase::Factorization, started);
         let unsymmetric: Vec<&plxs_contact::ContactElement> = evaluation
             .as_ref()
             .map(|e| {
@@ -1224,6 +1231,7 @@ fn attempt(
                     .collect()
             })
             .unwrap_or_default();
+        let started = std::time::Instant::now();
         let dv = if unsymmetric.is_empty() {
             let mut dv = residual;
             equations
@@ -1256,6 +1264,7 @@ fn attempt(
             let precondition = |v: &mut [f64]| equations.apply_inverse(solver, v);
             plxs_linalg::gmres(&apply, &precondition, &residual, 1e-10, 60, 300)?.0
         };
+        ctx.profile.add(Phase::Solve, started);
         let mut du = set.expand(&dv, &vec![0.0; n]);
         // A correction that drives contact points deep into the master (a body arriving
         // fast in a sub-increment it was still free in) is shortened, see

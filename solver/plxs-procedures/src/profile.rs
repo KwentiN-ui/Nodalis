@@ -17,17 +17,21 @@ pub enum Phase {
     Factorization,
     /// Forward and back substitution.
     Solve,
+    /// Matrix-vector products and vector arithmetic of a time increment (predictors,
+    /// right-hand side, reactions, energies).
+    Vectors,
     /// Stresses, strains, reaction forces and the result fields of an increment.
     Results,
 }
 
 impl Phase {
-    pub const ALL: [Phase; 6] = [
+    pub const ALL: [Phase; 7] = [
         Phase::Assembly,
         Phase::Reduction,
         Phase::Analysis,
         Phase::Factorization,
         Phase::Solve,
+        Phase::Vectors,
         Phase::Results,
     ];
 
@@ -42,6 +46,7 @@ impl Phase {
             Phase::Analysis => "symbolic analysis",
             Phase::Factorization => "factorization",
             Phase::Solve => "solve",
+            Phase::Vectors => "vector arithmetic",
             Phase::Results => "results",
         }
     }
@@ -50,8 +55,8 @@ impl Phase {
 /// Time and count per phase, plus how often a symbolic analysis was reused.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Profile {
-    time: [Duration; 6],
-    count: [u32; 6],
+    time: [Duration; 7],
+    count: [u32; 7],
     /// Symbolic analyses skipped because the pattern was the one analyzed before.
     pub analyses_reused: u32,
 }

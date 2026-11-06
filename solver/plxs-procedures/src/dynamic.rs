@@ -52,6 +52,7 @@ use rayon::prelude::*;
 
 use crate::equations::{Equations, FirstOrWarnings, in_increment};
 use crate::fields::{internal_energy_density, nodal_average_scalar, node_order};
+use crate::profile::Phase;
 use crate::static_linear::{integration_point_results, writes_increment};
 use crate::{Procedure, ProcedureContext, StepOutcome};
 
@@ -178,6 +179,7 @@ impl Procedure for DynamicProcedure {
         let k = ctx.stiffness.take().unwrap();
         let mut m = SparseMatrix::zeros(ctx.pattern.clone());
         assemble_mass_with(ctx.table, ctx.model, MassRule::Full, &mut m)?;
+        ctx.profile.add(Phase::Assembly, started);
         progress.event(ProgressEvent::Info(format!(
             "stiffness and mass assembled in {:.2} s",
             started.elapsed().as_secs_f64()
@@ -454,10 +456,14 @@ impl DynamicProcedure {
             // Effective matrix A = c_m M + c_k K (Rayleigh damping folded in).
             let c1 = 1.0 / (beta * dt * dt);
             let (c_m, c_k) = matrix_factors(scheme, rayleigh, dt, false);
+            let started = std::time::Instant::now();
             let a_matrix = SparseMatrix::linear_combination(m, c_m, k, c_k);
+            ctx.profile.add(Phase::Assembly, started);
             if factored_dt.is_none_or(|d| (d - dt).abs() > 1e-12 * dt) {
                 let started = std::time::Instant::now();
                 let a_red = set.reduce(&a_matrix);
+                ctx.profile.add(Phase::Reduction, started);
+                let started = std::time::Instant::now();
                 let coordinates =
                     || Unknowns::from_free(&set.free, 3, &ctx.model.nodes.coordinates);
                 equations
@@ -472,6 +478,7 @@ impl DynamicProcedure {
                         },
                     )
                     .map_err(|e| numerical(e, ctx.step_number, increment, &equations))?;
+                ctx.profile.add(Phase::Factorization, started);
                 progress.event(ProgressEvent::Info(format!(
                     "system matrix factorized in {:.2} s",
                     started.elapsed().as_secs_f64()
@@ -479,6 +486,7 @@ impl DynamicProcedure {
                 factored_dt = Some(dt);
             }
 
+            let started = std::time::Instant::now();
             let (f1, _) = load_at(t1)?;
             let g1 = spc_at(t1)?;
             // Predictors.
@@ -509,6 +517,8 @@ impl DynamicProcedure {
             let r = combine(&[(1.0, &f_eff), (c1, &mu), (-(1.0 + alpha), &cd)], n);
             let ag = multiply(&a_matrix, &g1);
             let mut x = set.reduce_rhs(&combine(&[(1.0, &r), (-1.0, &ag)], n));
+            ctx.profile.add(Phase::Vectors, started);
+            let started = std::time::Instant::now();
             equations
                 .solve(
                     &mut ctx.solver,
@@ -519,6 +529,8 @@ impl DynamicProcedure {
                     },
                 )
                 .map_err(|e| in_increment(e, ctx.step_number, increment))?;
+            ctx.profile.add(Phase::Solve, started);
+            let started = std::time::Instant::now();
             let u1 = set.expand(&x, &g1);
             let a1 = combine(&[(c1, &u1), (-c1, &u_tilde)], n);
             let v1 = combine(&[(1.0, &v_tilde), (gamma * dt, &a1)], n);
@@ -545,6 +557,8 @@ impl DynamicProcedure {
             }
             ctx.constraints
                 .transfer_forces(&mut reactions, &spc0.dofs, &active);
+            ctx.profile.add(Phase::Vectors, started);
+            let started = std::time::Instant::now();
             integration_point_results(ctx.table, ctx.model, &u1, &mut strains, &mut stresses);
             motion = Motion {
                 u: u1,
@@ -587,6 +601,7 @@ impl DynamicProcedure {
                 &strains,
                 None,
             );
+            ctx.profile.add(Phase::Results, started);
             // CalculiX counts a linear increment as two iterations.
             ctx.sta.push(StaRow {
                 step: ctx.step_number,
