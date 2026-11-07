@@ -29,7 +29,9 @@ selects. Drag it by its title bar to another place; it opens there from then on.
 
 / Geometry based: #ui("Faces, edges and points") selects the CAD face under the cursor, split
   faces included (@geometry-import), or on a mesh without geometry the smooth patch of faces;
-  near a feature edge or corner, within a few pixels, it selects that. #ui("Part") selects whole parts.
+  near a feature edge or corner, within a few pixels, it selects that. #ui("Part") selects whole parts;
+  for a region of nodes (an initial velocity or temperature, a node set) these are all nodes of the
+  part, those inside a solid too.
   #ui("Edge angle") and #ui("Surface angle") grow the selection across edges or faces as long as
   the angle between neighbours stays below the given value (default 30°). On a mesh generated
   from geometry, #ui("Surface angle") selects and highlights whole CAD faces, like
