@@ -677,7 +677,7 @@ impl<'h> HeatRun<'h> {
             let mut strains = table.layout.field(6);
             integration_point_results(table, model, &u, &mut strains, &mut stresses);
             if let (Some(th), Some(e)) = (thermal, &eps_th) {
-                th.correct_stresses(e, &mut stresses);
+                th.correct_stresses(e, &mut strains, &mut stresses);
             }
             ctx.state.displacements.per_node = 3;
             ctx.state.displacements.values.clear();
@@ -901,7 +901,7 @@ impl<'h> HeatRun<'h> {
         let mut strains = table.layout.field(6);
         integration_point_results(table, model, &u, &mut strains, &mut stresses);
         if let (Some(th), Some(e)) = (thermal, &eps_th) {
-            th.correct_stresses(e, &mut stresses);
+            th.correct_stresses(e, &mut strains, &mut stresses);
         }
         ctx.state.displacements.per_node = 3;
         ctx.state.displacements.values.clear();

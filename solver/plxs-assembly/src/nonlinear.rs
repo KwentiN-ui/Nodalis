@@ -131,7 +131,8 @@ pub fn assemble_nonlinear(
                     |ip, kinematics: &PointKinematics| {
                         let slice = &mut material[ip * STATE_SIZE..(ip + 1) * STATE_SIZE];
                         let old_rate = slice[STATE_SIZE - 1];
-                        let output = law.stress(
+                        // Plane stress laws find the thickness strain themselves.
+                        let (output, e) = law.stress_and_strain(
                             &MaterialInput {
                                 strain: kinematics.strain,
                                 temperature: input.temperature,
@@ -143,12 +144,19 @@ pub fn assemble_nonlinear(
                         );
                         creep_change = creep_change.max((slice[STATE_SIZE - 1] - old_rate).abs());
                         let sigma = if input.nlgeom {
+                            let mut kinematics = *kinematics;
+                            if e[2] != kinematics.strain[2] {
+                                // The thickness stretch of plane stress (`E33 = (λ² - 1) / 2`),
+                                // which the in-plane motion leaves at 1.
+                                kinematics.deformation_gradient[2][2] =
+                                    (1.0 + 2.0 * e[2]).max(0.0).sqrt();
+                            }
                             kinematics.cauchy(&output.stress)
                         } else {
                             output.stress
                         };
                         stresses[ip * 6..(ip + 1) * 6].copy_from_slice(&sigma);
-                        let e = &kinematics.strain;
+                        let e = &e;
                         strains[ip * 6..(ip + 1) * 6].copy_from_slice(&[
                             e[0],
                             e[1],

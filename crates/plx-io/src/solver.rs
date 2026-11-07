@@ -334,6 +334,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Plane stress carries no stress across the thickness: `S33`, `S13`, `S23` are zero at
+    /// every integration point and left out of the fields and the history output; the
+    /// thickness strain `E33` stays.
+    #[test]
+    fn a_plane_stress_model_leaves_its_thickness_stress_out() {
+        let dir = std::env::temp_dir().join(format!("plx-io-cps-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../solver/fixtures/plane/ebene-cps4.inp");
+        let text = std::fs::read_to_string(fixture).unwrap().replace(
+            "*End step",
+            "*El print, Elset=Internal_Selection-1_Section-1\nS, E\n*End step",
+        );
+        let input = dir.join("cps.inp");
+        std::fs::write(&input, text).unwrap();
+        let (solved, _) = solve(&input, &dir).unwrap();
+        let components = |name: &str| -> Vec<String> {
+            let increment = solved.results.increments.last().unwrap();
+            let field = increment.fields.iter().find(|f| f.name == name).unwrap();
+            field.components.clone()
+        };
+        assert_eq!(components("STRESS"), ["SXX", "SYY", "SXY"]);
+        assert_eq!(components("TOSTRAIN"), ["EXX", "EYY", "EZZ", "EXY"]);
+        let import = history(&solved, None).unwrap();
+        let set = import.sets.iter().find(|s| s.name.contains("SECTION")).unwrap();
+        let names = |field: &str| -> Vec<String> {
+            let field = set.fields.iter().find(|f| f.name == field).unwrap();
+            field.components.iter().map(|c| c.name.clone()).collect()
+        };
+        let stresses = names("STRESSES");
+        for c in ["S33", "S13", "S23"] {
+            assert!(!stresses.iter().any(|s| s == c), "{stresses:?}");
+        }
+        assert!(stresses.iter().any(|s| s == "S12"));
+        assert!(names("STRAINS").iter().any(|s| s == "E33"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn exported_results_read_like_the_solver_files() {
         let dir = std::env::temp_dir().join(format!("plx-io-export-{}", std::process::id()));

@@ -364,19 +364,32 @@ impl<'a> ThermalStrains<'a> {
         f
     }
 
-    /// Subtracts `D ε_th` from stresses computed from the total strains.
-    pub fn correct_stresses(&self, strains: &[f64], stresses: &mut IntegrationPointField) {
+    /// Subtracts `D ε_th` from stresses computed from the total strains, and adds the free
+    /// thermal expansion to the thickness strain of plane stress elements.
+    pub fn correct_stresses(
+        &self,
+        thermal: &[f64],
+        strains: &mut IntegrationPointField,
+        stresses: &mut IntegrationPointField,
+    ) {
         for (index, entry) in self.table.entries.iter().enumerate() {
             let d = self.table.material_matrix(entry);
             let start = self.table.layout.offsets[index] as usize;
             let end = self.table.layout.offsets[index + 1] as usize;
-            for (p, &e) in strains.iter().enumerate().take(end).skip(start) {
+            for (p, &e) in thermal.iter().enumerate().take(end).skip(start) {
                 if e == 0.0 {
                     continue;
                 }
                 let s = Self::stress(d, e);
                 for (k, v) in s.iter().enumerate() {
                     stresses.values[p * 6 + k] -= v;
+                }
+                // Tensor shear strains in the field, engineering ones in the law.
+                let at = p * 6;
+                let v = &strains.values[at..at + 6];
+                let eps = [v[0], v[1], v[2], 2.0 * v[3], 2.0 * v[4], 2.0 * v[5]];
+                if let Some(ezz) = self.table.thickness_strain(entry, &eps, e) {
+                    strains.values[at + 2] = ezz;
                 }
             }
         }

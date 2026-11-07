@@ -1220,11 +1220,8 @@ impl Pair {
         // at the start of the increment instead (`prepare`).
         if !tied && self.kind != ContactKind::NodeToSurface {
             let mut r = sub(x, fp.x);
-            // Edges of plane and axisymmetric elements: only the in-plane offset counts. The
-            // out-of-plane unknown of a plane stress node is the change of its thickness, no
-            // displacement; a soft part thickens under compression by more than the
-            // tolerance (a rubber pad hit by a lever: 10 µm), and its points then jumped
-            // between touching and "beside" from one iteration to the next.
+            // Edges of plane and axisymmetric elements: only the in-plane offset counts
+            // (their out-of-plane DOF is no displacement).
             if face.planar.is_some() {
                 r[2] = 0.0;
             }
