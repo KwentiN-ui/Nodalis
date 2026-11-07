@@ -207,9 +207,9 @@ impl Procedure for NonlinearDynamic {
                 "NonlinearDynamic needs a *DYNAMIC step".into(),
             ));
         };
-        if parameters.explicit {
+        if parameters.integration != plxs_core::step::Integration::Implicit {
             return Err(Error::Unsupported(format!(
-                "procedure not implemented yet: *DYNAMIC, EXPLICIT (step {})",
+                "NonlinearDynamic integrates implicitly only (step {})",
                 step.name
             )));
         }

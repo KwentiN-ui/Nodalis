@@ -1394,6 +1394,50 @@ impl SolidElement {
         Some(full)
     }
 
+    /// The volume of the element and the volume average of its shape function gradients
+    /// as a row over its DOFs (`g[3a + c] = (1/V) ∫ ∂N_a/∂x_c dV`), in the reference
+    /// configuration: `g · v` is the mean volumetric strain rate of the nodal velocities
+    /// `v`, and `V (g · v) g` the nodal forces of a unit pressure rate (the linear bulk
+    /// viscosity of explicit time integration). Plane and axisymmetric elements average over
+    /// their expanded element and return the row on their 2D DOFs and the volume of the
+    /// thickness or the full circumference.
+    pub fn volume_mean_gradients(&self, coords: &[[f64; 3]]) -> (f64, Vec<f64>) {
+        let expanded;
+        let (coords3, x) = match self.expansion.as_deref() {
+            Some(x) => {
+                expanded = x.coordinates(coords);
+                (expanded.as_slice(), Some(x))
+            }
+            None => (coords, None),
+        };
+        let rule = self.mass_rule();
+        let nodes = self.family.node_count();
+        let mut g3 = vec![0.0; 3 * nodes];
+        let mut volume = 0.0;
+        for (&p, &w) in rule.points.iter().zip(&rule.weights) {
+            let point = self.point(p, coords3);
+            let dv = point.det * w;
+            volume += dv;
+            for (a, d) in point.dndx.iter().enumerate() {
+                for c in 0..3 {
+                    g3[3 * a + c] += dv * d[c];
+                }
+            }
+        }
+        if volume > 0.0 {
+            g3.iter_mut().for_each(|g| *g /= volume);
+        }
+        match x {
+            None => (volume, g3),
+            Some(x) => {
+                let mut g2 = vec![0.0; self.dof_count()];
+                x.condense_vector(&g3, &mut g2);
+                g2.iter_mut().for_each(|g| *g /= x.scale);
+                (volume * x.scale, g2)
+            }
+        }
+    }
+
     /// Consistent mass matrix (row-major `3n × 3n`) for the density `rho`:
     /// `M[(a,i),(b,j)] = δ_ij ∫ ρ N_a N_b dV`, with the rule of [`SolidElement::mass_rule`].
     pub fn mass(&self, coords: &[[f64; 3]], rho: f64, out: &mut Vec<f64>) {

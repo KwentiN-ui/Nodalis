@@ -82,7 +82,7 @@ pub use detection::{
     auto_detection_tolerance, auto_geometry_detection_tolerance,
 };
 pub use distribution::{Distribution, DistributionKind, Interpolation, Sampler, parse_points};
-pub use dynamic::{Integration, RayleighFit, StepLimit};
+pub use dynamic::{Integration, RayleighFit, StableStepEstimate, StepLimit};
 pub use element_type::{PartElementType, element_type_options};
 pub use exposed::{Exposed, Field, ItemRef, ValuePath};
 pub use features::{
@@ -1160,6 +1160,10 @@ pub enum DynamicMethod {
     /// exact in the modes it has; the modes must reach above the frequencies the loads
     /// excite.
     Modal { modes: u32 },
+    /// Explicit integration (central differences, lumped mass): many small time steps
+    /// below the stability limit of the mesh, no equation system. For impacts, crashes and
+    /// drop tests with buckling and plasticity.
+    Explicit,
 }
 
 impl DynamicMethod {
@@ -1168,9 +1172,34 @@ impl DynamicMethod {
 
     pub fn label(&self) -> &'static str {
         match self {
-            DynamicMethod::Direct => "Direct integration",
+            DynamicMethod::Direct => "Implicit (direct integration)",
             DynamicMethod::Modal { .. } => "Modal superposition",
+            DynamicMethod::Explicit => "Explicit",
         }
+    }
+
+    /// What the method is for, as the dialog explains it.
+    pub fn hint(&self) -> &'static str {
+        match self {
+            DynamicMethod::Direct => {
+                "Large implicit time steps with an equation system each: smooth motions, \
+                 vibrations, slow drop tests. Takes contact, large deformations and plasticity."
+            }
+            DynamicMethod::Modal { .. } => {
+                "Superposes the lowest eigenmodes: fine steps and long durations of linear \
+                 models come cheap."
+            }
+            DynamicMethod::Explicit => {
+                "Thousands of tiny time steps without equation solving: impacts, crashes, drop \
+                 tests with buckling and plasticity. Each step must be shorter than a wave \
+                 needs to cross the smallest element; the estimate is shown below."
+            }
+        }
+    }
+
+    /// Whether the method integrates explicitly.
+    pub fn is_explicit(&self) -> bool {
+        matches!(self, DynamicMethod::Explicit)
     }
 }
 

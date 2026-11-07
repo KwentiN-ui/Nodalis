@@ -2835,7 +2835,7 @@ impl Editor {
                 let sectors = (model.fe.cyclic_tie())
                     .and_then(|t| t.cyclic_sectors(&model.mesh))
                     .and_then(Result::ok);
-                step_form(ui, step, self.index, &model.fe, sectors);
+                step_form(ui, step, self.index, &model.fe, &model.mesh, sectors);
                 crate::connections::step_contacts(ui, &model.fe, step, self.index);
                 if step.kind.design_region().is_some() {
                     region.ui_labeled(ui, model, "Design region", "design region", true);
@@ -5906,6 +5906,7 @@ fn step_form(
     step: &mut Step,
     index: Option<usize>,
     fe: &FeModel,
+    mesh: &FeMesh,
     cyclic_sectors: Option<u32>,
 ) {
     let creating = index.is_none();
@@ -5915,6 +5916,11 @@ fn step_form(
         StepKind::Dynamic(settings) => Some(DynamicContext {
             amplitude_interval: fe.amplitude_interval(step, settings.duration),
             starts_from: dynamic_start(fe, index),
+            stable_step: settings
+                .method
+                .is_explicit()
+                .then(|| stable_step_estimate(ui.ctx(), fe, mesh))
+                .flatten(),
         }),
         _ => None,
     };
@@ -6080,6 +6086,33 @@ struct DynamicContext {
     amplitude_interval: Option<f64>,
     /// "rest", "the state at the end of step Preload", ...
     starts_from: String,
+    /// Explicit integration: the stable time step estimated from the mesh.
+    stable_step: Option<plx_model::StableStepEstimate>,
+}
+
+/// [`FeModel::explicit_time_step_estimate`], kept between frames of the dialog while the
+/// mesh, the sections and the materials stay.
+fn stable_step_estimate(
+    ctx: &egui::Context,
+    fe: &FeModel,
+    mesh: &FeMesh,
+) -> Option<plx_model::StableStepEstimate> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    mesh.elements().len().hash(&mut hasher);
+    mesh.node_count().hash(&mut hasher);
+    format!("{:?}{:?}", fe.sections, fe.materials).hash(&mut hasher);
+    let key = hasher.finish();
+    let id = egui::Id::new("explicit stable step estimate");
+    type Cached = (u64, Option<plx_model::StableStepEstimate>);
+    if let Some((k, estimate)) = ctx.data(|d| d.get_temp::<Cached>(id))
+        && k == key
+    {
+        return estimate;
+    }
+    let estimate = fe.explicit_time_step_estimate(mesh);
+    ctx.data_mut(|d| d.insert_temp::<Cached>(id, (key, estimate.clone())));
+    estimate
 }
 
 /// What a Dynamic step at `index` (`None`: a new one at the end) starts from: the state the
@@ -6153,41 +6186,88 @@ fn dynamic_form(
     ));
     ui.end_row();
     let modal = matches!(settings.method, DynamicMethod::Modal { .. });
-    ui.label("");
-    ui.add_enabled(
-        !modal,
-        egui::Checkbox::new(&mut settings.event_frames, "Frames at contact events"),
-    )
-    .on_hover_text(
-        "Also a frame whenever a contact closes or opens and at the sub-steps of an \
-         impact, between the evenly spaced frames. Only with direct integration.",
-    );
-    ui.end_row();
+    let explicit = settings.method.is_explicit();
+    if !explicit {
+        ui.label("");
+        ui.add_enabled(
+            !modal,
+            egui::Checkbox::new(&mut settings.event_frames, "Frames at contact events"),
+        )
+        .on_hover_text(
+            "Also a frame whenever a contact closes or opens and at the sub-steps of an \
+             impact, between the evenly spaced frames. Only with implicit integration.",
+        );
+        ui.end_row();
+    }
 
-    ui.label("Method").on_hover_text(
-        "Direct integration solves all equations in every time step and takes contact, \
-         large deformations and plasticity. Modal superposition computes the lowest \
-         eigenmodes first and integrates them exactly: every time step then costs almost \
-         nothing, for linear models.",
-    );
+    ui.label("Method").on_hover_text(settings.method.hint());
     egui::ComboBox::from_id_salt("dynamic method")
         .selected_text(settings.method.label())
         .show_ui(ui, |ui| {
-            let mut choice = modal;
-            ui.selectable_value(&mut choice, false, DynamicMethod::Direct.label());
-            ui.selectable_value(&mut choice, true, DynamicMethod::Modal { modes: 0 }.label());
-            if choice != modal {
-                settings.method = if choice {
-                    settings.large_deformations = false;
-                    DynamicMethod::Modal {
-                        modes: DynamicMethod::DEFAULT_MODES,
+            // 0 implicit, 1 explicit, 2 modal.
+            let current = match settings.method {
+                DynamicMethod::Direct => 0,
+                DynamicMethod::Explicit => 1,
+                DynamicMethod::Modal { .. } => 2,
+            };
+            let mut choice = current;
+            for (i, method) in [
+                DynamicMethod::Direct,
+                DynamicMethod::Explicit,
+                DynamicMethod::Modal { modes: 0 },
+            ]
+            .iter()
+            .enumerate()
+            {
+                ui.selectable_value(&mut choice, i, method.label())
+                    .on_hover_text(method.hint());
+            }
+            if choice != current {
+                settings.method = match choice {
+                    0 => DynamicMethod::Direct,
+                    1 => DynamicMethod::Explicit,
+                    _ => {
+                        settings.large_deformations = false;
+                        DynamicMethod::Modal {
+                            modes: DynamicMethod::DEFAULT_MODES,
+                        }
                     }
-                } else {
-                    DynamicMethod::Direct
                 };
             }
         });
     ui.end_row();
+    if explicit {
+        match &context.stable_step {
+            Some(estimate) => {
+                let steps = (settings.duration / estimate.time_step).ceil();
+                let place = match estimate.thickness {
+                    Some(t) => format!(
+                        "{}, {} thickness",
+                        estimate.section,
+                        shown(t, units, Quantity::Length)
+                    ),
+                    None => estimate.section.clone(),
+                };
+                ui.label("");
+                ui.weak(format!(
+                    "Stable time step ~ {} ({place}),\nabout {} steps for the duration",
+                    shown(estimate.time_step, units, Quantity::Time),
+                    numeric::fit(steps, |t| t.len() <= 8)
+                ));
+                ui.end_row();
+                if steps > 1e6 {
+                    ui.label("");
+                    ui.weak("Consider a shorter duration.");
+                    ui.end_row();
+                }
+            }
+            None => {
+                ui.label("");
+                ui.weak("The solver finds the time step from the mesh.");
+                ui.end_row();
+            }
+        }
+    }
     if let DynamicMethod::Modal { modes } = &mut settings.method {
         ui.label("    Modes").on_hover_text(
             "The lowest eigenmodes superposed. The highest of them must lie above the \
@@ -6277,6 +6357,10 @@ fn dynamic_form(
                 ui.label("        Upper frequency");
                 ui.add(numeric::physical(f2, units, Quantity::Frequency));
                 ui.end_row();
+            } else if explicit {
+                ui.label("");
+                ui.weak("At the lowest eigenfrequency, mass-\nproportional (explicit)");
+                ui.end_row();
             } else {
                 ui.label("");
                 ui.weak(format!(
@@ -6314,7 +6398,7 @@ fn dynamic_form(
          with modal superposition.",
     );
     ui.end_row();
-    if settings.large_deformations {
+    if settings.large_deformations && !explicit {
         ui.label("");
         ui.weak("Time steps are split where needed.");
         ui.end_row();
@@ -6340,10 +6424,12 @@ fn dynamic_form(
         let mut fixed = matches!(settings.time_step, TimeStep::Fixed(_));
         ui.horizontal(|ui| {
             ui.radio_value(&mut fixed, false, "Automatic")
-                .on_hover_text(
+                .on_hover_text(if explicit {
+                    "The stable time step of the mesh."
+                } else {
                     "Short enough for the frames, a tenth of the shortest segment of the \
-                 amplitudes the loads follow, and the frequency limit.",
-                );
+                 amplitudes the loads follow, and the frequency limit."
+                });
             ui.radio_value(&mut fixed, true, "At most");
         });
         ui.end_row();
@@ -6359,35 +6445,49 @@ fn dynamic_form(
             ui.add(numeric::physical(dt, units, Quantity::Time));
             ui.end_row();
         }
-        ui.label("Max. frequency").on_hover_text(
-            "The time step resolves vibrations up to this frequency with 20 steps per period. \
+        if !explicit {
+            ui.label("Max. frequency").on_hover_text(
+                "The time step resolves vibrations up to this frequency with 20 steps per period. \
              Higher ones are damped out by the numerical damping.",
-        );
-        let mut limited = settings.frequency_limit.is_some();
-        let mut limit =
-            (settings.frequency_limit).unwrap_or_else(|| integration.resolved_frequency());
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut limited, "");
-            ui.add_enabled(
-                limited,
-                numeric::physical(&mut limit, units, Quantity::Frequency),
             );
-        });
-        ui.end_row();
-        settings.frequency_limit = limited.then_some(limit);
-        ui.label("Numerical damping").on_hover_text(
-            "Removes the high frequencies the time step cannot resolve. Normal damps them \
-             slightly, None conserves the energy, Strong damps them as much as possible.",
-        );
-        egui::ComboBox::from_id_salt("numerical damping")
-            .selected_text(settings.numerical_damping.label())
-            .show_ui(ui, |ui| {
-                for choice in NumericalDamping::ALL {
-                    ui.selectable_value(&mut settings.numerical_damping, choice, choice.label());
-                }
+            let mut limited = settings.frequency_limit.is_some();
+            let mut limit =
+                (settings.frequency_limit).unwrap_or_else(|| integration.resolved_frequency());
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut limited, "");
+                ui.add_enabled(
+                    limited,
+                    numeric::physical(&mut limit, units, Quantity::Frequency),
+                );
             });
+            ui.end_row();
+            settings.frequency_limit = limited.then_some(limit);
+            ui.label("Numerical damping").on_hover_text(
+                "Removes the high frequencies the time step cannot resolve. Normal damps them \
+             slightly, None conserves the energy, Strong damps them as much as possible.",
+            );
+            egui::ComboBox::from_id_salt("numerical damping")
+                .selected_text(settings.numerical_damping.label())
+                .show_ui(ui, |ui| {
+                    for choice in NumericalDamping::ALL {
+                        ui.selectable_value(
+                            &mut settings.numerical_damping,
+                            choice,
+                            choice.label(),
+                        );
+                    }
+                });
+            ui.end_row();
+            solver_row(ui, &mut settings.solver);
+        }
+    }
+    if explicit {
+        ui.label("");
+        ui.weak(
+            "Loads act at once; give a load an\namplitude for a ramp or pulse.\nMaterials need a density.",
+        );
         ui.end_row();
-        solver_row(ui, &mut settings.solver);
+        return;
     }
     // Recomputed: the settings may have changed above.
     let integration = settings.integration(context.amplitude_interval);

@@ -76,6 +76,10 @@ pub enum Problem {
     /// trusses, membranes and general beams, and steps without large deformations
     /// (coupled temperature-displacement, modal dynamics, sensitivity).
     HyperelasticLinearized,
+    /// An explicit Dynamic step on elements with full integration that have a reduced
+    /// variant (C3D8, C3D20, S4, S8, CPS4, ...): reduced integration is several times
+    /// faster there.
+    ExplicitFullIntegration,
     NoConductivity,
     NoSpecificHeat,
     NoInitialTemperature,
@@ -259,7 +263,8 @@ impl Problem {
             | Problem::BoltHeldAtCut
             | Problem::NoCreep
             | Problem::UnstableHyperelastic
-            | Problem::HyperelasticLinearized => Severity::Warning,
+            | Problem::HyperelasticLinearized
+            | Problem::ExplicitFullIntegration => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -305,6 +310,7 @@ impl Problem {
             Problem::InvalidHyperelastic => "Invalid hyperelastic material",
             Problem::UnstableHyperelastic => "Hyperelastic material unstable at large strains",
             Problem::HyperelasticLinearized => "Hyperelastic material computed linearly",
+            Problem::ExplicitFullIntegration => "Full integration in an explicit step",
             Problem::NoExpansion => "Temperature without thermal expansion",
             Problem::NoStoredModes => "No stored eigenmodes",
             Problem::NoSensitivityBase => "No step for the sensitivities",
@@ -434,6 +440,13 @@ impl Problem {
                  there (Drucker). If the model strains that far, the solver loses \
                  convergence or finds unphysical deformations. Constants fitted to data of \
                  a single test often are unstable in the other modes."
+            }
+            Problem::ExplicitFullIntegration => {
+                "An explicit step computes the internal forces of every element in every one \
+                 of its many time steps. Elements with reduced integration (C3D8R, C3D20R, \
+                 S4R, S8R) evaluate one or eight points instead of eight or 27: the step runs \
+                 several times faster, usually with the same accuracy for impacts and \
+                 crashes."
             }
             Problem::HyperelasticLinearized => {
                 "Trusses, membranes and beams with general profiles, and steps without \
@@ -905,6 +918,10 @@ impl Problem {
             Problem::UnstableHyperelastic => {
                 "Check the constants, fit them to test data of several modes, or use a \
                  simpler model (Neo-Hooke, Yeoh), which stays stable."
+            }
+            Problem::ExplicitFullIntegration => {
+                "Change the element type of the parts to the reduced variant (Mesh settings, \
+                 element type), or keep it where bending of a single element layer matters."
             }
             Problem::HyperelasticLinearized => {
                 "Model the part with solid or shell elements, or use a Static or Dynamic \
@@ -1745,6 +1762,26 @@ impl FeModel {
             }
             if let StepKind::Dynamic(settings) = &step.kind {
                 self.check_dynamic_step(s, step, settings, &mut findings);
+                if settings.method.is_explicit() {
+                    const FULL: [&str; 10] = [
+                        "C3D8", "C3D20", "S4", "S8", "CPS4", "CPS8", "CPE4", "CPE8", "CAX4", "CAX8",
+                    ];
+                    let full = (mesh.elements().iter())
+                        .filter(|e| FULL.contains(&e.type_name.to_ascii_uppercase().as_str()))
+                        .count();
+                    if full > 0 {
+                        findings.push(Finding::new(
+                            ModelItem::Step(s),
+                            Problem::ExplicitFullIntegration,
+                            format!(
+                                "{}: {full} element(s) with full integration; reduced \
+                                 integration (S4R, S8R, C3D8R) makes explicit steps several \
+                                 times faster",
+                                step.name
+                            ),
+                        ));
+                    }
+                }
             }
             if let StepKind::Static(settings)
             | StepKind::Visco(crate::ViscoStep {

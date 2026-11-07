@@ -159,6 +159,8 @@ pub enum StepGlyph {
     CoupledTempDisp,
     UncoupledTempDisp,
     Dynamic,
+    /// A Dynamic step integrated explicitly.
+    ExplicitDynamic,
     ModalDynamics,
     SteadyStateDynamics,
     Sensitivity,
@@ -177,6 +179,7 @@ impl StepGlyph {
             StepGlyph::CoupledTempDisp => "Coupled Temperature-Displacement",
             StepGlyph::UncoupledTempDisp => "Uncoupled Temperature-Displacement",
             StepGlyph::Dynamic => "Dynamic",
+            StepGlyph::ExplicitDynamic => "Dynamic (explicit)",
             StepGlyph::ModalDynamics => "Modal Dynamics",
             StepGlyph::SteadyStateDynamics => "Steady State Dynamics",
             StepGlyph::Sensitivity => "Sensitivity",
@@ -195,7 +198,11 @@ impl From<&StepKind> for StepGlyph {
             StepKind::HeatTransfer(_) => StepGlyph::HeatTransfer,
             StepKind::CoupledTempDisp(_) => StepGlyph::CoupledTempDisp,
             StepKind::UncoupledTempDisp(_) => StepGlyph::UncoupledTempDisp,
-            StepKind::Dynamic(_) => StepGlyph::Dynamic,
+            StepKind::Dynamic(d) => match d.method {
+                plx_model::DynamicMethod::Direct => StepGlyph::Dynamic,
+                plx_model::DynamicMethod::Explicit => StepGlyph::ExplicitDynamic,
+                plx_model::DynamicMethod::Modal { .. } => StepGlyph::ModalDynamics,
+            },
             StepKind::ModalDynamics(_) => StepGlyph::ModalDynamics,
             StepKind::SteadyStateDynamics(_) => StepGlyph::SteadyStateDynamics,
             StepKind::Sensitivity(_) => StepGlyph::Sensitivity,
@@ -345,6 +352,13 @@ fn paint_step_type(painter: &Painter, min: Pos2, glyph: StepGlyph) {
         StepGlyph::Dynamic => {
             painter.circle_stroke(at(8.0, 8.0), 6.5, Stroke::new(1.5, BLUE));
             line(&[(8.0, 3.5), (8.0, 8.0), (11.0, 10.0)], INK);
+        }
+        // The clock of the Dynamic step, smaller, struck by an impact flash: many tiny
+        // time steps through a shock.
+        StepGlyph::ExplicitDynamic => {
+            painter.circle_stroke(at(6.5, 9.5), 5.0, Stroke::new(1.5, BLUE));
+            line(&[(6.5, 6.0), (6.5, 9.5), (8.5, 11.0)], INK);
+            line(&[(14.5, 0.8), (11.0, 5.5), (13.5, 5.5), (10.5, 9.8)], RED);
         }
         // Two superposed modes over time.
         StepGlyph::ModalDynamics => {

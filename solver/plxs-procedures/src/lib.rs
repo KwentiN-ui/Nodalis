@@ -19,6 +19,7 @@ pub mod cyclic;
 pub mod dynamic;
 pub mod eigen;
 pub mod equations;
+pub mod explicit_dynamic;
 pub mod fields;
 pub mod heat;
 pub mod history;
@@ -34,7 +35,7 @@ pub mod thermal;
 use std::sync::Arc;
 
 use plxs_assembly::ElementTable;
-use plxs_core::step::Procedure as ProcedureKind;
+use plxs_core::step::{Integration, Procedure as ProcedureKind};
 use plxs_core::{Error, Model, Progress, Result, Results, State, Step};
 use plxs_linalg::{LdltSolver, Pattern, SparseMatrix};
 use plxs_output::{CvgRow, StaRow};
@@ -155,6 +156,15 @@ pub fn run_step(
         }
         ProcedureKind::Frequency(_) => eigen::FrequencyProcedure.run(ctx, step, progress),
         ProcedureKind::Buckle(_) => eigen::BuckleProcedure.run(ctx, step, progress),
+        ProcedureKind::Dynamic(d) if matches!(d.integration, Integration::Explicit(_)) => {
+            explicit_dynamic::ExplicitDynamic.run(ctx, step, progress)
+        }
+        ProcedureKind::Dynamic(d) if matches!(d.integration, Integration::Automatic { .. }) => {
+            Err(Error::Unsupported(format!(
+                "automatic switching between implicit and explicit integration is not implemented yet (step {})",
+                step.name
+            )))
+        }
         // Contact makes a dynamic step nonlinear as well: Newton iterations on the contact
         // status in every increment.
         ProcedureKind::Dynamic(_)

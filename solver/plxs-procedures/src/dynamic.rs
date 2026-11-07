@@ -21,7 +21,7 @@
 //! **Increments**: `DIRECT` keeps the initial size; otherwise the size grows by 1.5 from the
 //! third increment on up to the maximum size, as CalculiX does for a linear step.
 //!
-//! **Explicit** (`EXPLICIT`) is refused as not implemented yet. `NLGEOM` and nonlinear
+//! **Explicit** (`EXPLICIT`, `INTEGRATION=EXPLICIT`) goes to [`crate::explicit_dynamic`]. `NLGEOM` and nonlinear
 //! materials go to [`crate::nonlinear_dynamic`].
 //!
 //! **Damping**: Rayleigh `C = α_R M + β_R K` from `*DAMPING` in the step.
@@ -147,12 +147,9 @@ impl Procedure for DynamicProcedure {
                 "DynamicProcedure needs a *DYNAMIC step".into(),
             ));
         };
-        if parameters.explicit {
-            // ccx 2.21's explicit scheme updates the displacements with the trapezoidal rule
-            // of the velocities and is not the β = 0 member of the α-method; it is not
-            // identified yet (single-DOF oracles in the M3 T13 notes).
+        if parameters.integration != plxs_core::step::Integration::Implicit {
             return Err(Error::Unsupported(format!(
-                "procedure not implemented yet: *DYNAMIC, EXPLICIT (step {})",
+                "DynamicProcedure integrates implicitly only (step {})",
                 step.name
             )));
         }

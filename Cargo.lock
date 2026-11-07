@@ -3664,6 +3664,7 @@ dependencies = [
  "plxs-core",
  "plxs-elements",
  "plxs-linalg",
+ "plxs-materials",
  "plxs-output",
  "rayon",
 ]

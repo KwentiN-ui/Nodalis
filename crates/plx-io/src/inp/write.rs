@@ -4136,11 +4136,38 @@ fn dynamic_step(settings: &DynamicStep, model: &FeModel, step: &Step) -> (ir::St
         ir_step.default_amplitude = ir::step::DefaultAmplitude::Step;
         return (ir_step, integration.per_frame);
     }
+    if let DynamicMethod::Explicit = settings.method {
+        // The solver finds the time step from the mesh; the increments are the frames.
+        let mut ir_step = new_step(ir::step::Procedure::Dynamic(ir::step::Dynamic {
+            solver: ir::step::EquationSolver::Default,
+            alpha: None,
+            integration: ir::step::Integration::Explicit(ir::step::ExplicitControls {
+                mass_scaling: None,
+                time_step: match settings.time_step {
+                    plx_model::TimeStep::Fixed(dt) if dt > 0.0 => Some(dt),
+                    _ => None,
+                },
+            }),
+            increments: ir::step::Incrementation {
+                initial: Some(settings.frame_interval()),
+                period: Some(settings.duration),
+                direct: true,
+                ..ir::step::Incrementation::default()
+            },
+            rayleigh,
+            damping_ratio,
+            event_frames: false,
+        }));
+        ir_step.max_increments = settings.frames.max(1) + 1;
+        ir_step.default_amplitude = ir::step::DefaultAmplitude::Step;
+        ir_step.nlgeom = settings.large_deformations;
+        return (ir_step, 1);
+    }
     let alpha = settings.numerical_damping.alpha();
     let mut ir_step = new_step(ir::step::Procedure::Dynamic(ir::step::Dynamic {
         solver: equation_solver(settings.solver),
         alpha: (alpha != -0.05).then_some(alpha),
-        explicit: false,
+        integration: ir::step::Integration::Implicit,
         increments: ir::step::Incrementation {
             initial: Some(integration.increment),
             period: Some(settings.duration),

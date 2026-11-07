@@ -23,9 +23,9 @@ use plxs_core::step::{
     Boundary, Buckle, ComplexFrequency, ConcentratedFlux, ConcentratedLoad, ContactChange,
     Controls, CyclicModes, DampingRatio, DefaultAmplitude, DefinedField, DefinedFieldKind,
     DesignResponse, DistributedFlux, DistributedLoad, DistributedLoadKind, Dynamic, EquationSolver,
-    FieldOutput, Film, Filter, FluxKind, Frequency, HeatTransfer, HistoryOutput, Incrementation,
-    ModalDamping, ModalDynamics, OutputDimension, Procedure, Radiate, Rayleigh, RestartWrite,
-    Sensitivity, Static, SteadyStateDynamics, Step, Totals, Visco,
+    ExplicitControls, FieldOutput, Film, Filter, FluxKind, Frequency, HeatTransfer, HistoryOutput,
+    Incrementation, Integration, ModalDamping, ModalDynamics, OutputDimension, Procedure, Radiate,
+    Rayleigh, RestartWrite, Sensitivity, Static, SteadyStateDynamics, Step, Totals, Visco,
 };
 use plxs_core::{Error, normalized_name};
 
@@ -1834,11 +1834,36 @@ impl Reader {
             "TIME RESET",
             "TOTAL TIME AT START",
             "EVENTS",
+            "INTEGRATION",
+            "MASS SCALING",
+            "TIME STEP",
+            "SWITCH",
         ])?;
+        let controls = ExplicitControls {
+            mass_scaling: k.number("MASS SCALING")?,
+            time_step: k.number("TIME STEP")?,
+        };
+        let integration = match k.value("INTEGRATION").map(|t| t.to_ascii_uppercase()) {
+            None if k.has("EXPLICIT") => Integration::Explicit(controls),
+            None => Integration::Implicit,
+            Some(t) if t == "IMPLICIT" => Integration::Implicit,
+            Some(t) if t == "EXPLICIT" => Integration::Explicit(controls),
+            Some(t) if t == "AUTOMATIC" => Integration::Automatic {
+                explicit: controls,
+                switch_factor: k
+                    .number("SWITCH")?
+                    .unwrap_or(Integration::DEFAULT_SWITCH_FACTOR),
+            },
+            Some(other) => {
+                return Err(k.error(format!(
+                    "INTEGRATION={other}: expected IMPLICIT, EXPLICIT or AUTOMATIC"
+                )));
+            }
+        };
         let procedure = Procedure::Dynamic(Dynamic {
             solver: solver(k)?,
             alpha: k.number("ALPHA")?,
-            explicit: k.has("EXPLICIT"),
+            integration,
             increments: incrementation(k, data)?,
             rayleigh: None,
             damping_ratio: None,

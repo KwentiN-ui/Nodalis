@@ -11,8 +11,10 @@ structure is damped; Nodalis chooses the time step and the integration from that
 #screenshot("dynamic-step.png", [Dynamic step])
 
 #fields(
-  [Method], [#ui("Direct integration") solves all equations of the model in every time step
-    and takes contact, large deformations and plasticity. #ui("Modal superposition")
+  [Method], [#ui("Implicit (direct integration)") solves all equations of the model in every
+    time step and takes contact, large deformations and plasticity; its time steps can be
+    long. #ui("Explicit") takes thousands of tiny time steps without solving equations: for
+    impacts, crashes and drop tests, see @dynamic-explicit. #ui("Modal superposition")
     computes the lowest eigenmodes of the supported model first and integrates each of
     them exactly; every time step then costs almost nothing. For linear models only, see
     below.],
@@ -24,7 +26,7 @@ structure is damped; Nodalis chooses the time step and the integration from that
     or opens and at the sub-steps the solver takes through an impact, between the evenly
     spaced frames (at most 32 per time step). The impact force and the moment of touch
     then show in the history and on the timeline even when the time steps are far longer
-    than the impact. Direct integration only.],
+    than the impact. Implicit integration only.],
   [Damping], [#ui("None"): undamped, only the numerical damping of the integration removes
     energy. #ui("Damping ratio"): the viscous damping ratio of the structure (0.02 = 2 % of
     critical damping, typical for steel structures), applied as Rayleigh damping
@@ -68,6 +70,59 @@ dynamic step too, see below.
 The model check warns when the frequency limit is higher than the frames can show
 (#ui("Too few frames for the frequency limit")) and when all points of an amplitude the
 step follows lie after its end (#ui("Amplitude starts after the step")).
+
+=== Explicit integration <dynamic-explicit>
+
+With #ui("Explicit") the solver integrates the motion with central differences and a lumped
+(diagonal) mass matrix. A time step then costs the internal forces of the elements and a
+division per node: there is no equation system to solve and nothing that can fail to
+converge. The price is the length of the time step: it must stay below the time a
+compression wave needs to cross the smallest element, typically 10⁻⁷ to 10⁻⁶ s for steel
+parts meshed in millimetres. An explicit step therefore suits short, violent events (an
+impact, a crash, a drop with buckling and plasticity), which the implicit integration can
+only follow with tiny time steps anyway, and not slow motions or long vibrations.
+
+#screenshot("dynamic-explicit.png", [Dynamic step with explicit integration and the estimate of
+  its stable time step])
+
+The dialog shows an estimate of the stable time step from the mesh and the materials (the
+shortest distance between two nodes of an element over the wave speed √(E(1−ν)/((1+ν)(1−2ν)ρ)),
+with the node spacing through the thickness of shells) and the number of time steps it means
+for the duration. Above a million steps it suggests a shorter duration. The solver computes
+the exact stable time step at the start of the step from the highest eigenfrequency of every
+element and takes 90 % of it; the output names the element that limits it:
+
+```
+explicit: stable time step 4.31e-7 s (element 1534), about 6.96e+5 time steps for 0.3 s
+```
+
+#ui("Frames") work as with implicit integration: the time steps within a frame are equal, so
+that each frame falls exactly on a time step. The solver reports its progress per frame, with
+the time steps done, the remaining time and the energy balance.
+
+What is different from implicit integration:
+
+- #ui("Damping ratio") damps only the mass-proportional part, met at the lowest
+  eigenfrequency (stiffness-proportional damping would shrink the time step to nothing). A
+  model that moves freely as a whole is not damped. #ui("Rayleigh coefficients") are taken as
+  given; a β above zero shortens the time step.
+- A small bulk viscosity (6 % of critical damping in the highest mode of every element)
+  smooths the ringing of the sharpest waves; its energy is part of ALLVD.
+- #ui("Advanced settings"): #ui("Time step") #ui("At most") caps the time step below the
+  stable one (it is never taken longer). #ui("Max. frequency"), #ui("Numerical damping") and
+  the equation solver have no meaning and are hidden; there are no event frames.
+- Elements with reduced integration (C3D8R, C3D20R, S4R, S8R) compute several times faster
+  than fully integrated ones; the model check points this out
+  (#ui("Full integration in an explicit step")).
+- Plates and shells are expanded into solid elements: the time step of a thin shell follows
+  from its thickness, which can make it very short (a 0.4 mm steel sheet: about 3·10⁻⁸ s).
+- The energies are those of the lumped mass; ALLWK includes the work of prescribed
+  displacements, so ALLIE + ALLKE + ALLVD − ALLWK stays at its starting value. The solver
+  warns when the balance is off by more than 5 %.
+
+The first stage of the explicit integration takes solids, plane and shell elements, loads
+with amplitudes, prescribed displacements, initial velocities and constraints; contact, mass
+scaling and the switch between implicit and explicit integration follow.
 
 === Modal superposition <dynamic-modal>
 
