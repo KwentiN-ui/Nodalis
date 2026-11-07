@@ -1008,3 +1008,133 @@ fn mass_scaling_lifts_the_time_step_of_a_thin_layer_only() {
         "swings at {f1} Hz with mass scaling, {f0} Hz without"
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// Stage 4: handover between steps
+
+/// A cantilever under a static tip load, then an explicit step with the load kept: it
+/// starts in equilibrium (displacements, stresses and the internal forces carried over),
+/// so it stays where it is and gains no kinetic energy.
+#[test]
+fn an_explicit_step_starts_from_the_static_equilibrium() {
+    let (length, side) = (0.2, 0.02);
+    let mesh = bar_mesh(20, 2, 2, [length, side, side], "C3D8I");
+    let input = format!(
+        "{mesh}*Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
+         *Solid section, Elset=EALL, Material=STEEL\n*Boundary\nEND0, 1, 3, 0\n\
+         *Step\n*Static\n*Cload\nEND1, 2, {}\n*Node print, Nset=END1\nU\n*End step\n\
+         *Step\n*Dynamic, Integration=Explicit\n2e-4, 2e-3\n\
+         *Node print, Nset=END1\nU\n*El print, Elset=EALL, Totals=Only\nALLKE, ALLIE\n*End step\n",
+        1000.0 / 9.0
+    );
+    let dir = work_dir("preload");
+    let (dat, log) = run(&dir, "preload", &input);
+    clean(&dir);
+    let tip: Vec<f64> = blocks(&dat, "displacements")
+        .iter()
+        .map(|(_, rows)| rows.iter().map(|r| r[2]).sum::<f64>() / rows.len() as f64)
+        .collect();
+    let deflection = tip[0];
+    for u in &tip[1..] {
+        assert!(
+            (u - deflection).abs() < 1e-3 * deflection.abs(),
+            "the tip moved from {deflection} to {u}\n{log}"
+        );
+    }
+    let internal = blocks(&dat, "total model internal energy")
+        .last()
+        .unwrap()
+        .1[0][0];
+    let kinetic = blocks(&dat, "total model kinetic energy").last().unwrap().1[0][0];
+    assert!(
+        kinetic < 1e-4 * internal,
+        "kinetic {kinetic} J against {internal} J"
+    );
+}
+
+/// The released cantilever swings explicitly for a period and a half, then implicitly: the
+/// implicit step takes the explicit one's displacements and velocities, the swing goes on
+/// with the same frequency and amplitude.
+#[test]
+fn an_implicit_step_continues_an_explicit_swing() {
+    let (length, side) = (0.2, 0.02);
+    let mesh = bar_mesh(10, 2, 2, [length, side, side], "C3D8I");
+    let material = format!(
+        "*Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
+         *Solid section, Elset=EALL, Material=STEEL\n"
+    );
+    let dir = work_dir("handover");
+    let (_, log) = run(
+        &dir,
+        "handover-modes",
+        &format!("{mesh}{material}*Boundary\nEND0, 1, 3, 0\n*Step\n*Frequency\n1\n*End step\n"),
+    );
+    let modes = std::fs::read_to_string(dir.join("handover-modes.dat")).unwrap();
+    let f1 = modes
+        .lines()
+        .skip_while(|l| !l.contains("E I G E N V A L U E   O U T P U T"))
+        .filter_map(|l| {
+            let v: Vec<f64> = l
+                .split_whitespace()
+                .filter_map(|w| w.parse().ok())
+                .collect();
+            (v.len() >= 4 && v[0] == 1.0).then(|| v[3])
+        })
+        .next()
+        .unwrap_or_else(|| panic!("{log}"));
+    let half = 1.5 / f1;
+    let (dat, log) = run(
+        &dir,
+        "handover",
+        &format!(
+            "{mesh}{material}*Boundary\nEND0, 1, 3, 0\n\
+             *Step\n*Static\n*Cload\nEND1, 2, {}\n*Node print, Nset=END1\nU\n*End step\n\
+             *Step\n*Dynamic, Integration=Explicit\n{}, {half}\n*Cload, Op=New\n\
+             *Node print, Nset=END1\nU\n*End step\n\
+             *Step, Inc=10000\n*Dynamic, Direct\n{}, {half}\n\
+             *Node print, Nset=END1\nU\n*End step\n",
+            1000.0 / 9.0,
+            half / 150.0,
+            half / 150.0,
+        ),
+    );
+    clean(&dir);
+    let tip: Vec<(f64, f64)> = blocks(&dat, "displacements")
+        .iter()
+        .map(|(t, rows)| {
+            (
+                *t,
+                rows.iter().map(|r| r[2]).sum::<f64>() / rows.len() as f64,
+            )
+        })
+        .collect();
+    let deflection = tip[0].1;
+    let crossings = |from: f64, to: f64| -> Vec<f64> {
+        tip.windows(2)
+            .filter(|w| w[0].0 >= from && w[1].0 <= to && w[0].1 * w[1].1 < 0.0)
+            .map(|w| w[0].0 + (w[1].0 - w[0].0) * w[0].1 / (w[0].1 - w[1].1))
+            .collect()
+    };
+    let all = crossings(1.0, 1.0 + 2.0 * half);
+    assert!(all.len() >= 5, "{all:?}\n{log}");
+    // Half periods across the change of method.
+    for w in all.windows(2) {
+        let measured = 0.5 / (w[1] - w[0]);
+        assert!(
+            (measured - f1).abs() < 0.04 * f1,
+            "half period from {} to {} s: {measured} Hz, eigenfrequency {f1} Hz",
+            w[0],
+            w[1]
+        );
+    }
+    // The amplitude in the implicit step (its numerical damping takes a little).
+    let lowest_late = tip
+        .iter()
+        .filter(|(t, _)| *t > 1.0 + half)
+        .map(|p| p.1.abs())
+        .fold(0.0, f64::max);
+    assert!(
+        (lowest_late - deflection.abs()).abs() < 0.1 * deflection.abs(),
+        "swings up to {lowest_late} in the implicit step, released at {deflection}"
+    );
+}

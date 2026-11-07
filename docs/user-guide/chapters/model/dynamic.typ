@@ -163,7 +163,21 @@ Added mass is inertia that is not there: it slows waves and lowers eigenfrequenc
 sits. A few per cent spread over small elements leave the overall response almost
 unchanged; above 5 % the solver warns. Loads from gravity keep the real mass.
 
-The switch between implicit and explicit integration follows.
+==== Implicit and explicit steps in a row
+
+Steps of either method can follow each other: a static step settles the model, an explicit
+step computes a short impact, an implicit step follows the slow motion afterwards. Each step
+takes over the displacements, velocities and stresses at the end of the step before it, and
+#ui("Starts from") names the method of that step. The accelerations are not taken over:
+every step computes them again from its own mass, the implicit step from the consistent mass,
+the explicit step from the lumped mass, so the motion continues without a jolt. Velocities
+at the end of an explicit step are those at the end time, not the half step before it.
+
+An explicit step after a contact phase starts with the reduced contact stiffness it needs for
+its time step; an implicit step after it uses the full stiffness again. Bodies that rest on
+each other at the switch can then settle slightly into the stiffer contact.
+
+Switching automatically within one step follows.
 
 === Modal superposition <dynamic-modal>
 

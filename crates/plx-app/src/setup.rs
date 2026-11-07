@@ -6132,7 +6132,15 @@ fn dynamic_start(fe: &FeModel, index: Option<usize>) -> String {
         .collect();
     let mut parts = Vec::new();
     if let Some(previous) = previous {
-        parts.push(format!("the state at the end of {}", previous.name));
+        // A Dynamic step before names its integration: the state (displacements,
+        // velocities, stresses, contact) carries over between implicit and explicit
+        // integration, the accelerations are found anew with this step's mass.
+        let method = match &previous.kind {
+            StepKind::Dynamic(d) if d.method.is_explicit() => " (explicit)",
+            StepKind::Dynamic(d) if matches!(d.method, DynamicMethod::Direct) => " (implicit)",
+            _ => "",
+        };
+        parts.push(format!("the state at the end of {}{method}", previous.name));
     }
     if !dynamic_before && !velocities.is_empty() {
         parts.push(format!("initial velocity {}", velocities.join(", ")));
