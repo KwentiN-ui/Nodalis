@@ -666,9 +666,11 @@ impl Procedure for NonlinearDynamic {
                 step_time: t1,
                 increment_size: dt,
             });
+            // Numbered like the `.sta` row and the result frame, which the results match it
+            // with; the event frames before it have no row and carry their own time.
             progress.event(ProgressEvent::IncrementDone {
                 step: ctx.step_number,
-                increment,
+                increment: record,
                 attempt: 1,
                 iterations,
                 total_time: total,
