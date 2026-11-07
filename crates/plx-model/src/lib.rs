@@ -66,7 +66,8 @@ pub use connection::{
     WEAK_SPRING_FACTOR, conducts_across_contacts, mortar_supports,
 };
 pub use constraint::{
-    CompressionOnly, Joint, JointKind, NodeTie, RigidBody, Spring, SpringEnd, SpringLayout,
+    CompressionOnly, Joint, JointAxis, JointKind, NodeTie, RigidBody, Spring, SpringEnd,
+    SpringLayout,
 };
 pub use contact::{
     Constraint, ContactMethod, ContactPair, ContactScale, CyclicSymmetry, ElementYoung, Friction,
