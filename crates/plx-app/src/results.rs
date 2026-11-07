@@ -261,11 +261,13 @@ impl ResultsView {
         view
     }
 
-    /// The automatic scale, except for contact: exaggerated, the touching parts appear to
-    /// penetrate each other, which confuses new users. Mode shapes have a deformation of
-    /// their own, [`ResultsView::mode_deformation`].
+    /// The automatic scale, except for contact and for steps with large deformations:
+    /// exaggerated, the touching parts appear to penetrate each other and a large motion looks
+    /// wrong, which confuses new users. Mode shapes have a deformation of their own,
+    /// [`ResultsView::mode_deformation`].
     pub fn default_deformation(&self) -> Deformation {
-        if self.contact {
+        let large = self.current_step().is_some_and(|s| s.nlgeom);
+        if self.contact || large {
             Deformation::TrueScale
         } else {
             Deformation::Automatic(1.0)
@@ -1053,6 +1055,7 @@ impl ResultsView {
             convergence,
             unconverged,
         );
+        self.follow_default_deformation();
     }
 
     /// Shows another increment, also while the animation window is open: the animation then
@@ -1822,6 +1825,38 @@ mod tests {
         let without = ResultsView::new(vec![increment(1, 1, AnalysisKind::Static, &disp)], None);
         assert!(!without.contact);
         assert_eq!(without.deformation, Deformation::Automatic(1.0));
+    }
+
+    #[test]
+    fn large_deformations_open_in_true_scale() {
+        use plx_results::steps::{StepCategory, StepRecord};
+        let disp = [[0.0, 0.0, 1.0]];
+        let record = |nlgeom: bool, step: u32| StepRecord {
+            name: format!("S{step}"),
+            category: StepCategory::Static,
+            nlgeom,
+            perturbation: false,
+            time_period: None,
+            solver_steps: vec![step],
+            inherited_from: None,
+        };
+        let mut view = ResultsView::new(
+            vec![
+                increment(1, 1, AnalysisKind::Static, &disp),
+                increment(2, 1, AnalysisKind::Static, &disp),
+            ],
+            Some(([0.0; 3], [10.0; 3])),
+        );
+        assert_eq!(view.deformation, Deformation::Automatic(1.0));
+        view.set_step_records(&[record(false, 1), record(true, 2)], &[], None);
+        // The last step is shown.
+        assert_eq!(view.deformation, Deformation::TrueScale);
+        view.select_increment(0);
+        assert_eq!(view.deformation, Deformation::Automatic(1.0));
+        // A scale the user picked stays.
+        (view.deformation, view.deformation_chosen) = (Deformation::UserDefined, true);
+        view.select_increment(1);
+        assert_eq!(view.deformation, Deformation::UserDefined);
     }
 
     #[test]
