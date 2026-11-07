@@ -27,6 +27,7 @@ pub mod geometry;
 pub mod law;
 pub mod output;
 
+use rayon::prelude::*;
 use std::collections::HashSet;
 
 use plxs_core::contact::{Adjust, ContactKind};
@@ -758,25 +759,26 @@ impl ContactModel {
             } else {
                 pair.mortar_nodes.len()
             };
+            // The points one by one in parallel (the search for their master faces is most
+            // of a contact evaluation), then gathered in their order.
+            let evaluated: Vec<(PointResult, Option<ContactElement>)> = (0..count)
+                .into_par_iter()
+                .map(|p| {
+                    let previous = start
+                        .get(pi)
+                        .and_then(|s| s.get(p))
+                        .copied()
+                        .unwrap_or_default();
+                    let damping = self.damping.as_ref();
+                    if pair.mortar_nodes.is_empty() {
+                        pair.evaluate_point(p, &current, u, &previous, predictor, damping)
+                    } else {
+                        pair.evaluate_mortar_node(p, &current, u, &previous, predictor, damping)
+                    }
+                })
+                .collect();
             let mut results = Vec::with_capacity(count);
-            for p in 0..count {
-                let previous = start
-                    .get(pi)
-                    .and_then(|s| s.get(p))
-                    .copied()
-                    .unwrap_or_default();
-                let (result, element) = if pair.mortar_nodes.is_empty() {
-                    pair.evaluate_point(p, &current, u, &previous, predictor, self.damping.as_ref())
-                } else {
-                    pair.evaluate_mortar_node(
-                        p,
-                        &current,
-                        u,
-                        &previous,
-                        predictor,
-                        self.damping.as_ref(),
-                    )
-                };
+            for (result, element) in evaluated {
                 if let Some(element) = element {
                     evaluation.elements.push(element);
                     if result.element {

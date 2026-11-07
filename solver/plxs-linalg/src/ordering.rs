@@ -261,6 +261,8 @@ enum Task {
     Order(Vec<u32>),
     /// Append these vertices (a separator, after both of its sides).
     Emit(Vec<u32>),
+    /// Order this (connected) subgraph without splitting it.
+    Leaf(Vec<u32>),
 }
 
 impl<'a> Dissection<'a> {
@@ -413,8 +415,18 @@ impl<'a> Dissection<'a> {
         for &v in separator.iter() {
             self.side[v as usize] = Side::S;
         }
-        let mut wa: usize = a.iter().map(|&v| weight(self, v)).sum();
-        let mut wb: usize = b.iter().map(|&v| weight(self, v)).sum();
+        // The separator comes as a subset of the sides: its vertices count for neither side.
+        // Counted in, the sides looked heavier than they are, the floor below let the moves
+        // drain one side completely, and the subgraph came back whole, to be split again
+        // forever (a free model of a ball, a can and a plate hung before its first output).
+        let side_weight = |this: &Self, vertices: &[u32], side: Side| -> usize {
+            (vertices.iter())
+                .filter(|&&v| this.side[v as usize] == side)
+                .map(|&v| weight(this, v))
+                .sum()
+        };
+        let mut wa = side_weight(self, a, Side::A);
+        let mut wb = side_weight(self, b, Side::B);
         let total = wa + wb + separator.iter().map(|&v| weight(self, v)).sum::<usize>();
         let floor = total / 4;
         let mut queue: Vec<u32> = separator.clone();
@@ -509,6 +521,14 @@ impl<'a> Dissection<'a> {
         for &v in &separator {
             self.side[v as usize] = Side::Out;
         }
+        if separator.is_empty() && (rest_a.is_empty() || rest_b.is_empty()) {
+            // No smaller pieces: splitting the same subgraph again would never end. Ordered
+            // as a leaf (Cuthill-McKee) instead.
+            let mut whole = rest_a;
+            whole.extend(rest_b);
+            work.push(Task::Leaf(whole));
+            return;
+        }
         // The generation changes in the later tasks; the separator needs no further
         // searches. Last in, first out: side A, then side B, then the separator.
         work.push(Task::Emit(separator));
@@ -573,8 +593,31 @@ impl<'a> Dissection<'a> {
             match task {
                 Task::Order(vertices) => self.order_one(vertices, out, &mut work),
                 Task::Emit(vertices) => out.extend(vertices),
+                Task::Leaf(vertices) => self.order_leaf(vertices, out),
             }
         }
+    }
+
+    /// Orders the connected subgraph `vertices` into `out` without splitting it: Cuthill-McKee
+    /// from a pseudo-peripheral vertex.
+    fn order_leaf(&mut self, vertices: Vec<u32>, out: &mut Vec<u32>) {
+        let Some(start) = (vertices.iter().copied()).min_by_key(|&v| self.graph.neighbors(v).len())
+        else {
+            return;
+        };
+        self.select(&vertices);
+        self.new_search();
+        let first = self.bfs(start);
+        let far = *first.last().unwrap();
+        self.new_search();
+        let mut order = self.bfs(far);
+        // Pieces the searches did not reach (the subgraph is connected, but to be safe).
+        for &v in &vertices {
+            if !self.visited(v) {
+                order.extend(self.bfs(v));
+            }
+        }
+        out.extend(order);
     }
 
     /// Orders the subgraph `vertices`: a leaf straight into `out`, else splits it and leaves
@@ -992,6 +1035,101 @@ mod tests {
         assert!(is_permutation(&perm));
         assert_eq!(perm.len(), n);
         assert!(start.elapsed().as_secs() < 20, "took {:?}", start.elapsed());
+    }
+
+    /// The subgraph that hung the ordering of a free model (a ball, a shell can and a shell
+    /// plate in contact): nodes of a plate with 6, 9 and 15 unknowns each. The refinement of
+    /// its split counted the separator into both sides, drained side A and gave the whole
+    /// subgraph back, which was split the same way again forever.
+    #[test]
+    fn a_split_that_drains_a_side_ends() {
+        let vertices: [(u32, u32, [f64; 2], &[u32]); 10] = [
+            (
+                4200,
+                6,
+                [0.05409620985141139, -0.017032783851346545],
+                &[4044, 4056, 4198, 4199, 4220],
+            ),
+            (
+                4220,
+                6,
+                [0.061173798994375916, -0.016740033392685115],
+                &[3915, 3928, 4044, 4056, 4199, 4200],
+            ),
+            (
+                4056,
+                9,
+                [0.05734759798875184, -0.014908638213941672],
+                &[3915, 3928, 4044, 4198, 4199, 4200, 4220],
+            ),
+            (
+                3928,
+                6,
+                [0.065, -0.013928571428571415],
+                &[3915, 4044, 4056, 4199, 4220],
+            ),
+            (
+                4199,
+                6,
+                [0.05713680281343876, -0.011777208683497742],
+                &[3915, 3928, 4044, 4056, 4198, 4200, 4220],
+            ),
+            (
+                3915,
+                15,
+                [0.065, -0.009285714285714272],
+                &[3927, 3928, 4044, 4056, 4199, 4201, 4220],
+            ),
+            (
+                4198,
+                6,
+                [0.05283134753476454, -0.008918217815723259],
+                &[4044, 4056, 4199, 4200, 4201],
+            ),
+            (
+                4044,
+                9,
+                [0.05692600763812569, -0.008645779153053812],
+                &[3915, 3927, 3928, 4056, 4198, 4199, 4200, 4201, 4220],
+            ),
+            (3927, 6, [0.065, -0.004642857142857129], &[3915, 4044, 4201]),
+            (
+                4201,
+                6,
+                [0.05669205553947769, -0.004189715681346892],
+                &[3915, 3927, 4044, 4198],
+            ),
+        ];
+        // The unknowns of each node, numbered one node after the other.
+        let mut first = std::collections::HashMap::new();
+        let mut n = 0usize;
+        let mut coordinates = Vec::new();
+        for (id, weight, [x, y], _) in vertices {
+            first.insert(id, n);
+            n += weight as usize;
+            coordinates.extend(std::iter::repeat_n([x, y, -0.0005], weight as usize));
+        }
+        let dofs = |id: u32| {
+            let (_, weight, ..) = vertices.iter().find(|v| v.0 == id).unwrap();
+            (first[&id]..first[&id] + *weight as usize).map(|d| d as u32)
+        };
+        let mut blocks: Vec<Vec<u32>> = Vec::new();
+        for (id, _, _, neighbors) in vertices {
+            blocks.push(dofs(id).collect());
+            for &other in neighbors {
+                blocks.push(dofs(id).chain(dofs(other)).collect());
+            }
+        }
+        let pattern = Pattern::from_blocks(n, blocks.iter().map(Vec::as_slice));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(nested_dissection(&pattern, Some(&coordinates)));
+        });
+        let perm = rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the ordering did not end");
+        assert_eq!(perm.len(), n);
+        assert!(is_permutation(&perm));
     }
 
     #[test]
