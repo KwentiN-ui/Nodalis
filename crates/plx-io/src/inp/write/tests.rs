@@ -6850,6 +6850,94 @@ fn a_complex_frequency_step_is_solved_as_preload_eigenmodes_and_complex_modes() 
     ));
 }
 
+/// The rotor of [`rotor_analysis`] turning only its outer half x >= 50 (element set
+/// OUTER); the half at the clamp stands still.
+fn outer_half_rotor(speed: f64) -> (FeMesh, FeModel) {
+    let (mut mesh, mut model) = rotor_analysis(speed);
+    let outer: Vec<ElementId> = (mesh.elements().iter())
+        .filter(|e| {
+            e.nodes
+                .iter()
+                .all(|&n| mesh.node(n).unwrap()[0] >= 50.0 - 1e-9)
+        })
+        .map(|e| e.id)
+        .collect();
+    assert!(!outer.is_empty() && outer.len() < mesh.elements().len());
+    mesh.element_sets.insert("OUTER".into(), outer);
+    let StepKind::ComplexFrequency(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.region = Region::ElementSet("OUTER".into());
+    (mesh, model)
+}
+
+#[test]
+fn a_complex_frequency_step_turns_only_its_rotating_parts() {
+    // The whole model turns when no part is picked.
+    let (mesh, model) = rotor_analysis(100.0);
+    let text = lower_unvalidated(&mesh, &model, "").unwrap().text();
+    assert!(text.contains("ROTOR_ROTATION, CENTRIF, 10000"), "{text}");
+    // Picked parts or elements carry the centrifugal load and the Coriolis forces alone.
+    let (mesh, model) = outer_half_rotor(100.0);
+    let text = lower_unvalidated(&mesh, &model, "").unwrap().text();
+    let rotation = "\nOUTER, CENTRIF, 10000, 0, 5, 5, 1, 0, 0\n";
+    assert_eq!(text.matches(rotation).count(), 3, "{text}");
+    assert!(!text.contains("ROTOR_ROTATION"), "{text}");
+}
+
+#[test]
+fn a_coordinate_system_gives_the_rotation_axis() {
+    // The z axis of a coordinate system at the hub: through (0, 5, 5) along x.
+    let (mesh, mut model) = rotor_analysis(100.0);
+    let mut hub = plx_model::CoordinateSystem::new("Hub");
+    hub.origin = [0.0, 5.0, 5.0];
+    hub.point_x = [0.0, 6.0, 5.0];
+    hub.point_xy = [0.0, 5.0, 9.0];
+    model.coordinate_systems.push(hub);
+    let StepKind::ComplexFrequency(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    // The typed point and direction no longer count.
+    settings.system = Some("Hub".into());
+    settings.point = [7.0; 3];
+    settings.axis = [0.0; 3];
+    let text = lower_unvalidated(&mesh, &model, "").unwrap().text();
+    let rotation = "ROTOR_ROTATION, CENTRIF, 10000, 0, 5, 5, 1, 0, 0\n";
+    assert_eq!(text.matches(rotation).count(), 3, "{text}");
+    // A missing coordinate system is an error of the step.
+    let StepKind::ComplexFrequency(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.system = Some("Gone".into());
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::InvalidLoad { item, .. }) if item == "Rotor"
+    ));
+}
+
+#[test]
+fn solver_couples_a_rotating_part_to_standing_ones() {
+    // Only the outer half of the cantilever spins: its Coriolis forces still split the
+    // bending modes, but less than when the whole beam spins.
+    let split = |(mesh, model): (FeMesh, FeModel), name: &str| {
+        let frd = run_solver(name, &write_inp(&mesh, &model, "").unwrap())?;
+        let whirling: Vec<f64> = (frd.increments.iter())
+            .filter(|i| i.kind == plx_results::AnalysisKind::ComplexFrequency)
+            .map(|i| i.value)
+            .collect();
+        assert_eq!(whirling.len(), 4, "{whirling:?}");
+        Some(whirling[1] - whirling[0])
+    };
+    let Some(whole) = split(rotor_analysis(100.0), "rotor-whole") else {
+        return;
+    };
+    let Some(outer) = split(outer_half_rotor(100.0), "rotor-outer-half") else {
+        return;
+    };
+    eprintln!("split whole {whole}, outer half {outer}");
+    assert!(0.0 < outer && outer < whole, "0 < {outer} < {whole}");
+}
+
 #[test]
 fn solver_takes_the_stress_stiffening_of_the_rotation_on_request() {
     // Stress stiffening and spin softening change the whirl frequencies of the spinning

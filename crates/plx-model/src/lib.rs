@@ -241,7 +241,7 @@ impl FeModel {
                 (step.boundary_conditions.iter().map(|b| &b.region))
                     .chain(step.loads.iter().map(|l| &l.region))
                     .chain(step.history_outputs.iter().filter_map(|h| h.kind.region()))
-                    .chain(step.kind.design_region())
+                    .chain(step.kind.region())
             }))
     }
 
@@ -372,7 +372,7 @@ impl FeModel {
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
                     .chain(step.defined_fields.iter_mut().map(|f| &mut f.region))
                     .chain((step.history_outputs.iter_mut()).filter_map(|h| h.kind.region_mut()))
-                    .chain(step.kind.design_region_mut())
+                    .chain(step.kind.region_mut())
             }))
     }
 
@@ -516,7 +516,7 @@ impl FeModel {
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
                     .chain(step.defined_fields.iter_mut().map(|f| &mut f.region))
                     .chain((step.history_outputs.iter_mut()).filter_map(|h| h.kind.region_mut()))
-                    .chain(step.kind.design_region_mut())
+                    .chain(step.kind.region_mut())
             }));
         for region in regions {
             match region {
@@ -799,6 +799,24 @@ impl StepKind {
             self,
             StepKind::Frequency(_) | StepKind::ComplexFrequency(_) | StepKind::Sensitivity(_)
         )
+    }
+
+    /// The region the step itself acts on: the design region of a sensitivity step, the
+    /// rotating elements of a complex frequency step.
+    pub fn region(&self) -> Option<&Region> {
+        match self {
+            StepKind::Sensitivity(settings) => Some(&settings.design_region),
+            StepKind::ComplexFrequency(settings) => Some(&settings.region),
+            _ => None,
+        }
+    }
+
+    pub fn region_mut(&mut self) -> Option<&mut Region> {
+        match self {
+            StepKind::Sensitivity(settings) => Some(&mut settings.design_region),
+            StepKind::ComplexFrequency(settings) => Some(&mut settings.region),
+            _ => None,
+        }
     }
 
     /// The design region of a sensitivity step.
@@ -1550,7 +1568,8 @@ impl Default for FrequencyStep {
 /// centrifugal forces (with [`ComplexFrequencyStep::stiffening`]), a frequency step that
 /// stores [`ComplexFrequencyStep::num_modes`] eigenmodes (a perturbation of the preload
 /// with stiffening) and the complex frequency step on those modes. Only the complex modes
-/// are kept as results. The rotation acts on the whole model.
+/// are kept as results. The rotation acts on [`ComplexFrequencyStep::region`]; the rest of
+/// the model stands still.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ComplexFrequencyStep {
     /// Number of complex eigenfrequencies to compute.
@@ -1563,6 +1582,15 @@ pub struct ComplexFrequencyStep {
     pub point: [f64; 3],
     /// Direction of the rotation axis.
     pub axis: [f64; 3],
+    /// A coordinate system whose z axis is the rotation axis, through its origin; `None`
+    /// takes [`ComplexFrequencyStep::point`] and [`ComplexFrequencyStep::axis`].
+    #[serde(default)]
+    pub system: Option<String>,
+    /// The elements that rotate (parts or an element set); no parts picked: the whole
+    /// model. Centrifugal forces, stress stiffening, spin softening and Coriolis forces act
+    /// on these elements only.
+    #[serde(default = "whole_model")]
+    pub region: Region,
     /// Stress stiffening and spin softening by the centrifugal forces: the eigenmodes are
     /// those of the structure preloaded by the rotation. Off, they are those at standstill
     /// (as some other programs compute them).
@@ -1581,6 +1609,8 @@ impl Default for ComplexFrequencyStep {
             speed: 0.0,
             point: [0.0; 3],
             axis: [0.0, 0.0, 1.0],
+            system: None,
+            region: whole_model(),
             stiffening: true,
             num_modes: 20,
             solver: LinearSolverChoice::Automatic,
@@ -1588,12 +1618,43 @@ impl Default for ComplexFrequencyStep {
     }
 }
 
+/// No parts picked: the region of a step that acts on the whole model.
+fn whole_model() -> Region {
+    Region::Parts(Vec::new())
+}
+
 impl ComplexFrequencyStep {
+    /// Whether the whole model rotates.
+    pub fn rotates_whole_model(&self) -> bool {
+        matches!(&self.region, Region::Parts(parts) if parts.is_empty())
+    }
+
+    /// The rotation axis in `fe`: a point on it and its unit direction, from the coordinate
+    /// system when the step names one.
+    pub fn axis_in(&self, fe: &FeModel) -> Result<([f64; 3], [f64; 3]), String> {
+        let (point, axis) = match &self.system {
+            Some(name) => {
+                let system = fe
+                    .coordinate_system_or_global(name)
+                    .ok_or_else(|| format!("Coordinate System {name} does not exist"))?;
+                (system.origin, system.axes()?[2])
+            }
+            None => (self.point, self.axis),
+        };
+        let length = axis.iter().map(|c| c * c).sum::<f64>().sqrt();
+        if length == 0.0 || !length.is_finite() {
+            return Err("The rotation axis has no direction.".into());
+        }
+        Ok((point, axis.map(|c| c / length)))
+    }
+
     /// What keeps the settings from being solved, in words.
     pub fn problem(&self) -> Option<String> {
-        let length = self.axis.iter().map(|c| c * c).sum::<f64>().sqrt();
-        if length == 0.0 || !length.is_finite() {
-            return Some("The rotation axis has no direction.".into());
+        if self.system.is_none() {
+            let length = self.axis.iter().map(|c| c * c).sum::<f64>().sqrt();
+            if length == 0.0 || !length.is_finite() {
+                return Some("The rotation axis has no direction.".into());
+            }
         }
         if self.num_frequencies == 0 {
             return Some("Compute at least one complex frequency.".into());

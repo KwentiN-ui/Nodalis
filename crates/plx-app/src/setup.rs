@@ -788,6 +788,15 @@ pub(crate) fn contact_target(fe: &FeModel) -> Target {
 }
 
 /// Pressure and surface traction act on element faces, in 2D models on their edges.
+/// What the region of a step of `kind` picks: the surface nodes of a design region, the
+/// rotating parts or element sets of a complex frequency step.
+fn step_region_picks(kind: &StepKind, fe: &FeModel) -> (&'static [Source], Target) {
+    match kind {
+        StepKind::ComplexFrequency(_) => (ELEMENT_SOURCES, Target::Faces),
+        _ => (NODE_SOURCES, face_target(fe)),
+    }
+}
+
 pub(crate) fn face_target(fe: &FeModel) -> Target {
     if fe.properties.space.is_2d() {
         Target::Edges
@@ -1251,7 +1260,7 @@ fn draft_region(draft: &Draft) -> Option<&RegionDraft> {
         Draft::Constraint(c) => Some(c.region()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
         Draft::DefinedField(_, field, r) if field.kind.takes_region() => Some(r),
-        Draft::Step(step, r) if step.kind.design_region().is_some() => Some(r),
+        Draft::Step(step, r) if step.kind.region().is_some() => Some(r),
         _ => None,
     }
 }
@@ -1271,7 +1280,7 @@ fn draft_region_mut(draft: &mut Draft) -> Option<&mut RegionDraft> {
         Draft::Constraint(c) => Some(c.region_mut()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
         Draft::DefinedField(_, field, r) if field.kind.takes_region() => Some(r),
-        Draft::Step(step, r) if step.kind.design_region().is_some() => Some(r),
+        Draft::Step(step, r) if step.kind.region().is_some() => Some(r),
         _ => None,
     }
 }
@@ -2234,12 +2243,9 @@ impl Editor {
             }
             TreeItem::Step(i) => {
                 let step = fe.steps.get(i)?.clone();
-                let design = step
-                    .kind
-                    .design_region()
-                    .cloned()
-                    .unwrap_or(Region::Nodes(Vec::new()));
-                let region = RegionDraft::from_region(&design, NODE_SOURCES, face_target(fe), mesh);
+                let own = (step.kind.region().cloned()).unwrap_or(Region::Nodes(Vec::new()));
+                let (sources, target) = step_region_picks(&step.kind, fe);
+                let region = RegionDraft::from_region(&own, sources, target, mesh);
                 (Draft::Step(step, region), i)
             }
             TreeItem::BoundaryCondition(s, i) => {
@@ -2837,11 +2843,35 @@ impl Editor {
                     .and_then(Result::ok);
                 step_form(ui, step, self.index, &model.fe, sectors);
                 crate::connections::step_contacts(ui, &model.fe, step, self.index);
-                if step.kind.design_region().is_some() {
-                    region.ui_labeled(ui, model, "Design region", "design region", true);
-                    ui.label("");
-                    ui.weak("Surface nodes that may move; the solver ignores inner nodes.");
-                    ui.end_row();
+                // The kind may have changed: the region picks what the new kind takes.
+                let (sources, target) = step_region_picks(&step.kind, &model.fe);
+                if region.sources != sources {
+                    *region = region.converted(sources, target, &model.mesh).0;
+                }
+                match step.kind {
+                    StepKind::Sensitivity(_) => {
+                        region.ui_labeled(ui, model, "Design region", "design region", true);
+                        ui.label("");
+                        ui.weak("Surface nodes that may move; the solver ignores inner nodes.");
+                        ui.end_row();
+                    }
+                    StepKind::ComplexFrequency(_) => {
+                        region.ui_labeled(ui, model, "Rotating parts", "rotating parts", true);
+                        ui.label("");
+                        ui.weak(if region.is_empty() {
+                            "None picked: the whole model rotates."
+                        } else {
+                            "Only these rotate; the rest of the model stands still."
+                        });
+                        ui.end_row();
+                        ui.label("");
+                        ui.weak(
+                            "The rotating materials need a density.\n\
+                             Results are the complex modes only.",
+                        );
+                        ui.end_row();
+                    }
+                    _ => {}
                 }
             }
             Draft::BoundaryCondition(step, bc, region) => {
@@ -4024,8 +4054,8 @@ impl Editor {
                 put(&mut fe.cross_sections, index, cross_section);
             }
             Draft::Step(mut step, region) => {
-                if let Some(design) = step.kind.design_region_mut() {
-                    *design = region.region();
+                if let Some(own) = step.kind.region_mut() {
+                    *own = region.region();
                 }
                 match index.and_then(|i| fe.steps.get_mut(i)) {
                     // The dialog edits the settings; the step's items stay.
@@ -5966,7 +5996,7 @@ fn step_form(
         }
         StepKind::ModalDynamics(settings) => modal_dynamics_form(ui, settings, units),
         StepKind::SteadyStateDynamics(settings) => steady_state_form(ui, settings, units),
-        StepKind::ComplexFrequency(settings) => complex_frequency_form(ui, settings, units),
+        StepKind::ComplexFrequency(settings) => complex_frequency_form(ui, settings, fe),
         StepKind::Buckle(settings) => buckle_form(ui, settings),
         StepKind::HeatTransfer(settings) => heat_transfer_form(ui, settings, units, false),
         StepKind::CoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, true),
@@ -6718,7 +6748,8 @@ fn nodal_diameter_rows(ui: &mut Ui, range: &mut Option<[u32; 2]>, sectors: u32) 
 /// Settings of a complex frequency step: the rotation, the stress stiffening by it, the
 /// numbers of modes and the solver. The step is complete on its own; the solver preloads and
 /// computes the eigenmodes in steps of its own.
-fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep, units: UnitSystem) {
+fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep, fe: &FeModel) {
+    let units = fe.properties.units;
     ui.label("Rotational speed");
     expose::field(ui, Field::Speed, |ui| {
         ui.add(numeric::quantity(&mut settings.speed, units, Quantity::RotationalSpeed).speed(1.0))
@@ -6735,25 +6766,73 @@ fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep, unit
     };
     ui.weak(format!("= {} rpm", numeric::format_physical(rpm)));
     ui.end_row();
-    for ((value, label), field) in (settings.point.iter_mut())
-        .zip(["Axis point X", "Axis point Y", "Axis point Z"])
-        .zip(Field::LOCATION)
-    {
-        ui.label(label);
-        expose::field(ui, field, |ui| {
-            ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.1))
-        });
-        ui.end_row();
-    }
-    for ((value, label), field) in (settings.axis.iter_mut())
-        .zip(["Axis direction X", "Axis direction Y", "Axis direction Z"])
-        .zip(Field::AXIS)
-    {
-        ui.label(label);
-        expose::field(ui, field, |ui| {
-            ui.add(numeric::drag_value(value).speed(0.01))
-        });
-        ui.end_row();
+    // The axis: the z axis of a coordinate system, or a point and a direction.
+    const TYPED: &str = "Point and direction";
+    ui.label("Rotation axis");
+    egui::ComboBox::from_id_salt("rotation axis")
+        .selected_text(match &settings.system {
+            Some(name) => format!("z axis of {name}"),
+            None => TYPED.to_string(),
+        })
+        .width(crate::dock::fit_width(ui, 200.0))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut settings.system, None, TYPED);
+            for system in &fe.coordinate_systems {
+                let name = Some(system.name.clone());
+                let label = format!("z axis of {}", system.name);
+                ui.selectable_value(&mut settings.system, name, label);
+            }
+        })
+        .response
+        .on_hover_text(
+            "A coordinate system (Features > Coordinate System) puts the axis through its \
+             origin along its z axis, e.g. one placed at the hub by picking on the geometry.",
+        );
+    ui.end_row();
+    if settings.system.is_some() {
+        match settings.axis_in(fe) {
+            Ok((point, axis)) => {
+                ui.label("");
+                let length = |v: f64| shown(v, units, Quantity::Length);
+                let number = |v: f64| numeric::format_physical((v * 1e6).round() / 1e6);
+                ui.weak(format!(
+                    "through ({}, {}, {}),\ndirection ({}, {}, {})",
+                    length(point[0]),
+                    length(point[1]),
+                    length(point[2]),
+                    number(axis[0]),
+                    number(axis[1]),
+                    number(axis[2]),
+                ));
+                ui.end_row();
+            }
+            Err(problem) => {
+                ui.label("");
+                ui.colored_label(ui.visuals().error_fg_color, problem);
+                ui.end_row();
+            }
+        }
+    } else {
+        for ((value, label), field) in (settings.point.iter_mut())
+            .zip(["Axis point X", "Axis point Y", "Axis point Z"])
+            .zip(Field::LOCATION)
+        {
+            ui.label(label);
+            expose::field(ui, field, |ui| {
+                ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.1))
+            });
+            ui.end_row();
+        }
+        for ((value, label), field) in (settings.axis.iter_mut())
+            .zip(["Axis direction X", "Axis direction Y", "Axis direction Z"])
+            .zip(Field::AXIS)
+        {
+            ui.label(label);
+            expose::field(ui, field, |ui| {
+                ui.add(numeric::drag_value(value).speed(0.01))
+            });
+            ui.end_row();
+        }
     }
     ui.label("Stress stiffening");
     ui.checkbox(&mut settings.stiffening, "Centrifugal prestress")
@@ -6776,9 +6855,6 @@ fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep, unit
     ui.add(numeric::drag_value(&mut settings.num_modes).range(least..=10_000));
     ui.end_row();
     solver_row(ui, &mut settings.solver);
-    ui.label("");
-    ui.weak("Rotates the whole model; the materials\nneed a density. Results are the\ncomplex modes only.");
-    ui.end_row();
 }
 
 fn validate_frequency_step(settings: &FrequencyStep) -> Result<(), String> {
