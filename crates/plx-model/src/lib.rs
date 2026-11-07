@@ -1012,6 +1012,11 @@ impl StaticStep {
     /// A step with large deformations starts with at most this share of its duration.
     pub const NONLINEAR_START: f64 = 0.1;
 
+    /// The length of the step in time (its duration).
+    pub fn period(&self) -> f64 {
+        self.duration
+    }
+
     /// The time between two result frames.
     pub fn frame_interval(&self) -> f64 {
         self.duration / f64::from(self.frames.max(1))
