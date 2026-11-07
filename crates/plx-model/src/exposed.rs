@@ -684,6 +684,7 @@ mod tests {
             kind: LoadKind::force([0.0, -100.0, 0.0]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         FeModel {
             materials: vec![Material {

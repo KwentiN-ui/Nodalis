@@ -285,6 +285,10 @@ impl Procedure for NonlinearStatic {
         let mut warned = false;
         let carried = ctx.state.loads.clone();
         let mut applied: Vec<f64> = Vec::new();
+        // Increments end at the points of the amplitudes (and value tables) the step follows,
+        // so a motion that changes direction is applied as given; the increment size cut to
+        // reach a point is restored afterwards, like that of a frame.
+        let breakpoints = step.amplitude_times(ctx.model, start_total, period);
         while time < period * (1.0 - 1e-12) {
             if ctx.cancel.is_cancelled() {
                 return Ok(StepOutcome::Cancelled);
@@ -312,6 +316,12 @@ impl Procedure for NonlinearStatic {
                 }
                 if let Some(frames) = &frames {
                     dt = frames.limit(time, dt);
+                }
+                let tolerance = period * 1e-9;
+                if let Some(&next) = breakpoints.iter().find(|&&t| t > time + tolerance)
+                    && time + dt > next + tolerance
+                {
+                    dt = next - time;
                 }
                 planned = (dt < full).then_some(full);
                 let step_time = time + dt;

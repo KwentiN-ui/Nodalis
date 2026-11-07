@@ -19,8 +19,8 @@ use plx_model::{
     ModelItem, ModelSpace, MovingFrame, NodeTie, Origins, OutputDimension, OutputKind, Quantity,
     RayleighFit, Region, RemoteBehavior, RemoteDof, Sampler, Section, SectionKind, SectorDisplay,
     SensitivityStep, StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior,
-    SurfaceInteraction, Tie, Totals, UnitSystem, ViscoStep, line_tangent, symmetry_dofs,
-    symmetry_plane,
+    SurfaceInteraction, TableOwner, Tie, Totals, UnitSystem, ViscoStep, line_tangent,
+    symmetry_dofs, symmetry_plane,
 };
 use plxs_core as ir;
 use plxs_core::mesh::{ElementRef, NodeRef};
@@ -711,6 +711,19 @@ fn lower_model_named(
     for (i, amplitude) in original.amplitudes.iter().enumerate() {
         let item = ir::ItemRef::Amplitude(ir_name(&name(&amplitude.name)));
         origins.insert(item, ModelItem::Amplitude(i));
+    }
+    for (s, step) in original.steps.iter().enumerate().filter(|(_, s)| s.active) {
+        for table in step.tables() {
+            let (item, label) = table_owner(step, &table);
+            let amplitude = ir::ItemRef::Amplitude(table_amplitude(&step.name, item, label));
+            origins.insert(
+                amplitude,
+                match table.owner {
+                    TableOwner::BoundaryCondition(i) => ModelItem::BoundaryCondition(s, i),
+                    TableOwner::Load(i) => ModelItem::Load(s, i),
+                },
+            );
+        }
     }
     ir_model.contact = ir::contact::Contact {
         interactions,
@@ -1443,7 +1456,102 @@ fn amplitudes(model: &FeModel) -> Result<Vec<ir::amplitude::Amplitude>, WriteErr
             points: amplitude.points.iter().map(|&[t, a]| (t, a)).collect(),
         });
     }
+    // Each time table of a component is an amplitude of its own, in step time, that a value
+    // of 1 follows.
+    for step in model.steps.iter().filter(|s| s.active) {
+        for table in step.tables() {
+            let (item, label) = table_owner(step, &table);
+            if let Some(reason) = table.table.points_problem() {
+                return Err(WriteError::InvalidAmplitude {
+                    item: item.to_owned(),
+                    reason,
+                });
+            }
+            let name = table_amplitude(&step.name, item, label);
+            if amplitudes.iter().any(|a| a.name == name) {
+                continue;
+            }
+            amplitudes.push(ir::amplitude::Amplitude {
+                name,
+                total_time: false,
+                shift_x: 0.0,
+                shift_y: 0.0,
+                points: table.table.points.iter().map(|&[t, v]| (t, v)).collect(),
+            });
+        }
+    }
     Ok(amplitudes)
+}
+
+/// The labels of the degrees of freedom of a displacement and the components of a load,
+/// which name the amplitudes of their tables.
+const DOF_TABLE_LABELS: [&str; 6] = ["U1", "U2", "U3", "UR1", "UR2", "UR3"];
+const FORCE_TABLE_LABELS: [&str; 3] = ["F1", "F2", "F3"];
+const MOMENT_TABLE_LABELS: [&str; 3] = ["M1", "M2", "M3"];
+
+/// The name of the item a table belongs to and the label of its component.
+fn table_owner<'a>(step: &'a Step, table: &plx_model::StepTable) -> (&'a str, &'static str) {
+    match table.owner {
+        TableOwner::BoundaryCondition(i) => (
+            &step.boundary_conditions[i].name,
+            DOF_TABLE_LABELS[table.component],
+        ),
+        TableOwner::Load(i) => {
+            let load = &step.loads[i];
+            let label = match load.kind {
+                LoadKind::Moment(_) => MOMENT_TABLE_LABELS[table.component],
+                LoadKind::Pressure(_) => "P",
+                _ => FORCE_TABLE_LABELS[table.component],
+            };
+            (&load.name, label)
+        }
+    }
+}
+
+/// The name of the amplitude of the table of component `label` of item `item` in a step,
+/// as the solver compares it.
+fn table_amplitude(step: &str, item: &str, label: &str) -> String {
+    ir_name(&name(&format!("Table~{step}~{item}~{label}")))
+}
+
+/// The values a displacement holds and the amplitude each follows: a degree of freedom with
+/// a table holds 1 and follows the amplitude of its table, the others their value and the
+/// amplitude of the boundary condition.
+fn displacement_values(
+    step: &Step,
+    bc: &plx_model::BoundaryCondition,
+    displacement: &plx_model::Displacement,
+    amplitude: &Option<String>,
+) -> ([Option<f64>; 6], [Option<String>; 6]) {
+    let values = std::array::from_fn(|d| match displacement.table(d) {
+        Some(_) => Some(1.0),
+        None => displacement.values[d],
+    });
+    let amplitudes = std::array::from_fn(|d| match displacement.table(d) {
+        Some(_) => Some(table_amplitude(&step.name, &bc.name, DOF_TABLE_LABELS[d])),
+        None => amplitude.clone(),
+    });
+    (values, amplitudes)
+}
+
+/// The components of a load's value and the amplitude each follows: a component with a
+/// table is 1 and follows the amplitude of its table.
+fn load_components<const N: usize>(
+    step: &Step,
+    load: &plx_model::Load,
+    values: [f64; N],
+    labels: [&str; N],
+    amplitude: &Option<String>,
+) -> ([f64; N], [Option<String>; N]) {
+    let values = std::array::from_fn(|c| match load.table(c) {
+        Some(_) => 1.0,
+        None => values[c],
+    });
+    let amplitudes = std::array::from_fn(|c| match load.table(c) {
+        Some(_) => Some(table_amplitude(&step.name, &load.name, labels[c])),
+        None => amplitude.clone(),
+    });
+    (values, amplitudes)
 }
 
 /// The amplitude a boundary condition or load refers to, by its name in the analysis;
@@ -2052,6 +2160,7 @@ fn joint_item(
             system: plx_model::GLOBAL.to_string(),
             location: Some(origin),
             pinball: None,
+            tables: Default::default(),
         };
         let excluded = model.directly_held_nodes_in(sets.mesh, |_| true);
         let held = model.held_translations(sets.mesh);
@@ -3000,33 +3109,38 @@ fn displacement_boundaries(
     rotation: Option<&NodeRef>,
     values: &[Option<f64>; 6],
     dofs: usize,
-    amplitude: &Option<String>,
+    amplitudes: &[Option<String>; 6],
 ) -> Vec<ir::step::Boundary> {
-    // Each held degree of freedom as (target, its number there, value).
-    let held = (1..).zip(values).take(dofs).filter_map(|(dof, value)| {
-        let value = (*value)?;
-        Some(match rotation {
-            Some(rotation) if dof > 3 => (rotation, dof - 3, value),
-            _ => (nodes, dof, value),
-        })
-    });
+    // Each held degree of freedom as (target, its number there, value, amplitude).
+    let held = (1..)
+        .zip(values.iter().zip(amplitudes))
+        .take(dofs)
+        .filter_map(|(dof, (value, amplitude))| {
+            let value = (*value)?;
+            Some(match rotation {
+                Some(rotation) if dof > 3 => (rotation, dof - 3, value, amplitude),
+                _ => (nodes, dof, value, amplitude),
+            })
+        });
     let mut out = Vec::new();
-    let mut run: Option<(&NodeRef, u8, u8, f64)> = None;
-    for (target, dof, value) in held {
+    let mut run: Option<(&NodeRef, u8, u8, f64, &Option<String>)> = None;
+    for (target, dof, value, amplitude) in held {
         match &mut run {
-            Some((t, _, last, v)) if *t == target && *last + 1 == dof && *v == value => {
+            Some((t, _, last, v, a))
+                if *t == target && *last + 1 == dof && *v == value && *a == amplitude =>
+            {
                 *last = dof;
             }
             _ => {
-                if let Some((t, first, last, v)) = run {
-                    out.push(boundary(t.clone(), first, last, Some(v), amplitude.clone()));
+                if let Some((t, first, last, v, a)) = run {
+                    out.push(boundary(t.clone(), first, last, Some(v), a.clone()));
                 }
-                run = Some((target, dof, dof, value));
+                run = Some((target, dof, dof, value, amplitude));
             }
         }
     }
-    if let Some((t, first, last, v)) = run {
-        out.push(boundary(t.clone(), first, last, Some(v), amplitude.clone()));
+    if let Some((t, first, last, v, a)) = run {
+        out.push(boundary(t.clone(), first, last, Some(v), a.clone()));
     }
     out
 }
@@ -3160,11 +3274,19 @@ fn step_block<'f>(
             let amplitude = amplitude_parameter(amplitudes, &bc.name, &bc.amplitude)?;
             // The translations are those of the reference node, the rotations the
             // displacements of the rotation node.
-            let held = remote.held(space);
+            let (values, dof_amplitudes) = displacement_values(step, bc, remote, &amplitude);
+            let held = remote.held(space).map(|v| v.map(|_| ()));
+            let held = std::array::from_fn(|d| held[d].and(values[d]));
             let (reference, rotation) = (NodeRef::Node(reference), NodeRef::Node(rotation));
             boundaries.push(Card::Boundary {
                 op_new: false,
-                items: displacement_boundaries(&reference, Some(&rotation), &held, 6, &amplitude),
+                items: displacement_boundaries(
+                    &reference,
+                    Some(&rotation),
+                    &held,
+                    6,
+                    &dof_amplitudes,
+                ),
             });
             continue;
         }
@@ -3222,7 +3344,8 @@ fn step_block<'f>(
         let mut items = Vec::new();
         match bc.kind {
             BoundaryKind::Displacement(ref displacement) => {
-                let values = displacement.values;
+                let (values, dof_amplitudes) =
+                    displacement_values(step, bc, displacement, &amplitude);
                 // A coordinate system of its own turns the directions of the nodes.
                 if displacement.system != plx_model::GLOBAL && rotation_node.is_none() {
                     let system = (model.coordinate_system_or_global(&displacement.system))
@@ -3262,15 +3385,20 @@ fn step_block<'f>(
                             .then(|| values[i])
                             .flatten()
                     });
-                    items =
-                        displacement_boundaries(&target, rotation.as_ref(), &held, 6, &amplitude);
+                    items = displacement_boundaries(
+                        &target,
+                        rotation.as_ref(),
+                        &held,
+                        6,
+                        &dof_amplitudes,
+                    );
                 } else {
                     items = displacement_boundaries(
                         &target,
                         rotation.as_ref(),
                         &values,
                         dofs,
-                        &amplitude,
+                        &dof_amplitudes,
                     );
                 }
             }
@@ -3406,10 +3534,13 @@ fn step_block<'f>(
                     }
                     None => (node_set_ref(&sets.node_set(&load.name, &load.region)?), 4),
                 };
+                let (moment, component_amplitudes) =
+                    load_components(step, load, moment, MOMENT_TABLE_LABELS, &amplitude);
                 let mut items = Vec::new();
                 for (dof, value) in (0..).zip(moment) {
                     if value != 0.0 && dof as usize + 4 <= dofs {
-                        items.push(cload(target.clone(), first_dof + dof, value, &amplitude));
+                        let amplitude = &component_amplitudes[dof as usize];
+                        items.push(cload(target.clone(), first_dof + dof, value, amplitude));
                     }
                 }
                 vec![Card::Cload {
@@ -3470,6 +3601,8 @@ fn step_block<'f>(
             }
             LoadKind::Pressure(pressure) => {
                 use ir::step::DistributedLoadKind::Pressure;
+                let ([pressure], [amplitude]) =
+                    load_components(step, load, [pressure], ["P"], &amplitude);
                 let mut items = Vec::new();
                 match distribution(model, &load.name, &load.distribution)? {
                     // Every face takes the pressure scaled at its center.
@@ -3537,6 +3670,8 @@ fn step_block<'f>(
                 let faces = load.region.faces(sets.mesh);
                 let edges = load.region.edges(sets.mesh);
                 let axisymmetric = space == ModelSpace::Axisymmetric;
+                let (force, component_amplitudes) =
+                    load_components(step, load, force, FORCE_TABLE_LABELS, &amplitude);
                 let mut items = Vec::new();
                 // On points the nodes share the force equally, a reference point takes it
                 // whole: the share at every node of their set. With `each_node` every node
@@ -3551,7 +3686,8 @@ fn step_block<'f>(
                     for (dof, value) in (1..).zip(force).take(dofs) {
                         if value != 0.0 {
                             let share = value / count as f64;
-                            items.push(cload(set.clone(), dof, share, &amplitude));
+                            let amplitude = &component_amplitudes[dof as usize - 1];
+                            items.push(cload(set.clone(), dof, share, amplitude));
                         }
                     }
                 } else {
@@ -3567,7 +3703,8 @@ fn step_block<'f>(
                     for (node, values) in nodal {
                         for (dof, value) in (1..).zip(values).take(dofs) {
                             if value != 0.0 {
-                                items.push(cload(NodeRef::Node(node), dof, value, &amplitude));
+                                let amplitude = &component_amplitudes[dof as usize - 1];
+                                items.push(cload(NodeRef::Node(node), dof, value, amplitude));
                             }
                         }
                     }

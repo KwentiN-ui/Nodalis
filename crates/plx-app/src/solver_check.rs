@@ -253,6 +253,7 @@ pub(crate) fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeMod
         kind: load,
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     });
     FeModel {
         properties: Default::default(),

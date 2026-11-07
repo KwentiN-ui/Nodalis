@@ -805,15 +805,39 @@ pub(crate) fn face_target(fe: &FeModel) -> Target {
     }
 }
 
-/// The components of a force; 2D models have none along z.
-fn force_rows(ui: &mut Ui, force: &mut [f64; 3], two_d: bool, units: UnitSystem) {
-    let count = if two_d { 2 } else { 3 };
-    let labels = ["F1", "F2", "F3"].into_iter().zip(Field::VECTOR);
-    for (value, (label, field)) in force.iter_mut().zip(labels).take(count) {
+/// Rows of the components of a force, moment or pressure, each with its table button.
+#[allow(clippy::too_many_arguments)]
+fn component_rows(
+    ui: &mut Ui,
+    values: &mut [f64],
+    tables: &mut [Option<plx_model::ValueTable>; 3],
+    labels: &[&str],
+    fields: &[Field],
+    quantity: Quantity,
+    load_name: &str,
+    period: f64,
+    units: UnitSystem,
+) {
+    for (c, value) in values.iter_mut().enumerate() {
+        let (label, field) = (labels[c], fields[c]);
         ui.label(label);
-        expose::field(ui, field, |ui| {
-            ui.add(numeric::quantity(value, units, Quantity::Force).speed(1.0))
-        });
+        let start = *value;
+        crate::value_table::value_with_table(
+            ui,
+            egui::Id::new(("load value table", c)),
+            &mut tables[c],
+            &format!("{label} of {load_name}"),
+            label,
+            quantity,
+            units,
+            start,
+            period,
+            |ui| {
+                expose::field(ui, field, |ui| {
+                    ui.add(numeric::quantity(value, units, quantity).speed(1.0))
+                })
+            },
+        );
         ui.end_row();
     }
 }
@@ -1342,11 +1366,17 @@ const MOVING: &str = "Moving_Load";
 /// Whether the boundary condition dialog offers a preview of the motion: a prescribed
 /// displacement that follows an amplitude of the model.
 fn previews_motion(bc: &BoundaryCondition, fe: &FeModel) -> bool {
-    matches!(bc.kind, BoundaryKind::Displacement(_))
-        && bc
-            .amplitude
-            .as_deref()
-            .is_some_and(|a| fe.amplitude(a).is_some())
+    motion_of(bc, fe).is_some()
+}
+
+/// The motion a displacement boundary condition prescribes over time, if it follows an
+/// amplitude or tables.
+fn motion_of(bc: &BoundaryCondition, fe: &FeModel) -> Option<crate::motion_preview::Motion> {
+    let BoundaryKind::Displacement(displacement) = &bc.kind else {
+        return None;
+    };
+    let amplitude = bc.amplitude.as_deref().and_then(|a| fe.amplitude(a));
+    crate::motion_preview::Motion::of(displacement, amplitude)
 }
 
 /// The boundary condition kinds of the dialog: label, default name and the kind.
@@ -2026,6 +2056,7 @@ impl Editor {
                         kind: kind.clone(),
                         amplitude: None,
                         factor_amplitude: None,
+                        tables: Default::default(),
                     },
                     load_region(&kind, None, fe, &FeMesh::default()),
                 )
@@ -2458,12 +2489,8 @@ impl Editor {
             return None;
         };
         let preview = self.motion.as_mut()?;
-        let BoundaryKind::Displacement(Displacement { values, .. }) = bc.kind else {
-            return None;
-        };
-        let amplitude = model.fe.amplitude(bc.amplitude.as_deref()?)?;
-        let values = [values[0], values[1], values[2]];
-        Some(preview.frame(now, model, region.region(), values, amplitude))
+        let motion = motion_of(bc, &model.fe)?;
+        Some(preview.frame(now, model, region.region(), &motion))
     }
 
     /// Whether clicks in the 3D view pick for this dialog.
@@ -2920,13 +2947,11 @@ impl Editor {
                     _ if two_d => vec![0, 1],
                     _ => (0..6).collect(),
                 };
-                let values = match &mut bc.kind {
-                    BoundaryKind::Displacement(displacement) => Some(&mut displacement.values),
-                    _ => None,
-                };
-                if let Some(values) = values {
+                let period = step_kind.map_or(1.0, StepKind::period);
+                let bc_name = bc.name.clone();
+                if let BoundaryKind::Displacement(displacement) = &mut bc.kind {
                     for i in dofs {
-                        let (value, label) = (&mut values[i], DOF_LABELS[i]);
+                        let (value, label) = (&mut displacement.values[i], DOF_LABELS[i]);
                         let mut set = value.is_some();
                         ui.checkbox(&mut set, label);
                         let mut number = value.unwrap_or(0.0);
@@ -2936,14 +2961,38 @@ impl Editor {
                         } else {
                             Quantity::Angle
                         };
-                        let field = numeric::quantity(&mut number, units, quantity).speed(0.01);
                         let path = if i < 3 {
                             Field::VECTOR[i]
                         } else {
                             Field::ROTATION[i - 3]
                         };
-                        expose::field(ui, path, |ui| ui.add_enabled(set, field));
+                        // A held degree of freedom can follow a table instead of the value.
+                        if set {
+                            let start = number;
+                            crate::value_table::value_with_table(
+                                ui,
+                                egui::Id::new(("bc value table", i)),
+                                &mut displacement.tables[i],
+                                &format!("{label} of {bc_name}"),
+                                label,
+                                quantity,
+                                units,
+                                start,
+                                period,
+                                |ui| {
+                                    let field =
+                                        numeric::quantity(&mut number, units, quantity).speed(0.01);
+                                    expose::field(ui, path, |ui| ui.add(field))
+                                },
+                            );
+                        } else {
+                            let field = numeric::quantity(&mut number, units, quantity).speed(0.01);
+                            expose::field(ui, path, |ui| ui.add_enabled(false, field));
+                        }
                         *value = set.then_some(number);
+                        if !set {
+                            displacement.tables[i] = None;
+                        }
                         ui.end_row();
                     }
                 }
@@ -2982,6 +3031,13 @@ impl Editor {
                             }
                         },
                     );
+                    if let BoundaryKind::Displacement(displacement) = &bc.kind
+                        && (0..6).any(|d| displacement.table(d).is_some())
+                    {
+                        ui.label("");
+                        ui.weak("Values with a table (T) follow it instead of the amplitude.");
+                        ui.end_row();
+                    }
                     if !previews_motion(bc, &model.fe) {
                         self.motion = None;
                     } else if toggle {
@@ -3036,6 +3092,7 @@ impl Editor {
                             {
                                 let moved = load_target(&kind) != load_target(&load.kind);
                                 load.kind = kind;
+                                load.tables = Default::default();
                                 rename_default(&mut load.name, current, name, &taken);
                                 if moved {
                                     let (sources, target) = load_picks(&load.kind, &model.fe);
@@ -3053,6 +3110,12 @@ impl Editor {
                 if !matches!(load.kind, LoadKind::Pressure(_)) {
                     load.distribution = None;
                 }
+                // Tables of components the kind does not have are dropped.
+                for c in load.kind.table_components()..3 {
+                    load.tables[c] = None;
+                }
+                let period = step_kind.map_or(1.0, StepKind::period);
+                let load_name = load.name.clone();
                 match &mut load.kind {
                     LoadKind::Moment(moment) => {
                         if two_d {
@@ -3060,17 +3123,17 @@ impl Editor {
                             ui.weak("Moments need a 3D model.");
                             ui.end_row();
                         } else {
-                            let labels = ["M1", "M2", "M3"].into_iter().zip(Field::VECTOR);
-                            for (value, (label, field)) in moment.iter_mut().zip(labels) {
-                                ui.label(label);
-                                expose::field(ui, field, |ui| {
-                                    ui.add(
-                                        numeric::quantity(value, units, Quantity::Moment)
-                                            .speed(1.0),
-                                    )
-                                });
-                                ui.end_row();
-                            }
+                            component_rows(
+                                ui,
+                                moment,
+                                &mut load.tables,
+                                &["M1", "M2", "M3"],
+                                &Field::VECTOR,
+                                Quantity::Moment,
+                                &load_name,
+                                period,
+                                units,
+                            );
                         }
                         ui.label("");
                         ui.weak(
@@ -3080,18 +3143,33 @@ impl Editor {
                         ui.end_row();
                     }
                     LoadKind::Pressure(pressure) => {
-                        ui.label("Pressure");
-                        expose::field(ui, Field::Value, |ui| {
-                            ui.add(
-                                numeric::quantity(pressure, units, Quantity::Pressure).speed(0.1),
-                            )
-                        });
-                        ui.end_row();
+                        component_rows(
+                            ui,
+                            std::slice::from_mut(pressure),
+                            &mut load.tables,
+                            &["Pressure"],
+                            &[Field::Value],
+                            Quantity::Pressure,
+                            &load_name,
+                            period,
+                            units,
+                        );
                         let reference = &mut load.distribution;
                         distribution_row(ui, "load distribution", reference, &model.fe);
                     }
                     LoadKind::Force { value, each_node } => {
-                        force_rows(ui, value, two_d, units);
+                        let count = if two_d { 2 } else { 3 };
+                        component_rows(
+                            ui,
+                            &mut value[..count],
+                            &mut load.tables,
+                            &["F1", "F2", "F3"],
+                            &Field::VECTOR,
+                            Quantity::Force,
+                            &load_name,
+                            period,
+                            units,
+                        );
                         ui.label("");
                         ui.checkbox(each_node, "Apply to all nodes individually");
                         ui.end_row();
@@ -3382,6 +3460,11 @@ impl Editor {
                     "Amplitude"
                 };
                 amplitude_row(ui, label, "load amplitude", &mut load.amplitude, &model.fe);
+                if (0..3).any(|c| load.table(c).is_some()) {
+                    ui.label("");
+                    ui.weak("Values with a table (T) follow it instead of the amplitude.");
+                    ui.end_row();
+                }
                 if let Some(factor) = factor {
                     let label = format!("Amplitude {factor}");
                     let reference = &mut load.factor_amplitude;
@@ -7469,6 +7552,7 @@ mod tests {
             kind: LoadKind::Pressure(1.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         let mut editor = Editor::create(NewItem::Step, &fe).unwrap();
         if let Draft::Step(step, _) = &mut editor.draft {
@@ -7548,6 +7632,7 @@ mod tests {
                 kind: LoadKind::Pressure(1.0),
                 amplitude: None,
                 factor_amplitude: None,
+                tables: Default::default(),
             },
             Load {
                 distribution: None,
@@ -7561,6 +7646,7 @@ mod tests {
                 },
                 amplitude: None,
                 factor_amplitude: None,
+                tables: Default::default(),
             },
         ];
         // A heat transfer step after it keeps the temperature and the film only.
@@ -7633,6 +7719,7 @@ mod tests {
             kind: LoadKind::force([1.0, 0.0, 0.0]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         assert!(set_visible(&mut fe, &TreeItem::Load(0, 0), false));
         assert!(!fe.steps[0].loads[0].visible);
@@ -7730,6 +7817,7 @@ mod tests {
             },
             amplitude: Some("Amplitude-1".into()),
             factor_amplitude: Some("Amplitude-1".into()),
+            tables: Default::default(),
         };
         fe.steps[0].loads.push(film.clone());
         let mut editor = Editor::edit(&TreeItem::Amplitude(0), &fe, &FeMesh::default()).unwrap();
@@ -7792,6 +7880,7 @@ mod tests {
             kind: LoadKind::Pressure(1.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         model.fe.steps.push(step);
         let mut pair = ContactPair::new("Contact_Pair-1", "Interaction-1");
