@@ -4142,7 +4142,7 @@ fn dynamic_step(settings: &DynamicStep, model: &FeModel, step: &Step) -> (ir::St
             solver: ir::step::EquationSolver::Default,
             alpha: None,
             integration: ir::step::Integration::Explicit(ir::step::ExplicitControls {
-                mass_scaling: None,
+                mass_scaling: settings.mass_scaling,
                 time_step: match settings.time_step {
                     plx_model::TimeStep::Fixed(dt) if dt > 0.0 => Some(dt),
                     _ => None,

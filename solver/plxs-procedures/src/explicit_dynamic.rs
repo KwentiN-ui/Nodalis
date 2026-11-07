@@ -856,6 +856,156 @@ fn prescribed(
     Ok(set.particular(&spc.values))
 }
 
+/// Power iterations for the highest frequency of the reduced system.
+const REDUCED_ITERATIONS: usize = 30;
+
+/// The highest frequency of the reduced system `Tᵀ K T x = ω² Tᵀ M_L T x` (elastic
+/// stiffness), from power iterations on `M_red⁻¹ K_red` and a margin for their slow
+/// convergence from below.
+fn reduced_frequency(
+    ctx: &ProcedureContext<'_>,
+    set: &ConstraintSet,
+    reduced_mass: &ReducedMass,
+    mass: &[f64],
+) -> Result<f64> {
+    let n = ctx.table.dofs.len();
+    let r = set.reduced_len();
+    if r == 0 {
+        return Ok(0.0);
+    }
+    let mut k = SparseMatrix::zeros(ctx.pattern.clone());
+    plxs_assembly::assemble_stiffness(ctx.table, ctx.model, &mut k);
+    let k = set.reduce(&k);
+    let zero = vec![0.0; n];
+    let mass_times = |x: &[f64]| -> Vec<f64> {
+        let full = set.expand(x, &zero);
+        let weighted: Vec<f64> = full.iter().zip(mass).map(|(x, m)| x * m).collect();
+        set.reduce_rhs(&weighted)
+    };
+    let mut x: Vec<f64> = (0..r)
+        .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 } + 0.3 * ((i as f64) * 1.7).sin())
+        .collect();
+    let mut kx = vec![0.0; r];
+    let mut lambda = 0.0_f64;
+    for _ in 0..REDUCED_ITERATIONS {
+        k.multiply(&x, &mut kx);
+        let mx = mass_times(&x);
+        let (num, den) = (dot(&x, &kx), dot(&x, &mx));
+        if den <= 0.0 {
+            break;
+        }
+        lambda = num / den;
+        let mut next = kx.clone();
+        reduced_mass.solve(&mut next)?;
+        let norm = next.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if norm <= 0.0 || norm.is_nan() {
+            break;
+        }
+        x = next.into_iter().map(|v| v / norm).collect();
+    }
+    Ok((1.1 * lambda).max(0.0).sqrt())
+}
+
+/// What mass scaling added.
+struct MassScaling {
+    /// Elements that got mass, the mass added and the mass of the model before.
+    elements: usize,
+    added: f64,
+    total: f64,
+    /// The element with the largest factor (dense entry index) and the factor.
+    largest: Option<(usize, f64)>,
+}
+
+/// Mass scaling to the stable time step `target`: every element whose own stable time
+/// step (with the bulk viscosity and the factor `contact_step`) is shorter gets the mass
+/// that makes it `target`, `(target / Δt_e)²` times its own, on its nodes in the
+/// proportion of its lumped mass. Its frequency, bulk and hourglass viscosity follow.
+fn scale_masses(
+    table: &ElementTable,
+    data: &mut ElementData,
+    target: f64,
+    contact_step: f64,
+) -> MassScaling {
+    let mut out = MassScaling {
+        elements: 0,
+        added: 0.0,
+        total: 0.0,
+        largest: None,
+    };
+    let mut offset = 0;
+    for (index, entry) in table.entries.iter().enumerate() {
+        let ndof = entry.dofs.len();
+        let lumped = &mut data.lumped[offset..offset + ndof];
+        offset += ndof;
+        // The mass of the element: the sum over one direction.
+        let own: f64 = lumped.iter().step_by(3).sum();
+        out.total += own;
+        let omega = data.omega[index];
+        let dt = stable_time_step_of(&[omega], 0.0, 0.0).stable * contact_step;
+        if dt >= target || dt.is_nan() || dt <= 0.0 {
+            continue;
+        }
+        let factor = (target / dt).powi(2);
+        for (m, &dof) in lumped.iter_mut().zip(&entry.dofs) {
+            data.mass[dof as usize] += (factor - 1.0) * *m;
+            *m *= factor;
+        }
+        let root = factor.sqrt();
+        data.omega[index] = omega / root;
+        let viscosity = &mut data.viscosity[index];
+        viscosity.rate *= root;
+        viscosity.hourglass *= root;
+        out.elements += 1;
+        out.added += (factor - 1.0) * own;
+        if out.largest.is_none_or(|(_, f)| factor > f) {
+            out.largest = Some((index, factor));
+        }
+    }
+    out
+}
+
+/// Above this fraction of added mass mass scaling warns.
+const MASS_SCALING_WARNING: f64 = 0.05;
+
+fn report_mass_scaling(
+    ctx: &ProcedureContext<'_>,
+    scaling: &MassScaling,
+    target: f64,
+    progress: &mut dyn Progress,
+) {
+    if scaling.elements == 0 {
+        progress.event(ProgressEvent::Info(format!(
+            "explicit: mass scaling to {} s adds no mass (every element is stable at it)",
+            short(target)
+        )));
+        return;
+    }
+    let fraction = scaling.added / scaling.total.max(f64::MIN_POSITIVE);
+    let largest = scaling.largest.map_or(String::new(), |(index, factor)| {
+        format!(
+            "; most on element {} ({} times its mass)",
+            ctx.model.elements[ctx.table.entries[index].element as usize].id,
+            short(factor)
+        )
+    });
+    let text = format!(
+        "explicit: mass scaling to {} s adds {} ({} % of the model's mass) to {} elements{}",
+        short(target),
+        short(scaling.added),
+        short(100.0 * fraction),
+        scaling.elements,
+        largest
+    );
+    progress.event(if fraction > MASS_SCALING_WARNING {
+        ProgressEvent::Warning(format!(
+            "{text}; above {} % the added inertia changes the response noticeably",
+            100.0 * MASS_SCALING_WARNING
+        ))
+    } else {
+        ProgressEvent::Info(text)
+    });
+}
+
 /// The settings of an explicit step and what follows from them.
 pub(crate) struct Timing {
     /// The stable time step (with the safety factor and the damping).
@@ -1112,13 +1262,6 @@ impl Procedure for ExplicitDynamic {
                 "the initial increment must be positive",
             ));
         }
-        if let Some(target) = controls.mass_scaling
-            && target > 0.0
-        {
-            progress.event(ProgressEvent::Warning(
-                "explicit: mass scaling is not implemented yet; the step runs without it".into(),
-            ));
-        }
         ctx.table.require_elastic()?;
         // Contact: *MODEL CHANGE / *CHANGE FRICTION of the step, a state per slave point.
         for warning in ctx.contact.begin_step(step, ctx.state) {
@@ -1130,8 +1273,13 @@ impl Procedure for ExplicitDynamic {
 
         // Lumped mass, element frequencies, bulk viscosity.
         let started = std::time::Instant::now();
-        let data = element_data(ctx.table, ctx.model, step.nlgeom)?;
+        let mut data = element_data(ctx.table, ctx.model, step.nlgeom)?;
         ctx.profile.add(Phase::Assembly, started);
+        if let Some(target) = controls.mass_scaling.filter(|t| *t > 0.0) {
+            let contact_step = if has_contact { CONTACT_STEP } else { 1.0 };
+            let scaling = scale_masses(ctx.table, &mut data, target, contact_step);
+            report_mass_scaling(ctx, &scaling, target, progress);
+        }
 
         // Constraints: `u = T q + g`.
         let spc_end = Spc::of_step(
@@ -1143,7 +1291,7 @@ impl Procedure for ExplicitDynamic {
             period,
         )?;
         let active = ctx.table.active_dofs();
-        let set = ctx
+        let mut set = ctx
             .constraints
             .step_set(ctx.model.nodes.len(), &active, &spc_end.dofs);
         for warning in &set.warnings {
@@ -1157,12 +1305,27 @@ impl Procedure for ExplicitDynamic {
             set.reduced_len()
         )));
         let started = std::time::Instant::now();
-        let reduced_mass = ReducedMass::new(ctx, &set, &data.mass)?;
+        let mut reduced_mass = ReducedMass::new(ctx, &set, &data.mass)?;
         ctx.profile.add(Phase::Factorization, started);
         if let ReducedMass::Factored(_) = reduced_mass {
             progress.event(ProgressEvent::Info(
                 "explicit: constraints couple the mass; the reduced mass is factorized once".into(),
             ));
+            // The element bound holds for the elements on their own masses; constraints
+            // that carry stiffness to lighter nodes (a tie, an equation) can raise the
+            // highest frequency of the whole: check it on the reduced system.
+            let started = std::time::Instant::now();
+            let omega = reduced_frequency(ctx, &set, &reduced_mass, &data.mass)?;
+            ctx.profile.add(Phase::Assembly, started);
+            let elements = data.omega.iter().copied().fold(data.other_omega, f64::max);
+            if omega > elements {
+                progress.event(ProgressEvent::Info(format!(
+                    "explicit: the constraints raise the highest frequency to {} rad/s (elements: {} rad/s)",
+                    short(omega),
+                    short(elements)
+                )));
+                data.other_omega = omega;
+            }
         }
 
         // Damping.
@@ -1247,16 +1410,29 @@ impl Procedure for ExplicitDynamic {
             motion.u = initial_values(ctx.model, ctx.table, &ctx.model.initial.displacements);
         }
         let previous = ctx.state.displacements.values.clone();
+        // Rigid bodies and joints turning by finite angles (NLGEOM): the constraints are
+        // linearized at the current rotations in every time step and the members put
+        // where the rotation takes them.
+        let finite_rotations = step.nlgeom && ctx.constraints.has_finite_rotations();
+        let rotated_set = |ctx: &ProcedureContext<'_>, u: &[f64]| {
+            ctx.constraints
+                .at_rotations(u)
+                .step_set(ctx.model.nodes.len(), &active, &spc_end.dofs)
+        };
+        if finite_rotations && motion.u.iter().any(|v| *v != 0.0) {
+            set = rotated_set(ctx, &motion.u);
+            reduced_mass = ReducedMass::new(ctx, &set, &data.mass)?;
+        }
         let varying = step.boundaries.iter().any(|b| {
             b.amplitude.is_some()
                 || (step.default_amplitude == DefaultAmplitude::Ramp
                     && b.value.is_some_and(|v| v != 0.0))
         });
-        let g_at = |ctx: &ProcedureContext<'_>, time: f64| {
-            prescribed(ctx, step, &set, &previous, time, start_total, period)
+        let g_at = |ctx: &ProcedureContext<'_>, set: &ConstraintSet, time: f64| {
+            prescribed(ctx, step, set, &previous, time, start_total, period)
         };
-        let mut g_cur = g_at(ctx, 0.0)?;
-        let varying = varying || g_cur != g_at(ctx, period)?;
+        let mut g_cur = g_at(ctx, &set, 0.0)?;
+        let varying = varying || g_cur != g_at(ctx, &set, period)?;
         let mut g_prev = g_cur.clone();
 
         let (_, warnings) = load_at(ctx, step, 0.0, start_total, period)?;
@@ -1312,11 +1488,12 @@ impl Procedure for ExplicitDynamic {
         };
         let mut f_damp = damping_force(&v_half, &forces.internal, &forces.internal, 0.0);
         // The acceleration at the start.
-        let accelerate = |r: &[f64]| -> Result<Vec<f64>> {
-            let mut a = set.reduce_rhs(r);
-            reduced_mass.solve(&mut a)?;
-            Ok(a)
-        };
+        let accelerate =
+            |set: &ConstraintSet, reduced_mass: &ReducedMass, r: &[f64]| -> Result<Vec<f64>> {
+                let mut a = set.reduce_rhs(r);
+                reduced_mass.solve(&mut a)?;
+                Ok(a)
+            };
         let residual = |p: &[f64], forces: &Forces, f_damp: &[f64], g_acc: Option<&[f64]>| {
             (0..n)
                 .map(|i| {
@@ -1327,7 +1504,7 @@ impl Procedure for ExplicitDynamic {
                 })
                 .collect::<Vec<f64>>()
         };
-        let mut a_red = accelerate(&residual(&p, &forces, &f_damp, None))?;
+        let mut a_red = accelerate(&set, &reduced_mass, &residual(&p, &forces, &f_damp, None))?;
         let zero = vec![0.0; n];
         let mut a_full = set.expand(&a_red, &zero);
 
@@ -1441,7 +1618,7 @@ impl Procedure for ExplicitDynamic {
                 event_pending = false;
                 let started = std::time::Instant::now();
                 let g_next = if varying {
-                    g_at(ctx, t_next)?
+                    g_at(ctx, &set, t_next)?
                 } else {
                     g_cur.clone()
                 };
@@ -1453,7 +1630,36 @@ impl Procedure for ExplicitDynamic {
                 for (qi, qd) in q.iter_mut().zip(&qdot) {
                     *qi += h * qd;
                 }
-                let u_next = set.expand(&q, &g_next);
+                // With finite rotations: the members on their rotated places, the
+                // constraints linearized there, and the acceleration `Ṫ q̇` the turning
+                // constraints give the members at constant `q̇` (centripetal).
+                let mut turning: Option<Vec<f64>> = None;
+                let u_next = if finite_rotations {
+                    let mut u_next = set.expand(&q, &g_next);
+                    ctx.constraints.project_rigid(&mut u_next, &spc_end.dofs);
+                    let next_set = rotated_set(ctx, &u_next);
+                    if next_set.free != set.free {
+                        return Err(Error::Unsupported(
+                            "explicit: the rotated constraints chose other independent DOFs".into(),
+                        ));
+                    }
+                    let before = set.expand(&qdot, &zero);
+                    let after = next_set.expand(&qdot, &zero);
+                    turning = Some(
+                        before
+                            .iter()
+                            .zip(&after)
+                            .map(|(b, a)| (a - b) / h)
+                            .collect(),
+                    );
+                    set = next_set;
+                    let started = std::time::Instant::now();
+                    reduced_mass = ReducedMass::new(ctx, &set, &data.mass)?;
+                    ctx.profile.add(Phase::Factorization, started);
+                    u_next
+                } else {
+                    set.expand(&q, &g_next)
+                };
                 let mut v_next = set.expand(&qdot, &zero);
                 if varying {
                     for ((v, gn), gc) in v_next.iter_mut().zip(&g_next).zip(&g_cur) {
@@ -1513,13 +1719,17 @@ impl Procedure for ExplicitDynamic {
                         g_acc.iter_mut().for_each(|g| *g = 0.0);
                     }
                 }
-                let r = residual(
-                    &p_next,
-                    &new_forces,
-                    &f_damp_next,
-                    varying.then_some(&g_acc[..]),
-                );
-                a_red = accelerate(&r)?;
+                let extra: Option<Vec<f64>> = match &turning {
+                    Some(t) => Some(
+                        t.iter()
+                            .zip(&g_acc)
+                            .map(|(t, g)| t + if varying { *g } else { 0.0 })
+                            .collect(),
+                    ),
+                    None => varying.then(|| g_acc.clone()),
+                };
+                let r = residual(&p_next, &new_forces, &f_damp_next, extra.as_deref());
+                a_red = accelerate(&set, &reduced_mass, &r)?;
                 // Energies over the step (trapezoidal rule of the forces).
                 let mut w_int = 0.0;
                 let mut w_ext = 0.0;

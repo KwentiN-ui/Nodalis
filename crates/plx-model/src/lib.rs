@@ -1059,6 +1059,10 @@ pub struct DynamicStep {
     /// rigid bodies turn by finite angles. Off, the motion is linear (small deformations).
     #[serde(default)]
     pub large_deformations: bool,
+    /// Explicit integration: the stable time step mass scaling raises the elements to
+    /// (they get the mass that needs); `None` scales nothing.
+    #[serde(default)]
+    pub mass_scaling: Option<f64>,
 }
 
 fn default_true() -> bool {
@@ -1078,6 +1082,7 @@ impl Default for DynamicStep {
             numerical_damping: NumericalDamping::Normal,
             solver: LinearSolverChoice::Automatic,
             large_deformations: false,
+            mass_scaling: None,
         }
     }
 }
@@ -1102,6 +1107,15 @@ impl DynamicStep {
         {
             return Some(
                 "A fixed time step must be greater than 0 and no longer than the duration.".into(),
+            );
+        }
+        if let Some(t) = self.mass_scaling
+            && !(t > 0.0 && t <= self.duration)
+        {
+            return Some(
+                "The mass scaling time step must be greater than 0 and no longer than the \
+                 duration."
+                    .into(),
             );
         }
         if let Some(f) = self.frequency_limit

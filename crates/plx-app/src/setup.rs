@@ -6240,7 +6240,8 @@ fn dynamic_form(
     if explicit {
         match &context.stable_step {
             Some(estimate) => {
-                let steps = (settings.duration / estimate.time_step).ceil();
+                let scaled = settings.mass_scaling.filter(|t| *t > estimate.time_step);
+                let steps = (settings.duration / scaled.unwrap_or(estimate.time_step)).ceil();
                 let place = match estimate.thickness {
                     Some(t) => format!(
                         "{}, {} thickness",
@@ -6251,14 +6252,19 @@ fn dynamic_form(
                 };
                 ui.label("");
                 ui.weak(format!(
-                    "Stable time step ~ {} ({place}),\nabout {} steps for the duration",
+                    "Stable time step ~ {} ({place}),\n{}about {} steps for the duration",
                     shown(estimate.time_step, units, Quantity::Time),
+                    match scaled {
+                        Some(t) =>
+                            format!("{} with mass scaling, ", shown(t, units, Quantity::Time)),
+                        None => String::new(),
+                    },
                     numeric::fit(steps, |t| t.len() <= 8)
                 ));
                 ui.end_row();
                 if steps > 1e6 {
                     ui.label("");
-                    ui.weak("Consider a shorter duration.");
+                    ui.weak("Consider a shorter duration or\nmass scaling (Advanced).");
                     ui.end_row();
                 }
             }
@@ -6414,7 +6420,8 @@ fn dynamic_form(
     let custom = settings.time_step != TimeStep::Automatic
         || settings.frequency_limit.is_some()
         || settings.numerical_damping != NumericalDamping::Normal
-        || settings.solver != LinearSolverChoice::Automatic;
+        || settings.solver != LinearSolverChoice::Automatic
+        || (explicit && settings.mass_scaling.is_some());
     let mut advanced = ui.data(|d| d.get_temp(id)).unwrap_or(custom);
     ui.label("");
     ui.checkbox(&mut advanced, "Advanced settings");
@@ -6446,7 +6453,29 @@ fn dynamic_form(
             ui.add(numeric::physical(dt, units, Quantity::Time));
             ui.end_row();
         }
-        if !explicit {
+        if explicit {
+            ui.label("Mass scaling").on_hover_text(
+                "Elements whose stable time step is shorter than this one get the mass that \
+                 lifts it there (small or thin elements). The solver reports the mass added; \
+                 above a few per cent of the model it changes the response.",
+            );
+            let mut scaled = settings.mass_scaling.is_some();
+            let mut target = settings.mass_scaling.unwrap_or_else(|| {
+                context
+                    .stable_step
+                    .as_ref()
+                    .map_or(settings.frame_interval(), |e| 2.0 * e.time_step)
+            });
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut scaled, "To time step");
+                ui.add_enabled(
+                    scaled,
+                    numeric::physical(&mut target, units, Quantity::Time),
+                );
+            });
+            ui.end_row();
+            settings.mass_scaling = scaled.then_some(target);
+        } else {
             ui.label("Max. frequency").on_hover_text(
                 "The time step resolves vibrations up to this frequency with 20 steps per period. \
              Higher ones are damped out by the numerical damping.",

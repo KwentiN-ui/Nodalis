@@ -813,3 +813,198 @@ fn an_explicit_impact_logs_frames_at_the_contact_events() {
         "the first frame with contact is at {first}, the arrival at {arrival}\n{log}"
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// Stage 3: rigid bodies under finite rotations, mass scaling
+
+/// A steel plate (plane stress, 100 × 20 mm, 10 × 2 CPS4, 10 mm thick) whose left edge is
+/// a rigid body held at its reference point, released horizontally under gravity: a
+/// physical pendulum that hangs straight down after `K(sin 45°) / ω₀`, and keeps its
+/// length while it turns.
+#[test]
+fn a_plate_hinged_at_a_rigid_edge_swings_as_a_pendulum() {
+    let (length, height, g) = (0.1, 0.02, 9.81);
+    let id = |i: usize, j: usize| 1 + i + 11 * j;
+    let mut s = String::from("*Node, Nset=NALL\n");
+    for j in 0..3 {
+        for i in 0..11 {
+            writeln!(
+                s,
+                "{}, {}, {}, 0",
+                id(i, j),
+                length * i as f64 / 10.0,
+                height * j as f64 / 2.0
+            )
+            .unwrap();
+        }
+    }
+    writeln!(
+        s,
+        "100, 0, {}, 0\n101, 0, {}, 0",
+        height / 2.0,
+        height / 2.0
+    )
+    .unwrap();
+    s.push_str("*Element, Type=CPS4, Elset=EALL\n");
+    let mut e = 0;
+    for j in 0..2 {
+        for i in 0..10 {
+            e += 1;
+            writeln!(
+                s,
+                "{e}, {}, {}, {}, {}",
+                id(i, j),
+                id(i + 1, j),
+                id(i + 1, j + 1),
+                id(i, j + 1)
+            )
+            .unwrap();
+        }
+    }
+    let d = length / 2.0;
+    let i2 = (length * length + height * height) / 12.0 + d * d;
+    let quarter = 1.854_075 / (g * d / i2).sqrt();
+    let period = 1.1 * quarter;
+    writeln!(
+        s,
+        "*Nset, Nset=LEFT\n{}, {}, {}\n*Nset, Nset=TIPNODE\n{}\n\
+         *Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
+         *Solid section, Elset=EALL, Material=STEEL\n0.01\n\
+         *Rigid body, Nset=LEFT, Ref node=100, Rot node=101\n\
+         *Step, Nlgeom\n*Dynamic, Integration=Explicit\n{}, {period}\n*Boundary\n100, 1, 2, 0\n\
+         *Dload\nEALL, GRAV, {g}, 0, -1, 0\n*Node print, Nset=TIPNODE\nU\n*End step",
+        id(0, 0),
+        id(0, 1),
+        id(0, 2),
+        id(10, 1),
+        period / 110.0
+    )
+    .unwrap();
+    let dir = work_dir("pendulum");
+    let (dat, log) = run(&dir, "pendulum", &s);
+    clean(&dir);
+    let mut crossing = None;
+    let mut previous: Option<(f64, f64)> = None;
+    for (t, rows) in blocks(&dat, "displacements") {
+        let (x, y) = (length + rows[0][1], rows[0][2]);
+        let (angle, distance) = (y.atan2(x).to_degrees(), x.hypot(y));
+        assert!(
+            (distance - length).abs() < 1e-3 * length,
+            "t = {t}: the plate is {distance} long\n{log}"
+        );
+        if let Some((t0, a0)) = previous
+            && crossing.is_none()
+            && a0 > -90.0
+            && angle <= -90.0
+        {
+            crossing = Some(t0 + (a0 + 90.0) / (a0 - angle) * (t - t0));
+        }
+        previous = Some((t, angle));
+    }
+    let crossing = crossing.unwrap_or_else(|| panic!("never hangs down\n{log}"));
+    assert!(
+        (crossing - quarter).abs() < 5e-3 * quarter,
+        "hangs down at {crossing} s, expected {quarter} s"
+    );
+}
+
+/// The tip of a cantilever (20 × 2 × 2 C3D8I, 200 × 20 × 20 mm) whose first element
+/// layer is thin (a tenth of the others), released from a static tip load: its zero
+/// crossings. `scaling` is the `MASS SCALING` target.
+fn released_cantilever(job: &str, scaling: Option<f64>) -> (Vec<f64>, String) {
+    let (length, side, cells) = (0.2, 0.02, 20);
+    let mut mesh = bar_mesh(cells, 2, 2, [length, side, side], "C3D8I");
+    // Station 1 close to the support: x = cell/10.
+    let cell = length / cells as f64;
+    let mut moved = String::new();
+    for line in mesh.lines() {
+        let fields: Vec<&str> = line.split(", ").collect();
+        if fields.len() == 4
+            && let (Ok(id), Ok(x)) = (fields[0].parse::<usize>(), fields[1].parse::<f64>())
+            && id > 0
+            && (x - cell).abs() < 1e-12
+        {
+            writeln!(moved, "{id}, {}, {}, {}", 0.1 * cell, fields[2], fields[3]).unwrap();
+        } else {
+            writeln!(moved, "{line}").unwrap();
+        }
+    }
+    mesh = moved;
+    let swing = 0.007;
+    let input = format!(
+        "{mesh}*Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
+         *Solid section, Elset=EALL, Material=STEEL\n*Boundary\nEND0, 1, 3, 0\n\
+         *Step\n*Static\n*Cload\nEND1, 2, {}\n*End step\n\
+         *Step\n*Dynamic, Integration=Explicit{}\n{}, {swing}\n*Cload, Op=New\n\
+         *Node print, Nset=END1\nU\n*End step\n",
+        1000.0 / 9.0,
+        scaling.map_or(String::new(), |t| format!(", Mass scaling={t}")),
+        swing / 400.0
+    );
+    let dir = work_dir(job);
+    let (dat, log) = run(&dir, job, &input);
+    clean(&dir);
+    let tip: Vec<(f64, f64)> = blocks(&dat, "displacements")
+        .iter()
+        .map(|(t, rows)| {
+            (
+                *t,
+                rows.iter().map(|r| r[2]).sum::<f64>() / rows.len() as f64,
+            )
+        })
+        .collect();
+    let crossings = tip
+        .windows(2)
+        .filter(|w| w[0].1 * w[1].1 < 0.0)
+        .map(|w| w[0].0 + (w[1].0 - w[0].0) * w[0].1 / (w[0].1 - w[1].1))
+        .collect();
+    (crossings, log)
+}
+
+/// Mass scaling to the time step of the regular elements adds mass to the thin layer at
+/// the support only: a small fraction of the model, and the swing keeps its frequency.
+#[test]
+fn mass_scaling_lifts_the_time_step_of_a_thin_layer_only() {
+    let (plain, log) = released_cantilever("unscaled", None);
+    let stable = |log: &str| -> f64 {
+        log.lines()
+            .find_map(|l| l.split("stable time step ").nth(1))
+            .and_then(|r| r.split_whitespace().next())
+            .and_then(|v| v.parse().ok())
+            .unwrap()
+    };
+    let dt = stable(&log);
+    // About the stable time step of the regular elements.
+    let target = 2.5 * dt;
+    let (scaled, scaled_log) = released_cantilever("scaled", Some(target));
+    assert!(scaled_log.contains("mass scaling to"), "{scaled_log}");
+    assert!(
+        stable(&scaled_log) > 2.0 * dt,
+        "time step {} s with mass scaling, {dt} s without\n{scaled_log}",
+        stable(&scaled_log)
+    );
+    let added = scaled_log
+        .lines()
+        .find_map(|l| {
+            l.split("% of the model")
+                .next()
+                .filter(|_| l.contains("mass scaling to"))
+        })
+        .and_then(|l| l.rsplit('(').next())
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .unwrap();
+    assert!(
+        added < 5.0,
+        "mass scaling added {added} %\n{scaled_log}\n{log}"
+    );
+    assert!(
+        plain.len() >= 4 && scaled.len() >= 4,
+        "{plain:?} {scaled:?}"
+    );
+    let frequency = |c: &[f64]| (c.len() - 1) as f64 / (2.0 * (c[c.len() - 1] - c[0]));
+    let (f0, f1) = (frequency(&plain), frequency(&scaled));
+    assert!(
+        (f1 - f0).abs() < 0.01 * f0,
+        "swings at {f1} Hz with mass scaling, {f0} Hz without"
+    );
+}

@@ -135,7 +135,35 @@ What is different from implicit integration:
 - C3D8R elements get a viscous hourglass control in addition to their hourglass stiffness;
   its work is part of ALLVD.
 
-Mass scaling and the switch between implicit and explicit integration follow.
+- *Rigid bodies and joints* follow finite rotations under #ui("Large deformations"): in
+  every time step the constraints are linearized at the current rotation and the members
+  are put where the rotation takes them; the inertia of the turning members (their
+  centripetal acceleration) is part of the motion.
+- Where constraints couple the masses of several nodes (rigid bodies, ties, equations,
+  joints), the solver checks the highest frequency of the constrained system once and
+  shortens the time step if the constraints raise it above that of the elements.
+
+==== Mass scaling
+
+A few small or thin elements can dictate a time step that the rest of the mesh does not
+need. #ui("Advanced settings") > #ui("Mass scaling") > #ui("To time step") gives every
+element whose own stable time step is shorter than the value just the mass that lifts it
+there, (target / own time step)² times its mass; all other elements keep theirs. The dialog
+then counts the steps with the new time step.
+
+#screenshot("dynamic-explicit-mass-scaling.png", [Mass scaling to a target time step in the
+  advanced settings of an explicit Dynamic step])
+
+The solver reports the mass it added, absolute and as a share of the model, the number of
+elements that got some and the element that got the most. On a cantilever of 16 000 C3D10
+elements with a stable time step of 3.2·10⁻⁸ s, mass scaling to 10⁻⁷ s added 3.7 % of the
+mass and the step ran three times faster.
+
+Added mass is inertia that is not there: it slows waves and lowers eigenfrequencies where it
+sits. A few per cent spread over small elements leave the overall response almost
+unchanged; above 5 % the solver warns. Loads from gravity keep the real mass.
+
+The switch between implicit and explicit integration follows.
 
 === Modal superposition <dynamic-modal>
 
