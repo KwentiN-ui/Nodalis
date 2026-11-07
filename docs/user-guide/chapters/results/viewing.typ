@@ -50,8 +50,9 @@ it; the other tiles act at once and show pressed while their option is on.
   [Deformation], [#ui("Undeformed"), #ui("True scale"), #ui("Automatic") with factors from
     0.25 to 5, or #ui("User defined"), with the #ui("Factor") below them; it is typed for
     #ui("User defined"). Results open in #ui("Automatic"); static and dynamic
-    steps of a model with contact open in #ui("True scale"), so touching parts do not appear to
-    penetrate each other. Contact is recognised by a
+    steps of a model with contact, and steps with large deformations (nonlinear geometry), open in
+    #ui("True scale"), so touching parts do not appear to penetrate each other and large
+    motions are not exaggerated. Contact is recognised by a
     contact pair in the input file next to the results (same name, as CalculiX leaves it) or
     contact results in the file. Until you pick a deformation yourself, it follows the shown
     step. Mode shapes have a deformation of their own (@mode-shapes): the tile is then called
