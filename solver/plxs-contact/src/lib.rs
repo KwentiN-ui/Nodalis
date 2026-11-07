@@ -658,11 +658,10 @@ impl ContactModel {
                 // A point's spring couples it with one master face: a block per candidate
                 // face (not one over all candidates, which would couple the master faces
                 // among each other and fill the factor for nothing).
-                for p in 0..pair.points.len() {
-                    for &f in &pair.candidates[p] {
-                        blocks.push(pair.point_face_dofs(&[p as u32], f));
-                    }
-                }
+                let pair = &*pair;
+                blocks.par_extend((0..pair.points.len()).into_par_iter().flat_map_iter(|p| {
+                    (pair.candidates[p].iter()).map(move |&f| pair.point_face_dofs(&[p as u32], f))
+                }));
             } else {
                 // A mortar node couples all its integration points.
                 for (_, points) in &pair.mortar_nodes {
@@ -677,7 +676,7 @@ impl ContactModel {
             }
         }
         // The integration points of one slave face share their blocks.
-        blocks.sort_unstable();
+        blocks.par_sort_unstable();
         blocks.dedup();
         blocks
     }
@@ -1015,6 +1014,7 @@ impl Pair {
         let margin = 2.0 * self.typical + reach;
         let grid = FaceGrid::new(&self.master, current, self.typical.max(margin), margin);
         self.candidates = (0..self.points.len())
+            .into_par_iter()
             .map(|p| {
                 let x = self.position(p, current);
                 let mut c: Vec<u32> = grid.candidates(x).to_vec();

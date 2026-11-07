@@ -1,6 +1,7 @@
 //! Contact in the procedures: the matrix pattern with the possible contact springs, and the
 //! contact fields of an increment (`*CONTACT FILE`).
 
+use rayon::prelude::*;
 use std::sync::Arc;
 
 use plxs_assembly::ElementTable;
@@ -38,7 +39,7 @@ pub fn cached_pattern(
 ) -> Arc<Pattern> {
     if let Some(current) = cached.as_ref()
         && current.dimension() == table.dofs.len()
-        && extra.iter().all(|block| covers(current, block))
+        && extra.par_iter().all(|block| covers(current, block))
     {
         return current.clone();
     }
