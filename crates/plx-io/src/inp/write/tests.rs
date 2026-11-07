@@ -2098,6 +2098,36 @@ fn a_dynamic_step_with_large_deformations_is_nonlinear() {
     );
 }
 
+/// The Automatic method: the implicit step with the switch to explicit integration, its
+/// factor and the mass scaling of the explicit parts.
+#[test]
+fn an_automatic_dynamic_step_is_lowered_with_its_switch_factor() {
+    let (mesh, mut model) = dynamic_cantilever(1.5e-3, 2.5e-5, None);
+    let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.method = plx_model::DynamicMethod::Automatic;
+    let lowered = lowered(&mesh, &model);
+    let ir::step::Procedure::Dynamic(d) = &lowered.steps[0].procedure else {
+        panic!("{:?}", lowered.steps[0].procedure)
+    };
+    assert_eq!(
+        d.integration,
+        ir::step::Integration::Automatic {
+            explicit: ir::step::ExplicitControls::default(),
+            switch_factor: 30.0
+        }
+    );
+    let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.switch_factor = Some(50.0);
+    settings.mass_scaling = Some(1e-6);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("Integration=Automatic"), "{text}");
+    assert!(text.contains("Switch=50"), "{text}");
+}
+
 /// Modal superposition: a frequency step that stores the eigenmodes prepares a modal
 /// dynamics step with the Dynamic step's time step, duration and damping.
 #[test]

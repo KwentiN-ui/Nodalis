@@ -1020,6 +1020,25 @@ pub(crate) fn stable_time_step(data: &ElementData, beta: f64) -> Timing {
     stable_time_step_of(&data.omega, data.other_omega, beta)
 }
 
+/// The stable time step an explicit integration of `step` would take, from the elements
+/// (without the check of the constraints), for the switch of an automatic step.
+pub(crate) fn stable_time_step_estimate(
+    ctx: &ProcedureContext<'_>,
+    step: &Step,
+    controls: &ExplicitControls,
+) -> Result<f64> {
+    let mut data = element_data(ctx.table, ctx.model, step.nlgeom)?;
+    let contact_step = if ctx.contact.is_empty() {
+        1.0
+    } else {
+        CONTACT_STEP
+    };
+    if let Some(target) = controls.mass_scaling.filter(|t| *t > 0.0) {
+        scale_masses(ctx.table, &mut data, target, contact_step);
+    }
+    Ok(stable_time_step(&data, 0.0).stable * contact_step)
+}
+
 /// [`stable_time_step`] from the element frequencies `omega` and that of the other
 /// elements.
 fn stable_time_step_of(omega: &[f64], other_omega: f64, beta: f64) -> Timing {
@@ -1263,13 +1282,19 @@ impl Procedure for ExplicitDynamic {
             ));
         }
         ctx.table.require_elastic()?;
+        // A part of a step that switches between the integrators: from `start` to `end` of
+        // the step time, on the state the part before it ended with.
+        let segment = ctx.segment.clone();
+        let (start, end) = segment.as_ref().map_or((0.0, period), |s| (s.start, s.end));
         // Contact: *MODEL CHANGE / *CHANGE FRICTION of the step, a state per slave point.
-        for warning in ctx.contact.begin_step(step, ctx.state) {
-            progress.event(ProgressEvent::Warning(warning));
+        if segment.as_ref().is_none_or(|s| s.first) {
+            for warning in ctx.contact.begin_step(step, ctx.state) {
+                progress.event(ProgressEvent::Warning(warning));
+            }
         }
         let has_contact = ctx.contact.is_active();
         let n = ctx.table.dofs.len();
-        let start_total = ctx.state.total_time;
+        let start_total = ctx.state.total_time - start;
 
         // Lumped mass, element frequencies, bulk viscosity.
         let started = std::time::Instant::now();
@@ -1409,7 +1434,10 @@ impl Procedure for ExplicitDynamic {
         {
             motion.u = initial_values(ctx.model, ctx.table, &ctx.model.initial.displacements);
         }
-        let previous = ctx.state.displacements.values.clone();
+        let previous = match &segment {
+            Some(s) => s.previous.clone(),
+            None => ctx.state.displacements.values.clone(),
+        };
         // Rigid bodies and joints turning by finite angles (NLGEOM): the constraints are
         // linearized at the current rotations in every time step and the members put
         // where the rotation takes them.
@@ -1431,11 +1459,11 @@ impl Procedure for ExplicitDynamic {
         let g_at = |ctx: &ProcedureContext<'_>, set: &ConstraintSet, time: f64| {
             prescribed(ctx, step, set, &previous, time, start_total, period)
         };
-        let mut g_cur = g_at(ctx, &set, 0.0)?;
+        let mut g_cur = g_at(ctx, &set, start)?;
         let varying = varying || g_cur != g_at(ctx, &set, period)?;
         let mut g_prev = g_cur.clone();
 
-        let (_, warnings) = load_at(ctx, step, 0.0, start_total, period)?;
+        let (_, warnings) = load_at(ctx, step, start, start_total, period)?;
         for warning in warnings {
             progress.event(ProgressEvent::Warning(warning));
         }
@@ -1455,7 +1483,7 @@ impl Procedure for ExplicitDynamic {
             &u,
             &v_half,
             dt_max,
-            start_total,
+            start_total + start,
             &mut material,
             Some((&mut stresses, &mut strains)),
         );
@@ -1473,7 +1501,7 @@ impl Procedure for ExplicitDynamic {
             forces.add_contact(&springs, &damping);
         }
         ctx.profile.add(Phase::Assembly, started);
-        let mut p = loads.at(ctx, step, 0.0, start_total, period)?;
+        let mut p = loads.at(ctx, step, start, start_total, period)?;
         let mass = &data.mass;
         let damping_force = |v: &[f64], f_int: &[f64], f_int_prev: &[f64], dt: f64| -> Vec<f64> {
             (0..n)
@@ -1512,10 +1540,12 @@ impl Procedure for ExplicitDynamic {
         let mut energies = Energies {
             internal: 0.5 * dot(&u, &forces.internal),
             kinetic: kinetic(&v_half),
-            external_work: 0.0,
-            dissipation: 0.0,
+            external_work: segment.as_ref().map_or(0.0, |s| s.external_work),
+            dissipation: segment.as_ref().map_or(0.0, |s| s.dissipation),
         };
-        let initial_energy = energies.internal + energies.kinetic;
+        // The balance counts from the start of this part.
+        let initial_energy =
+            energies.internal + energies.kinetic + energies.dissipation - energies.external_work;
         let mut largest_energy = initial_energy.abs();
         // The reactions (`M a + f − p` on the prescribed DOFs) for the work of prescribed
         // displacements.
@@ -1552,7 +1582,10 @@ impl Procedure for ExplicitDynamic {
 
         let frames = ((period / interval) - 1e-9).ceil().max(1.0) as u32;
         let event_frames = parameters.event_frames && has_contact;
-        let mut time = 0.0;
+        // The frames of this part: from the first frame end after its start to its end.
+        let first_frame = ((start / interval) + 1e-9).floor() as u32 + 1;
+        let last_frame = (((end / interval) - 1e-9).ceil().max(1.0) as u32).min(frames);
+        let mut time = start;
         let mut h_prev = 0.0;
         let mut h;
         let mut steps_done: u64 = 0;
@@ -1561,11 +1594,11 @@ impl Procedure for ExplicitDynamic {
         let mut balance_warned = false;
         let mut balance = 0.0;
         // The result frames written so far (the frames of the step and the event frames).
-        let mut record: u32 = 0;
+        let mut record: u32 = segment.as_ref().map_or(0, |s| s.record);
         // An event in the last time step: the next one is written as an event frame.
         let mut event_pending = false;
         let mut omega_now: Option<Vec<f64>> = None;
-        for frame in 1..=frames {
+        for frame in first_frame..=last_frame {
             if ctx.cancel.is_cancelled() {
                 ctx.contact.stiffness_scale.clear();
                 return Ok(StepOutcome::Cancelled);
@@ -1574,7 +1607,8 @@ impl Procedure for ExplicitDynamic {
                 period
             } else {
                 f64::from(frame) * interval
-            };
+            }
+            .min(end);
             progress.event(ProgressEvent::Increment {
                 step: ctx.step_number,
                 increment: record + 1,
@@ -1889,10 +1923,10 @@ impl Procedure for ExplicitDynamic {
                 step_time: time,
                 size: h,
             });
-            if last_info.elapsed().as_secs_f64() > PROGRESS_SECONDS || frame == frames {
+            if last_info.elapsed().as_secs_f64() > PROGRESS_SECONDS || frame == last_frame {
                 last_info = std::time::Instant::now();
                 let elapsed = run_started.elapsed().as_secs_f64();
-                let left = elapsed * (period - time) / time.max(f64::MIN_POSITIVE);
+                let left = elapsed * (end - time) / (time - start).max(f64::MIN_POSITIVE);
                 progress.event(ProgressEvent::Info(format!(
                     "explicit: {} s of {} s, {steps_done} time steps{}, energy balance {} %{}",
                     short(time),
@@ -1903,7 +1937,7 @@ impl Procedure for ExplicitDynamic {
                         format!(" of {} s", short(h))
                     },
                     short(100.0 * balance),
-                    if frame < frames {
+                    if frame < last_frame {
                         format!(", about {:.0} s left", left)
                     } else {
                         String::new()
@@ -1946,8 +1980,14 @@ impl Procedure for ExplicitDynamic {
         ctx.state.stresses = stresses;
         ctx.state.strains = strains;
         ctx.state.material.values = material;
-        ctx.state.total_time = start_total + period;
+        ctx.state.total_time = start_total + end;
         ctx.state.steps_done = ctx.step_number;
+        if let Some(s) = ctx.segment.as_mut() {
+            s.record = record;
+            s.reached = time;
+            s.external_work = energies.external_work;
+            s.dissipation = energies.dissipation;
+        }
         Ok(StepOutcome::Converged)
     }
 }
@@ -1994,8 +2034,12 @@ fn explicit_damping(
                 // α = 2ζ ω₁ω₂/(ω₁+ω₂), β = 2ζ/(ω₁+ω₂): ω₁ = α/(β ω₂); α = 0 marks rigid
                 // body modes, which mass-proportional damping would brake.
                 let w2 = std::f64::consts::TAU * ratio.upper;
-                (fitted.alpha > 0.0 && fitted.beta > 0.0)
-                    .then(|| fitted.alpha / (fitted.beta * w2) / std::f64::consts::TAU)
+                let lower = (fitted.alpha > 0.0 && fitted.beta > 0.0)
+                    .then(|| fitted.alpha / (fitted.beta * w2) / std::f64::consts::TAU);
+                if let Some(segment) = ctx.segment.as_mut() {
+                    segment.lowest = lower;
+                }
+                lower
             }
         };
         return Ok(match lower {

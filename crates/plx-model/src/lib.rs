@@ -1063,6 +1063,11 @@ pub struct DynamicStep {
     /// (they get the mass that needs); `None` scales nothing.
     #[serde(default)]
     pub mass_scaling: Option<f64>,
+    /// Automatic method: implicit time steps shorter than this multiple of the stable
+    /// explicit time step go on explicitly; `None` takes the default
+    /// ([`DynamicStep::DEFAULT_SWITCH_FACTOR`]), 0 never switches.
+    #[serde(default)]
+    pub switch_factor: Option<f64>,
 }
 
 fn default_true() -> bool {
@@ -1083,6 +1088,7 @@ impl Default for DynamicStep {
             solver: LinearSolverChoice::Automatic,
             large_deformations: false,
             mass_scaling: None,
+            switch_factor: None,
         }
     }
 }
@@ -1090,6 +1096,10 @@ impl Default for DynamicStep {
 impl DynamicStep {
     /// The most frames a step may keep.
     pub const MAX_FRAMES: u32 = 100_000;
+
+    /// The switch factor of the Automatic method when none is given: an implicit time step
+    /// costs about as much as 30 to 100 explicit ones.
+    pub const DEFAULT_SWITCH_FACTOR: f64 = 30.0;
 
     /// What is wrong with the settings, if anything.
     pub fn problem(&self) -> Option<String> {
@@ -1117,6 +1127,11 @@ impl DynamicStep {
                  duration."
                     .into(),
             );
+        }
+        if let Some(k) = self.switch_factor
+            && !(k >= 0.0 && k.is_finite())
+        {
+            return Some("The switch factor must be 0 or greater.".into());
         }
         if let Some(f) = self.frequency_limit
             && (f.is_nan() || f <= 0.0)
@@ -1178,6 +1193,9 @@ pub enum DynamicMethod {
     /// below the stability limit of the mesh, no equation system. For impacts, crashes and
     /// drop tests with buckling and plasticity.
     Explicit,
+    /// Implicit while the motion is smooth, explicit through impacts and wherever the
+    /// implicit time steps would have to become tiny; the solver switches within the step.
+    Automatic,
 }
 
 impl DynamicMethod {
@@ -1189,6 +1207,7 @@ impl DynamicMethod {
             DynamicMethod::Direct => "Implicit (direct integration)",
             DynamicMethod::Modal { .. } => "Modal superposition",
             DynamicMethod::Explicit => "Explicit",
+            DynamicMethod::Automatic => "Automatic (implicit/explicit)",
         }
     }
 
@@ -1208,12 +1227,22 @@ impl DynamicMethod {
                  tests with buckling and plasticity. Each step must be shorter than a wave \
                  needs to cross the smallest element; the estimate is shown below."
             }
+            DynamicMethod::Automatic => {
+                "Implicit while the motion is smooth, explicit through impacts and wherever the \
+                 implicit time steps would have to become tiny: a drop, a hit, then the slow \
+                 motion afterwards. The output and the solver log show where it switched."
+            }
         }
     }
 
     /// Whether the method integrates explicitly.
     pub fn is_explicit(&self) -> bool {
         matches!(self, DynamicMethod::Explicit)
+    }
+
+    /// Whether the method integrates explicitly at least in parts of the step.
+    pub fn uses_explicit(&self) -> bool {
+        matches!(self, DynamicMethod::Explicit | DynamicMethod::Automatic)
     }
 }
 

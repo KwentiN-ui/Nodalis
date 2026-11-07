@@ -14,7 +14,9 @@ structure is damped; Nodalis chooses the time step and the integration from that
   [Method], [#ui("Implicit (direct integration)") solves all equations of the model in every
     time step and takes contact, large deformations and plasticity; its time steps can be
     long. #ui("Explicit") takes thousands of tiny time steps without solving equations: for
-    impacts, crashes and drop tests, see @dynamic-explicit. #ui("Modal superposition")
+    impacts, crashes and drop tests, see @dynamic-explicit. #ui("Automatic
+    (implicit/explicit)") switches between the two within the step, see
+    @dynamic-automatic. #ui("Modal superposition")
     computes the lowest eigenmodes of the supported model first and integrates each of
     them exactly; every time step then costs almost nothing. For linear models only, see
     below.],
@@ -177,7 +179,42 @@ An explicit step after a contact phase starts with the reduced contact stiffness
 its time step; an implicit step after it uses the full stiffness again. Bodies that rest on
 each other at the switch can then settle slightly into the stiffer contact.
 
-Switching automatically within one step follows.
+=== Automatic switching <dynamic-automatic>
+
+A drop test is mostly flight: smooth motion that an implicit step covers in a few long time
+steps. Only the impact needs the tiny steps of explicit integration. With #ui("Automatic
+(implicit/explicit)") the solver integrates implicitly and goes on explicitly where the
+implicit time steps would have to become tiny:
+
+- an increment would have to be split, for an impact or for convergence, below the
+  #ui("Switch factor") (Advanced, default 30) times the stable explicit time step,
+- or an increment does not converge at all.
+
+The step then continues explicitly from the last converged increment to the end of that
+frame and tries implicit integration again. When the implicit attempt stops again before it
+got as far as the explicit part before it, the explicit parts grow to 2, 4, 8 and at most 16
+frames before the next attempt. Each switch hands over the state as between two steps (see
+above); the same model switches at the same times.
+
+#screenshot("dynamic-automatic.png", [Dynamic step with automatic switching between implicit
+  and explicit integration])
+
+The dialog shows the stable explicit time step and the implicit time step below which the
+step switches. A switch factor of 0 keeps the step implicit; a large one switches at the
+first impact. Mass scaling (Advanced) applies to the explicit parts. A linear model without
+contact has nothing that would shorten the implicit time steps and stays implicit.
+
+The solver log names each switch and why, and sums up how much of the step ran explicitly:
+
+```
+automatic: implicit while its increments stay above 2.109e-5 s (30 times the stable explicit time step of 7.031e-7 s), explicit below
+automatic: explicit from 0.001097 s: an impact needs implicit increments shorter than 2.109e-5 s
+automatic: 2.175e-4 of 0.001933 s explicit, 1 switch to explicit
+```
+
+The vibrations the implicit parts do not resolve finely enough are damped by the numerical
+damping, as in an implicit step: the switch is for time steps that must be short, not for
+the accuracy of a vibration.
 
 === Modal superposition <dynamic-modal>
 

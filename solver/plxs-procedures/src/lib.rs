@@ -23,6 +23,7 @@ pub mod explicit_dynamic;
 pub mod fields;
 pub mod heat;
 pub mod history;
+pub mod hybrid_dynamic;
 pub mod modal;
 pub mod nonlinear;
 pub mod nonlinear_dynamic;
@@ -92,6 +93,40 @@ pub struct ProcedureContext<'a> {
     pub contact_pattern: Option<Arc<Pattern>>,
     /// Time per phase, summed over the steps of the session.
     pub profile: profile::Profile,
+    /// A part of a dynamic step that switches between implicit and explicit integration
+    /// (`INTEGRATION=AUTOMATIC`); `None` computes the whole step.
+    pub segment: Option<Segment>,
+}
+
+/// A part of a dynamic step, computed by one of its integrators on the state the part
+/// before it ended with ([`hybrid_dynamic`]).
+#[derive(Clone, Debug, Default)]
+pub struct Segment {
+    /// Step time the part starts at; the state holds the motion at this time.
+    pub start: f64,
+    /// Step time the part ends at.
+    pub end: f64,
+    /// The first part of the step: the changes the step makes to the contact
+    /// (`*MODEL CHANGE`) and the initial conditions apply.
+    pub first: bool,
+    /// The displacements at the start of the step (prescribed displacements count from
+    /// them).
+    pub previous: Vec<f64>,
+    /// Implicit parts: a sub-increment shorter than this stops the part (0 never stops).
+    pub shortest: f64,
+    /// The result frames of the step written before the part; the part's own are added.
+    pub record: u32,
+    /// The work of the external forces and the dissipated energy before the part; the
+    /// part's own are added.
+    pub external_work: f64,
+    pub dissipation: f64,
+    /// Out: the step time the part reached (`end` unless it stopped).
+    pub reached: f64,
+    /// Out: why an implicit part stopped before its end.
+    pub stopped: Option<String>,
+    /// Out: the lowest eigenfrequency a damping ratio was fitted to, which the next parts
+    /// take instead of computing it again.
+    pub lowest: Option<f64>,
 }
 
 /// A procedure computes a step on the context.
@@ -160,10 +195,7 @@ pub fn run_step(
             explicit_dynamic::ExplicitDynamic.run(ctx, step, progress)
         }
         ProcedureKind::Dynamic(d) if matches!(d.integration, Integration::Automatic { .. }) => {
-            Err(Error::Unsupported(format!(
-                "automatic switching between implicit and explicit integration is not implemented yet (step {})",
-                step.name
-            )))
+            hybrid_dynamic::HybridDynamic.run(ctx, step, progress)
         }
         // Contact makes a dynamic step nonlinear as well: Newton iterations on the contact
         // status in every increment.

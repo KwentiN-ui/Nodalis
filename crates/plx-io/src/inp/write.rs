@@ -4167,7 +4167,20 @@ fn dynamic_step(settings: &DynamicStep, model: &FeModel, step: &Step) -> (ir::St
     let mut ir_step = new_step(ir::step::Procedure::Dynamic(ir::step::Dynamic {
         solver: equation_solver(settings.solver),
         alpha: (alpha != -0.05).then_some(alpha),
-        integration: ir::step::Integration::Implicit,
+        integration: match settings.method {
+            // Implicit on the time steps of an implicit step, explicit where the solver
+            // switches.
+            DynamicMethod::Automatic => ir::step::Integration::Automatic {
+                explicit: ir::step::ExplicitControls {
+                    mass_scaling: settings.mass_scaling,
+                    time_step: None,
+                },
+                switch_factor: settings
+                    .switch_factor
+                    .unwrap_or(plx_model::DynamicStep::DEFAULT_SWITCH_FACTOR),
+            },
+            _ => ir::step::Integration::Implicit,
+        },
         increments: ir::step::Incrementation {
             initial: Some(integration.increment),
             period: Some(settings.duration),

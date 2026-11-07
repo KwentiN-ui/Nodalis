@@ -1762,7 +1762,7 @@ impl FeModel {
             }
             if let StepKind::Dynamic(settings) = &step.kind {
                 self.check_dynamic_step(s, step, settings, &mut findings);
-                if settings.method.is_explicit() {
+                if settings.method.uses_explicit() {
                     const FULL: [&str; 10] = [
                         "C3D8", "C3D20", "S4", "S8", "CPS4", "CPS8", "CPE4", "CPE8", "CAX4", "CAX8",
                     ];

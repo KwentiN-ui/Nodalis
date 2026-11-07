@@ -192,6 +192,7 @@ impl Session {
             contact: std::mem::take(&mut self.contact),
             contact_pattern: self.contact_pattern.take(),
             profile: std::mem::take(&mut self.profile),
+            segment: None,
         };
         // The procedure runs on the session's pool in a thread of its own; events come
         // through a channel so that the caller's (not necessarily `Send`) progress sink

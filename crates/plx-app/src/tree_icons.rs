@@ -161,6 +161,8 @@ pub enum StepGlyph {
     Dynamic,
     /// A Dynamic step integrated explicitly.
     ExplicitDynamic,
+    /// A Dynamic step that switches between implicit and explicit integration.
+    AutomaticDynamic,
     ModalDynamics,
     SteadyStateDynamics,
     Sensitivity,
@@ -180,6 +182,7 @@ impl StepGlyph {
             StepGlyph::UncoupledTempDisp => "Uncoupled Temperature-Displacement",
             StepGlyph::Dynamic => "Dynamic",
             StepGlyph::ExplicitDynamic => "Dynamic (explicit)",
+            StepGlyph::AutomaticDynamic => "Dynamic (automatic)",
             StepGlyph::ModalDynamics => "Modal Dynamics",
             StepGlyph::SteadyStateDynamics => "Steady State Dynamics",
             StepGlyph::Sensitivity => "Sensitivity",
@@ -201,6 +204,7 @@ impl From<&StepKind> for StepGlyph {
             StepKind::Dynamic(d) => match d.method {
                 plx_model::DynamicMethod::Direct => StepGlyph::Dynamic,
                 plx_model::DynamicMethod::Explicit => StepGlyph::ExplicitDynamic,
+                plx_model::DynamicMethod::Automatic => StepGlyph::AutomaticDynamic,
                 plx_model::DynamicMethod::Modal { .. } => StepGlyph::ModalDynamics,
             },
             StepKind::ModalDynamics(_) => StepGlyph::ModalDynamics,
@@ -359,6 +363,13 @@ fn paint_step_type(painter: &Painter, min: Pos2, glyph: StepGlyph) {
             painter.circle_stroke(at(6.5, 9.5), 5.0, Stroke::new(1.5, BLUE));
             line(&[(6.5, 6.0), (6.5, 9.5), (8.5, 11.0)], INK);
             line(&[(14.5, 0.8), (11.0, 5.5), (13.5, 5.5), (10.5, 9.8)], RED);
+        }
+        // The clock of the Dynamic step, its right half struck by the flash of the explicit
+        // one: implicit and explicit in one step.
+        StepGlyph::AutomaticDynamic => {
+            painter.circle_stroke(at(7.0, 8.5), 6.0, Stroke::new(1.5, BLUE));
+            line(&[(7.0, 4.5), (7.0, 8.5), (10.0, 10.5)], INK);
+            line(&[(15.0, 0.8), (12.0, 5.0), (14.2, 5.0), (11.5, 9.0)], RED);
         }
         // Two superposed modes over time.
         StepGlyph::ModalDynamics => {

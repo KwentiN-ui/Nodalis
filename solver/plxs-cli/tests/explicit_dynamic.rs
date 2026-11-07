@@ -1138,3 +1138,86 @@ fn an_implicit_step_continues_an_explicit_swing() {
         "swings up to {lowest_late} in the implicit step, released at {deflection}"
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// Stage 5: automatic switching within a step
+
+/// The bar of [`bar_on_wall`] flies a long way to the wall, bounces off it and flies back,
+/// in a step with `INTEGRATION=AUTOMATIC`: the flight is implicit, the impact explicit.
+#[test]
+fn an_automatic_step_goes_explicit_through_the_impact_only() {
+    let (bar, cells, v0) = (0.1, 20, 1.0);
+    let c = (E / RHO).sqrt();
+    let duration = 2.0 * bar / c;
+    let arrival = 30.0 * duration;
+    let gap = arrival * v0;
+    let period = arrival + 20.0 * duration;
+    let frames = 25;
+    let input = bar_on_wall(
+        "Node to surface",
+        cells,
+        gap,
+        v0,
+        period / frames as f64,
+        period,
+    )
+    .replace("Integration=Explicit", "Integration=Automatic");
+    let dir = work_dir("automatic-bar");
+    let (dat, log) = run(&dir, "automatic-bar", &input);
+    clean(&dir);
+    assert!(log.contains("automatic: explicit from"), "{log}");
+    // Explicit for the impact and not much longer.
+    let explicit = log
+        .lines()
+        .find_map(|l| {
+            let rest = l.split("automatic: ").nth(1)?;
+            let (time, _) = rest.split_once(" of ")?;
+            time.trim().parse::<f64>().ok()
+        })
+        .expect("summary line");
+    assert!(
+        explicit > 0.5 * duration && explicit < 0.3 * period,
+        "explicit for {explicit} s of {period} s (impact {duration} s)\n{log}"
+    );
+    // The flight before the impact is implicit: few increments; the bar leaves at -v0.
+    let velocities = blocks(&dat, "velocities");
+    let (t_end, rows) = velocities.last().unwrap();
+    assert!((t_end - period).abs() < 1e-6 * period, "ends at {t_end}");
+    let rebound = rows.iter().map(|r| r[1]).sum::<f64>() / rows.len() as f64;
+    assert!(
+        (rebound + v0).abs() < 0.05 * v0,
+        "the bar leaves at {rebound} m/s\n{log}"
+    );
+    let before = velocities
+        .iter()
+        .filter(|(t, _)| *t < arrival)
+        .map(|(_, r)| r.iter().map(|r| r[1]).sum::<f64>() / r.len() as f64)
+        .collect::<Vec<_>>();
+    assert!(!before.is_empty() && before.iter().all(|v| (v - v0).abs() < 1e-3 * v0));
+}
+
+/// `SWITCH=0` keeps an automatic step implicit: the same results as an implicit step.
+#[test]
+fn an_automatic_step_with_switch_factor_zero_stays_implicit() {
+    let input = bar_on_wall("Node to surface", 4, 1e-3, 1.0, 2e-4, 2e-3);
+    let dir = work_dir("automatic-zero");
+    let (implicit, _) = run(
+        &dir,
+        "implicit",
+        &input.replace(", Integration=Explicit", ""),
+    );
+    let (automatic, log) = run(
+        &dir,
+        "automatic",
+        &input.replace("Integration=Explicit", "Integration=Automatic, Switch=0"),
+    );
+    clean(&dir);
+    assert!(
+        log.contains("switch factor 0, the step stays implicit"),
+        "{log}"
+    );
+    assert_eq!(
+        blocks(&implicit, "velocities"),
+        blocks(&automatic, "velocities")
+    );
+}

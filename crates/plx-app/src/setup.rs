@@ -5918,7 +5918,7 @@ fn step_form(
             starts_from: dynamic_start(fe, index),
             stable_step: settings
                 .method
-                .is_explicit()
+                .uses_explicit()
                 .then(|| stable_step_estimate(ui.ctx(), fe, mesh))
                 .flatten(),
         }),
@@ -6137,6 +6137,7 @@ fn dynamic_start(fe: &FeModel, index: Option<usize>) -> String {
         // integration, the accelerations are found anew with this step's mass.
         let method = match &previous.kind {
             StepKind::Dynamic(d) if d.method.is_explicit() => " (explicit)",
+            StepKind::Dynamic(d) if matches!(d.method, DynamicMethod::Automatic) => " (automatic)",
             StepKind::Dynamic(d) if matches!(d.method, DynamicMethod::Direct) => " (implicit)",
             _ => "",
         };
@@ -6213,16 +6214,18 @@ fn dynamic_form(
     egui::ComboBox::from_id_salt("dynamic method")
         .selected_text(settings.method.label())
         .show_ui(ui, |ui| {
-            // 0 implicit, 1 explicit, 2 modal.
+            // 0 implicit, 1 explicit, 2 automatic, 3 modal.
             let current = match settings.method {
                 DynamicMethod::Direct => 0,
                 DynamicMethod::Explicit => 1,
-                DynamicMethod::Modal { .. } => 2,
+                DynamicMethod::Automatic => 2,
+                DynamicMethod::Modal { .. } => 3,
             };
             let mut choice = current;
             for (i, method) in [
                 DynamicMethod::Direct,
                 DynamicMethod::Explicit,
+                DynamicMethod::Automatic,
                 DynamicMethod::Modal { modes: 0 },
             ]
             .iter()
@@ -6235,6 +6238,7 @@ fn dynamic_form(
                 settings.method = match choice {
                     0 => DynamicMethod::Direct,
                     1 => DynamicMethod::Explicit,
+                    2 => DynamicMethod::Automatic,
                     _ => {
                         settings.large_deformations = false;
                         DynamicMethod::Modal {
@@ -6245,7 +6249,8 @@ fn dynamic_form(
             }
         });
     ui.end_row();
-    if explicit {
+    let automatic = matches!(settings.method, DynamicMethod::Automatic);
+    if explicit || automatic {
         match &context.stable_step {
             Some(estimate) => {
                 let scaled = settings.mass_scaling.filter(|t| *t > estimate.time_step);
@@ -6259,28 +6264,46 @@ fn dynamic_form(
                     None => estimate.section.clone(),
                 };
                 ui.label("");
-                ui.weak(format!(
-                    "Stable time step ~ {} ({place}),\n{}about {} steps for the duration",
-                    shown(estimate.time_step, units, Quantity::Time),
-                    match scaled {
-                        Some(t) =>
-                            format!("{} with mass scaling, ", shown(t, units, Quantity::Time)),
-                        None => String::new(),
-                    },
-                    numeric::fit(steps, |t| t.len() <= 8)
-                ));
+                if automatic {
+                    let factor = settings
+                        .switch_factor
+                        .unwrap_or(DynamicStep::DEFAULT_SWITCH_FACTOR);
+                    let explicit_step = scaled.unwrap_or(estimate.time_step);
+                    ui.weak(if factor > 0.0 {
+                        format!(
+                            "Stable time step ~ {} ({place}),\nexplicit where implicit steps \
+                             fall below {}",
+                            shown(explicit_step, units, Quantity::Time),
+                            shown(factor * explicit_step, units, Quantity::Time)
+                        )
+                    } else {
+                        "Switch factor 0: implicit throughout".into()
+                    });
+                } else {
+                    ui.weak(format!(
+                        "Stable time step ~ {} ({place}),\n{}about {} steps for the duration",
+                        shown(estimate.time_step, units, Quantity::Time),
+                        match scaled {
+                            Some(t) =>
+                                format!("{} with mass scaling, ", shown(t, units, Quantity::Time)),
+                            None => String::new(),
+                        },
+                        numeric::fit(steps, |t| t.len() <= 8)
+                    ));
+                }
                 ui.end_row();
-                if steps > 1e6 {
+                if steps > 1e6 && explicit {
                     ui.label("");
                     ui.weak("Consider a shorter duration or\nmass scaling (Advanced).");
                     ui.end_row();
                 }
             }
-            None => {
+            None if explicit => {
                 ui.label("");
                 ui.weak("The solver finds the time step from the mesh.");
                 ui.end_row();
             }
+            None => {}
         }
     }
     if let DynamicMethod::Modal { modes } = &mut settings.method {
@@ -6429,7 +6452,8 @@ fn dynamic_form(
         || settings.frequency_limit.is_some()
         || settings.numerical_damping != NumericalDamping::Normal
         || settings.solver != LinearSolverChoice::Automatic
-        || (explicit && settings.mass_scaling.is_some());
+        || ((explicit || automatic) && settings.mass_scaling.is_some())
+        || (automatic && settings.switch_factor.is_some());
     let mut advanced = ui.data(|d| d.get_temp(id)).unwrap_or(custom);
     ui.label("");
     ui.checkbox(&mut advanced, "Advanced settings");
@@ -6461,7 +6485,26 @@ fn dynamic_form(
             ui.add(numeric::physical(dt, units, Quantity::Time));
             ui.end_row();
         }
-        if explicit {
+        if automatic {
+            ui.label("Switch factor").on_hover_text(
+                "Implicit time steps shorter than this many stable explicit time steps go \
+                 on explicitly: an implicit step costs about as much as 30 to 100 explicit \
+                 ones. 0 never switches; a large value switches at the first impact.",
+            );
+            let mut factor = settings
+                .switch_factor
+                .unwrap_or(DynamicStep::DEFAULT_SWITCH_FACTOR);
+            ui.add(
+                numeric::drag_value(&mut factor)
+                    .range(0.0..=1e6)
+                    .speed(1.0)
+                    .max_decimals(3),
+            );
+            ui.end_row();
+            settings.switch_factor =
+                (factor != DynamicStep::DEFAULT_SWITCH_FACTOR).then_some(factor);
+        }
+        if explicit || automatic {
             ui.label("Mass scaling").on_hover_text(
                 "Elements whose stable time step is shorter than this one get the mass that \
                  lifts it there (small or thin elements). The solver reports the mass added; \
@@ -6483,7 +6526,8 @@ fn dynamic_form(
             });
             ui.end_row();
             settings.mass_scaling = scaled.then_some(target);
-        } else {
+        }
+        if !explicit {
             ui.label("Max. frequency").on_hover_text(
                 "The time step resolves vibrations up to this frequency with 20 steps per period. \
              Higher ones are damped out by the numerical damping.",
