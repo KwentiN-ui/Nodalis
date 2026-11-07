@@ -89,6 +89,7 @@ fn tip_force() -> Load {
         kind: LoadKind::force([0.0, 0.0, -100.0]),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     }
 }
 
@@ -211,6 +212,7 @@ fn picked_faces_become_one_element_set_per_face_number() {
         kind: LoadKind::Pressure(2.5),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     };
     let (mesh, model) = cantilever(load);
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -235,6 +237,7 @@ fn empty_regions_and_unknown_materials_are_errors() {
         kind: LoadKind::force([1.0, 0.0, 0.0]),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     });
     assert_eq!(
         write_inp(&mesh, &model, ""),
@@ -528,6 +531,7 @@ fn moment(moment: [f64; 3]) -> Load {
         kind: LoadKind::Moment(moment),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     }
 }
 
@@ -1219,6 +1223,7 @@ fn solver_yields_the_bar_pulled_beyond_its_yield_stress() {
         kind: LoadKind::Pressure(-stress),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     };
     let (mesh, mut model) = cantilever(load);
     s235(&mut model);
@@ -1298,6 +1303,7 @@ fn pre_tension(value: f64, by_displacement: bool) -> (FeMesh, FeModel) {
         },
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     }];
     // Both ends held: the bolt is clamped between them.
     model.steps[0].boundary_conditions.push(BoundaryCondition {
@@ -1864,6 +1870,7 @@ fn solver_pressure_on_a_surface_balances_the_reactions() {
         kind: LoadKind::Pressure(2.0),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     };
     let (mesh, model) = cantilever(load);
     let Some(frd) = run_solver("druck", &write_inp(&mesh, &model, "").unwrap()) else {
@@ -1890,6 +1897,7 @@ fn solver_reads_quadratic_elements_over_two_lines() {
         kind: LoadKind::force(FORCE),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     };
     let (mesh, model) = analysis("block_c3d20r.inp", load);
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -1961,6 +1969,7 @@ fn solver_balances_a_surface_traction() {
         kind: LoadKind::force([0.0, -80.0, 0.0]),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     };
     let (mesh, model) = cantilever(load);
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -2366,6 +2375,7 @@ fn buckle_analysis() -> (FeMesh, FeModel) {
             kind: LoadKind::force([-21.0, 0.0, 0.0]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         },
     );
     let mut step = Step::new_buckle("Step-1");
@@ -2723,6 +2733,7 @@ fn deactivated_items_are_left_out() {
         kind: LoadKind::force([1.0, 0.0, 0.0]),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     });
     model.steps[0].loads[0].active = false;
     model.steps[0].boundary_conditions[0].active = false;
@@ -2859,6 +2870,7 @@ fn plane_model(
         kind: load,
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     });
     FeModel {
         properties: plx_model::ModelProperties {
@@ -3131,6 +3143,7 @@ fn solver_runs_every_plane_element_type() {
                 kind: LoadKind::force([150.0, -40.0, 0.0]),
                 amplitude: None,
                 factor_amplitude: None,
+                tables: Default::default(),
             });
             assert!(model.set_element_type("PLATE", chosen));
             let written = space.element_type(chosen, shape);
@@ -3287,6 +3300,7 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
         kind: LoadKind::Pressure(10.0),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     });
     model.materials.push(Material {
         name: "Steel".into(),
@@ -3355,6 +3369,7 @@ fn solver_preloads_a_bolt_split_into_two_tied_parts() {
             },
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         }];
         let mut tie = plx_model::Tie::new("Tie-1");
         (tie.master, tie.slave) = if cut_is_master {
@@ -3851,6 +3866,7 @@ fn solver_gives_the_same_contact_in_mm_and_in_m() {
             kind: LoadKind::force([1e4, 0.0, 0.0]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         if name == "hard" {
             // Held sideways at its top, the upper block rests on the lower one by contact.
@@ -4096,6 +4112,7 @@ fn blocks_model(
         kind: LoadKind::force(force),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     });
     FeModel {
         materials: vec![Material {
@@ -4580,6 +4597,7 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
         kind: load,
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     });
     FeModel {
         cross_sections: line_cross_sections(),
@@ -5441,6 +5459,7 @@ fn heat_load(name: &str, region: Region, kind: LoadKind) -> Load {
         kind,
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     }
 }
 
@@ -6314,6 +6333,7 @@ fn solver_scales_distributed_loads_and_displacements_by_amplitudes() {
         kind: LoadKind::Pressure(2.0),
         amplitude: Some("Rise".into()),
         factor_amplitude: None,
+        tables: Default::default(),
     };
     let (mesh, mut model) = cantilever(pressure);
     let mut gravity = body_load(LoadKind::Gravity([0.0, -9810.0, 0.0]));
@@ -6632,6 +6652,7 @@ fn body_load(kind: LoadKind) -> Load {
         kind,
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     }
 }
 
@@ -7349,6 +7370,7 @@ fn moving_cantilever() -> (FeMesh, FeModel) {
         }),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     };
     let (_, mut model) = cantilever(load);
     // Another load stays the same in every position.
@@ -7643,6 +7665,7 @@ fn solver_creeps_the_bar_by_nortons_law() {
         kind: LoadKind::Pressure(-stress),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     };
     let (mesh, mut model) = cantilever(load);
     let creep = plx_model::Creep {
@@ -8036,6 +8059,7 @@ fn block_on_plate(plate_type: &str) -> (FeMesh, FeModel) {
         kind: LoadKind::Pressure(10.0),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     });
     let mut model = FeModel::default();
     model.materials.push(Material {
@@ -8121,6 +8145,7 @@ fn solver_bends_a_box_of_a_mesh_block_held_and_loaded_on_its_sides() {
         kind: LoadKind::Pressure(1.0),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     };
     let (_, mut model) = cantilever(load);
     model.sections[0].region = Region::Parts(vec!["BOX".into()]);
@@ -9604,6 +9629,7 @@ fn solver_pressure_follows_its_distribution() {
         kind: LoadKind::Pressure(2.0),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     };
     let (mesh, mut model) = cantilever(load);
     model.properties.units = UnitSystem::MKgSC;
@@ -10047,6 +10073,7 @@ fn uniaxial_bar(hardening: Hardening, stress: f64) -> (FeMesh, FeModel) {
         kind: LoadKind::Pressure(-stress),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
     };
     let (mesh, mut model) = cantilever(load);
     s235(&mut model);
@@ -10605,4 +10632,154 @@ fn a_hyperelastic_material_is_written_and_switches_nlgeom_on() {
     };
     settings.method = plx_model::DynamicMethod::Modal { modes: 5 };
     assert!(!lowered(&mesh, &model).steps.iter().any(|s| s.nlgeom));
+}
+
+/// The tip of the cantilever moved by tables of two directions in one boundary condition:
+/// down by 0.8, then up to 0.8 while it moves 4 to the side, as one motion.
+fn tabled_tip(period: f64) -> (FeMesh, FeModel) {
+    let (mesh, mut model) = cantilever(tip_force());
+    let step = &mut model.steps[0];
+    step.loads.clear();
+    let StepKind::Static(settings) = &mut step.kind else {
+        unreachable!()
+    };
+    settings.incrementation = Incrementation::Automatic;
+    settings.time_period = period;
+    settings.initial_increment = period;
+    let mut displacement = Displacement::new([None, Some(0.0), Some(0.0), None, None, None]);
+    displacement.behavior = Behavior::EachNode;
+    displacement.tables[1] = Some(plx_model::ValueTable {
+        points: vec![[0.0, 0.0], [1.0, 0.0], [2.0, 4.0]],
+    });
+    displacement.tables[2] = Some(plx_model::ValueTable {
+        points: vec![[0.0, 0.0], [1.0, -0.8], [2.0, 0.8]],
+    });
+    step.boundary_conditions.push(BoundaryCondition {
+        distribution: None,
+        name: "Move".into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes(vec![99]),
+        kind: BoundaryKind::Displacement(displacement),
+        amplitude: Some("Half".into()),
+    });
+    model.amplitudes.push(amplitude("Half", vec![[0.0, 0.5]]));
+    (mesh, model)
+}
+
+#[test]
+fn each_degree_of_freedom_follows_its_own_table() {
+    let (mesh, mut model) = tabled_tip(2.0);
+    // A degree of freedom without a table keeps the amplitude of the boundary condition.
+    let BoundaryKind::Displacement(d) = &mut model.steps[0].boundary_conditions[1].kind else {
+        unreachable!()
+    };
+    d.values[0] = Some(0.25);
+    let analysis = lowered(&mesh, &model);
+    let names = ["TABLE_STEP-1_MOVE_U2", "TABLE_STEP-1_MOVE_U3"];
+    for (name, points) in names.iter().zip([
+        vec![(0.0, 0.0), (1.0, 0.0), (2.0, 4.0)],
+        vec![(0.0, 0.0), (1.0, -0.8), (2.0, 0.8)],
+    ]) {
+        let amplitude = analysis.model.amplitude(name).expect(name);
+        assert!(!amplitude.total_time);
+        assert_eq!(amplitude.points, points);
+    }
+    let boundaries = &analysis.steps[0].boundaries;
+    let moved: Vec<_> = (boundaries.iter())
+        .filter(|b| b.region != NodeRef::Set("FIX".into()))
+        .map(|b| (b.first_dof, b.last_dof, b.value, b.amplitude.clone()))
+        .collect();
+    assert_eq!(
+        moved,
+        [
+            (1, 1, Some(0.25), Some("HALF".to_string())),
+            (2, 2, Some(1.0), Some(names[0].to_string())),
+            (3, 3, Some(1.0), Some(names[1].to_string())),
+        ]
+    );
+    // The amplitudes of the tables point back to the boundary condition.
+    let origins = lower_unvalidated(&mesh, &model, "").unwrap().origins;
+    assert_eq!(
+        origins.get(&ir::ItemRef::Amplitude(names[0].into())),
+        Some(ModelItem::BoundaryCondition(0, 1))
+    );
+    // Points that go back in time are refused.
+    let BoundaryKind::Displacement(d) = &mut model.steps[0].boundary_conditions[1].kind else {
+        unreachable!()
+    };
+    d.tables[1].as_mut().unwrap().points.swap(0, 2);
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::InvalidAmplitude { .. })
+    ));
+}
+
+#[test]
+fn force_components_follow_their_own_tables() {
+    let mut force = tip_force();
+    force.kind = LoadKind::force([10.0, 0.0, -100.0]);
+    force.tables[2] = Some(plx_model::ValueTable {
+        points: vec![[0.0, 0.0], [0.5, -200.0], [1.0, 50.0]],
+    });
+    let (mesh, model) = cantilever(force);
+    let analysis = lowered(&mesh, &model);
+    let loads: Vec<_> = (analysis.steps[0].loads.concentrated.iter())
+        .map(|l| (l.dof, l.value, l.amplitude.clone()))
+        .collect();
+    assert_eq!(
+        loads,
+        [
+            (1, 10.0, None),
+            (3, 1.0, Some("TABLE_STEP-1_FORCE-1_F3".to_string())),
+        ]
+    );
+    let table = analysis.model.amplitude("TABLE_STEP-1_FORCE-1_F3").unwrap();
+    assert_eq!(table.points[1], (0.5, -200.0));
+}
+
+/// The displacements `(U2, U3)` of the tip node in every increment, with the time.
+fn tip_motion(frd: &FrdImport) -> Vec<(f64, f64, f64)> {
+    let index = frd.mesh.node_index(99).unwrap();
+    (frd.increments.iter())
+        .filter_map(|i| Some((i.value, i.field("DISP")?)))
+        .map(|(t, f)| {
+            let u = |c: &str| f64::from(f.component(c).unwrap().values[index]);
+            (t, u("U2"), u("U3"))
+        })
+        .collect()
+}
+
+/// The solver ends an increment at the bend of the tables, linear or not, so the tip goes
+/// down first and then up and to the side, although a single increment was asked for.
+#[test]
+fn solver_moves_the_tip_along_tables_and_stops_at_their_points() {
+    for nlgeom in [false, true] {
+        let (mesh, mut model) = tabled_tip(2.0);
+        let StepKind::Static(settings) = &mut model.steps[0].kind else {
+            unreachable!()
+        };
+        settings.nlgeom = nlgeom;
+        let name = if nlgeom {
+            "value_tables_nlgeom"
+        } else {
+            "value_tables"
+        };
+        let Some(frd) = run_solver(name, &write_inp(&mesh, &model, "").unwrap()) else {
+            return;
+        };
+        let motion = tip_motion(&frd);
+        let at = |time: f64| {
+            (motion.iter())
+                .find(|(t, ..)| (t - time).abs() < 1e-9)
+                .unwrap_or_else(|| panic!("no increment at {time}: {motion:?}"))
+        };
+        let (_, u2, u3) = at(1.0);
+        assert!(u2.abs() < 1e-6 && (u3 + 0.8).abs() < 1e-6, "{motion:?}");
+        let (_, u2, u3) = at(2.0);
+        assert!(
+            (u2 - 4.0).abs() < 1e-6 && (u3 - 0.8).abs() < 1e-6,
+            "{motion:?}"
+        );
+    }
 }

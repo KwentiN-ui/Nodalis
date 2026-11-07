@@ -279,6 +279,11 @@ impl Procedure for NonlinearStatic {
         let mut warned = false;
         let carried = ctx.state.loads.clone();
         let mut applied: Vec<f64> = Vec::new();
+        // Increments end at the points of the amplitudes (and value tables) the step follows,
+        // so a motion that changes direction is applied as given; the increment size cut to
+        // reach a point is restored afterwards.
+        let breakpoints = step.amplitude_times(ctx.model, start_total, period);
+        let mut clipped: Option<f64> = None;
         while time < period * (1.0 - 1e-12) {
             if ctx.cancel.is_cancelled() {
                 return Ok(StepOutcome::Cancelled);
@@ -299,6 +304,13 @@ impl Procedure for NonlinearStatic {
                 attempt += 1;
                 if dt > period - time {
                     dt = period - time;
+                }
+                let tolerance = period * 1e-9;
+                if let Some(&next) = breakpoints.iter().find(|&&t| t > time + tolerance)
+                    && time + dt > next + tolerance
+                {
+                    clipped.get_or_insert(dt);
+                    dt = next - time;
                 }
                 let step_time = time + dt;
                 let total = start_total + step_time;
@@ -447,6 +459,7 @@ impl Procedure for NonlinearStatic {
                             reason: reason.clone(),
                         });
                         dt *= factor;
+                        clipped = None;
                         if dt < minimum {
                             return Ok(StepOutcome::Diverged {
                                 increment,
@@ -568,6 +581,11 @@ impl Procedure for NonlinearStatic {
                 }
                 previous_fast = fast;
                 dt = dt.min(maximum);
+            }
+            if let Some(before) = clipped.take()
+                && (direct || iterations <= controls.slow_iterations)
+            {
+                dt = dt.max(before).min(maximum);
             }
         }
         ctx.state.total_time = start_total + period;

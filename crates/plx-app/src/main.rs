@@ -83,6 +83,7 @@ mod tree_icons;
 mod tree_rows;
 mod undo;
 mod update;
+mod value_table;
 mod viewport;
 mod virtual_table;
 mod vtk_export_dialog;

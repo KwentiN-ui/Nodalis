@@ -55,6 +55,7 @@ impl RemoteForce {
             system: self.system.clone(),
             location: self.location,
             pinball: self.pinball,
+            tables: Default::default(),
         }
     }
 

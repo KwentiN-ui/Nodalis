@@ -47,10 +47,12 @@ mod signature;
 mod solver_diagnostics;
 mod study;
 mod symmetry;
+mod tables;
 pub mod units;
+pub use tables::{StepTable, TableOwner};
 mod validity;
 
-pub use amplitude::{Amplitude, AmplitudeTime};
+pub use amplitude::{Amplitude, AmplitudeTime, ValueTable, no_tables};
 pub use bolt::{Bolt, BoltAction, BoltChange, LoweredBolts, Preload, ResolvedBolt};
 pub use cad_operation::{CadOperation, CadOperationKind};
 pub use checks::{
@@ -773,6 +775,21 @@ pub enum StepKind {
 }
 
 impl StepKind {
+    /// How long the step lasts in step time: the time period of static, heat transfer,
+    /// visco and modal dynamics steps, the duration of a dynamic one; 1 for the others.
+    pub fn period(&self) -> f64 {
+        match self {
+            StepKind::Static(settings) => settings.period(),
+            StepKind::HeatTransfer(settings)
+            | StepKind::CoupledTempDisp(settings)
+            | StepKind::UncoupledTempDisp(settings) => settings.increments.period(),
+            StepKind::Visco(settings) => settings.increments.period(),
+            StepKind::Dynamic(settings) => settings.duration,
+            StepKind::ModalDynamics(settings) => settings.time_period,
+            _ => 1.0,
+        }
+    }
+
     /// Whether the step is computed with large deformations (`NLGEOM`).
     pub fn nlgeom(&self) -> bool {
         match self {
@@ -962,6 +979,17 @@ pub struct StaticStep {
     /// Missing in projects saved before the solver could be chosen.
     #[serde(default)]
     pub solver: LinearSolverChoice,
+}
+
+impl StaticStep {
+    /// The time period the solver takes: 1, CalculiX's default, unless the increments are
+    /// given.
+    pub fn period(&self) -> f64 {
+        match self.incrementation {
+            Incrementation::Default => 1.0,
+            Incrementation::Automatic | Incrementation::Direct => self.time_period,
+        }
+    }
 }
 
 impl Default for StaticStep {
@@ -1778,6 +1806,9 @@ pub struct BoundaryCondition {
     pub distribution: Option<String>,
 }
 
+// The tables of a displacement make it larger than the other kinds; there are few
+// boundary conditions, so boxing would only add indirection.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum BoundaryKind {
     /// Prescribed displacements (U1..U3) and rotations (UR1..UR3) of the region, held at
@@ -1843,6 +1874,11 @@ pub struct Load {
     /// `RADIATION AMPLITUDE`); other loads have none.
     #[serde(default)]
     pub factor_amplitude: Option<String>,
+    /// A time table per component of the value (force and moment x, y, z; the pressure)
+    /// that replaces the component: it follows the table over the step time instead of
+    /// the amplitude. See [`LoadKind::table_components`].
+    #[serde(default, skip_serializing_if = "crate::no_tables")]
+    pub tables: [Option<ValueTable>; 3],
     /// Distribution the value is scaled by over the region; `None` is the same value
     /// everywhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1917,6 +1953,26 @@ impl LoadKind {
         LoadKind::Force {
             value,
             each_node: false,
+        }
+    }
+
+    /// How many components of the value can follow a time table of their own: the three
+    /// of a force or moment, the pressure; none for the other loads.
+    pub fn table_components(&self) -> usize {
+        match self {
+            LoadKind::Force { .. } | LoadKind::Moment(_) => 3,
+            LoadKind::Pressure(_) => 1,
+            _ => 0,
+        }
+    }
+
+    /// The quantity of the values in the time tables of the components, if it takes any.
+    pub fn table_quantity(&self) -> Option<units::Quantity> {
+        match self {
+            LoadKind::Force { .. } => Some(units::Quantity::Force),
+            LoadKind::Moment(_) => Some(units::Quantity::Moment),
+            LoadKind::Pressure(_) => Some(units::Quantity::Pressure),
+            _ => None,
         }
     }
 
@@ -2248,6 +2304,7 @@ mod tests {
             kind: LoadKind::Pressure(1.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         model.steps.push(step);
         model.rename_part("A", "C");

@@ -32,15 +32,17 @@ impl Procedure for StaticLinear {
                 "StaticLinear needs a *STATIC step".into(),
             ));
         };
-        // A linear step is solved once, at its end: CalculiX ignores the initial increment
-        // and `DIRECT` of a purely linear *STATIC step and reports a single increment of
-        // the size of the period (checked with ccx 2.21; the increments only show with
-        // NLGEOM or other nonlinearities, which are not this procedure's).
+        // A linear step is solved at its end, and at every point of the amplitudes (and
+        // value tables) its loads and boundaries follow inside the step, where the
+        // curve bends: the solution only depends on the loads of the moment, so these are
+        // the increments that show the whole motion. The initial increment and `DIRECT` do
+        // not matter.
         let period = parameters.increments.period();
         if period <= 0.0 {
             return Err(Error::input("*STATIC", "the step period must be positive"));
         }
-        let (initial, count) = (period, 1);
+        let mut times = step.amplitude_times(ctx.model, ctx.state.total_time, period);
+        times.push(period);
 
         // Stiffness: assembled once per model, reused by every linear step.
         if ctx.stiffness.is_none() {
@@ -56,7 +58,7 @@ impl Procedure for StaticLinear {
             )));
         }
         let k = ctx.stiffness.take().unwrap();
-        let outcome = Self::increments(ctx, step, progress, &k, period, initial, count);
+        let outcome = Self::increments(ctx, step, progress, &k, period, &times);
         ctx.stiffness = Some(k);
         outcome
     }
@@ -70,8 +72,7 @@ impl StaticLinear {
         progress: &mut dyn Progress,
         k: &SparseMatrix,
         period: f64,
-        initial: f64,
-        count: u32,
+        times: &[f64],
     ) -> Result<StepOutcome> {
         let total_dofs = ctx.table.dofs.len();
 
@@ -142,12 +143,14 @@ impl StaticLinear {
         let mut stresses = ctx.table.layout.field(6);
         let mut strains = ctx.table.layout.field(6);
         let mut reactions = vec![0.0; total_dofs];
-        for increment in 1..=count {
+        let count = times.len() as u32;
+        let mut before = 0.0;
+        for (increment, &time) in (1..).zip(times) {
             if ctx.cancel.is_cancelled() {
                 return Ok(StepOutcome::Cancelled);
             }
-            let time = (f64::from(increment) * initial).min(period);
-            let size = time - (f64::from(increment - 1) * initial).min(period);
+            let size = time - before;
+            before = time;
             let total = start_total + time;
             progress.event(ProgressEvent::Increment {
                 step: ctx.step_number,

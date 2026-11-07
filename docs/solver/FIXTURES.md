@@ -232,9 +232,9 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `heat/waermedehnung-entkoppelt` | A | M2 | plxs 0.2.0 | C3D8, \*EXPANSION, \*CONDUCTIVITY, \*SPECIFIC HEAT, \*INITIAL CONDITIONS, \*UNCOUPLED TEMPERATURE-DISPLACEMENT, \*CFLUX |
 | `heat/waermedehnung` | A | M2 | plxs 0.2.0 | C3D8, \*EXPANSION, \*CONDUCTIVITY, \*SPECIFIC HEAT, \*INITIAL CONDITIONS, \*COUPLED TEMPERATURE-DISPLACEMENT, \*CFLUX |
 | `heat/waermeleitung` | A | M2 | plxs 0.2.0 | C3D8, \*EXPANSION, \*CONDUCTIVITY, \*SPECIFIC HEAT, \*HEAT TRANSFER, \*CFLUX, \*DFLUX |
-| `loads/amplitude_hold` | A | M2 | plxs 0.2.0 | C3D8, \*AMPLITUDE, \*STATIC |
-| `loads/amplitude_loads` | A | M2 | plxs 0.2.0 | C3D8, \*AMPLITUDE, \*STATIC |
-| `loads/amplitude_total_time` | A | M2 | plxs 0.2.0 | C3D8, \*AMPLITUDE, \*STATIC |
+| `loads/amplitude_hold` | A | M2 | plxs 0.2.8 | C3D8, \*AMPLITUDE, \*STATIC |
+| `loads/amplitude_loads` | A | M2 | plxs 0.2.8 | C3D8, \*AMPLITUDE, \*STATIC |
+| `loads/amplitude_total_time` | A | M2 | plxs 0.2.8 | C3D8, \*AMPLITUDE, \*STATIC |
 | `loads/centrifugal` | A | M2 | plxs 0.2.0 | C3D8, \*STATIC |
 | `loads/gravity` | A | M2 | plxs 0.2.0 | C3D8, \*STATIC |
 | `loads/gravity_c3d20r` | A | M2 | plxs 0.2.0 | C3D20R, \*STATIC |

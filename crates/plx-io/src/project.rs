@@ -1148,6 +1148,7 @@ mod tests {
             kind: plx_model::LoadKind::Pressure(5e6),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         // A second step pressing harder, to show the contacts of a step.
         if std::env::var_os("PLX_CONTACT_DEMO_STEPS").is_some() {

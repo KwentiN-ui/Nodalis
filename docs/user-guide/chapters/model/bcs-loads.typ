@@ -32,7 +32,8 @@ plates (rotations).
 )
 
 The region is a selection of faces, edges or nodes, a node set or a surface. Displacement and
-temperature boundary conditions can follow an #ui("Amplitude") (@amplitudes).
+temperature boundary conditions can follow an #ui("Amplitude") (@amplitudes). Each component of
+a displacement can also follow a table of its own over the step time (@value-tables).
 
 === Behavior: nodes or a point <displacement-behavior>
 
@@ -119,13 +120,14 @@ angle Theta of a cylindrical system is the one number that cannot be exposed.
   (@model-check) reports "Nodes in several rigid bodies or remote points" otherwise.
 - A coordinate system of its own at each node turns everything else on those nodes too, like
   a skewed symmetry plane (@symmetry); keep other supports and point loads off them.
-- Ansys features that CalculiX cannot carry over are left out: the #ui("Beam") behavior, the
-  augmented Lagrange formulation (Nodalis always writes exact constraints) and tabular values
-  per component (one amplitude acts on all components).
+- Ansys features that are left out: the #ui("Beam") behavior and the augmented Lagrange
+  formulation (Nodalis always writes exact constraints). Tabular values per component are
+  available (@value-tables).
 
 === Motion preview <motion-preview>
 
-When a displacement boundary condition follows an amplitude, a play button appears right of the
+When a displacement boundary condition follows an amplitude or a value table (@value-tables), a
+play button appears right of the
 #ui("Amplitude") field. It previews the prescribed motion in the 3D view: the nodes of the region
 move by the prescribed displacements times the amplitude, passing through the amplitude's time
 range in three seconds and starting again after a short rest. The button turns into a stop
@@ -137,7 +139,37 @@ values, the amplitude or the region show while it plays.
 Only the nodes of the region move; the rest of the mesh stays in place, so the elements next to
 the region stretch. The motion is exaggerated so that the largest displacement is a quarter of
 the model size; the dialog shows the current time of the amplitude and this scale. Rotations
-(`UR1` to `UR3`) are not shown.
+(`UR1` to `UR3`) are not shown. Components with a table (@value-tables) move along their table,
+so the preview also shows a motion in several directions at once.
+
+=== Value tables <value-tables>
+
+Instead of a fixed value, every component of a displacement (`U1` to `UR3`) and of a force,
+moment or pressure can follow a table of values over the step time. The small #ui("T") button
+right of the value opens the table in a window of its own. The first click starts a table that
+ramps from zero to the value at the end of the step; edit, add or paste rows there (two columns,
+time and value, for example from a spreadsheet). The value field then shows the number of
+points, and a click on it opens the table again. #ui("Remove Table") goes back to the fixed value.
+
+#screenshot("value-table.png", [`U1` and `U2` of one boundary condition, each with its own table])
+
+This describes a combined motion with one boundary condition: for example the tip of a lever
+pressed down by 0.8 mm in the first second and then moved 4 mm to the side while it rises to
+0.8 mm, with the tables `U1`: (0, 0), (1, 0), (2, 4) and `U2`: (0, 0), (1, -0.8), (2, 0.8). In
+CalculiX a boundary condition has one amplitude for all its components, so such a motion needs a
+boundary condition per direction; the Nodalis solver takes a curve per component.
+
+- The values are the displacements themselves (in the unit of the field), not factors. They are
+  linear between the points and constant before the first and after the last one.
+- A component with a table ignores the #ui("Amplitude") of the boundary condition or load; the
+  other components still follow it.
+- Times count from the start of the step. A static step with #ui("Default") incrementation lasts
+  1 time unit: set the incrementation to #ui("Automatic") or #ui("Direct") and the time period
+  to the last time of the table, otherwise the model check warns "Table goes beyond the step".
+- The increments of a static step end at every point of the tables and amplitudes, so a
+  motion that changes direction is applied as given, even with a single large increment. A
+  linear static step is solved at each of these points too and shows them as increments. A
+  dynamic step chooses its time step fine enough for the shortest segment of the tables.
 
 == Loads <loads>
 
@@ -180,7 +212,8 @@ step. A frequency step takes no loads.
 #screenshot("gravity-dialog.png", [Gravity dialog: standard gravity along `-Z`])
 
 Every load can follow an #ui("Amplitude"). Film and radiation have a second amplitude for the film
-coefficient or the emissivity.
+coefficient or the emissivity. The components of a force or moment and a pressure can also
+follow a table of their own over the step time (#ui("T") button, @value-tables).
 
 In 2D models face loads act on element edges. In axisymmetric models forces act on the full
 circumference.
