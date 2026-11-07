@@ -1369,11 +1369,9 @@ fn attempt(
         iteration += 1;
         if let Some(tangent) = fresh_tangent {
             let started = std::time::Instant::now();
-            let reduced = if setup.large_rotations {
-                set.reduce(&tangent)
-            } else {
-                set.reduce_cached(&tangent, &mut setup.reducer)
-            };
+            // The reducer depends on the structure of the constraints only, so the rows
+            // of rigid bodies relinearized at every rotation reuse it as well.
+            let reduced = set.reduce_cached(&tangent, &mut setup.reducer);
             setup.factored = Some(Factored {
                 dt,
                 key,

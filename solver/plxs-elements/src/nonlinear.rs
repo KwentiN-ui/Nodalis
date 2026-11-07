@@ -12,6 +12,7 @@
 //! condensed linear stiffness exactly and keeps the enhanced kinematics for nonlinear
 //! materials and large displacements. No CalculiX code was consulted.
 
+use crate::plane::Expansion;
 use crate::solid::{Formulation, SolidElement};
 
 /// What a material law needs at an integration point.
@@ -61,6 +62,11 @@ impl PointKinematics {
     }
 }
 
+#[inline(always)]
+fn dot6(a: &[f64; 6], b: &[f64; 6]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
 fn det3(a: &[[f64; 3]; 3]) -> f64 {
     a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1])
         - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
@@ -76,18 +82,40 @@ struct Gradient {
 impl SolidElement {
     /// The gradient operators of all integration points (one for the uniform-strain
     /// element) and, for C3D8R, the hourglass stiffness to add.
+    ///
+    /// With `condense` (the expansion of a 2D element, `coords` those of its 3D element)
+    /// the operators act on the 2D DOFs (`L T`); the hourglass stiffness stays on the 3D
+    /// DOFs.
     fn gradients(
         &self,
         coords: &[[f64; 3]],
         d_elastic: &[[f64; 6]; 6],
+        condense: Option<&Expansion>,
     ) -> (Vec<Gradient>, Option<Vec<f64>>) {
-        let ndof = self.dof_count_3d();
+        let ndof = condense.map_or(self.dof_count_3d(), |x| 3 * x.nodes);
         let nodal = |dndx: &[[f64; 3]], weight: f64| -> Gradient {
             let mut l = vec![0.0; 9 * ndof];
-            for (a, g) in dndx.iter().enumerate() {
-                for k in 0..3 {
-                    for c in 0..3 {
-                        l[(k * 3 + c) * ndof + 3 * a + k] = g[c];
+            match condense {
+                None => {
+                    for (a, g) in dndx.iter().enumerate() {
+                        for k in 0..3 {
+                            for c in 0..3 {
+                                l[(k * 3 + c) * ndof + 3 * a + k] = g[c];
+                            }
+                        }
+                    }
+                }
+                Some(x) => {
+                    let map = x.dof_map();
+                    for (a, g) in dndx.iter().enumerate() {
+                        for k in 0..3 {
+                            let Some((d, factor)) = map[3 * a + k] else {
+                                continue;
+                            };
+                            for c in 0..3 {
+                                l[(k * 3 + c) * ndof + d] += factor * g[c];
+                            }
+                        }
                     }
                 }
             }
@@ -96,12 +124,12 @@ impl SolidElement {
         match self.formulation {
             Formulation::Standard => (
                 self.rule
-                    .points
+                    .weights
                     .iter()
-                    .zip(&self.rule.weights)
-                    .map(|(&p, &w)| {
-                        let point = self.point(p, coords);
-                        nodal(&point.dndx, point.det * w)
+                    .enumerate()
+                    .map(|(ip, &w)| {
+                        let (det, dndx) = self.rule_point(ip, coords);
+                        nodal(&dndx, det * w)
                     })
                     .collect(),
                 None,
@@ -150,8 +178,10 @@ impl SolidElement {
     /// keeps whatever state it updates there. `d_elastic` serves the hourglass control and
     /// the incompatible modes.
     ///
-    /// Plane and axisymmetric elements compute their expanded 3D element and condense its
-    /// forces and tangent on the 2D DOFs, as the linear stiffness does.
+    /// Plane and axisymmetric elements integrate their expanded 3D element on the 2D DOFs
+    /// directly: the gradient operators of the integration points are condensed (`L T` for
+    /// the expansion `u₃ = T u₂`), which gives `Tᵀ f₃` and `Tᵀ K₃ T` at a fraction of the
+    /// cost of the 3D element matrix.
     #[allow(clippy::too_many_arguments)]
     pub fn nonlinear<M>(
         &self,
@@ -166,59 +196,68 @@ impl SolidElement {
         M: FnMut(usize, &PointKinematics) -> ([f64; 6], [[f64; 6]; 6]),
     {
         let Some(x) = self.expansion() else {
-            self.nonlinear_3d(coords, u, nlgeom, d_elastic, material, fe, ke);
+            let (gradients, hourglass) = self.gradients(coords, d_elastic, None);
+            let ndof = self.dof_count_3d();
+            let hourglass = hourglass.as_deref();
+            self.integrate(
+                &gradients, hourglass, ndof, 1.0, u, nlgeom, material, fe, ke,
+            );
             return;
         };
-        let mut f3 = vec![0.0; self.dof_count_3d()];
-        let mut k3 = Vec::new();
-        let want_k = ke.is_some();
-        self.nonlinear_3d(
-            &x.coordinates(coords),
-            &x.expand(u),
-            nlgeom,
-            d_elastic,
-            material,
-            &mut f3,
-            want_k.then_some(&mut k3),
+        let (gradients, hourglass) = self.gradients(&x.coordinates(coords), d_elastic, Some(x));
+        let n2 = self.dof_count();
+        let hourglass = hourglass.map(|hg| {
+            let mut out = vec![0.0; n2 * n2];
+            x.condense_matrix(&hg, &mut out);
+            // The condensation scaled it already.
+            out.iter_mut().for_each(|v| *v /= x.scale);
+            out
+        });
+        let hourglass = hourglass.as_deref();
+        self.integrate(
+            &gradients, hourglass, n2, x.scale, u, nlgeom, material, fe, ke,
         );
-        x.condense_vector(&f3, fe);
-        if let Some(ke) = ke {
-            let n = self.dof_count();
-            ke.clear();
-            ke.resize(n * n, 0.0);
-            x.condense_matrix(&k3, ke);
-        }
     }
 
+    /// Integrates the forces and the tangent over the points `gradients` (operators of
+    /// `ndof` columns) for the displacements `u` of those `ndof` DOFs, every contribution
+    /// scaled by `scale`; `hourglass` is a constant stiffness to add.
     #[allow(clippy::too_many_arguments)]
-    fn nonlinear_3d<M>(
+    fn integrate<M>(
         &self,
-        coords: &[[f64; 3]],
+        gradients: &[Gradient],
+        hourglass: Option<&[f64]>,
+        ndof: usize,
+        scale: f64,
         u: &[f64],
         nlgeom: bool,
-        d_elastic: &[[f64; 6]; 6],
         mut material: M,
         fe: &mut [f64],
         mut ke: Option<&mut Vec<f64>>,
     ) where
         M: FnMut(usize, &PointKinematics) -> ([f64; 6], [[f64; 6]; 6]),
     {
-        let ndof = self.dof_count_3d();
+        debug_assert_eq!(u.len(), ndof);
+        debug_assert_eq!(fe.len(), ndof);
         if let Some(ke) = ke.as_deref_mut() {
             ke.clear();
             ke.resize(ndof * ndof, 0.0);
         }
-        let (gradients, hourglass) = self.gradients(coords, d_elastic);
-        let mut b = vec![0.0; 6 * ndof];
-        let mut db = vec![0.0; 6 * ndof];
+        // Column-major operators: `bt[col]` holds the six strain rows of one DOF, so the
+        // products below are dot products of short fixed-size arrays.
+        let mut bt = vec![[0.0; 6]; ndof];
+        let mut dbt = vec![[0.0; 6]; ndof];
+        let mut g = vec![[0.0; 3]; ndof];
+        const IJ: [(usize, usize); 6] = [(0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (2, 0)];
         for (ip, gradient) in gradients.iter().enumerate() {
-            let l = &gradient.l;
+            // The nine rows `L_(k,c)` of the operator.
+            let rows: Vec<&[f64]> = gradient.l.chunks_exact(ndof).collect();
+            let lrow = |k: usize, c: usize| rows[k * 3 + c];
             // H = L u, F = I + H.
             let mut h = [[0.0; 3]; 3];
-            for k in 0..3 {
-                for c in 0..3 {
-                    let row = &l[(k * 3 + c) * ndof..(k * 3 + c + 1) * ndof];
-                    h[k][c] = row.iter().zip(u).map(|(a, b)| a * b).sum();
+            for (k, hk) in h.iter_mut().enumerate() {
+                for (c, hkc) in hk.iter_mut().enumerate() {
+                    *hkc = lrow(k, c).iter().zip(u).map(|(a, b)| a * b).sum();
                 }
             }
             let mut f = [[0.0; 3]; 3];
@@ -227,7 +266,6 @@ impl SolidElement {
                     f[i][j] = if i == j { 1.0 } else { 0.0 } + if nlgeom { h[i][j] } else { 0.0 };
                 }
             }
-            const IJ: [(usize, usize); 6] = [(0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (2, 0)];
             let mut strain = [0.0; 6];
             for (r, &(i, j)) in IJ.iter().enumerate() {
                 let mut e = h[i][j] + h[j][i];
@@ -237,19 +275,17 @@ impl SolidElement {
                 strain[r] = if i == j { 0.5 * e } else { e };
             }
             // B_L = ∂E/∂u: normal rows Σ_k F_ki L_(k,i), shear rows Σ_k (F_ki L_(k,j) + F_kj L_(k,i)).
-            for (r, &(i, j)) in IJ.iter().enumerate() {
-                let out = &mut b[r * ndof..(r + 1) * ndof];
-                out.iter_mut().for_each(|v| *v = 0.0);
-                for k in 0..3 {
-                    let li = &l[(k * 3 + i) * ndof..(k * 3 + i + 1) * ndof];
-                    let lj = &l[(k * 3 + j) * ndof..(k * 3 + j + 1) * ndof];
+            bt.iter_mut().for_each(|col| *col = [0.0; 6]);
+            for (k, fk) in f.iter().enumerate() {
+                for (r, &(i, j)) in IJ.iter().enumerate() {
+                    let (li, lj) = (lrow(k, i), lrow(k, j));
                     if i == j {
-                        for (o, a) in out.iter_mut().zip(li) {
-                            *o += f[k][i] * a;
+                        for (col, a) in bt.iter_mut().zip(li) {
+                            col[r] += fk[i] * a;
                         }
                     } else {
-                        for ((o, a), c) in out.iter_mut().zip(lj).zip(li) {
-                            *o += f[k][i] * a + f[k][j] * c;
+                        for ((col, a), c) in bt.iter_mut().zip(lj).zip(li) {
+                            col[r] += fk[i] * a + fk[j] * c;
                         }
                     }
                 }
@@ -260,51 +296,50 @@ impl SolidElement {
                 weight: gradient.weight,
             };
             let (s, d) = material(ip, &kinematics);
-            let w = gradient.weight;
-            for (c, o) in fe.iter_mut().enumerate() {
-                *o += w * (0..6).map(|r| b[r * ndof + c] * s[r]).sum::<f64>();
+            let w = scale * gradient.weight;
+            for (o, col) in fe.iter_mut().zip(&bt) {
+                *o += w * dot6(col, &s);
             }
             let Some(ke) = ke.as_deref_mut() else {
                 continue;
             };
-            // Material stiffness Bᵀ D B.
-            for r in 0..6 {
-                for c in 0..ndof {
-                    db[r * ndof + c] = (0..6).map(|q| d[r][q] * b[q * ndof + c]).sum();
+            // Material stiffness Bᵀ D B (upper triangle).
+            for (dcol, col) in dbt.iter_mut().zip(&bt) {
+                for (r, drow) in d.iter().enumerate() {
+                    dcol[r] = dot6(drow, col);
                 }
             }
-            for a in 0..ndof {
-                for c in a..ndof {
-                    let v: f64 = (0..6).map(|r| b[r * ndof + a] * db[r * ndof + c]).sum();
-                    ke[a * ndof + c] += w * v;
+            for (a, ba) in bt.iter().enumerate() {
+                let row = &mut ke[a * ndof..(a + 1) * ndof];
+                for (c, dbc) in dbt.iter().enumerate().skip(a) {
+                    row[c] += w * dot6(ba, dbc);
                 }
             }
             if nlgeom {
                 // Initial-stress stiffness Lᵀ (S ⊗ I) L: for every direction k,
                 // Σ_{c,c'} L_(k,c)ᵀ S_cc' L_(k,c').
-                let sm = [[s[0], s[3], s[5]], [s[3], s[1], s[4]], [s[5], s[4], s[2]]];
-                let mut g = vec![0.0; 3 * ndof];
+                // (`S` is symmetric: its columns are its rows.)
                 for k in 0..3 {
-                    for c in 0..3 {
-                        let row = &mut g[c * ndof..(c + 1) * ndof];
-                        row.iter_mut().for_each(|v| *v = 0.0);
-                        for cp in 0..3 {
-                            let lk = &l[(k * 3 + cp) * ndof..(k * 3 + cp + 1) * ndof];
-                            for (o, a) in row.iter_mut().zip(lk) {
-                                *o += sm[c][cp] * a;
+                    g.iter_mut().for_each(|col| *col = [0.0; 3]);
+                    for (cp, s_cp) in [[s[0], s[3], s[5]], [s[3], s[1], s[4]], [s[5], s[4], s[2]]]
+                        .iter()
+                        .enumerate()
+                    {
+                        for (gc, a) in g.iter_mut().zip(lrow(k, cp)) {
+                            for (gcc, scc) in gc.iter_mut().zip(s_cp) {
+                                *gcc += scc * a;
                             }
                         }
                     }
-                    for c in 0..3 {
-                        let lk = &l[(k * 3 + c) * ndof..(k * 3 + c + 1) * ndof];
-                        let gc = &g[c * ndof..(c + 1) * ndof];
-                        for a in 0..ndof {
-                            if lk[a] == 0.0 {
-                                continue;
-                            }
-                            for cc in a..ndof {
-                                ke[a * ndof + cc] += w * lk[a] * gc[cc];
-                            }
+                    let (l0, l1, l2) = (lrow(k, 0), lrow(k, 1), lrow(k, 2));
+                    for a in 0..ndof {
+                        let la = [l0[a], l1[a], l2[a]];
+                        if la == [0.0; 3] {
+                            continue;
+                        }
+                        let row = &mut ke[a * ndof..(a + 1) * ndof];
+                        for (cc, gc) in g.iter().enumerate().skip(a) {
+                            row[cc] += w * (la[0] * gc[0] + la[1] * gc[1] + la[2] * gc[2]);
                         }
                     }
                 }
@@ -320,11 +355,11 @@ impl SolidElement {
         if let Some(hg) = hourglass {
             for a in 0..ndof {
                 let row = &hg[a * ndof..(a + 1) * ndof];
-                fe[a] += row.iter().zip(u).map(|(k, u)| k * u).sum::<f64>();
+                fe[a] += scale * row.iter().zip(u).map(|(k, u)| k * u).sum::<f64>();
             }
             if let Some(ke) = ke {
-                for (k, h) in ke.iter_mut().zip(&hg) {
-                    *k += h;
+                for (k, h) in ke.iter_mut().zip(hg) {
+                    *k += scale * h;
                 }
             }
         }

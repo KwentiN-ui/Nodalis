@@ -72,6 +72,9 @@ pub struct Expansion {
     pub nodes: usize,
     /// For every node of the 3D element: the 2D node it belongs to and its layer.
     map: Vec<(usize, Layer)>,
+    /// For every DOF of the 3D element (3 per node): the 2D DOF it follows and the factor,
+    /// `None` when it is held at zero.
+    dofs: Vec<Option<(usize, f64)>>,
     /// Factor on stiffness, forces and volume: 1 for plane elements, 180 for the 2°
     /// segment of axisymmetric ones.
     pub scale: f64,
@@ -109,17 +112,19 @@ pub fn plane(kind: ElementType, thickness: Option<f64>) -> Option<SolidElement> 
     let map = node_map(family);
     debug_assert_eq!(map.len(), family.node_count());
     let thickness = thickness.filter(|t| *t > 0.0).unwrap_or(1.0);
-    let expansion = Expansion {
+    let mut expansion = Expansion {
         kind: plane_kind,
         thickness,
         nodes,
         map,
+        dofs: Vec::new(),
         scale: if plane_kind == PlaneKind::Axisymmetric {
             std::f64::consts::PI / HALF_ANGLE
         } else {
             1.0
         },
     };
+    expansion.dofs = expansion.build_dof_map();
     let extrapolation = expansion.extrapolation(element.extrapolation(), element.rule.len());
     element.kind = kind;
     element.set_expansion(expansion, extrapolation);
@@ -186,7 +191,11 @@ impl Expansion {
 
     /// For every DOF of the 3D element (3 per node): the 2D DOF it follows and the factor,
     /// `None` when it is held at zero.
-    fn dof_map(&self) -> Vec<Option<(usize, f64)>> {
+    pub(crate) fn dof_map(&self) -> &[Option<(usize, f64)>] {
+        &self.dofs
+    }
+
+    fn build_dof_map(&self) -> Vec<Option<(usize, f64)>> {
         let mut out = Vec::with_capacity(3 * self.map.len());
         for &(a, layer) in &self.map {
             let s = layer.sign();
