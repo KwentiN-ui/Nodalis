@@ -47,7 +47,7 @@ in 2D stay:
 CalculiX export (#menu("File", "Export", "CalculiX Results (.frd) ...")) writes every component, as
 CalculiX does.
 
-#screenshot("results-2d-tree.png", [Results of a plane strain model: no Z components])
+#screenshot("results-2d-tree.png", [Results of a plane strain model: no Z components, no `E33`])
 
 Results list the parts of the model they were computed from, as in the FE Model workspace, also
 when several parts share a section. A `.frd` file itself only groups the elements by material;
