@@ -2422,6 +2422,7 @@ mod tests {
             name: name.into(),
             values: vec![1.0; 4],
             derived: false,
+            out_of_plane: false,
         };
         let stress = ["SXX", "SYY", "SZZ", "SXY", "SYZ", "SZX"]
             .map(component)

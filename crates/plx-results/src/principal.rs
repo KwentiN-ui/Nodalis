@@ -347,6 +347,7 @@ mod tests {
             name: name.into(),
             values: values.to_vec(),
             derived: false,
+            out_of_plane: false,
         };
         let stress = ["S11", "S22", "S33", "S12", "S23", "S13"]
             .iter()

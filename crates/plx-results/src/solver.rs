@@ -12,7 +12,7 @@ use std::io::Write;
 use std::path::Path;
 
 use plx_mesh::{Element, FeMesh, Part};
-use plxs_core::results::IncrementKind;
+use plxs_core::results::{IncrementKind, plane};
 use plxs_core::{Model, Results};
 use plxs_output::packed::{self, Array, Packable};
 use serde::{Deserialize, Serialize};
@@ -59,8 +59,10 @@ impl std::error::Error for ReadError {}
 
 impl SolverResults {
     /// The results on the mesh of `model`, the solver's output model, of which only what
-    /// the results need is kept.
-    pub fn new(model: &Model, results: Results, version: &str) -> Self {
+    /// the results need is kept; without the out-of-plane components of a 2D model (see
+    /// [`plxs_core::results::plane`]), which [`from_solver`] fills in as zeros.
+    pub fn new(model: &Model, mut results: Results, version: &str) -> Self {
+        results.drop_out_of_plane(model);
         let mut kept = Model::default();
         kept.heading = model.heading.clone();
         kept.nodes = model.nodes.clone();
@@ -139,7 +141,11 @@ pub struct SolverImport {
 /// write for them, without writing and parsing it.
 pub fn from_solver(solved: &SolverResults) -> SolverImport {
     // The modes of the eigenvalue steps join the increments as fields of their own.
-    let with_modes = with_mode_increments(&solved.results);
+    let mut with_modes = with_mode_increments(&solved.results);
+    // The mode shapes keep three components; of a 2D model the third is left out too.
+    if let Some(results) = &mut with_modes {
+        results.drop_out_of_plane(&solved.model);
+    }
     let results = with_modes.as_ref().unwrap_or(&solved.results);
     // A cyclic symmetric model on all the sectors the `.frd` file has.
     let expanded = plxs_output::frd::expand_sectors(&solved.model, results);
@@ -272,18 +278,27 @@ pub fn from_solver(solved: &SolverResults) -> SolverImport {
             };
             let index: Vec<Option<usize>> =
                 field.nodes.iter().map(|&id| mesh.node_index(id)).collect();
-            let components = (field.components.iter().zip(&field.values))
-                .map(|(name, column)| {
+            // The out-of-plane components a 2D model leaves out come back as zeros, unlisted.
+            let names: Vec<&str> = match plane::full_components(&field.components) {
+                Some(full) => full.to_vec(),
+                None => field.components.iter().map(String::as_str).collect(),
+            };
+            let components = (names.into_iter())
+                .map(|name| {
+                    let column = (field.components.iter())
+                        .position(|c| c == name)
+                        .map(|k| &field.values[k]);
                     let mut values = vec![f32::NAN; mesh.node_count()];
-                    for (at, value) in index.iter().zip(column) {
+                    for (n, at) in index.iter().enumerate() {
                         if let Some(at) = at {
-                            values[*at] = *value as f32;
+                            values[*at] = column.map_or(0.0, |c| c[n] as f32);
                         }
                     }
                     Component {
                         name: rename_component(name).to_string(),
                         values,
                         derived: false,
+                        out_of_plane: column.is_none(),
                     }
                 })
                 .collect();

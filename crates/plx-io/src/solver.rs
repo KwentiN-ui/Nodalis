@@ -36,21 +36,48 @@ pub fn history(solved: &SolverResults, input: Option<&str>) -> Option<DatImport>
     if let Some(input) = input {
         text = crate::dat::restore_shortened_names(&text, input);
     }
-    Some(crate::dat::parse_dat(&text))
+    let mut import = crate::dat::parse_dat(&text);
+    if plxs_core::results::plane::is_plane(&solved.model) {
+        for set in &mut import.sets {
+            drop_out_of_plane(set);
+        }
+    }
+    Some(import)
+}
+
+/// Leaves the history components out that are zero out of the plane of a 2D model, also
+/// those the solver keeps because they are not at the end of their rows (the thickness
+/// stress of plane stress, the thickness strain of plane strain).
+fn drop_out_of_plane(set: &mut plx_results::history_output::HistorySet) {
+    const OUT_OF_PLANE: &[&str] = &[
+        "U3", "V3", "RF3", "Q3", "S33", "S13", "S23", "E33", "E13", "E23",
+    ];
+    for field in &mut set.fields {
+        field.components.retain(|c| {
+            !OUT_OF_PLANE.contains(&c.name.as_str())
+                || c.entries.iter().any(|e| e.values.iter().any(|v| *v != 0.0))
+        });
+    }
+    set.fields.retain(|f| !f.components.is_empty());
 }
 
 /// Writes the results as CalculiX's files: `frd` and, with history output, the `.dat` file
 /// beside it.
 pub fn export_calculix(solved: &SolverResults, frd: &Path) -> std::io::Result<()> {
     let error = |e: plxs_core::Error| std::io::Error::other(e.to_string());
-    plxs_output::write_frd(frd, &solved.model, &solved.results, &solved.version).map_err(error)?;
+    // CalculiX's files have every component, also those a 2D model leaves out.
+    let mut full = std::borrow::Cow::Borrowed(&solved.results);
+    if solved.results.has_out_of_plane_dropped() {
+        full.to_mut().restore_out_of_plane();
+    }
+    plxs_output::write_frd(frd, &solved.model, &full, &solved.version).map_err(error)?;
     let dat = frd.with_extension("dat");
     if solved.results.history.is_empty() {
         if dat.is_file() {
             std::fs::remove_file(&dat)?;
         }
     } else {
-        plxs_output::write_dat(&dat, &solved.results).map_err(error)?;
+        plxs_output::write_dat(&dat, &full).map_err(error)?;
     }
     Ok(())
 }
@@ -157,6 +184,7 @@ mod tests {
         let Some((solved, frd)) = solve(input, dir) else {
             return false;
         };
+        let mut out_of_plane = 0;
         let what = input.display();
         let file = read_frd(&frd).unwrap();
         let memory = import(&solved);
@@ -211,6 +239,13 @@ mod tests {
                     };
                     let tolerance = if cb.derived { 1e-4 } else { 1e-5 };
                     assert_eq!(ca.derived, cb.derived, "{what}");
+                    // Out of the plane of a 2D model: zero, the file's round-off at most.
+                    if ca.out_of_plane {
+                        let largest = cb.range().map_or(0.0, |(l, h)| l.abs().max(h.abs()));
+                        assert!(largest <= 1e-9 * field_scale, "{what} {}", ca.name);
+                        out_of_plane += 1;
+                        continue;
+                    }
                     // The signed largest principal value takes the sign of whichever of
                     // two opposite principal values of (nearly) equal size the rounding
                     // makes larger.
@@ -231,6 +266,11 @@ mod tests {
                 }
             }
         }
+        // A 2D model leaves its third displacements out (each field at most once here).
+        let displaced = memory.increments.iter().any(|i| i.field("DISP").is_some());
+        if plxs_core::results::plane::is_plane(&solved.model) && displaced {
+            assert!(out_of_plane > 0, "{what}");
+        }
         let dat = frd.with_extension("dat");
         let from_file = crate::dat::read_dat(&dat).ok();
         let input_text = std::fs::read_to_string(input).ok();
@@ -241,6 +281,57 @@ mod tests {
             "{what}"
         );
         true
+    }
+
+    /// The history output of a 2D model leaves the zero out-of-plane values out: from
+    /// memory without them, in the exported `.dat` file in full as CalculiX prints it.
+    #[test]
+    fn history_of_a_plane_model_leaves_out_of_plane_values_out() {
+        let dir = std::env::temp_dir().join(format!("plx-io-plane-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../solver/fixtures/plane/ebene-cpe4.inp");
+        let text = std::fs::read_to_string(fixture).unwrap().replace(
+            "*End step",
+            "*Node print, Nset=Internal_Selection-1_Displacement_Rotation-1\nU, RF\n\
+             *El print, Elset=Internal_Selection-1_Section-1\nS, E\n*End step",
+        );
+        let input = dir.join("plane.inp");
+        std::fs::write(&input, text).unwrap();
+        let (solved, _) = solve(&input, &dir).unwrap();
+        let import = history(&solved, None).unwrap();
+        let set_of = |import: &'_ DatImport, name: &str| {
+            let set = import.sets.iter().find(|s| s.name.contains(name));
+            set.cloned().unwrap()
+        };
+        let set = set_of(&import, "DISPLACEMENT");
+        let names = |field: &str| -> Vec<String> {
+            let field = set.fields.iter().find(|f| f.name == field).unwrap();
+            field.components.iter().map(|c| c.name.clone()).collect()
+        };
+        assert_eq!(names("DISPLACEMENTS"), ["U1", "U2"]);
+        assert_eq!(names("FORCES"), ["RF1", "RF2"]);
+        let set = set_of(&import, "SECTION");
+        let stresses = set.fields.iter().find(|f| f.name == "STRESSES").unwrap();
+        let stresses: Vec<&str> = stresses
+            .components
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        // Plane strain: no transverse shear, no thickness stress left out (it is not zero).
+        assert!(!stresses.contains(&"S13") && !stresses.contains(&"S23"));
+        assert!(stresses.contains(&"S33"));
+        assert!(stresses.contains(&"S12") && stresses.contains(&"MISES"));
+        // The files have every value.
+        let frd = dir.join("exported.frd");
+        export_calculix(&solved, &frd).unwrap();
+        let file = crate::dat::read_dat(&frd.with_extension("dat")).unwrap();
+        let displacements = (set_of(&file, "DISPLACEMENT").fields.into_iter())
+            .find(|f| f.name == "DISPLACEMENTS")
+            .unwrap();
+        assert_eq!(displacements.components.len(), 3);
+        assert!(file.warnings.is_empty(), "{:?}", file.warnings);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

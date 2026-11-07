@@ -154,6 +154,7 @@ impl<'a> Reader<'a> {
                         name: name.clone(),
                         values,
                         derived: false,
+                        out_of_plane: false,
                     })
                     .collect(),
             );

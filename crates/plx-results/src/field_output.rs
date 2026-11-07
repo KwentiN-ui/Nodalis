@@ -201,10 +201,15 @@ fn transformed_field(source: &Field, name: &str, rotations: &[[[f64; 3]; 3]]) ->
                     }
                 }
             };
+            let values: Vec<f32> = (0..count).map(|n| rotated(n) as f32).collect();
+            // A direction out of the plane of a 2D model stays unlisted while it stays
+            // zero (local directions turned about the plane's normal).
+            let out_of_plane = component.out_of_plane && values.iter().all(|v| *v == 0.0);
             Component {
                 name: component.name.clone(),
-                values: (0..count).map(|n| rotated(n) as f32).collect(),
+                values,
                 derived: component.derived,
+                out_of_plane,
             }
         })
         .collect();
@@ -225,6 +230,7 @@ fn new_field(name: &str, components: Vec<(&str, Vec<f32>)>) -> Field {
                 name: n.to_string(),
                 values,
                 derived: true,
+                out_of_plane: false,
             })
             .collect(),
     }
@@ -443,6 +449,7 @@ fn principal_field(name: &str, tensors: &[[f64; 6]], which: Principal) -> Field 
         name: name.to_string(),
         values,
         derived,
+        out_of_plane: false,
     };
     Field {
         name: name.to_string(),
@@ -625,6 +632,7 @@ mod tests {
                     name: n.to_string(),
                     values: v.to_vec(),
                     derived: false,
+                    out_of_plane: false,
                 })
                 .collect(),
         );

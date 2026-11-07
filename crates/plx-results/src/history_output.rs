@@ -584,6 +584,7 @@ mod tests {
                     .map(|c| if k == 2 && c[2] > 0.5 { top } else { 0.0 })
                     .collect(),
                 derived: false,
+                out_of_plane: false,
             };
             Field::new(
                 "DISP",

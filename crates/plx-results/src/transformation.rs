@@ -273,6 +273,7 @@ mod tests {
                     name: name.into(),
                     values: vec![value],
                     derived: false,
+                    out_of_plane: false,
                 })
                 .collect(),
         );
