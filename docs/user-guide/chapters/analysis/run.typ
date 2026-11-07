@@ -226,8 +226,8 @@ the cause and the remedy:
 - *Contact does not converge*: the same, while the contact status was still changing in the
   last iterations (points opening and closing again), with the remedies for contact.
 - *Temperatures do not converge* in a heat transfer step.
-- *More increments needed than allowed*: the step needs more increments than
-  #ui("Max. increments").
+- *More increments needed than allowed*: the step needs more increments than the
+  #ui("Increment limit") set under #ui("Advanced settings") of the step (off by default).
 - *Rigid body motion possible* for a singular stiffness matrix, with the model check of the
   solver that names the parts that move (@solver-model-check).
 - *Stiffness not positive definite*, *Not enough memory*, *Iterative equation solver failed*

@@ -20,6 +20,7 @@ pub mod dynamic;
 pub mod eigen;
 pub mod equations;
 pub mod fields;
+pub mod frames;
 pub mod heat;
 pub mod history;
 pub mod modal;

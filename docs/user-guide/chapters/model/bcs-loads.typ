@@ -163,13 +163,15 @@ boundary condition per direction; the Nodalis solver takes a curve per component
   linear between the points and constant before the first and after the last one.
 - A component with a table ignores the #ui("Amplitude") of the boundary condition or load; the
   other components still follow it.
-- Times count from the start of the step. A static step with #ui("Default") incrementation lasts
-  1 time unit: set the incrementation to #ui("Automatic") or #ui("Direct") and the time period
-  to the last time of the table, otherwise the model check warns "Table goes beyond the step".
-- The increments of a static step end at every point of the tables and amplitudes, so a
-  motion that changes direction is applied as given, even with a single large increment. A
-  linear static step is solved at each of these points too and shows them as increments. A
-  dynamic step chooses its time step fine enough for the shortest segment of the tables.
+- Times count from the start of the step. Set the #ui("Duration") of the step to the last
+  time of the table (a new static step lasts 1), otherwise the model check warns "Table goes
+  beyond the step". Choose the #ui("Frames") so that the results show the points of interest,
+  e.g. 2 frames for the times 1 and 2 above.
+- The increments of a nonlinear static step also end at every point of the tables and
+  amplitudes, between the frames too, so a motion that changes direction is applied along the
+  given path even with large increments. A linear step does not depend on the path and is
+  solved at the frames only. A dynamic step chooses its time step fine enough for the shortest
+  segment of the tables.
 
 == Loads <loads>
 

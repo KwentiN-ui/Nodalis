@@ -166,21 +166,27 @@ fn the_chosen_solver_is_written_with_the_procedure() {
     let (mesh, mut model) = cantilever(tip_force());
     // Automatic (the default) leaves the choice to the solver.
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(text.contains("*Static\n"), "{text}");
+    assert!(
+        text.contains("*Static, Frames=1\n1, 1, 0.00001, 1\n"),
+        "{text}"
+    );
     let StepKind::Static(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
     settings.solver = LinearSolverChoice::Direct;
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(text.contains("*Static, Solver=PaStiX\n"), "{text}");
+    assert!(
+        text.contains("*Static, Solver=PaStiX, Frames=1\n"),
+        "{text}"
+    );
     let StepKind::Static(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
     settings.solver = LinearSolverChoice::Iterative;
-    settings.incrementation = Incrementation::Direct;
+    settings.control.size = plx_model::IncrementSize::Fixed(0.5);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Static, Solver=Iterative Cholesky, Direct\n1, 1\n"),
+        text.contains("*Static, Solver=Iterative Cholesky, Direct, Frames=1\n0.5, 1\n"),
         "{text}"
     );
     // Frequency and buckle steps name it as well.
@@ -5542,7 +5548,7 @@ fn writes_heat_transfer_keywords() {
         "*Physical constants, Absolute zero=-273.15, Stefan Boltzmann=5.67e-11\n",
         "*Expansion, Zero=20\n0.00001, 0\n*Conductivity\n50, 0\n*Specific heat\n460000000, 0\n",
         "*Initial conditions, Type=Temperature\nINTERNAL_SELECTION-1_INITIAL_TEMPERATURE-1, 20\n",
-        "*Heat transfer, Deltmx=5\n",
+        "*Heat transfer, Deltmx=5, Frames=1\n",
         // Displacements and forces do not act in a heat transfer step.
         "*Boundary\nFIX, 11, 11, 20\n*Cflux",
         "*Cflux, op=New\nINTERNAL_SELECTION-1_FLUX-1, 11, 3\n",
@@ -5891,10 +5897,8 @@ fn solver_warms_the_bar_transiently() {
     let a = CONDUCTIVITY / (density * SPECIFIC_HEAT);
     // Half way to the end temperature at the far end.
     let period = 0.4 * length * length / a;
-    settings.increments.incrementation = Incrementation::Direct;
-    settings.increments.time_period = period;
-    settings.increments.initial_increment = period / 200.0;
-    settings.increments.max_increments = 1000;
+    settings.increments.duration = period;
+    settings.increments.control.size = plx_model::IncrementSize::Fixed(period / 200.0);
     let (mesh, mut model) = thermal_bar(
         StepKind::HeatTransfer(settings),
         vec![temperature(
@@ -5945,7 +5949,7 @@ fn solver_expands_the_bar_in_an_uncoupled_step() {
         StepKind::UncoupledTempDisp(HeatTransferStep::default()),
         "waermedehnung-entkoppelt",
     );
-    assert!(inp.contains("*Uncoupled temperature-displacement, Steady state\n"));
+    assert!(inp.contains("*Uncoupled temperature-displacement, Steady state, Frames=1\n"));
 }
 
 /// Writes and runs the heated bar in a step of the given kind; returns the input file.
@@ -6193,10 +6197,9 @@ fn solver_scales_a_load_by_its_amplitude() {
     let StepKind::Static(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
-    // A linear static step is solved once, at its end; increments need a nonlinear one.
+    // Four frames; the nonlinear procedure ends its increments on them.
     settings.nlgeom = true;
-    settings.incrementation = Incrementation::Direct;
-    settings.initial_increment = 0.25;
+    settings.frames = 4;
     let frd = run_solver("amplitude_force", &write_inp(&mesh, &model, "").unwrap()).unwrap();
     let index = frd.mesh.node_index(99).unwrap();
     let u3: Vec<f64> = (frd.increments.iter())
@@ -6293,9 +6296,8 @@ fn solver_reads_a_total_time_amplitude_with_shifts_across_steps() {
             unreachable!()
         };
         // The initial increment does not matter: a linear step is solved once.
-        settings.incrementation = Incrementation::Automatic;
-        settings.time_period = period;
-        settings.initial_increment = period / 2.0;
+        settings.duration = period;
+        settings.control.initial = Some(period / 2.0);
         model.steps.push(step);
     }
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -6361,16 +6363,14 @@ fn solver_scales_distributed_loads_and_displacements_by_amplitudes() {
     let StepKind::Static(settings) = &mut step.kind else {
         unreachable!()
     };
-    settings.incrementation = Incrementation::Automatic;
-    settings.time_period = 0.5;
-    settings.initial_increment = 0.5;
+    settings.duration = 0.5;
     let mut second = model.steps[0].clone();
     second.name = "Step-2".into();
     let StepKind::Static(settings) = &mut second.kind else {
         unreachable!()
     };
-    settings.time_period = 2.0;
-    settings.initial_increment = 1.0;
+    settings.duration = 2.0;
+    settings.control.initial = Some(1.0);
     model.steps.push(second);
     model.amplitudes = vec![
         amplitude("Rise", vec![[0.0, 0.0], [1.0, 1.0], [2.0, 3.0]]),
@@ -6831,7 +6831,7 @@ fn a_complex_frequency_step_is_solved_as_preload_eigenmodes_and_complex_modes() 
     for line in [
         // The preload is solved directly: the eigenmodes factorize the stiffness anyway.
         "** Rotor Preload +",
-        "*Step, Inc=100, Amplitude=Ramp\n*Static, Solver=PaStiX\n",
+        "*Step, Inc=4294967295, Amplitude=Ramp\n*Static, Solver=PaStiX, Frames=1\n",
         "** Rotor Eigenmodes +",
         "*Step, Perturbation, Inc=100, Amplitude=Ramp\n*Frequency, Storage=Yes\n4\n",
         "** Rotor +",
@@ -7644,7 +7644,8 @@ fn a_visco_step_and_a_creep_law_are_written() {
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
         "*Elastic\n210000, 0.3, 0\n*Creep, Law=Norton\n1e-15, 5, 0, 0\n",
-        "*Step, Inc=1000, Amplitude=Ramp\n*Visco, Cetol=0.0001\n1, 1000, 0.00001, 1e30\n",
+        // Unlimited increments, a first one of 1 s, ten frames over the creep time.
+        "*Step, Inc=4294967295, Amplitude=Ramp\n*Visco, Cetol=0.0001, Frames=10\n1, 1000, 0.01, 1000\n",
         "*El file\nS, E, PEEQ, NOE\n",
     ] {
         assert!(text.contains(line), "{line:?} missing in\n{text}");
@@ -10163,8 +10164,10 @@ fn solver_stretches_the_bar_plastically_with_nlgeom() {
     model.steps[0].field_outputs[1].variables.pop();
     model.steps[0].kind = StepKind::Static(StaticStep {
         nlgeom: true,
-        incrementation: Incrementation::Automatic,
-        initial_increment: 0.2,
+        control: plx_model::IncrementControl {
+            initial: Some(0.2),
+            ..Default::default()
+        },
         ..StaticStep::default()
     });
     let (_, max) = mesh.bounds().unwrap();
@@ -10643,9 +10646,11 @@ fn tabled_tip(period: f64) -> (FeMesh, FeModel) {
     let StepKind::Static(settings) = &mut step.kind else {
         unreachable!()
     };
-    settings.incrementation = Incrementation::Automatic;
-    settings.time_period = period;
-    settings.initial_increment = period;
+    settings.duration = period;
+    // One result frame per second; a single increment would be enough for the solver,
+    // which still ends one at the bend of the tables.
+    settings.frames = 2;
+    settings.control.size = plx_model::IncrementSize::Fixed(period);
     let mut displacement = Displacement::new([None, Some(0.0), Some(0.0), None, None, None]);
     displacement.behavior = Behavior::EachNode;
     displacement.tables[1] = Some(plx_model::ValueTable {
@@ -10750,36 +10755,52 @@ fn tip_motion(frd: &FrdImport) -> Vec<(f64, f64, f64)> {
         .collect()
 }
 
-/// The solver ends an increment at the bend of the tables, linear or not, so the tip goes
-/// down first and then up and to the side, although a single increment was asked for.
+/// The tip goes down first and then up and to the side: the results at the frames follow
+/// the tables. A nonlinear step with one increment over the whole step and a single frame
+/// still ends an increment at the bend of the tables, so the path is the one given.
 #[test]
 fn solver_moves_the_tip_along_tables_and_stops_at_their_points() {
-    for nlgeom in [false, true] {
-        let (mesh, mut model) = tabled_tip(2.0);
-        let StepKind::Static(settings) = &mut model.steps[0].kind else {
-            unreachable!()
-        };
-        settings.nlgeom = nlgeom;
-        let name = if nlgeom {
-            "value_tables_nlgeom"
-        } else {
-            "value_tables"
-        };
-        let Some(frd) = run_solver(name, &write_inp(&mesh, &model, "").unwrap()) else {
-            return;
-        };
-        let motion = tip_motion(&frd);
-        let at = |time: f64| {
-            (motion.iter())
-                .find(|(t, ..)| (t - time).abs() < 1e-9)
-                .unwrap_or_else(|| panic!("no increment at {time}: {motion:?}"))
-        };
-        let (_, u2, u3) = at(1.0);
-        assert!(u2.abs() < 1e-6 && (u3 + 0.8).abs() < 1e-6, "{motion:?}");
-        let (_, u2, u3) = at(2.0);
-        assert!(
-            (u2 - 4.0).abs() < 1e-6 && (u3 - 0.8).abs() < 1e-6,
-            "{motion:?}"
-        );
-    }
+    let (mesh, model) = tabled_tip(2.0);
+    let Some(frd) = run_solver("value_tables", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let motion = tip_motion(&frd);
+    let at = |time: f64| {
+        (motion.iter())
+            .find(|(t, ..)| (t - time).abs() < 1e-9)
+            .unwrap_or_else(|| panic!("no frame at {time}: {motion:?}"))
+    };
+    let (_, u2, u3) = at(1.0);
+    assert!(u2.abs() < 1e-6 && (u3 + 0.8).abs() < 1e-6, "{motion:?}");
+    let (_, u2, u3) = at(2.0);
+    assert!(
+        (u2 - 4.0).abs() < 1e-6 && (u3 - 0.8).abs() < 1e-6,
+        "{motion:?}"
+    );
+
+    let (mesh, mut model) = tabled_tip(2.0);
+    let StepKind::Static(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.nlgeom = true;
+    settings.frames = 1;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let dir = run_dir("value_tables_nlgeom").unwrap();
+    let (log, finished) = solve_in(&dir, "value_tables_nlgeom", &text);
+    let frd = read_frd(&dir.join("value_tables_nlgeom.frd")).unwrap();
+    remove_run_dir(&dir);
+    assert!(finished, "{}", log.join("\n"));
+    let times: Vec<&String> = log
+        .iter()
+        .filter(|l| l.contains("actual step time"))
+        .collect();
+    assert_eq!(times.len(), 2, "{times:?}");
+    assert!(
+        times[0].contains("1e0") && times[1].contains("2e0"),
+        "{times:?}"
+    );
+    let motion = tip_motion(&frd);
+    assert_eq!(motion.len(), 1, "only the frame at the end: {motion:?}");
+    let (t, u2, u3) = motion[0];
+    assert!((t - 2.0).abs() < 1e-9 && (u2 - 4.0).abs() < 1e-6 && (u3 - 0.8).abs() < 1e-6);
 }

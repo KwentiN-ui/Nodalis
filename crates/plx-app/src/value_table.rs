@@ -94,7 +94,7 @@ pub fn value_with_table(
                 }
                 ui.weak(
                     "Step time and value; linear between the points, constant before the \
-                     first and after the last. The increments of a static step end at every \
+                     first and after the last. Nonlinear static increments end at every \
                      point.",
                 );
                 ui.horizontal(|ui| {

@@ -7,6 +7,7 @@ use plxs_assembly::{
     ElementTable, Spc, assemble_stiffness, load_vector, rotate_concentrated_loads,
 };
 use plxs_core::state::IntegrationPointField;
+use plxs_core::step::Incrementation;
 use plxs_core::step::Procedure as ProcedureKind;
 use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Step};
 use plxs_linalg::SparseMatrix;
@@ -32,17 +33,16 @@ impl Procedure for StaticLinear {
                 "StaticLinear needs a *STATIC step".into(),
             ));
         };
-        // A linear step is solved at its end, and at every point of the amplitudes (and
-        // value tables) its loads and boundaries follow inside the step, where the
-        // curve bends: the solution only depends on the loads of the moment, so these are
-        // the increments that show the whole motion. The initial increment and `DIRECT` do
-        // not matter.
+        // A linear step is solved once per result frame (`FRAMES=`, Nodalis), with the
+        // one factorization; without frames once, at its end: CalculiX ignores the initial
+        // increment and `DIRECT` of a purely linear *STATIC step and reports a single
+        // increment of the size of the period (checked with ccx 2.21).
         let period = parameters.increments.period();
         if period <= 0.0 {
             return Err(Error::input("*STATIC", "the step period must be positive"));
         }
-        let mut times = step.amplitude_times(ctx.model, ctx.state.total_time, period);
-        times.push(period);
+        let count = parameters.increments.frames.unwrap_or(1).max(1);
+        let framed = parameters.increments.frames.is_some();
 
         // Stiffness: assembled once per model, reused by every linear step.
         if ctx.stiffness.is_none() {
@@ -58,7 +58,7 @@ impl Procedure for StaticLinear {
             )));
         }
         let k = ctx.stiffness.take().unwrap();
-        let outcome = Self::increments(ctx, step, progress, &k, period, &times);
+        let outcome = Self::increments(ctx, step, progress, &k, period, framed, count);
         ctx.stiffness = Some(k);
         outcome
     }
@@ -72,7 +72,8 @@ impl StaticLinear {
         progress: &mut dyn Progress,
         k: &SparseMatrix,
         period: f64,
-        times: &[f64],
+        framed: bool,
+        count: u32,
     ) -> Result<StepOutcome> {
         let total_dofs = ctx.table.dofs.len();
 
@@ -143,14 +144,12 @@ impl StaticLinear {
         let mut stresses = ctx.table.layout.field(6);
         let mut strains = ctx.table.layout.field(6);
         let mut reactions = vec![0.0; total_dofs];
-        let count = times.len() as u32;
-        let mut before = 0.0;
-        for (increment, &time) in (1..).zip(times) {
+        for increment in 1..=count {
             if ctx.cancel.is_cancelled() {
                 return Ok(StepOutcome::Cancelled);
             }
-            let size = time - before;
-            before = time;
+            let time = Incrementation::frame_time(period, count, increment);
+            let size = time - Incrementation::frame_time(period, count, increment - 1);
             let total = start_total + time;
             progress.event(ProgressEvent::Increment {
                 step: ctx.step_number,
@@ -324,7 +323,7 @@ impl StaticLinear {
             ctx.state.strains = strains.clone();
             ctx.state.loads = Some(applied);
 
-            if writes_increment(step, increment, count) {
+            if framed || writes_increment(step, increment, count) {
                 write_increment(
                     ctx, step, increment, time, total, &u, &reactions, &stresses, &strains, None,
                 )?;
