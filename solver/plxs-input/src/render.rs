@@ -938,6 +938,9 @@ fn procedure(out: &mut Out, procedure: &Procedure) {
             if settings.increments.direct {
                 header.push_str(", Direct");
             }
+            if settings.event_frames {
+                header.push_str(", Events");
+            }
             out.keyword(&header);
             increments_line(out, &settings.increments);
             if let Some(rayleigh) = &settings.rayleigh {

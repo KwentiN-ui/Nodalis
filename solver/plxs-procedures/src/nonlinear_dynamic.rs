@@ -44,7 +44,7 @@ use plxs_assembly::{
 };
 use plxs_constraints::{ConstraintSet, ModelConstraints, ReducedPattern};
 use plxs_contact::Evaluation;
-use plxs_core::state::{ContactPointState, IntegrationPointField, NodalField};
+use plxs_core::state::{ContactPointState, ContactStatus, IntegrationPointField, NodalField};
 use plxs_core::step::{Procedure as ProcedureKind, Rayleigh};
 use plxs_core::{Convergence, Divergence, Error, Progress, ProgressEvent, Result, Step, Stop};
 use plxs_linalg::{SparseMatrix, Unknowns};
@@ -70,6 +70,10 @@ const MAX_SPLITS: u32 = 6;
 /// How often an increment may be halved for an impact (see [`IMPACT_ENERGY`]): down to a
 /// few nanoseconds of a millisecond, only around the impact.
 const MAX_IMPACT_SPLITS: u32 = 16;
+/// How many event frames (`*DYNAMIC, EVENTS`) an increment writes at most: the
+/// sub-increments at which a contact closes or opens and those of an impact, thinned
+/// evenly beyond this.
+const MAX_EVENT_FRAMES: usize = 32;
 /// Largest error of the contact's energy in a (sub-)increment relative to the energy of the
 /// motion (kinetic energy, work of the loads, energy of the springs).
 const IMPACT_ENERGY: f64 = 1e-3;
@@ -145,6 +149,8 @@ struct Setup<'s> {
     /// springs of the current sub-increment.
     has_contact: bool,
     m_contact: Option<SparseMatrix>,
+    /// `EVENTS`: result frames at the contact events between the increments.
+    event_frames: bool,
     /// The size of the model (diagonal of its bounding box).
     size: f64,
     /// Linear elastic material without `NLGEOM` (a small-deformation contact step): the
@@ -317,6 +323,7 @@ impl Procedure for NonlinearDynamic {
             energies_wanted: !energy_requests(step).is_empty(),
             has_contact,
             m_contact: None,
+            event_frames: parameters.event_frames && has_contact,
             size: model_size(&ctx.model.nodes.coordinates),
             linear_elastic: !step.nlgeom && !table.has_nonlinear_material(),
             k0_embedded: None,
@@ -458,6 +465,10 @@ impl Procedure for NonlinearDynamic {
         // Increments in a row whose sub-increments converged fast with a small error.
         let mut calm = 0u32;
         let mut increment = 0u32;
+        // The number of the frames written (the increments of the results): the events of
+        // an increment take numbers of their own before it.
+        let mut record = 0u32;
+        let mut events: Vec<At> = Vec::new();
         while state.time < period * (1.0 - 1e-12) {
             if ctx.cancel.is_cancelled() {
                 return Ok(StepOutcome::Cancelled);
@@ -500,6 +511,7 @@ impl Procedure for NonlinearDynamic {
             let (next, iterations) = loop {
                 let started = std::time::Instant::now();
                 let mut current = state.clone();
+                events.clear();
                 ctx.profile.add(Phase::Vectors, started);
                 let mut iterations = 0u32;
                 let mut slowest = 0u32;
@@ -521,6 +533,7 @@ impl Procedure for NonlinearDynamic {
                         end,
                         increment,
                         (0, 0),
+                        &mut events,
                     )? {
                         Ok((next, its)) => {
                             let error =
@@ -533,6 +546,13 @@ impl Procedure for NonlinearDynamic {
                             if error > ACCURACY && parts < ACCURACY_PARTS && increment > 1 {
                                 too_coarse = true;
                                 break;
+                            }
+                            // A contact that closed or opened within a part is an event.
+                            if part < parts
+                                && setup.event_frames
+                                && contact_changed(&current, &next)
+                            {
+                                events.push(next.clone());
                             }
                             current = next;
                             iterations += its;
@@ -599,74 +619,47 @@ impl Procedure for NonlinearDynamic {
                 ctx.state.contact.clone_from(&state.contact_states);
                 ctx.contact.last = Some(evaluation.clone());
             }
-            // Outputs: the internal and contact forces carried to the reference points.
+            // Outputs: the event frames of the increment, then the increment itself.
             let started = std::time::Instant::now();
-            let mut reactions = state.internal.clone();
-            if setup.has_contact {
-                for (r, c) in reactions.iter_mut().zip(&state.contact) {
-                    *r += c;
-                }
+            if events.len() > MAX_EVENT_FRAMES {
+                let n = events.len();
+                let mut kept = 0;
+                events.retain(|_| {
+                    kept += 1;
+                    (kept - 1) * MAX_EVENT_FRAMES / n != kept * MAX_EVENT_FRAMES / n
+                });
             }
-            let constraints = rotated(ctx.constraints, &setup, &state.motion.u);
-            constraints
-                .as_ref()
-                .unwrap_or(ctx.constraints)
-                .transfer_forces(&mut reactions, &setup.spc_dofs, &setup.active);
-            if !requests.is_empty() {
-                write_energies(
-                    ctx.results,
+            for event in events.drain(..) {
+                record += 1;
+                write_frame(
+                    ctx,
+                    &setup,
+                    &event,
+                    record,
                     &requests,
-                    &state.energies,
-                    (ctx.step_number, increment, total),
+                    carried_nodal.as_deref(),
+                    true,
                 );
             }
-            if crate::static_linear::writes_increment(
+            record += 1;
+            let fields = crate::static_linear::writes_increment(
                 step,
                 increment,
                 if last { increment } else { u32::MAX },
-            ) {
-                write_increment(
-                    ctx,
-                    step,
-                    increment,
-                    total,
-                    &state.motion,
-                    &reactions,
-                    (&state.stresses, &state.strains),
-                    carried_nodal.as_deref(),
-                    Some(&state.material),
-                );
-            }
-            crate::history::write_history_with_velocities(
-                ctx.results,
-                ctx.model,
-                ctx.table,
-                step,
-                (ctx.step_number, increment, total),
-                (&state.motion.u, Some(&state.motion.v)),
-                &reactions,
-                &state.stresses,
-                &state.strains,
-                Some(&state.material),
             );
-            if let Some(evaluation) = &ctx.contact.last {
-                for request in &step.outputs.contact_print {
-                    let blocks = plxs_contact::output::history_blocks(
-                        &ctx.contact,
-                        evaluation,
-                        request,
-                        &ctx.model.nodes.ids,
-                        ctx.step_number,
-                        increment,
-                        total,
-                    );
-                    ctx.results.history.extend(blocks);
-                }
-            }
+            write_frame(
+                ctx,
+                &setup,
+                &state,
+                record,
+                &requests,
+                carried_nodal.as_deref(),
+                fields,
+            );
             ctx.profile.add(Phase::Results, started);
             ctx.sta.push(StaRow {
                 step: ctx.step_number,
-                increment,
+                increment: record,
                 attempt: 1,
                 iterations,
                 total_time: total,
@@ -910,6 +903,100 @@ fn constraint_set(ctx: &ProcedureContext<'_>, setup: &Setup<'_>, u: &[f64]) -> C
     }
 }
 
+/// Whether any contact point is closed.
+fn any_closed(at: &At) -> bool {
+    at.contact_states
+        .iter()
+        .flatten()
+        .any(|p| p.status != ContactStatus::Open)
+}
+
+/// Whether a contact point closed or opened between the two states.
+fn contact_changed(a: &At, b: &At) -> bool {
+    let closed = |at: &At| {
+        at.contact_states
+            .iter()
+            .flatten()
+            .map(|p| p.status != ContactStatus::Open)
+            .collect::<Vec<bool>>()
+    };
+    closed(a) != closed(b)
+}
+
+/// Writes the results of a state as frame `record` of the step: the energies, the fields
+/// (when `fields`), the history outputs and the contact print blocks. The reactions are the
+/// internal and contact forces carried to the reference points of the constraints.
+fn write_frame(
+    ctx: &mut ProcedureContext<'_>,
+    setup: &Setup<'_>,
+    state: &At,
+    record: u32,
+    requests: &[(String, Vec<String>)],
+    carried_nodal: Option<&[f64]>,
+    fields: bool,
+) {
+    let step = setup.step;
+    let total = setup.start_total + state.time;
+    let mut reactions = state.internal.clone();
+    if setup.has_contact {
+        for (r, c) in reactions.iter_mut().zip(&state.contact) {
+            *r += c;
+        }
+    }
+    let constraints = rotated(ctx.constraints, setup, &state.motion.u);
+    constraints
+        .as_ref()
+        .unwrap_or(ctx.constraints)
+        .transfer_forces(&mut reactions, &setup.spc_dofs, &setup.active);
+    if !requests.is_empty() {
+        write_energies(
+            ctx.results,
+            requests,
+            &state.energies,
+            (ctx.step_number, record, total),
+        );
+    }
+    if fields {
+        write_increment(
+            ctx,
+            step,
+            record,
+            total,
+            &state.motion,
+            &reactions,
+            (&state.stresses, &state.strains),
+            carried_nodal,
+            Some(&state.material),
+        );
+    }
+    crate::history::write_history_with_velocities(
+        ctx.results,
+        ctx.model,
+        ctx.table,
+        step,
+        (ctx.step_number, record, total),
+        (&state.motion.u, Some(&state.motion.v)),
+        &reactions,
+        &state.stresses,
+        &state.strains,
+        Some(&state.material),
+    );
+    if let Some(evaluation) = &state.evaluation {
+        for request in &step.outputs.contact_print {
+            let blocks = plxs_contact::output::history_blocks(
+                &ctx.contact,
+                evaluation,
+                request,
+                &ctx.model.nodes.ids,
+                ctx.step_number,
+                record,
+                total,
+            );
+            ctx.results.history.extend(blocks);
+        }
+    }
+}
+
 /// Integrates from `from` to step time `t1`; a failed attempt is split into two halves
 /// (`cuts` such splits so far, at most [`MAX_SPLITS`]), and so is an attempt in which a
 /// contact closes or opens too abruptly (`depth` splits of any kind so far, at most
@@ -924,6 +1011,7 @@ fn advance(
     t1: f64,
     increment: u32,
     (depth, cuts): (u32, u32),
+    events: &mut Vec<At>,
 ) -> Result<std::result::Result<(At, u32), Failed>> {
     let (reason, cut) = match attempt(ctx, setup, equations, progress, from, t1, increment, depth)?
     {
@@ -946,13 +1034,30 @@ fn advance(
     let middle = 0.5 * (from.time + t1);
     let next = (depth + 1, cuts + cut);
     let (half, first) = match advance(
-        ctx, setup, equations, progress, from, middle, increment, next,
+        ctx, setup, equations, progress, from, middle, increment, next, events,
     )? {
         Ok(done) => done,
         Err(failed) => return Ok(Err(failed)),
     };
-    match advance(ctx, setup, equations, progress, &half, t1, increment, next)? {
-        Ok((end, second)) => Ok(Ok((end, first + second))),
+    // The middle is an event: the moment a contact closed or opened, or a sub-increment of
+    // an impact (a split for its energy error) while the contact is closed. The halvings
+    // that only approach the moment of touch are no events.
+    let pushed =
+        setup.event_frames && (contact_changed(from, &half) || (cut == 0 && any_closed(&half)));
+    if pushed {
+        events.push(half.clone());
+    }
+    let position = events.len();
+    match advance(
+        ctx, setup, equations, progress, &half, t1, increment, next, events,
+    )? {
+        Ok((end, second)) => {
+            // The last state before a contact closed or opened in the second half.
+            if setup.event_frames && !pushed && contact_changed(&half, &end) {
+                events.insert(position, half);
+            }
+            Ok(Ok((end, first + second)))
+        }
         Err(failed) => Ok(Err(failed)),
     }
 }

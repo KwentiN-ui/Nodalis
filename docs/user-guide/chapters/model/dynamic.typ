@@ -20,6 +20,11 @@ structure is damped; Nodalis chooses the time step and the integration from that
   [Frames], [The number of result frames kept, evenly spaced over the duration; the last one
     at its end. The dialog shows the time between two frames. 200 frames are plenty for an
     animation; for the history of a fast vibration use at least two frames per period.],
+  [Frames at contact events], [On, the results also get a frame whenever a contact closes
+    or opens and at the sub-steps the solver takes through an impact, between the evenly
+    spaced frames (at most 32 per time step). The impact force and the moment of touch
+    then show in the history and on the timeline even when the time steps are far longer
+    than the impact. Direct integration only.],
   [Damping], [#ui("None"): undamped, only the numerical damping of the integration removes
     energy. #ui("Damping ratio"): the viscous damping ratio of the structure (0.02 = 2 % of
     critical damping, typical for steel structures), applied as Rayleigh damping

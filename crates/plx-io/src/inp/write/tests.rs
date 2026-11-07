@@ -2093,7 +2093,7 @@ fn a_dynamic_step_with_large_deformations_is_nonlinear() {
     assert!(lowered(&mesh, &model).steps[0].nlgeom);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Step, Nlgeom, Inc=61, Amplitude=Step\n*Dynamic, Direct\n"),
+        text.contains("*Step, Nlgeom, Inc=61, Amplitude=Step\n*Dynamic, Direct, Events\n"),
         "{text}"
     );
 }
@@ -2149,7 +2149,7 @@ fn a_dynamic_step_is_written() {
     let (mesh, mut model) = dynamic_cantilever(1.5e-3, 2.5e-5, Some(damping));
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
-        "*Step, Inc=61, Amplitude=Step\n*Dynamic, Direct\n0.000025, 0.0015\n\
+        "*Step, Inc=61, Amplitude=Step\n*Dynamic, Direct, Events\n0.000025, 0.0015\n\
          *Damping, Alpha=0, Beta=0.00004\n",
         "*Cload, op=New\n",
         "*Node file\nRF, U, V, A\n",

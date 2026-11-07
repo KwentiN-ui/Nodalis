@@ -4149,6 +4149,7 @@ fn dynamic_step(settings: &DynamicStep, model: &FeModel, step: &Step) -> (ir::St
         },
         rayleigh,
         damping_ratio,
+        event_frames: settings.event_frames,
     }));
     ir_step.max_increments = (integration.increments(settings) + 1).min(u32::MAX as u64) as u32;
     ir_step.default_amplitude = ir::step::DefaultAmplitude::Step;

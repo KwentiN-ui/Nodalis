@@ -1044,6 +1044,10 @@ pub struct DynamicStep {
     pub duration: f64,
     /// Result frames written over the duration, evenly spaced, the last one at the end.
     pub frames: u32,
+    /// Also a frame whenever a contact closes or opens and at the sub-steps of an impact,
+    /// between the evenly spaced frames (direct integration only).
+    #[serde(default = "default_true")]
+    pub event_frames: bool,
     pub damping: Damping,
     pub time_step: TimeStep,
     /// Highest frequency the integration must resolve: the time step is at most
@@ -1057,12 +1061,17 @@ pub struct DynamicStep {
     pub large_deformations: bool,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Default for DynamicStep {
     fn default() -> Self {
         Self {
             method: DynamicMethod::Direct,
             duration: 1.0,
             frames: 200,
+            event_frames: true,
             damping: Damping::None,
             time_step: TimeStep::Automatic,
             frequency_limit: None,
