@@ -2759,18 +2759,21 @@ fn complex_frequency_blocks(
     if let Some(problem) = settings.problem() {
         return Err(invalid(problem));
     }
-    let Some((_, axis)) = unit_vector(settings.axis) else {
-        return Err(invalid("the rotation axis has no direction".into()));
+    let (point, axis) = settings.axis_in(context.model).map_err(invalid)?;
+    // The rotating elements; no parts picked: all of them.
+    let region = if settings.rotates_whole_model() {
+        Region::Parts(sets.mesh.parts.iter().map(|p| p.name.clone()).collect())
+    } else {
+        settings.region.clone()
     };
-    let parts: Vec<String> = sets.mesh.parts.iter().map(|p| p.name.clone()).collect();
-    let set = sets.element_set(&format!("{}_Rotation", step.name), &Region::Parts(parts))?;
+    let set = sets.element_set(&format!("{}_Rotation", step.name), &region)?;
     let rotation = Card::Dload {
         op_new: false,
         items: vec![dload(
             element_set_ref(&set),
             ir::step::DistributedLoadKind::Centrifugal {
                 omega_squared: settings.speed * settings.speed,
-                point: settings.point,
+                point,
                 axis,
             },
             &None,
