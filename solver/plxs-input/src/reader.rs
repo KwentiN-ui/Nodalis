@@ -13,8 +13,8 @@ use plxs_core::contact::{
 };
 use plxs_core::element::{Element, ElementType};
 use plxs_core::material::{
-    Conductivity, Creep, CreepRow, Density, Elastic, ElasticRow, Expansion, Hardening, Material,
-    Plastic, PlasticRow, SpecificHeat, TemperatureValue,
+    Conductivity, Creep, CreepRow, Density, Elastic, ElasticRow, Expansion, Hardening,
+    Hyperelastic, HyperelasticModel, Material, Plastic, PlasticRow, SpecificHeat, TemperatureValue,
 };
 use plxs_core::mesh::{ElementId, ElementRef, NodeId, NodeRef, Surface, SurfaceFace};
 use plxs_core::model::{Analysis, DesignVariables, RestartRead};
@@ -76,7 +76,6 @@ const KNOWN_UNSUPPORTED: &[&str] = &[
     "*GEOMETRICTOLERANCE",
     "*GREEN",
     "*HCF",
-    "*HYPERELASTIC",
     "*HYPERFOAM",
     "*INTERPOLATION",
     "*KINEMATIC",
@@ -237,6 +236,7 @@ impl Reader {
             "*ELASTIC" => self.elastic(k, data)?,
             "*PLASTIC" => self.plastic(k, data)?,
             "*CREEP" => self.creep(k, data)?,
+            "*HYPERELASTIC" => self.hyperelastic(k, data)?,
             "*EXPANSION" => self.expansion(k, data)?,
             "*CONDUCTIVITY" => {
                 let rows = self.temperature_table(k, data)?;
@@ -640,6 +640,68 @@ impl Reader {
             });
         }
         self.current_material(k)?.creep = Some(Creep { rows });
+        Ok(())
+    }
+
+    /// `*HYPERELASTIC` with one of the strain energy models; the constants of the first
+    /// temperature (temperature dependent constants are not supported).
+    fn hyperelastic(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
+        k.check_parameters(&[
+            "NEO HOOKE",
+            "MOONEY-RIVLIN",
+            "POLYNOMIAL",
+            "REDUCED POLYNOMIAL",
+            "YEOH",
+            "OGDEN",
+            "ARRUDA-BOYCE",
+            "N",
+        ])?;
+        let order = || -> Result<u8, Error> {
+            match k.integer("N")?.unwrap_or(1) {
+                n @ 1..=3 => Ok(n as u8),
+                n => Err(k.error(format!("N={n} is not supported, only 1 to 3"))),
+            }
+        };
+        let model = if k.has("NEO HOOKE") {
+            HyperelasticModel::NeoHooke
+        } else if k.has("MOONEY-RIVLIN") {
+            HyperelasticModel::MooneyRivlin
+        } else if k.has("REDUCED POLYNOMIAL") {
+            HyperelasticModel::ReducedPolynomial(order()?)
+        } else if k.has("POLYNOMIAL") {
+            HyperelasticModel::Polynomial(order()?)
+        } else if k.has("YEOH") {
+            HyperelasticModel::Yeoh
+        } else if k.has("OGDEN") {
+            HyperelasticModel::Ogden(order()?)
+        } else if k.has("ARRUDA-BOYCE") {
+            HyperelasticModel::ArrudaBoyce
+        } else {
+            return Err(k.error(
+                "no strain energy model given (NEO HOOKE, MOONEY-RIVLIN, POLYNOMIAL, \
+                 REDUCED POLYNOMIAL, YEOH, OGDEN or ARRUDA-BOYCE)",
+            ));
+        };
+        let mut values = Vec::new();
+        for d in data {
+            values.extend(numbers(k, d)?);
+        }
+        let count = model.constant_count();
+        if values.len() < count {
+            return Err(k.error(format!(
+                "{count} constants expected, {} given",
+                values.len()
+            )));
+        }
+        // One temperature: the constants and an optional temperature.
+        if values.len() > count + 1 {
+            return Err(k.error("temperature dependent constants are not supported"));
+        }
+        values.truncate(count);
+        self.current_material(k)?.hyperelastic = Some(Hyperelastic {
+            model,
+            constants: values,
+        });
         Ok(())
     }
 

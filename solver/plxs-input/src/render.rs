@@ -252,6 +252,22 @@ fn materials(out: &mut Out, model: &Model) {
                 out.numbers(&[row.young, row.poisson, row.temperature]);
             }
         }
+        if let Some(hyper) = &material.hyperelastic {
+            use plxs_core::material::HyperelasticModel as H;
+            let model = match hyper.model {
+                H::NeoHooke => "Neo Hooke".to_string(),
+                H::MooneyRivlin => "Mooney-Rivlin".to_string(),
+                H::Polynomial(n) => format!("Polynomial, N={n}"),
+                H::ReducedPolynomial(n) => format!("Reduced polynomial, N={n}"),
+                H::Yeoh => "Yeoh".to_string(),
+                H::Ogden(n) => format!("Ogden, N={n}"),
+                H::ArrudaBoyce => "Arruda-Boyce".to_string(),
+            };
+            out.keyword(&format!("*Hyperelastic, {model}"));
+            let mut values = hyper.constants.clone();
+            values.push(0.0);
+            out.numbers(&values);
+        }
         if let Some(plastic) = &material.plastic {
             let hardening = match plastic.hardening {
                 plxs_core::material::Hardening::Isotropic => "Isotropic",

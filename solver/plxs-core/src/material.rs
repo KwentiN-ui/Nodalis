@@ -9,6 +9,9 @@ pub struct Material {
     /// Upper case name.
     pub name: String,
     pub elastic: Option<Elastic>,
+    /// Hyperelasticity (`*HYPERELASTIC`); replaces `elastic` where both are given.
+    #[serde(default)]
+    pub hyperelastic: Option<Hyperelastic>,
     pub plastic: Option<Plastic>,
     pub creep: Option<Creep>,
     pub expansion: Option<Expansion>,
@@ -28,6 +31,60 @@ pub struct ElasticRow {
     pub young: f64,
     pub poisson: f64,
     pub temperature: f64,
+}
+
+/// An isotropic hyperelastic material (`*HYPERELASTIC`): the strain energy model and its
+/// constants in the order of CalculiX's data lines, without the temperature.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Hyperelastic {
+    pub model: HyperelasticModel,
+    pub constants: Vec<f64>,
+}
+
+/// The strain energy potentials of `*HYPERELASTIC`. With the isochoric invariants `Ī1`,
+/// `Ī2`, the isochoric principal stretches `λ̄` and the volume ratio `J`:
+///
+/// - polynomial: `W = Σ C_ij (Ī1 - 3)^i (Ī2 - 3)^j + Σ (J - 1)^(2k) / D_k`, of which
+///   Neo-Hooke (`C10`), Mooney-Rivlin (`C10`, `C01`), the reduced polynomial (`j = 0`) and
+///   Yeoh (the reduced polynomial of order 3) are special cases;
+/// - Ogden: `W = Σ 2 μ_p / α_p² (λ̄1^α_p + λ̄2^α_p + λ̄3^α_p - 3) + Σ (J - 1)^(2k) / D_k`;
+/// - Arruda-Boyce: the first five terms of the inverse Langevin series in `Ī1` with the
+///   initial shear modulus parameter `μ` and the locking stretch `λm`, plus
+///   `((J² - 1) / 2 - ln J) / D`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HyperelasticModel {
+    /// `C10, D1`.
+    NeoHooke,
+    /// `C10, C01, D1`.
+    MooneyRivlin,
+    /// `C10, C01, C20, C11, C02, C30, C21, C12, C03` up to order `N`, then `D1 .. DN`.
+    Polynomial(u8),
+    /// `C10, C20, C30` up to order `N`, then `D1 .. DN`.
+    ReducedPolynomial(u8),
+    /// `C10, C20, C30, D1, D2, D3`.
+    Yeoh,
+    /// `μ1, α1, .. μN, αN`, then `D1 .. DN`.
+    Ogden(u8),
+    /// `μ, λm, D`.
+    ArrudaBoyce,
+}
+
+impl HyperelasticModel {
+    /// Number of constants on the data lines (without the temperature).
+    pub fn constant_count(self) -> usize {
+        match self {
+            Self::NeoHooke => 2,
+            Self::MooneyRivlin => 3,
+            Self::Polynomial(n) => {
+                let n = n as usize;
+                n * (n + 3) / 2 + n
+            }
+            Self::ReducedPolynomial(n) => 2 * n as usize,
+            Self::Yeoh => 6,
+            Self::Ogden(n) => 3 * n as usize,
+            Self::ArrudaBoyce => 3,
+        }
+    }
 }
 
 /// Rate-independent plasticity (`*PLASTIC`) with a stress / plastic strain table per

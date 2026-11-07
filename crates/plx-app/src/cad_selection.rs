@@ -489,6 +489,7 @@ mod tests {
                 expansion: None,
                 plastic: None,
                 creep: None,
+                hyperelastic: None,
             }],
             sections: vec![Section {
                 name: "Section-1".into(),
@@ -653,6 +654,7 @@ mod tests {
                 expansion: None,
                 plastic: None,
                 creep: None,
+                hyperelastic: None,
             }],
             sections: vec![Section {
                 name: "Section-1".into(),

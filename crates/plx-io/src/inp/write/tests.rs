@@ -4595,6 +4595,7 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
             expansion: None,
             plastic: None,
             creep: None,
+            hyperelastic: None,
         }],
         sections: vec![Section {
             name: "Beam-1".into(),
@@ -10575,4 +10576,33 @@ fn solver_clamps_an_edge_by_a_fixed_joint_to_the_point_of_another_clamp() {
     );
     assert!(ub < -1e-5, "{ub}");
     assert!((ua - ub).abs() < 1e-6 * ub.abs(), "{ua} != {ub}");
+}
+
+/// A hyperelastic material is written with its model, constants and the compressibility
+/// from Poisson's ratio, in place of the linear elasticity, and switches NLGEOM on in the
+/// steps that deform it (direct dynamics, not modal superposition).
+#[test]
+fn a_hyperelastic_material_is_written_and_switches_nlgeom_on() {
+    let (mesh, mut model) = dynamic_cantilever(1.5e-3, 2.5e-5, None);
+    model.materials[0].hyperelastic = Some(
+        plx_model::Hyperelastic::neo_hooke(1e6, 0.49)
+            .with_model(plx_model::HyperelasticModel::Yeoh),
+    );
+    let analysis = lowered(&mesh, &model);
+    assert!(analysis.steps[0].nlgeom);
+    let material = &analysis.model.materials[0];
+    assert!(material.elastic.is_none());
+    let hyper = material.hyperelastic.as_ref().unwrap();
+    assert_eq!(hyper.model, ir::material::HyperelasticModel::Yeoh);
+    let bulk = 2.0 * 1e6 * 1.49 / (3.0 * 0.02);
+    assert_eq!(hyper.constants.len(), 6);
+    assert!((hyper.constants[0] - 0.5e6).abs() < 1e-6);
+    assert!((hyper.constants[3] - 2.0 / bulk).abs() < 1e-18);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Hyperelastic, Yeoh\n"), "{text}");
+    let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.method = plx_model::DynamicMethod::Modal { modes: 5 };
+    assert!(!lowered(&mesh, &model).steps.iter().any(|s| s.nlgeom));
 }

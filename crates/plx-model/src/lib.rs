@@ -29,6 +29,8 @@ mod field;
 pub mod fingerprint;
 mod geometry;
 mod history;
+pub mod hyperelastic;
+pub mod hyperelastic_fit;
 pub mod library;
 mod measure;
 mod mesh_set;
@@ -93,6 +95,7 @@ pub use geometry::{
     MeshingParameters, Recombination,
 };
 pub use history::{HistoryKind, HistoryOutput, Totals};
+pub use hyperelastic::{Hyperelastic, HyperelasticModel, TestMode};
 pub use library::MaterialLibrary;
 pub use measure::{Extreme, MeasureKind, MeasureRegion, POINT_AXES};
 pub use mesh_set::{MeshSet, SetKind};
@@ -537,6 +540,9 @@ pub struct Material {
     pub name: String,
     pub density: Option<f64>,
     pub elastic: Option<Elastic>,
+    /// Hyperelasticity: a strain energy model for large strains in place of `elastic`.
+    #[serde(default)]
+    pub hyperelastic: Option<Hyperelastic>,
     /// Thermal conductivity (`*CONDUCTIVITY`), for heat transfer.
     #[serde(default)]
     pub conductivity: Option<f64>,
@@ -552,6 +558,17 @@ pub struct Material {
     /// Creep by Norton's law (`*CREEP`), which acts in Visco steps.
     #[serde(default)]
     pub creep: Option<Creep>,
+}
+
+impl Material {
+    /// The elastic constants at small strains: the linear elasticity, or the initial moduli
+    /// of a hyperelastic material.
+    pub fn small_strain_elastic(&self) -> Option<Elastic> {
+        match &self.hyperelastic {
+            Some(hyper) => Some(hyper.small_strain()),
+            None => self.elastic,
+        }
+    }
 }
 
 /// Norton's creep law (`*CREEP, LAW=NORTON`): the equivalent creep strain rate is

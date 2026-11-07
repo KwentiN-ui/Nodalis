@@ -1163,6 +1163,109 @@ mod tests {
         save_project(std::path::Path::new(&path), &project).unwrap();
     }
 
+    /// Writes a project of a rubber pad (Yeoh) on a fixed base, compressed by 30 % from
+    /// the top, for the user guide's screenshots of hyperelastic materials:
+    /// `PLX_RUBBER_DEMO=path cargo test rubber_demo -- --ignored`.
+    #[test]
+    #[ignore]
+    fn rubber_demo_project() {
+        let Some(path) = std::env::var_os("PLX_RUBBER_DEMO") else {
+            return;
+        };
+        let mut mesh = FeMesh::default();
+        let mm = 1e-3;
+        let [bottom, top] = add_block(
+            &mut mesh,
+            "Pad",
+            1,
+            [0.0, 0.0, 0.0],
+            [40.0 * mm, 40.0 * mm, 20.0 * mm],
+            [10, 10, 5],
+        );
+        let mut model = FeModel::default();
+        model.materials.push(Material {
+            name: "Rubber".into(),
+            density: Some(1100.0),
+            hyperelastic: Some(plx_model::Hyperelastic {
+                model: plx_model::HyperelasticModel::Yeoh,
+                constants: vec![0.55e6, -0.02e6, 0.004e6],
+                poisson: 0.49,
+                test_data: Vec::new(),
+            }),
+            ..Default::default()
+        });
+        // Test data from Ogden's classic fit to Treloar's natural rubber (in the CalculiX form).
+        if std::env::var_os("PLX_RUBBER_DEMO_DATA").is_some() {
+            let ogden = plx_model::Hyperelastic {
+                model: plx_model::HyperelasticModel::Ogden(3),
+                constants: vec![0.41e6, 1.3, 0.003e6, 5.0, 0.01e6, -2.0],
+                poisson: 0.49,
+                test_data: Vec::new(),
+            };
+            let hyper = model.materials[0].hyperelastic.as_mut().unwrap();
+            *hyper = hyper.with_model(plx_model::HyperelasticModel::Ogden(3));
+            for (mode, largest) in [
+                (plx_model::TestMode::Uniaxial, 6.0),
+                (plx_model::TestMode::Biaxial, 3.0),
+            ] {
+                for i in 1..=10 {
+                    let strain = largest * f64::from(i) / 10.0;
+                    hyper
+                        .test_data
+                        .push(plx_model::hyperelastic_fit::TestPoint {
+                            mode,
+                            strain,
+                            // Four digits, as measured.
+                            stress: (ogden.nominal_stress(mode, 1.0 + strain) / 1e3).round() * 1e3,
+                        });
+                }
+            }
+        }
+        model.sections.push(plx_model::Section {
+            name: "Solid_Section-1".into(),
+            material: "Rubber".into(),
+            region: Region::Parts(vec!["Pad".into()]),
+            thickness: 1.0,
+            kind: plx_model::SectionKind::Solid,
+        });
+        let mut step = plx_model::Step::new_static("Step-1");
+        step.boundary_conditions.push(plx_model::BoundaryCondition {
+            distribution: None,
+            name: "Fixed-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Faces(bottom),
+            kind: plx_model::BoundaryKind::displacement([Some(0.0); 6]),
+            amplitude: None,
+        });
+        step.boundary_conditions.push(plx_model::BoundaryCondition {
+            distribution: None,
+            name: "Pressed-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Faces(top),
+            kind: plx_model::BoundaryKind::displacement([
+                Some(0.0),
+                Some(0.0),
+                Some(-6.0 * mm),
+                None,
+                None,
+                None,
+            ]),
+            amplitude: None,
+        });
+        if let plx_model::StepKind::Static(settings) = &mut step.kind {
+            settings.incrementation = plx_model::Incrementation::Automatic;
+            settings.initial_increment = 0.1;
+        }
+        model.steps.push(step);
+        let project = single(None, &mesh, &model, None);
+        save_project(std::path::Path::new(&path), &project).unwrap();
+        if let Some(inp) = std::env::var_os("PLX_RUBBER_DEMO_INP") {
+            std::fs::write(inp, crate::inp::write_inp(&mesh, &model, "").unwrap()).unwrap();
+        }
+    }
+
     #[test]
     fn the_format_is_read_from_the_start_of_the_file() {
         // Reading it as a Header instead took minutes for a project with a large mesh.

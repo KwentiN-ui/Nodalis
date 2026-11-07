@@ -109,6 +109,26 @@ pub fn run_step(
     step: &Step,
     progress: &mut dyn Progress,
 ) -> Result<StepOutcome> {
+    // Hyperelastic materials deform with large strains: steps that deform the model take
+    // NLGEOM, as in CalculiX.
+    let hyperelastic_step;
+    let step = if ctx.table.hyperelastic
+        && !step.nlgeom
+        && matches!(
+            step.procedure,
+            ProcedureKind::Static(_) | ProcedureKind::Visco(_) | ProcedureKind::Dynamic(_)
+        ) {
+        progress.event(plxs_core::progress::ProgressEvent::Info(format!(
+            "step {}: NLGEOM switched on for the hyperelastic materials",
+            step.name
+        )));
+        let mut nonlinear = step.clone();
+        nonlinear.nlgeom = true;
+        hyperelastic_step = nonlinear;
+        &hyperelastic_step
+    } else {
+        step
+    };
     match &step.procedure {
         ProcedureKind::NoAnalysis => Ok(StepOutcome::Converged),
         ProcedureKind::Static(_)

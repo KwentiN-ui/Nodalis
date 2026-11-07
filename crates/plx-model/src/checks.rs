@@ -65,6 +65,17 @@ pub enum Problem {
     InvalidPlastic,
     /// A creep law with nonpositive constants, or without elasticity.
     InvalidCreep,
+    /// A hyperelastic material the solver refuses: constants that give no positive initial
+    /// shear modulus, Poisson's ratio of 0.5 or more, or plasticity or creep beside it.
+    InvalidHyperelastic,
+    /// A hyperelastic material whose stress stops growing with the strain somewhere
+    /// between a stretch of 0.1 and 10 in a basic test (Drucker unstable): elements
+    /// strained that far make the solution unstable.
+    UnstableHyperelastic,
+    /// A hyperelastic material where the solver takes its initial linear stiffness:
+    /// trusses, membranes and general beams, and steps without large deformations
+    /// (coupled temperature-displacement, modal dynamics, sensitivity).
+    HyperelasticLinearized,
     NoConductivity,
     NoSpecificHeat,
     NoInitialTemperature,
@@ -246,7 +257,9 @@ impl Problem {
             | Problem::LockWithoutPreload
             | Problem::BoltWithoutPreload
             | Problem::BoltHeldAtCut
-            | Problem::NoCreep => Severity::Warning,
+            | Problem::NoCreep
+            | Problem::UnstableHyperelastic
+            | Problem::HyperelasticLinearized => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -289,6 +302,9 @@ impl Problem {
             Problem::RigidBeamNodes => "Beam or shell nodes in a rigid body",
             Problem::InvalidPlastic => "Invalid plasticity",
             Problem::InvalidCreep => "Invalid creep law",
+            Problem::InvalidHyperelastic => "Invalid hyperelastic material",
+            Problem::UnstableHyperelastic => "Hyperelastic material unstable at large strains",
+            Problem::HyperelasticLinearized => "Hyperelastic material computed linearly",
             Problem::NoExpansion => "Temperature without thermal expansion",
             Problem::NoStoredModes => "No stored eigenmodes",
             Problem::NoSensitivityBase => "No step for the sensitivities",
@@ -405,6 +421,25 @@ impl Problem {
             Problem::InvalidCreep => {
                 "The solver reads Norton's creep law only after an isotropic elasticity and \
                  refuses a constant A or an exponent n that is not positive."
+            }
+            Problem::InvalidHyperelastic => {
+                "A hyperelastic material needs constants that give a positive initial shear \
+                 modulus and a Poisson's ratio below 0.5 (fully incompressible materials \
+                 need hybrid elements, which Nodalis does not have). It cannot be plastic \
+                 or creep at the same time."
+            }
+            Problem::UnstableHyperelastic => {
+                "With these constants the nominal stress stops growing with the stretch in \
+                 a basic test (uniaxial, equibiaxial or planar): the material is unstable \
+                 there (Drucker). If the model strains that far, the solver loses \
+                 convergence or finds unphysical deformations. Constants fitted to data of \
+                 a single test often are unstable in the other modes."
+            }
+            Problem::HyperelasticLinearized => {
+                "Trusses, membranes and beams with general profiles, and steps without \
+                 large deformations (coupled temperature-displacement, modal superposition, \
+                 sensitivities) use the initial linear stiffness of a hyperelastic \
+                 material. That is right for small strains only."
             }
             Problem::InvalidPlastic => {
                 "The hardening curve of a plastic material lists the yield stress over the \
@@ -862,6 +897,18 @@ impl Problem {
             }
             Problem::InvalidCreep => {
                 "Edit the material: enter the elasticity and positive values of A and n."
+            }
+            Problem::InvalidHyperelastic => {
+                "Edit the material: give positive moduli (C10, mu) and a Poisson's ratio \
+                 below 0.5, e.g. 0.49, and untick Plasticity and Creep."
+            }
+            Problem::UnstableHyperelastic => {
+                "Check the constants, fit them to test data of several modes, or use a \
+                 simpler model (Neo-Hooke, Yeoh), which stays stable."
+            }
+            Problem::HyperelasticLinearized => {
+                "Model the part with solid or shell elements, or use a Static or Dynamic \
+                 step (direct integration), which computes large deformations."
             }
             Problem::InvalidPlastic => {
                 "Edit the material: enter the elastic constants and a hardening curve that \
@@ -1478,7 +1525,7 @@ impl FeModel {
                 ),
             ));
         }
-        let nlgeom = (self.steps.iter()).find(|s| s.active && s.kind.nlgeom());
+        let nlgeom = (self.steps.iter()).find(|s| s.active && self.step_nlgeom(&s.kind));
         for (i, region) in self.contact_regions.iter().enumerate() {
             if let Some(step) = nlgeom.filter(|_| {
                 region.active && region.behavior == crate::ContactBehavior::NoSeparation
@@ -1549,6 +1596,7 @@ impl FeModel {
             }
         }
         self.check_materials(&mut findings);
+        self.check_hyperelastic_use(mesh, &mut findings);
         self.check_sections(mesh, &mut findings);
         for (part, bad) in mesh_check.distorted.iter().enumerate() {
             if !bad.is_empty() {
@@ -1599,7 +1647,7 @@ impl FeModel {
         let general_beams = self.general_beam_sections(mesh);
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
             self.check_step(s, mesh, mesh_check, &trusses, &mut findings);
-            let general_fits = !step.kind.nlgeom()
+            let general_fits = !self.step_nlgeom(&step.kind)
                 && matches!(
                     step.kind,
                     StepKind::Static(_)
@@ -1614,7 +1662,11 @@ impl FeModel {
                     format!(
                         "{}{}: {} use general beam profiles",
                         step.name,
-                        if step.kind.nlgeom() { " (Nlgeom)" } else { "" },
+                        if self.step_nlgeom(&step.kind) {
+                            " (Nlgeom)"
+                        } else {
+                            ""
+                        },
                         general_beams.join(", ")
                     ),
                 ));
@@ -1874,7 +1926,7 @@ impl FeModel {
                 }
             }
         }
-        if let Some(step) = (self.steps.iter()).find(|s| s.active && s.kind.nlgeom()) {
+        if let Some(step) = (self.steps.iter()).find(|s| s.active && self.step_nlgeom(&s.kind)) {
             let expanded = crate::expanded_nodes(mesh);
             for (item, name, nodes) in &bodies {
                 let count = nodes.iter().filter(|n| expanded.contains(n)).count();
@@ -2100,12 +2152,48 @@ impl FeModel {
                 continue;
             }
             let item = ModelItem::Material(i);
-            match material.elastic {
-                None if mechanical => findings.push(Finding::new(
-                    item,
-                    Problem::NoElastic,
-                    format!("{} has no elasticity", material.name),
-                )),
+            if let Some(hyper) = &material.hyperelastic
+                && mechanical
+            {
+                let detail = match hyper.problem() {
+                    Some(problem) => Some(format!("{}: {problem}", material.name)),
+                    None if material.plastic.is_some() || material.creep.is_some() => Some(
+                        format!("{} is hyperelastic and plastic or creeping", material.name),
+                    ),
+                    None => None,
+                };
+                match detail {
+                    Some(detail) => {
+                        findings.push(Finding::new(item, Problem::InvalidHyperelastic, detail))
+                    }
+                    None => {
+                        if let Some((mode, stretch)) = hyper.unstable_stretch() {
+                            findings.push(Finding::new(
+                                item,
+                                Problem::UnstableHyperelastic,
+                                format!(
+                                    "{}: unstable in {} {} at a stretch of {stretch:.2}",
+                                    material.name,
+                                    mode.label().to_lowercase(),
+                                    if stretch < 1.0 {
+                                        "compression"
+                                    } else {
+                                        "tension"
+                                    },
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+            match material.elastic.filter(|_| material.hyperelastic.is_none()) {
+                None if mechanical && material.hyperelastic.is_none() => {
+                    findings.push(Finding::new(
+                        item,
+                        Problem::NoElastic,
+                        format!("{} has no elasticity", material.name),
+                    ))
+                }
                 Some(e) if e.young <= 0.0 || e.poisson >= 0.5 || e.poisson <= -1.0 => {
                     findings.push(Finding::new(
                         item,
@@ -2174,6 +2262,53 @@ impl FeModel {
     /// Parts with elements no section covers.
     /// The beam sections on elements whose cross-section is a general profile, which
     /// the solver knows only as the user element U1.
+    /// Hyperelastic materials where the solver takes the initial linear stiffness.
+    fn check_hyperelastic_use(&self, mesh: &FeMesh, findings: &mut Vec<Finding>) {
+        let hyperelastic = |name: &str| {
+            (self.materials.iter()).any(|m| m.name == name && m.hyperelastic.is_some())
+        };
+        for (i, section) in self.sections.iter().enumerate() {
+            if !hyperelastic(&section.material) || section.region.elements(mesh).is_empty() {
+                continue;
+            }
+            let linear = match &section.kind {
+                SectionKind::Truss { .. } => Some("trusses"),
+                SectionKind::Membrane { .. } => Some("membranes"),
+                kind if self.section_profile(kind).is_some_and(|p| !p.is_native()) => {
+                    Some("beams with a general profile")
+                }
+                _ => None,
+            };
+            if let Some(what) = linear {
+                findings.push(Finding::new(
+                    ModelItem::Section(i),
+                    Problem::HyperelasticLinearized,
+                    format!(
+                        "{}: {what} of the hyperelastic {}",
+                        section.name, section.material
+                    ),
+                ));
+            }
+        }
+        if !self.has_hyperelastic() {
+            return;
+        }
+        for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
+            let linear = match &step.kind {
+                StepKind::CoupledTempDisp(_) | StepKind::Sensitivity(_) => true,
+                StepKind::Dynamic(d) => matches!(d.method, crate::DynamicMethod::Modal { .. }),
+                _ => false,
+            };
+            if linear {
+                findings.push(Finding::new(
+                    ModelItem::Step(s),
+                    Problem::HyperelasticLinearized,
+                    format!("{}: no large deformations in this step", step.name),
+                ));
+            }
+        }
+    }
+
     fn general_beam_sections(&self, mesh: &FeMesh) -> Vec<&str> {
         (self.sections.iter())
             .filter(|s| {
@@ -3963,6 +4098,40 @@ mod tests {
             problems(&check(&model, &mesh)),
             [(ModelItem::Material(0), Problem::InvalidCreep)]
         );
+    }
+
+    #[test]
+    fn hyperelastic_materials_are_checked() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        model.materials[0].elastic = None;
+        model.materials[0].hyperelastic = Some(crate::Hyperelastic::neo_hooke(1e6, 0.49));
+        assert_eq!(check(&model, &mesh), []);
+        model.materials[0].hyperelastic.as_mut().unwrap().poisson = 0.5;
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::Material(0), Problem::InvalidHyperelastic)]
+        );
+        model.materials[0].hyperelastic = Some(crate::Hyperelastic {
+            model: crate::HyperelasticModel::MooneyRivlin,
+            constants: vec![-0.2e6, 0.7e6],
+            poisson: 0.49,
+            test_data: Vec::new(),
+        });
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::Material(0), Problem::UnstableHyperelastic)]
+        );
+        model.materials[0].hyperelastic = Some(crate::Hyperelastic::neo_hooke(1e6, 0.49));
+        model.materials[0].plastic = Some(crate::Plastic::default());
+        assert!(
+            problems(&check(&model, &mesh))
+                .contains(&(ModelItem::Material(0), Problem::InvalidHyperelastic))
+        );
+        model.materials[0].plastic = None;
+        // The static step computes with large deformations.
+        assert!(!model.steps[0].kind.nlgeom());
+        assert!(model.step_nlgeom(&model.steps[0].kind));
     }
 
     #[test]
