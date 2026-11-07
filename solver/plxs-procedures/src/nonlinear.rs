@@ -734,6 +734,16 @@ impl NonlinearStatic {
             let residual = set.reduce_rhs(&residual_full);
             ctx.profile.add(Phase::Reduction, started);
             let r_max = residual.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            // An inverted element of a hyperelastic material has no stress (NaN, which the
+            // maximum above skips): the increment is cut back before the tangent is
+            // factorized.
+            if residual.iter().any(|r| !r.is_finite()) {
+                return Ok(Err(Failure::Diverging(
+                    Divergence::NotFinite,
+                    "an element is turned inside out (the residual is not finite)".into(),
+                    false,
+                )));
+            }
             let du_max = u
                 .iter()
                 .zip(&u_start)
