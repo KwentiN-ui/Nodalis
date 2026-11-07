@@ -107,6 +107,8 @@ struct HeatRun<'h> {
     initial: f64,
     minimum: f64,
     maximum: f64,
+    /// Result frames the increments end on (`FRAMES=`).
+    frames: Option<crate::frames::Frames>,
     deltmx: Option<f64>,
     nonlinear: bool,
     k: SparseMatrix,
@@ -148,7 +150,14 @@ impl<'h> HeatRun<'h> {
     ) -> Result<Self> {
         let transient = !p.steady_state;
         let period = p.increments.period();
-        let initial = p.increments.initial().min(period);
+        let maximum = p
+            .increments
+            .maximum
+            .filter(|m| *m > 0.0)
+            .unwrap_or(period)
+            .min(period);
+        // The first increment respects the largest one as every later increment does.
+        let initial = p.increments.initial().min(maximum);
         if period <= 0.0 || initial <= 0.0 {
             return Err(Error::input(
                 step.procedure.keyword(),
@@ -173,7 +182,8 @@ impl<'h> HeatRun<'h> {
             period,
             initial,
             minimum: p.increments.minimum.unwrap_or(initial * 1e-5),
-            maximum: p.increments.maximum.unwrap_or(period).min(period),
+            maximum,
+            frames: crate::frames::Frames::of(&p.increments, period),
             deltmx: p.deltmx.filter(|d| *d > 0.0),
             nonlinear,
             k: SparseMatrix::zeros(heat.pattern.clone()),
@@ -276,9 +286,16 @@ impl<'h> HeatRun<'h> {
                 self.set_links(links);
             }
             let mut attempt = 0u32;
+            // The planned size of an increment shortened to end on a frame, which the next
+            // increment resumes.
+            let mut planned: Option<f64>;
             let (accepted, size) = loop {
                 attempt += 1;
-                let size = dt.min(self.period - step_time);
+                let mut size = dt.min(self.period - step_time);
+                if let Some(frames) = &self.frames {
+                    size = frames.limit(step_time, size);
+                }
+                planned = (size < dt).then_some(dt);
                 let time = if self.period - step_time - size <= 1e-9 * self.period {
                     self.period
                 } else {
@@ -370,8 +387,11 @@ impl<'h> HeatRun<'h> {
             });
 
             // The mechanical part and the results of the increment.
-            let write = writes_increment(step, increment, u32::MAX)
-                || (self.period - time).abs() <= 1e-9 * self.period;
+            let last = (self.period - time).abs() <= 1e-9 * self.period;
+            let write = match &mut self.frames {
+                Some(frames) => frames.reached(time) || last,
+                None => writes_increment(step, increment, u32::MAX) || last,
+            };
             if self.mechanical {
                 self.mechanics(
                     ctx,
@@ -427,7 +447,7 @@ impl<'h> HeatRun<'h> {
             done.push(iterations);
 
             // The next increment.
-            dt = size;
+            dt = planned.unwrap_or(size);
             if !self.direct
                 && attempt == 1
                 && done.len() >= 2

@@ -559,8 +559,8 @@ impl Problem {
                  (x along the plane normal), and a node can have only one such system."
             }
             Problem::IncrementExceedsStep => {
-                "The initial increment is larger than the time period of the step, \
-                 which the solver rejects."
+                "The initial or fixed increment under Advanced settings is longer than the \
+                 duration of the step; the solver shortens it to the duration."
             }
             Problem::WheelOffSurface => {
                 "At some positions of the moving load a wheel is partly or fully off the \
@@ -983,7 +983,8 @@ impl Problem {
                  file (.frd) of the global model."
             }
             Problem::IncrementExceedsStep => {
-                "In the step choose an initial increment no larger than the time period."
+                "In the step's Advanced settings choose an increment no longer than the \
+                 duration, or set it back to automatic."
             }
             Problem::NoLoad => "Under Loads create a load or activate a deactivated one.",
             Problem::UnusedDistribution => {
@@ -1126,9 +1127,9 @@ impl Problem {
                  material data, and for heat across contact check the gap conductance."
             }
             Problem::IncrementLimit => {
-                "Raise Max. increments in the step (Incrementation Automatic or Direct). \
-                 If the increments are small without need, also raise the initial and \
-                 the maximum increment."
+                "Raise the Increment limit in the step's Advanced settings, or switch it \
+                 off. If the increments are small without need, also raise the initial and \
+                 the largest increment."
             }
             Problem::NotPositiveDefinite => {
                 "Choose the Direct equation solver in the step, which also solves \
@@ -1751,16 +1752,16 @@ impl FeModel {
                 increments: settings,
                 ..
             }) = &step.kind
-                && settings.incrementation != crate::Incrementation::Default
-                && settings.initial_increment > settings.time_period
+                && let Some(increment) = match settings.control.size {
+                    crate::IncrementSize::Fixed(dt) => Some(dt),
+                    crate::IncrementSize::Automatic => settings.control.initial,
+                }
+                && increment > settings.duration
             {
                 findings.push(Finding::new(
                     ModelItem::Step(s),
                     Problem::IncrementExceedsStep,
-                    format!(
-                        "Initial increment {} > time period {}",
-                        settings.initial_increment, settings.time_period
-                    ),
+                    format!("Increment {} > duration {}", increment, settings.duration),
                 ));
             }
         }

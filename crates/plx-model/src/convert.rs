@@ -354,13 +354,17 @@ impl FeModel {
 
 impl StaticStep {
     fn convert_units(&mut self, c: &Conversion) {
+        c.value(&mut self.duration, Quantity::Time);
+        let control = &mut self.control;
+        if let crate::IncrementSize::Fixed(dt) = &mut control.size {
+            c.value(dt, Quantity::Time);
+        }
         for time in [
-            &mut self.initial_increment,
-            &mut self.time_period,
-            &mut self.min_increment,
-            &mut self.max_increment,
+            &mut control.initial,
+            &mut control.minimum,
+            &mut control.maximum,
         ] {
-            c.value(time, Quantity::Time);
+            c.option(time, Quantity::Time);
         }
     }
 }

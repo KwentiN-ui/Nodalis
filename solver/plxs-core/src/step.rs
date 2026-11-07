@@ -171,6 +171,22 @@ pub struct Incrementation {
     pub maximum: Option<f64>,
     /// `DIRECT`: fixed increments, no automatic control.
     pub direct: bool,
+    /// `FRAMES=` (Nodalis): result frames evenly spaced over the period, the last one at
+    /// its end. The increments are shortened to end on them and only they are written
+    /// (instead of every `FREQUENCY`-th increment). `None`: every increment counts.
+    #[serde(default)]
+    pub frames: Option<u32>,
+}
+
+impl Incrementation {
+    /// The step time of frame `k` (1-based) of `frames` over `period`.
+    pub fn frame_time(period: f64, frames: u32, k: u32) -> f64 {
+        if k >= frames {
+            period
+        } else {
+            period * f64::from(k) / f64::from(frames)
+        }
+    }
 }
 
 impl Incrementation {

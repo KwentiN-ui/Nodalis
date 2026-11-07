@@ -15,9 +15,9 @@ use plx_model::{
     CyclicSymmetry, Damping, DampingRange, DefinedField, DefinedFieldKind, Displacement,
     Distribution, DynamicMethod, DynamicStep, Elastic, FeModel, Field, FieldOutput, Formulation,
     FrequencyStep, GLOBAL, GravityDirection, Hardening, HeatTransferStep, HistoryKind,
-    HistoryOutput, Hyperelastic, HyperelasticModel, Incrementation, InitialCondition,
-    InitialConditionKind, ItemRef, LinearSolverChoice, Load, LoadKind, Material, MeshSet,
-    ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad, NodeTie,
+    HistoryOutput, Hyperelastic, HyperelasticModel, IncrementControl, IncrementSize,
+    InitialCondition, InitialConditionKind, ItemRef, LinearSolverChoice, Load, LoadKind, Material,
+    MeshSet, ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad, NodeTie,
     NumericalDamping, OutputDimension, OutputKind, PlasticPoint, Quantity, RayleighDamping, Region,
     RemoteBehavior, RemoteForce, STANDARD_GRAVITY, Section, SectionKind, SensitivityStep, SetKind,
     StaticStep, SteadyStateDynamicsStep, Step, StepKind, StepLimit, SurfaceInteraction,
@@ -3809,7 +3809,17 @@ impl Editor {
                 StepKind::Buckle(settings) => validate_buckle_step(settings)?,
                 StepKind::HeatTransfer(settings)
                 | StepKind::CoupledTempDisp(settings)
-                | StepKind::UncoupledTempDisp(settings) => validate_heat_transfer_step(settings)?,
+                | StepKind::UncoupledTempDisp(settings) => {
+                    validate_heat_transfer_step(settings)?;
+                    if let Some(problem) = settings.increments.problem() {
+                        return Err(problem);
+                    }
+                }
+                StepKind::Static(settings) => {
+                    if let Some(problem) = settings.problem() {
+                        return Err(problem);
+                    }
+                }
                 StepKind::Sensitivity(settings) => {
                     if let Some(problem) = settings.problem() {
                         return Err(problem);
@@ -3831,6 +3841,9 @@ impl Editor {
                     }
                 }
                 StepKind::Visco(settings) => {
+                    if let Some(problem) = settings.increments.problem() {
+                        return Err(problem);
+                    }
                     if settings.creep_tolerance <= 0.0 {
                         return Err("The creep strain tolerance must be positive.".into());
                     }
@@ -3840,7 +3853,6 @@ impl Editor {
                         return Err(problem);
                     }
                 }
-                StepKind::Static(_) => {}
             }
         }
         Ok(())
@@ -5969,7 +5981,7 @@ fn step_form(
         && fe.has_hyperelastic()
     {
         ui.label("");
-        ui.weak("Nonlinear geometry is on: the model has hyperelastic materials.");
+        ui.weak("Large deformations are on: the model has hyperelastic materials.");
         ui.end_row();
     }
 }
@@ -5978,7 +5990,6 @@ fn step_form(
 /// strain tolerance of the automatic increments.
 fn visco_form(ui: &mut Ui, settings: &mut ViscoStep, units: UnitSystem) {
     increments_form(ui, &mut settings.increments, units, true);
-    solver_row(ui, &mut settings.increments.solver);
     ui.label("Creep strain tolerance");
     ui.add(
         numeric::drag_value(&mut settings.creep_tolerance)
@@ -6065,7 +6076,6 @@ fn heat_transfer_form(
     settings.deltmx = limited.then_some(deltmx);
     ui.end_row();
     increments_form(ui, &mut settings.increments, units, coupled);
-    solver_row(ui, &mut settings.increments.solver);
     if !settings.steady_state {
         ui.label("");
         ui.weak("Transient: materials need density and specific heat.");
@@ -6810,82 +6820,157 @@ fn validate_buckle_step(settings: &BuckleStep) -> Result<(), String> {
 
 fn static_form(ui: &mut Ui, settings: &mut StaticStep, units: UnitSystem) {
     increments_form(ui, settings, units, true);
-    solver_row(ui, &mut settings.solver);
 }
 
-/// Nonlinear geometry and increments of a step with a time period; `mechanical`
-/// shows the geometric nonlinearity, which only steps with displacements have.
+/// Duration, result frames and large deformations of a step that runs over a (pseudo)
+/// time, then under Advanced the increments and the equation solver, all automatic by
+/// default. `mechanical` shows the large deformations, which only steps with displacements
+/// have.
 fn increments_form(ui: &mut Ui, settings: &mut StaticStep, units: UnitSystem, mechanical: bool) {
+    ui.label("Duration").on_hover_text(
+        "Length of the step. Without an amplitude the loads ramp up linearly over it; for \
+         rate-independent materials only its ratio to the amplitudes matters.",
+    );
+    expose::field(ui, Field::Duration, |ui| {
+        ui.add(numeric::physical(
+            &mut settings.duration,
+            units,
+            Quantity::Time,
+        ))
+    });
+    ui.end_row();
+    ui.label("Frames").on_hover_text(
+        "Result frames kept over the duration, evenly spaced; the last one at the end. The \
+         solver takes as many increments as it needs and ends one on every frame.",
+    );
+    expose::field(ui, Field::Frames, |ui| {
+        ui.add(numeric::count(&mut settings.frames).range(1..=StaticStep::MAX_FRAMES))
+    });
+    ui.end_row();
+    if settings.frames > 1 {
+        ui.label("");
+        ui.weak(format!(
+            "A frame every {}",
+            shown(settings.frame_interval(), units, Quantity::Time)
+        ));
+        ui.end_row();
+    }
     if mechanical {
         ui.label("");
-        ui.checkbox(&mut settings.nlgeom, "Nonlinear geometry (Nlgeom)");
+        let was = settings.nlgeom;
+        ui.checkbox(&mut settings.nlgeom, "Large deformations (Nlgeom)")
+            .on_hover_text(
+                "Large displacements and rotations: the equilibrium is found in the deformed \
+                 shape, loads follow it, stiffening and snap-through show. Each increment \
+                 iterates. Off, the deformations are small (linear unless contact or \
+                 plasticity make the step nonlinear).",
+            );
         ui.end_row();
+        // A nonlinear step is usually looked at over its load history.
+        if settings.nlgeom && !was && settings.frames == 1 {
+            settings.frames = 10;
+        }
     }
-    ui.label("Incrementation");
-    egui::ComboBox::from_id_salt("incrementation")
-        .selected_text(incrementation_label(settings.incrementation))
-        .show_ui(ui, |ui| {
-            for choice in [
-                Incrementation::Default,
-                Incrementation::Automatic,
-                Incrementation::Direct,
-            ] {
-                let label = incrementation_label(choice);
-                ui.selectable_value(&mut settings.incrementation, choice, label);
-            }
+
+    // Advanced: open while something in it differs from the defaults.
+    let id = ui.id().with("increments advanced");
+    let custom = settings.control != IncrementControl::default()
+        || settings.solver != LinearSolverChoice::Automatic;
+    let mut advanced = ui.data(|d| d.get_temp(id)).unwrap_or(custom);
+    ui.label("");
+    ui.checkbox(&mut advanced, "Advanced settings");
+    ui.end_row();
+    ui.data_mut(|d| d.insert_temp(id, advanced));
+    let automatic = StaticStep {
+        control: IncrementControl::default(),
+        ..settings.clone()
+    }
+    .plan(settings.nlgeom);
+    if advanced {
+        ui.label("Increments");
+        let mut fixed = matches!(settings.control.size, IncrementSize::Fixed(_));
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut fixed, false, "Automatic")
+                .on_hover_text(
+                    "Grow after increments that converge easily, are cut back after failed ones.",
+                );
+            ui.radio_value(&mut fixed, true, "Fixed").on_hover_text(
+                "Always the same size, shortened to end on the frames. An increment that \
+                 does not converge fails the step.",
+            );
         });
-    ui.end_row();
-    let custom = settings.incrementation != Incrementation::Default;
-    let automatic = settings.incrementation == Incrementation::Automatic;
-    ui.label("Max. increments");
-    ui.add_enabled(
-        custom,
-        numeric::drag_value(&mut settings.max_increments).range(1..=1_000_000),
-    );
-    ui.end_row();
-    for (label, value, enabled, field) in [
-        (
-            "Time period",
-            &mut settings.time_period,
-            custom,
-            Some(Field::TimePeriod),
-        ),
-        (
-            "Initial increment",
-            &mut settings.initial_increment,
-            custom,
-            Some(Field::InitialIncrement),
-        ),
-        (
-            "Min. increment",
-            &mut settings.min_increment,
-            automatic,
-            None,
-        ),
-        (
-            "Max. increment",
-            &mut settings.max_increment,
-            automatic,
-            None,
-        ),
-    ] {
-        ui.label(label);
-        let mut add =
-            |ui: &mut Ui| ui.add_enabled(enabled, numeric::physical(value, units, Quantity::Time));
-        match field {
-            Some(field) => expose::field(ui, field, add),
-            None => add(ui),
-        };
         ui.end_row();
+        match (fixed, settings.control.size) {
+            (true, IncrementSize::Automatic) => {
+                settings.control.size = IncrementSize::Fixed(automatic.initial)
+            }
+            (false, IncrementSize::Fixed(_)) => settings.control.size = IncrementSize::Automatic,
+            _ => {}
+        }
+        if let IncrementSize::Fixed(dt) = &mut settings.control.size {
+            ui.label("    Size");
+            ui.add(numeric::physical(dt, units, Quantity::Time));
+            ui.end_row();
+        } else {
+            let rows: [(&str, &str, &mut Option<f64>, f64); 3] = [
+                (
+                    "    Initial",
+                    "Size of the first increment. Automatic: a frame interval, with large \
+                     deformations at most a tenth of the duration; never more than the \
+                     largest increment.",
+                    &mut settings.control.initial,
+                    automatic.initial,
+                ),
+                (
+                    "    Smallest",
+                    "The step fails when cutbacks would make an increment shorter. \
+                     Automatic: 1e-5 of the duration.",
+                    &mut settings.control.minimum,
+                    automatic.minimum,
+                ),
+                (
+                    "    Largest",
+                    "No increment gets longer. Automatic: the duration (the frames still \
+                     end increments).",
+                    &mut settings.control.maximum,
+                    automatic.maximum,
+                ),
+            ];
+            for (label, hint, value, derived) in rows {
+                ui.label(label).on_hover_text(hint);
+                optional_time(ui, value, derived, units);
+                ui.end_row();
+            }
+        }
+        ui.label("Increment limit").on_hover_text(
+            "Stops the step after this many increments. Off, the step takes as many as it \
+             needs; the smallest increment still stops one that gets stuck.",
+        );
+        let mut limited = settings.control.limit.is_some();
+        let mut limit = settings.control.limit.unwrap_or(1000);
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut limited, "");
+            ui.add_enabled(limited, numeric::count(&mut limit).range(1..=u32::MAX));
+        });
+        ui.end_row();
+        settings.control.limit = limited.then_some(limit);
+        solver_row(ui, &mut settings.solver);
     }
 }
 
-fn incrementation_label(incrementation: Incrementation) -> &'static str {
-    match incrementation {
-        Incrementation::Default => "Default",
-        Incrementation::Automatic => "Automatic",
-        Incrementation::Direct => "Direct",
-    }
+/// A time that is derived unless the box is ticked: unticked, the derived value is shown
+/// greyed out; ticking starts from it.
+fn optional_time(ui: &mut Ui, value: &mut Option<f64>, derived: f64, units: UnitSystem) {
+    let mut set = value.is_some();
+    let mut shown_value = value.unwrap_or(derived);
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut set, "").on_hover_text("Off: automatic");
+        ui.add_enabled(
+            set,
+            numeric::physical(&mut shown_value, units, Quantity::Time),
+        );
+    });
+    *value = set.then_some(shown_value);
 }
 
 #[cfg(test)]
