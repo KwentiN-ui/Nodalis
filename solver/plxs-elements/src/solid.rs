@@ -41,6 +41,23 @@ pub struct SolidElement {
     /// For plane and axisymmetric elements: how the 2D element expands into this 3D one.
     /// The public methods then take and return values of the 2D nodes.
     expansion: Option<Box<Expansion>>,
+    /// `dN/dξ` of every node at every point of the rule: constant on the reference
+    /// element, so computed once.
+    reference_gradients: Vec<Vec<[f64; 3]>>,
+}
+
+/// `dN/dξ` of all nodes at every point of `rule`.
+fn reference_gradients(family: Family, rule: &IntegrationRule) -> Vec<Vec<[f64; 3]>> {
+    let count = family.node_count();
+    rule.points
+        .iter()
+        .map(|&p| {
+            let mut n = vec![0.0; count];
+            let mut dn = vec![[0.0; 3]; count];
+            family.shape(p, &mut n, &mut dn);
+            dn
+        })
+        .collect()
 }
 
 /// Nodal values of a plane or axisymmetric element as CalculiX reports them, see
@@ -102,6 +119,7 @@ pub fn solid(kind: ElementType) -> Option<SolidElement> {
     Some(SolidElement {
         kind,
         family,
+        reference_gradients: reference_gradients(family, &rule),
         rule,
         formulation,
         extrapolation,
@@ -240,6 +258,24 @@ pub(crate) struct Point {
     pub(crate) n: Vec<f64>,
 }
 
+/// The Jacobian determinant and `dN/dx` from `dN/dξ` and the node coordinates.
+fn cartesian_gradients(dn: &[[f64; 3]], coords: &[[f64; 3]]) -> (f64, Vec<[f64; 3]>) {
+    let j = jacobian(dn, coords);
+    let (det, inv) = invert3(&j);
+    // dN/dξ_r = Σ_c J_rc dN/dx_c with J_rc = dx_c/dξ_r, so dN/dx_c = Σ_r inv[c][r] dN/dξ_r.
+    let dndx = dn
+        .iter()
+        .map(|d| {
+            let mut g = [0.0; 3];
+            for (c, gc) in g.iter_mut().enumerate() {
+                *gc = d[0] * inv[c][0] + d[1] * inv[c][1] + d[2] * inv[c][2];
+            }
+            g
+        })
+        .collect();
+    (det, dndx)
+}
+
 fn jacobian(dn: &[[f64; 3]], coords: &[[f64; 3]]) -> [[f64; 3]; 3] {
     let mut j = [[0.0; 3]; 3];
     for (d, x) in dn.iter().zip(coords) {
@@ -282,6 +318,7 @@ impl SolidElement {
     pub fn with_rule(mut self, rule: IntegrationRule, extrapolation: Vec<f64>) -> Self {
         assert_eq!(extrapolation.len(), rule.len() * self.node_count());
         self.extrapolation = extrapolation;
+        self.reference_gradients = reference_gradients(self.family, &rule);
         self.rule = rule;
         self
     }
@@ -366,20 +403,14 @@ impl SolidElement {
         let mut n = vec![0.0; count];
         let mut dn = vec![[0.0; 3]; count];
         self.family.shape(p, &mut n, &mut dn);
-        let j = jacobian(&dn, coords);
-        let (det, inv) = invert3(&j);
-        // dN/dξ_r = Σ_c J_rc dN/dx_c with J_rc = dx_c/dξ_r, so dN/dx_c = Σ_r inv[c][r] dN/dξ_r.
-        let dndx = dn
-            .iter()
-            .map(|d| {
-                let mut g = [0.0; 3];
-                for (c, gc) in g.iter_mut().enumerate() {
-                    *gc = d[0] * inv[c][0] + d[1] * inv[c][1] + d[2] * inv[c][2];
-                }
-                g
-            })
-            .collect();
+        let (det, dndx) = cartesian_gradients(&dn, coords);
         Point { det, dndx, n }
+    }
+
+    /// The Jacobian determinant and the Cartesian shape function derivatives at integration
+    /// point `ip` of the rule (from the stored reference derivatives).
+    pub(crate) fn rule_point(&self, ip: usize, coords: &[[f64; 3]]) -> (f64, Vec<[f64; 3]>) {
+        cartesian_gradients(&self.reference_gradients[ip], coords)
     }
 
     /// Element volume (of the full circumference for axisymmetric elements).
@@ -1345,6 +1376,7 @@ impl SolidElement {
         };
         let mut full = self.clone();
         full.extrapolation = vec![0.0; rule.len() * self.family.node_count()];
+        full.reference_gradients = reference_gradients(self.family, &rule);
         full.rule = rule;
         full.formulation = formulation;
         Some(full)
