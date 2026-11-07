@@ -410,6 +410,13 @@ impl ConstraintSet {
             && self.free[self.t_col[range.start] as usize] as usize == row
     }
 
+    /// Whether `T` only selects the free DOFs: every row is the identity row of its own
+    /// free DOF or empty (held, or not used by any element), so that `u = q` on the free
+    /// DOFs and `u = g` on the others.
+    pub fn is_selection(&self) -> bool {
+        (0..self.n).all(|row| self.t_ptr[row] == self.t_ptr[row + 1] || self.is_identity_row(row))
+    }
+
     /// `Tᵀ K T` on a new pattern.
     pub fn reduce(&self, k: &SparseMatrix) -> SparseMatrix {
         self.reducer(k.pattern()).apply(k, &self.t_val)

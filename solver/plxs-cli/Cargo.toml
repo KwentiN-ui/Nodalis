@@ -17,11 +17,12 @@ plxs-session.workspace = true
 plxs-output.workspace = true
 plxs-elements.workspace = true
 plxs-linalg.workspace = true
+plxs-explicit.workspace = true
 
 [features]
 # The multigrid cycle of the iterative solver on a discrete graphics card (`PLXS_GPU`).
 default = ["gpu"]
-gpu = ["plxs-linalg/gpu"]
+gpu = ["plxs-linalg/gpu", "plxs-explicit/gpu"]
 
 [dev-dependencies]
 plxs-verify.workspace = true

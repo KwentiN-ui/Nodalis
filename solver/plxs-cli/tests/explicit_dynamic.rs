@@ -1221,3 +1221,92 @@ fn an_automatic_step_with_switch_factor_zero_stays_implicit() {
         blocks(&automatic, "velocities")
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// Stage 7: time steps on the graphics card
+
+/// Runs `input` with `PLXS_GPU=mode`: the `.dat` file and the log.
+fn run_with_gpu(dir: &Path, job: &str, input: &str, mode: &str) -> (String, String) {
+    std::fs::write(dir.join(format!("{job}.inp")), input).unwrap();
+    let output = Command::new(plxs())
+        .arg(job)
+        .arg("--threads")
+        .arg("2")
+        .env("PLXS_GPU", mode)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    let log = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{job} failed:\n{log}");
+    let dat = std::fs::read_to_string(dir.join(format!("{job}.dat"))).unwrap();
+    (dat, log)
+}
+
+/// A bar of `kind` elements, moving at the start, held at one end and pulled at the other
+/// by a growing load: the same on the graphics card as on the processor.
+fn gpu_matches_processor(kind: &str, job: &str) {
+    let (length, side, cells) = (0.1, 0.01, 20);
+    let c = (E / RHO).sqrt();
+    let period = 3.0 * length / c;
+    let frames = 30;
+    let mut input = bar_mesh(cells, 2, 2, [length, side, side], kind);
+    writeln!(
+        input,
+        "*Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
+         *Solid section, Elset=EALL, Material=STEEL\n\
+         *Amplitude, Name=RAMP\n0, 0, {period}, 1\n\
+         *Initial conditions, Type=Velocity\nALL, 2, 0.5\n\
+         *Step\n*Dynamic, Integration=Explicit\n{}, {period}\n\
+         *Boundary\nEND0, 1, 3, 0\n\
+         *Cload, Amplitude=RAMP\nEND1, 1, 2000\n\
+         *Node print, Nset=END0, Totals=Only\nRF\n\
+         *Node print, Nset=END1\nU, V\n\
+         *El print, Elset=EALL, Totals=Only\nALLIE, ALLKE, ALLVD, ALLWK\n*End step",
+        period / frames as f64
+    )
+    .unwrap();
+    let dir = work_dir(job);
+    let (cpu, _) = run_with_gpu(&dir, "cpu", &input, "off");
+    let (gpu, log) = run_with_gpu(&dir, "gpu", &input, "on");
+    clean(&dir);
+    if !log.contains("explicit: time steps on ") {
+        eprintln!("no graphics card with double precision: {log}");
+        return;
+    }
+    for heading in [
+        "displacements",
+        "velocities",
+        "total force",
+        "total model internal energy",
+        "total model kinetic energy",
+        "total model damping dissipation",
+        "total model external work",
+    ] {
+        let (a, b) = (blocks(&cpu, heading), blocks(&gpu, heading));
+        assert_eq!(a.len(), frames, "{heading}\n{log}");
+        assert_eq!(a.len(), b.len(), "{heading}");
+        let largest = a
+            .iter()
+            .flat_map(|(_, r)| r.iter().flatten())
+            .fold(0.0_f64, |m, x| m.max(x.abs()));
+        for ((t, ra), (_, rb)) in a.iter().zip(&b) {
+            for (x, y) in ra.iter().flatten().zip(rb.iter().flatten()) {
+                assert!(
+                    (x - y).abs() <= 1e-4 * largest,
+                    "{kind} {heading} at {t} s: {x} on the processor, {y} on the card"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn time_steps_on_the_graphics_card_match_the_processor() {
+    gpu_matches_processor("C3D8", "gpu-c3d8");
+}
+
+#[test]
+fn time_steps_of_reduced_elements_on_the_graphics_card_match_the_processor() {
+    gpu_matches_processor("C3D8R", "gpu-c3d8r");
+}

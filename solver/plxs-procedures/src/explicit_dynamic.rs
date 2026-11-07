@@ -1582,6 +1582,21 @@ impl Procedure for ExplicitDynamic {
             .map(|e| nodal_average_scalar(ctx.table, ctx.model, e));
         let requests = energy_requests(step);
 
+        // The time steps of a linear model on the graphics card.
+        let mut gpu = if !step.nlgeom
+            && !ctx.table.has_nonlinear_material()
+            && contact.is_none()
+            && !varying
+            && beta_r == 0.0
+            && set.is_selection()
+            && matches!(reduced_mass, ReducedMass::Diagonal(_))
+            && ctx.table.membranes.is_empty()
+            && ctx.table.discrete.is_empty()
+        {
+            gpu_engine(ctx, &kernel, &set, &data.mass, alpha_r, progress)
+        } else {
+            None
+        };
         let frames = ((period / interval) - 1e-9).ceil().max(1.0) as u32;
         let event_frames = parameters.event_frames && has_contact;
         // The frames of this part: from the first frame end after its start to its end.
@@ -1623,6 +1638,87 @@ impl Procedure for ExplicitDynamic {
             let mut frame_steps: u64 = 0;
             let mut events_in_frame: u64 = 0;
             let mut last_event_step: Option<u64> = None;
+            // On the graphics card: all time steps of the frame but the last, which the
+            // processor computes with the fields of the frame.
+            if let Some(engine) = gpu.as_mut() {
+                let remaining = t_frame - time;
+                let count = (remaining / dt_max * (1.0 - 1e-12)).ceil().max(1.0) as usize;
+                if count > 1 {
+                    let h = remaining / count as f64;
+                    let started = std::time::Instant::now();
+                    let visc: Vec<f64> = (0..n).map(|i| forces.viscous[i] + f_damp[i]).collect();
+                    let a_now = set.expand(&a_red, &zero);
+                    let run = |engine: &mut plxs_explicit::Engine| -> std::result::Result<
+                        (plxs_explicit::Reached, Vec<f64>),
+                        String,
+                    > {
+                        engine.load(&plxs_explicit::Start {
+                            u: &u,
+                            v: &v_half,
+                            a: &a_now,
+                            internal: &forces.internal,
+                            viscous: &visc,
+                            loads: &p,
+                        })?;
+                        let mut from = p.clone();
+                        let mut done = 0;
+                        while done < count - 1 {
+                            let chunk = (count - 1 - done).min(plxs_explicit::MAX_CHUNK);
+                            let steps: Vec<(f64, f64)> = (0..chunk)
+                                .map(|j| {
+                                    let c = if done + j == 0 { 0.5 * (h_prev + h) } else { h };
+                                    (h, c)
+                                })
+                                .collect();
+                            let t_end = time + (done + chunk) as f64 * h;
+                            let to = loads
+                                .at(ctx, step, t_end, start_total, period)
+                                .map_err(|e| e.to_string())?;
+                            engine.run(&steps, &from, &to)?;
+                            from = to;
+                            done += chunk;
+                        }
+                        Ok((engine.read()?, from))
+                    };
+                    match run(engine) {
+                        Ok((reached, p_reached)) => {
+                            let taken = (count - 1) as u64;
+                            u = reached.u;
+                            v_half = reached.v;
+                            q = free.iter().map(|&d| u[d]).collect();
+                            qdot = free.iter().map(|&d| v_half[d]).collect();
+                            a_red = free.iter().map(|&d| reached.a[d]).collect();
+                            energies.internal += reached.internal_work;
+                            energies.external_work += reached.external_work;
+                            energies.dissipation += reached.dissipation;
+                            time += (count - 1) as f64 * h;
+                            h_prev = h;
+                            steps_done += taken;
+                            frame_steps += taken;
+                            p = p_reached;
+                            ctx.profile.add(Phase::Solve, started);
+                            let started = std::time::Instant::now();
+                            forces = kernel.forces(
+                                &u,
+                                &v_half,
+                                h,
+                                start_total + time,
+                                &mut material,
+                                None,
+                            );
+                            f_damp =
+                                damping_force(&v_half, &forces.internal, &forces.internal, 0.0);
+                            ctx.profile.add(Phase::Assembly, started);
+                        }
+                        Err(e) => {
+                            progress.event(ProgressEvent::Warning(format!(
+                                "explicit: the graphics card failed ({e}); the time steps go on on the processor"
+                            )));
+                            gpu = None;
+                        }
+                    }
+                }
+            }
             loop {
                 if frame_steps > 0
                     && frame_steps.is_multiple_of(CANCEL_STEPS)
@@ -1991,6 +2087,129 @@ impl Procedure for ExplicitDynamic {
             s.dissipation = energies.dissipation;
         }
         Ok(StepOutcome::Converged)
+    }
+}
+
+/// Models of at least this many DOFs go to a discrete graphics card in the automatic
+/// mode (`PLXS_GPU` unset); smaller ones are not worth the transfers.
+const GPU_FROM: usize = 30_000;
+
+/// The engine for the time steps of a linear model on the graphics card
+/// ([`plxs_explicit`]), when the mode (`PLXS_GPU`, the setting of the application) and the
+/// card allow: the stiffness and the viscous matrix (bulk viscosity and hourglass control,
+/// linear in the velocities under small strains) in single precision, the inverse lumped
+/// mass on the free DOFs.
+fn gpu_engine(
+    ctx: &mut ProcedureContext<'_>,
+    kernel: &Kernel<'_>,
+    set: &ConstraintSet,
+    mass: &[f64],
+    alpha: f64,
+    progress: &mut dyn Progress,
+) -> Option<plxs_explicit::Engine> {
+    use plxs_linalg::amg::GpuMode;
+    let n = ctx.table.dofs.len();
+    let mode = GpuMode::from_environment();
+    let any = match mode {
+        GpuMode::Off => return None,
+        GpuMode::Automatic if n < GPU_FROM => return None,
+        GpuMode::Automatic => false,
+        GpuMode::On => true,
+    };
+    let started = std::time::Instant::now();
+    if ctx.stiffness.is_none() {
+        let mut k = SparseMatrix::zeros(ctx.pattern.clone());
+        plxs_assembly::assemble_stiffness(ctx.table, ctx.model, &mut k);
+        ctx.stiffness = Some(k);
+    }
+    let k = ctx.stiffness.as_ref().expect("assembled");
+    let mut entries = Vec::with_capacity(2 * k.values().len());
+    let pattern = k.pattern();
+    for col in 0..n {
+        let start = pattern.col_ptr()[col] as usize;
+        for (offset, &row) in pattern.column(col).iter().enumerate() {
+            let value = k.values()[start + offset];
+            entries.push((row, col as u32, value));
+            if row as usize != col {
+                entries.push((col as u32, row, value));
+            }
+        }
+    }
+    let stiffness = plxs_explicit::Csr::from_entries(n, entries);
+    // The viscous matrix element by element: the bulk viscosity `c V g gᵀ`, the hourglass
+    // control column by column.
+    let mut entries = Vec::new();
+    for (entry, viscosity) in ctx.table.entries.iter().zip(kernel.viscosity) {
+        let dofs = &entry.dofs;
+        let m = dofs.len();
+        let factor = viscosity.rate * viscosity.volume;
+        let mut ce = vec![0.0; m * m];
+        if factor != 0.0 && viscosity.g.len() == m {
+            for a in 0..m {
+                for b in 0..m {
+                    ce[a * m + b] += factor * viscosity.g[a] * viscosity.g[b];
+                }
+            }
+        }
+        if viscosity.hourglass > 0.0 {
+            let coords = ctx.table.coordinates(ctx.model, entry);
+            let mut unit = vec![0.0; m];
+            for b in 0..m {
+                unit[b] = 1.0;
+                let mut column = vec![0.0; m];
+                hourglass_forces(
+                    &coords,
+                    &viscosity.g,
+                    &unit,
+                    viscosity.hourglass,
+                    &mut column,
+                );
+                unit[b] = 0.0;
+                for a in 0..m {
+                    ce[a * m + b] += column[a];
+                }
+            }
+        }
+        for a in 0..m {
+            for b in 0..m {
+                if ce[a * m + b] != 0.0 {
+                    entries.push((dofs[a], dofs[b], ce[a * m + b]));
+                }
+            }
+        }
+    }
+    let viscous = plxs_explicit::Csr::from_entries(n, entries);
+    let mut inverse = vec![0.0; n];
+    for &dof in &set.free {
+        let m = mass[dof as usize];
+        if m > 0.0 {
+            inverse[dof as usize] = 1.0 / m;
+        }
+    }
+    let setup = plxs_explicit::Setup {
+        stiffness: &stiffness,
+        viscous: &viscous,
+        inverse_mass: &inverse,
+        alpha,
+    };
+    match plxs_explicit::Engine::new(&setup, any) {
+        Ok(engine) => {
+            ctx.profile.add(Phase::Assembly, started);
+            progress.event(ProgressEvent::Info(format!(
+                "explicit: time steps on {} (forces in single precision from the motion within \
+                 a frame, state in double precision)",
+                engine.device()
+            )));
+            Some(engine)
+        }
+        Err(e) => {
+            if mode == GpuMode::On || n >= GPU_FROM {
+                progress.event(ProgressEvent::Info(format!(
+                    "explicit: time steps on the processor ({e})"
+                )));
+            }
+            None
+        }
     }
 }
 

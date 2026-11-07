@@ -1,0 +1,26 @@
+[package]
+name = "plxs-explicit"
+description = "Nodalis solver: explicit time steps on the graphics card (wgpu compute shaders)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The time steps on the graphics card (feature `gpu`): the wgpu of the user interface.
+wgpu = { version = "30", optional = true, default-features = false, features = [
+    "std",
+    "parking_lot",
+    "wgsl",
+    "vulkan",
+    "dx12",
+    "metal",
+] }
+pollster = { version = "1", optional = true }
+bytemuck = { workspace = true, optional = true }
+
+[features]
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
+[lints]
+workspace = true

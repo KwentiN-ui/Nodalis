@@ -32,6 +32,7 @@ plxs-constraints = { path = "solver/plxs-constraints" }
 plxs-contact = { path = "solver/plxs-contact" }
 plxs-assembly = { path = "solver/plxs-assembly" }
 plxs-procedures = { path = "solver/plxs-procedures" }
+plxs-explicit = { path = "solver/plxs-explicit" }
 plxs-output = { path = "solver/plxs-output" }
 plxs-session = { path = "solver/plxs-session" }
 faer = "0.24"
@@ -104,6 +105,8 @@ opt-level = 2
 [profile.dev.package.plxs-constraints]
 opt-level = 2
 [profile.dev.package.plxs-procedures]
+opt-level = 2
+[profile.dev.package.plxs-explicit]
 opt-level = 2
 
 # Profil für die CI: wie dev (Abhängigkeiten und Solver-Numerik optimiert, im Cache), ohne

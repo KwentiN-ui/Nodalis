@@ -145,6 +145,30 @@ What is different from implicit integration:
   joints), the solver checks the highest frequency of the constrained system once and
   shortens the time step if the constraints raise it above that of the elements.
 
+==== On the graphics card <dynamic-gpu>
+
+The time steps of a linear model (no contact, no large deformations, elastic materials, no
+prescribed motion that changes during the step, supports without equations or local
+systems) run on a discrete graphics card from 30 000 DOFs, when the setting
+#ui("Graphics card") > #ui("Use for the solver") is on (@settings). Each time step is then a
+product with the stiffness matrix and one with the viscous matrix (bulk viscosity and
+hourglass control) and a few vector updates, which the card does many times faster than the
+processor.
+
+Most cards compute double precision far slower than single precision (a sixty-fourth on an
+RTX 4070), and Metal on macOS has none. The displacements, velocities, accelerations, loads
+and energies therefore stay in double precision; only the two products run in single
+precision, on the motion since the start of the frame. Their rounding error is relative to
+that motion and does not add up from step to step, and the energy balance the solver
+reports checks it: on test models the card agrees with the processor to 1e-4 of the largest
+value. The last time step of every frame, which computes the stresses of the frame, runs on
+the processor. Loads follow their amplitudes linearly over at most 256 time steps.
+
+The solver log names the card ("explicit: time steps on ..."). A card without double
+precision, a model too large for its memory or any error leaves the time steps on the
+processor, with the reason in the log. `PLXS_GPU=off` keeps them on the processor, and
+`PLXS_GPU=on` uses any adapter (software renderers included) for models of any size.
+
 ==== Mass scaling
 
 A few small or thin elements can dictate a time step that the rest of the mesh does not
