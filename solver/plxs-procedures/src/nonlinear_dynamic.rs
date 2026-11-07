@@ -1316,6 +1316,15 @@ fn attempt(
         let residual = set.reduce_rhs(&residual_full);
         ctx.profile.add(Phase::Vectors, started);
         let r_max = residual.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        // An inverted element of a hyperelastic material has no stress (NaN, which the
+        // maximum above skips): the increment is split before the tangent is factorized.
+        if residual.iter().any(|r| !r.is_finite()) {
+            return Ok(Err(Failed {
+                cause: Divergence::NotFinite,
+                reason: "an element is turned inside out (the residual is not finite)".into(),
+                contact_changing: changing,
+            }));
+        }
         let largest = |x: &[f64]| x.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
         // A body in free flight has none of these forces: the round-off of its inertial
         // forces against the momentum it carries (`M v / Δt`) is the floor.
