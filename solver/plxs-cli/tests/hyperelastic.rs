@@ -181,9 +181,10 @@ fn frequencies_of_a_hyperelastic_body_use_the_initial_moduli() {
 
 /// A plane stress rubber pad compressed by 5 % through face-to-face contact with a stiff
 /// punch wider than the pad (frictionless, so the pad is in uniaxial compression). The
-/// out-of-plane unknown of a plane stress node is the change of its thickness: the nearly
-/// incompressible pad thickens by about 1 %, which once counted as the punch's points lying
-/// "beside" the pad's edge, so they jumped between touching and open in every iteration.
+/// nearly incompressible pad thickens by about 1 %, which once (when the out-of-plane DOF of
+/// a plane stress node carried the change of its thickness) counted as the punch's points
+/// lying "beside" the pad's edge, so they jumped between touching and open in every
+/// iteration.
 #[test]
 fn a_plane_stress_rubber_pad_compressed_through_contact_carries_the_uniaxial_force() {
     let dir = std::env::temp_dir().join(format!("plxs-hyper-pad-{}", std::process::id()));

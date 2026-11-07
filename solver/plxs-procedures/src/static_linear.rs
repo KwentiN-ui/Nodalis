@@ -306,7 +306,7 @@ impl StaticLinear {
             let results_started = std::time::Instant::now();
             integration_point_results(ctx.table, ctx.model, &u, &mut strains, &mut stresses);
             if let (Some(th), Some(e)) = (&thermal, &thermal_strains) {
-                th.correct_stresses(e, &mut stresses);
+                th.correct_stresses(e, &mut strains, &mut stresses);
             }
             if let Some(t) = &t {
                 ctx.state.temperatures = Some(plxs_core::state::NodalField {
@@ -406,7 +406,14 @@ pub fn integration_point_results(
             let coords = table.coordinates(model, entry);
             let d = table.material_matrix(entry);
             let ue = table.gather(entry, u);
-            let e = formulation.strains(&coords, d, &ue);
+            let mut e = formulation.strains(&coords, d, &ue);
+            // Plane stress: the thickness strain that makes the thickness stress zero (the
+            // displacements leave it at zero; thermal strains add theirs later).
+            for eps in &mut e {
+                if let Some(ezz) = table.thickness_strain(entry, eps, 0.0) {
+                    eps[2] = ezz;
+                }
+            }
             let s: Vec<[f64; 6]> = e
                 .iter()
                 .map(|eps| {

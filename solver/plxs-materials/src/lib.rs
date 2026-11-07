@@ -15,6 +15,7 @@
 
 pub mod finite;
 pub mod hyper;
+pub mod plane_stress;
 pub mod plastic;
 
 use plxs_core::material::{Material, interpolate};
@@ -22,6 +23,7 @@ use plxs_core::{Error, Result};
 
 pub use finite::FiniteStrainJ2;
 pub use hyper::Hyperelastic;
+pub use plane_stress::PlaneStress;
 pub use plastic::{J2Plastic, STATE_SIZE};
 
 /// The 6 × 6 matrix of isotropic linear elasticity acting on engineering strains
@@ -144,6 +146,16 @@ pub trait MaterialLaw: Send + Sync {
     /// iterate.
     fn is_nonlinear(&self) -> bool;
     fn stress(&self, input: &MaterialInput, state: &mut [f64]) -> MaterialOutput;
+    /// [`MaterialLaw::stress`] together with the strain the stress belongs to: the input
+    /// strain, except under plane stress ([`PlaneStress`]), where the law finds the
+    /// thickness strain itself.
+    fn stress_and_strain(
+        &self,
+        input: &MaterialInput,
+        state: &mut [f64],
+    ) -> (MaterialOutput, [f64; 6]) {
+        (self.stress(input, state), input.strain)
+    }
     /// The elastic matrix (for hourglass control and incompatible modes).
     fn elastic_matrix(&self) -> [[f64; 6]; 6];
 }

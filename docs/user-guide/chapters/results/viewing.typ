@@ -38,9 +38,10 @@ in 2D stay:
 - `S33` and `E33` of an axisymmetric model are the hoop stress and strain.
 - `S33` of a plane strain model is the stress across the thickness; its `E33` is zero and left
   out.
-- `E33` of a plane stress model is the thickness strain. Its `S33` is zero in theory, but the
-  values extrapolated to the nodes are not, so it stays, as do the transverse shear stresses at
-  the integration points of plane stress and axisymmetric elements in the history output.
+- `E33` of a plane stress model is the thickness strain. `S33`, `S13` and `S23` of plane
+  stress are zero at every integration point (the thickness strain is found there so that the
+  stress across the thickness vanishes) and left out. The transverse shear stresses at the
+  integration points of axisymmetric elements stay in the history output.
 - The rotation of a reference point about the Z axis.
 
 `ALL`, `MISES` and the principal values are computed with the left out components as zero. A

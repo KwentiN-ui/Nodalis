@@ -341,12 +341,15 @@ impl SolidElement {
     }
 
     /// Whether the third DOF of the element's nodes takes part in the stiffness (not for
-    /// plane strain and axisymmetric elements, whose nodes move in their plane only).
+    /// plane and axisymmetric elements, whose nodes move in their plane only).
     pub fn uses_out_of_plane(&self) -> bool {
-        !matches!(
-            self.expansion.as_deref().map(|x| x.kind),
-            Some(PlaneKind::Strain | PlaneKind::Axisymmetric)
-        )
+        self.expansion.is_none()
+    }
+
+    /// Whether the element is a plane stress element: its material must make the thickness
+    /// stress zero (`plxs_materials::plane_stress`).
+    pub fn is_plane_stress(&self) -> bool {
+        self.expansion.as_deref().map(|x| x.kind) == Some(PlaneKind::Stress)
     }
 
     /// For plane and axisymmetric elements: displacements and nodal forces (`K u`) of the
@@ -678,7 +681,16 @@ impl SolidElement {
     /// Engineering strains at the integration points for nodal displacements `u`.
     pub fn strains(&self, coords: &[[f64; 3]], d: &[[f64; 6]; 6], u: &[f64]) -> Vec<[f64; 6]> {
         if let Some(x) = &self.expansion {
-            return self.strains_3d(&x.coordinates(coords), d, &x.expand(u));
+            let mut e = self.strains_3d(&x.coordinates(coords), d, &x.expand(u));
+            if x.kind != PlaneKind::Axisymmetric {
+                // No transverse shear in the plane (its value is round-off of the equal
+                // in-plane displacements of the layers).
+                for e in &mut e {
+                    e[4] = 0.0;
+                    e[5] = 0.0;
+                }
+            }
+            return e;
         }
         self.strains_3d(coords, d, u)
     }
