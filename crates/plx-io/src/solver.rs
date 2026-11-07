@@ -358,7 +358,11 @@ mod tests {
         assert_eq!(components("STRESS"), ["SXX", "SYY", "SXY"]);
         assert_eq!(components("TOSTRAIN"), ["EXX", "EYY", "EZZ", "EXY"]);
         let import = history(&solved, None).unwrap();
-        let set = import.sets.iter().find(|s| s.name.contains("SECTION")).unwrap();
+        let set = import
+            .sets
+            .iter()
+            .find(|s| s.name.contains("SECTION"))
+            .unwrap();
         let names = |field: &str| -> Vec<String> {
             let field = set.fields.iter().find(|f| f.name == field).unwrap();
             field.components.iter().map(|c| c.name.clone()).collect()
