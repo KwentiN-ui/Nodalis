@@ -985,8 +985,10 @@ impl ExplicitContact {
         // A new search for candidates once a node moved more than the search covers.
         let current = Self::gather(&self.nodes, u);
         let moved = current
-            .chunks_exact(3)
-            .zip(self.prepared.chunks_exact(3))
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(self.prepared.as_chunks::<3>().0)
             .map(|(a, b)| {
                 ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
             })
