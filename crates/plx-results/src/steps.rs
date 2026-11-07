@@ -184,6 +184,9 @@ pub struct IncrementRecord {
     pub iterations: u32,
     pub step_time: f64,
     pub total_time: f64,
+    /// Integrated explicitly (a step with automatic switching).
+    #[serde(default)]
+    pub explicit: bool,
 }
 
 /// A step of the results with the increments that belong to it.
@@ -206,6 +209,9 @@ pub struct ResultStep {
     pub converged: bool,
     /// Whether the name is only the number, for results without records.
     pub numbered: bool,
+    /// The spans of total time the solver integrated explicitly in a step that switches
+    /// between implicit and explicit integration.
+    pub explicit: Vec<(f64, f64)>,
 }
 
 impl ResultStep {
@@ -266,6 +272,8 @@ pub struct IncrementPlace {
     /// Attempts and iterations, when the solver reported them.
     pub attempts: Option<u32>,
     pub iterations: Option<u32>,
+    /// Integrated explicitly (a step with automatic switching).
+    pub explicit: bool,
 }
 
 /// The steps of results and where each increment lies in them.
@@ -327,6 +335,7 @@ impl ResultSteps {
                         end_time: 0.0,
                         converged: true,
                         numbered: false,
+                        explicit: Vec::new(),
                     }
                 }
                 Source::Number(n) => {
@@ -344,6 +353,7 @@ impl ResultSteps {
                         end_time: 0.0,
                         converged: true,
                         numbered: true,
+                        explicit: Vec::new(),
                     }
                 }
             })
@@ -379,6 +389,8 @@ impl ResultSteps {
             let start = if start.is_finite() { start } else { clock };
             step.start_time = if timed { start } else { clock };
             let mut reached = step.start_time;
+            // The end of the increment before, for the explicit spans.
+            let mut before_time = step.start_time;
             // The increments give the total time, or the step time when one of them lies
             // before the start of the step.
             let step_times =
@@ -398,6 +410,17 @@ impl ResultSteps {
                 if let Some(total) = total_time {
                     reached = reached.max(total);
                 }
+                // Event frames between the increments have no report and do not break a
+                // span.
+                if let (Some(c), Some(total)) = (report, total_time) {
+                    if c.explicit {
+                        match step.explicit.last_mut() {
+                            Some(span) if span.1 >= before_time => span.1 = total,
+                            _ => step.explicit.push((before_time, total)),
+                        }
+                    }
+                    before_time = total;
+                }
                 places[i] = IncrementPlace {
                     step: s,
                     index: position,
@@ -405,6 +428,7 @@ impl ResultSteps {
                     total_time,
                     attempts: report.map(|c| c.attempts),
                     iterations: report.map(|c| c.iterations),
+                    explicit: report.is_some_and(|c| c.explicit),
                 };
             }
             step.end_time = match step.time_period {
@@ -579,6 +603,7 @@ mod tests {
             iterations: 5,
             step_time: 0.1,
             total_time: 4.1,
+            explicit: false,
         }];
         let records = [
             record("Shake", StepCategory::Dynamic, Some(0.5), &[1]),
@@ -593,6 +618,43 @@ mod tests {
         // A modal step takes no time.
         assert!(near(steps.steps[1].start_time, 4.5));
         assert!(near(steps.steps[1].end_time, 4.5));
+    }
+
+    /// A step with automatic switching: the increments the solver reported as explicit
+    /// make spans of total time, from the increment before; an event frame without a report
+    /// between them does not break a span.
+    #[test]
+    fn explicit_increments_make_spans_of_the_step() {
+        let increments: Vec<Increment> = [0.1, 0.2, 0.25, 0.3, 0.4, 0.5]
+            .iter()
+            .enumerate()
+            .map(|(k, t)| inc(1, k as u32 + 1, AnalysisKind::Dynamic, *t))
+            .collect();
+        let explicit = [false, true, false, true, false, true];
+        let convergence: Vec<IncrementRecord> = increments
+            .iter()
+            .zip(explicit)
+            // Increment 3 (0.25) is an event frame without a report.
+            .filter(|(i, _)| i.increment != 3)
+            .map(|(i, explicit)| IncrementRecord {
+                step: 1,
+                increment: i.increment,
+                attempts: 1,
+                iterations: 1,
+                step_time: i.value,
+                total_time: i.value,
+                explicit,
+            })
+            .collect();
+        let records = [record("Drop", StepCategory::Dynamic, Some(0.5), &[1])];
+        let steps = ResultSteps::new(&increments, &records, &convergence, None);
+        let spans = &steps.steps[0].explicit;
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        assert!(near(spans[0].0, 0.1) && near(spans[0].1, 0.3), "{spans:?}");
+        assert!(near(spans[1].0, 0.4) && near(spans[1].1, 0.5), "{spans:?}");
+        assert!(steps.place(1).unwrap().explicit);
+        assert!(!steps.place(4).unwrap().explicit);
     }
 
     #[test]

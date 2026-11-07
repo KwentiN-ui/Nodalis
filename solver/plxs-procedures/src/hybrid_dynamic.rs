@@ -133,6 +133,10 @@ impl Procedure for HybridDynamic {
             ctx.state.energy.clone_from(&energy);
             ctx.state.steps_done = steps_done;
             segment.stopped = None;
+            progress.event(ProgressEvent::Integration {
+                step: ctx.step_number,
+                explicit: !implicit,
+            });
             let outcome = if implicit {
                 segment.end = period;
                 ctx.segment = Some(segment.clone());

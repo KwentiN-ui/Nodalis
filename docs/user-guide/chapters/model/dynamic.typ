@@ -228,7 +228,8 @@ step switches. A switch factor of 0 keeps the step implicit; a large one switche
 first impact. Mass scaling (Advanced) applies to the explicit parts. A linear model without
 contact has nothing that would shorten the implicit time steps and stays implicit.
 
-The solver log names each switch and why, and sums up how much of the step ran explicitly:
+The timeline of the results shows the explicit parts in orange (@results-timeline). The solver
+log names each switch and why, and sums up how much of the step ran explicitly:
 
 ```
 automatic: implicit while its increments stay above 2.109e-5 s (30 times the stable explicit time step of 7.031e-7 s), explicit below
