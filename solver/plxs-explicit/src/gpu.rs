@@ -165,9 +165,7 @@ impl Engine {
         let largest = largest
             .max(4 * setup.stiffness.val.len() as u64)
             .max(4 * setup.viscous.val.len() as u64);
-        if largest > limits.max_storage_buffer_binding_size
-            || largest > limits.max_buffer_size
-        {
+        if largest > limits.max_storage_buffer_binding_size || largest > limits.max_buffer_size {
             return Err(format!("the model is too large for the buffers of {name}"));
         }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
