@@ -22,7 +22,16 @@ frequency step, #ui("Sound") appears right of #ui("Animate") (@sound).
     frequency step apart. #ui("Positions") plays the positions of the moving load of the step
     (@moving-load), the last increment of each; it is offered only for such a step.],
   [Frames], [Number of frames of a scale factor animation (default 60).],
-  [Frames per second], [Playback speed (default 30).],
+  [Timing], [For the increments of steps that run over time. #ui("By time") (default) plays them
+    by their simulation time: the frames lie at even times over the #ui("Duration"), and a frame
+    between two increments is interpolated from them, deformation and colours alike. The
+    increments the solver adds at the events of a Dynamic step (@dynamic-step) thus show at
+    their true moment instead of slowing the playback down. #ui("By frame") shows one
+    increment per frame, however far apart in time they lie.],
+  [Duration], [Seconds a playback #ui("By time") takes from the first to the last increment
+    (default 4). The label below the player gives the time of the shown frame.],
+  [Frames per second], [Playback speed (default 30); #ui("By time"), also the number of frames
+    over the duration.],
   [Playback], [#ui("Once"), #ui("Loop") or #ui("Swing") (forth and back, default).],
   [Color scale], [#ui("Current frame") adapts the legend to every frame, #ui("All frames") keeps
     one range for the whole animation.],
@@ -52,7 +61,8 @@ floating camera bar is not part of the recorded frames. The file follows the set
 
 #screenshot("animation-export-progress.png", [Progress and Stop button in the status bar while the frames are recorded])
 
-- #ui("Frames") and #ui("Frames per second") give the number of frames and the playing speed.
+- #ui("Frames") and #ui("Frames per second") give the number of frames and the playing speed;
+  #ui("By time"), the file plays over the #ui("Duration") with its interpolated frames.
 - #ui("Once") and #ui("Loop") record every frame once, #ui("Swing") records there and back, so a
   player that repeats the file swings smoothly. A GIF repeats endlessly unless the playback is
   #ui("Once"); videos are played as the video player is set.
