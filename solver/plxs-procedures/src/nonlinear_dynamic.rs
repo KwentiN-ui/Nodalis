@@ -999,6 +999,20 @@ fn write_frame(
     }
 }
 
+/// Whether the converged state `done` has slave points inside a master that the
+/// increment never saw (see `ContactModel::missed`): the increment is split like an impact.
+fn missed_contact(ctx: &ProcedureContext<'_>, setup: &Setup<'_>, from: &At, done: &At) -> bool {
+    setup.has_contact
+        && done.evaluation.as_ref().is_some_and(|evaluation| {
+            ctx.contact.missed(
+                &ctx.model.nodes.coordinates,
+                &from.motion.u,
+                &done.motion.u,
+                evaluation,
+            )
+        })
+}
+
 /// Integrates from `from` to step time `t1`; a failed attempt is split into two halves
 /// (`cuts` such splits so far, at most [`MAX_SPLITS`]), and so is an attempt in which a
 /// contact closes or opens too abruptly (`depth` splits of any kind so far, at most
@@ -1017,7 +1031,10 @@ fn advance(
 ) -> Result<std::result::Result<(At, u32), Failed>> {
     let (reason, cut) = match attempt(ctx, setup, equations, progress, from, t1, increment, depth)?
     {
-        Ok((done, its, impact)) if impact <= IMPACT_ENERGY || depth >= MAX_IMPACT_SPLITS => {
+        Ok((done, its, impact))
+            if depth >= MAX_IMPACT_SPLITS
+                || (impact <= IMPACT_ENERGY && !missed_contact(ctx, setup, from, &done)) =>
+        {
             return Ok(Ok((done, its)));
         }
         Ok(_) => (None, 0),
