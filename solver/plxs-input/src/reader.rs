@@ -1833,6 +1833,7 @@ impl Reader {
             "RELATIVE TO ABSOLUTE",
             "TIME RESET",
             "TOTAL TIME AT START",
+            "EVENTS",
         ])?;
         let procedure = Procedure::Dynamic(Dynamic {
             solver: solver(k)?,
@@ -1841,6 +1842,7 @@ impl Reader {
             increments: incrementation(k, data)?,
             rayleigh: None,
             damping_ratio: None,
+            event_frames: k.has("EVENTS"),
         });
         // CalculiX applies the loads of a dynamic step at once unless the step asks for a
         // ramp (observed with ccx 2.21: `*STEP` without `AMPLITUDE=` gives the same

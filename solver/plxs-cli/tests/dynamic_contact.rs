@@ -486,3 +486,51 @@ fn a_block_dropped_on_a_plate_lands_in_time_and_gains_no_energy() {
 fn an_elastic_bar_bounces_off_a_wall_mortar() {
     check_bar_impact("Mortar", "bar-mortar");
 }
+
+/// `*DYNAMIC, EVENTS`: with time steps longer than the impact, the results get frames at
+/// the moment the contact closes and at the sub-increments of the impact, between the
+/// evenly spaced increments.
+#[test]
+fn an_impact_logs_frames_at_the_contact_events() {
+    let c = (E / RHO).sqrt();
+    let duration = 2.0 * BAR / c;
+    let arrival = GAP / V0;
+    // Two time steps over the contact; the first frame lies before the arrival.
+    let dt = 0.6 * duration;
+    let period = 4.0 * dt;
+    let input = bar_impact("Node to surface", period, dt)
+        .replace("*Dynamic, Direct\n", "*Dynamic, Direct, Events\n");
+    let dir = work_dir("bar-events");
+    let (dat, log) = run(&dir, "bar-events", &input);
+    if std::env::var_os("PLXS_KEEP").is_none() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    let forces = blocks(&dat, "total force");
+    let times: Vec<f64> = forces.iter().map(|(t, _)| *t).collect();
+    assert!(
+        times.windows(2).all(|w| w[1] > w[0]),
+        "the frames are not in order of time: {times:?}\n{log}"
+    );
+    // The four increments and the events of the impact.
+    // The `.dat` prints seven significant digits.
+    let on_grid = |t: f64| ((t / dt).round() * dt - t).abs() < 1e-5 * dt;
+    let grid = times.iter().filter(|&&t| on_grid(t)).count();
+    let events = times.len() - grid;
+    assert_eq!(grid, 4, "{times:?}\n{log}");
+    assert!(events >= 4, "only {events} event frames: {times:?}\n{log}");
+    // The contact closes at the arrival: the first frame with a wall force lies right
+    // after it, far closer than a time step.
+    let threshold = 1e-3 * RHO * c * V0 * SIDE * SIDE;
+    let first = forces
+        .iter()
+        .find(|(_, rows)| rows[0][0].abs() > threshold)
+        .map(|(t, _)| *t)
+        .expect("the wall is hit");
+    assert!(
+        first > arrival && first - arrival < 0.05 * dt,
+        "the first frame with contact is at {first}, the arrival at {arrival} (dt {dt})\n{log}"
+    );
+    // The frame before it shows no contact yet.
+    let before = times.iter().rfind(|&&t| t < first).unwrap();
+    assert!(first - before < 0.1 * dt, "{times:?}");
+}

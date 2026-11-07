@@ -441,6 +441,26 @@ fn joints_read_and_render_back() {
 }
 
 #[test]
+fn event_frames_of_a_dynamic_step_read_and_render_back() {
+    let text = cube("*Step\n*Dynamic, Direct, Events\n0.001, 0.1\n*End step\n");
+    let analysis = read(&text).unwrap();
+    let Procedure::Dynamic(dynamic) = &analysis.steps[0].procedure else {
+        panic!("not a dynamic step");
+    };
+    assert!(dynamic.event_frames);
+    let rendered = super::render(&analysis);
+    assert!(
+        rendered.contains("*Dynamic, Direct, Events\n"),
+        "{rendered}"
+    );
+    let plain = read(&cube("*Step\n*Dynamic, Direct\n0.001, 0.1\n*End step\n")).unwrap();
+    let Procedure::Dynamic(dynamic) = &plain.steps[0].procedure else {
+        panic!("not a dynamic step");
+    };
+    assert!(!dynamic.event_frames);
+}
+
+#[test]
 fn a_no_analysis_step_reads_the_model_only() {
     let analysis = read(&cube("*Step\n*No analysis\n*End step\n")).unwrap();
     assert!(matches!(analysis.steps[0].procedure, Procedure::NoAnalysis));

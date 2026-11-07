@@ -6152,6 +6152,17 @@ fn dynamic_form(
         shown(settings.frame_interval(), units, Quantity::Time)
     ));
     ui.end_row();
+    let modal = matches!(settings.method, DynamicMethod::Modal { .. });
+    ui.label("");
+    ui.add_enabled(
+        !modal,
+        egui::Checkbox::new(&mut settings.event_frames, "Frames at contact events"),
+    )
+    .on_hover_text(
+        "Also a frame whenever a contact closes or opens and at the sub-steps of an \
+         impact, between the evenly spaced frames. Only with direct integration.",
+    );
+    ui.end_row();
 
     ui.label("Method").on_hover_text(
         "Direct integration solves all equations in every time step and takes contact, \
@@ -6159,7 +6170,6 @@ fn dynamic_form(
          eigenmodes first and integrates them exactly: every time step then costs almost \
          nothing, for linear models.",
     );
-    let modal = matches!(settings.method, DynamicMethod::Modal { .. });
     egui::ComboBox::from_id_salt("dynamic method")
         .selected_text(settings.method.label())
         .show_ui(ui, |ui| {

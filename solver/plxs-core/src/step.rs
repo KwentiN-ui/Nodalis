@@ -266,6 +266,11 @@ pub struct Dynamic {
     /// frequency the solver takes the lowest eigenfrequency of the model.
     #[serde(default)]
     pub damping_ratio: Option<DampingRatio>,
+    /// `EVENTS` (Nodalis): besides the increments, a result frame at every sub-increment
+    /// at which a contact closes or opens and at the sub-increments an impact is split
+    /// into, so the results show the contact events between the frames.
+    #[serde(default)]
+    pub event_frames: bool,
 }
 
 /// A damping ratio fitted as Rayleigh damping between two frequencies (cycles per time).
