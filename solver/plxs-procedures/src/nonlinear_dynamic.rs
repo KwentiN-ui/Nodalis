@@ -1368,7 +1368,13 @@ fn attempt(
                 step_time: t1,
                 increment_size: dt,
             });
-            let residual_ok = r_max <= RESIDUAL * scale || r_max == 0.0;
+            // A correction at the round-off of the model's coordinates leaves a residual that
+            // is round-off as well: the internal forces of a body flying stress-free (no
+            // load, nothing in contact) are differences of coordinates far larger than its
+            // strains, and their noise, raised by the stiffness-proportional damping
+            // (`β_R / Δt`) in short sub-increments, stays above any force of the increment.
+            let at_round_off = last_correction <= 1e-14 * motion.max(setup.size);
+            let residual_ok = r_max <= RESIDUAL * scale || r_max == 0.0 || at_round_off;
             // A body at rest moves by nothing in an increment: a correction at the round-off
             // of the model's size is converged as well.
             let correction_ok = last_correction <= CORRECTION * motion

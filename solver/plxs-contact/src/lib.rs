@@ -27,6 +27,7 @@ pub mod geometry;
 pub mod law;
 pub mod output;
 
+use rayon::prelude::*;
 use std::collections::HashSet;
 
 use plxs_core::contact::{Adjust, ContactKind};
@@ -657,11 +658,10 @@ impl ContactModel {
                 // A point's spring couples it with one master face: a block per candidate
                 // face (not one over all candidates, which would couple the master faces
                 // among each other and fill the factor for nothing).
-                for p in 0..pair.points.len() {
-                    for &f in &pair.candidates[p] {
-                        blocks.push(pair.point_face_dofs(&[p as u32], f));
-                    }
-                }
+                let pair = &*pair;
+                blocks.par_extend((0..pair.points.len()).into_par_iter().flat_map_iter(|p| {
+                    (pair.candidates[p].iter()).map(move |&f| pair.point_face_dofs(&[p as u32], f))
+                }));
             } else {
                 // A mortar node couples all its integration points.
                 for (_, points) in &pair.mortar_nodes {
@@ -676,7 +676,7 @@ impl ContactModel {
             }
         }
         // The integration points of one slave face share their blocks.
-        blocks.sort_unstable();
+        blocks.par_sort_unstable();
         blocks.dedup();
         blocks
     }
@@ -758,25 +758,26 @@ impl ContactModel {
             } else {
                 pair.mortar_nodes.len()
             };
+            // The points one by one in parallel (the search for their master faces is most
+            // of a contact evaluation), then gathered in their order.
+            let evaluated: Vec<(PointResult, Option<ContactElement>)> = (0..count)
+                .into_par_iter()
+                .map(|p| {
+                    let previous = start
+                        .get(pi)
+                        .and_then(|s| s.get(p))
+                        .copied()
+                        .unwrap_or_default();
+                    let damping = self.damping.as_ref();
+                    if pair.mortar_nodes.is_empty() {
+                        pair.evaluate_point(p, &current, u, &previous, predictor, damping)
+                    } else {
+                        pair.evaluate_mortar_node(p, &current, u, &previous, predictor, damping)
+                    }
+                })
+                .collect();
             let mut results = Vec::with_capacity(count);
-            for p in 0..count {
-                let previous = start
-                    .get(pi)
-                    .and_then(|s| s.get(p))
-                    .copied()
-                    .unwrap_or_default();
-                let (result, element) = if pair.mortar_nodes.is_empty() {
-                    pair.evaluate_point(p, &current, u, &previous, predictor, self.damping.as_ref())
-                } else {
-                    pair.evaluate_mortar_node(
-                        p,
-                        &current,
-                        u,
-                        &previous,
-                        predictor,
-                        self.damping.as_ref(),
-                    )
-                };
+            for (result, element) in evaluated {
                 if let Some(element) = element {
                     evaluation.elements.push(element);
                     if result.element {
@@ -1013,6 +1014,7 @@ impl Pair {
         let margin = 2.0 * self.typical + reach;
         let grid = FaceGrid::new(&self.master, current, self.typical.max(margin), margin);
         self.candidates = (0..self.points.len())
+            .into_par_iter()
             .map(|p| {
                 let x = self.position(p, current);
                 let mut c: Vec<u32> = grid.candidates(x).to_vec();

@@ -3595,6 +3595,7 @@ dependencies = [
  "plxs-core",
  "plxs-elements",
  "plxs-materials",
+ "rayon",
 ]
 
 [[package]]

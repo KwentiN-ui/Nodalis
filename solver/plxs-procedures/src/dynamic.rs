@@ -775,6 +775,9 @@ pub(crate) fn fit_damping(
     let lower = match damping.lower {
         Some(lower) => lower,
         None => {
+            progress.event(ProgressEvent::Info(
+                "damping: computing the lowest eigenfrequencies to fit it to".into(),
+            ));
             let started = std::time::Instant::now();
             let k_free = set.reduce(k);
             let m_free = set.reduce(m);
