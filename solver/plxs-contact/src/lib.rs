@@ -681,6 +681,66 @@ impl ContactModel {
         blocks
     }
 
+    /// Whether a slave point without a spring in `evaluation` (at `u`) went through a master
+    /// face during the increment from `u0`: outside it at the start, more than a percent
+    /// of an edge inside it at the end. The increment's springs only look for master faces
+    /// near where the points started (the candidates of [`ContactModel::prepare`]); a body
+    /// that reaches another within one increment of a dynamic step went through it unseen
+    /// (a lever ended 2 mm inside a rubber wall, a falling block below the plate).
+    pub fn missed(
+        &self,
+        coords: &[[f64; 3]],
+        u0: &[f64],
+        u: &[f64],
+        evaluation: &Evaluation,
+    ) -> bool {
+        let start = current_configuration(coords, u0);
+        let current = current_configuration(coords, u);
+        self.pairs.iter().enumerate().any(|(pi, pair)| {
+            if !pair.active || pair.law.is_tied() || !pair.mortar_nodes.is_empty() {
+                return false;
+            }
+            let Some(results) = evaluation.points.get(pi) else {
+                return false;
+            };
+            let unseen: Vec<usize> = (0..pair.points.len())
+                .filter(|&p| results.get(p).is_some_and(|r| !r.element))
+                .collect();
+            if unseen.is_empty() {
+                return false;
+            }
+            // Master faces within reach of the whole path of a point.
+            let moved = (pair.points.iter().flat_map(|point| &point.nodes))
+                .chain(pair.master.iter().flat_map(|face| &face.nodes))
+                .map(|&n| {
+                    let n = n as usize;
+                    geometry::norm(sub(current[n], start[n]))
+                })
+                .fold(0.0, f64::max);
+            let margin = 2.0 * pair.typical + moved;
+            let grid = FaceGrid::new(&pair.master, &current, pair.typical.max(margin), margin);
+            let side = |face: &ContactFace, config: &[[f64; 3]], x: [f64; 3]| {
+                let (natural, fp) = face.project(config, x);
+                (natural, dot(sub(x, fp.x), fp.normal))
+            };
+            unseen.into_iter().any(|p| {
+                let x = pair.position(p, &current);
+                let x0 = pair.position(p, &start);
+                let own: HashSet<u32> = pair.points[p].nodes.iter().copied().collect();
+                grid.candidates(x).iter().any(|&f| {
+                    let face = &pair.master[f as usize];
+                    if face.nodes.iter().any(|n| own.contains(n)) {
+                        return false;
+                    }
+                    let (natural, gap) = side(face, &current, x);
+                    gap < -0.01 * pair.typical
+                        && face.contains(natural, 1e-3)
+                        && side(face, &start, x0).1 > 0.0
+                })
+            })
+        })
+    }
+
     /// Evaluates all springs at the displacements `u` from the states `start` (plastic
     /// slips at the start of the increment).
     pub fn evaluate(
@@ -804,12 +864,17 @@ impl ContactModel {
                         change += c * du[node as usize * 3 + d] * kin.normal[d];
                     }
                 }
-                let (before, after) = (kin.gap, kin.gap + change);
-                if -after <= limit || -before >= limit {
+                let (before, after) = (-kin.gap, -kin.gap - change);
+                // A point may overclose by the limit more than it already is: a soft part
+                // pressed hard is in equilibrium near the limit (p / K is a few percent of
+                // an edge of rubber), and a cap at the limit itself shortened every
+                // correction to nothing.
+                let target = before.max(0.0) + limit;
+                if after <= target || before >= limit {
                     continue;
                 }
                 // The gap changes about linearly with the length of the step.
-                let f = (before + limit) / (before - after);
+                let f = (target - before) / (after - before);
                 cap = cap.min(f);
             }
         }
@@ -1164,7 +1229,7 @@ impl Pair {
                 r[2] = 0.0;
             }
             let lateral = geometry::norm(sub(r, scale(n, geometric_gap)));
-            if lateral > BESIDE_TOLERANCE * self.typical {
+            if lateral > BESIDE_TOLERANCE * self.typical && !self.inner_edge(p, f, &fp.n) {
                 return Err((x, 0.0));
             }
         }
@@ -1200,6 +1265,29 @@ impl Pair {
             area: point.area,
             cutoff: self.cutoff[p],
         })
+    }
+
+    /// Whether the edge or corner of master face `f` that a clamped foot point (shape
+    /// function values `n`) lies on is shared with another master face. A point deep in a
+    /// dent of a soft master (a lever pressed 2 mm into rubber) lies beyond the end of both
+    /// faces at a concave kink and projects onto that edge with a sideways offset; it is
+    /// no point beside the master surface, which only exists at the surface's boundary.
+    fn inner_edge(&self, p: usize, f: u32, n: &[f64]) -> bool {
+        let face = &self.master[f as usize];
+        // The shape functions of the nodes off an edge vanish on it.
+        let edge: Vec<u32> = (face.nodes.iter().zip(n))
+            .filter(|(_, v)| v.abs() > 1e-9)
+            .map(|(&node, _)| node)
+            .collect();
+        !edge.is_empty()
+            && self.candidates.get(p).is_some_and(|candidates| {
+                candidates.iter().any(|&g| {
+                    g != f && {
+                        let other = &self.master[g as usize];
+                        edge.iter().all(|node| other.nodes.contains(node))
+                    }
+                })
+            })
     }
 
     /// The spring of a point (or mortar node) from its kinematics: the pressure relation,

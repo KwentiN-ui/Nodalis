@@ -482,6 +482,26 @@ fn a_block_dropped_on_a_plate_lands_in_time_and_gains_no_energy() {
     }
 }
 
+/// The block falls 50 mm and the first time step (120 ms) takes it 20 mm below the plate's
+/// top, through the 5 mm plate: at the start of the step the plate was far beyond the
+/// master faces the block's points could touch. The step converged with the block below
+/// the plate and not one spring (it fell through); such an increment is split until the
+/// contact is seen.
+#[test]
+fn a_block_reaching_the_plate_within_one_increment_does_not_fall_through() {
+    let h = 0.05;
+    let contact = format!("*Surface behavior, Pressure-overclosure=Linear\n{PENALTY}");
+    let input = block_on_plate(h, &contact, "", "0.12, 0.24");
+    let dir = work_dir("drop-through");
+    let (dat, log) = run(&dir, "drop-through", &input);
+    if std::env::var_os("PLXS_KEEP").is_none() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    let path = corner(&dat);
+    let lowest = path.iter().map(|(_, u)| u[1]).fold(f64::INFINITY, f64::min);
+    assert!(lowest > -h - 1e-4, "the block sank to {lowest} m\n{log}");
+}
+
 #[test]
 fn an_elastic_bar_bounces_off_a_wall_mortar() {
     check_bar_impact("Mortar", "bar-mortar");
