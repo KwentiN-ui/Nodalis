@@ -8,7 +8,7 @@ use plx_render::StandardView;
 use plx_results::hot_spot::{HotSpot, HotSpotPath};
 
 use crate::analysis::{Analysis, MonitorEvent, RunView};
-use crate::animation::{AnimationKind, ColorLimits, Playback};
+use crate::animation::{AnimationKind, ColorLimits, Pace, Playback};
 use crate::animation_export::{self, Format};
 use crate::exploded::{ExplodedDialog, ExplodedResult};
 use crate::features::{FeatureDialog, FeatureKind, FeatureResult};
@@ -30,7 +30,7 @@ use crate::overlay::{Marker, Overlay};
 use crate::path_plot::{self, PathPlot, PlotEvent};
 use crate::properties;
 use crate::query::{QueryAction, QueryWindow};
-use crate::results::{Deformation, ResultsView, format_legend_value};
+use crate::results::{Deformation, ResultsView, format_legend_value, format_value};
 use crate::screenshot::{self, Screenshot};
 use crate::section::{PlaneDefinition, SectionDialog, SectionResult, SectionView};
 use crate::selection::Operation;
@@ -6893,6 +6893,7 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
     let positions = (view.animation.as_ref())
         .and_then(|a| view.steps.step_of(a.start_increment))
         .is_some_and(|s| s.has_positions());
+    let time_unit = view.units.unit(plx_model::Quantity::Time);
     egui::Window::new("Animation")
         .id(crate::ids::window(ctx, "animation"))
         .open(&mut open)
@@ -6940,8 +6941,67 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
                         }
                         ui.end_row();
                     }
+                    if animation.can_play_by_time() {
+                        ui.label("Timing");
+                        ui.horizontal(|ui| {
+                            for (pace, label, tip) in [
+                                (
+                                    Pace::Frames,
+                                    "By frame",
+                                    "One increment per frame, however far apart in time they lie",
+                                ),
+                                (
+                                    Pace::Time,
+                                    "By time",
+                                    "The frames follow the simulation time evenly over the \
+                                     duration, interpolated between the increments; the extra \
+                                     frames at an impact do not slow the playback down",
+                                ),
+                            ] {
+                                if ui
+                                    .radio(animation.pace == pace, label)
+                                    .on_hover_text(tip)
+                                    .clicked()
+                                    && animation.pace != pace
+                                {
+                                    animation.retime(|a| a.pace = pace);
+                                    event = WindowEvent::Settings;
+                                }
+                            }
+                        });
+                        ui.end_row();
+                    }
+                    if animation.by_time() {
+                        ui.label("Duration");
+                        let mut duration = animation.duration;
+                        let seconds = numeric::drag_value(&mut duration)
+                            .range(0.5..=120.0)
+                            .speed(0.1)
+                            .suffix(" s");
+                        if ui
+                            .add(seconds)
+                            .on_hover_text(
+                                "Seconds the playback takes from the first to the last increment",
+                            )
+                            .changed()
+                        {
+                            animation.retime(|a| a.duration = duration);
+                            event = WindowEvent::Settings;
+                        }
+                        ui.end_row();
+                    }
                     ui.label("Frames per second");
-                    ui.add(numeric::drag_value(&mut animation.fps).range(1.0..=60.0));
+                    let mut fps = animation.fps;
+                    if ui
+                        .add(numeric::drag_value(&mut fps).range(1.0..=60.0))
+                        .changed()
+                    {
+                        // By time, the frame rate also sets the number of frames.
+                        animation.retime(|a| a.fps = fps);
+                        if animation.by_time() {
+                            event = WindowEvent::Settings;
+                        }
+                    }
                     ui.end_row();
                     ui.label("Playback");
                     ui.horizontal(|ui| {
@@ -7007,7 +7067,10 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
                     target = Some(slider);
                 }
                 ui.add_space(8.0);
-                ui.label(format!("Frame {} of {}", frame + 1, last + 1));
+                ui.label(match animation.time() {
+                    Some(time) => format!("{} {time_unit}", format_value(time as f32)),
+                    None => format!("Frame {} of {}", frame + 1, last + 1),
+                });
                 ui.add_space(8.0);
                 let tip = if exporting {
                     "Export Animation (the last export is still being written)"
