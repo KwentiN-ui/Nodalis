@@ -14,7 +14,7 @@ use plx_model::{
     Amplitude, AmplitudeTime, BeamProfile, BeamSection, BoundaryKind, BuckleStep,
     ComplexFrequencyStep, Constraint, ContactMethod, ContactPair, ContactScale, Damping,
     DefinedFieldKind, DynamicMethod, DynamicStep, FeModel, FieldOutput, Formulation, FrequencyStep,
-    GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
+    GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, IncrementPlan,
     InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep,
     ModelItem, ModelSpace, MovingFrame, NodeTie, Origins, OutputDimension, OutputKind, Quantity,
     RayleighFit, Region, RemoteBehavior, RemoteDof, Sampler, Section, SectionKind, SectorDisplay,
@@ -2803,7 +2803,7 @@ fn complex_frequency_blocks(
             ..StaticStep::default()
         };
         blocks.push(helper(
-            static_step(&preload),
+            static_step(&preload, false),
             "Preload",
             std::mem::take(&mut first_cards),
         ));
@@ -3087,20 +3087,27 @@ fn step_block<'f>(
     let dofs = if space.is_2d() { 2 } else { 6 };
     // Every how many increments the field outputs are written.
     let mut frame_every = 1;
+    // Large deformations, also when the materials switch them on: they start the automatic
+    // increments shorter.
+    let nlgeom = model.step_nlgeom(&step.kind);
     let mut ir_step = match &step.kind {
-        StepKind::Static(settings) => static_step(settings),
+        StepKind::Static(settings) => static_step(settings, nlgeom),
         StepKind::Frequency(settings) => frequency_step(settings, cyclic),
         StepKind::ComplexFrequency(settings) => complex_frequency_step(settings),
         StepKind::Buckle(settings) => buckle_step(settings),
-        StepKind::HeatTransfer(settings) => heat_transfer_step(settings, HeatKind::Heat),
-        StepKind::CoupledTempDisp(settings) => heat_transfer_step(settings, HeatKind::Coupled),
-        StepKind::UncoupledTempDisp(settings) => heat_transfer_step(settings, HeatKind::Uncoupled),
+        StepKind::HeatTransfer(settings) => heat_transfer_step(settings, HeatKind::Heat, false),
+        StepKind::CoupledTempDisp(settings) => {
+            heat_transfer_step(settings, HeatKind::Coupled, nlgeom)
+        }
+        StepKind::UncoupledTempDisp(settings) => {
+            heat_transfer_step(settings, HeatKind::Uncoupled, false)
+        }
         StepKind::Dynamic(settings) => {
             let (ir_step, per_frame) = dynamic_step(settings, model, step);
             frame_every = per_frame;
             ir_step
         }
-        StepKind::Visco(settings) => visco_step(settings),
+        StepKind::Visco(settings) => visco_step(settings, nlgeom),
         StepKind::ModalDynamics(settings) => modal_dynamics_step(settings),
         StepKind::SteadyStateDynamics(settings) => steady_state_dynamics_step(settings),
         StepKind::Sensitivity(settings) => sensitivity_step(sets, &step.name, settings)?,
@@ -3970,13 +3977,13 @@ fn new_step(procedure: ir::step::Procedure) -> ir::Step {
 }
 
 /// A static step.
-fn static_step(settings: &StaticStep) -> ir::Step {
-    let increments = incrementation(settings);
+fn static_step(settings: &StaticStep, nlgeom: bool) -> ir::Step {
+    let plan = settings.plan(nlgeom);
     incremented_step(
-        settings,
+        &plan,
         ir::step::Procedure::Static(ir::step::Static {
             solver: equation_solver(settings.solver),
-            increments,
+            increments: incrementation(&plan),
             time_reset: false,
             total_time_at_start: None,
         }),
@@ -3986,13 +3993,14 @@ fn static_step(settings: &StaticStep) -> ir::Step {
 
 /// A visco step: a static step whose automatic increments the creep strain tolerance
 /// limits.
-fn visco_step(settings: &ViscoStep) -> ir::Step {
+fn visco_step(settings: &ViscoStep, nlgeom: bool) -> ir::Step {
     let increments = &settings.increments;
+    let plan = increments.plan(nlgeom);
     incremented_step(
-        increments,
+        &plan,
         ir::step::Procedure::Visco(ir::step::Visco {
             solver: equation_solver(increments.solver),
-            increments: incrementation(increments),
+            increments: incrementation(&plan),
             cetol: settings.creep_tolerance,
         }),
         increments.nlgeom,
@@ -4060,15 +4068,16 @@ enum HeatKind {
 }
 
 /// A heat transfer or coupled step.
-fn heat_transfer_step(settings: &HeatTransferStep, kind: HeatKind) -> ir::Step {
+fn heat_transfer_step(settings: &HeatTransferStep, kind: HeatKind, nlgeom: bool) -> ir::Step {
     let increments = &settings.increments;
+    let plan = increments.plan(nlgeom);
     let heat = ir::step::HeatTransfer {
         solver: equation_solver(increments.solver),
         steady_state: settings.steady_state,
-        increments: incrementation(increments),
+        increments: incrementation(&plan),
         deltmx: settings.deltmx.filter(|_| !settings.steady_state),
         frequency_count: None,
-        direct: increments.incrementation == Incrementation::Direct,
+        direct: plan.fixed,
     };
     let (procedure, nlgeom) = match kind {
         HeatKind::Heat => (ir::step::Procedure::HeatTransfer(heat), false),
@@ -4081,7 +4090,7 @@ fn heat_transfer_step(settings: &HeatTransferStep, kind: HeatKind) -> ir::Step {
             false,
         ),
     };
-    incremented_step(increments, procedure, nlgeom)
+    incremented_step(&plan, procedure, nlgeom)
 }
 
 /// A Dynamic step: fixed time steps that put the result frames exactly on time steps
@@ -4214,37 +4223,29 @@ fn modal_damping(damping: Option<&ModalDamping>) -> Option<ir::step::ModalDampin
     })
 }
 
-/// The increments of a step with a time period.
-fn incrementation(settings: &StaticStep) -> ir::step::Incrementation {
-    let mut increments = ir::step::Incrementation::default();
-    match settings.incrementation {
-        Incrementation::Default => {}
-        Incrementation::Automatic => {
-            increments.initial = Some(settings.initial_increment);
-            increments.period = Some(settings.time_period);
-            increments.minimum = Some(settings.min_increment);
-            increments.maximum = Some(settings.max_increment);
-        }
-        Incrementation::Direct => {
-            increments.initial = Some(settings.initial_increment);
-            increments.period = Some(settings.time_period);
-            increments.direct = true;
-        }
+/// The increments of a step with a duration: every value resolved, the result frames as
+/// `FRAMES=`.
+fn incrementation(plan: &IncrementPlan) -> ir::step::Incrementation {
+    ir::step::Incrementation {
+        initial: Some(plan.initial),
+        period: Some(plan.duration),
+        minimum: (!plan.fixed).then_some(plan.minimum),
+        maximum: (!plan.fixed).then_some(plan.maximum),
+        direct: plan.fixed,
+        frames: Some(plan.frames),
     }
-    increments
 }
 
-/// A step of `procedure` with the increments of `settings`.
+/// A step of `procedure` with the increments of `plan`: without a limit on their number
+/// the step takes as many as it needs.
 fn incremented_step(
-    settings: &StaticStep,
+    plan: &IncrementPlan,
     procedure: ir::step::Procedure,
     nlgeom: bool,
 ) -> ir::Step {
     let mut step = new_step(procedure);
     step.nlgeom = nlgeom;
-    if settings.incrementation != Incrementation::Default {
-        step.max_increments = settings.max_increments;
-    }
+    step.max_increments = plan.limit.unwrap_or(u32::MAX);
     step
 }
 

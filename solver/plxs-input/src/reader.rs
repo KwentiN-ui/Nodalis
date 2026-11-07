@@ -1678,6 +1678,7 @@ impl Reader {
         k.check_parameters(&[
             "SOLVER",
             "DIRECT",
+            "FRAMES",
             "EXPLICIT",
             "TIME RESET",
             "TOTAL TIME AT START",
@@ -1698,6 +1699,7 @@ impl Reader {
         k.check_parameters(&[
             "SOLVER",
             "DIRECT",
+            "FRAMES",
             "CETOL",
             "TIME RESET",
             "TOTAL TIME AT START",
@@ -1795,6 +1797,7 @@ impl Reader {
         k.check_parameters(&[
             "SOLVER",
             "DIRECT",
+            "FRAMES",
             "STEADY STATE",
             "DELTMX",
             "FREQUENCY",
@@ -2662,5 +2665,9 @@ fn incrementation(k: &Keyword, data: &[Data<'_>]) -> Result<Incrementation, Erro
         minimum: at(2),
         maximum: at(3),
         direct: k.has("DIRECT"),
+        frames: match k.integer("FRAMES")? {
+            Some(0) => return Err(k.error("FRAMES must be at least 1")),
+            frames => frames,
+        },
     })
 }

@@ -165,21 +165,27 @@ fn the_chosen_solver_is_written_with_the_procedure() {
     let (mesh, mut model) = cantilever(tip_force());
     // Automatic (the default) leaves the choice to the solver.
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(text.contains("*Static\n"), "{text}");
+    assert!(
+        text.contains("*Static, Frames=1\n1, 1, 0.00001, 1\n"),
+        "{text}"
+    );
     let StepKind::Static(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
     settings.solver = LinearSolverChoice::Direct;
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(text.contains("*Static, Solver=PaStiX\n"), "{text}");
+    assert!(
+        text.contains("*Static, Solver=PaStiX, Frames=1\n"),
+        "{text}"
+    );
     let StepKind::Static(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
     settings.solver = LinearSolverChoice::Iterative;
-    settings.incrementation = Incrementation::Direct;
+    settings.control.size = plx_model::IncrementSize::Fixed(0.5);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Static, Solver=Iterative Cholesky, Direct\n1, 1\n"),
+        text.contains("*Static, Solver=Iterative Cholesky, Direct, Frames=1\n0.5, 1\n"),
         "{text}"
     );
     // Frequency and buckle steps name it as well.
@@ -5523,7 +5529,7 @@ fn writes_heat_transfer_keywords() {
         "*Physical constants, Absolute zero=-273.15, Stefan Boltzmann=5.67e-11\n",
         "*Expansion, Zero=20\n0.00001, 0\n*Conductivity\n50, 0\n*Specific heat\n460000000, 0\n",
         "*Initial conditions, Type=Temperature\nINTERNAL_SELECTION-1_INITIAL_TEMPERATURE-1, 20\n",
-        "*Heat transfer, Deltmx=5\n",
+        "*Heat transfer, Deltmx=5, Frames=1\n",
         // Displacements and forces do not act in a heat transfer step.
         "*Boundary\nFIX, 11, 11, 20\n*Cflux",
         "*Cflux, op=New\nINTERNAL_SELECTION-1_FLUX-1, 11, 3\n",
@@ -5872,10 +5878,8 @@ fn solver_warms_the_bar_transiently() {
     let a = CONDUCTIVITY / (density * SPECIFIC_HEAT);
     // Half way to the end temperature at the far end.
     let period = 0.4 * length * length / a;
-    settings.increments.incrementation = Incrementation::Direct;
-    settings.increments.time_period = period;
-    settings.increments.initial_increment = period / 200.0;
-    settings.increments.max_increments = 1000;
+    settings.increments.duration = period;
+    settings.increments.control.size = plx_model::IncrementSize::Fixed(period / 200.0);
     let (mesh, mut model) = thermal_bar(
         StepKind::HeatTransfer(settings),
         vec![temperature(
@@ -5926,7 +5930,7 @@ fn solver_expands_the_bar_in_an_uncoupled_step() {
         StepKind::UncoupledTempDisp(HeatTransferStep::default()),
         "waermedehnung-entkoppelt",
     );
-    assert!(inp.contains("*Uncoupled temperature-displacement, Steady state\n"));
+    assert!(inp.contains("*Uncoupled temperature-displacement, Steady state, Frames=1\n"));
 }
 
 /// Writes and runs the heated bar in a step of the given kind; returns the input file.
@@ -6174,10 +6178,9 @@ fn solver_scales_a_load_by_its_amplitude() {
     let StepKind::Static(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
-    // A linear static step is solved once, at its end; increments need a nonlinear one.
+    // Four frames; the nonlinear procedure ends its increments on them.
     settings.nlgeom = true;
-    settings.incrementation = Incrementation::Direct;
-    settings.initial_increment = 0.25;
+    settings.frames = 4;
     let frd = run_solver("amplitude_force", &write_inp(&mesh, &model, "").unwrap()).unwrap();
     let index = frd.mesh.node_index(99).unwrap();
     let u3: Vec<f64> = (frd.increments.iter())
@@ -6274,9 +6277,8 @@ fn solver_reads_a_total_time_amplitude_with_shifts_across_steps() {
             unreachable!()
         };
         // The initial increment does not matter: a linear step is solved once.
-        settings.incrementation = Incrementation::Automatic;
-        settings.time_period = period;
-        settings.initial_increment = period / 2.0;
+        settings.duration = period;
+        settings.control.initial = Some(period / 2.0);
         model.steps.push(step);
     }
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -6341,16 +6343,14 @@ fn solver_scales_distributed_loads_and_displacements_by_amplitudes() {
     let StepKind::Static(settings) = &mut step.kind else {
         unreachable!()
     };
-    settings.incrementation = Incrementation::Automatic;
-    settings.time_period = 0.5;
-    settings.initial_increment = 0.5;
+    settings.duration = 0.5;
     let mut second = model.steps[0].clone();
     second.name = "Step-2".into();
     let StepKind::Static(settings) = &mut second.kind else {
         unreachable!()
     };
-    settings.time_period = 2.0;
-    settings.initial_increment = 1.0;
+    settings.duration = 2.0;
+    settings.control.initial = Some(1.0);
     model.steps.push(second);
     model.amplitudes = vec![
         amplitude("Rise", vec![[0.0, 0.0], [1.0, 1.0], [2.0, 3.0]]),
@@ -6810,7 +6810,7 @@ fn a_complex_frequency_step_is_solved_as_preload_eigenmodes_and_complex_modes() 
     for line in [
         // The preload is solved directly: the eigenmodes factorize the stiffness anyway.
         "** Rotor Preload +",
-        "*Step, Inc=100, Amplitude=Ramp\n*Static, Solver=PaStiX\n",
+        "*Step, Inc=4294967295, Amplitude=Ramp\n*Static, Solver=PaStiX, Frames=1\n",
         "** Rotor Eigenmodes +",
         "*Step, Perturbation, Inc=100, Amplitude=Ramp\n*Frequency, Storage=Yes\n4\n",
         "** Rotor +",
@@ -7622,7 +7622,8 @@ fn a_visco_step_and_a_creep_law_are_written() {
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
         "*Elastic\n210000, 0.3, 0\n*Creep, Law=Norton\n1e-15, 5, 0, 0\n",
-        "*Step, Inc=1000, Amplitude=Ramp\n*Visco, Cetol=0.0001\n1, 1000, 0.00001, 1e30\n",
+        // Unlimited increments, a first one of 1 s, ten frames over the creep time.
+        "*Step, Inc=4294967295, Amplitude=Ramp\n*Visco, Cetol=0.0001, Frames=10\n1, 1000, 0.01, 1000\n",
         "*El file\nS, E, PEEQ, NOE\n",
     ] {
         assert!(text.contains(line), "{line:?} missing in\n{text}");
@@ -10136,8 +10137,10 @@ fn solver_stretches_the_bar_plastically_with_nlgeom() {
     model.steps[0].field_outputs[1].variables.pop();
     model.steps[0].kind = StepKind::Static(StaticStep {
         nlgeom: true,
-        incrementation: Incrementation::Automatic,
-        initial_increment: 0.2,
+        control: plx_model::IncrementControl {
+            initial: Some(0.2),
+            ..Default::default()
+        },
         ..StaticStep::default()
     });
     let (_, max) = mesh.bounds().unwrap();

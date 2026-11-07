@@ -1255,8 +1255,7 @@ mod tests {
             amplitude: None,
         });
         if let plx_model::StepKind::Static(settings) = &mut step.kind {
-            settings.incrementation = plx_model::Incrementation::Automatic;
-            settings.initial_increment = 0.1;
+            settings.control.initial = Some(0.1);
         }
         model.steps.push(step);
         let project = single(None, &mesh, &model, None);
