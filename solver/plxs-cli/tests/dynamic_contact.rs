@@ -502,6 +502,37 @@ fn a_block_reaching_the_plate_within_one_increment_does_not_fall_through() {
     assert!(lowest > -h - 1e-4, "the block sank to {lowest} m\n{log}");
 }
 
+/// The block is thrown at the plate, 2 mm above it, at 1 m/s down and 5 m/s along it, and a
+/// single 20 ms time step would take it 20 mm down and 100 mm along, beyond the plate's
+/// end. Where it ends it lies beside the plate, not inside a face of it: only the
+/// continuous collision detection sees that its path went through the plate's top. The
+/// block hits the plate at about 2 ms and bounces off it.
+#[test]
+fn a_block_thrown_past_the_plate_end_within_one_increment_hits_it() {
+    let h = 0.002;
+    let contact = format!("*Surface behavior, Pressure-overclosure=Linear\n{PENALTY}");
+    let throw = "*Initial conditions, Type=Velocity\nBLOCKN, 1, 5.0\nBLOCKN, 2, -1.0\n";
+    let input = block_on_plate(h, &contact, throw, "0.02, 0.02");
+    let dir = work_dir("thrown");
+    let (dat, log) = run(&dir, "thrown", &input);
+    if std::env::var_os("PLXS_KEEP").is_none() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    let path = corner(&dat);
+    let (_, end) = path.last().unwrap();
+    // Bounced back up (an elastic impact turns the 1 m/s down into about 1 m/s up): above
+    // where it started, not below the plate's top.
+    assert!(
+        end[1] > 0.0,
+        "the block ended at {end:?} (went through the plate)\n{log}"
+    );
+    // Flying on along it at 5 m/s.
+    assert!(
+        (end[0] - 0.1).abs() < 0.005,
+        "the block ended at {end:?}\n{log}"
+    );
+}
+
 #[test]
 fn an_elastic_bar_bounces_off_a_wall_mortar() {
     check_bar_impact("Mortar", "bar-mortar");
