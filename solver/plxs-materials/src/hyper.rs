@@ -462,6 +462,15 @@ impl MaterialLaw for Hyperelastic {
                 tangent[column][row] = mean;
             }
         }
+        if tangent.iter().flatten().any(|v| !v.is_finite()) {
+            // A point within the difference step of turning inside out: treated as
+            // inverted, so the iteration cuts the increment back instead of factorizing a
+            // tangent without numbers.
+            return MaterialOutput {
+                stress: [f64::NAN; 6],
+                tangent,
+            };
+        }
         MaterialOutput { stress, tangent }
     }
 
@@ -658,5 +667,29 @@ mod tests {
         assert!(new(HyperelasticModel::NeoHooke, &[0.5]).is_err());
         assert!(new(HyperelasticModel::Ogden(1), &[1.0, 0.0, 0.02]).is_err());
         assert!(new(HyperelasticModel::Polynomial(4), &[0.0; 18]).is_err());
+    }
+
+    #[test]
+    fn a_point_on_the_verge_of_inverting_has_no_stress() {
+        // C33 = 1 + 2 E33 = 1e-7: positive, but the difference step of the tangent crosses
+        // zero. Its tangent would have no numbers, so the point counts as inverted and the
+        // iteration cuts the increment back.
+        let law = law(HyperelasticModel::NeoHooke, &[0.5, 0.02]);
+        let mut strain = [0.0; 6];
+        strain[2] = 0.5 * (1e-7 - 1.0);
+        assert!(
+            law.second_piola_kirchhoff(&strain)
+                .iter()
+                .all(|v| v.is_finite())
+        );
+        let input = MaterialInput {
+            strain,
+            temperature: 0.0,
+            dt: 1.0,
+            time: 1.0,
+            creep_active: false,
+        };
+        let out = law.stress(&input, &mut []);
+        assert!(out.stress.iter().all(|v| v.is_nan()));
     }
 }

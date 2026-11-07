@@ -88,7 +88,7 @@ fn neo_hooke_force(c10: f64, d1: f64, stretch: f64) -> f64 {
         2.0 * c10 * j.powf(-5.0 / 3.0) * (stretch * stretch - t * t)
     };
     let residual = |t: f64| deviator(t) / 3.0 - 2.0 * (stretch * t * t - 1.0) / d1;
-    let (mut lo, mut hi) = (0.1, 1.0);
+    let (mut lo, mut hi) = (0.1, 3.0);
     for _ in 0..200 {
         let mid = 0.5 * (lo + hi);
         if residual(mid) > 0.0 {
@@ -176,5 +176,119 @@ fn frequencies_of_a_hyperelastic_body_use_the_initial_moduli() {
     for (x, y) in a.iter().zip(&b) {
         assert!((x - y).abs() < 1e-8 * y.abs(), "{a:?} vs {b:?}");
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A plane stress rubber pad compressed by 5 % through face-to-face contact with a stiff
+/// punch wider than the pad (frictionless, so the pad is in uniaxial compression). The
+/// out-of-plane unknown of a plane stress node is the change of its thickness: the nearly
+/// incompressible pad thickens by about 1 %, which once counted as the punch's points lying
+/// "beside" the pad's edge, so they jumped between touching and open in every iteration.
+#[test]
+fn a_plane_stress_rubber_pad_compressed_through_contact_carries_the_uniaxial_force() {
+    let dir = std::env::temp_dir().join(format!("plxs-hyper-pad-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // C10 and D1 of E = 10, nu = 0.49.
+    let (young, nu): (f64, f64) = (10.0, 0.49);
+    let c10 = young / (4.0 * (1.0 + nu));
+    let d1 = 2.0 * 3.0 * (1.0 - 2.0 * nu) / young;
+    let strain = 0.05;
+    let expected = -neo_hooke_force(c10, d1, 1.0 - strain);
+    let mut s = String::from("*NODE\n");
+    // The pad: 4 x 4 elements over [0, 1]²; the punch: 3 elements over [-0.1, 1.1] x
+    // [1, 1.2].
+    let pad = |i: usize, j: usize| 1 + j * 5 + i;
+    for j in 0..5 {
+        for i in 0..5 {
+            writeln!(
+                s,
+                "{}, {}, {}, 0",
+                pad(i, j),
+                i as f64 * 0.25,
+                j as f64 * 0.25
+            )
+            .unwrap();
+        }
+    }
+    let punch = |i: usize, j: usize| 101 + j * 4 + i;
+    for j in 0..2 {
+        for i in 0..4 {
+            writeln!(
+                s,
+                "{}, {}, {}, 0",
+                punch(i, j),
+                -0.1 + i as f64 * 0.4,
+                1.0 + j as f64 * 0.2
+            )
+            .unwrap();
+        }
+    }
+    s.push_str("*ELEMENT, TYPE=CPS4, ELSET=PAD\n");
+    for j in 0..4 {
+        for i in 0..4 {
+            let e = 1 + j * 4 + i;
+            let n = [pad(i, j), pad(i + 1, j), pad(i + 1, j + 1), pad(i, j + 1)];
+            writeln!(s, "{e}, {}, {}, {}, {}", n[0], n[1], n[2], n[3]).unwrap();
+        }
+    }
+    s.push_str("*ELEMENT, TYPE=CPS4, ELSET=PUNCH\n");
+    for i in 0..3 {
+        let n = [punch(i, 0), punch(i + 1, 0), punch(i + 1, 1), punch(i, 1)];
+        writeln!(s, "{}, {}, {}, {}, {}", 101 + i, n[0], n[1], n[2], n[3]).unwrap();
+    }
+    let list = |ids: Vec<usize>| {
+        ids.iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    write!(
+        s,
+        "*NSET, NSET=BOTTOM\n{}\n*NSET, NSET=TOP\n{}\n*NSET, NSET=CORNER\n1\n\
+*ELSET, ELSET=PAD_TOP\n13, 14, 15, 16\n*ELSET, ELSET=PUNCH_BOTTOM\n101, 102, 103\n\
+*SURFACE, NAME=MASTER, TYPE=ELEMENT\nPAD_TOP, S3\n\
+*SURFACE, NAME=SLAVE, TYPE=ELEMENT\nPUNCH_BOTTOM, S1\n\
+*MATERIAL, NAME=RUBBER\n*HYPERELASTIC, NEO HOOKE\n{c10}, {d1}\n\
+*MATERIAL, NAME=STEEL\n*ELASTIC\n1e5, 0.3\n\
+*SOLID SECTION, ELSET=PAD, MATERIAL=RUBBER\n1\n\
+*SOLID SECTION, ELSET=PUNCH, MATERIAL=STEEL\n1\n\
+*SURFACE INTERACTION, NAME=SI\n*SURFACE BEHAVIOR, PRESSURE-OVERCLOSURE=LINEAR\n1e5\n\
+*CONTACT PAIR, INTERACTION=SI, TYPE=SURFACE TO SURFACE\nSLAVE, MASTER\n\
+*STEP, NLGEOM, INC=100\n*STATIC\n0.25, 1\n*BOUNDARY\nBOTTOM, 2\nCORNER, 1\n\
+TOP, 1\nTOP, 2, 2, {}\n*NODE PRINT, NSET=BOTTOM, TOTALS=ONLY\nRF\n*END STEP\n",
+        list((0..5).map(|i| pad(i, 0)).collect()),
+        list((0..4).map(|i| punch(i, 1)).collect()),
+        -strain,
+    )
+    .unwrap();
+    std::fs::write(dir.join("pad.inp"), s).unwrap();
+    let output = Command::new(plxs())
+        .arg("pad")
+        .arg("--threads")
+        .arg("2")
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let log = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(output.status.success(), "pad failed:\n{log}");
+    let dat = std::fs::read_to_string(dir.join("pad.dat")).unwrap();
+    let mut take = false;
+    let mut fy = f64::NAN;
+    for line in dat.lines() {
+        if line.contains("total force") {
+            take = true;
+        } else if take && let Some(v) = line.split_whitespace().nth(1).and_then(|v| v.parse().ok())
+        {
+            fy = v;
+            take = false;
+        }
+    }
+    // The bottom carries the punch's force: upwards, |F| of uniaxial compression; the
+    // penalty's overclosure (p / K = 2e-5) is below the tolerance.
+    assert!(
+        (fy - expected).abs() < 2e-3 * expected.abs(),
+        "force {fy}, expected {expected}\n{log}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

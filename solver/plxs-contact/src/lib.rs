@@ -1154,7 +1154,15 @@ impl Pair {
         // false overclosure of the order of its overhang. Node-to-face points are sorted out
         // at the start of the increment instead (`prepare`).
         if !tied && self.kind != ContactKind::NodeToSurface {
-            let r = sub(x, fp.x);
+            let mut r = sub(x, fp.x);
+            // Edges of plane and axisymmetric elements: only the in-plane offset counts. The
+            // out-of-plane unknown of a plane stress node is the change of its thickness, no
+            // displacement; a soft part thickens under compression by more than the
+            // tolerance (a rubber pad hit by a lever: 10 µm), and its points then jumped
+            // between touching and "beside" from one iteration to the next.
+            if face.planar.is_some() {
+                r[2] = 0.0;
+            }
             let lateral = geometry::norm(sub(r, scale(n, geometric_gap)));
             if lateral > BESIDE_TOLERANCE * self.typical {
                 return Err((x, 0.0));
