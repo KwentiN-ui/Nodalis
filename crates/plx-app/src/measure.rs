@@ -235,7 +235,10 @@ pub fn offered(step: u32, frd: &FrdImport, dat: Option<&plx_io::dat::DatImport>)
     let mut fields: Fields = Vec::new();
     for increment in frd.increments.iter().filter(|i| i.step == step) {
         for field in &increment.fields {
-            let components = field.components.iter().map(|c| c.name.clone()).collect();
+            let components = (field.components.iter())
+                .filter(|c| !c.out_of_plane)
+                .map(|c| c.name.clone())
+                .collect();
             match fields.iter_mut().find(|(name, _)| *name == field.name) {
                 Some(entry) => entry.1 = components,
                 None => fields.push((field.name.clone(), components)),

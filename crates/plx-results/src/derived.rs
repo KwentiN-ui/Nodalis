@@ -15,6 +15,7 @@ pub fn add_derived_components(field: &mut Field) {
         name: name.to_string(),
         values,
         derived: true,
+        out_of_plane: false,
     };
 
     if field.rank == FieldRank::Vector && base.len() == 3 {
@@ -100,6 +101,7 @@ mod tests {
                     name: n.into(),
                     values: vec![v],
                     derived: false,
+                    out_of_plane: false,
                 })
                 .collect(),
         )

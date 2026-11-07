@@ -2126,8 +2126,12 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                 .fields
                 .iter()
                 .map(|f| {
-                    let components: Vec<String> =
-                        f.components.iter().map(|c| c.name.clone()).collect();
+                    // Components out of the plane of a 2D model are zero and not listed;
+                    // the rest keep their index in the field.
+                    let components: Vec<(usize, String)> = (f.components.iter().enumerate())
+                        .filter(|(_, c)| !c.out_of_plane)
+                        .map(|(c, component)| (c, component.name.clone()))
+                        .collect();
                     let derived = view.field_outputs.iter().any(|o| o.name == f.name);
                     (f.name.clone(), components, derived)
                 })
@@ -2160,7 +2164,7 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                         };
                         // Nodalis opens the first two fields.
                         tree.branch(ui, item, name, f < 2, |tree, ui| {
-                            for (c, component) in components.into_iter().enumerate() {
+                            for (c, component) in components {
                                 let item = TreeItem::Component(f, c);
                                 if tree.leaf(ui, item, component).clicked()
                                     && active != Some((f, c))

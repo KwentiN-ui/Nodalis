@@ -1794,6 +1794,7 @@ mod tests {
             name: name.into(),
             values: disp.iter().map(|d| d[k]).collect(),
             derived: false,
+            out_of_plane: false,
         };
         let mut field = Field::new(
             "DISP",
@@ -1821,6 +1822,7 @@ mod tests {
                 name: "SXX".into(),
                 values: vec![2.5e8],
                 derived: false,
+                out_of_plane: false,
             }],
         ));
         convert_results(&mut mesh, &mut increments, UnitSystem::MmTonSC);
@@ -2099,6 +2101,7 @@ mod tests {
             name: name.into(),
             values: vec![value],
             derived: false,
+            out_of_plane: false,
         };
         increment.fields.push(Field::new(
             "PDISP",

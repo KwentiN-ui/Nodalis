@@ -23,6 +23,32 @@ When results are opened, Nodalis shows the Results workspace with the last incre
 / History Outputs: values from the `.dat` file and history outputs you create (@history-outputs).
 / Hot Spot Stresses, Paths, Plane Results: evaluations described in the following sections.
 
+=== Results of 2D models <results-2d>
+
+A 2D model (plane stress, plane strain, axisymmetric, @model-properties) lies in the X-Y plane,
+so its displacements, velocities, accelerations and forces have no Z component and its stresses
+and strains no shear out of the plane. The built-in solver does not keep these components: the
+result file is smaller, and the results tree lists only what the model computes, such as `U1`
+and `U2` of `DISP` and `S11`, `S22`, `S33`, `S12` of `STRESS`. The same holds for the history
+outputs.
+
+A component is left out only where it is zero in every increment. Components that carry values
+in 2D stay:
+
+- `S33` and `E33` of an axisymmetric model are the hoop stress and strain.
+- `S33` of a plane strain model is the stress across the thickness; its `E33` is zero and left
+  out.
+- `E33` of a plane stress model is the thickness strain. Its `S33` is zero in theory, but the
+  values extrapolated to the nodes are not, so it stays, as do the transverse shear stresses at
+  the integration points of plane stress and axisymmetric elements in the history output.
+- The rotation of a reference point about the Z axis.
+
+`ALL`, `MISES` and the principal values are computed with the left out components as zero. A
+CalculiX export (#menu("File", "Export", "CalculiX Results (.frd) ...")) writes every component, as
+CalculiX does.
+
+#screenshot("results-2d-tree.png", [Results of a plane strain model: no Z components, no `E33`])
+
 Results list the parts of the model they were computed from, as in the FE Model workspace, also
 when several parts share a section. A `.frd` file itself only groups the elements by material;
 Nodalis reads the parts from the input file CalculiX ran, the `.inp` file of the same name next

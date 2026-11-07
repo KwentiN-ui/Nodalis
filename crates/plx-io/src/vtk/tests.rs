@@ -74,6 +74,7 @@ fn increment(step: u32, number: u32, value: f64, nodes: usize) -> Increment {
             .map(|n| scale * n as f32 * value as f32)
             .collect(),
         derived,
+        out_of_plane: false,
     };
     let mut disp = Field::new(
         "DISP",

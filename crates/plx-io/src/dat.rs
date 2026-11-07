@@ -645,7 +645,14 @@ pub fn parse_dat(text: &str) -> DatImport {
                 Ids::Id => 1,
                 Ids::IdPoint => 2,
             };
-            if values.len() < offset + kind.components.len() {
+            // The built-in solver leaves the trailing out-of-plane values of a 2D model
+            // out (the z value, the shear stresses xz and yz).
+            let least = match kind.components.len() {
+                3 => 2,
+                6 => 4,
+                n => n,
+            };
+            if values.len() < offset + least {
                 warnings.push(format!("Line {line_number}: too few values"));
                 continue;
             }
@@ -901,13 +908,13 @@ fn parse_number(text: &str) -> f64 {
 /// Adds von Mises, Tresca and the principal stresses to stress fields.
 fn add_stress_components(set: &mut HistorySet) {
     for field in set.fields.iter_mut().filter(|f| f.name == "STRESSES") {
-        let Some(base) = STRESS
-            .iter()
-            .map(|n| field.component(n))
-            .collect::<Option<Vec<_>>>()
-        else {
+        // The shear stresses out of the plane of a 2D model may be left out: zero.
+        let base: Vec<Option<&HistoryComponent>> =
+            STRESS.iter().map(|n| field.component(n)).collect();
+        if base[..4].iter().any(Option::is_none) {
             continue;
-        };
+        }
+        let first = base[0].expect("checked");
         let names = [
             "MISES",
             "TRESCA",
@@ -923,16 +930,15 @@ fn add_stress_components(set: &mut HistorySet) {
                 entries: Vec::new(),
             })
             .collect();
-        for (e, entry) in base[0].entries.iter().enumerate() {
+        for (e, entry) in first.entries.iter().enumerate() {
             let mut columns: Vec<Vec<f64>> = vec![Vec::new(); names.len()];
             for row in 0..entry.values.len() {
-                let value = |c: usize| {
-                    base[c]
-                        .entries
-                        .get(e)
+                let value = |c: usize| match base[c] {
+                    Some(component) => (component.entries.get(e))
                         .and_then(|x| x.values.get(row))
                         .copied()
-                        .unwrap_or(f64::NAN)
+                        .unwrap_or(f64::NAN),
+                    None => 0.0,
                 };
                 // S11, S22, S33, S12, S13, S23 as xx, yy, zz, xy, yz, zx.
                 let [xx, yy, zz, xy, xz, yz] = [0, 1, 2, 3, 4, 5].map(value);

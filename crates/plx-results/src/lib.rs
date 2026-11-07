@@ -157,6 +157,10 @@ pub struct Component {
     pub values: Vec<f32>,
     /// Computed by nodalis rather than read from the file.
     pub derived: bool,
+    /// An out-of-plane component of a 2D model, zero everywhere: the built-in solver leaves
+    /// it out of the results, and it is filled in with zeros for what computes with all
+    /// components of the field (magnitudes, invariants, transformations), but not listed.
+    pub out_of_plane: bool,
 }
 
 impl Component {
