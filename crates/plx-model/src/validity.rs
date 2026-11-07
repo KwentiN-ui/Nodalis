@@ -219,6 +219,13 @@ impl FeModel {
                                 (self.coordinate_system_or_global(&joint.system).is_none()).then(
                                     || format!("Coordinate System {} does not exist", joint.system),
                                 )
+                            })
+                            .or_else(|| {
+                                // The axis from faces that have none (an origin that cannot
+                                // be found is the selection's problem).
+                                (self.joint_origin(mesh, joint).is_ok())
+                                    .then(|| self.joint_frame(mesh, joint).err())
+                                    .flatten()
                             }),
                         _ => None,
                     }),

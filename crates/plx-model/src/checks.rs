@@ -3052,8 +3052,12 @@ impl FeModel {
                             let Some(node) = nearest_node(mesh, region, centre) else {
                                 continue;
                             };
-                            let axes = (self.coordinate_system_or_global(&joint.system))
-                                .and_then(|system| system.directions_at(centre).ok())
+                            let axes = (self.joint_frame(mesh, joint).ok())
+                                .map(|(_, axes)| axes)
+                                .or_else(|| {
+                                    (self.coordinate_system_or_global(&joint.system))
+                                        .and_then(|system| system.directions_at(centre).ok())
+                                })
                                 .unwrap_or([axis(0), axis(1), axis(2)]);
                             for dof in (0..6).filter(|&d| !free[d]) {
                                 if dof < 3 || space == ModelSpace::ThreeD {
@@ -3675,7 +3679,7 @@ pub(crate) fn describe_motions(space: ModelSpace, free: &[[f64; 6]]) -> String {
 
 /// Eigenvalues and eigenvectors of the upper left `n` x `n` block of a symmetric matrix by
 /// Jacobi rotations; small enough to be exact for the six rigid body unknowns.
-fn eigen(matrix: &[[f64; 6]; 6], n: usize) -> ([f64; 6], [[f64; 6]; 6]) {
+pub(crate) fn eigen(matrix: &[[f64; 6]; 6], n: usize) -> ([f64; 6], [[f64; 6]; 6]) {
     let mut a = *matrix;
     let mut v = [[0.0; 6]; 6];
     for (i, row) in v.iter_mut().enumerate() {
