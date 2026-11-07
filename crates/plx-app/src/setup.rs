@@ -6187,18 +6187,19 @@ fn dynamic_form(
     ui.end_row();
     let modal = matches!(settings.method, DynamicMethod::Modal { .. });
     let explicit = settings.method.is_explicit();
-    if !explicit {
-        ui.label("");
-        ui.add_enabled(
-            !modal,
-            egui::Checkbox::new(&mut settings.event_frames, "Frames at contact events"),
-        )
-        .on_hover_text(
-            "Also a frame whenever a contact closes or opens and at the sub-steps of an \
-             impact, between the evenly spaced frames. Only with implicit integration.",
-        );
-        ui.end_row();
-    }
+    ui.label("");
+    ui.add_enabled(
+        !modal,
+        egui::Checkbox::new(&mut settings.event_frames, "Frames at contact events"),
+    )
+    .on_hover_text(if explicit {
+        "Also a frame whenever a contact closes or opens (within a few time steps), \
+         between the evenly spaced frames."
+    } else {
+        "Also a frame whenever a contact closes or opens and at the sub-steps of an \
+         impact, between the evenly spaced frames. Not with modal superposition."
+    });
+    ui.end_row();
 
     ui.label("Method").on_hover_text(settings.method.hint());
     egui::ComboBox::from_id_salt("dynamic method")

@@ -101,14 +101,59 @@ pub(crate) struct ElementData {
     /// The highest eigenfrequency of the other elements (membranes, springs, linear
     /// blocks) and what it belongs to.
     pub(crate) other_omega: f64,
+    /// The lumped mass of every entry, one after the other in the order of the entries.
+    pub(crate) lumped: Vec<f64>,
 }
 
-/// The linear bulk viscosity of an element: coefficient times volume, and the mean
-/// gradient row (see `SolidElement::mean_gradients`).
+/// The linear bulk viscosity of an element, `f = c V (g · v) g` with the mean gradient row
+/// `g` (see `SolidElement::volume_mean_gradients`), and its hourglass viscosity.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Viscosity {
-    pub(crate) cv: f64,
+    /// `c`: `b₁ ρ c_d² Δt_e`, per volume.
+    pub(crate) rate: f64,
+    /// Volume and mean gradients in the reference configuration.
+    pub(crate) volume: f64,
     pub(crate) g: Vec<f64>,
+    /// The coefficient of the viscous hourglass control (C3D8R), zero for other elements.
+    pub(crate) hourglass: f64,
+}
+
+/// The hourglass base vectors of an eight-node brick (Flanagan and Belytschko 1981): the
+/// nodal patterns `ξη`, `ηζ`, `ζξ` and `ξηζ`, which the single integration point does not
+/// see.
+const HOURGLASS_BASE: [[f64; 8]; 4] = [
+    [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0],
+    [1.0, 1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0],
+    [1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0],
+    [-1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0],
+];
+
+/// Coefficient of the viscous hourglass control: `f = κ ρ c_d V^⅔ / 4 · Σ γ (γ · v)`
+/// (the LS-DYNA standard, κ = 0.1).
+const HOURGLASS_VISCOSITY: f64 = 0.1;
+
+/// The viscous hourglass forces of a C3D8R at nodal positions `x` (eight nodes) with mean
+/// gradients `g` (24, node-major), velocities `v` (24), added to `f`: the hourglass
+/// patterns made orthogonal to the linear fields, `γ_i = h_i − (h_i · x) b`.
+fn hourglass_forces(x: &[[f64; 3]], g: &[f64], v: &[f64], coefficient: f64, f: &mut [f64]) {
+    for h in &HOURGLASS_BASE {
+        let mut hx = [0.0; 3];
+        for (a, xa) in x.iter().enumerate() {
+            for j in 0..3 {
+                hx[j] += h[a] * xa[j];
+            }
+        }
+        let mut gamma = [0.0; 8];
+        for a in 0..8 {
+            gamma[a] = h[a] - (0..3).map(|j| hx[j] * g[3 * a + j]).sum::<f64>();
+        }
+        for j in 0..3 {
+            let q: f64 = (0..8).map(|a| gamma[a] * v[3 * a + j]).sum();
+            for a in 0..8 {
+                f[3 * a + j] += coefficient * gamma[a] * q;
+            }
+        }
+    }
 }
 
 /// HRZ lumping of a consistent element mass (row-major `ndof × ndof`, three DOFs per
@@ -208,12 +253,22 @@ pub(crate) fn element_data(
             let modulus = (0..3).map(|i| d[i][i]).fold(0.0_f64, f64::max);
             let (volume, g) = formulation.volume_mean_gradients(&coords);
             let dt_e = if omega > 0.0 { 2.0 / omega } else { 0.0 };
+            let hourglass = if formulation.kind == plxs_core::element::ElementType::C3D8R
+                && coords.len() == 8
+                && ndof == 24
+            {
+                HOURGLASS_VISCOSITY * rho * (modulus / rho).sqrt() * volume.powf(2.0 / 3.0) / 4.0
+            } else {
+                0.0
+            };
             Ok(PerElement {
                 lumped,
                 omega,
                 viscosity: Viscosity {
-                    cv: BULK_VISCOSITY * modulus * dt_e * volume,
+                    rate: BULK_VISCOSITY * modulus * dt_e,
+                    volume,
                     g,
+                    hourglass,
                 },
             })
         })
@@ -221,11 +276,13 @@ pub(crate) fn element_data(
     let mut mass = vec![0.0; table.dofs.len()];
     let mut omega = Vec::with_capacity(per.len());
     let mut viscosity = Vec::with_capacity(per.len());
+    let mut lumped = Vec::new();
     for (entry, element) in table.entries.iter().zip(per) {
         let element = element?;
         for (&dof, m) in entry.dofs.iter().zip(&element.lumped) {
             mass[dof as usize] += m;
         }
+        lumped.extend_from_slice(&element.lumped);
         omega.push(element.omega);
         viscosity.push(element.viscosity);
     }
@@ -275,7 +332,49 @@ pub(crate) fn element_data(
         omega,
         viscosity,
         other_omega,
+        lumped,
     })
+}
+
+/// The highest eigenfrequency of every entry in the configuration `u` (NLGEOM: elements
+/// that are squeezed get stiffer and their stable time step shorter), with the elastic
+/// stiffness and the lumped masses of `data` (which do not change).
+fn current_frequencies(
+    table: &ElementTable,
+    model: &Model,
+    nlgeom: bool,
+    u: &[f64],
+    data: &ElementData,
+    offsets: &[usize],
+) -> Vec<f64> {
+    table
+        .entries
+        .par_iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let formulation = table.formulation(entry);
+            let coords = table.coordinates(model, entry);
+            let ue = table.gather(entry, u);
+            if ue.len() != 3 * coords.len() {
+                return data.omega[index];
+            }
+            let current: Vec<[f64; 3]> = coords
+                .iter()
+                .enumerate()
+                .map(|(a, x)| [x[0] + ue[3 * a], x[1] + ue[3 * a + 1], x[2] + ue[3 * a + 2]])
+                .collect();
+            let d = table.law(entry, nlgeom).elastic_matrix();
+            let mut ke = Vec::new();
+            formulation.stiffness(&current, &d, &mut ke);
+            let omega = largest_frequency(&ke, &data.lumped[offsets[index]..offsets[index + 1]]);
+            // An inverted element has no meaningful frequency: keep the reference one.
+            if omega.is_finite() && omega > 0.0 {
+                omega
+            } else {
+                data.omega[index]
+            }
+        })
+        .collect()
 }
 
 fn missing_density(model: &Model, element: u32) -> Error {
@@ -484,6 +583,18 @@ struct Forces {
     viscous: Vec<f64>,
 }
 
+impl Forces {
+    /// Contact springs count as internal forces, their damping as viscous.
+    fn add_contact(&mut self, springs: &[f64], damping: &[f64]) {
+        for (f, c) in self.internal.iter_mut().zip(springs) {
+            *f += c;
+        }
+        for (f, c) in self.viscous.iter_mut().zip(damping) {
+            *f += c;
+        }
+    }
+}
+
 impl<'a> Kernel<'a> {
     fn new(ctx: &ProcedureContext<'a>, step: &Step, data: &'a ElementData) -> Self {
         let mut offsets = Vec::with_capacity(ctx.table.entries.len() + 1);
@@ -584,7 +695,7 @@ impl<'a> Kernel<'a> {
                     &d_elastic,
                     |ip, kinematics: &plxs_elements::PointKinematics| {
                         let slice = &mut state[ip * STATE_SIZE..(ip + 1) * STATE_SIZE];
-                        let (output, e) = law.stress_and_strain(
+                        let (stress, e) = law.stress_without_tangent(
                             &MaterialInput {
                                 strain: kinematics.strain,
                                 temperature: 0.0,
@@ -601,9 +712,9 @@ impl<'a> Kernel<'a> {
                                     kinematics.deformation_gradient[2][2] =
                                         (1.0 + 2.0 * e[2]).max(0.0).sqrt();
                                 }
-                                kinematics.cauchy(&output.stress)
+                                kinematics.cauchy(&stress)
                             } else {
-                                output.stress
+                                stress
                             };
                             stresses[ip * 6..(ip + 1) * 6].copy_from_slice(&sigma);
                             strains[ip * 6..(ip + 1) * 6].copy_from_slice(&[
@@ -615,21 +726,46 @@ impl<'a> Kernel<'a> {
                                 0.5 * e[5],
                             ]);
                         }
-                        (output.stress, output.tangent)
+                        // No tangent is assembled (`ke` is `None`).
+                        (stress, d_elastic)
                     },
                     fe,
                     None,
                 );
-                // Bulk viscosity on the mean volumetric strain rate.
-                let rate: f64 = entry
-                    .dofs
-                    .iter()
-                    .zip(&viscosity.g)
-                    .map(|(&dof, g)| g * v[dof as usize])
-                    .sum();
-                let q = viscosity.cv * rate;
-                for (f, g) in fv.iter_mut().zip(&viscosity.g) {
+                // Bulk viscosity on the mean volumetric strain rate, under NLGEOM in the
+                // current configuration (a spinning element must not see a rate).
+                let current: Option<Vec<[f64; 3]>> =
+                    (nlgeom && ue.len() == 3 * coords.len()).then(|| {
+                        coords
+                            .iter()
+                            .enumerate()
+                            .map(|(a, x)| {
+                                [x[0] + ue[3 * a], x[1] + ue[3 * a + 1], x[2] + ue[3 * a + 2]]
+                            })
+                            .collect()
+                    });
+                let moved;
+                let (volume, g): (f64, &[f64]) = match &current {
+                    Some(x) => {
+                        moved = formulation.volume_mean_gradients(x);
+                        (moved.0, &moved.1)
+                    }
+                    None => (viscosity.volume, &viscosity.g),
+                };
+                let ve: Vec<f64> = entry.dofs.iter().map(|&dof| v[dof as usize]).collect();
+                let rate: f64 = ve.iter().zip(g).map(|(v, g)| g * v).sum();
+                let q = viscosity.rate * volume * rate;
+                for (f, g) in fv.iter_mut().zip(g) {
                     *f = q * g;
+                }
+                if viscosity.hourglass > 0.0 {
+                    hourglass_forces(
+                        current.as_deref().unwrap_or(&coords),
+                        g,
+                        &ve,
+                        viscosity.hourglass,
+                        fv,
+                    );
                 }
                 want_fields.then_some((stresses, strains))
             })
@@ -731,9 +867,15 @@ pub(crate) struct Timing {
 /// The stable time step from the element frequencies, reduced for the bulk viscosity and
 /// the stiffness-proportional damping `beta`.
 pub(crate) fn stable_time_step(data: &ElementData, beta: f64) -> Timing {
-    let mut largest = data.other_omega;
+    stable_time_step_of(&data.omega, data.other_omega, beta)
+}
+
+/// [`stable_time_step`] from the element frequencies `omega` and that of the other
+/// elements.
+fn stable_time_step_of(omega: &[f64], other_omega: f64, beta: f64) -> Timing {
+    let mut largest = other_omega;
     let mut limiting = None;
-    for (index, &omega) in data.omega.iter().enumerate() {
+    for (index, &omega) in omega.iter().enumerate() {
         if omega > largest {
             largest = omega;
             limiting = Some(index as u32);
@@ -749,6 +891,191 @@ pub(crate) fn stable_time_step(data: &ElementData, beta: f64) -> Timing {
     Timing {
         stable: SAFETY * 2.0 / largest * ((1.0 + xi * xi).sqrt() - xi),
         limiting,
+    }
+}
+
+/// How stiff a contact spring may be against the masses it joins: `ω_c² Δt² ≤ 0.7`, with
+/// `ω_c` from Gershgorin's bound of `M^-½ K_c M^-½`. On its own such a spring would be
+/// stable up to `ω Δt = 2`; together with the element at the same node (`ω Δt ≈ 1.7`) and
+/// the time step shortened by [`CONTACT_STEP`] the node stays below it.
+const CONTACT_STIFFNESS: f64 = 0.7;
+
+/// The factor on the stable time step while contact pairs are in force.
+const CONTACT_STEP: f64 = 0.9;
+
+/// Damping of the contact springs as a fraction of the time step (`c = η Δt dp/dd`, see
+/// `plxs_contact::Damping`): `ζ ≈ η ω_c Δt / 2 ≈ 0.2` for a spring at the stiffness limit,
+/// enough to keep a slave node from chattering on its spring.
+const CONTACT_DAMPING: f64 = 0.5;
+
+/// Under NLGEOM the stable time step is found anew every so many time steps.
+const NLGEOM_CHECK_STEPS: u64 = 100;
+
+/// Most event frames (contact closing or opening) between two result frames.
+const MAX_EVENT_FRAMES: u64 = 32;
+
+/// The contact of an explicit step: the springs of `plxs_contact` evaluated at every time
+/// step from the states of the step before (the friction slips), their stiffness capped
+/// where it would be too stiff for the time step.
+struct ExplicitContact {
+    /// The nodes of the pairs and their displacements when the candidates were found.
+    nodes: Vec<u32>,
+    prepared: Vec<f64>,
+    /// How far those nodes may move before the candidates are searched again.
+    reach: f64,
+    states: Vec<Vec<plxs_core::state::ContactPointState>>,
+    /// DOFs whose motion is prescribed: they count as infinitely heavy.
+    fixed: Vec<bool>,
+    /// The last evaluation (with the capped stiffness), for the outputs.
+    last: Option<plxs_contact::Evaluation>,
+    /// Points whose stiffness was capped, and the smallest factor.
+    capped: usize,
+    smallest: f64,
+}
+
+impl ExplicitContact {
+    fn new(ctx: &mut ProcedureContext<'_>, u: &[f64], fixed: Vec<bool>) -> Self {
+        let nodes = ctx.contact.nodes();
+        ctx.contact.prepare(&ctx.model.nodes.coordinates, u);
+        ctx.contact.stiffness_scale = ctx
+            .contact
+            .pairs
+            .iter()
+            .map(|p| {
+                let count = if p.mortar_nodes.is_empty() {
+                    p.points.len()
+                } else {
+                    p.mortar_nodes.len()
+                };
+                vec![1.0; count]
+            })
+            .collect();
+        let prepared = Self::gather(&nodes, u);
+        Self {
+            nodes,
+            prepared,
+            reach: 0.5 * ctx.contact.search_reach(),
+            states: ctx.state.contact.clone(),
+            fixed,
+            last: None,
+            capped: 0,
+            smallest: 1.0,
+        }
+    }
+
+    fn gather(nodes: &[u32], u: &[f64]) -> Vec<f64> {
+        nodes
+            .iter()
+            .flat_map(|&n| (0..3).map(move |d| u[n as usize * 3 + d]))
+            .collect()
+    }
+
+    /// The forces of the springs at `u` (velocities `v`, time step `h`): the springs and,
+    /// separately, their damping. The states advance to those at `u`.
+    fn forces(
+        &mut self,
+        ctx: &mut ProcedureContext<'_>,
+        u: &[f64],
+        v: &[f64],
+        h: f64,
+        mass: &[f64],
+    ) -> (Vec<f64>, Vec<f64>) {
+        let n = u.len();
+        let coords = &ctx.model.nodes.coordinates;
+        // A new search for candidates once a node moved more than the search covers.
+        let current = Self::gather(&self.nodes, u);
+        let moved = current
+            .chunks_exact(3)
+            .zip(self.prepared.chunks_exact(3))
+            .map(|(a, b)| {
+                ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+            })
+            .fold(0.0_f64, f64::max);
+        if moved >= self.reach || moved.is_nan() {
+            ctx.contact.prepare(coords, u);
+            self.prepared = current;
+        }
+        ctx.contact.damping = Some(plxs_contact::Damping {
+            velocities: v.to_vec(),
+            coefficient: CONTACT_DAMPING * h,
+            rate: 0.0,
+        });
+        let mut evaluation = ctx.contact.evaluate(coords, u, &self.states, false);
+        ctx.contact.damping = None;
+        let mut springs = vec![0.0; n];
+        let mut damping = vec![0.0; n];
+        let limit = CONTACT_STIFFNESS / (h * h);
+        // Gershgorin's bound of all springs together on the masses of their nodes, per
+        // DOF: a node under several springs (the integration points of a face) takes
+        // their sum.
+        let moving = |dof: u32| !self.fixed[dof as usize] && mass[dof as usize] > 0.0;
+        let mut rows = vec![0.0_f64; n];
+        for element in &evaluation.elements {
+            let m = element.dofs.len();
+            for i in 0..m {
+                let di = element.dofs[i];
+                if !moving(di) {
+                    continue;
+                }
+                rows[di as usize] += (0..m)
+                    .filter(|&j| moving(element.dofs[j]))
+                    .map(|j| {
+                        element.ke[i * m + j].abs()
+                            / (mass[di as usize] * mass[element.dofs[j] as usize]).sqrt()
+                    })
+                    .sum::<f64>();
+            }
+        }
+        for element in &mut evaluation.elements {
+            let largest = element
+                .dofs
+                .iter()
+                .map(|&d| rows[d as usize])
+                .fold(0.0_f64, f64::max);
+            if largest > limit {
+                let factor = limit / largest;
+                let (pair, point) = (element.source.0 as usize, element.source.1 as usize);
+                if let Some(scale) = ctx
+                    .contact
+                    .stiffness_scale
+                    .get_mut(pair)
+                    .and_then(|s| s.get_mut(point))
+                {
+                    if *scale == 1.0 {
+                        self.capped += 1;
+                    }
+                    *scale *= factor;
+                    self.smallest = self.smallest.min(*scale);
+                }
+                // This step's force with the lowered stiffness as well (a fast impact
+                // overcloses by `v Δt` in its first step).
+                element.fe.iter_mut().for_each(|f| *f *= factor);
+                element.damping.iter_mut().for_each(|f| *f *= factor);
+                element.normal.iter_mut().for_each(|f| *f *= factor);
+                element.ke.iter_mut().for_each(|k| *k *= factor);
+            }
+            for (a, &dof) in element.dofs.iter().enumerate() {
+                let d = element.damping.get(a).copied().unwrap_or(0.0);
+                springs[dof as usize] += element.fe[a] - d;
+                damping[dof as usize] += d;
+            }
+        }
+        self.states = evaluation.states();
+        self.last = Some(evaluation);
+        (springs, damping)
+    }
+
+    /// Whether some point is closed now that was open before, or the other way round.
+    fn changed(
+        before: &[Vec<plxs_core::state::ContactPointState>],
+        after: &[Vec<plxs_core::state::ContactPointState>],
+    ) -> bool {
+        use plxs_core::state::ContactStatus;
+        before
+            .iter()
+            .flatten()
+            .zip(after.iter().flatten())
+            .any(|(a, b)| (a.status == ContactStatus::Open) != (b.status == ContactStatus::Open))
     }
 }
 
@@ -793,12 +1120,11 @@ impl Procedure for ExplicitDynamic {
             ));
         }
         ctx.table.require_elastic()?;
-        if !ctx.contact.is_empty() {
-            return Err(Error::Unsupported(format!(
-                "contact in explicit *DYNAMIC steps is not implemented yet (step {})",
-                step.name
-            )));
+        // Contact: *MODEL CHANGE / *CHANGE FRICTION of the step, a state per slave point.
+        for warning in ctx.contact.begin_step(step, ctx.state) {
+            progress.event(ProgressEvent::Warning(warning));
         }
+        let has_contact = ctx.contact.is_active();
         let n = ctx.table.dofs.len();
         let start_total = ctx.state.total_time;
 
@@ -842,7 +1168,12 @@ impl Procedure for ExplicitDynamic {
         // Damping.
         let (alpha_r, beta_r) = explicit_damping(ctx, step, &set, progress)?;
 
-        let timing = stable_time_step(&data, beta_r);
+        let contact_step = if has_contact { CONTACT_STEP } else { 1.0 };
+        let mut timing = stable_time_step(&data, beta_r);
+        timing.stable *= contact_step;
+        let fixed_step = controls
+            .time_step
+            .filter(|t| *t > 0.0 && *t <= timing.stable);
         let mut dt_max = timing.stable;
         if let Some(fixed) = controls.time_step.filter(|t| *t > 0.0) {
             if fixed > timing.stable {
@@ -952,6 +1283,19 @@ impl Procedure for ExplicitDynamic {
             &mut material,
             Some((&mut stresses, &mut strains)),
         );
+        let mut contact = has_contact.then(|| {
+            let mut fixed = vec![false; n];
+            for &dof in &spc_end.dofs {
+                if let Some(f) = fixed.get_mut(dof as usize) {
+                    *f = true;
+                }
+            }
+            ExplicitContact::new(ctx, &u, fixed)
+        });
+        if let Some(contact) = contact.as_mut() {
+            let (springs, damping) = contact.forces(ctx, &u, &v_half, dt_max, &data.mass);
+            forces.add_contact(&springs, &damping);
+        }
         ctx.profile.add(Phase::Assembly, started);
         let mut p = loads.at(ctx, step, 0.0, start_total, period)?;
         let mass = &data.mass;
@@ -1030,14 +1374,23 @@ impl Procedure for ExplicitDynamic {
         let requests = energy_requests(step);
 
         let frames = ((period / interval) - 1e-9).ceil().max(1.0) as u32;
+        let event_frames = parameters.event_frames && has_contact;
         let mut time = 0.0;
         let mut h_prev = 0.0;
+        let mut h;
         let mut steps_done: u64 = 0;
         let mut last_info = std::time::Instant::now();
         let run_started = std::time::Instant::now();
         let mut balance_warned = false;
+        let mut balance = 0.0;
+        // The result frames written so far (the frames of the step and the event frames).
+        let mut record: u32 = 0;
+        // An event in the last time step: the next one is written as an event frame.
+        let mut event_pending = false;
+        let mut omega_now: Option<Vec<f64>> = None;
         for frame in 1..=frames {
             if ctx.cancel.is_cancelled() {
+                ctx.contact.stiffness_scale.clear();
                 return Ok(StepOutcome::Cancelled);
             }
             let t_frame = if frame == frames {
@@ -1045,22 +1398,47 @@ impl Procedure for ExplicitDynamic {
             } else {
                 f64::from(frame) * interval
             };
-            let steps = ((t_frame - time) / dt_max * (1.0 - 1e-12)).ceil().max(1.0) as u64;
-            let h = (t_frame - time) / steps as f64;
             progress.event(ProgressEvent::Increment {
                 step: ctx.step_number,
-                increment: frame,
+                increment: record + 1,
                 attempt: 1,
                 size: t_frame - time,
                 step_time: t_frame,
                 total_time: start_total + t_frame,
             });
-            for s in 0..steps {
-                if s > 0 && s % CANCEL_STEPS == 0 && ctx.cancel.is_cancelled() {
+            let frame_start = time;
+            let mut frame_steps: u64 = 0;
+            let mut events_in_frame: u64 = 0;
+            let mut last_event_step: Option<u64> = None;
+            loop {
+                if frame_steps > 0
+                    && frame_steps.is_multiple_of(CANCEL_STEPS)
+                    && ctx.cancel.is_cancelled()
+                {
+                    ctx.contact.stiffness_scale.clear();
                     return Ok(StepOutcome::Cancelled);
                 }
-                let last_of_frame = s + 1 == steps;
+                // Under NLGEOM the elements change their stable time step as they deform.
+                if step.nlgeom && steps_done > 0 && steps_done.is_multiple_of(NLGEOM_CHECK_STEPS) {
+                    let started = std::time::Instant::now();
+                    let omega =
+                        current_frequencies(ctx.table, ctx.model, true, &u, &data, &kernel.offsets);
+                    let now = stable_time_step_of(&omega, data.other_omega, beta_r);
+                    dt_max = (now.stable * contact_step).min(fixed_step.unwrap_or(f64::INFINITY));
+                    if !dt_max.is_finite() {
+                        dt_max = interval;
+                    }
+                    omega_now = Some(omega);
+                    ctx.profile.add(Phase::Assembly, started);
+                }
+                // Equal steps to the end of the frame.
+                let remaining = t_frame - time;
+                let count = (remaining / dt_max * (1.0 - 1e-12)).ceil().max(1.0);
+                h = remaining / count;
+                let last_of_frame = count <= 1.0;
                 let t_next = if last_of_frame { t_frame } else { time + h };
+                let write_event = event_pending && !last_of_frame;
+                event_pending = false;
                 let started = std::time::Instant::now();
                 let g_next = if varying {
                     g_at(ctx, t_next)?
@@ -1085,8 +1463,9 @@ impl Procedure for ExplicitDynamic {
                 ctx.profile.add(Phase::Vectors, started);
                 // Forces at the new time.
                 let started = std::time::Instant::now();
-                let fields = last_of_frame.then_some((&mut stresses, &mut strains));
-                let new_forces = kernel.forces(
+                let fields =
+                    (last_of_frame || write_event).then_some((&mut stresses, &mut strains));
+                let mut new_forces = kernel.forces(
                     &u_next,
                     &v_next,
                     h,
@@ -1095,6 +1474,26 @@ impl Procedure for ExplicitDynamic {
                     fields,
                 );
                 ctx.profile.add(Phase::Assembly, started);
+                if let Some(contact) = contact.as_mut() {
+                    let started = std::time::Instant::now();
+                    let before = event_frames.then(|| contact.states.clone());
+                    let (springs, damping) = contact.forces(ctx, &u_next, &v_next, h, &data.mass);
+                    new_forces.add_contact(&springs, &damping);
+                    // A contact that closed or opened: the next time step is an event frame
+                    // (at most `MAX_EVENT_FRAMES` per frame, spread over it).
+                    let expected = ((t_frame - frame_start) / h).max(1.0) as u64;
+                    if let Some(before) = before
+                        && events_in_frame < MAX_EVENT_FRAMES
+                        && last_event_step
+                            .is_none_or(|last| frame_steps >= last + expected / MAX_EVENT_FRAMES)
+                        && ExplicitContact::changed(&before, &contact.states)
+                    {
+                        event_pending = true;
+                        events_in_frame += 1;
+                        last_event_step = Some(frame_steps);
+                    }
+                    ctx.profile.add(Phase::Contact, started);
+                }
                 let started = std::time::Instant::now();
                 let p_next = loads.at(ctx, step, t_next, start_total, period)?;
                 ctx.profile.add(Phase::Loads, started);
@@ -1161,96 +1560,122 @@ impl Procedure for ExplicitDynamic {
                 h_prev = h;
                 time = t_next;
                 steps_done += 1;
+                frame_steps += 1;
                 ctx.profile.add(Phase::Vectors, started);
+
+                if last_of_frame || write_event {
+                    // The frame: full-step velocities and the accelerations.
+                    let started = std::time::Instant::now();
+                    a_full = set.expand(&a_red, &g_acc);
+                    let v_full: Vec<f64> = v_half
+                        .iter()
+                        .zip(&a_full)
+                        .map(|(v, a)| v + 0.5 * h * a)
+                        .collect();
+                    energies.kinetic = kinetic(&v_full);
+                    let total_energy = energies.kinetic + energies.internal + energies.dissipation;
+                    largest_energy = largest_energy
+                        .max(energies.kinetic)
+                        .max(energies.internal.abs())
+                        .max(energies.external_work.abs());
+                    balance = (total_energy - initial_energy - energies.external_work).abs()
+                        / largest_energy.max(f64::MIN_POSITIVE);
+                    if balance > ENERGY_WARNING && !balance_warned && largest_energy > 0.0 {
+                        balance_warned = true;
+                        progress.event(ProgressEvent::Warning(format!(
+                            "explicit: the energy balance is off by {} % at {} s; the time step may be \
+                             too large for the model",
+                            short(100.0 * balance),
+                            short(time)
+                        )));
+                    }
+                    motion = Motion {
+                        u: u.clone(),
+                        v: v_full,
+                        a: a_full.clone(),
+                    };
+                    let mut reactions: Vec<f64> = (0..n)
+                        .map(|i| forces.internal[i] + forces.viscous[i] + f_damp[i])
+                        .collect();
+                    ctx.constraints
+                        .transfer_forces(&mut reactions, &spc_end.dofs, &active);
+                    if let Some(contact) = &contact {
+                        ctx.state.contact.clone_from(&contact.states);
+                        ctx.contact.last.clone_from(&contact.last);
+                    }
+                    record += 1;
+                    let total = start_total + time;
+                    if !requests.is_empty() {
+                        write_energies(
+                            ctx.results,
+                            &requests,
+                            &energies,
+                            (ctx.step_number, record, total),
+                        );
+                    }
+                    let mut current_material = material_template.clone();
+                    current_material.values.clone_from(&material);
+                    if write_event || crate::static_linear::writes_increment(step, frame, frames) {
+                        write_increment(
+                            ctx,
+                            step,
+                            record,
+                            total,
+                            &motion,
+                            &reactions,
+                            (&stresses, &strains),
+                            carried_nodal.as_deref(),
+                            Some(&current_material),
+                        );
+                    }
+                    crate::history::write_history_with_velocities(
+                        ctx.results,
+                        ctx.model,
+                        ctx.table,
+                        step,
+                        (ctx.step_number, record, total),
+                        (&motion.u, Some(&motion.v)),
+                        &reactions,
+                        &stresses,
+                        &strains,
+                        Some(&current_material),
+                    );
+                    if let Some(evaluation) = contact.as_ref().and_then(|c| c.last.as_ref()) {
+                        for request in &step.outputs.contact_print {
+                            let blocks = plxs_contact::output::history_blocks(
+                                &ctx.contact,
+                                evaluation,
+                                request,
+                                &ctx.model.nodes.ids,
+                                ctx.step_number,
+                                record,
+                                total,
+                            );
+                            ctx.results.history.extend(blocks);
+                        }
+                    }
+                    ctx.profile.add(Phase::Results, started);
+                }
+                if last_of_frame {
+                    break;
+                }
             }
 
-            // The frame: full-step velocities and the accelerations.
-            let started = std::time::Instant::now();
-            a_full = set.expand(&a_red, &g_acc);
-            let v_full: Vec<f64> = v_half
-                .iter()
-                .zip(&a_full)
-                .map(|(v, a)| v + 0.5 * h * a)
-                .collect();
-            energies.kinetic = kinetic(&v_full);
-            let total_energy = energies.kinetic + energies.internal + energies.dissipation;
-            largest_energy = largest_energy
-                .max(energies.kinetic)
-                .max(energies.internal.abs())
-                .max(energies.external_work.abs());
-            let balance = (total_energy - initial_energy - energies.external_work).abs()
-                / largest_energy.max(f64::MIN_POSITIVE);
-            if balance > ENERGY_WARNING && !balance_warned && largest_energy > 0.0 {
-                balance_warned = true;
-                progress.event(ProgressEvent::Warning(format!(
-                    "explicit: the energy balance is off by {} % at {} s; the time step may be \
-                     too large for the model",
-                    short(100.0 * balance),
-                    short(time)
-                )));
-            }
-            let state_motion = Motion {
-                u: u.clone(),
-                v: v_full,
-                a: a_full.clone(),
-            };
-            let mut reactions: Vec<f64> = (0..n)
-                .map(|i| forces.internal[i] + forces.viscous[i] + f_damp[i])
-                .collect();
-            ctx.constraints
-                .transfer_forces(&mut reactions, &spc_end.dofs, &active);
-            let total = start_total + time;
-            if !requests.is_empty() {
-                write_energies(
-                    ctx.results,
-                    &requests,
-                    &energies,
-                    (ctx.step_number, frame, total),
-                );
-            }
-            let mut current_material = material_template.clone();
-            current_material.values.clone_from(&material);
-            if crate::static_linear::writes_increment(step, frame, frames) {
-                write_increment(
-                    ctx,
-                    step,
-                    frame,
-                    total,
-                    &state_motion,
-                    &reactions,
-                    (&stresses, &strains),
-                    carried_nodal.as_deref(),
-                    Some(&current_material),
-                );
-            }
-            crate::history::write_history_with_velocities(
-                ctx.results,
-                ctx.model,
-                ctx.table,
-                step,
-                (ctx.step_number, frame, total),
-                (&state_motion.u, Some(&state_motion.v)),
-                &reactions,
-                &stresses,
-                &strains,
-                Some(&current_material),
-            );
-            ctx.profile.add(Phase::Results, started);
             ctx.sta.push(StaRow {
                 step: ctx.step_number,
-                increment: frame,
+                increment: record,
                 attempt: 1,
-                iterations: steps.min(u64::from(u32::MAX)) as u32,
-                total_time: total,
+                iterations: frame_steps.min(u64::from(u32::MAX)) as u32,
+                total_time: start_total + time,
                 step_time: time,
                 increment_size: h,
             });
             progress.event(ProgressEvent::IncrementDone {
                 step: ctx.step_number,
-                increment: frame,
+                increment: record,
                 attempt: 1,
-                iterations: steps.min(u64::from(u32::MAX)) as u32,
-                total_time: total,
+                iterations: frame_steps.min(u64::from(u32::MAX)) as u32,
+                total_time: start_total + time,
                 step_time: time,
                 size: h,
             });
@@ -1259,10 +1684,14 @@ impl Procedure for ExplicitDynamic {
                 let elapsed = run_started.elapsed().as_secs_f64();
                 let left = elapsed * (period - time) / time.max(f64::MIN_POSITIVE);
                 progress.event(ProgressEvent::Info(format!(
-                    "explicit: {} s of {} s, {steps_done} time steps of {} s, energy balance {} %{}",
+                    "explicit: {} s of {} s, {steps_done} time steps{}, energy balance {} %{}",
                     short(time),
                     short(period),
-                    short(h),
+                    if omega_now.is_some() {
+                        format!(", now {} s each", short(h))
+                    } else {
+                        format!(" of {} s", short(h))
+                    },
                     short(100.0 * balance),
                     if frame < frames {
                         format!(", about {:.0} s left", left)
@@ -1271,8 +1700,18 @@ impl Procedure for ExplicitDynamic {
                     }
                 )));
             }
-            motion = state_motion;
         }
+        if let Some(contact) = &contact
+            && contact.capped > 0
+        {
+            progress.event(ProgressEvent::Info(format!(
+                "explicit: the contact stiffness of {} points was lowered for the time step \
+                 (down to {} of the relation's)",
+                contact.capped,
+                short(contact.smallest)
+            )));
+        }
+        ctx.contact.stiffness_scale.clear();
 
         let mut energy = internal_energy_density(&stresses, &strains);
         if let Some(c) = &carried {

@@ -26,7 +26,8 @@ structure is damped; Nodalis chooses the time step and the integration from that
     or opens and at the sub-steps the solver takes through an impact, between the evenly
     spaced frames (at most 32 per time step). The impact force and the moment of touch
     then show in the history and on the timeline even when the time steps are far longer
-    than the impact. Implicit integration only.],
+    than the impact. With explicit integration a frame follows each closing or opening
+    contact within a few time steps (at most 32 between two evenly spaced frames).],
   [Damping], [#ui("None"): undamped, only the numerical damping of the integration removes
     energy. #ui("Damping ratio"): the viscous damping ratio of the structure (0.02 = 2 % of
     critical damping, typical for steel structures), applied as Rayleigh damping
@@ -110,7 +111,7 @@ What is different from implicit integration:
   smooths the ringing of the sharpest waves; its energy is part of ALLVD.
 - #ui("Advanced settings"): #ui("Time step") #ui("At most") caps the time step below the
   stable one (it is never taken longer). #ui("Max. frequency"), #ui("Numerical damping") and
-  the equation solver have no meaning and are hidden; there are no event frames.
+  the equation solver have no meaning and are hidden.
 - Elements with reduced integration (C3D8R, C3D20R, S4R, S8R) compute several times faster
   than fully integrated ones; the model check points this out
   (#ui("Full integration in an explicit step")).
@@ -120,9 +121,21 @@ What is different from implicit integration:
   displacements, so ALLIE + ALLKE + ALLVD − ALLWK stays at its starting value. The solver
   warns when the balance is off by more than 5 %.
 
-The first stage of the explicit integration takes solids, plane and shell elements, loads
-with amplitudes, prescribed displacements, initial velocities and constraints; contact, mass
-scaling and the switch between implicit and explicit integration follow.
+- *Contact* works with all contact pairs (node to surface, surface to surface, mortar,
+  friction). Every time step evaluates the contact springs once, without iterations: the
+  time step is so short that closing and opening within it is the motion itself. A penalty
+  stiffness that would be too stiff for the time step is lowered for the points concerned
+  (the output reports how many and by how much), and the time step is 10 % shorter while
+  contact pairs are in force. A lowered stiffness lets the surfaces overlap a little more
+  under the same pressure.
+- *Large deformations* (NLGEOM) take finite strains and rotations; plasticity and
+  hyperelastic materials work with and without it. The stable time step is found anew every
+  100 time steps, since squeezed elements get stiffer; the bulk viscosity acts in the
+  deformed configuration, so that a spinning part is not braked.
+- C3D8R elements get a viscous hourglass control in addition to their hourglass stiffness;
+  its work is part of ALLVD.
+
+Mass scaling and the switch between implicit and explicit integration follow.
 
 === Modal superposition <dynamic-modal>
 

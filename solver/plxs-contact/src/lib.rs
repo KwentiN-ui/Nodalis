@@ -160,6 +160,8 @@ pub struct ContactElement {
     /// The part of `fe` from the normal spring alone (no damping, no friction); empty for
     /// tied contact.
     pub normal: Vec<f64>,
+    /// The pair and the point (or mortar node) the spring belongs to.
+    pub source: (u32, u32),
 }
 
 /// Damping of the normal springs in a dynamic step: the pressure `p + c ḋ` with the rate of
@@ -239,6 +241,10 @@ pub struct ContactModel {
     pub last: Option<Evaluation>,
     /// Damping of the springs for the next evaluations (dynamic steps), `None` otherwise.
     pub damping: Option<Damping>,
+    /// A factor on the stiffness of every point's relation (normal and stick), per pair
+    /// and point; missing entries are 1. The explicit integration lowers it where a
+    /// penalty spring would be too stiff for its time step.
+    pub stiffness_scale: Vec<Vec<f64>>,
 }
 
 /// Young's modulus of the first material (CalculiX's reference for defaults).
@@ -547,6 +553,29 @@ impl ContactModel {
         self.pairs.iter().any(|p| p.active)
     }
 
+    /// The nodes of the pairs in force (slave points and master faces), sorted.
+    pub fn nodes(&self) -> Vec<u32> {
+        let mut nodes: Vec<u32> = (self.pairs.iter().filter(|p| p.active))
+            .flat_map(|pair| {
+                (pair.points.iter().flat_map(|p| p.nodes.iter().copied()))
+                    .chain(pair.master.iter().flat_map(|f| f.nodes.iter().copied()))
+            })
+            .collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        nodes
+    }
+
+    /// How far the nodes may move after [`ContactModel::prepare`] before its candidate
+    /// master faces may miss one: the candidates reach two typical master edge lengths
+    /// beyond a point, so that a slave and a master node moving towards each other by half
+    /// of that leave it complete.
+    pub fn search_reach(&self) -> f64 {
+        (self.pairs.iter().filter(|p| p.active && p.typical > 0.0))
+            .map(|p| p.typical)
+            .fold(f64::INFINITY, f64::min)
+    }
+
     /// Applies `*MODEL CHANGE` and `*CHANGE FRICTION` of a step; the pairs switched off are
     /// kept in `state.inactive_pairs`. In a dynamic step node-to-face springs carry
     /// compression only ([`Pair::compression_only`]).
@@ -769,11 +798,23 @@ impl ContactModel {
                         .copied()
                         .unwrap_or_default();
                     let damping = self.damping.as_ref();
-                    if pair.mortar_nodes.is_empty() {
-                        pair.evaluate_point(p, &current, u, &previous, predictor, damping)
+                    let scale = self
+                        .stiffness_scale
+                        .get(pi)
+                        .and_then(|s| s.get(p))
+                        .copied()
+                        .unwrap_or(1.0);
+                    let (result, mut element) = if pair.mortar_nodes.is_empty() {
+                        pair.evaluate_point(p, &current, u, &previous, predictor, damping, scale)
                     } else {
-                        pair.evaluate_mortar_node(p, &current, u, &previous, predictor, damping)
+                        pair.evaluate_mortar_node(
+                            p, &current, u, &previous, predictor, damping, scale,
+                        )
+                    };
+                    if let Some(element) = element.as_mut() {
+                        element.source = (pi as u32, p as u32);
                     }
+                    (result, element)
                 })
                 .collect();
             let mut results = Vec::with_capacity(count);
@@ -1063,6 +1104,7 @@ impl Pair {
     /// One point: its result and, when a spring exists, the element.
     /// One integration point or slave node: its result and, when a spring exists, the
     /// element.
+    #[allow(clippy::too_many_arguments)]
     fn evaluate_point(
         &self,
         p: usize,
@@ -1071,9 +1113,10 @@ impl Pair {
         previous: &ContactPointState,
         predictor: bool,
         damping: Option<&Damping>,
+        stiffness: f64,
     ) -> (PointResult, Option<ContactElement>) {
         match self.kinematics(p, current, u) {
-            Ok(kin) => self.respond(&kin, previous, predictor, damping),
+            Ok(kin) => self.respond(&kin, previous, predictor, damping, stiffness),
             Err((x, gap)) => (self.open_result(x, gap, self.points[p].area), None),
         }
     }
@@ -1083,6 +1126,7 @@ impl Pair {
     /// `ḡ_k = Σ a g / Σ a` and the node carries the force `p_k Σ a` (the dual-basis mortar
     /// condition of CalculiX for hard contact; for a penalty relation the nodal pressure is
     /// that of the weighted gap).
+    #[allow(clippy::too_many_arguments)]
     fn evaluate_mortar_node(
         &self,
         k: usize,
@@ -1091,6 +1135,7 @@ impl Pair {
         previous: &ContactPointState,
         predictor: bool,
         damping: Option<&Damping>,
+        stiffness: f64,
     ) -> (PointResult, Option<ContactElement>) {
         let (node, points) = &self.mortar_nodes[k];
         let x = current[*node as usize];
@@ -1158,7 +1203,7 @@ impl Pair {
             area: total,
             cutoff,
         };
-        self.respond(&kin, previous, predictor, damping)
+        self.respond(&kin, previous, predictor, damping, stiffness)
     }
 
     /// The result of a point without a spring.
@@ -1291,12 +1336,15 @@ impl Pair {
 
     /// The spring of a point (or mortar node) from its kinematics: the pressure relation,
     /// friction with return mapping, the element.
+    /// The spring of a point from its kinematics; a factor multiplies the stiffness of the
+    /// relation (`stiffness`: pressure and its slope, the stick stiffness and the energies).
     fn respond(
         &self,
         kin: &Kinematics,
         previous: &ContactPointState,
         predictor: bool,
         damping: Option<&Damping>,
+        stiffness: f64,
     ) -> (PointResult, Option<ContactElement>) {
         let tied = self.law.is_tied();
         let n = kin.normal;
@@ -1345,6 +1393,7 @@ impl Pair {
         } else {
             self.law.face_pressure(overclosure)
         };
+        let (pressure, dp) = (stiffness * pressure, stiffness * dp);
 
         // Tangential basis and relative displacement.
         let t1 = normalized(sub(kin.tangent, scale(n, dot(kin.tangent, n))));
@@ -1369,7 +1418,7 @@ impl Pair {
             // Node-to-face springs keep their friction in tension as well (observed: ccx
             // reports shear at nodes with a negative CPRESS), bounded by μ |p|.
             Some(friction) if tied || pressure > 0.0 || (node_to_face && pressure < 0.0) => {
-                let lambda = friction.stick;
+                let lambda = stiffness * friction.stick;
                 let trial = [
                     lambda * (tangential[0] - slip[0]),
                     lambda * (tangential[1] - slip[1]),
@@ -1409,7 +1458,10 @@ impl Pair {
                 // the first iteration and leave the following ones far from the slip.
                 slip = tangential;
                 status = ContactStatus::Open;
-                tangent = [[friction.stick, 0.0], [0.0, friction.stick]];
+                tangent = [
+                    [stiffness * friction.stick, 0.0],
+                    [0.0, stiffness * friction.stick],
+                ];
             }
             _ => {
                 // No friction or no pressure: slides freely, the slip follows the motion.
@@ -1528,15 +1580,16 @@ impl Pair {
         } else {
             Vec::new()
         };
+        // The spring pressure already carries the scale; the energies of the relation not.
         let normal_energy = if let Some(delta) = smoothing {
-            self.law.rounded_energy(overclosure, delta)
+            stiffness * self.law.rounded_energy(overclosure, delta)
         } else if node_to_face && !tied {
-            node_energy(&self.law, overclosure)
+            stiffness * node_energy(&self.law, overclosure)
         } else if tied {
             let d = -(geometric_gap - initial_gap);
             0.5 * spring_pressure * d
         } else {
-            self.law.face_energy(overclosure)
+            stiffness * self.law.face_energy(overclosure)
         };
         let energy = area * (normal_energy + tangential_energy);
         let normal_energy = area * normal_energy;
@@ -1594,6 +1647,7 @@ impl Pair {
                 },
                 fe,
                 unsymmetric,
+                source: (0, 0),
             }),
         )
     }
