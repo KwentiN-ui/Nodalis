@@ -1382,6 +1382,33 @@ impl Engine {
         }
     }
 
+    pub(crate) fn read_values(&mut self, dofs: &[u32]) -> Result<Vec<f64>, String> {
+        if dofs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let staging = self.gpu.staging("values", 8 * dofs.len() as u64);
+        let mut encoder = self
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("read values"),
+            });
+        for (k, &d) in dofs.iter().enumerate() {
+            if d as usize >= self.n {
+                return Err(format!("DOF {d} of {}", self.n));
+            }
+            encoder.copy_buffer_to_buffer(&self.u, 8 * u64::from(d), &staging, 8 * k as u64, 8);
+        }
+        self.gpu.queue.submit([encoder.finish()]);
+        let values = self.gpu.map(&staging, |b| {
+            bytemuck::cast_slice::<u8, f64>(&b[..8 * dofs.len()]).to_vec()
+        })?;
+        match self.gpu.take_error() {
+            Some(e) => Err(e),
+            None => Ok(values),
+        }
+    }
+
     pub(crate) fn guard_reference(&mut self, reference: &[f32]) -> Result<(), String> {
         let Some(g) = &self.guard else {
             return Err("no watch over the time step on the card".to_owned());

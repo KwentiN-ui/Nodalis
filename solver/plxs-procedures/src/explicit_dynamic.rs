@@ -1291,6 +1291,12 @@ const CONTACT_DAMPING: f64 = 0.5;
 /// Under NLGEOM the stable time step is found anew every so many time steps.
 const NLGEOM_CHECK_STEPS: u64 = 100;
 
+/// Rigid bodies that have turned by less than this (about 0.06°) keep their constraints
+/// of the start under NLGEOM: the members then stretch by about `θ² / 2` of their
+/// distance, 5e-7 at most. A body free to turn must not stay longer: its members, rotated
+/// linearly, strain the elements by `θ² / 2`, which holds a pendulum at about a degree.
+const SMALL_ROTATION: f64 = 1e-3;
+
 /// Rotations of elements without NLGEOM above which the step warns (about 6°): a
 /// rotation by `θ` strains an element by about `θ² / 2` under small deformations.
 const TURN_WARNING: f64 = 0.1;
@@ -1879,7 +1885,35 @@ impl Procedure for ExplicitDynamic {
         // Rigid bodies and joints turning by finite angles (NLGEOM): the constraints are
         // linearized at the current rotations in every time step and the members put
         // where the rotation takes them.
-        let finite_rotations = step.nlgeom && ctx.constraints.has_finite_rotations();
+        // Rigid bodies that have turned by less than `SMALL_ROTATION` (supports, mostly) keep
+        // the constraints of the start, which the card can take; once one turns farther the
+        // steps go on with finite rotations on the processor. Joints always turn.
+        let finite_capable = step.nlgeom && ctx.constraints.has_finite_rotations();
+        let rotation_dofs: Vec<u32> = {
+            let mut nodes: Vec<u32> = ctx.constraints.rigid.iter().map(|r| r.rotation).collect();
+            nodes.sort_unstable();
+            nodes.dedup();
+            nodes
+                .iter()
+                .flat_map(|&node| (0..3).map(move |k| 3 * node + k))
+                .collect()
+        };
+        let largest_rotation = |values: &[f64]| {
+            values
+                .chunks(3)
+                .map(|t| t.iter().map(|x| x * x).sum::<f64>().sqrt())
+                .fold(0.0_f64, f64::max)
+        };
+        let rotations_of = |u: &[f64]| -> Vec<f64> {
+            rotation_dofs
+                .iter()
+                .map(|&d| u.get(d as usize).copied().unwrap_or(0.0))
+                .collect()
+        };
+        let mut finite_rotations = finite_capable
+            && (!ctx.constraints.joint_rows.is_empty()
+                || largest_rotation(&rotations_of(&motion.u)) > SMALL_ROTATION);
+        let watch_rotations = finite_capable && !finite_rotations;
         // Rotations held at zero because the rotated rows refer to them only by a vanishing
         // coefficient (`ModelConstraints::hold`).
         let mut held: Vec<u32> = Vec::new();
@@ -2290,7 +2324,10 @@ impl Procedure for ExplicitDynamic {
                                 g_from = g_to;
                             }
                             done += ran.steps;
-                            if ran.search || ran.event {
+                            let turned = watch_rotations
+                                && largest_rotation(&engine.read_values(&rotation_dofs)?)
+                                    > SMALL_ROTATION;
+                            if ran.search || ran.event || turned {
                                 let reached = engine.read()?;
                                 return Ok(GpuRun {
                                     reached,
@@ -2301,6 +2338,7 @@ impl Procedure for ExplicitDynamic {
                                     checked: None,
                                     search: ran.search,
                                     event: ran.event,
+                                    turned,
                                 });
                             }
                             if let Some(every) = check
@@ -2333,6 +2371,7 @@ impl Procedure for ExplicitDynamic {
                                     checked: Some((dt, omega)),
                                     search: false,
                                     event: false,
+                                    turned: false,
                                 });
                             }
                         }
@@ -2346,6 +2385,7 @@ impl Procedure for ExplicitDynamic {
                             checked: None,
                             search: false,
                             event: false,
+                            turned: false,
                         })
                     };
                         let outcome = run(engine);
@@ -2360,6 +2400,7 @@ impl Procedure for ExplicitDynamic {
                                 checked,
                                 search,
                                 event,
+                                turned,
                             }) => {
                                 if let Some(state) = state {
                                     material = state;
@@ -2438,6 +2479,38 @@ impl Procedure for ExplicitDynamic {
                                     last_event_step = Some(frame_steps - 1);
                                     again = false;
                                 }
+                                if turned {
+                                    // On with finite rotations, on the processor.
+                                    progress.event(ProgressEvent::Info(format!(
+                                        "explicit: a rigid body has turned by more than {}° at \
+                                         {} s; the time steps go on with finite rotations on \
+                                         the processor",
+                                        short(SMALL_ROTATION.to_degrees()),
+                                        short(time)
+                                    )));
+                                    finite_rotations = true;
+                                    let next = settled(ctx, &u, &mut held, &set);
+                                    if !held.is_empty() {
+                                        progress.event(ProgressEvent::Info(held_note.into()));
+                                    }
+                                    let pick = |values: &[f64]| -> Vec<f64> {
+                                        next.free.iter().map(|&d| values[d as usize]).collect()
+                                    };
+                                    let a_full = set.expand(&a_red, &zero);
+                                    let v_full = set.expand(&qdot, &zero);
+                                    q = pick(&u);
+                                    qdot = pick(&v_full);
+                                    a_red = pick(&a_full);
+                                    set = next;
+                                    reduced_mass = ReducedMass::new(
+                                        ctx,
+                                        &set,
+                                        &data.mass,
+                                        fibre_mass.as_ref(),
+                                    )?;
+                                    gpu = None;
+                                    again = false;
+                                }
                             }
                             Err(e) => {
                                 progress.event(ProgressEvent::Warning(format!(
@@ -2504,6 +2577,35 @@ impl Procedure for ExplicitDynamic {
                     } else {
                         g_cur.clone()
                     };
+                    // A rigid body that turned beyond `SMALL_ROTATION`: on with finite
+                    // rotations.
+                    if watch_rotations
+                        && !finite_rotations
+                        && largest_rotation(&rotations_of(&u)) > SMALL_ROTATION
+                    {
+                        progress.event(ProgressEvent::Info(format!(
+                            "explicit: a rigid body has turned by more than {}° at {} s; the \
+                             time steps go on with finite rotations",
+                            short(SMALL_ROTATION.to_degrees()),
+                            short(time)
+                        )));
+                        finite_rotations = true;
+                        let next = settled(ctx, &u, &mut held, &set);
+                        if !held.is_empty() {
+                            progress.event(ProgressEvent::Info(held_note.into()));
+                        }
+                        let pick = |values: &[f64]| -> Vec<f64> {
+                            next.free.iter().map(|&d| values[d as usize]).collect()
+                        };
+                        let a_full = set.expand(&a_red, &zero);
+                        let v_full = set.expand(&qdot, &zero);
+                        q = pick(&u);
+                        qdot = pick(&v_full);
+                        a_red = pick(&a_full);
+                        set = next;
+                        reduced_mass =
+                            ReducedMass::new(ctx, &set, &data.mass, fibre_mass.as_ref())?;
+                    }
                     // Velocities and displacements.
                     let c = 0.5 * (h_prev + h);
                     for (qd, a) in qdot.iter_mut().zip(&a_red) {
@@ -2904,9 +3006,11 @@ struct GpuRun {
     prescribed: Vec<f64>,
     taken: usize,
     checked: Option<(f64, Vec<f64>)>,
-    /// The card stopped for a search of candidates, for an event frame.
+    /// The card stopped for a search of candidates, for an event frame, or because a
+    /// rigid body turned beyond `SMALL_ROTATION`.
     search: bool,
     event: bool,
+    turned: bool,
 }
 
 /// Models of at least this many DOFs go to a discrete graphics card in the automatic

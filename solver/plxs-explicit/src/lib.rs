@@ -269,6 +269,19 @@ impl Engine {
         }
     }
 
+    /// Waits for the queued steps and reads the displacements of the DOFs `dofs`.
+    pub fn read_values(&mut self, dofs: &[u32]) -> Result<Vec<f64>, String> {
+        #[cfg(feature = "gpu")]
+        {
+            self.inner.read_values(dofs)
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            let _ = dofs;
+            Err("built without graphics card support".to_owned())
+        }
+    }
+
     /// Waits for the queued steps and reads the state back.
     pub fn read(&mut self) -> Result<Reached, String> {
         #[cfg(feature = "gpu")]

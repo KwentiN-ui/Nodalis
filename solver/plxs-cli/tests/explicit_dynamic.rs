@@ -2322,3 +2322,61 @@ fn rigid_bodies_on_edges_turn_explicitly_under_nlgeom() {
     assert!(log.contains("held at zero"), "{log}");
     assert_eq!(blocks(&dat, "displacements").len(), 2, "{log}");
 }
+
+/// A steel bar (10 × 1 × 1 C3D8) on rigid bodies along its lower end edges, one held, one
+/// sliding, sagging under gravity with NLGEOM: the bodies hardly turn, keep their
+/// constraints of the start and go to the card, which agrees with the processor. Spinning
+/// the bar instead turns them beyond 1°, and the steps go on on the processor.
+#[test]
+fn rigid_supports_under_nlgeom_on_the_graphics_card() {
+    let mut input = bar_mesh(10, 1, 1, [0.1, 0.01, 0.01], "C3D8");
+    writeln!(
+        input,
+        "*Node\n1001, 0, 0.005, 0\n1002, 0, 0.005, 0\n1003, 0.1, 0.005, 0\n1004, 0.1, 0.005, 0\n\
+         *Nset, Nset=EDGE0\n1, 12\n*Nset, Nset=EDGE1\n11, 22\n*Nset, Nset=MID\n6\n\
+         *Rigid body, Nset=EDGE0, Ref node=1001, Rot node=1002\n\
+         *Rigid body, Nset=EDGE1, Ref node=1003, Rot node=1004\n\
+         *Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
+         *Solid section, Elset=EALL, Material=STEEL\n\
+         *Step, Nlgeom\n*Dynamic, Integration=Explicit\n0.0002, 0.0006\n\
+         *Boundary\n1001, 1, 3, 0\n1003, 2, 3, 0\n*Dload\nEALL, GRAV, 1000, 0, 0, -1\n\
+         *Node print, Nset=MID\nU, V\n*End step"
+    )
+    .unwrap();
+    contact_on_the_card(
+        "gpu-rigid-supports",
+        &input,
+        &["displacements", "velocities"],
+        1e-4,
+    );
+    // Without the supports' conditions and spinning about a vertical axis.
+    let mut spinning = input
+        .replace(
+            "*Boundary\n1001, 1, 3, 0\n1003, 2, 3, 0\n*Dload\nEALL, GRAV, 1000, 0, 0, -1\n",
+            "",
+        )
+        .replace(
+            "*Step, Nlgeom",
+            "*Initial conditions, Type=Velocity\n*Step, Nlgeom",
+        );
+    let mut velocities = String::new();
+    for k in 0..=1 {
+        for j in 0..=1 {
+            for i in 0..=10 {
+                let id = 1 + i + 11 * (j + 2 * k);
+                let (x, y) = (0.01 * i as f64 - 0.05, 0.01 * j as f64 - 0.005);
+                writeln!(velocities, "{id}, 1, {}\n{id}, 2, {}", -50.0 * y, 50.0 * x).unwrap();
+            }
+        }
+    }
+    spinning = spinning.replace(
+        "*Initial conditions, Type=Velocity\n",
+        &format!("*Initial conditions, Type=Velocity\n{velocities}"),
+    );
+    let dir = work_dir("gpu-rigid-spinning");
+    let (_, log) = run_with_gpu(&dir, "spin", &spinning, "on");
+    clean(&dir);
+    if !log.contains("no graphics card") && !log.contains("double precision)") {
+        assert!(log.contains("has turned by more than"), "{log}");
+    }
+}
