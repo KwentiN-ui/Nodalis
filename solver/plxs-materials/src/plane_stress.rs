@@ -16,7 +16,7 @@
 //! Index 2 of the engineering vectors `[xx, yy, zz, xy, yz, zx]` is the thickness
 //! direction.
 
-use crate::{MaterialInput, MaterialLaw, MaterialOutput};
+use crate::{KernelLaw, MaterialInput, MaterialLaw, MaterialOutput};
 
 /// The thickness component of the strain and stress vectors.
 const ZZ: usize = 2;
@@ -185,6 +185,15 @@ impl MaterialLaw for PlaneStress {
 
     fn elastic_matrix(&self) -> [[f64; 6]; 6] {
         condense(&self.inner.elastic_matrix())
+    }
+
+    /// A linear elastic law is the condensed matrix; the others iterate on the thickness
+    /// strain, which the kernels do not.
+    fn kernel_law(&self) -> Option<KernelLaw> {
+        match self.inner.kernel_law()? {
+            KernelLaw::Elastic => Some(KernelLaw::Elastic),
+            _ => None,
+        }
     }
 }
 

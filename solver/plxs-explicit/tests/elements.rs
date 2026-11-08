@@ -4,8 +4,8 @@
 //! software renderers too); elsewhere it says so and passes.
 
 use plxs_explicit::{
-    Element, Elements, Engine, ForceModel, Hourglass, Isochoric, MAX_CHUNK, Material, Setup, Start,
-    Volumetric,
+    Element, Elements, Engine, ForceModel, Hourglass, Isochoric, MAX_CHUNK, Material, Points,
+    Setup, Start, Volumetric,
 };
 
 /// The trilinear brick's natural node coordinates.
@@ -34,6 +34,49 @@ fn gradients(p: [f64; 3], s: [f64; 3]) -> Vec<[f64; 3]> {
             ]
         })
         .collect()
+}
+
+/// The dense operator `L` (9 × 24) of nodal gradients `g`, plus `H_zz += Σ_a u_ax / (8 r)`
+/// with `r` fifty element lengths `h`: a translation along x strains it.
+fn operator(g: &[[f64; 3]], h: f64) -> Vec<f64> {
+    let nd = 3 * g.len();
+    let mut l = vec![0.0; 9 * nd];
+    for (a, ga) in g.iter().enumerate() {
+        for k in 0..3 {
+            for c in 0..3 {
+                l[(3 * k + c) * nd + 3 * a + k] = ga[c];
+            }
+        }
+        l[8 * nd + 3 * a] += 1.0 / (8.0 * 50.0 * h);
+    }
+    l
+}
+
+/// A constant stiffness of a brick: the hourglass stiffness `ε Σ γ γᵀ ⊗ I` (CalculiX's
+/// `γ`) and a weak foundation `k_0 / 8` on every DOF, which translations load.
+fn constant_matrix(x: &[[f64; 3]], g: &[[f64; 3]], epsilon: f64, k0: f64) -> Vec<f64> {
+    const BASE: [[f64; 8]; 4] = [
+        [1.0, 1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0],
+        [1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0],
+        [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0],
+        [-1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0],
+    ];
+    let mut k = vec![0.0; 24 * 24];
+    for h in &BASE {
+        let hz: f64 = (0..8).map(|a| h[a] * x[a][2]).sum();
+        let gamma: Vec<f64> = (0..8).map(|a| h[a] - hz * g[a][2]).collect();
+        for a in 0..8 {
+            for b in 0..8 {
+                for d in 0..3 {
+                    k[(3 * a + d) * 24 + 3 * b + d] += epsilon * gamma[a] * gamma[b];
+                }
+            }
+        }
+    }
+    for i in 0..24 {
+        k[i * 24 + i] += k0 / 8.0;
+    }
+    k
 }
 
 fn isotropic(young: f64, poisson: f64) -> [[f64; 6]; 6] {
@@ -75,17 +118,32 @@ fn a_block_of_bricks_yields_far_as_on_the_processor() {
 /// steel, so that the time step stays.
 #[test]
 fn a_block_of_hyperelastic_bricks_swings_far_as_on_the_processor() {
-    swing_with(true, 400.0, false, true);
+    swing_with(true, 400.0, false, true, false);
 }
 
 /// A cantilever block of bricks starting with `speed` across, pulled at its free end;
 /// `plastic`: of J2 materials.
 fn swing(nlgeom: bool, speed: f64, plastic: bool) {
-    swing_with(nlgeom, speed, plastic, false);
+    swing_with(nlgeom, speed, plastic, false, false);
 }
 
-/// `swing`, `hyper`: of hyperelastic materials.
-fn swing_with(nlgeom: bool, speed: f64, plastic: bool, hyper: bool) {
+/// General operators: every element's gradients as a dense `L`, with a term that a
+/// translation strains (as the hoop strain of axisymmetric elements), and a constant
+/// stiffness on the reduced ones in place of the hourglass control (with a part that
+/// holds translations).
+#[test]
+fn a_block_of_dense_bricks_swings_as_on_the_processor() {
+    swing_with(false, 0.3, false, false, true);
+}
+
+/// Dense operators under NLGEOM, yielding.
+#[test]
+fn a_block_of_dense_bricks_yields_far_as_on_the_processor() {
+    swing_with(true, 25.0, true, false, true);
+}
+
+/// `swing`, `hyper`: of hyperelastic materials, `dense`: by general operators.
+fn swing_with(nlgeom: bool, speed: f64, plastic: bool, hyper: bool, dense: bool) {
     if std::env::var("PLXS_GPU").is_ok_and(|v| v.eq_ignore_ascii_case("off")) {
         return;
     }
@@ -146,7 +204,25 @@ fn swing_with(nlgeom: bool, speed: f64, plastic: bool, hyper: bool) {
                             .iter()
                             .flat_map(|&id| (0..3).map(move |d| (3 * id + d) as u32))
                             .collect(),
-                        points,
+                        points: if dense {
+                            Points::Dense(
+                                points
+                                    .iter()
+                                    .map(|(w, g)| (*w, operator(g, s[0])))
+                                    .collect(),
+                            )
+                        } else {
+                            Points::Nodal(points)
+                        },
+                        matrix: (dense && reduced).then(|| {
+                            let mean = gradients([0.0; 3], s);
+                            constant_matrix(
+                                &coordinates,
+                                &mean,
+                                0.004 * young * volume * 0.5,
+                                1e-3 * young * s[0],
+                            )
+                        }),
                         material: if plastic {
                             let mu = young / 2.6;
                             let bulk = young / (3.0 * 0.4);
@@ -203,7 +279,7 @@ fn swing_with(nlgeom: bool, speed: f64, plastic: bool, hyper: bool) {
                         }),
                         bulk: 0.06 * young * dt_e * volume,
                         mean: mean.iter().flatten().copied().collect(),
-                        hourglass: reduced.then(|| Hourglass {
+                        hourglass: (reduced && !dense).then(|| Hourglass {
                             stiffness: 0.004 * young * volume * 0.5,
                             viscosity: 0.1 * rho * (young / rho).sqrt() * s[0] * s[0] / 4.0,
                             coordinates,

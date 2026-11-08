@@ -5,15 +5,20 @@
 // go to the element force buffers at `base + k * count + e`, which `gather.wgsl` sums per
 // DOF.
 //
-// NN (nodes), NP (points), HG (hourglass control) and NL (large deformations) are set per
-// family.
+// NN (nodes), NP (points), HG (hourglass control), NL (large deformations), DL (dense
+// operators), KM (constant stiffness) and PS (values per point) are set per family.
 
 const NN: u32 = __NN__u;
 const NP: u32 = __NP__u;
 const HG: bool = __HG__;
 const NL: bool = __NL__;
+// General operators `L` instead of nodal gradients, a constant stiffness per element.
+const DL: bool = __DL__;
+const KM: bool = __KM__;
 const ND: u32 = 3u * NN;
-const PS: u32 = 1u + ND;
+// Values per point: the volume, then the nodal derivatives, or the responses to unit
+// translations (27) and `L` (9 × ND).
+const PS: u32 = __PS__u;
 
 struct Dims {
     count: u32,
@@ -494,7 +499,21 @@ fn elements(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_ind
         reference += w;
         // Column j holds ∂u/∂X_j: h[j][k] = H_kj.
         var h = mat3x3<f32>();
-        for (var a = 0u; a < NN; a++) {
+        if DL {
+            // H = L u_rel + Σ_d u0_d (L t_d).
+            let u0f = vec3<f32>(u0);
+            for (var r = 0u; r < 9u; r++) {
+                var sum = u0f.x * gradients[(at + 1u + r) * c + e]
+                    + u0f.y * gradients[(at + 10u + r) * c + e]
+                    + u0f.z * gradients[(at + 19u + r) * c + e];
+                let row = at + 28u + r * ND;
+                for (var j = 0u; j < ND; j++) {
+                    sum += gradients[(row + j) * c + e] * ue[j];
+                }
+                h[r % 3u][r / 3u] = sum;
+            }
+        }
+        for (var a = 0u; a < NN && !DL; a++) {
             let ga = vec3<f32>(
                 gradients[(at + 1u + 3u * a) * c + e],
                 gradients[(at + 2u + 3u * a) * c + e],
@@ -549,14 +568,33 @@ fn elements(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_ind
             // P = F S.
             p = deformation * p;
         }
-        for (var a = 0u; a < NN; a++) {
+        if DL {
+            // Lᵀ P, and under NLGEOM cof(F) : L.
+            let cof = cofactors(deformation);
+            if NL {
+                volume += w * dot(deformation[0], cof[0]);
+            }
+            for (var r = 0u; r < 9u; r++) {
+                let pr = w * p[r % 3u][r / 3u];
+                let cr = w * cof[r % 3u][r / 3u];
+                let row = at + 28u + r * ND;
+                for (var j = 0u; j < ND; j++) {
+                    let l = gradients[(row + j) * c + e];
+                    f[j] += pr * l;
+                    if NL {
+                        gc[j] += cr * l;
+                    }
+                }
+            }
+        }
+        for (var a = 0u; a < NN && !DL; a++) {
             let ga = vec3<f32>(g[3u * a], g[3u * a + 1u], g[3u * a + 2u]);
             let fa = w * (p * ga);
             f[3u * a] += fa.x;
             f[3u * a + 1u] += fa.y;
             f[3u * a + 2u] += fa.z;
         }
-        if NL && !HG {
+        if NL && !HG && !DL {
             // J F⁻ᵀ ∇N.
             let cof = cofactors(deformation);
             volume += w * dot(deformation[0], cof[0]);
@@ -667,6 +705,20 @@ fn elements(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_ind
                     fv[3u * a + k] += kappa * visc[a] * qv;
                 }
             }
+        }
+    }
+    if KM {
+        // K u = K u_rel + Σ_d u0_d (K t_d).
+        let u0f = vec3<f32>(u0);
+        let t = ND * ND;
+        for (var i = 0u; i < ND; i++) {
+            var sum = u0f.x * control[(t + i) * c + e]
+                + u0f.y * control[(t + ND + i) * c + e]
+                + u0f.z * control[(t + 2u * ND + i) * c + e];
+            for (var j = 0u; j < ND; j++) {
+                sum += control[(i * ND + j) * c + e] * ue[j];
+            }
+            f[i] += sum;
         }
     }
     for (var k = 0u; k < ND; k++) {

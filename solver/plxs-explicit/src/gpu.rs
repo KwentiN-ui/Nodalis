@@ -483,7 +483,7 @@ impl Engine {
             }
             let count = family.count;
             let gradients = transpose(&single(&family.gradients), count);
-            if !gpu.fits(4 * gradients.len() as u64) {
+            if !gpu.fits(4 * gradients.len() as u64) || !gpu.fits(4 * family.control.len() as u64) {
                 return Err(too_large());
             }
             let history = if family.history {
@@ -506,7 +506,10 @@ impl Engine {
                 .replace("__NN__", &family.nodes.to_string())
                 .replace("__NP__", &family.points.to_string())
                 .replace("__HG__", if family.hourglass { "true" } else { "false" })
-                .replace("__NL__", if elements.nlgeom { "true" } else { "false" });
+                .replace("__NL__", if elements.nlgeom { "true" } else { "false" })
+                .replace("__DL__", if family.dense { "true" } else { "false" })
+                .replace("__KM__", if family.matrix { "true" } else { "false" })
+                .replace("__PS__", &family.point_size().to_string());
             let groups = gpu.fold(count, ELEMENT_GROUP);
             let dims = gpu.uniform(
                 "element dims",
