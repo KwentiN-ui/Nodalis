@@ -383,6 +383,12 @@ impl ConstraintSet {
         self.reduced
     }
 
+    /// `T` by rows: the row pointers (`len() + 1`), the columns (reduced unknowns) and
+    /// the values.
+    pub fn transform(&self) -> (&[u32], &[u32], &[f64]) {
+        (&self.t_ptr, &self.t_col, &self.t_val)
+    }
+
     fn t_row(&self, row: usize) -> impl Iterator<Item = (u32, f64)> + '_ {
         let range = self.t_ptr[row] as usize..self.t_ptr[row + 1] as usize;
         self.t_col[range.clone()]

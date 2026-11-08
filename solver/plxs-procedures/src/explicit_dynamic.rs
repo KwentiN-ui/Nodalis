@@ -609,7 +609,8 @@ fn load_at(
 /// constraints couple DOFs.
 enum ReducedMass {
     Diagonal(Vec<f64>),
-    Factored(Box<LdltSolver>),
+    /// The factorization and the reduced mass itself (for the clusters on the card).
+    Factored(Box<LdltSolver>, SparseMatrix),
 }
 
 impl ReducedMass {
@@ -668,7 +669,54 @@ impl ReducedMass {
         let mut solver = LdltSolver::new(ctx.threads);
         solver.analyze(reduced.pattern())?;
         solver.factorize(&reduced)?;
-        Ok(ReducedMass::Factored(Box::new(solver)))
+        Ok(ReducedMass::Factored(Box::new(solver), reduced))
+    }
+
+    /// The constraints and the inverse reduced mass for the card: the factorized mass in
+    /// its clusters, each inverted densely. `Err` when a cluster is too large.
+    fn reduction(
+        &self,
+        set: &ConstraintSet,
+    ) -> std::result::Result<(plxs_explicit::Reduction, plxs_explicit::Clusters), String> {
+        let (ptr, col, val) = set.transform();
+        let transform = plxs_explicit::Sparse {
+            ptr: ptr.to_vec(),
+            col: col.to_vec(),
+            val: val.to_vec(),
+        };
+        match self {
+            ReducedMass::Diagonal(inverse) => {
+                let r = inverse.len();
+                let entries = (0..r as u32).map(|j| (j, j, inverse[j as usize])).collect();
+                Ok((
+                    plxs_explicit::Reduction {
+                        transform,
+                        inverse_mass: plxs_explicit::Sparse::from_entries(r, entries),
+                    },
+                    plxs_explicit::Clusters {
+                        coupled: 0,
+                        largest: 1,
+                    },
+                ))
+            }
+            ReducedMass::Factored(_, mass) => {
+                let r = mass.dimension();
+                let pattern = mass.pattern();
+                let mut entries = Vec::with_capacity(2 * mass.values().len());
+                for c in 0..r {
+                    let start = pattern.col_ptr()[c] as usize;
+                    for (k, &row) in pattern.column(c).iter().enumerate() {
+                        let value = mass.values()[start + k];
+                        entries.push((row, c as u32, value));
+                        if row != c as u32 {
+                            entries.push((c as u32, row, value));
+                        }
+                    }
+                }
+                let mass = plxs_explicit::Sparse::from_entries(r, entries);
+                plxs_explicit::Reduction::new(transform, &mass)
+            }
+        }
     }
 
     /// `x ← (Tᵀ M_L T)⁻¹ x`.
@@ -678,7 +726,7 @@ impl ReducedMass {
                 x.iter_mut().zip(inverse).for_each(|(v, m)| *v *= m);
                 Ok(())
             }
-            ReducedMass::Factored(solver) => solver.solve(x),
+            ReducedMass::Factored(solver, _) => solver.solve(x),
         }
     }
 }
@@ -1494,7 +1542,7 @@ impl Procedure for ExplicitDynamic {
         let started = std::time::Instant::now();
         let mut reduced_mass = ReducedMass::new(ctx, &set, &data.mass, fibre_mass.as_ref())?;
         ctx.profile.add(Phase::Factorization, started);
-        if let ReducedMass::Factored(_) = reduced_mass {
+        if let ReducedMass::Factored(..) = reduced_mass {
             progress.event(ProgressEvent::Info(
                 "explicit: constraints couple the mass; the reduced mass is factorized once".into(),
             ));
@@ -1747,13 +1795,17 @@ impl Procedure for ExplicitDynamic {
         let requests = energy_requests(step);
 
         // The time steps on the graphics card.
-        let mut gpu = if contact.is_none()
-            && !varying
-            && beta_r == 0.0
-            && set.is_selection()
-            && matches!(reduced_mass, ReducedMass::Diagonal(_))
-        {
-            gpu_engine(ctx, step, &kernel, &set, &data.mass, alpha_r, progress)
+        let mut gpu = if contact.is_none() && !varying && beta_r == 0.0 && !finite_rotations {
+            gpu_engine(
+                ctx,
+                step,
+                &kernel,
+                &set,
+                &reduced_mass,
+                &data.mass,
+                alpha_r,
+                progress,
+            )
         } else {
             None
         };
@@ -1812,7 +1864,6 @@ impl Procedure for ExplicitDynamic {
                     let h = remaining / count as f64;
                     let started = std::time::Instant::now();
                     let visc: Vec<f64> = (0..n).map(|i| forces.viscous[i] + f_damp[i]).collect();
-                    let a_now = set.expand(&a_red, &zero);
                     // The material state on the card, when elements have state variables.
                     let state_of = |engine: &mut plxs_explicit::Engine| -> std::result::Result<
                         Option<Vec<f64>>,
@@ -1832,9 +1883,12 @@ impl Procedure for ExplicitDynamic {
                         String,
                     > {
                         engine.load(&plxs_explicit::Start {
+                            q: &q,
+                            qdot: &qdot,
+                            a: &a_red,
+                            prescribed: &g_cur,
                             u: &u,
                             v: &v_half,
-                            a: &a_now,
                             internal: &forces.internal,
                             viscous: &visc,
                             loads: &p,
@@ -1928,9 +1982,9 @@ impl Procedure for ExplicitDynamic {
                             let taken = taken as u64;
                             u = reached.u;
                             v_half = reached.v;
-                            q = free.iter().map(|&d| u[d]).collect();
-                            qdot = free.iter().map(|&d| v_half[d]).collect();
-                            a_red = free.iter().map(|&d| reached.a[d]).collect();
+                            q = reached.q;
+                            qdot = reached.qdot;
+                            a_red = reached.a;
                             energies.internal += reached.internal_work;
                             energies.external_work += reached.external_work;
                             energies.dissipation += reached.dissipation;
@@ -2359,11 +2413,13 @@ const GPU_FROM: usize = 30_000;
 /// ([`plxs_explicit`]), when the mode (`PLXS_GPU`, the setting of the application) and the
 /// card allow: the element kernels or else the stiffness and the viscous matrix, the
 /// inverse lumped mass on the free DOFs.
+#[allow(clippy::too_many_arguments)]
 fn gpu_engine(
     ctx: &mut ProcedureContext<'_>,
     step: &Step,
     kernel: &Kernel<'_>,
     set: &ConstraintSet,
+    reduced_mass: &ReducedMass,
     mass: &[f64],
     alpha: f64,
     progress: &mut dyn Progress,
@@ -2378,25 +2434,29 @@ fn gpu_engine(
         GpuMode::On => true,
     };
     let started = std::time::Instant::now();
-    let mut inverse = vec![0.0; n];
-    for &dof in &set.free {
-        let m = mass[dof as usize];
-        if m > 0.0 {
-            inverse[dof as usize] = 1.0 / m;
-        }
-    }
-    // Element by element; where an element or a material has no kernel yet, the steps
-    // stay on the processor.
+    // Element by element, the constraints by `T` and the coupled mass in clusters; where
+    // an element or a material has no kernel yet or a constraint couples too many
+    // unknowns, the steps stay on the processor.
+    let mut clusters = None;
     let opened = gpu_elements(ctx, kernel, step.nlgeom).and_then(|elements| {
+        let (reduction, sizes) = reduced_mass.reduction(set)?;
+        clusters = Some(sizes);
         plxs_explicit::Engine::new(
             &plxs_explicit::Setup {
                 elements: &elements,
-                inverse_mass: &inverse,
+                mass,
+                reduction: &reduction,
                 alpha,
             },
             any,
         )
     });
+    if let Some(c) = clusters.filter(|c| c.coupled > 0) {
+        progress.event(ProgressEvent::Info(format!(
+            "explicit: the mass couples {} groups of unknowns, the largest of {}",
+            c.coupled, c.largest
+        )));
+    }
     match opened {
         Ok(engine) => {
             ctx.profile.add(Phase::Assembly, started);

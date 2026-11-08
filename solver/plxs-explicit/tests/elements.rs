@@ -4,8 +4,8 @@
 //! software renderers too); elsewhere it says so and passes.
 
 use plxs_explicit::{
-    Block, Element, Elements, Engine, Hourglass, Isochoric, MAX_CHUNK, Material, Points, Setup,
-    Start, Volumetric,
+    Block, Element, Elements, Engine, Hourglass, Isochoric, MAX_CHUNK, Material, Points, Reduction,
+    Setup, Start, Volumetric,
 };
 
 /// The trilinear brick's natural node coordinates.
@@ -336,9 +336,13 @@ fn swing_with(nlgeom: bool, speed: f64, plastic: bool, hyper: bool, dense: bool)
         }
     }
     let alpha = 50.0;
+    let reduction = Reduction::selection(&inverse);
+    let free: Vec<usize> = (0..n).filter(|&i| inverse[i] > 0.0).collect();
+    let pick = |x: &[f64]| -> Vec<f64> { free.iter().map(|&i| x[i]).collect() };
     let setup = Setup {
         elements: &elements,
-        inverse_mass: &inverse,
+        mass: &mass,
+        reduction: &reduction,
         alpha,
     };
     let mut engine = match Engine::new(&setup, true) {
@@ -393,9 +397,12 @@ fn swing_with(nlgeom: bool, speed: f64, plastic: bool, hyper: bool, dense: bool)
     let a0 = accel(&p0, &fi0, &fv0);
     engine
         .load(&Start {
+            q: &pick(&u),
+            qdot: &pick(&v),
+            a: &pick(&a0),
+            prescribed: &vec![0.0; n],
             u: &u,
             v: &v,
-            a: &a0,
             internal: &fi0,
             viscous: &fv0,
             loads: &p0,

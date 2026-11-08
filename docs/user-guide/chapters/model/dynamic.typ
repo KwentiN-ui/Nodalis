@@ -148,16 +148,20 @@ What is different from implicit integration:
 
 ==== On the graphics card <dynamic-gpu>
 
-The time steps of a model without contact (no prescribed motion that changes during the
-step, supports without equations or local systems) run on a discrete graphics card from
-30 000 DOFs, when the setting
+The time steps of a model without contact and without prescribed motion that changes
+during the step run on a discrete graphics card from 30 000 DOFs, when the setting
 #ui("Graphics card") > #ui("Use for the solver") is on (@settings). Each time step then
 computes the forces element by element, one thread of the card per element, sums them per
 node, and does a few vector updates, many times faster than the processor. No stiffness
 matrix is built for that; C3D8I and the plane and axisymmetric elements take their
 condensed operators. U1 blocks and springs act on the card as constant stiffness blocks,
 and so do membranes under small strains; membranes under large deformations (NLGEOM) and
-gaps keep the time steps on the processor. Large deformations run on the card too: Green-Lagrange strain, Saint
+gaps keep the time steps on the processor. Constraints (equations, ties, rigid bodies
+under small rotations, local systems, the expansion of shells and beams) go to the card
+as the transformation from the unknowns to the DOFs; where they couple the mass (the
+fibres of shells with scaled inertia, a tie), the card inverts each coupled group of up
+to 48 unknowns on its own, and a larger group or rigid bodies turning by finite angles
+keep the time steps on the processor. Large deformations run on the card too: Green-Lagrange strain, Saint
 Venant-Kirchhoff stress, and the bulk and hourglass viscosity in the deformed shape, as on
 the processor. Every 100 time steps the card stops for the processor to check the stable
 time step of the deformed elements. Materials: elastic ones, and J2 plasticity (`*PLASTIC`,
@@ -173,7 +177,9 @@ precision, on the displacements relative to the element's first node (the consta
 in double precision). Their rounding error is relative to the motion within the element
 and does not add up from step to step, and the energy balance the solver
 reports checks it: on test models the card agrees with the processor to 1e-4 of the largest
-value. The last time step of every frame, which computes the stresses of the frame, runs on
+value. The reaction forces of thin shells are small differences of the large forces
+across the thickness; there the card's rounding shows at about a percent of the largest
+reaction. The last time step of every frame, which computes the stresses of the frame, runs on
 the processor. Between the corners of their amplitudes, loads follow them linearly over at
 most 256 time steps; the corners themselves are kept.
 

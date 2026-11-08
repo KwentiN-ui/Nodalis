@@ -3,7 +3,7 @@
 use plxs_gpu::{Double, Gpu, Options, Use, wgpu};
 
 use crate::elements::{Isochoric, Material, STATE_SIZE, Volumetric};
-use crate::{Elements, MAX_CHUNK, Reached, Setup, Start};
+use crate::{Elements, MAX_CHUNK, Reached, Setup, Sparse, Start};
 
 /// Values per material in the materials buffer of the element kernels (`MAT` in
 /// `elements.wgsl`), see [`materials`].
@@ -137,13 +137,18 @@ struct Pass {
 
 pub(crate) struct Engine {
     pub(crate) gpu: Gpu,
+    /// DOFs and reduced unknowns.
     n: usize,
+    r: usize,
     alpha: f64,
     stride: u64,
     params: wgpu::Buffer,
     u: wgpu::Buffer,
     v: wgpu::Buffer,
+    q: wgpu::Buffer,
+    qd: wgpu::Buffer,
     a: wgpu::Buffer,
+    g: wgpu::Buffer,
     loads: wgpu::Buffer,
     energy: wgpu::Buffer,
     staging: wgpu::Buffer,
@@ -215,9 +220,17 @@ fn single(values: &[f64]) -> Vec<f32> {
 
 impl Engine {
     pub(crate) fn new(setup: &Setup<'_>, any: bool) -> Result<Self, String> {
-        let n = setup.inverse_mass.len();
-        if n == 0 {
+        let n = setup.mass.len();
+        let reduction = setup.reduction;
+        let r = reduction.len();
+        if n == 0 || r == 0 {
             return Err("no unknowns".to_owned());
+        }
+        if reduction.transform.rows() != n {
+            return Err(format!(
+                "the constraints have {} rows for {n} DOFs",
+                reduction.transform.rows()
+            ));
         }
         let tracing = std::env::var("PLXS_GPU_TRACE").is_ok_and(|v| v != "0");
         let gpu = Gpu::open(Options {
@@ -231,7 +244,12 @@ impl Engine {
             memory_share: false,
         })?;
         let too_large = || format!("the model is too large for the buffers of {}", gpu.name);
-        if !gpu.fits(8 * 6 * n as u64) {
+        let entries = reduction
+            .transform
+            .val
+            .len()
+            .max(reduction.inverse_mass.val.len());
+        if !gpu.fits(8 * 6 * n as u64) || !gpu.fits(8 * entries as u64 + 8 * n as u64) {
             return Err(too_large());
         }
         // Out of memory and internal errors as well as validation errors: a buffer the
@@ -240,15 +258,21 @@ impl Engine {
         let internal = gpu.device.push_error_scope(wgpu::ErrorFilter::Internal);
         let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let f64s = 8 * n as u64;
+        let reduced = 8 * r as u64;
         let u = gpu.storage("u", f64s);
         let v = gpu.storage("v", f64s);
-        let a = gpu.storage("a", f64s);
         let du = gpu.storage("du", f64s);
+        let q = gpu.storage("q", reduced);
+        let qd = gpu.storage("q dot", reduced);
+        let a = gpu.storage("a", reduced);
+        let rq = gpu.storage("reduced residual", reduced);
+        let residual = gpu.storage("residual", f64s);
+        let g = gpu.storage("prescribed", f64s);
         let fs = gpu.storage("forces", 2 * f64s);
         let loads = gpu.storage("loads", 2 * f64s);
         let energy = gpu.storage("energy", 6 * f64s);
-        let im = gpu.init("inverse mass", bytemuck::cast_slice(setup.inverse_mass));
-        let staging = gpu.staging("staging", 6 * f64s);
+        let mass = gpu.init("mass", bytemuck::cast_slice(setup.mass));
+        let staging = gpu.staging("staging", 5 * f64s + 3 * reduced);
         let stride = u64::from(gpu.limits.min_uniform_buffer_offset_alignment)
             .max(std::mem::size_of::<StepParams>() as u64);
         let params = gpu.buffer(&wgpu::BufferDescriptor {
@@ -258,6 +282,7 @@ impl Engine {
             mapped_at_creation: false,
         });
         let groups = gpu.fold(n, GROUP);
+        let reduced_groups = gpu.fold(r, GROUP);
         let dims_of = |count: usize, groups: (u32, u32)| {
             gpu.uniform(
                 "dims",
@@ -270,6 +295,7 @@ impl Engine {
             )
         };
         let dims = dims_of(n, groups);
+        let reduced_dims = dims_of(r, reduced_groups);
         let step_binding = || {
             wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                 buffer: &params,
@@ -277,27 +303,64 @@ impl Engine {
                 size: wgpu::BufferSize::new(std::mem::size_of::<StepParams>() as u64),
             })
         };
+        // A sparse matrix as the shaders read it: the row pointers, then the columns; the
+        // values. Empty buffers hold one zero.
+        let sparse = |name: &str, m: &Sparse| {
+            let mut index = m.ptr.clone();
+            index.extend_from_slice(&m.col);
+            let values = if m.val.is_empty() {
+                vec![0.0]
+            } else {
+                m.val.clone()
+            };
+            (
+                gpu.init(name, bytemuck::cast_slice(&index)),
+                gpu.init(name, bytemuck::cast_slice(&values)),
+            )
+        };
+        let transform = sparse("T", &reduction.transform);
+        let transposed = sparse("T transposed", &reduction.transform.transpose(r));
+        let inverse = sparse("inverse mass", &reduction.inverse_mass);
         use Use::*;
         let mut passes = Vec::new();
-        let layout = gpu.layout(
-            "advance",
-            &[Uniform, Dynamic, Write, Write, Read, Write, Read],
-        );
+        let layout = gpu.layout("advance", &[Uniform, Dynamic, Write, Write, Read]);
         passes.push(Pass {
             pipeline: gpu.pipeline(include_str!("advance.wgsl"), "advance", &layout, &[]),
             bind: gpu.bind(
                 &layout,
                 vec![
-                    dims.as_entire_binding(),
+                    reduced_dims.as_entire_binding(),
                     step_binding(),
-                    u.as_entire_binding(),
-                    v.as_entire_binding(),
+                    q.as_entire_binding(),
+                    qd.as_entire_binding(),
                     a.as_entire_binding(),
-                    du.as_entire_binding(),
-                    im.as_entire_binding(),
                 ],
             ),
             step: true,
+            groups: reduced_groups,
+            kind: 0,
+        });
+        let layout = gpu.layout(
+            "expand",
+            &[Uniform, Read, Read, Read, Read, Read, Write, Write, Write],
+        );
+        passes.push(Pass {
+            pipeline: gpu.pipeline(include_str!("expand.wgsl"), "expand", &layout, &[]),
+            bind: gpu.bind(
+                &layout,
+                vec![
+                    dims.as_entire_binding(),
+                    q.as_entire_binding(),
+                    qd.as_entire_binding(),
+                    g.as_entire_binding(),
+                    transform.0.as_entire_binding(),
+                    transform.1.as_entire_binding(),
+                    u.as_entire_binding(),
+                    v.as_entire_binding(),
+                    du.as_entire_binding(),
+                ],
+            ),
+            step: false,
             groups,
             kind: 0,
         });
@@ -314,9 +377,9 @@ impl Engine {
                     dims.as_entire_binding(),
                     step_binding(),
                     v.as_entire_binding(),
-                    a.as_entire_binding(),
+                    residual.as_entire_binding(),
                     du.as_entire_binding(),
-                    im.as_entire_binding(),
+                    mass.as_entire_binding(),
                     loads.as_entire_binding(),
                     fs.as_entire_binding(),
                     energy.as_entire_binding(),
@@ -326,6 +389,27 @@ impl Engine {
             groups,
             kind: 3,
         });
+        // The reduced residual `Tᵀ r` and the reduced accelerations `M_q⁻¹ Tᵀ r`.
+        let layout = gpu.layout("sparse", &[Uniform, Read, Read, Read, Write]);
+        let pipeline = gpu.pipeline(include_str!("sparse.wgsl"), "sparse", &layout, &[]);
+        for (matrix, x, y) in [(&transposed, &residual, &rq), (&inverse, &rq, &a)] {
+            passes.push(Pass {
+                pipeline: pipeline.clone(),
+                bind: gpu.bind(
+                    &layout,
+                    vec![
+                        reduced_dims.as_entire_binding(),
+                        matrix.0.as_entire_binding(),
+                        matrix.1.as_entire_binding(),
+                        x.as_entire_binding(),
+                        y.as_entire_binding(),
+                    ],
+                ),
+                step: false,
+                groups: reduced_groups,
+                kind: 3,
+            });
+        }
         let timed = (QUERIES / (2 * passes.len())).min(MAX_CHUNK);
         let trace = (gpu.timestamps && timed > 0).then(|| {
             let count = (2 * passes.len() * timed) as u32;
@@ -390,12 +474,16 @@ impl Engine {
         Ok(Self {
             gpu,
             n,
+            r,
             alpha: setup.alpha,
             stride,
             params,
             u,
             v,
+            q,
+            qd,
             a,
+            g,
             loads,
             energy,
             staging,
@@ -647,22 +735,30 @@ impl Engine {
     }
 
     pub(crate) fn load(&mut self, start: &Start<'_>) -> Result<(), String> {
-        let n = self.n;
+        let (n, r) = (self.n, self.r);
         for x in [
             start.u,
             start.v,
-            start.a,
+            start.prescribed,
             start.internal,
             start.viscous,
             start.loads,
         ] {
             if x.len() != n {
-                return Err(format!("{} values for {n} unknowns", x.len()));
+                return Err(format!("{} values for {n} DOFs", x.len()));
+            }
+        }
+        for x in [start.q, start.qdot, start.a] {
+            if x.len() != r {
+                return Err(format!("{} values for {r} reduced unknowns", x.len()));
             }
         }
         let q = &self.gpu.queue;
         q.write_buffer(&self.u, 0, bytemuck::cast_slice(start.u));
         q.write_buffer(&self.v, 0, bytemuck::cast_slice(start.v));
+        q.write_buffer(&self.g, 0, bytemuck::cast_slice(start.prescribed));
+        q.write_buffer(&self.q, 0, bytemuck::cast_slice(start.q));
+        q.write_buffer(&self.qd, 0, bytemuck::cast_slice(start.qdot));
         q.write_buffer(&self.a, 0, bytemuck::cast_slice(start.a));
         let bytes = 8 * n as u64;
         q.write_buffer(&self.loads, 0, bytemuck::cast_slice(start.loads));
@@ -833,29 +929,37 @@ impl Engine {
     }
 
     pub(crate) fn read(&mut self) -> Result<Reached, String> {
-        let n = self.n;
+        let (n, r) = (self.n, self.r);
         let bytes = 8 * n as u64;
+        let reduced = 8 * r as u64;
         let mut encoder = self
             .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("read"),
             });
+        // u, v, the work per DOF, then q, q̇, a.
         encoder.copy_buffer_to_buffer(&self.u, 0, &self.staging, 0, bytes);
         encoder.copy_buffer_to_buffer(&self.v, 0, &self.staging, bytes, bytes);
-        encoder.copy_buffer_to_buffer(&self.a, 0, &self.staging, 2 * bytes, bytes);
-        encoder.copy_buffer_to_buffer(&self.energy, 3 * bytes, &self.staging, 3 * bytes, 3 * bytes);
+        encoder.copy_buffer_to_buffer(&self.energy, 3 * bytes, &self.staging, 2 * bytes, 3 * bytes);
+        let at = 5 * bytes;
+        encoder.copy_buffer_to_buffer(&self.q, 0, &self.staging, at, reduced);
+        encoder.copy_buffer_to_buffer(&self.qd, 0, &self.staging, at + reduced, reduced);
+        encoder.copy_buffer_to_buffer(&self.a, 0, &self.staging, at + 2 * reduced, reduced);
         self.gpu.queue.submit([encoder.finish()]);
         let reached = self.gpu.map(&self.staging, |bytes| {
             let data: &[f64] = bytemuck::cast_slice(bytes);
             let sum = |k: usize| data[k * n..(k + 1) * n].iter().sum::<f64>();
+            let tail = &data[5 * n..];
             Reached {
                 u: data[..n].to_vec(),
                 v: data[n..2 * n].to_vec(),
-                a: data[2 * n..3 * n].to_vec(),
-                internal_work: sum(3),
-                external_work: sum(4),
-                dissipation: sum(5),
+                internal_work: sum(2),
+                external_work: sum(3),
+                dissipation: sum(4),
+                q: tail[..r].to_vec(),
+                qdot: tail[r..2 * r].to_vec(),
+                a: tail[2 * r..3 * r].to_vec(),
             }
         })?;
         if let Some(e) = self.gpu.take_error() {

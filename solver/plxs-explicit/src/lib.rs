@@ -1,5 +1,6 @@
-//! Explicit time steps on the graphics card: central differences with a lumped mass for a
-//! model without contact (with the element kernels: elastic materials under small strains
+//! Explicit time steps on the graphics card: central differences with a lumped mass,
+//! constraints `u = T q + g` and the reduced mass inverted in clusters ([`Reduction`]),
+//! for a model without contact (with the element kernels: elastic materials under small strains
 //! or large deformations, J2 plasticity at small or finite strains, hyperelasticity, and
 //! constant stiffness blocks), by compute shaders through wgpu (Vulkan, DirectX 12 or
 //! Metal).
@@ -14,9 +15,10 @@
 //! the state in every step. The energy balance the solver reports checks the result; cards
 //! without double precision leave the step to the processor.
 //!
-//! **One step** is a few dispatches: [`advance`](../advance.wgsl) (velocities,
-//! displacements), the forces, and [`accelerate`](../accelerate.wgsl) (forces, work,
-//! accelerations). The forces come from the elements ([`Elements`],
+//! **One step** is a few dispatches: [`advance`](../advance.wgsl) (reduced velocities and
+//! displacements), [`expand`](../expand.wgsl) (`u = T q + g`, `v = T q̇`), the forces,
+//! [`accelerate`](../accelerate.wgsl) (forces, work, residual) and twice
+//! [`sparse`](../sparse.wgsl) (`Tᵀ r`, then the reduced accelerations). The forces come from the elements ([`Elements`],
 //! [`elements`](../elements.wgsl) per family of elements, one thread per element, and
 //! [`blocks`](../blocks.wgsl) for the constant blocks, one thread per block row), then
 //! [`gather`](../gather.wgsl) sums them per DOF in double precision; no matrix is built. A
@@ -33,29 +35,38 @@
 mod gpu;
 
 mod elements;
+mod reduction;
 pub use elements::{
     Block, Element, Elements, Family, Hourglass, Isochoric, MAX_NODES, Material, Points,
     STATE_SIZE, Volumetric,
 };
+pub use reduction::{Clusters, MAX_CLUSTER, Reduction, Sparse};
 
 /// The most time steps one [`Engine::run`] takes.
 pub const MAX_CHUNK: usize = 256;
 
-/// What the card needs once per step: the elements, the inverse lumped mass (0 on the DOFs
-/// that do not move: held, or no element uses them) and the mass-proportional damping.
+/// What the card needs once per step: the elements, the lumped mass per DOF (for the
+/// damping), the constraints with the inverse reduced mass, and the mass-proportional
+/// damping.
 pub struct Setup<'a> {
     pub elements: &'a Elements,
-    pub inverse_mass: &'a [f64],
+    pub mass: &'a [f64],
+    pub reduction: &'a Reduction,
     /// `α` of the damping force `α m v`.
     pub alpha: f64,
 }
 
-/// The state at the start of a run of steps: displacements, half-step velocities,
-/// accelerations, and the internal, viscous (with damping) and external forces at it.
+/// The state at the start of a run of steps: the reduced displacements, half-step
+/// velocities and accelerations, the prescribed displacements `g` (constant over the run),
+/// the displacements and velocities of the DOFs (`T q + g`, `T q̇`), and the internal,
+/// viscous (with damping) and external forces at it.
 pub struct Start<'a> {
+    pub q: &'a [f64],
+    pub qdot: &'a [f64],
+    pub a: &'a [f64],
+    pub prescribed: &'a [f64],
     pub u: &'a [f64],
     pub v: &'a [f64],
-    pub a: &'a [f64],
     pub internal: &'a [f64],
     pub viscous: &'a [f64],
     pub loads: &'a [f64],
@@ -64,13 +75,16 @@ pub struct Start<'a> {
     pub material: &'a [f64],
 }
 
-/// The state the card reached: displacements, half-step velocities, accelerations and the
-/// work of the internal, external and viscous forces since [`Engine::load`].
+/// The state the card reached: the reduced displacements, half-step velocities and
+/// accelerations, the displacements and velocities of the DOFs, and the work of the
+/// internal, external and viscous forces since [`Engine::load`].
 #[derive(Clone, Debug, Default)]
 pub struct Reached {
+    pub q: Vec<f64>,
+    pub qdot: Vec<f64>,
+    pub a: Vec<f64>,
     pub u: Vec<f64>,
     pub v: Vec<f64>,
-    pub a: Vec<f64>,
     pub internal_work: f64,
     pub external_work: f64,
     pub dissipation: f64,
@@ -83,7 +97,7 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Opens the card and uploads the matrices. `any_adapter` takes any adapter, software
+    /// Opens the card and uploads the elements and the constraints. `any_adapter` takes any adapter, software
     /// renderers included (tests, measurements); otherwise only a discrete card. `Err`
     /// tells why the steps stay on the processor.
     pub fn new(setup: &Setup<'_>, any_adapter: bool) -> Result<Self, String> {
@@ -110,8 +124,7 @@ impl Engine {
         }
     }
 
-    /// Takes the state to start from; it is also the reference state of the single
-    /// precision products. The work starts again at zero.
+    /// Takes the state to start from. The work starts again at zero.
     pub fn load(&mut self, start: &Start<'_>) -> Result<(), String> {
         #[cfg(feature = "gpu")]
         {

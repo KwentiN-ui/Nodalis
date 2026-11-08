@@ -1755,6 +1755,120 @@ fn released_shell_strip(job: &str, full: bool) -> (Vec<f64>, String) {
     (crossings, log)
 }
 
+/// A shell strip (expanded to bricks, tied to its nodes by constraints) with the scaled
+/// inertia of its fibres swings from its static deflection, and a block tied to the strip
+/// by an equation follows: the card steps with the constraints and the coupled masses as
+/// the processor does.
+#[test]
+fn shells_with_constraints_on_the_graphics_card_match_the_processor() {
+    let (length, width, thickness, cells) = (0.05, 0.01, 0.001, 10);
+    let (hx, hy) = (length / (2 * cells) as f64, width / 4.0);
+    let id = |i: usize, j: usize| i * 5 + j + 1;
+    let mut input = String::from("*Node\n");
+    for i in 0..=2 * cells {
+        for j in 0..=4 {
+            if i % 2 == 1 && j % 2 == 1 {
+                continue;
+            }
+            writeln!(
+                input,
+                "{}, {}, {}, 0",
+                id(i, j),
+                i as f64 * hx,
+                j as f64 * hy
+            )
+            .unwrap();
+        }
+    }
+    input.push_str("*Element, Type=S8R, Elset=EALL\n");
+    for a in 0..cells {
+        for b in 0..2 {
+            let (i, j) = (2 * a, 2 * b);
+            writeln!(
+                input,
+                "{}, {}, {}, {}, {}, {}, {}, {}, {}",
+                a * 2 + b + 1,
+                id(i, j),
+                id(i + 2, j),
+                id(i + 2, j + 2),
+                id(i, j + 2),
+                id(i + 1, j),
+                id(i + 2, j + 1),
+                id(i + 1, j + 2),
+                id(i, j + 1)
+            )
+            .unwrap();
+        }
+    }
+    let end = |i: usize| {
+        (0..=4)
+            .map(|j| id(i, j).to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let swing = 0.0021;
+    let frames = 6;
+    write!(
+        input,
+        "*Nset, Nset=END0\n{}\n*Nset, Nset=END1\n{}\n*Nset, Nset=MID\n{}\n\
+         *Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
+         *Shell section, Elset=EALL, Material=STEEL\n{thickness}\n\
+         *Boundary\nEND0, 1, 6, 0\n\
+         *Equation\n2\n{}, 3, 1.0, {}, 3, -1.0\n\
+         *Step\n*Static\n*Cload\nEND1, 3, 2\n*End step\n\
+         *Step\n*Dynamic, Integration=Explicit\n{}, {swing}\n*Cload, Op=New\n\
+         *Node print, Nset=END1\nU, V\n*Node print, Nset=END0, Totals=Only\nRF\n\
+         *El print, Elset=EALL, Totals=Only\nALLIE, ALLKE, ALLWK\n*End step\n",
+        end(0),
+        end(2 * cells),
+        end(cells),
+        id(cells, 4),
+        id(cells, 0),
+        swing / frames as f64
+    )
+    .unwrap();
+    let dir = work_dir("gpu-shells");
+    let (cpu, _) = run_with_gpu(&dir, "cpu", &input, "off");
+    let (gpu, log) = run_with_gpu(&dir, "gpu", &input, "on");
+    clean(&dir);
+    if log.lines().any(|l| {
+        l.contains("explicit: time steps on the processor")
+            && (l.contains("no graphics card") || l.contains("double precision"))
+    }) {
+        eprintln!("no graphics card with double precision: {log}");
+        return;
+    }
+    assert!(log.contains("element forces"), "not on the card:\n{log}");
+    assert!(log.contains("the mass couples"), "no coupled mass:\n{log}");
+    // The reactions are small differences of the large forces across the thin thickness
+    // (the bending couple): the single precision of the element forces on the card shows
+    // in them at a few percent of the largest, while the motion agrees to 1e-4.
+    for (heading, tolerance) in [
+        ("displacements", 1e-4),
+        ("velocities", 1e-4),
+        ("total force", 5e-2),
+        ("total model internal energy", 1e-4),
+        ("total model kinetic energy", 1e-4),
+        ("total model external work", 1e-4),
+    ] {
+        let (a, b) = (blocks(&cpu, heading), blocks(&gpu, heading));
+        assert_eq!(a.len(), frames, "{heading}\n{log}");
+        assert_eq!(a.len(), b.len(), "{heading}");
+        let largest = a
+            .iter()
+            .flat_map(|(_, r)| r.iter().flatten())
+            .fold(0.0_f64, |m, x| m.max(x.abs()));
+        for ((t, ra), (_, rb)) in a.iter().zip(&b) {
+            for (x, y) in ra.iter().flatten().zip(rb.iter().flatten()) {
+                assert!(
+                    (x - y).abs() <= tolerance * largest,
+                    "{heading} at {t} s: {x} on the processor, {y} on the card"
+                );
+            }
+        }
+    }
+}
+
 /// The thickness of a thin shell no longer sets the time step, and the strip swings at the
 /// frequency it has with its full inertia.
 #[test]
