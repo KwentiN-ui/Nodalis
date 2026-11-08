@@ -432,13 +432,7 @@ impl ContactFace {
     /// The distance from `x` to the bounding box of the face nodes: no point of the face
     /// is closer.
     pub fn box_distance(&self, coords: &[[f64; 3]], x: [f64; 3]) -> f64 {
-        let (lo, hi) = self.bounds(coords);
-        let mut sum = 0.0;
-        for d in 0..3 {
-            let out = (lo[d] - x[d]).max(x[d] - hi[d]).max(0.0);
-            sum += out * out;
-        }
-        sum.sqrt()
+        outside(self.bounds(coords), x)
     }
 
     /// Whether natural coordinates lie strictly inside the face (not on its clamped border).
@@ -804,6 +798,16 @@ pub fn dual_coefficients(mass: &[f64], diag: &[f64], m: usize) -> Vec<f64> {
         }
     }
     out
+}
+
+/// The distance of `x` from a box (lowest, highest coordinates); zero inside it.
+pub fn outside((lo, hi): ([f64; 3], [f64; 3]), x: [f64; 3]) -> f64 {
+    let mut sum = 0.0;
+    for d in 0..3 {
+        let out = (lo[d] - x[d]).max(x[d] - hi[d]).max(0.0);
+        sum += out * out;
+    }
+    sum.sqrt()
 }
 
 #[cfg(test)]

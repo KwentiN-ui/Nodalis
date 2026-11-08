@@ -566,7 +566,7 @@ impl ContactModel {
             let initial: Vec<Option<(u32, f64)>> = (0..prepared.points.len())
                 .map(|p| {
                     prepared
-                        .closest(p, coords)
+                        .closest(p, coords, None)
                         .map(|(f, _, fp, x)| (f, dot(sub(x, fp.x), fp.normal)))
                 })
                 .collect();
@@ -695,9 +695,11 @@ impl ContactModel {
                 // (observed: ccx drops a node that slid past the master's edge in an
                 // earlier step, and keeps one that slides off within the increment).
                 for p in 0..pair.points.len() {
-                    let beside = pair.closest(p, &current).is_none_or(|(f, natural, ..)| {
-                        !pair.master[f as usize].contains(natural, 1e-3)
-                    });
+                    let beside = pair
+                        .closest(p, &current, None)
+                        .is_none_or(|(f, natural, ..)| {
+                            !pair.master[f as usize].contains(natural, 1e-3)
+                        });
                     if beside {
                         pair.candidates[p].clear();
                     }
@@ -899,6 +901,7 @@ impl ContactModel {
             } else {
                 pair.mortar_nodes.len()
             };
+            let boxes: Vec<Bounds> = pair.master.iter().map(|f| f.bounds(&current)).collect();
             // The points one by one in parallel (the search for their master faces is most
             // of a contact evaluation), then gathered in their order.
             let evaluated: Vec<(PointResult, Option<ContactElement>)> = (0..count)
@@ -917,10 +920,26 @@ impl ContactModel {
                         .copied()
                         .unwrap_or(1.0);
                     let (result, mut element) = if pair.mortar_nodes.is_empty() {
-                        pair.evaluate_point(p, &current, u, &previous, predictor, damping, scale)
+                        pair.evaluate_point(
+                            p,
+                            &current,
+                            u,
+                            &previous,
+                            predictor,
+                            damping,
+                            scale,
+                            Some(&boxes),
+                        )
                     } else {
                         pair.evaluate_mortar_node(
-                            p, &current, u, &previous, predictor, damping, scale,
+                            p,
+                            &current,
+                            u,
+                            &previous,
+                            predictor,
+                            damping,
+                            scale,
+                            Some(&boxes),
                         )
                     };
                     if let Some(element) = element.as_mut() {
@@ -1009,7 +1028,7 @@ impl ContactModel {
                 // beside every master face it could be projected on (the master moved, for
                 // a curved master as the slave of a flat surface), and the deep overclosure
                 // would go unseen.
-                let Ok(kin) = pair.kinematics(p, &current, u) else {
+                let Ok(kin) = pair.kinematics(p, &current, u, None) else {
                     continue;
                 };
                 let mut change = 0.0;
@@ -1103,7 +1122,7 @@ impl ContactModel {
             }
             let results = evaluation.points.get(pi);
             for p in 0..pair.points.len() {
-                let Ok(kin) = pair.kinematics(p, &current, u) else {
+                let Ok(kin) = pair.kinematics(p, &current, u, None) else {
                     continue;
                 };
                 let (closed, pressure) = if pair.law.is_tied() {
@@ -1131,6 +1150,9 @@ impl ContactModel {
         out
     }
 }
+
+/// The bounding box of a master face: lowest and highest coordinates.
+type Bounds = ([f64; 3], [f64; 3]);
 
 impl Pair {
     /// The sorted DOFs of the slave nodes of `points` and the nodes of master face `face`.
@@ -1184,6 +1206,7 @@ impl Pair {
         &self,
         p: usize,
         current: &[[f64; 3]],
+        boxes: Option<&[Bounds]>,
     ) -> Option<(u32, [f64; 2], geometry::FacePoint, [f64; 3])> {
         let point = &self.points[p];
         let x = self.position(p, current);
@@ -1191,43 +1214,62 @@ impl Pair {
         if candidates.is_empty() {
             return None;
         }
-        // The candidates nearest first (by the bounding boxes of their nodes), so that a
-        // face the point projects into is found early and the faces whose box lies farther
-        // away than it need no projection.
-        let mut order: Vec<(f64, u32)> = candidates
-            .iter()
-            .filter(|&&f| {
-                !self.master[f as usize]
-                    .nodes
-                    .iter()
-                    .any(|n| point.nodes.contains(n))
-            })
-            .map(|&f| (self.master[f as usize].box_distance(current, x), f))
-            .collect();
-        order.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-        let mut best: Option<(f64, bool, u32, [f64; 2])> = None;
-        for (reach, f) in order {
-            if let Some((d, true, ..)) = best
-                && reach > d
-            {
-                break;
+        // The bounding boxes of the faces, computed once per evaluation where given.
+        let box_distance = |f: u32| match boxes {
+            Some(b) => geometry::outside(b[f as usize], x),
+            None => self.master[f as usize].box_distance(current, x),
+        };
+        let own = |f: u32| {
+            self.master[f as usize]
+                .nodes
+                .iter()
+                .any(|n| point.nodes.contains(n))
+        };
+        // First the face whose box lies nearest (a face the point projects into is mostly
+        // that one); then only the faces whose box is nearer than the best distance so far
+        // need a projection. The choice does not depend on the order: a face the point
+        // projects into wins, among those the closest, among equally close the first.
+        let mut nearest: Option<(f64, u32)> = None;
+        for &f in candidates {
+            let reach = box_distance(f);
+            if nearest.is_none_or(|(r, g)| reach < r || (reach == r && f < g)) && !own(f) {
+                nearest = Some((reach, f));
             }
+        }
+        let (_, first) = nearest?;
+        let mut best: Option<(f64, bool, u32, [f64; 2])> = None;
+        let consider = |f: u32, best: &mut Option<(f64, bool, u32, [f64; 2])>| {
             let face = &self.master[f as usize];
             let natural = face.project_natural(current, x);
             let distance = geometry::norm(sub(x, face.point(current, natural)));
             let interior = face.is_interior(natural);
             // Prefer a face the point projects into; among those the closest (the first of
             // equally close ones in the order of the candidates).
-            let better = match &best {
+            let better = match best {
                 None => true,
                 Some((d, i, g, _)) => {
-                    (interior && !i)
+                    (interior && !*i)
                         || (interior == *i && (distance < *d || (distance == *d && f < *g)))
                 }
             };
             if better {
-                best = Some((distance, interior, f, natural));
+                *best = Some((distance, interior, f, natural));
             }
+        };
+        consider(first, &mut best);
+        for &f in candidates {
+            if f == first {
+                continue;
+            }
+            if let Some((d, true, ..)) = best
+                && box_distance(f) > d
+            {
+                continue;
+            }
+            if own(f) {
+                continue;
+            }
+            consider(f, &mut best);
         }
         best.map(|(_, _, f, natural)| {
             let fp = self.master[f as usize].at(current, natural);
@@ -1248,8 +1290,9 @@ impl Pair {
         predictor: bool,
         damping: Option<&Damping>,
         stiffness: f64,
+        boxes: Option<&[Bounds]>,
     ) -> (PointResult, Option<ContactElement>) {
-        match self.kinematics(p, current, u) {
+        match self.kinematics(p, current, u, boxes) {
             Ok(kin) => self.respond(&kin, previous, predictor, damping, stiffness),
             Err((x, gap)) => (self.open_result(x, gap, self.points[p].area), None),
         }
@@ -1270,6 +1313,7 @@ impl Pair {
         predictor: bool,
         damping: Option<&Damping>,
         stiffness: f64,
+        boxes: Option<&[Bounds]>,
     ) -> (PointResult, Option<ContactElement>) {
         let (node, points) = &self.mortar_nodes[k];
         let x = current[*node as usize];
@@ -1286,7 +1330,7 @@ impl Pair {
             let p = p as usize;
             let a = w * self.points[p].area;
             all_area += a;
-            let Ok(kin) = self.kinematics(p, current, u) else {
+            let Ok(kin) = self.kinematics(p, current, u, boxes) else {
                 continue;
             };
             total += a;
@@ -1370,6 +1414,7 @@ impl Pair {
         p: usize,
         current: &[[f64; 3]],
         u: &[f64],
+        boxes: Option<&[Bounds]>,
     ) -> std::result::Result<Kinematics, ([f64; 3], f64)> {
         let point = &self.points[p];
         let x = self.position(p, current);
@@ -1385,7 +1430,7 @@ impl Pair {
             let (natural, fp) = self.master[f as usize].project(current, x);
             Some((f, natural, fp, x))
         } else {
-            self.closest(p, current)
+            self.closest(p, current, boxes)
         };
         let Some((f, _natural, fp, x)) = found else {
             return Err((x, 0.0));
