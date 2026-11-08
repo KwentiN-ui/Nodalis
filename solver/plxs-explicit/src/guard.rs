@@ -35,7 +35,7 @@ impl Guard {
         if self.offsets.is_empty() {
             self.offsets.push(0);
         }
-        for (x, d) in coordinates.iter().zip(dofs.chunks_exact(3)) {
+        for (x, d) in coordinates.iter().zip(dofs.as_chunks::<3>().0) {
             self.coordinates.extend_from_slice(x);
             self.dofs.extend_from_slice(d);
         }
