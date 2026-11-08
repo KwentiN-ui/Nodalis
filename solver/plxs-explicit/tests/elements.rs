@@ -3,7 +3,9 @@
 //! processor. Runs where a card with double precision is found (`PLXS_GPU=on` takes
 //! software renderers too); elsewhere it says so and passes.
 
-use plxs_explicit::{Element, Elements, Engine, ForceModel, Hourglass, MAX_CHUNK, Setup, Start};
+use plxs_explicit::{
+    Element, Elements, Engine, ForceModel, Hourglass, MAX_CHUNK, Material, Setup, Start,
+};
 
 /// The trilinear brick's natural node coordinates.
 const CORNERS: [[f64; 3]; 8] = [
@@ -47,17 +49,24 @@ fn isotropic(young: f64, poisson: f64) -> [[f64; 6]; 6] {
 
 #[test]
 fn a_block_of_bricks_swings_as_on_the_processor() {
-    swing(false, 0.3);
+    swing(false, 0.3, false);
+}
+
+/// Fast enough to yield: J2 plasticity, isotropic and kinematic hardening.
+#[test]
+fn a_block_of_bricks_yields_as_on_the_processor() {
+    swing(false, 20.0, true);
 }
 
 /// Under NLGEOM, swinging far enough that the rotations matter.
 #[test]
 fn a_block_of_bricks_swings_far_as_on_the_processor() {
-    swing(true, 400.0);
+    swing(true, 400.0, false);
 }
 
-/// A cantilever block of bricks starting with `speed` across, pulled at its free end.
-fn swing(nlgeom: bool, speed: f64) {
+/// A cantilever block of bricks starting with `speed` across, pulled at its free end;
+/// `plastic`: of J2 materials.
+fn swing(nlgeom: bool, speed: f64, plastic: bool) {
     if std::env::var("PLXS_GPU").is_ok_and(|v| v.eq_ignore_ascii_case("off")) {
         return;
     }
@@ -68,6 +77,7 @@ fn swing(nlgeom: bool, speed: f64) {
     let nodes = (nx + 1) * (ny + 1) * (nz + 1);
     let n = 3 * nodes;
     let mut mass = vec![0.0; n];
+    let mut states = 0;
     let mut elements = Elements {
         nlgeom,
         ..Default::default()
@@ -110,6 +120,7 @@ fn swing(nlgeom: bool, speed: f64) {
                         .map(|c| (volume / 8.0, gradients([g * c[0], g * c[1], g * c[2]], s)))
                         .collect()
                 };
+                let count = points.len();
                 elements
                     .push(Element {
                         dofs: ids
@@ -117,7 +128,33 @@ fn swing(nlgeom: bool, speed: f64) {
                             .flat_map(|&id| (0..3).map(move |d| (3 * id + d) as u32))
                             .collect(),
                         points,
-                        elastic: isotropic(young, 0.3),
+                        material: if plastic {
+                            let mu = young / 2.6;
+                            let bulk = young / (3.0 * 0.4);
+                            let curve = vec![(0.0, 235e6), (0.002, 300e6), (0.2, 400e6)];
+                            // Every third element with kinematic hardening.
+                            let (isotropic, kinematic) = if (i + j) % 3 == 0 {
+                                (
+                                    vec![(0.0, 235e6)],
+                                    curve.iter().map(|&(e, s)| (e, s - 235e6)).collect(),
+                                )
+                            } else {
+                                (curve, Vec::new())
+                            };
+                            Material::J2 {
+                                shear: mu,
+                                bulk,
+                                isotropic,
+                                kinematic,
+                            }
+                        } else {
+                            Material::Elastic(isotropic(young, 0.3))
+                        },
+                        state: plastic.then(|| {
+                            let first = states;
+                            states += 14 * count;
+                            first
+                        }),
                         bulk: 0.06 * young * dt_e * volume,
                         mean: mean.iter().flatten().copied().collect(),
                         hourglass: reduced.then(|| Hourglass {
@@ -179,8 +216,9 @@ fn swing(nlgeom: bool, speed: f64) {
             }
         })
         .collect();
+    let state = std::cell::RefCell::new(vec![0.0; states]);
     let forces = |u: &[f64], v: &[f64]| {
-        let (fi, mut fv) = elements.forces(u, v);
+        let (fi, mut fv) = elements.forces(u, v, &mut state.borrow_mut());
         for i in 0..n {
             fv[i] += alpha * mass[i] * v[i];
         }
@@ -192,6 +230,7 @@ fn swing(nlgeom: bool, speed: f64) {
             .collect()
     };
     let (fi0, fv0) = forces(&u, &v);
+    let start_state = state.borrow().clone();
     let p0 = load(0.0);
     let a0 = accel(&p0, &fi0, &fv0);
     engine
@@ -202,6 +241,7 @@ fn swing(nlgeom: bool, speed: f64) {
             internal: &fi0,
             viscous: &fv0,
             loads: &p0,
+            material: &start_state,
         })
         .unwrap();
     let mut a = a0;
@@ -241,6 +281,23 @@ fn swing(nlgeom: bool, speed: f64) {
         done += chunk;
     }
     let reached = engine.read().unwrap();
+    if plastic {
+        let mut on_card = vec![0.0; states];
+        engine.read_state(&mut on_card).unwrap();
+        let cpu = state.borrow();
+        let peeq = cpu.iter().step_by(14).fold(0.0_f64, |m, x| m.max(*x));
+        eprintln!("largest equivalent plastic strain {peeq}");
+        assert!(peeq > 1e-4, "{peeq}");
+        let off = cpu
+            .iter()
+            .zip(&on_card)
+            .step_by(14)
+            .fold(0.0_f64, |m, (a, b)| m.max((a - b).abs()));
+        assert!(
+            off <= 1e-3 * peeq,
+            "equivalent plastic strain off by {off} of {peeq}"
+        );
+    }
     let largest = u.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
     assert!(largest > 1e-6, "{largest}");
     eprintln!("largest displacement {largest} m");

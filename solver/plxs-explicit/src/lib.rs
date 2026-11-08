@@ -1,6 +1,6 @@
-//! Explicit time steps on the graphics card: central differences with a lumped mass for an
-//! elastic model (small strains, or large deformations with the element kernels; no
-//! contact), by compute shaders through
+//! Explicit time steps on the graphics card: central differences with a lumped mass for a
+//! model without contact (with the element kernels: elastic materials under small strains
+//! or large deformations, small-strain J2 plasticity; with the matrices: linear models), by compute shaders through
 //! wgpu (Vulkan, DirectX 12 or Metal).
 //!
 //! **Precision.** Consumer cards compute double precision at a fraction of the single
@@ -38,7 +38,7 @@ mod gpu;
 mod sliced;
 
 mod elements;
-pub use elements::{Element, Elements, Family, Hourglass, MAX_NODES};
+pub use elements::{Element, Elements, Family, Hourglass, MAX_NODES, Material, STATE_SIZE};
 
 /// The most time steps one [`Engine::run`] takes.
 pub const MAX_CHUNK: usize = 256;
@@ -120,6 +120,9 @@ pub struct Start<'a> {
     pub internal: &'a [f64],
     pub viscous: &'a [f64],
     pub loads: &'a [f64],
+    /// The material state ([`STATE_SIZE`] per integration point; see [`Element::state`]),
+    /// empty when no element has state variables.
+    pub material: &'a [f64],
 }
 
 /// The state the card reached: displacements, half-step velocities, accelerations and the
@@ -196,6 +199,20 @@ impl Engine {
         #[cfg(not(feature = "gpu"))]
         {
             let _ = (steps, from, to);
+            Err("built without graphics card support".to_owned())
+        }
+    }
+
+    /// Writes the material state on the card into `material` (the vector of
+    /// [`Start::material`]).
+    pub fn read_state(&mut self, material: &mut [f64]) -> Result<(), String> {
+        #[cfg(feature = "gpu")]
+        {
+            self.inner.read_state(material)
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            let _ = material;
             Err("built without graphics card support".to_owned())
         }
     }

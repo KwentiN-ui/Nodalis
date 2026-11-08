@@ -27,6 +27,146 @@ pub struct Hourglass {
     pub coordinates: Vec<[f64; 3]>,
 }
 
+/// State variables per integration point (those of the processor's J2 law: equivalent
+/// plastic strain, plastic strain, back stress, creep rate).
+pub const STATE_SIZE: usize = 14;
+
+/// A material law of the kernels.
+// A model has a handful of materials: their size does not matter.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum Material {
+    /// `σ = D ε` (Saint Venant-Kirchhoff under NLGEOM).
+    Elastic([[f64; 6]; 6]),
+    /// Small-strain J2 plasticity, isotropic and linear kinematic hardening (radial return
+    /// as the processor's `J2Plastic`, without creep).
+    J2 {
+        shear: f64,
+        bulk: f64,
+        /// Yield stress against equivalent plastic strain.
+        isotropic: Vec<(f64, f64)>,
+        /// The back stress's uniaxial stress against equivalent plastic strain, or empty.
+        kinematic: Vec<(f64, f64)>,
+    },
+}
+
+/// Value and slope of a piecewise linear curve, constant beyond its ends.
+fn curve(points: &[(f64, f64)], x: f64) -> (f64, f64) {
+    let Some(&(x0, y0)) = points.first() else {
+        return (0.0, 0.0);
+    };
+    if x <= x0 {
+        return (y0, if x < x0 { 0.0 } else { slope_after(points) });
+    }
+    for w in points.windows(2) {
+        if x <= w[1].0 {
+            let slope = (w[1].1 - w[0].1) / (w[1].0 - w[0].0);
+            return (w[0].1 + (x - w[0].0) * slope, slope);
+        }
+    }
+    (points[points.len() - 1].1, 0.0)
+}
+
+fn slope_after(points: &[(f64, f64)]) -> f64 {
+    match points {
+        [a, b, ..] => (b.1 - a.1) / (b.0 - a.0),
+        _ => 0.0,
+    }
+}
+
+impl Material {
+    /// The stress of the engineering strain; `state` (J2) advances.
+    pub fn stress(&self, strain: &[f64; 6], state: Option<&mut [f64]>) -> [f64; 6] {
+        match self {
+            Material::Elastic(d) => {
+                std::array::from_fn(|r| d[r].iter().zip(strain).map(|(a, b)| a * b).sum())
+            }
+            Material::J2 {
+                shear,
+                bulk,
+                isotropic,
+                kinematic,
+            } => {
+                let state = state.expect("J2 has state variables");
+                j2(*shear, *bulk, isotropic, kinematic, strain, state)
+            }
+        }
+    }
+}
+
+/// The radial return of `J2Plastic` (rate independent).
+fn j2(
+    mu: f64,
+    bulk: f64,
+    isotropic: &[(f64, f64)],
+    kinematic: &[(f64, f64)],
+    strain: &[f64; 6],
+    state: &mut [f64],
+) -> [f64; 6] {
+    let e = strain;
+    let elastic: [f64; 6] = std::array::from_fn(|k| {
+        let total = if k < 3 { e[k] } else { 0.5 * e[k] };
+        total - state[1 + k]
+    });
+    let trace = elastic[0] + elastic[1] + elastic[2];
+    let mean = trace / 3.0;
+    let s_trial: [f64; 6] =
+        std::array::from_fn(|k| 2.0 * mu * (elastic[k] - if k < 3 { mean } else { 0.0 }));
+    let xi: [f64; 6] = std::array::from_fn(|k| s_trial[k] - state[7 + k]);
+    let xi_norm = (xi[0] * xi[0]
+        + xi[1] * xi[1]
+        + xi[2] * xi[2]
+        + 2.0 * (xi[3] * xi[3] + xi[4] * xi[4] + xi[5] * xi[5]))
+        .sqrt();
+    let q = 1.5_f64.sqrt() * xi_norm;
+    let peeq = state[0];
+    let yield_stress = curve(isotropic, peeq).0;
+    let hydrostatic = bulk * trace;
+    let mut stress = s_trial;
+    if q - yield_stress > 1e-9 * yield_stress.max(0.0) && xi_norm > 0.0 {
+        let kappa0 = curve(kinematic, peeq).0;
+        let overstress = |dg: f64| {
+            q - 3.0 * mu * dg
+                - (curve(kinematic, peeq + dg).0 - kappa0)
+                - curve(isotropic, peeq + dg).0
+        };
+        let hardening = |dg: f64| curve(kinematic, peeq + dg).1 + curve(isotropic, peeq + dg).1;
+        let (mut lo, mut hi) = (0.0, q / (3.0 * mu));
+        let mut dg = (q - yield_stress) / (3.0 * mu + hardening(0.0));
+        for _ in 0..100 {
+            let g = overstress(dg);
+            if g.abs() <= 1e-12 * q.max(1.0) {
+                break;
+            }
+            if g > 0.0 {
+                lo = dg;
+            } else {
+                hi = dg;
+            }
+            let next = dg + g / (3.0 * mu + hardening(dg));
+            dg = if next > lo && next < hi {
+                next
+            } else {
+                0.5 * (lo + hi)
+            };
+        }
+        let dg = dg.clamp(0.0, q / (3.0 * mu));
+        let delta_kappa = curve(kinematic, peeq + dg).0 - kappa0;
+        for k in 0..6 {
+            let n = xi[k] / xi_norm;
+            let dep = dg * 1.5_f64.sqrt() * n;
+            state[1 + k] += dep;
+            state[7 + k] += delta_kappa * (2.0_f64 / 3.0).sqrt() * n;
+            stress[k] -= 2.0 * mu * dep;
+        }
+        state[0] = peeq + dg;
+    }
+    for v in stress.iter_mut().take(3) {
+        *v += hydrostatic;
+    }
+    stress
+}
+
 /// One element.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Element {
@@ -35,8 +175,10 @@ pub struct Element {
     /// Per integration point: the volume it stands for and the shape function derivatives
     /// per node.
     pub points: Vec<(f64, Vec<[f64; 3]>)>,
-    /// The elastic matrix on engineering strains.
-    pub elastic: [[f64; 6]; 6],
+    pub material: Material,
+    /// With a material that has state variables: the index of the first one of its first
+    /// point in the material state ([`STATE_SIZE`] per point, the points in a row).
+    pub state: Option<usize>,
     /// The bulk viscosity `c V` and the mean gradients `g` (three per node).
     pub bulk: f64,
     pub mean: Vec<f64>,
@@ -63,6 +205,10 @@ pub struct Family {
     pub control: Vec<f64>,
     /// Per element its index into [`Elements::materials`].
     pub material: Vec<u32>,
+    /// Whether an element has state variables, and per element the index of its first one
+    /// (`u32::MAX` for elements without).
+    pub history: bool,
+    pub state: Vec<u32>,
 }
 
 impl Family {
@@ -76,8 +222,8 @@ impl Family {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Elements {
     pub families: Vec<Family>,
-    /// The different elastic matrices.
-    pub materials: Vec<[[f64; 6]; 6]>,
+    /// The different materials.
+    pub materials: Vec<Material>,
     /// Large deformations (total Lagrangian: Green-Lagrange strain, Saint Venant-Kirchhoff
     /// stress, the bulk and hourglass viscosity in the current configuration).
     pub nlgeom: bool,
@@ -113,10 +259,17 @@ impl Elements {
         {
             return Err("hourglass control for an element other than C3D8R".to_owned());
         }
-        let material = match self.materials.iter().position(|m| *m == element.elastic) {
+        let state = match (&element.material, element.state) {
+            (Material::Elastic(_), _) => u32::MAX,
+            (Material::J2 { .. }, Some(state)) if state < u32::MAX as usize => state as u32,
+            (Material::J2 { .. }, _) => {
+                return Err("a plastic element without state variables".to_owned());
+            }
+        };
+        let material = match self.materials.iter().position(|m| *m == element.material) {
             Some(i) => i,
             None => {
-                self.materials.push(element.elastic);
+                self.materials.push(element.material);
                 self.materials.len() - 1
             }
         } as u32;
@@ -145,6 +298,8 @@ impl Elements {
         family.viscosity.push(element.bulk);
         family.viscosity.extend_from_slice(&element.mean);
         family.material.push(material);
+        family.state.push(state);
+        family.history |= state != u32::MAX;
         if let Some(h) = element.hourglass {
             family.control.push(h.stiffness);
             family.control.push(h.viscosity);
@@ -166,8 +321,8 @@ impl Elements {
     }
 
     /// The internal and the viscous forces at the displacements `u` and velocities `v`,
-    /// in double precision.
-    pub fn forces(&self, u: &[f64], v: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    /// in double precision; the material state advances in place.
+    pub fn forces(&self, u: &[f64], v: &[f64], state: &mut [f64]) -> (Vec<f64>, Vec<f64>) {
         let mut internal = vec![0.0; u.len()];
         let mut viscous = vec![0.0; u.len()];
         for family in &self.families {
@@ -182,7 +337,7 @@ impl Elements {
                 let ve: Vec<f64> = dofs.iter().map(|&d| v[d as usize]).collect();
                 let mut f = vec![0.0; nd];
                 let mut fv = vec![0.0; nd];
-                let d = &self.materials[family.material[e] as usize];
+                let material = &self.materials[family.material[e] as usize];
                 let size = family.point_size();
                 // The current volume and `V g` of the fully integrated elements.
                 let mut current = (0.0, vec![0.0; nd]);
@@ -192,7 +347,12 @@ impl Elements {
                     let w = family.gradients[at];
                     let g = &family.gradients[at + 1..at + size];
                     reference += w;
-                    point_forces(w, g, &ue, d, self.nlgeom, &mut f, &mut current);
+                    let history = (family.state[e] != u32::MAX).then(|| {
+                        let at = family.state[e] as usize + ip * STATE_SIZE;
+                        &mut state[at..at + STATE_SIZE]
+                    });
+                    let stress = |strain: &[f64; 6]| material.stress(strain, history);
+                    point_forces(w, g, &ue, stress, self.nlgeom, &mut f, &mut current);
                 }
                 let visc = &family.viscosity[e * (1 + nd)..(e + 1) * (1 + nd)];
                 let control = family
@@ -245,7 +405,7 @@ fn point_forces(
     w: f64,
     g: &[f64],
     ue: &[f64],
-    d: &[[f64; 6]; 6],
+    stress: impl FnOnce(&[f64; 6]) -> [f64; 6],
     nlgeom: bool,
     f: &mut [f64],
     current: &mut (f64, Vec<f64>),
@@ -275,10 +435,7 @@ fn point_forces(
         h[1][2] + h[2][1] + hh(1, 2),
         h[2][0] + h[0][2] + hh(2, 0),
     ];
-    let s: Vec<f64> = d
-        .iter()
-        .map(|row| row.iter().zip(&strain).map(|(a, b)| a * b).sum())
-        .collect();
+    let s = stress(&strain);
     let sm = [[s[0], s[3], s[5]], [s[3], s[1], s[4]], [s[5], s[4], s[2]]];
     // P = F S (F = I under small strains).
     let mut p = sm;

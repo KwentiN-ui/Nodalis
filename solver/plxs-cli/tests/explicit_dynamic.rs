@@ -1279,16 +1279,29 @@ fn run_with_gpu(dir: &Path, job: &str, input: &str, mode: &str) -> (String, Stri
 /// by a growing load: the same on the graphics card as on the processor. `how` is in the
 /// message that names the card: how it forms the forces.
 fn gpu_matches_processor(kind: &str, job: &str, pulse: bool, how: &str) {
-    gpu_matches_processor_with(kind, job, pulse, how, false);
+    gpu_matches_processor_with(kind, job, pulse, how, false, false);
 }
 
 /// [`gpu_matches_processor`], under NLGEOM over ten times the time in three frames, with a
 /// hundred times the start velocity, which bends the bar by about a third of its length.
-fn gpu_matches_processor_with(kind: &str, job: &str, pulse: bool, how: &str, nlgeom: bool) {
-    let (speed, step) = if nlgeom {
-        (50.0, "*Step, Nlgeom")
+/// With `plastic` a J2 material and forty times the start velocity, which yields the bar.
+fn gpu_matches_processor_with(
+    kind: &str,
+    job: &str,
+    pulse: bool,
+    how: &str,
+    nlgeom: bool,
+    plastic: bool,
+) {
+    let (speed, step) = match (nlgeom, plastic) {
+        (true, _) => (50.0, "*Step, Nlgeom"),
+        (false, true) => (20.0, "*Step"),
+        (false, false) => (0.5, "*Step"),
+    };
+    let plasticity = if plastic {
+        "*Plastic\n300e6, 0\n350e6, 0.002\n450e6, 0.2\n"
     } else {
-        (0.5, "*Step")
+        ""
     };
     let (length, side, cells) = (0.1, 0.01, 20);
     let c = (E / RHO).sqrt();
@@ -1307,7 +1320,7 @@ fn gpu_matches_processor_with(kind: &str, job: &str, pulse: bool, how: &str, nlg
     };
     writeln!(
         input,
-        "*Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
+        "*Material, Name=STEEL\n*Elastic\n{E}, 0.3\n{plasticity}*Density\n{RHO}\n\
          *Solid section, Elset=EALL, Material=STEEL\n\
          *Amplitude, Name=RAMP\n{amplitude}\n\
          *Initial conditions, Type=Velocity\nALL, 2, {speed}\n\
@@ -1373,12 +1386,38 @@ fn time_steps_of_reduced_elements_on_the_graphics_card_match_the_processor() {
 
 #[test]
 fn large_deformations_on_the_graphics_card_match_the_processor() {
-    gpu_matches_processor_with("C3D8", "gpu-nlgeom", false, "element forces", true);
+    gpu_matches_processor_with("C3D8", "gpu-nlgeom", false, "element forces", true, false);
 }
 
 #[test]
 fn large_deformations_of_reduced_elements_on_the_graphics_card_match_the_processor() {
-    gpu_matches_processor_with("C3D8R", "gpu-nlgeom-r", true, "element forces", true);
+    gpu_matches_processor_with("C3D8R", "gpu-nlgeom-r", true, "element forces", true, false);
+}
+
+#[test]
+fn plastic_flow_on_the_graphics_card_matches_the_processor() {
+    gpu_matches_processor_with("C3D8R", "gpu-plastic", false, "element forces", false, true);
+}
+
+/// Plasticity under NLGEOM (finite strain J2) has no kernel yet: the processor.
+#[test]
+fn plastic_flow_under_nlgeom_stays_on_the_processor() {
+    let dir = work_dir("gpu-plastic-nlgeom");
+    let mut input = bar_mesh(4, 1, 1, [0.04, 0.01, 0.01], "C3D8R");
+    writeln!(
+        input,
+        "*Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Plastic\n300e6, 0\n*Density\n{RHO}\n\
+         *Solid section, Elset=EALL, Material=STEEL\n\
+         *Step, Nlgeom\n*Dynamic, Integration=Explicit\n1e-6, 1e-5\n\
+         *Boundary\nEND0, 1, 3, 0\n*Node print, Nset=END1\nU\n*End step"
+    )
+    .unwrap();
+    let (_, log) = run_with_gpu(&dir, "nlgeom", &input, "on");
+    clean(&dir);
+    assert!(
+        log.contains("time steps on the processor (large deformations and nonlinear materials"),
+        "{log}"
+    );
 }
 
 /// The incompatible modes have no element kernel yet: the matrices.
