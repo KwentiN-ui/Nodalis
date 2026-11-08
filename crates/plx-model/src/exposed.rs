@@ -143,11 +143,9 @@ pub enum Field {
     I11,
     I22,
     ShearFactor,
-    TimePeriod,
-    InitialIncrement,
-    /// The duration of a Dynamic step.
+    /// The duration of a static, heat transfer, visco or Dynamic step.
     Duration,
-    /// The result frames of a Dynamic step.
+    /// The result frames of a static, heat transfer, visco or Dynamic step.
     Frames,
     /// The damping ratio of a Dynamic step.
     DampingRatio,
@@ -202,8 +200,6 @@ impl Field {
             Self::I11 => "I11",
             Self::I22 => "I22",
             Self::ShearFactor => "k",
-            Self::TimePeriod => "Time period",
-            Self::InitialIncrement => "Initial increment",
             Self::Duration => "Duration",
             Self::Frames => "Frames",
             Self::DampingRatio => "Damping ratio",
@@ -222,7 +218,7 @@ impl Field {
     pub const ROTATION: [Self; 3] = [Self::RotationX, Self::RotationY, Self::RotationZ];
     pub const LOCATION: [Self; 3] = [Self::LocationX, Self::LocationY, Self::LocationZ];
     pub const AXIS: [Self; 3] = [Self::AxisX, Self::AxisY, Self::AxisZ];
-    pub const ALL: [Self; 46] = [
+    pub const ALL: [Self; 44] = [
         Self::Value,
         Self::X,
         Self::Y,
@@ -256,8 +252,6 @@ impl Field {
         Self::I11,
         Self::I22,
         Self::ShearFactor,
-        Self::TimePeriod,
-        Self::InitialIncrement,
         Self::Duration,
         Self::Frames,
         Self::DampingRatio,
@@ -421,7 +415,7 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                         field,
                     );
                 }
-                StepKind::Static(s) => s,
+                StepKind::Static(s) | StepKind::Visco(crate::ViscoStep { increments: s, .. }) => s,
                 StepKind::HeatTransfer(h)
                 | StepKind::CoupledTempDisp(h)
                 | StepKind::UncoupledTempDisp(h) => &mut h.increments,
@@ -448,8 +442,8 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                 _ => return None,
             };
             match field {
-                Field::TimePeriod => real(&mut increments.time_period, Quantity::Time),
-                Field::InitialIncrement => real(&mut increments.initial_increment, Quantity::Time),
+                Field::Duration => real(&mut increments.duration, Quantity::Time),
+                Field::Frames => Some((Slot::Count(&mut increments.frames), ValueKind::Count)),
                 _ => None,
             }
         }
@@ -692,6 +686,7 @@ mod tests {
             kind: LoadKind::force([0.0, -100.0, 0.0]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         FeModel {
             materials: vec![Material {

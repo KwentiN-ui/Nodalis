@@ -617,11 +617,18 @@ impl FaceGrid {
     /// Faces in cells; every face is registered in all cells its box inflated by `margin`
     /// touches.
     pub fn new(faces: &[ContactFace], coords: &[[f64; 3]], cell: f64, margin: f64) -> Self {
+        let boxes: Vec<([f64; 3], [f64; 3])> = faces.iter().map(|f| f.bounds(coords)).collect();
+        Self::of_boxes(&boxes, cell, margin)
+    }
+
+    /// Boxes (lowest and highest corner) in cells, each in all cells it touches inflated by
+    /// `margin`; the candidates are indices into `boxes`. The swept boxes of the
+    /// continuous collision detection ([`crate::ccd`]) take this.
+    pub fn of_boxes(boxes: &[([f64; 3], [f64; 3])], cell: f64, margin: f64) -> Self {
         let cell = cell.max(1e-12);
         let key = |x: f64| (x / cell).floor() as i64;
         let mut cells: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
-        for (index, face) in faces.iter().enumerate() {
-            let (lo, hi) = face.bounds(coords);
+        for (index, (lo, hi)) in boxes.iter().enumerate() {
             let lo = lo.map(|v| key(v - margin));
             let hi = hi.map(|v| key(v + margin));
             for i in lo[0]..=hi[0] {
@@ -640,6 +647,24 @@ impl FaceGrid {
         self.cells
             .get(&(key(x[0]), key(x[1]), key(x[2])))
             .map_or(&[], Vec::as_slice)
+    }
+
+    /// The entries of all cells a box touches, sorted and unique, into `out`.
+    pub fn candidates_in(&self, lo: [f64; 3], hi: [f64; 3], out: &mut Vec<u32>) {
+        out.clear();
+        let key = |v: f64| (v / self.cell).floor() as i64;
+        let (lo, hi) = (lo.map(key), hi.map(key));
+        for i in lo[0]..=hi[0] {
+            for j in lo[1]..=hi[1] {
+                for k in lo[2]..=hi[2] {
+                    if let Some(list) = self.cells.get(&(i, j, k)) {
+                        out.extend_from_slice(list);
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
     }
 }
 

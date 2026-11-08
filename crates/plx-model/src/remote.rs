@@ -76,6 +76,12 @@ pub struct Displacement {
     /// Only the nodes within this distance of the point take part, Ansys' pinball region.
     /// Setting it asks for a point.
     pub pinball: Option<f64>,
+    /// A time table per degree of freedom that replaces its value in `values`: the value
+    /// follows the table over the step time instead of the amplitude of the boundary
+    /// condition. The degree of freedom must be held (`Some` in `values`); the number there
+    /// is kept for when the table is removed.
+    #[serde(default, skip_serializing_if = "crate::no_tables")]
+    pub tables: [Option<crate::ValueTable>; 6],
 }
 
 /// A remote displacement resolved on a mesh.
@@ -326,7 +332,26 @@ impl Displacement {
             system: GLOBAL.into(),
             location: None,
             pinball: None,
+            tables: Default::default(),
         }
+    }
+
+    /// The table of degree of freedom `d` (0..6), if it is held and follows one.
+    pub fn table(&self, d: usize) -> Option<&crate::ValueTable> {
+        self.values[d].and(self.tables[d].as_ref())
+    }
+
+    /// Whether degree of freedom `d` is held at zero throughout the step.
+    pub fn still(&self, d: usize) -> bool {
+        match self.table(d) {
+            Some(table) => !table.moves(),
+            None => self.values[d] == Some(0.0),
+        }
+    }
+
+    /// Whether degree of freedom `d` is held and moves at some time of the step.
+    pub fn moves(&self, d: usize) -> bool {
+        self.values[d].is_some() && !self.still(d)
     }
 
     /// A displacement whose selection follows a rigid point.
@@ -379,7 +404,7 @@ impl Displacement {
                 if s == step && n == name)
                 && crate::Field::ROTATION.contains(&e.path.field)
         });
-        let still = rotations.iter().all(|&d| self.values[d] == Some(0.0));
+        let still = rotations.iter().all(|&d| self.still(d));
         if still && !exposed {
             return Formulation::Nodes;
         }

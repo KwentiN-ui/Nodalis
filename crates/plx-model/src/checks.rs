@@ -157,6 +157,9 @@ pub enum Problem {
     /// An amplitude a Dynamic step follows whose points all lie after the step's duration:
     /// the load stays at its first value.
     AmplitudeOutsideStep,
+    /// A time table of a boundary condition or load with points after the end of its step:
+    /// the rest of the table is not applied.
+    TableBeyondStep,
     /// A Coriolis complex frequency step without a centrifugal load before it.
     NoRotation,
     /// Contact pairs in a frequency step without perturbation: the solver ignores them.
@@ -242,6 +245,7 @@ impl Problem {
             | Problem::FramesTooFew
             | Problem::ModalStepNonlinear
             | Problem::AmplitudeOutsideStep
+            | Problem::TableBeyondStep
             | Problem::NoLoad
             | Problem::UnusedAmplitude
             | Problem::UnusedDistribution
@@ -327,6 +331,7 @@ impl Problem {
             Problem::FramesTooFew => "Too few frames for the frequency limit",
             Problem::ModalStepNonlinear => "Modal superposition is linear",
             Problem::AmplitudeOutsideStep => "Amplitude starts after the step",
+            Problem::TableBeyondStep => "Table goes beyond the step",
             Problem::NoRotation => "No rotation",
             Problem::ContactIgnored => "Contact ignored",
             Problem::ContactWithCoriolis => "Contact with Coriolis",
@@ -572,8 +577,8 @@ impl Problem {
                  (x along the plane normal), and a node can have only one such system."
             }
             Problem::IncrementExceedsStep => {
-                "The initial increment is larger than the time period of the step, \
-                 which the solver rejects."
+                "The initial or fixed increment under Advanced settings is longer than the \
+                 duration of the step; the solver shortens it to the duration."
             }
             Problem::WheelOffSurface => {
                 "At some positions of the moving load a wheel is partly or fully off the \
@@ -677,6 +682,10 @@ impl Problem {
                 "All points of the amplitude lie after the end of the step. Within the step \
                  the load stays at the factor of the first point, and the change the \
                  amplitude describes never happens."
+            }
+            Problem::TableBeyondStep => {
+                "The table of a value has points after the end of the step: the step stops \
+                 at its duration, so the value never reaches them."
             }
             Problem::NoRotation => {
                 "The Coriolis forces of a Complex Frequency step come from its rotational \
@@ -1000,7 +1009,8 @@ impl Problem {
                  file (.frd) of the global model."
             }
             Problem::IncrementExceedsStep => {
-                "In the step choose an initial increment no larger than the time period."
+                "In the step's Advanced settings choose an increment no longer than the \
+                 duration, or set it back to automatic."
             }
             Problem::NoLoad => "Under Loads create a load or activate a deactivated one.",
             Problem::UnusedDistribution => {
@@ -1057,6 +1067,10 @@ impl Problem {
             Problem::AmplitudeOutsideStep => {
                 "Move the points of the amplitude into the duration of the step (step time \
                  starts at 0), or lengthen the step."
+            }
+            Problem::TableBeyondStep => {
+                "Set the duration of the step to the last time of the table, or shorten \
+                 the table."
             }
             Problem::InvalidBolt => {
                 "Pick the two faces of the cut on the geometry, or element faces of solid \
@@ -1143,9 +1157,9 @@ impl Problem {
                  material data, and for heat across contact check the gap conductance."
             }
             Problem::IncrementLimit => {
-                "Raise Max. increments in the step (Incrementation Automatic or Direct). \
-                 If the increments are small without need, also raise the initial and \
-                 the maximum increment."
+                "Raise the Increment limit in the step's Advanced settings, or switch it \
+                 off. If the increments are small without need, also raise the initial and \
+                 the largest increment."
             }
             Problem::NotPositiveDefinite => {
                 "Choose the Direct equation solver in the step, which also solves \
@@ -1646,6 +1660,7 @@ impl FeModel {
         self.check_cyclic_symmetry(mesh, &mut findings);
         self.check_tied_contacts(&mut findings);
         self.check_amplitudes(&mut findings);
+        self.check_tables(&mut findings);
         let used = self.used_distributions();
         for (i, distribution) in self.distributions.iter().enumerate() {
             if !used.contains(distribution.name.as_str()) {
@@ -1788,16 +1803,16 @@ impl FeModel {
                 increments: settings,
                 ..
             }) = &step.kind
-                && settings.incrementation != crate::Incrementation::Default
-                && settings.initial_increment > settings.time_period
+                && let Some(increment) = match settings.control.size {
+                    crate::IncrementSize::Fixed(dt) => Some(dt),
+                    crate::IncrementSize::Automatic => settings.control.initial,
+                }
+                && increment > settings.duration
             {
                 findings.push(Finding::new(
                     ModelItem::Step(s),
                     Problem::IncrementExceedsStep,
-                    format!(
-                        "Initial increment {} > time period {}",
-                        settings.initial_increment, settings.time_period
-                    ),
+                    format!("Increment {} > duration {}", increment, settings.duration),
                 ));
             }
         }
@@ -2129,6 +2144,45 @@ impl FeModel {
                     format!(
                         "{} is not used by any boundary condition, load or defined field",
                         amplitude.name
+                    ),
+                ));
+            }
+        }
+    }
+
+    /// Time tables with points after the end of their step.
+    fn check_tables(&self, findings: &mut Vec<Finding>) {
+        for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
+            let period = step.kind.period();
+            for table in step.tables() {
+                let Some(last) = table.table.points.last().map(|p| p[0]) else {
+                    continue;
+                };
+                if last <= period * (1.0 + 1e-9) {
+                    continue;
+                }
+                let (item, name, labels): (_, _, &[&str]) = match table.owner {
+                    crate::TableOwner::BoundaryCondition(i) => (
+                        ModelItem::BoundaryCondition(s, i),
+                        &step.boundary_conditions[i].name,
+                        &["U1", "U2", "U3", "UR1", "UR2", "UR3"],
+                    ),
+                    crate::TableOwner::Load(i) => (
+                        ModelItem::Load(s, i),
+                        &step.loads[i].name,
+                        match step.loads[i].kind {
+                            LoadKind::Moment(_) => &["M1", "M2", "M3"],
+                            LoadKind::Pressure(_) => &["the pressure"],
+                            _ => &["F1", "F2", "F3"],
+                        },
+                    ),
+                };
+                findings.push(Finding::new(
+                    item,
+                    Problem::TableBeyondStep,
+                    format!(
+                        "{name}: the table of {} goes to time {last}, {} ends at {period}",
+                        labels[table.component], step.name
                     ),
                 ));
             }
@@ -2510,7 +2564,7 @@ impl FeModel {
             }
             let formulation = self.formulation(mesh, s, i);
             if let BoundaryKind::Displacement(displacement) = &bc.kind {
-                moved |= (displacement.values.iter()).any(|v| v.is_some_and(|v| v != 0.0));
+                moved |= (0..6).any(|d| displacement.moves(d));
             }
             let values: Vec<(usize, f64)> = match &bc.kind {
                 // The nodes follow the rigid body of a point, see `check_rigid_body`.
@@ -2534,9 +2588,12 @@ impl FeModel {
                     }
                     Vec::new()
                 }
+                // A value that follows a table differs from any other: NaN.
                 BoundaryKind::Displacement(displacement) => (displacement.values.iter())
                     .enumerate()
-                    .filter_map(|(d, v)| v.map(|v| (d, v)))
+                    .filter_map(|(d, v)| {
+                        v.map(|v| (d, displacement.table(d).map_or(v, |_| f64::NAN)))
+                    })
                     .collect(),
                 // Degree of freedom 11.
                 BoundaryKind::Temperature(t) => vec![(10, *t)],
@@ -2599,9 +2656,7 @@ impl FeModel {
             // Rotations held at zero do no harm; nothing turns solid nodes anyway.
             if let BoundaryKind::Displacement(displacement) = &bc.kind
                 && formulation == Some(Formulation::Nodes)
-                && displacement.values[3..]
-                    .iter()
-                    .any(|v| v.is_some_and(|v| v != 0.0))
+                && (3..6).any(|d| displacement.moves(d))
                 && bc.region.reference_point().is_none()
                 && (space.is_2d() || !trusses.rotational.iter().any(|&r| r))
             {
@@ -3088,8 +3143,12 @@ impl FeModel {
                             let Some(node) = nearest_node(mesh, region, centre) else {
                                 continue;
                             };
-                            let axes = (self.coordinate_system_or_global(&joint.system))
-                                .and_then(|system| system.directions_at(centre).ok())
+                            let axes = (self.joint_frame(mesh, joint).ok())
+                                .map(|(_, axes)| axes)
+                                .or_else(|| {
+                                    (self.coordinate_system_or_global(&joint.system))
+                                        .and_then(|system| system.directions_at(centre).ok())
+                                })
                                 .unwrap_or([axis(0), axis(1), axis(2)]);
                             for dof in (0..6).filter(|&d| !free[d]) {
                                 if dof < 3 || space == ModelSpace::ThreeD {
@@ -3711,7 +3770,7 @@ pub(crate) fn describe_motions(space: ModelSpace, free: &[[f64; 6]]) -> String {
 
 /// Eigenvalues and eigenvectors of the upper left `n` x `n` block of a symmetric matrix by
 /// Jacobi rotations; small enough to be exact for the six rigid body unknowns.
-fn eigen(matrix: &[[f64; 6]; 6], n: usize) -> ([f64; 6], [[f64; 6]; 6]) {
+pub(crate) fn eigen(matrix: &[[f64; 6]; 6], n: usize) -> ([f64; 6], [[f64; 6]; 6]) {
     let mut a = *matrix;
     let mut v = [[0.0; 6]; 6];
     for (i, row) in v.iter_mut().enumerate() {
@@ -4022,6 +4081,7 @@ mod tests {
             kind: LoadKind::force([0.0, 0.0, -1.0]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         FeModel {
             materials: vec![steel()],
@@ -4069,6 +4129,43 @@ mod tests {
             problems(&check(&model, &mesh)),
             [(ModelItem::Section(0), Problem::MissingReference)]
         );
+    }
+
+    #[test]
+    fn a_table_beyond_the_end_of_its_step_is_reported() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        let mut displacement = crate::Displacement::new([None, Some(0.0), None, None, None, None]);
+        displacement.tables[1] = Some(crate::ValueTable {
+            points: vec![[0.0, 0.0], [1.0, -0.8], [2.0, 0.8]],
+        });
+        model.steps[0]
+            .boundary_conditions
+            .push(crate::BoundaryCondition {
+                name: "Move".into(),
+                active: true,
+                visible: true,
+                region: crate::Region::Nodes(vec![1]),
+                kind: BoundaryKind::Displacement(displacement),
+                amplitude: None,
+                distribution: None,
+            });
+        let beyond = |model: &FeModel| {
+            (check(model, &mesh).into_iter())
+                .filter(|f| f.problem == Problem::TableBeyondStep)
+                .map(|f| f.detail)
+                .collect::<Vec<_>>()
+        };
+        // A new static step lasts 1.
+        assert_eq!(
+            beyond(&model),
+            ["Move: the table of U2 goes to time 2, Step-1 ends at 1"]
+        );
+        let StepKind::Static(settings) = &mut model.steps[0].kind else {
+            unreachable!()
+        };
+        settings.duration = 2.0;
+        assert!(beyond(&model).is_empty());
     }
 
     #[test]
@@ -4703,6 +4800,7 @@ mod tests {
             kind: LoadKind::Gravity([0.0, 0.0, -9.81]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         assert_eq!(
             problems(&check(&model, &mesh)),
@@ -5539,6 +5637,7 @@ mod tests {
             kind: LoadKind::ConcentratedFlux(10.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         model.steps = vec![step];
         // Displacements are free in a heat transfer, and no elasticity is needed.
