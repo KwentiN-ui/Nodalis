@@ -47,10 +47,12 @@ mod signature;
 mod solver_diagnostics;
 mod study;
 mod symmetry;
+mod tables;
 pub mod units;
+pub use tables::{StepTable, TableOwner};
 mod validity;
 
-pub use amplitude::{Amplitude, AmplitudeTime};
+pub use amplitude::{Amplitude, AmplitudeTime, ValueTable, no_tables};
 pub use bolt::{Bolt, BoltAction, BoltChange, LoweredBolts, Preload, ResolvedBolt};
 pub use cad_operation::{CadOperation, CadOperationKind};
 pub use checks::{
@@ -64,7 +66,8 @@ pub use connection::{
     WEAK_SPRING_FACTOR, conducts_across_contacts, mortar_supports,
 };
 pub use constraint::{
-    CompressionOnly, Joint, JointKind, NodeTie, RigidBody, Spring, SpringEnd, SpringLayout,
+    CompressionOnly, Joint, JointAxis, JointKind, NodeTie, RigidBody, Spring, SpringEnd,
+    SpringLayout,
 };
 pub use contact::{
     Constraint, ContactMethod, ContactPair, ContactScale, CyclicSymmetry, ElementYoung, Friction,
@@ -241,7 +244,7 @@ impl FeModel {
                 (step.boundary_conditions.iter().map(|b| &b.region))
                     .chain(step.loads.iter().map(|l| &l.region))
                     .chain(step.history_outputs.iter().filter_map(|h| h.kind.region()))
-                    .chain(step.kind.design_region())
+                    .chain(step.kind.region())
             }))
     }
 
@@ -372,7 +375,7 @@ impl FeModel {
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
                     .chain(step.defined_fields.iter_mut().map(|f| &mut f.region))
                     .chain((step.history_outputs.iter_mut()).filter_map(|h| h.kind.region_mut()))
-                    .chain(step.kind.design_region_mut())
+                    .chain(step.kind.region_mut())
             }))
     }
 
@@ -516,7 +519,7 @@ impl FeModel {
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
                     .chain(step.defined_fields.iter_mut().map(|f| &mut f.region))
                     .chain((step.history_outputs.iter_mut()).filter_map(|h| h.kind.region_mut()))
-                    .chain(step.kind.design_region_mut())
+                    .chain(step.kind.region_mut())
             }));
         for region in regions {
             match region {
@@ -773,6 +776,21 @@ pub enum StepKind {
 }
 
 impl StepKind {
+    /// How long the step lasts in step time: the time period of static, heat transfer,
+    /// visco and modal dynamics steps, the duration of a dynamic one; 1 for the others.
+    pub fn period(&self) -> f64 {
+        match self {
+            StepKind::Static(settings) => settings.period(),
+            StepKind::HeatTransfer(settings)
+            | StepKind::CoupledTempDisp(settings)
+            | StepKind::UncoupledTempDisp(settings) => settings.increments.period(),
+            StepKind::Visco(settings) => settings.increments.period(),
+            StepKind::Dynamic(settings) => settings.duration,
+            StepKind::ModalDynamics(settings) => settings.time_period,
+            _ => 1.0,
+        }
+    }
+
     /// Whether the step is computed with large deformations (`NLGEOM`).
     pub fn nlgeom(&self) -> bool {
         match self {
@@ -799,6 +817,24 @@ impl StepKind {
             self,
             StepKind::Frequency(_) | StepKind::ComplexFrequency(_) | StepKind::Sensitivity(_)
         )
+    }
+
+    /// The region the step itself acts on: the design region of a sensitivity step, the
+    /// rotating elements of a complex frequency step.
+    pub fn region(&self) -> Option<&Region> {
+        match self {
+            StepKind::Sensitivity(settings) => Some(&settings.design_region),
+            StepKind::ComplexFrequency(settings) => Some(&settings.region),
+            _ => None,
+        }
+    }
+
+    pub fn region_mut(&mut self) -> Option<&mut Region> {
+        match self {
+            StepKind::Sensitivity(settings) => Some(&mut settings.design_region),
+            StepKind::ComplexFrequency(settings) => Some(&mut settings.region),
+            _ => None,
+        }
     }
 
     /// The design region of a sensitivity step.
@@ -890,18 +926,6 @@ impl StepKind {
     }
 }
 
-/// How the increments of a step are chosen.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Incrementation {
-    /// CalculiX's own defaults; no increment data is written.
-    #[default]
-    Default,
-    /// Automatic increments within the given limits.
-    Automatic,
-    /// Fixed increments of `initial_increment` (`DIRECT`).
-    Direct,
-}
-
 /// How a step solves its systems of equations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LinearSolverChoice {
@@ -947,35 +971,163 @@ impl LinearSolverChoice {
     }
 }
 
-/// Settings of a `*STATIC` step, with the default values.
+/// Settings of a static step (also the increments of heat transfer and visco steps): how
+/// long it lasts, how many result frames it keeps and whether it follows large
+/// deformations. How the solver divides the duration into increments is derived from these
+/// (see [`StaticStep::plan`]); [`IncrementControl`] overrides it where needed.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StaticStep {
-    /// Geometrically nonlinear (`NLGEOM`).
+    /// Length of the step in (pseudo) time; loads ramp up over it.
+    pub duration: f64,
+    /// Result frames kept over the duration, evenly spaced, the last one at the end. The
+    /// increments are shortened where needed so that they end on the frames.
+    pub frames: u32,
+    /// Large displacements and rotations (`NLGEOM`).
     pub nlgeom: bool,
-    pub incrementation: Incrementation,
-    /// Maximum number of increments (`INC`), written unless incrementation is default.
-    pub max_increments: u32,
-    pub initial_increment: f64,
-    pub time_period: f64,
-    pub min_increment: f64,
-    pub max_increment: f64,
-    /// Missing in projects saved before the solver could be chosen.
-    #[serde(default)]
+    /// How the increments are chosen; automatic by default.
+    pub control: IncrementControl,
     pub solver: LinearSolverChoice,
 }
 
 impl Default for StaticStep {
     fn default() -> Self {
         Self {
+            duration: 1.0,
+            frames: 1,
             nlgeom: false,
-            incrementation: Incrementation::Default,
-            max_increments: 100,
-            initial_increment: 1.0,
-            time_period: 1.0,
-            min_increment: 1e-5,
-            max_increment: 1e30,
+            control: IncrementControl::default(),
             solver: LinearSolverChoice::Automatic,
         }
+    }
+}
+
+/// The advanced increment settings of a [`StaticStep`]: everything `None` is derived from
+/// the duration and the frames.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IncrementControl {
+    pub size: IncrementSize,
+    /// Size of the first increment (automatic increments).
+    pub initial: Option<f64>,
+    /// Smallest increment a cutback may reach before the step fails (automatic increments).
+    pub minimum: Option<f64>,
+    /// Largest increment (automatic increments).
+    pub maximum: Option<f64>,
+    /// Most increments the step may take; `None` sets no limit.
+    pub limit: Option<u32>,
+}
+
+/// Whether the solver chooses the increment sizes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum IncrementSize {
+    /// Grown after easy increments, cut back after failed ones.
+    #[default]
+    Automatic,
+    /// Always this size (shortened to end on the frames); a failed increment fails the step.
+    Fixed(f64),
+}
+
+/// The increments a [`StaticStep`] asks of the solver, with every automatic value resolved.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IncrementPlan {
+    pub duration: f64,
+    pub frames: u32,
+    /// The first increment; with fixed increments, every one.
+    pub initial: f64,
+    pub minimum: f64,
+    pub maximum: f64,
+    pub fixed: bool,
+    /// `None`: no limit.
+    pub limit: Option<u32>,
+}
+
+impl StaticStep {
+    /// The most frames a step may keep.
+    pub const MAX_FRAMES: u32 = 100_000;
+    /// A step with large deformations starts with at most this share of its duration.
+    pub const NONLINEAR_START: f64 = 0.1;
+
+    /// The length of the step in time (its duration).
+    pub fn period(&self) -> f64 {
+        self.duration
+    }
+
+    /// The time between two result frames.
+    pub fn frame_interval(&self) -> f64 {
+        self.duration / f64::from(self.frames.max(1))
+    }
+
+    /// The increments of the step, `nlgeom` saying whether it is solved with large
+    /// deformations (it may be switched on by the materials). Automatically, the first
+    /// increment is a frame interval, with large deformations at most a tenth of the
+    /// duration; the smallest one 1e-5 of the duration, the largest one the duration. The
+    /// first increment never exceeds the largest one.
+    pub fn plan(&self, nlgeom: bool) -> IncrementPlan {
+        let duration = self.duration;
+        let c = &self.control;
+        let maximum = c.maximum.unwrap_or(duration).min(duration);
+        let (initial, fixed) = match c.size {
+            IncrementSize::Fixed(dt) => (dt.min(duration), true),
+            IncrementSize::Automatic => {
+                let automatic = if nlgeom {
+                    self.frame_interval().min(Self::NONLINEAR_START * duration)
+                } else {
+                    self.frame_interval()
+                };
+                (c.initial.unwrap_or(automatic).min(maximum), false)
+            }
+        };
+        let minimum = c.minimum.unwrap_or(1e-5 * duration).min(initial);
+        IncrementPlan {
+            duration,
+            frames: self.frames.max(1),
+            initial,
+            minimum,
+            maximum,
+            fixed,
+            limit: c.limit,
+        }
+    }
+
+    /// What is wrong with the settings, if anything.
+    pub fn problem(&self) -> Option<String> {
+        let positive = |v: f64| v.is_finite() && v > 0.0;
+        if !positive(self.duration) {
+            return Some("The duration must be greater than 0.".into());
+        }
+        if !(1..=Self::MAX_FRAMES).contains(&self.frames) {
+            return Some(format!(
+                "The number of frames must lie between 1 and {}.",
+                Self::MAX_FRAMES
+            ));
+        }
+        let c = &self.control;
+        if let IncrementSize::Fixed(dt) = c.size
+            && !(positive(dt) && dt <= self.duration)
+        {
+            return Some(
+                "A fixed increment must be greater than 0 and no longer than the duration.".into(),
+            );
+        }
+        for (value, name) in [
+            (c.initial, "initial"),
+            (c.minimum, "smallest"),
+            (c.maximum, "largest"),
+        ] {
+            if value.is_some_and(|v| !positive(v)) {
+                return Some(format!("The {name} increment must be greater than 0."));
+            }
+        }
+        if let (Some(min), Some(max)) = (c.minimum, c.maximum)
+            && min > max
+        {
+            return Some("The smallest increment must not exceed the largest one.".into());
+        }
+        if c.limit == Some(0) {
+            return Some("The increment limit must be at least 1.".into());
+        }
+        None
     }
 }
 
@@ -1506,7 +1658,8 @@ impl Default for FrequencyStep {
 /// centrifugal forces (with [`ComplexFrequencyStep::stiffening`]), a frequency step that
 /// stores [`ComplexFrequencyStep::num_modes`] eigenmodes (a perturbation of the preload
 /// with stiffening) and the complex frequency step on those modes. Only the complex modes
-/// are kept as results. The rotation acts on the whole model.
+/// are kept as results. The rotation acts on [`ComplexFrequencyStep::region`]; the rest of
+/// the model stands still.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ComplexFrequencyStep {
     /// Number of complex eigenfrequencies to compute.
@@ -1519,6 +1672,15 @@ pub struct ComplexFrequencyStep {
     pub point: [f64; 3],
     /// Direction of the rotation axis.
     pub axis: [f64; 3],
+    /// A coordinate system whose z axis is the rotation axis, through its origin; `None`
+    /// takes [`ComplexFrequencyStep::point`] and [`ComplexFrequencyStep::axis`].
+    #[serde(default)]
+    pub system: Option<String>,
+    /// The elements that rotate (parts or an element set); no parts picked: the whole
+    /// model. Centrifugal forces, stress stiffening, spin softening and Coriolis forces act
+    /// on these elements only.
+    #[serde(default = "whole_model")]
+    pub region: Region,
     /// Stress stiffening and spin softening by the centrifugal forces: the eigenmodes are
     /// those of the structure preloaded by the rotation. Off, they are those at standstill
     /// (as some other programs compute them).
@@ -1537,6 +1699,8 @@ impl Default for ComplexFrequencyStep {
             speed: 0.0,
             point: [0.0; 3],
             axis: [0.0, 0.0, 1.0],
+            system: None,
+            region: whole_model(),
             stiffening: true,
             num_modes: 20,
             solver: LinearSolverChoice::Automatic,
@@ -1544,12 +1708,43 @@ impl Default for ComplexFrequencyStep {
     }
 }
 
+/// No parts picked: the region of a step that acts on the whole model.
+fn whole_model() -> Region {
+    Region::Parts(Vec::new())
+}
+
 impl ComplexFrequencyStep {
+    /// Whether the whole model rotates.
+    pub fn rotates_whole_model(&self) -> bool {
+        matches!(&self.region, Region::Parts(parts) if parts.is_empty())
+    }
+
+    /// The rotation axis in `fe`: a point on it and its unit direction, from the coordinate
+    /// system when the step names one.
+    pub fn axis_in(&self, fe: &FeModel) -> Result<([f64; 3], [f64; 3]), String> {
+        let (point, axis) = match &self.system {
+            Some(name) => {
+                let system = fe
+                    .coordinate_system_or_global(name)
+                    .ok_or_else(|| format!("Coordinate System {name} does not exist"))?;
+                (system.origin, system.axes()?[2])
+            }
+            None => (self.point, self.axis),
+        };
+        let length = axis.iter().map(|c| c * c).sum::<f64>().sqrt();
+        if length == 0.0 || !length.is_finite() {
+            return Err("The rotation axis has no direction.".into());
+        }
+        Ok((point, axis.map(|c| c / length)))
+    }
+
     /// What keeps the settings from being solved, in words.
     pub fn problem(&self) -> Option<String> {
-        let length = self.axis.iter().map(|c| c * c).sum::<f64>().sqrt();
-        if length == 0.0 || !length.is_finite() {
-            return Some("The rotation axis has no direction.".into());
+        if self.system.is_none() {
+            let length = self.axis.iter().map(|c| c * c).sum::<f64>().sqrt();
+            if length == 0.0 || !length.is_finite() {
+                return Some("The rotation axis has no direction.".into());
+            }
         }
         if self.num_frequencies == 0 {
             return Some("Compute at least one complex frequency.".into());
@@ -1605,11 +1800,15 @@ pub struct ViscoStep {
 impl Default for ViscoStep {
     fn default() -> Self {
         Self {
+            // Creep starts fast: small first increments that grow while the creep strain
+            // tolerance allows.
             increments: StaticStep {
-                incrementation: Incrementation::Automatic,
-                max_increments: 1000,
-                initial_increment: 1.0,
-                time_period: 1000.0,
+                duration: 1000.0,
+                frames: 10,
+                control: IncrementControl {
+                    initial: Some(1.0),
+                    ..IncrementControl::default()
+                },
                 ..StaticStep::default()
             },
             creep_tolerance: 1e-4,
@@ -1850,6 +2049,9 @@ pub struct BoundaryCondition {
     pub distribution: Option<String>,
 }
 
+// The tables of a displacement make it larger than the other kinds; there are few
+// boundary conditions, so boxing would only add indirection.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum BoundaryKind {
     /// Prescribed displacements (U1..U3) and rotations (UR1..UR3) of the region, held at
@@ -1915,6 +2117,11 @@ pub struct Load {
     /// `RADIATION AMPLITUDE`); other loads have none.
     #[serde(default)]
     pub factor_amplitude: Option<String>,
+    /// A time table per component of the value (force and moment x, y, z; the pressure)
+    /// that replaces the component: it follows the table over the step time instead of
+    /// the amplitude. See [`LoadKind::table_components`].
+    #[serde(default, skip_serializing_if = "crate::no_tables")]
+    pub tables: [Option<ValueTable>; 3],
     /// Distribution the value is scaled by over the region; `None` is the same value
     /// everywhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1989,6 +2196,26 @@ impl LoadKind {
         LoadKind::Force {
             value,
             each_node: false,
+        }
+    }
+
+    /// How many components of the value can follow a time table of their own: the three
+    /// of a force or moment, the pressure; none for the other loads.
+    pub fn table_components(&self) -> usize {
+        match self {
+            LoadKind::Force { .. } | LoadKind::Moment(_) => 3,
+            LoadKind::Pressure(_) => 1,
+            _ => 0,
+        }
+    }
+
+    /// The quantity of the values in the time tables of the components, if it takes any.
+    pub fn table_quantity(&self) -> Option<units::Quantity> {
+        match self {
+            LoadKind::Force { .. } => Some(units::Quantity::Force),
+            LoadKind::Moment(_) => Some(units::Quantity::Moment),
+            LoadKind::Pressure(_) => Some(units::Quantity::Pressure),
+            _ => None,
         }
     }
 
@@ -2250,6 +2477,87 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_static_step_derives_its_increments_from_duration_and_frames() {
+        let mut step = StaticStep {
+            duration: 2.0,
+            frames: 4,
+            ..StaticStep::default()
+        };
+        let plan = step.plan(false);
+        assert_eq!(plan.initial, 0.5);
+        assert_eq!(plan.maximum, 2.0);
+        assert!((plan.minimum - 2e-5).abs() < 1e-15);
+        assert_eq!(plan.limit, None, "no limit on the number of increments");
+        // Large deformations start with at most a tenth of the duration.
+        assert_eq!(step.plan(true).initial, 0.2);
+        step.frames = 20;
+        assert_eq!(step.plan(true).initial, 0.1);
+    }
+
+    #[test]
+    fn the_first_increment_never_exceeds_the_largest_one() {
+        let step = StaticStep {
+            control: IncrementControl {
+                initial: Some(0.5),
+                maximum: Some(0.1),
+                ..IncrementControl::default()
+            },
+            ..StaticStep::default()
+        };
+        let plan = step.plan(true);
+        assert_eq!(plan.initial, 0.1);
+        assert_eq!(plan.maximum, 0.1);
+        // Automatic as well: one frame over the whole step, the largest increment smaller.
+        let step = StaticStep {
+            control: IncrementControl {
+                maximum: Some(0.25),
+                ..IncrementControl::default()
+            },
+            ..StaticStep::default()
+        };
+        assert_eq!(step.plan(false).initial, 0.25);
+    }
+
+    #[test]
+    fn fixed_increments_and_wrong_settings() {
+        let mut step = StaticStep {
+            control: IncrementControl {
+                size: IncrementSize::Fixed(0.05),
+                limit: Some(30),
+                ..IncrementControl::default()
+            },
+            ..StaticStep::default()
+        };
+        let plan = step.plan(false);
+        assert!(plan.fixed);
+        assert_eq!(plan.initial, 0.05);
+        assert_eq!(plan.limit, Some(30));
+        assert_eq!(step.problem(), None);
+        step.control.size = IncrementSize::Fixed(2.0);
+        assert!(step.problem().is_some(), "longer than the duration");
+        step.control.size = IncrementSize::Automatic;
+        step.frames = 0;
+        assert!(step.problem().is_some());
+        step.frames = 1;
+        step.control.minimum = Some(0.5);
+        step.control.maximum = Some(0.1);
+        assert!(step.problem().is_some(), "smallest above largest");
+    }
+
+    #[test]
+    fn settings_of_older_static_steps_fall_back_to_the_defaults() {
+        // An old project: its fields are ignored, the automatic settings take over and no
+        // increment limit is carried over.
+        let old = "(nlgeom: true, incrementation: Automatic, max_increments: 100, \
+            initial_increment: 0.1, time_period: 1.0, min_increment: 1e-5, \
+            max_increment: 0.1, solver: Automatic)";
+        let step: StaticStep = ron::from_str(old).unwrap();
+        assert!(step.nlgeom);
+        assert_eq!(step.duration, 1.0);
+        assert_eq!(step.control, IncrementControl::default());
+    }
+
+    #[test]
     fn eigenvalue_steps_start_without_field_outputs() {
         for step in [
             Step::new_frequency("F"),
@@ -2320,6 +2628,7 @@ mod tests {
             kind: LoadKind::Pressure(1.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         model.steps.push(step);
         model.rename_part("A", "C");

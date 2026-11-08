@@ -1057,24 +1057,128 @@ fn write_frame(
     }
 }
 
-/// Whether the converged state `done` has slave points inside a master that the
-/// increment never saw (see `ContactModel::missed`): the increment is split like an impact.
-fn missed_contact(ctx: &ProcedureContext<'_>, setup: &Setup<'_>, from: &At, done: &At) -> bool {
-    setup.has_contact
-        && done.evaluation.as_ref().is_some_and(|evaluation| {
-            ctx.contact.missed(
-                &ctx.model.nodes.coordinates,
-                &from.motion.u,
-                &done.motion.u,
-                evaluation,
-            )
-        })
+/// The smallest part of a (sub-)increment the continuous collision detection cuts off
+/// before an impact; an impact earlier than that is split in halves.
+const MIN_CUT: f64 = 0.05;
+/// How far (in typical master edge lengths) a slave point must start from a master face for
+/// the predicted motion to cut the increment before the touch: closer points are within
+/// reach of the springs of the increment.
+const FAR: f64 = 1.0;
+/// Below this distance (in typical master edge lengths) a point counts as touching its
+/// face already: the continuous collision detection leaves it to the springs.
+const NEAR: f64 = 1e-3;
+
+/// The motion the increment to `t1` predicts from the start (`ũ`: the velocity and
+/// acceleration of `from` continued).
+fn predictor(setup: &Setup<'_>, from: &At, t1: f64) -> Vec<f64> {
+    let dt = t1 - from.time;
+    let m0 = &from.motion;
+    combine(
+        &[
+            (1.0, &m0.u),
+            (dt, &m0.v),
+            (dt * dt * (0.5 - setup.scheme.beta), &m0.a),
+        ],
+        m0.u.len(),
+    )
+}
+
+/// Whether a slave point was open at the start of `from` (mortar pairs keep their states
+/// per mortar node: every point counts as open; a point already touching is left out by
+/// its distance).
+fn open_at(ctx: &ProcedureContext<'_>, from: &At, pair: usize, point: usize) -> bool {
+    if !ctx.contact.pairs[pair].mortar_nodes.is_empty() {
+        return true;
+    }
+    from.contact_states
+        .get(pair)
+        .and_then(|s| s.get(point))
+        .is_none_or(|s| s.status == ContactStatus::Open)
+}
+
+/// Where (as a fraction of the sub-increment from `from` to `t1`) to cut it for an impact
+/// the predicted motion runs into (the first open slave point that reaches a master face):
+/// - a point more than [`FAR`] typical edge lengths from the face (a projectile flying at a
+///   can, a lever swinging into a wall with a long time step): the springs of the
+///   sub-increment would not see that face; the first part ends just before the touch;
+/// - a point closer than that, but so fast that it would move more than a typical edge
+///   length on after the touch within the sub-increment: the sub-increment ends there (an
+///   impact is computed in steps the contact can follow, not in one that ends with the
+///   point deep inside the other part).
+fn predicted_cut(ctx: &ProcedureContext<'_>, setup: &Setup<'_>, from: &At, t1: f64) -> Option<f64> {
+    if !setup.has_contact {
+        return None;
+    }
+    let u1 = predictor(setup, from, t1);
+    let eligible = |pair: usize, point: usize| open_at(ctx, from, pair, point);
+    let impact = ctx.contact.first_impact(
+        &ctx.model.nodes.coordinates,
+        &from.motion.u,
+        &u1,
+        NEAR,
+        false,
+        &eligible,
+    )?;
+    // No lower bound: either cut ends a part of the motion (the approach, or a typical edge
+    // length of travel after the touch), so the cuts cannot pile up before the impact.
+    let cut = if impact.distance > FAR * impact.typical {
+        impact.cut()
+    } else {
+        // The point closes its distance in `fraction` of the sub-increment.
+        impact.fraction * (1.0 + impact.typical / impact.distance)
+    };
+    (cut > 0.0 && cut < 1.0 - MIN_CUT).then_some(cut)
+}
+
+/// The converged sub-increment from `from` to `done` is computed again in parts when
+/// - a slave point without a spring at its end went through a master face on the way (the
+///   springs only look for faces near where their points started): it is cut just before
+///   the point met the face (continuous collision detection along the straight path);
+/// - the contact's energy error is above [`IMPACT_ENERGY`] (`impact`): it is cut just
+///   before the first open point touched a face, or in halves when that is at its start
+///   (the impact itself is resolved by halving).
+///
+/// Returns where to cut it (a fraction of the sub-increment), `None` when it stands.
+fn impact_cut(
+    ctx: &ProcedureContext<'_>,
+    setup: &Setup<'_>,
+    from: &At,
+    done: &At,
+    impact: f64,
+) -> Option<f64> {
+    if !setup.has_contact {
+        return None;
+    }
+    let coords = &ctx.model.nodes.coordinates;
+    let usable = |cut: f64| (MIN_CUT..1.0 - MIN_CUT).contains(&cut).then_some(cut);
+    let through = done.evaluation.as_ref().and_then(|evaluation| {
+        let unseen = |pair: usize, point: usize| !ctx.contact.has_spring(evaluation, pair, point);
+        ctx.contact
+            .first_impact(coords, &from.motion.u, &done.motion.u, NEAR, true, &unseen)
+    });
+    if let Some(through) = through {
+        return Some(usable(through.cut()).unwrap_or(0.5));
+    }
+    if impact <= IMPACT_ENERGY {
+        return None;
+    }
+    let eligible = |pair: usize, point: usize| open_at(ctx, from, pair, point);
+    let touch = ctx.contact.first_impact(
+        coords,
+        &from.motion.u,
+        &done.motion.u,
+        NEAR,
+        false,
+        &eligible,
+    );
+    Some(touch.and_then(|t| usable(t.cut())).unwrap_or(0.5))
 }
 
 /// Integrates from `from` to step time `t1`; a failed attempt is split into two halves
-/// (`cuts` such splits so far, at most [`MAX_SPLITS`]), and so is an attempt in which a
-/// contact closes or opens too abruptly (`depth` splits of any kind so far, at most
-/// [`MAX_IMPACT_SPLITS`]). Returns the state at `t1` and the iterations it took.
+/// (`cuts` such splits so far, at most [`MAX_SPLITS`]), and an attempt in which a contact
+/// closes or opens too abruptly is split before the impact or in halves (`depth` splits of
+/// any kind so far, at most [`MAX_IMPACT_SPLITS`]; see [`predicted_cut`] and
+/// [`impact_cut`]). Returns the state at `t1` and the iterations it took.
 #[allow(clippy::too_many_arguments)]
 fn advance(
     ctx: &mut ProcedureContext<'_>,
@@ -1087,19 +1191,36 @@ fn advance(
     (depth, cuts): (u32, u32),
     events: &mut Vec<At>,
 ) -> Result<std::result::Result<(At, u32), Failed>> {
-    let (reason, cut) = match attempt(ctx, setup, equations, progress, from, t1, increment, depth)?
-    {
-        Ok((done, its, impact))
-            if depth >= MAX_IMPACT_SPLITS
-                || (impact <= IMPACT_ENERGY && !missed_contact(ctx, setup, from, &done)) =>
-        {
-            return Ok(Ok((done, its)));
-        }
-        Ok(_) => (None, 0),
-        Err(failed) if cuts >= MAX_SPLITS => return Ok(Err(failed)),
-        Err(failed) => (Some(failed.reason), 1),
+    // A point the predicted motion takes into a face far from it: cut before the impact
+    // without trying the whole sub-increment.
+    let started = std::time::Instant::now();
+    let predicted = if depth < MAX_IMPACT_SPLITS {
+        predicted_cut(ctx, setup, from, t1)
+    } else {
+        None
     };
-    // An impact is refined silently (it may take a dozen halvings).
+    ctx.profile.add(Phase::Contact, started);
+    let (reason, cut, split) = if let Some(split) = predicted {
+        (None, 0, split)
+    } else {
+        match attempt(ctx, setup, equations, progress, from, t1, increment, depth)? {
+            Ok((done, its, impact)) => {
+                if depth >= MAX_IMPACT_SPLITS {
+                    return Ok(Ok((done, its)));
+                }
+                let started = std::time::Instant::now();
+                let split = impact_cut(ctx, setup, from, &done, impact);
+                ctx.profile.add(Phase::Contact, started);
+                match split {
+                    None => return Ok(Ok((done, its))),
+                    Some(split) => (None, 0, split),
+                }
+            }
+            Err(failed) if cuts >= MAX_SPLITS => return Ok(Err(failed)),
+            Err(failed) => (Some(failed.reason), 1, 0.5),
+        }
+    };
+    // An impact is refined silently (it may take a dozen splits).
     if let Some(reason) = reason {
         progress.event(ProgressEvent::Cutback {
             step: ctx.step_number,
@@ -1108,10 +1229,12 @@ fn advance(
             reason: format!("{reason}; the increment is split in two"),
         });
     }
-    let middle = 0.5 * (from.time + t1);
-    // An automatic step goes on explicitly rather than in sub-increments this short.
+    let middle = from.time + split * (t1 - from.time);
+    // An automatic step goes on explicitly rather than in sub-increments this short: an
+    // interval that halves would fall below the shortest (a cut before a predicted impact
+    // may leave one piece shorter, which costs one increment only).
     let shortest = ctx.segment.as_ref().map_or(0.0, |s| s.shortest);
-    if shortest > 0.0 && middle - from.time < shortest {
+    if shortest > 0.0 && t1 - from.time < 2.0 * shortest {
         return Ok(Err(Failed {
             cause: Divergence::TooSlow,
             reason: if cut == 0 {
@@ -1145,8 +1268,16 @@ fn advance(
         events.push(half.clone());
     }
     let position = events.len();
+    // A cut of the predicted motion marches on through the impact (each part ends a stretch
+    // of the motion): the rest of the sub-increment keeps the depth, which counts the
+    // refinements of one moment.
+    let rest = if predicted.is_some() {
+        (depth, cuts)
+    } else {
+        next
+    };
     match advance(
-        ctx, setup, equations, progress, &half, t1, increment, next, events,
+        ctx, setup, equations, progress, &half, t1, increment, rest, events,
     )? {
         Ok((end, second)) => {
             // The last state before a contact closed or opened in the second half.

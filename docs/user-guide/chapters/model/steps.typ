@@ -10,7 +10,8 @@ step cannot be changed after it was created.
 #note[Every step writes `OP=NEW` for its boundary conditions and loads. What applies in a step is
 exactly what is listed under it in the tree.]
 
-#screenshot("step.png", [Static step])
+#screenshot("step.png", [A new static step with its defaults; the note below appears in a model
+  with hyperelastic materials])
 
 In a model with contact regions the dialog also lists #ui("Contacts in this step"): regions
 switched off or on and friction coefficients changed from this step on, see
@@ -124,14 +125,51 @@ any size.
 
 === Static
 
+A static step needs three settings: how long it lasts, how many results it keeps, and whether
+the deformations are large. How the solver divides the step into increments follows from
+them, so a step runs to its end without further settings.
+
+#screenshot("static-step.png", [A static step with large deformations and ten frames; the
+  advanced settings open])
+
 #fields(
-  [Nonlinear geometry (Nlgeom)], [Large deformations (`NLGEOM`).],
-  [Incrementation], [#ui("Default") leaves the incrementation to CalculiX. #ui("Automatic") uses
-    the time and increment values below, #ui("Direct") uses fixed increments.],
-  [Max. increments], [Largest number of increments (`INC`).],
-  [Time period], [Length of the step (default 1).],
-  [Initial / Min. / Max. increment], [Increment sizes for automatic incrementation.],
+  [Duration], [Length of the step (default 1). Without an amplitude the loads ramp up
+    linearly over it. For materials without creep only its ratio to the amplitudes matters,
+    so it is a pseudo time.],
+  [Frames], [Result frames kept over the duration, evenly spaced, the last one at the end
+    (default 1). The solver ends an increment on every frame, so the frames fall on exact
+    times. A linear step is solved once per frame with one factorization of the stiffness.],
+  [Large deformations (Nlgeom)], [The equilibrium is found in the deformed shape (`NLGEOM`):
+    large displacements and rotations, loads that follow the surface, stiffening, snap
+    through. Each increment iterates. Switching it on raises 1 frame to 10, to show the
+    load history.],
 )
+
+Under #ui("Advanced settings") the automatic choices can be overridden; the box opens by
+itself when something there differs from the defaults. A ticked box next to a value sets it,
+an unticked one shows the automatic value greyed out.
+
+#fields(
+  [Increments], [#ui("Automatic") (default): an increment grows by half after two that
+    converged easily and is cut back after one that failed. #ui("Fixed"): every increment has
+    the given #ui("Size"), shortened only to end on the frames; an increment that does not
+    converge fails the step.],
+  [Initial], [Size of the first increment. Automatic: one frame interval, with large
+    deformations at most a tenth of the duration. It never exceeds #ui("Largest").],
+  [Smallest], [The step fails when a cutback would make an increment shorter. Automatic:
+    1e-5 of the duration.],
+  [Largest], [No increment gets longer. Automatic: the duration, as the frames already end
+    increments.],
+  [Increment limit], [Stops the step after this many increments. Off by default: the step
+    takes as many increments as it needs, and #ui("Smallest") still stops one that gets
+    stuck.],
+  [Equation solver], [How the systems of equations are solved (@equation-solver).],
+)
+
+Other programs differ mainly in names: Abaqus and CalculiX ask for the initial, minimum and
+maximum increment and stop after 100 increments unless told otherwise; Ansys Mechanical asks
+for substeps and keeps results at evenly spaced points. Nodalis asks for the frames and
+derives the rest.
 
 === Frequency
 
@@ -186,7 +224,8 @@ together with supports and mechanical loads.
   [Nonlinear geometry], [Coupled steps only.],
 )
 
-Incrementation and equation solver are the same as for a static step.
+Duration, frames, the advanced settings and the equation solver are the same as for a static
+step. In a transient step the duration is real time.
 
 === Visco
 

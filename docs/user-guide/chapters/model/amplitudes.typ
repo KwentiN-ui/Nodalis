@@ -4,7 +4,9 @@
 
 An amplitude describes how a load or a prescribed value changes with time. Create it with
 #menu("Steps", "Amplitude") and choose it in the #ui("Amplitude") field of a boundary
-condition or load.
+condition or load. An amplitude scales all components of the item by the same factor and can be
+shared by many items. For a component that moves on its own course, e.g. a motion in two
+directions, give that component a value table instead (@value-tables).
 
 #screenshot("amplitude.png", [Amplitude with its curve])
 
