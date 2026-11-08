@@ -29,11 +29,18 @@ impl Sliced {
         let mut merged: Vec<Vec<(u32, [f32; 2])>> = Vec::with_capacity(n);
         for i in 0..n {
             let ks = stiffness.ptr[i] as usize..stiffness.ptr[i + 1] as usize;
-            let cs = viscous.ptr.get(i + 1).map_or(0..0, |&end| viscous.ptr[i] as usize..end as usize);
+            let cs = viscous
+                .ptr
+                .get(i + 1)
+                .map_or(0..0, |&end| viscous.ptr[i] as usize..end as usize);
             let (mut a, mut b) = (ks.start, cs.start);
             let mut row = Vec::with_capacity(ks.len().max(cs.len()));
             while a < ks.end || b < cs.end {
-                let ca = if a < ks.end { stiffness.col[a] } else { u32::MAX };
+                let ca = if a < ks.end {
+                    stiffness.col[a]
+                } else {
+                    u32::MAX
+                };
                 let cb = if b < cs.end { viscous.col[b] } else { u32::MAX };
                 if ca == cb {
                     row.push((ca, [stiffness.val[a], viscous.val[b]]));
@@ -136,7 +143,11 @@ mod tests {
         let x: Vec<f64> = (0..n).map(|i| (i as f64 * 0.37).sin()).collect();
         let y: Vec<f64> = (0..n).map(|i| (i as f64 * 0.11).cos()).collect();
         let (fk, fc) = sliced.multiply(&x, &y);
-        for (a, b) in fk.iter().zip(k.multiply(&x)).chain(fc.iter().zip(c.multiply(&y))) {
+        for (a, b) in fk
+            .iter()
+            .zip(k.multiply(&x))
+            .chain(fc.iter().zip(c.multiply(&y)))
+        {
             assert!((a - b).abs() <= 1e-12 * b.abs().max(1.0), "{a} {b}");
         }
     }
