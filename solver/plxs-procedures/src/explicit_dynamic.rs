@@ -1880,13 +1880,42 @@ impl Procedure for ExplicitDynamic {
         // linearized at the current rotations in every time step and the members put
         // where the rotation takes them.
         let finite_rotations = step.nlgeom && ctx.constraints.has_finite_rotations();
-        let rotated_set = |ctx: &ProcedureContext<'_>, u: &[f64]| {
-            ctx.constraints
-                .at_rotations(u)
-                .step_set(ctx.model.nodes.len(), &active, &spc_end.dofs)
+        // Rotations held at zero because the rotated rows refer to them only by a vanishing
+        // coefficient (`ModelConstraints::hold`).
+        let mut held: Vec<u32> = Vec::new();
+        let rotated_set = |ctx: &ProcedureContext<'_>, u: &[f64], held: &[u32]| {
+            let mut rotated = ctx.constraints.at_rotations(u);
+            rotated.hold(held);
+            rotated.step_set(ctx.model.nodes.len(), &active, &spc_end.dofs)
         };
+        // The set at the rotations `u`, holding the rotations that would become unknowns
+        // beside those of `base`.
+        let settled =
+            |ctx: &ProcedureContext<'_>, u: &[f64], held: &mut Vec<u32>, base: &ConstraintSet| {
+                let mut next = rotated_set(ctx, u, held);
+                let old: std::collections::HashSet<u32> = base.free.iter().copied().collect();
+                let added: Vec<u32> = next
+                    .free
+                    .iter()
+                    .copied()
+                    .filter(|d| !old.contains(d))
+                    .filter(|d| ctx.constraints.rigid.iter().any(|r| r.rotation == d / 3))
+                    .collect();
+                if !added.is_empty() {
+                    held.extend(added);
+                    held.sort_unstable();
+                    held.dedup();
+                    next = rotated_set(ctx, u, held);
+                }
+                next
+            };
+        let held_note =
+            "explicit: rotations of rigid bodies that no member follows are held at zero";
         if finite_rotations && motion.u.iter().any(|v| *v != 0.0) {
-            set = rotated_set(ctx, &motion.u);
+            set = settled(ctx, &motion.u, &mut held, &set);
+            if !held.is_empty() {
+                progress.event(ProgressEvent::Info(held_note.into()));
+            }
             reduced_mass = ReducedMass::new(ctx, &set, &data.mass, fibre_mass.as_ref())?;
         }
         let varying = step.boundaries.iter().any(|b| {
@@ -2490,14 +2519,23 @@ impl Procedure for ExplicitDynamic {
                     let u_next = if finite_rotations {
                         let mut u_next = set.expand(&q, &g_next);
                         ctx.constraints.project_rigid(&mut u_next, &spc_end.dofs);
-                        let next_set = rotated_set(ctx, &u_next);
-                        if next_set.free != set.free {
-                            return Err(Error::Unsupported(
-                                "explicit: the rotated constraints chose other independent DOFs"
-                                    .into(),
-                            ));
+                        let was_held = held.len();
+                        let next_set = settled(ctx, &u_next, &mut held, &set);
+                        if was_held == 0 && !held.is_empty() {
+                            progress.event(ProgressEvent::Info(held_note.into()));
                         }
                         let before = set.expand(&qdot, &zero);
+                        if next_set.free != set.free {
+                            // The rotated constraints chose other independent DOFs (a
+                            // rotation of a rigid body's point became the dependent DOF of
+                            // a row): the unknowns are the values of the new ones (the
+                            // accelerations follow from the forces at the new place).
+                            let pick = |values: &[f64]| -> Vec<f64> {
+                                next_set.free.iter().map(|&d| values[d as usize]).collect()
+                            };
+                            q = pick(&u_next);
+                            qdot = pick(&before);
+                        }
                         let after = next_set.expand(&qdot, &zero);
                         turning = Some(
                             before

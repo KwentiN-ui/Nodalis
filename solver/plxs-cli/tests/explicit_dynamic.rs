@@ -2284,3 +2284,41 @@ fn a_spinning_cube_without_nlgeom_warns() {
     }
     clean(&dir);
 }
+
+/// A free steel bar (10 × 1 × 1 C3D8, 100 × 10 × 10 mm) with rigid bodies on its lower
+/// end edges, spinning at 50 rad/s about a vertical axis, with NLGEOM: the rotation of a
+/// body about its own edge moves no member, and once the body has turned the rotated rows
+/// would make it an unknown without mass. It is held at zero and the step runs through.
+#[test]
+fn rigid_bodies_on_edges_turn_explicitly_under_nlgeom() {
+    let mut input = bar_mesh(10, 1, 1, [0.1, 0.01, 0.01], "C3D8");
+    writeln!(
+        input,
+        "*Node\n1001, 0, 0.005, 0\n1002, 0, 0.005, 0\n1003, 0.1, 0.005, 0\n1004, 0.1, 0.005, 0\n\
+         *Nset, Nset=EDGE0\n1, 12\n*Nset, Nset=EDGE1\n11, 22\n*Nset, Nset=MID\n6\n\
+         *Rigid body, Nset=EDGE0, Ref node=1001, Rot node=1002\n\
+         *Rigid body, Nset=EDGE1, Ref node=1003, Rot node=1004\n\
+         *Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
+         *Solid section, Elset=EALL, Material=STEEL\n*Initial conditions, Type=Velocity"
+    )
+    .unwrap();
+    let omega = 50.0;
+    for k in 0..=1 {
+        for j in 0..=1 {
+            for i in 0..=10 {
+                let id = 1 + i + 11 * (j + 2 * k);
+                let (x, y) = (0.01 * i as f64 - 0.05, 0.01 * j as f64 - 0.005);
+                writeln!(input, "{id}, 1, {}\n{id}, 2, {}", -omega * y, omega * x).unwrap();
+            }
+        }
+    }
+    input.push_str(
+        "*Step, Nlgeom\n*Dynamic, Integration=Explicit\n0.0005, 0.001\n\
+         *Node print, Nset=MID\nU\n*End step\n",
+    );
+    let dir = work_dir("rigid-edges");
+    let (dat, log) = run(&dir, "edges", &input);
+    clean(&dir);
+    assert!(log.contains("held at zero"), "{log}");
+    assert_eq!(blocks(&dat, "displacements").len(), 2, "{log}");
+}

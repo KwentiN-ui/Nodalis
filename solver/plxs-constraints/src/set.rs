@@ -361,6 +361,26 @@ impl ModelConstraints {
         self.constraints.is_empty() && self.rotations.is_empty() && self.cyclic_real.is_empty()
     }
 
+    /// Holds the primary DOFs `dofs` at zero: explicit steps under finite rotations keep the
+    /// unknowns of the unrotated constraints, and a rotation that the rotated rows refer to
+    /// only by a vanishing coefficient (no member moves with it to first order) would
+    /// otherwise become an unknown without mass.
+    pub fn hold(&mut self, dofs: &[u32]) {
+        if dofs.is_empty() {
+            return;
+        }
+        let origin = self.labels.len() as u32;
+        self.labels.push("rotations held at zero".to_owned());
+        for &dof in dofs {
+            self.constraints.push(LinearConstraint {
+                terms: vec![(dof, 1.0)],
+                preferred: dof,
+                policy: Policy::Repivot,
+                origin,
+            });
+        }
+    }
+
     /// The dense nodes any constraint refers to, ascending and unique. Nodes outside every
     /// element (rigid body reference and rotation nodes, remote points) take their
     /// stiffness from these constraints alone, so their DOFs must not be held at zero.
