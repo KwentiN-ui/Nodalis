@@ -449,8 +449,8 @@ rename it or to remove the parameter, which leaves the number as it is. Type a v
 or drag a value pin of a Parameters block to its pin: the number then follows the parameter,
 and the field in the dialog is read-only while the link is there. Renaming the item keeps the
 parameter. The numbers that can be exposed are those of loads, boundary conditions, defined
-fields and initial conditions, of materials and sections, the time period and first increment
-of steps and the number of modes of a frequency step. A Materials block (@materials-block)
+fields and initial conditions, of materials and sections, the duration and the number of frames
+of static, heat transfer, visco and Dynamic steps and the number of modes of a frequency step. A Materials block (@materials-block)
 exposes the numbers of its own materials in the same way, a Cross-Sections block
 (@cross-sections-block) the dimensions of its cross-sections.
 

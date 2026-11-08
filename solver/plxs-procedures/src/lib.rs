@@ -21,6 +21,7 @@ pub mod eigen;
 pub mod equations;
 pub mod explicit_dynamic;
 pub mod fields;
+pub mod frames;
 pub mod heat;
 pub mod history;
 pub mod modal;

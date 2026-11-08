@@ -329,6 +329,46 @@ impl JointKind {
     }
 }
 
+/// The axis of a joint: the axis a revolute, cylindrical or slider joint turns about or
+/// slides along, the normal of a planar joint; the z axis of the joint frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum JointAxis {
+    /// The z axis of the coordinate system.
+    #[default]
+    CoordinateSystem,
+    /// The mean normal of the faces of End 1 (of End 2 when End 1 has none), e.g. the face
+    /// where a hub sits on its shaft.
+    FaceNormal,
+    /// The axis of the cylindrical faces of End 1 (of End 2 when End 1 has none), e.g. a
+    /// bore or a pin.
+    CylinderAxis,
+    /// A direction in the coordinate system.
+    Direction([f64; 3]),
+}
+
+impl JointAxis {
+    pub const CHOICES: [JointAxis; 4] = [
+        JointAxis::FaceNormal,
+        JointAxis::CylinderAxis,
+        JointAxis::CoordinateSystem,
+        JointAxis::Direction([0.0, 0.0, 1.0]),
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            JointAxis::CoordinateSystem => "Z of the coordinate system",
+            JointAxis::FaceNormal => "Face normal",
+            JointAxis::CylinderAxis => "Cylinder axis",
+            JointAxis::Direction(_) => "Direction",
+        }
+    }
+
+    /// The same choice, whatever the direction.
+    pub fn same_kind(self, other: JointAxis) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+    }
+}
+
 /// A joint between two ends, each ground ("World"), a selection of the mesh or a point (a
 /// reference point or the point a boundary condition or remote force creates): like a
 /// Displacement/Rotation that holds the motion of the second end relative to the first
@@ -354,6 +394,9 @@ pub struct Joint {
     /// Coordinates of the joint in `system`; `None` is the centre of the first end (of the
     /// second with ground as the first).
     pub location: Option<[f64; 3]>,
+    /// The joint axis (3D only; a joint in a plane turns about the normal of the plane).
+    #[serde(default)]
+    pub axis: JointAxis,
 }
 
 impl Joint {
@@ -371,7 +414,17 @@ impl Joint {
             behavior: crate::RemoteBehavior::Rigid,
             system: crate::features::GLOBAL.to_string(),
             location: None,
+            axis: JointAxis::FaceNormal,
         }
+    }
+
+    /// The faces the axis is taken from: of the first end with faces.
+    pub fn axis_faces(&self, mesh: &plx_mesh::FeMesh) -> Vec<(plx_mesh::ElementId, u8)> {
+        (self.ends.iter())
+            .filter_map(|end| end.selection())
+            .map(|region| region.faces(mesh))
+            .find(|faces| !faces.is_empty())
+            .unwrap_or_default()
     }
 
     /// The free relative degrees of freedom, from the kind or chosen one by one.
@@ -423,8 +476,8 @@ impl crate::FeModel {
         }
     }
 
-    /// The joint frame: its origin and the x, y and z directions of its coordinate system
-    /// there.
+    /// The joint frame: its origin and its x, y and z directions, z along the joint axis
+    /// and x as close to the x direction of the coordinate system as the axis allows.
     pub fn joint_frame(
         &self,
         mesh: &plx_mesh::FeMesh,
@@ -433,7 +486,23 @@ impl crate::FeModel {
         let origin = self.joint_origin(mesh, joint)?;
         let system = (self.coordinate_system_or_global(&joint.system))
             .ok_or_else(|| format!("Coordinate System {} does not exist", joint.system))?;
-        Ok((origin, system.directions_at(origin)?))
+        let directions = system.directions_at(origin)?;
+        if self.properties.space.is_2d() {
+            return Ok((origin, directions));
+        }
+        let axis = match joint.axis {
+            JointAxis::CoordinateSystem => return Ok((origin, directions)),
+            JointAxis::Direction(d) => {
+                [0, 1, 2].map(|k| (0..3).map(|i| d[i] * directions[i][k]).sum::<f64>())
+            }
+            JointAxis::FaceNormal => match joint.axis_faces(mesh) {
+                faces if !faces.is_empty() => face_normal(mesh, &faces)?,
+                // Nodes picked on a mesh without faces: the normal of the plane they lie in.
+                _ => plane_normal(mesh, joint)?,
+            },
+            JointAxis::CylinderAxis => cylinder_axis(mesh, &joint.axis_faces(mesh))?,
+        };
+        Ok((origin, frame_about(axis, directions)?))
     }
 }
 
@@ -483,5 +552,284 @@ impl CompressionOnly {
         } else {
             outward.map(|v| -v)
         }
+    }
+}
+
+/// The faces as `(area, unit normal)` per triangle, the normals outward of solids (the
+/// corners of a CalculiX solid face turn about the inward normal).
+fn face_triangles(
+    mesh: &plx_mesh::FeMesh,
+    faces: &[(plx_mesh::ElementId, u8)],
+) -> Vec<(f64, [f64; 3])> {
+    let mut out = Vec::new();
+    for &(element, face) in faces {
+        let Some(element) = mesh.element(element) else {
+            continue;
+        };
+        let Some(topology) = element.faces().get(usize::from(face).saturating_sub(1)) else {
+            continue;
+        };
+        let corners: Vec<[f64; 3]> = (topology.corners.iter())
+            .filter_map(|&local| mesh.node(*element.nodes.get(local)?))
+            .collect();
+        if corners.len() < 3 {
+            continue;
+        }
+        let a = corners[0];
+        for pair in corners[1..].windows(2) {
+            let n = cross3(sub3(pair[1], a), sub3(pair[0], a));
+            let length = norm3(n);
+            if length > 0.0 {
+                out.push((0.5 * length, n.map(|c| c / length)));
+            }
+        }
+    }
+    out
+}
+
+/// The mean normal of faces that are (nearly) flat.
+fn face_normal(
+    mesh: &plx_mesh::FeMesh,
+    faces: &[(plx_mesh::ElementId, u8)],
+) -> Result<[f64; 3], String> {
+    let triangles = face_triangles(mesh, faces);
+    if triangles.is_empty() {
+        return Err("The face normal needs faces at End 1 or End 2.".into());
+    }
+    let area: f64 = triangles.iter().map(|(a, _)| a).sum();
+    let sum = (triangles.iter()).fold([0.0; 3], |s, (a, n)| [0, 1, 2].map(|k| s[k] + a * n[k]));
+    let length = norm3(sum);
+    if length < 0.5 * area {
+        return Err("The faces have no common normal: choose flat faces.".into());
+    }
+    Ok(sum.map(|c| c / length))
+}
+
+/// The normal of the plane the nodes of the first selection end lie in.
+fn plane_normal(mesh: &plx_mesh::FeMesh, joint: &Joint) -> Result<[f64; 3], String> {
+    let points: Vec<[f64; 3]> = (joint.ends.iter())
+        .filter_map(|end| end.selection())
+        .map(|region| region.nodes(mesh))
+        .find(|nodes| nodes.len() >= 3)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|id| mesh.node(id))
+        .collect();
+    if points.len() < 3 {
+        return Err("The face normal needs faces at End 1 or End 2.".into());
+    }
+    let count = points.len() as f64;
+    let centre = (points.iter()).fold([0.0; 3], |s, p| [0, 1, 2].map(|k| s[k] + p[k] / count));
+    let mut scatter = [[0.0; 6]; 6];
+    for p in &points {
+        let d = sub3(*p, centre);
+        for i in 0..3 {
+            for j in 0..3 {
+                scatter[i][j] += d[i] * d[j];
+            }
+        }
+    }
+    let (values, vectors) = crate::checks::eigen(&scatter, 3);
+    let mut order = [0, 1, 2];
+    order.sort_by(|&i, &j| values[i].total_cmp(&values[j]));
+    if values[order[0]] > 1e-6 * values[order[2]] || values[order[1]] < 1e-6 * values[order[2]] {
+        return Err("The nodes do not lie in a plane: choose flat faces.".into());
+    }
+    let v = vectors[order[0]];
+    Ok(along_positive([v[0], v[1], v[2]]))
+}
+
+/// The direction pointing along the positive global axis it is closest to, normalized.
+fn along_positive(mut axis: [f64; 3]) -> [f64; 3] {
+    let largest = (0..3)
+        .max_by(|&i, &j| axis[i].abs().total_cmp(&axis[j].abs()))
+        .unwrap_or(2);
+    if axis[largest] < 0.0 {
+        axis = axis.map(|c| -c);
+    }
+    let length = norm3(axis);
+    axis.map(|c| c / length)
+}
+
+/// The axis of cylindrical (or conical) faces: the direction all their normals are
+/// perpendicular to.
+fn cylinder_axis(
+    mesh: &plx_mesh::FeMesh,
+    faces: &[(plx_mesh::ElementId, u8)],
+) -> Result<[f64; 3], String> {
+    let triangles = face_triangles(mesh, faces);
+    if triangles.is_empty() {
+        return Err("The cylinder axis needs faces at End 1 or End 2.".into());
+    }
+    let mut scatter = [[0.0; 6]; 6];
+    for (a, n) in &triangles {
+        for i in 0..3 {
+            for j in 0..3 {
+                scatter[i][j] += a * n[i] * n[j];
+            }
+        }
+    }
+    let (values, vectors) = crate::checks::eigen(&scatter, 3);
+    let order = {
+        let mut order = [0, 1, 2];
+        order.sort_by(|&i, &j| values[i].total_cmp(&values[j]));
+        order
+    };
+    // Normals all around an axis: one direction without any normal component, two with.
+    if values[order[0]] > 0.05 * values[order[2]] || values[order[1]] < 0.05 * values[order[2]] {
+        return Err("The faces are not cylindrical: choose the faces of a bore or a pin.".into());
+    }
+    let v = vectors[order[0]];
+    Ok(along_positive([v[0], v[1], v[2]]))
+}
+
+/// An orthonormal frame with z along `axis` and x as close to the first of `directions` as
+/// it can be (the second when the axis is along the first).
+fn frame_about(axis: [f64; 3], directions: [[f64; 3]; 3]) -> Result<[[f64; 3]; 3], String> {
+    let length = norm3(axis);
+    if length < 1e-12 {
+        return Err("The joint axis has no direction.".into());
+    }
+    let z = axis.map(|c| c / length);
+    let project = |d: [f64; 3]| {
+        let along = dot3(d, z);
+        let x = [0, 1, 2].map(|k| d[k] - along * z[k]);
+        let l = norm3(x);
+        (l > 1e-6).then(|| x.map(|c| c / l))
+    };
+    let x = (project(directions[0]))
+        .or_else(|| project(directions[1]))
+        .ok_or("The joint axis has no direction.")?;
+    Ok([x, cross3(z, x), z])
+}
+
+fn sub3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn norm3(a: [f64; 3]) -> f64 {
+    dot3(a, a).sqrt()
+}
+
+#[cfg(test)]
+mod joint_axis_tests {
+    use super::*;
+    use plx_mesh::FeMesh;
+
+    /// The faces of `mesh` whose corners all satisfy `on`.
+    fn faces_where(mesh: &FeMesh, on: impl Fn([f64; 3]) -> bool) -> Region {
+        let mut faces = Vec::new();
+        for element in mesh.elements() {
+            for (f, topology) in element.faces().iter().enumerate() {
+                let all = (topology.corners.iter())
+                    .all(|&l| mesh.node(element.nodes[l]).is_some_and(&on));
+                if all {
+                    faces.push((element.id, f as u8 + 1));
+                }
+            }
+        }
+        Region::Faces(faces)
+    }
+
+    fn frame(mesh: &FeMesh, region: Region, axis: JointAxis) -> Result<[[f64; 3]; 3], String> {
+        let joint = Joint {
+            ends: [SpringEnd::Region(region), SpringEnd::World],
+            axis,
+            ..Joint::new("Joint-1")
+        };
+        crate::FeModel::default()
+            .joint_frame(mesh, &joint)
+            .map(|(_, axes)| axes)
+    }
+
+    fn close(a: [f64; 3], b: [f64; 3]) -> bool {
+        (0..3).all(|k| (a[k] - b[k]).abs() < 1e-9)
+    }
+
+    #[test]
+    fn the_axis_is_the_normal_of_a_flat_face() {
+        let mesh = plx_mesh::structured::box_mesh([0.0; 3], [1.0; 3], [2; 3], "C3D8", false, "P");
+        let side = faces_where(&mesh, |p| (p[0] - 1.0).abs() < 1e-12);
+        let axes = frame(&mesh, side, JointAxis::FaceNormal).unwrap();
+        assert!(close(axes[2], [1.0, 0.0, 0.0]), "{axes:?}");
+        let other = faces_where(&mesh, |p| p[0].abs() < 1e-12);
+        let flipped = frame(&mesh, other, JointAxis::FaceNormal).unwrap();
+        assert!(close(flipped[2], [-1.0, 0.0, 0.0]), "{flipped:?}");
+        // x as close to global x as the axis allows: global y here; a right-handed frame.
+        assert!(close(axes[0], [0.0, 1.0, 0.0]), "{axes:?}");
+        assert!(close(axes[1], [0.0, 0.0, 1.0]), "{axes:?}");
+        // Faces all around have no common normal.
+        let all = faces_where(&mesh, |p| {
+            p.iter().any(|c| c.abs() < 1e-12 || (c - 1.0).abs() < 1e-12)
+        });
+        assert!(frame(&mesh, all, JointAxis::FaceNormal).is_err());
+    }
+
+    #[test]
+    fn the_axis_of_a_tube_is_found_from_its_outer_faces() {
+        let a = [1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0];
+        let b = [2.0 / 3.0, 1.0 / 3.0, -2.0 / 3.0];
+        let c = cross3(a, b);
+        // A box along x, r from 1 to 1.5, t around: bent into a tube about `a`.
+        let mut mesh = plx_mesh::structured::box_mesh(
+            [0.0, 1.0, 0.0],
+            [2.0, 0.5, std::f64::consts::TAU],
+            [2, 1, 24],
+            "C3D8",
+            false,
+            "P",
+        );
+        for id in mesh.node_ids().to_vec() {
+            let [x, r, t] = mesh.node(id).unwrap();
+            let p = [0, 1, 2].map(|k| x * a[k] + r * t.cos() * b[k] + r * t.sin() * c[k]);
+            mesh.set_node(id, p);
+        }
+        let radius = |p: [f64; 3]| {
+            let along = dot3(p, a);
+            norm3([0, 1, 2].map(|k| p[k] - along * a[k]))
+        };
+        let outer = faces_where(&mesh, |p| (radius(p) - 1.5).abs() < 1e-9);
+        let axes = frame(&mesh, outer.clone(), JointAxis::CylinderAxis).unwrap();
+        assert!((0..3).all(|k| (axes[2][k] - a[k]).abs() < 1e-6), "{axes:?}");
+        assert!(frame(&mesh, outer, JointAxis::FaceNormal).is_err());
+        // A flat end is no cylinder.
+        let end = faces_where(&mesh, |p| dot3(p, a).abs() < 1e-9);
+        assert!(frame(&mesh, end.clone(), JointAxis::CylinderAxis).is_err());
+        let axes = frame(&mesh, end, JointAxis::FaceNormal).unwrap();
+        assert!((dot3(axes[2], a).abs() - 1.0).abs() < 1e-9, "{axes:?}");
+    }
+
+    #[test]
+    fn picked_nodes_give_the_normal_of_their_plane() {
+        let mesh = plx_mesh::structured::box_mesh([0.0; 3], [1.0; 3], [2; 3], "C3D8", false, "P");
+        let nodes = (mesh.node_ids().iter().copied())
+            .filter(|&id| mesh.node(id).is_some_and(|p| (p[2] - 1.0).abs() < 1e-12))
+            .collect();
+        let axes = frame(&mesh, Region::Nodes(nodes), JointAxis::FaceNormal).unwrap();
+        assert!(close(axes[2], [0.0, 0.0, 1.0]), "{axes:?}");
+        let all = Region::Nodes(mesh.node_ids().to_vec());
+        assert!(frame(&mesh, all, JointAxis::FaceNormal).is_err());
+    }
+
+    #[test]
+    fn a_direction_and_the_coordinate_system_give_the_axis_directly() {
+        let mesh = plx_mesh::structured::box_mesh([0.0; 3], [1.0; 3], [1; 3], "C3D8", false, "P");
+        let side = faces_where(&mesh, |p| p[0].abs() < 1e-12);
+        let axes = frame(&mesh, side.clone(), JointAxis::Direction([0.0, 2.0, 0.0])).unwrap();
+        assert!(close(axes[2], [0.0, 1.0, 0.0]), "{axes:?}");
+        let axes = frame(&mesh, side, JointAxis::CoordinateSystem).unwrap();
+        assert!(close(axes[2], [0.0, 0.0, 1.0]), "{axes:?}");
     }
 }

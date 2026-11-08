@@ -56,6 +56,58 @@ impl Step {
     }
 }
 
+impl Step {
+    /// The step times strictly inside `(0, period)` at which an amplitude the step's
+    /// boundaries, loads or fields follow has a point: where the curve bends, so increments
+    /// should end there to apply the table as given. `start_total` is the total time at the
+    /// start of the step. Ascending, without duplicates.
+    pub fn amplitude_times(&self, model: &crate::Model, start_total: f64, period: f64) -> Vec<f64> {
+        let l = &self.loads;
+        let names = (self.boundaries.iter().map(|b| &b.amplitude))
+            .chain(l.concentrated.iter().map(|c| &c.amplitude))
+            .chain(l.distributed.iter().map(|d| &d.amplitude))
+            .chain(l.concentrated_flux.iter().map(|c| &c.amplitude))
+            .chain(l.distributed_flux.iter().map(|d| &d.amplitude))
+            .chain(
+                l.films
+                    .iter()
+                    .flat_map(|f| [&f.amplitude, &f.film_amplitude]),
+            )
+            .chain(
+                l.radiations
+                    .iter()
+                    .flat_map(|r| [&r.amplitude, &r.radiation_amplitude]),
+            )
+            .chain(self.fields.iter().map(|f| &f.amplitude))
+            .flatten();
+        let mut seen: Vec<&str> = Vec::new();
+        let mut times = Vec::new();
+        for name in names {
+            if seen.contains(&name.as_str()) {
+                continue;
+            }
+            seen.push(name);
+            let Some(amplitude) = model.amplitude(name) else {
+                continue;
+            };
+            let offset = if amplitude.total_time {
+                start_total
+            } else {
+                0.0
+            };
+            for &(t, _) in &amplitude.points {
+                let time = t + amplitude.shift_x - offset;
+                if time > period * 1e-9 && time < period * (1.0 - 1e-9) {
+                    times.push(time);
+                }
+            }
+        }
+        times.sort_by(f64::total_cmp);
+        times.dedup_by(|a, b| (*a - *b).abs() <= period * 1e-9);
+        times
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DefaultAmplitude {
     Ramp,
@@ -171,6 +223,22 @@ pub struct Incrementation {
     pub maximum: Option<f64>,
     /// `DIRECT`: fixed increments, no automatic control.
     pub direct: bool,
+    /// `FRAMES=` (Nodalis): result frames evenly spaced over the period, the last one at
+    /// its end. The increments are shortened to end on them and only they are written
+    /// (instead of every `FREQUENCY`-th increment). `None`: every increment counts.
+    #[serde(default)]
+    pub frames: Option<u32>,
+}
+
+impl Incrementation {
+    /// The step time of frame `k` (1-based) of `frames` over `period`.
+    pub fn frame_time(period: f64, frames: u32, k: u32) -> f64 {
+        if k >= frames {
+            period
+        } else {
+            period * f64::from(k) / f64::from(frames)
+        }
+    }
 }
 
 impl Incrementation {
@@ -646,4 +714,45 @@ pub struct RestartWrite {
 pub struct Controls {
     pub parameters: String,
     pub values: Vec<f64>,
+}
+
+#[cfg(test)]
+mod amplitude_time_tests {
+    use super::*;
+    use crate::{Amplitude, Model};
+
+    #[test]
+    fn the_points_of_followed_amplitudes_inside_the_step_are_listed_once() {
+        let mut model = Model::default();
+        let table = |name: &str, total_time, points: Vec<(f64, f64)>| Amplitude {
+            name: name.into(),
+            total_time,
+            shift_x: 0.0,
+            shift_y: 0.0,
+            points,
+        };
+        model.amplitudes = vec![
+            table(
+                "A",
+                false,
+                vec![(0.0, 0.0), (0.5, 1.0), (1.0, 2.0), (3.0, 0.0)],
+            ),
+            // Total time 2.5 is step time 0.5 of a step starting at 2.
+            table("B", true, vec![(2.5, 0.0), (3.25, 1.0)]),
+            table("UNUSED", false, vec![(0.25, 0.0)]),
+        ];
+        let mut step = Step::new("Step-1", Procedure::NoAnalysis);
+        let boundary = |amplitude: &str| Boundary {
+            region: NodeRef::Node(1),
+            first_dof: 1,
+            last_dof: 1,
+            value: Some(1.0),
+            amplitude: Some(amplitude.into()),
+            fixed: false,
+            submodel_step: None,
+            load_case: None,
+        };
+        step.boundaries = vec![boundary("A"), boundary("B"), boundary("A")];
+        assert_eq!(step.amplitude_times(&model, 2.0, 2.0), [0.5, 1.0, 1.25]);
+    }
 }

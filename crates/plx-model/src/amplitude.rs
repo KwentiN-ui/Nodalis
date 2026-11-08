@@ -69,6 +69,60 @@ impl Amplitude {
     }
 }
 
+/// A value that changes over the step: the time table that a component of a boundary
+/// condition or load can take instead of a fixed value, e.g. a displacement in mm over the
+/// step time. Linear between the points and constant beyond the first and last, like an
+/// amplitude, but with the values themselves rather than factors. Each component has a table
+/// of its own, so one boundary condition describes a motion in several directions.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ValueTable {
+    /// Step time and value of each point, in order of time.
+    pub points: Vec<[f64; 2]>,
+}
+
+impl ValueTable {
+    /// A table that starts at zero and reaches `value` at `time`, as the default ramp does.
+    pub fn ramp(value: f64, time: f64) -> Self {
+        Self {
+            points: vec![[0.0, 0.0], [time, value]],
+        }
+    }
+
+    /// The value at a step time.
+    pub fn value_at(&self, time: f64) -> f64 {
+        self.as_amplitude("").value_at(time)
+    }
+
+    /// Why the solver would reject the points, if it would.
+    pub fn points_problem(&self) -> Option<String> {
+        self.as_amplitude("")
+            .points_problem()
+            .map(|p| p.replace("The amplitude", "The table"))
+    }
+
+    /// Whether any point has a value other than zero.
+    pub fn moves(&self) -> bool {
+        self.points.iter().any(|p| p[1] != 0.0)
+    }
+
+    /// The amplitude the solver takes for the table: the same points, in step time, as
+    /// factors of a value of 1.
+    pub fn as_amplitude(&self, name: impl Into<String>) -> Amplitude {
+        Amplitude {
+            name: name.into(),
+            time_span: AmplitudeTime::Step,
+            shift_time: 0.0,
+            shift_amplitude: 0.0,
+            points: self.points.clone(),
+        }
+    }
+}
+
+/// Whether no component has a table, which leaves the field out of the project file.
+pub fn no_tables<const N: usize>(tables: &[Option<ValueTable>; N]) -> bool {
+    tables.iter().all(Option::is_none)
+}
+
 /// The time an amplitude's points refer to (`TIME=`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AmplitudeTime {
@@ -94,6 +148,27 @@ mod tests {
         amplitude.shift_time = 1.0;
         amplitude.shift_amplitude = 0.5;
         assert_eq!(amplitude.value_at(1.5), 1.5);
+    }
+
+    #[test]
+    fn a_table_holds_values_and_names_its_problems() {
+        let table = ValueTable {
+            points: vec![[0.0, 0.0], [1.0, -0.8], [2.0, 0.8]],
+        };
+        assert_eq!(table.value_at(0.5), -0.4);
+        assert_eq!(table.value_at(5.0), 0.8);
+        assert!(table.moves());
+        assert!(!ValueTable::ramp(0.0, 1.0).moves());
+        assert_eq!(ValueTable::ramp(2.0, 4.0).value_at(1.0), 0.5);
+        let backwards = ValueTable {
+            points: vec![[1.0, 0.0], [0.0, 1.0]],
+        };
+        assert!(backwards.points_problem().unwrap().contains("row 2"));
+        let empty = ValueTable { points: Vec::new() };
+        assert_eq!(
+            empty.points_problem().as_deref(),
+            Some("The table needs at least one point")
+        );
     }
 
     #[test]

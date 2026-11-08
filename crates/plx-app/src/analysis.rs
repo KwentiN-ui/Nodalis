@@ -1048,6 +1048,7 @@ mod tests {
             kind: LoadKind::force([0.0, 1.0, 0.0]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         let mut both = cubes();
         both.fe.steps = vec![frequency.clone(), modal.clone()];

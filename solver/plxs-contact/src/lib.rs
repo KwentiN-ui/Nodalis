@@ -23,6 +23,7 @@
 //! relations and defaults ([`law`]) and the integration of slave faces ([`geometry`]).
 //! No CalculiX code was consulted.
 
+pub mod ccd;
 pub mod geometry;
 pub mod law;
 pub mod output;
@@ -99,6 +100,37 @@ pub struct Pair {
     /// Candidate master faces per point, from the last [`ContactModel::prepare`].
     candidates: Vec<Vec<u32>>,
 }
+
+/// The first impact of a slave point on a master face within an increment
+/// ([`ContactModel::first_impact`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Impact {
+    /// Fraction of the increment at which the point reaches the face (conservative: at
+    /// most the touch).
+    pub fraction: f64,
+    pub pair: usize,
+    pub point: usize,
+    pub face: u32,
+    /// The distance between them at the start and the pair's typical master edge length.
+    pub distance: f64,
+    pub typical: f64,
+    /// Whether the point ends on the other side of the face (went through it).
+    pub through: bool,
+}
+
+impl Impact {
+    /// Where to cut the increment (as a fraction of it) so that the first part ends just
+    /// before the touch: a fifth of the remaining approach before it, or half a typical
+    /// edge length when that is less (the springs of the next part then reach the face).
+    pub fn cut(&self) -> f64 {
+        let lead = (0.5 * self.typical / self.distance.max(1e-300)).min(0.2);
+        self.fraction * (1.0 - lead)
+    }
+}
+
+/// A master face cut into flat pieces, with their points at the start and the end of an
+/// increment.
+type SweptFace = (ccd::Pieces, Vec<[f64; 3]>, Vec<[f64; 3]>);
 
 /// The result of one point in an evaluation.
 #[derive(Clone, Debug)]
@@ -681,64 +713,144 @@ impl ContactModel {
         blocks
     }
 
-    /// Whether a slave point without a spring in `evaluation` (at `u`) went through a master
-    /// face during the increment from `u0`: outside it at the start, more than a percent
-    /// of an edge inside it at the end. The increment's springs only look for master faces
-    /// near where the points started (the candidates of [`ContactModel::prepare`]); a body
-    /// that reaches another within one increment of a dynamic step went through it unseen
-    /// (a lever ended 2 mm inside a rubber wall, a falling block below the plate).
-    pub fn missed(
+    /// The earliest impact of a slave point on a master face while both move on straight
+    /// lines from the displacements `u0` to `u1` (continuous collision detection, see
+    /// [`ccd`]). Only points `eligible(pair, point)` are checked, and only against faces
+    /// they start more than `farther` typical master edge lengths away from: a point closer
+    /// than that is in reach of the springs (the candidates of [`ContactModel::prepare`]),
+    /// a point in contact touches its face already. `through_only` counts only points that
+    /// end on the other side of the face they meet. Tied pairs are left out.
+    pub fn first_impact(
         &self,
         coords: &[[f64; 3]],
         u0: &[f64],
-        u: &[f64],
-        evaluation: &Evaluation,
-    ) -> bool {
+        u1: &[f64],
+        farther: f64,
+        through_only: bool,
+        eligible: &(dyn Fn(usize, usize) -> bool + Sync),
+    ) -> Option<Impact> {
         let start = current_configuration(coords, u0);
-        let current = current_configuration(coords, u);
-        self.pairs.iter().enumerate().any(|(pi, pair)| {
-            if !pair.active || pair.law.is_tied() || !pair.mortar_nodes.is_empty() {
-                return false;
+        let end = current_configuration(coords, u1);
+        let mut first: Option<Impact> = None;
+        for (pi, pair) in self.pairs.iter().enumerate() {
+            if !pair.active || pair.law.is_tied() || pair.master.is_empty() {
+                continue;
             }
-            let Some(results) = evaluation.points.get(pi) else {
-                return false;
+            let near = farther * pair.typical;
+            // Nothing moves far enough to close the distance: no search.
+            let moved = |nodes: &mut dyn Iterator<Item = &u32>| {
+                nodes
+                    .map(|&n| geometry::norm(sub(end[n as usize], start[n as usize])))
+                    .fold(0.0, f64::max)
             };
-            let unseen: Vec<usize> = (0..pair.points.len())
-                .filter(|&p| results.get(p).is_some_and(|r| !r.element))
+            let slave_moved = moved(&mut pair.points.iter().flat_map(|p| &p.nodes));
+            let master_moved = moved(&mut pair.master.iter().flat_map(|f| &f.nodes));
+            if slave_moved + master_moved <= near {
+                continue;
+            }
+            // The flat pieces of the master faces at the start and the end and the boxes
+            // they sweep.
+            let faces: Vec<SweptFace> = pair
+                .master
+                .par_iter()
+                .map(|face| {
+                    let pieces = ccd::pieces(face);
+                    let a = pieces.positions(face, &start);
+                    let b = pieces.positions(face, &end);
+                    (pieces, a, b)
+                })
                 .collect();
-            if unseen.is_empty() {
-                return false;
-            }
-            // Master faces within reach of the whole path of a point.
-            let moved = (pair.points.iter().flat_map(|point| &point.nodes))
-                .chain(pair.master.iter().flat_map(|face| &face.nodes))
-                .map(|&n| {
-                    let n = n as usize;
-                    geometry::norm(sub(current[n], start[n]))
-                })
-                .fold(0.0, f64::max);
-            let margin = 2.0 * pair.typical + moved;
-            let grid = FaceGrid::new(&pair.master, &current, pair.typical.max(margin), margin);
-            let side = |face: &ContactFace, config: &[[f64; 3]], x: [f64; 3]| {
-                let (natural, fp) = face.project(config, x);
-                (natural, dot(sub(x, fp.x), fp.normal))
-            };
-            unseen.into_iter().any(|p| {
-                let x = pair.position(p, &current);
-                let x0 = pair.position(p, &start);
-                let own: HashSet<u32> = pair.points[p].nodes.iter().copied().collect();
-                grid.candidates(x).iter().any(|&f| {
-                    let face = &pair.master[f as usize];
-                    if face.nodes.iter().any(|n| own.contains(n)) {
-                        return false;
+            let boxes: Vec<([f64; 3], [f64; 3])> =
+                faces.iter().map(|(_, a, b)| ccd::swept_box(a, b)).collect();
+            let grid = ccd::swept_grid(&boxes, pair.typical);
+            let hit = (0..pair.points.len())
+                .into_par_iter()
+                .filter(|&p| eligible(pi, p))
+                .map_init(Vec::new, |found, p| {
+                    let x0 = pair.position(p, &start);
+                    let x1 = pair.position(p, &end);
+                    let (lo, hi) = ccd::swept_box(&[x0], &[x1]);
+                    grid.candidates_in(lo, hi, found);
+                    let own = &pair.points[p].nodes;
+                    let mut best: Option<Impact> = None;
+                    for &f in found.iter() {
+                        let face = &pair.master[f as usize];
+                        if face.nodes.iter().any(|n| own.contains(n)) {
+                            continue;
+                        }
+                        let (lo_f, hi_f) = boxes[f as usize];
+                        if (0..3).any(|d| hi[d] < lo_f[d] || lo[d] > hi_f[d]) {
+                            continue;
+                        }
+                        let (pieces, a, b) = &faces[f as usize];
+                        for t in &pieces.triangles {
+                            let corners0 = [a[t[0]], a[t[1]], a[t[2]]];
+                            let corners1 = [b[t[0]], b[t[1]], b[t[2]]];
+                            let d0 = ccd::point_triangle_distance(
+                                x0,
+                                corners0[0],
+                                corners0[1],
+                                corners0[2],
+                            );
+                            if d0 <= near {
+                                continue;
+                            }
+                            let limit = best.as_ref().map_or(1.0, |b| b.fraction);
+                            let x = [x0, corners0[0], corners0[1], corners0[2]];
+                            let motion = [
+                                sub(x1, x0),
+                                sub(corners1[0], corners0[0]),
+                                sub(corners1[1], corners0[1]),
+                                sub(corners1[2], corners0[2]),
+                            ];
+                            if let Some(fraction) =
+                                ccd::additive_ccd(x, motion, ccd::SEPARATION, limit)
+                            {
+                                // Through: on the other side of the piece at the end.
+                                let side0 =
+                                    ccd::signed_distance(x0, corners0[0], corners0[1], corners0[2]);
+                                let side1 =
+                                    ccd::signed_distance(x1, corners1[0], corners1[1], corners1[2]);
+                                let through = side0 * side1 < 0.0;
+                                if through_only && !through {
+                                    continue;
+                                }
+                                best = Some(Impact {
+                                    fraction,
+                                    pair: pi,
+                                    point: p,
+                                    face: f,
+                                    distance: d0,
+                                    typical: pair.typical,
+                                    through,
+                                });
+                            }
+                        }
                     }
-                    let (natural, gap) = side(face, &current, x);
-                    gap < -0.01 * pair.typical
-                        && face.contains(natural, 1e-3)
-                        && side(face, &start, x0).1 > 0.0
+                    best
                 })
-            })
-        })
+                .flatten()
+                .min_by(|a, b| a.fraction.total_cmp(&b.fraction));
+            if let Some(hit) = hit
+                && first.as_ref().is_none_or(|f| hit.fraction < f.fraction)
+            {
+                first = Some(hit);
+            }
+        }
+        first
+    }
+
+    /// Whether the slave point `point` of pair `pair` has a spring in `evaluation` (mortar
+    /// pairs are evaluated per mortar node: always taken as seen).
+    pub fn has_spring(&self, evaluation: &Evaluation, pair: usize, point: usize) -> bool {
+        if !self.pairs[pair].mortar_nodes.is_empty() {
+            return true;
+        }
+        evaluation
+            .points
+            .get(pair)
+            .and_then(|r| r.get(point))
+            .is_none_or(|r| r.element)
     }
 
     /// Evaluates all springs at the displacements `u` from the states `start` (plastic

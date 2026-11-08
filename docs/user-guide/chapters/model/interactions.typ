@@ -115,8 +115,9 @@ point of a Displacement/Rotation condition or Remote Force). A selection follows
 its own at the joint, rigidly (#ui("Rigid"), the selection keeps its shape) or on average
 (#ui("Deformable")), chosen under #ui("Behavior").
 
-#screenshot("constraint-joint.png", [A revolute joint from the side face of a cantilever to ground:
-  the ball marks the joint at the centre of the face, the double arrow its free rotation about z])
+#screenshot("constraint-joint.png", [A revolute joint from the side face of a cantilever to ground
+  about the face normal: the ball marks the joint at the centre of the face, the double arrow
+  its free rotation about the axis])
 
 #ui("Joint type") chooses the free relative degrees of freedom in the joint frame:
 
@@ -131,14 +132,27 @@ its own at the joint, rigidly (#ui("Rigid"), the selection keeps its shape) or o
     #ui("Fixed") or #ui("Free").],
 )
 
-The joint frame is the #ui("Coordinate system") at the joint's #ui("Location"): by default
-the centre of #ui("End 1") (of #ui("End 2") when #ui("End 1") is #ui("World")), or given
-coordinates. Its z axis is the axis of a revolute, cylindrical or slider joint and the normal
-of a planar joint, so a hinge about another axis needs a coordinate system whose z axis points
-along it. The frame turns with #ui("End 1"): with #ui("Large deformations") in a Static or
-Dynamic step a hinge stays a hinge however far its parts turn, as in a mechanism. In a plane
-model a joint holds #ui("Ux"), #ui("Uy") and #ui("URz") only, so a revolute joint is a hinge
-normal to the model plane.
+The joint sits at its #ui("Location"): by default the centre of #ui("End 1") (of #ui("End 2")
+when #ui("End 1") is #ui("World")), or coordinates in the #ui("Coordinate system"). The
+#ui("Axis") is the axis of a revolute, cylindrical or slider joint and the normal of a planar
+joint, the z axis of the joint frame:
+
+#fields(
+  [Face normal], [The mean outward normal of the faces of #ui("End 1") (of #ui("End 2") when
+    #ui("End 1") has no faces), e.g. the face where a hub sits on its shaft. The faces must be
+    (nearly) flat; nodes instead of faces give the normal of the plane they lie in. The
+    default of a new joint.],
+  [Cylinder axis], [The axis of the cylindrical faces of #ui("End 1"), e.g. a bore or a pin.],
+  [Z of the coordinate system], [The z axis of the #ui("Coordinate system").],
+  [Direction], [A direction in the #ui("Coordinate system").],
+)
+
+The dialog shows the global #ui("Axis direction") it finds. The x axis of the frame is the x
+direction of the coordinate system turned normal to the axis. The axis is taken in the
+starting position and then turns with #ui("End 1"): with #ui("Large deformations") in a
+Static or Dynamic step a hinge stays a hinge however far its parts turn or bend, as in a
+mechanism. In a plane model a joint holds #ui("Ux"), #ui("Uy") and #ui("URz") only, so a
+revolute joint is a hinge normal to the model plane.
 
 The 3D view draws a joint as lines from both ends to a ball at the joint, with an arrow for
 each free translation and a double arrow for each free rotation along the axes of the joint

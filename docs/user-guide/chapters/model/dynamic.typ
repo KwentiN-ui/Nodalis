@@ -186,6 +186,20 @@ The time integration treats the contact so that impacts stay physical:
   the impact it is halved around the impact, down to a few nanoseconds where needed, and
   the frames stay where they are. A dropped part therefore never bounces higher than it
   fell from.
+- A fast part does not pass through another unseen. The contact springs of a time step only
+  look for the faces near where their points start, so a projectile that reaches a can wall
+  within one time step, or a lever that swings into a wall, would fly through it. The solver
+  follows every contact point and master face on its straight path through the time step
+  (continuous collision detection) and finds the moment the first point would touch a face:
+  - before trying the time step, along the motion the step predicts (the velocities and
+    accelerations continued): a point that starts more than an element edge away from the
+    face it reaches is the start of an impact; the time step is cut just before the touch
+    and the impact computed from there. A point that would move on more than an element edge
+    after its touch within the time step cuts it as well, so that the contact can follow;
+  - after a time step converged: a point without contact that went through a face on its
+    way cuts the time step just before it met the face.
+  The cuts are internal sub-steps like the halvings; with #ui("Frames at contact events")
+  the approach gets no frame of its own, the touch and the impact do.
 - The contact springs are damped with a fraction of the time step. This removes the
   chatter of the nodes on the stiff contact springs (the contact force jumping between zero
   and several times its value from one time step to the next) and leaves the slower motion
@@ -198,6 +212,12 @@ The time integration treats the contact so that impacts stay physical:
   bounces without gaining energy (part of it stays in the vibrations of the block). Right: a
   steel bar hitting a wall at 1 m/s presses with ρ c v₀ A for the time 2L/c a wave takes
   through the bar and back, then leaves at 1 m/s])
+
+#screenshot("dynamic-ccd.svg", [A steel block thrown at a plate in a single time step of 20 ms.
+  Dashed: where the motion of the time step takes it without the collision detection (the
+  springs of the step never see the plate, it ends below it). Red: computed; the time step is
+  cut just before the impact at 2 ms, the impact is resolved in microseconds and the block
+  bounces off])
 
 === What the solver reports
 
