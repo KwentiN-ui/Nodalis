@@ -13,8 +13,6 @@
 
 use std::sync::{Arc, Mutex};
 
-use wgpu::util::DeviceExt;
-
 pub use wgpu;
 
 /// Percent of the card's memory budget the solver's buffers may take, so that the user
@@ -241,36 +239,32 @@ impl Gpu {
     }
 
     /// A storage buffer holding `contents` (padded to 16 bytes), uploaded in pieces.
+    /// Never mapped at creation: a buffer the device cannot create (out of memory, over a
+    /// limit) then shows as an error of the error scope with its reason, instead of a
+    /// panic when its mapping fails.
     pub fn init(&self, label: &str, contents: &[u8]) -> wgpu::Buffer {
-        if contents.len() <= PIECE {
-            let padded;
-            let contents = if contents.len() < 16 {
-                padded = [contents, &[0u8; 16][..16 - contents.len()]].concat();
-                &padded[..]
-            } else {
-                contents
-            };
-            return self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(label),
-                    contents,
-                    usage: wgpu::BufferUsages::STORAGE,
-                });
-        }
         let buffer = self.storage(label, contents.len().next_multiple_of(4) as u64);
-        self.write(&buffer, 0, contents);
+        if contents.len().is_multiple_of(4) {
+            self.write(&buffer, 0, contents);
+        } else {
+            let mut padded = contents.to_vec();
+            padded.resize(contents.len().next_multiple_of(4), 0);
+            self.write(&buffer, 0, &padded);
+        }
         buffer
     }
 
-    /// A uniform buffer holding `contents`.
+    /// A uniform buffer holding `contents` (a multiple of 4 bytes), not mapped at creation
+    /// either.
     pub fn uniform(&self, label: &str, contents: &[u8]) -> wgpu::Buffer {
-        self.device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents,
-                usage: wgpu::BufferUsages::UNIFORM,
-            })
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: (contents.len() as u64).max(16).next_multiple_of(16),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&buffer, 0, contents);
+        buffer
     }
 
     /// A buffer the processor reads back, of `bytes`.
