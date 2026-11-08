@@ -1,8 +1,6 @@
 //! The engine behind [`crate::Engine`] with the feature `gpu`.
 
-use std::sync::{Arc, Mutex};
-
-use wgpu::util::DeviceExt;
+use plxs_gpu::{Double, Gpu, Options, Use, wgpu};
 
 use crate::sliced::{SLICE, Sliced};
 
@@ -32,9 +30,7 @@ struct Dims {
 }
 
 pub(crate) struct Engine {
-    pub(crate) name: String,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    pub(crate) gpu: Gpu,
     n: usize,
     alpha: f64,
     groups: (u32, u32),
@@ -51,7 +47,6 @@ pub(crate) struct Engine {
     advance: (wgpu::ComputePipeline, wgpu::BindGroup),
     product: (wgpu::ComputePipeline, wgpu::BindGroup),
     accelerate: (wgpu::ComputePipeline, wgpu::BindGroup),
-    error: Arc<Mutex<Option<String>>>,
     /// `PLXS_GPU_TRACE`: the time of every kind of dispatch on the card.
     trace: Option<Trace>,
 }
@@ -91,77 +86,6 @@ impl Drop for Engine {
     }
 }
 
-fn describe(info: &wgpu::AdapterInfo) -> String {
-    let kind = match info.device_type {
-        wgpu::DeviceType::DiscreteGpu => "discrete",
-        wgpu::DeviceType::IntegratedGpu => "integrated",
-        wgpu::DeviceType::VirtualGpu => "virtual",
-        wgpu::DeviceType::Cpu => "software",
-        wgpu::DeviceType::Other => "other",
-    };
-    format!("{} ({kind})", info.name)
-}
-
-/// How a binding is used.
-#[derive(Clone, Copy)]
-enum Use {
-    Uniform,
-    /// The step parameters, one block of the parameter buffer per step.
-    Step,
-    Read,
-    Write,
-}
-
-fn layout(device: &wgpu::Device, label: &str, uses: &[Use]) -> wgpu::BindGroupLayout {
-    let entries: Vec<wgpu::BindGroupLayoutEntry> = uses
-        .iter()
-        .enumerate()
-        .map(|(binding, u)| wgpu::BindGroupLayoutEntry {
-            binding: binding as u32,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty: match u {
-                    Use::Uniform | Use::Step => wgpu::BufferBindingType::Uniform,
-                    Use::Read => wgpu::BufferBindingType::Storage { read_only: true },
-                    Use::Write => wgpu::BufferBindingType::Storage { read_only: false },
-                },
-                has_dynamic_offset: matches!(u, Use::Step),
-                min_binding_size: None,
-            },
-            count: None,
-        })
-        .collect();
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some(label),
-        entries: &entries,
-    })
-}
-
-fn pipeline(
-    device: &wgpu::Device,
-    source: &'static str,
-    entry: &str,
-    layout: &wgpu::BindGroupLayout,
-) -> wgpu::ComputePipeline {
-    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some(entry),
-        source: wgpu::ShaderSource::Wgsl(source.into()),
-    });
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some(entry),
-        bind_group_layouts: &[Some(layout)],
-        immediate_size: 0,
-    });
-    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some(entry),
-        layout: Some(&pipeline_layout),
-        module: &module,
-        entry_point: Some(entry),
-        compilation_options: Default::default(),
-        cache: None,
-    })
-}
-
 /// A dispatch of the traced loop: pipeline and bind group, dynamic offsets, work groups.
 type TimedPass<'a> = (
     &'a (wgpu::ComputePipeline, wgpu::BindGroup),
@@ -175,92 +99,24 @@ impl Engine {
         if n == 0 {
             return Err("no unknowns".to_owned());
         }
-        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
-        descriptor.backends = wgpu::Backends::PRIMARY;
-        let instance = wgpu::Instance::new(descriptor);
-        let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::PRIMARY));
-        let rank = |t: wgpu::DeviceType| match t {
-            wgpu::DeviceType::DiscreteGpu => 0,
-            wgpu::DeviceType::IntegratedGpu => 1,
-            wgpu::DeviceType::VirtualGpu => 2,
-            wgpu::DeviceType::Other => 3,
-            wgpu::DeviceType::Cpu => 4,
-        };
-        let found: Vec<String> = adapters.iter().map(|a| describe(&a.get_info())).collect();
-        let adapter = adapters
-            .into_iter()
-            .filter(|a| any || a.get_info().device_type == wgpu::DeviceType::DiscreteGpu)
-            .min_by_key(|a| rank(a.get_info().device_type))
-            .ok_or_else(|| {
-                if found.is_empty() {
-                    "no graphics card found".to_owned()
-                } else {
-                    format!("no discrete graphics card (found {})", found.join(", "))
-                }
-            })?;
-        let info = adapter.get_info();
-        let name = describe(&info);
-        if !adapter.features().contains(wgpu::Features::SHADER_F64) {
-            return Err(format!("{name} computes no double precision"));
-        }
-        let tracing = std::env::var("PLXS_GPU_TRACE").is_ok_and(|v| v != "0")
-            && adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
-        let supported = adapter.limits();
-        let limits = wgpu::Limits {
-            max_storage_buffer_binding_size: supported.max_storage_buffer_binding_size,
-            max_buffer_size: supported.max_buffer_size,
-            ..Default::default()
-        };
+        let tracing = std::env::var("PLXS_GPU_TRACE").is_ok_and(|v| v != "0");
+        let gpu = Gpu::open(Options {
+            label: "plxs explicit",
+            any_adapter: any,
+            double: Double::Required,
+            timestamps: tracing,
+        })?;
         let sliced = Sliced::new(setup.stiffness, setup.viscous);
         let largest = (8 * 6 * n as u64).max(8 * sliced.val.len() as u64);
-        if largest > limits.max_storage_buffer_binding_size || largest > limits.max_buffer_size {
-            return Err(format!("the model is too large for the buffers of {name}"));
+        if !gpu.fits(largest) {
+            return Err(format!(
+                "the model is too large for the buffers of {}",
+                gpu.name
+            ));
         }
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("plxs explicit"),
-            required_features: if tracing {
-                wgpu::Features::SHADER_F64 | wgpu::Features::TIMESTAMP_QUERY
-            } else {
-                wgpu::Features::SHADER_F64
-            },
-            required_limits: limits.clone(),
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            memory_hints: wgpu::MemoryHints::Performance,
-            trace: wgpu::Trace::Off,
-        }))
-        .map_err(|e| format!("{name}: {e}"))?;
-        let error: Arc<Mutex<Option<String>>> = Arc::default();
-        let sink = error.clone();
-        device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
-            let mut slot = sink.lock().unwrap_or_else(|e| e.into_inner());
-            slot.get_or_insert_with(|| e.to_string());
-        }));
-        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-
-        let storage = |label: &str, bytes: u64| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size: bytes.max(16),
-                usage: wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_DST
-                    | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            })
-        };
-        let init = |label: &str, contents: &[u8]| {
-            let padded;
-            let contents = if contents.len() < 16 {
-                padded = [contents, &[0u8; 16][..16 - contents.len()]].concat();
-                &padded[..]
-            } else {
-                contents
-            };
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents,
-                usage: wgpu::BufferUsages::STORAGE,
-            })
-        };
+        let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let storage = |label: &str, bytes: u64| gpu.storage(label, bytes);
+        let init = |label: &str, contents: &[u8]| gpu.init(label, contents);
         let f64s = 8 * n as u64;
         let u = storage("u", f64s);
         let v = storage("v", f64s);
@@ -278,13 +134,9 @@ impl Engine {
         let slice_val = init("values", bytemuck::cast_slice(&sliced.val));
         let positions = sliced.rows.len();
         drop(sliced);
-        let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("staging"),
-            size: 6 * f64s,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let stride = u64::from(device.limits().min_uniform_buffer_offset_alignment)
+        let staging = gpu.staging("staging", 6 * f64s);
+        let device = &gpu.device;
+        let stride = u64::from(gpu.limits.min_uniform_buffer_offset_alignment)
             .max(std::mem::size_of::<StepParams>() as u64);
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("steps"),
@@ -292,25 +144,18 @@ impl Engine {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let max_groups = limits.max_compute_workgroups_per_dimension.max(1) as usize;
-        let fold = |threads: usize| {
-            let groups = threads.div_ceil(GROUP);
-            let groups_x = groups.min(max_groups);
-            (groups_x as u32, groups.div_ceil(groups_x) as u32)
-        };
-        let groups = fold(n);
-        let product_groups = fold(positions);
+        let groups = gpu.fold(n, GROUP);
+        let product_groups = gpu.fold(positions, GROUP);
         let dims_of = |groups: (u32, u32)| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("dims"),
-                contents: bytemuck::bytes_of(&Dims {
+            gpu.uniform(
+                "dims",
+                bytemuck::bytes_of(&Dims {
                     n: n as u32,
                     groups_x: groups.0,
                     positions: positions as u32,
                     pad: 0,
                 }),
-                usage: wgpu::BufferUsages::UNIFORM,
-            })
+            )
         };
         let dims = dims_of(groups);
         let product_dims = dims_of(product_groups);
@@ -319,34 +164,20 @@ impl Engine {
             offset: 0,
             size: wgpu::BufferSize::new(std::mem::size_of::<StepParams>() as u64),
         });
-        let bind = |layout: &wgpu::BindGroupLayout, resources: Vec<wgpu::BindingResource>| {
-            let entries: Vec<wgpu::BindGroupEntry> = resources
-                .into_iter()
-                .enumerate()
-                .map(|(binding, resource)| wgpu::BindGroupEntry {
-                    binding: binding as u32,
-                    resource,
-                })
-                .collect();
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout,
-                entries: &entries,
-            })
+        let bind = |layout: &wgpu::BindGroupLayout, resources| gpu.bind(layout, resources);
+        let layout = |label: &str, uses: &[Use]| gpu.layout(label, uses);
+        let pipeline = |source: &str, entry: &str, layout: &wgpu::BindGroupLayout| {
+            gpu.pipeline(source, entry, layout, &[])
         };
         use Use::*;
         let advance_layout = layout(
-            &device,
             "advance",
-            &[Uniform, Step, Write, Write, Read, Write, Read, Write, Read],
+            &[
+                Uniform, Dynamic, Write, Write, Read, Write, Read, Write, Read,
+            ],
         );
         let advance = (
-            pipeline(
-                &device,
-                include_str!("advance.wgsl"),
-                "advance",
-                &advance_layout,
-            ),
+            pipeline(include_str!("advance.wgsl"), "advance", &advance_layout),
             bind(
                 &advance_layout,
                 vec![
@@ -362,18 +193,9 @@ impl Engine {
                 ],
             ),
         );
-        let product_layout = layout(
-            &device,
-            "product",
-            &[Uniform, Read, Write, Read, Read, Read, Read],
-        );
+        let product_layout = layout("product", &[Uniform, Read, Write, Read, Read, Read, Read]);
         let product = (
-            pipeline(
-                &device,
-                include_str!("product.wgsl"),
-                "product",
-                &product_layout,
-            ),
+            pipeline(include_str!("product.wgsl"), "product", &product_layout),
             bind(
                 &product_layout,
                 vec![
@@ -388,13 +210,11 @@ impl Engine {
             ),
         );
         let accelerate_layout = layout(
-            &device,
             "accelerate",
-            &[Uniform, Step, Read, Write, Read, Read, Read, Read, Write],
+            &[Uniform, Dynamic, Read, Write, Read, Read, Read, Read, Write],
         );
         let accelerate = (
             pipeline(
-                &device,
                 include_str!("accelerate.wgsl"),
                 "accelerate",
                 &accelerate_layout,
@@ -414,7 +234,7 @@ impl Engine {
                 ],
             ),
         );
-        let trace = tracing.then(|| Trace {
+        let trace = gpu.timestamps.then(|| Trace {
             queries: device.create_query_set(&wgpu::QuerySetDescriptor {
                 label: Some("trace"),
                 ty: wgpu::QueryType::Timestamp,
@@ -432,18 +252,16 @@ impl Engine {
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
-            period: f64::from(queue.get_timestamp_period()) * 1e-9,
+            period: f64::from(gpu.queue.get_timestamp_period()) * 1e-9,
             kernels: [0.0; 3],
             wall: 0.0,
             steps: 0,
         });
-        if let Some(e) = pollster::block_on(scope.pop()) {
-            return Err(format!("{name}: {e}"));
+        if let Some(e) = plxs_gpu::block_on(scope.pop()) {
+            return Err(format!("{}: {e}", gpu.name));
         }
         Ok(Self {
-            name,
-            device,
-            queue,
+            gpu,
             n,
             alpha: setup.alpha,
             groups,
@@ -460,13 +278,8 @@ impl Engine {
             advance,
             product,
             accelerate,
-            error,
             trace,
         })
-    }
-
-    fn take_error(&self) -> Option<String> {
-        self.error.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
     pub(crate) fn load(&mut self, start: &Start<'_>) -> Result<(), String> {
@@ -483,7 +296,7 @@ impl Engine {
                 return Err(format!("{} values for {n} unknowns", x.len()));
             }
         }
-        let q = &self.queue;
+        let q = &self.gpu.queue;
         q.write_buffer(&self.u, 0, bytemuck::cast_slice(start.u));
         q.write_buffer(&self.uref, 0, bytemuck::cast_slice(start.u));
         q.write_buffer(&self.v, 0, bytemuck::cast_slice(start.v));
@@ -529,13 +342,14 @@ impl Engine {
             params[at..at + std::mem::size_of::<StepParams>()]
                 .copy_from_slice(bytemuck::bytes_of(&p));
         }
-        let q = &self.queue;
+        let q = &self.gpu.queue;
         q.write_buffer(&self.params, 0, &params);
         let bytes = 8 * n as u64;
         q.write_buffer(&self.loads, 0, bytemuck::cast_slice(from));
         q.write_buffer(&self.loads, bytes, bytemuck::cast_slice(to));
         let started = std::time::Instant::now();
         let mut encoder = self
+            .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("explicit"),
@@ -586,35 +400,26 @@ impl Engine {
             }
         }
         // The parameter buffer is written again by the next run: wait for this one first.
-        self.queue.submit([encoder.finish()]);
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| e.to_string())?;
+        self.gpu.queue.submit([encoder.finish()]);
+        self.gpu.wait()?;
         if let Some(t) = &mut self.trace {
             let count = 6 * steps.len();
-            let (tx, rx) = std::sync::mpsc::channel();
-            t.read.map_async(wgpu::MapMode::Read, .., move |r| {
-                let _ = tx.send(r);
-            });
-            self.device
-                .poll(wgpu::PollType::wait_indefinitely())
-                .map_err(|e| e.to_string())?;
-            rx.recv()
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string())?;
-            {
-                let view = t.read.get_mapped_range(..).map_err(|e| e.to_string())?;
-                let stamps: &[u64] = bytemuck::cast_slice(&view);
+            let times = self.gpu.map(&t.read, |bytes| {
+                let stamps: &[u64] = bytemuck::cast_slice(bytes);
+                let mut times = [0.0; 3];
                 for k in 0..count / 2 {
                     let ticks = stamps[2 * k + 1].saturating_sub(stamps[2 * k]);
-                    t.kernels[k % 3] += ticks as f64 * t.period;
+                    times[k % 3] += ticks as f64 * t.period;
                 }
+                times
+            })?;
+            for (sum, time) in t.kernels.iter_mut().zip(times) {
+                *sum += time;
             }
-            t.read.unmap();
             t.wall += started.elapsed().as_secs_f64();
             t.steps += steps.len();
         }
-        match self.take_error() {
+        match self.gpu.take_error() {
             Some(e) => Err(e),
             None => Ok(()),
         }
@@ -624,6 +429,7 @@ impl Engine {
         let n = self.n;
         let bytes = 8 * n as u64;
         let mut encoder = self
+            .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("read"),
@@ -632,24 +438,9 @@ impl Engine {
         encoder.copy_buffer_to_buffer(&self.v, 0, &self.staging, bytes, bytes);
         encoder.copy_buffer_to_buffer(&self.a, 0, &self.staging, 2 * bytes, bytes);
         encoder.copy_buffer_to_buffer(&self.energy, 3 * bytes, &self.staging, 3 * bytes, 3 * bytes);
-        self.queue.submit([encoder.finish()]);
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.staging
-            .map_async(wgpu::MapMode::Read, .., move |result| {
-                let _ = tx.send(result);
-            });
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| e.to_string())?;
-        rx.recv()
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
-        let reached = {
-            let view = self
-                .staging
-                .get_mapped_range(..)
-                .map_err(|e| e.to_string())?;
-            let data: &[f64] = bytemuck::cast_slice(&view);
+        self.gpu.queue.submit([encoder.finish()]);
+        let reached = self.gpu.map(&self.staging, |bytes| {
+            let data: &[f64] = bytemuck::cast_slice(bytes);
             let sum = |k: usize| data[k * n..(k + 1) * n].iter().sum::<f64>();
             Reached {
                 u: data[..n].to_vec(),
@@ -659,9 +450,8 @@ impl Engine {
                 external_work: sum(4),
                 dissipation: sum(5),
             }
-        };
-        self.staging.unmap();
-        if let Some(e) = self.take_error() {
+        })?;
+        if let Some(e) = self.gpu.take_error() {
             return Err(e);
         }
         if reached.u.iter().any(|x| !x.is_finite()) {

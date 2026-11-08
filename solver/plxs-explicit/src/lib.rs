@@ -141,7 +141,7 @@ impl Engine {
     pub fn device(&self) -> &str {
         #[cfg(feature = "gpu")]
         {
-            &self.inner.name
+            &self.inner.gpu.name
         }
         #[cfg(not(feature = "gpu"))]
         {
