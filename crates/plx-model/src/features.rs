@@ -555,7 +555,8 @@ impl FeModel {
         }
     }
 
-    /// Reference points and planes of a renamed coordinate system follow it.
+    /// Reference points, planes, loads, displacements and complex frequency steps of a
+    /// renamed coordinate system follow it.
     pub fn rename_coordinate_system(&mut self, old: &str, new: &str) {
         for point in &mut self.reference_points {
             if let PointDefinition::Local { system, .. } = &mut point.definition
@@ -587,6 +588,13 @@ impl FeModel {
                 && remote.system == old
             {
                 remote.system = new.to_string();
+            }
+        }
+        for step in &mut self.steps {
+            if let crate::StepKind::ComplexFrequency(complex) = &mut step.kind
+                && complex.system.as_deref() == Some(old)
+            {
+                complex.system = Some(new.to_string());
             }
         }
     }
@@ -767,10 +775,28 @@ mod tests {
             name: "Plane_Result-1".into(),
             plane: "Plane-1".into(),
         });
+        // So does the rotation axis of a complex frequency step: the z axis through the origin.
+        let mut step = crate::Step::new_static("Rotor");
+        step.kind = crate::StepKind::ComplexFrequency(crate::ComplexFrequencyStep {
+            system: Some("CS".into()),
+            ..Default::default()
+        });
+        model.steps.push(step);
+        let complex = |model: &FeModel| match &model.steps[0].kind {
+            crate::StepKind::ComplexFrequency(c) => c.clone(),
+            _ => unreachable!(),
+        };
+        let (point, axis) = complex(&model).axis_in(&model).unwrap();
+        assert!(close(point, [0.0, 0.0, 5.0]) && close(axis, [0.0, 0.0, 1.0]));
         model.coordinate_systems[0].name = "Turned".into();
         model.rename_coordinate_system("CS", "Turned");
         model.rename_plane("Plane-1", "Cut");
         assert!(model.planes[0].resolve(&model).is_ok());
+        assert_eq!(complex(&model).system.as_deref(), Some("Turned"));
+        assert!(complex(&model).axis_in(&model).is_ok());
+        let mut missing = complex(&model);
+        missing.system = Some("Gone".into());
+        assert!(missing.axis_in(&model).unwrap_err().contains("Gone"));
         assert_eq!(model.result_planes[0].plane, "Cut");
     }
 

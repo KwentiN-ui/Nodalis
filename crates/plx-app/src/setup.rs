@@ -15,9 +15,9 @@ use plx_model::{
     CyclicSymmetry, Damping, DampingRange, DefinedField, DefinedFieldKind, Displacement,
     Distribution, DynamicMethod, DynamicStep, Elastic, FeModel, Field, FieldOutput, Formulation,
     FrequencyStep, GLOBAL, GravityDirection, Hardening, HeatTransferStep, HistoryKind,
-    HistoryOutput, Hyperelastic, HyperelasticModel, Incrementation, InitialCondition,
-    InitialConditionKind, ItemRef, LinearSolverChoice, Load, LoadKind, Material, MeshSet,
-    ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad, NodeTie,
+    HistoryOutput, Hyperelastic, HyperelasticModel, IncrementControl, IncrementSize,
+    InitialCondition, InitialConditionKind, ItemRef, LinearSolverChoice, Load, LoadKind, Material,
+    MeshSet, ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad, NodeTie,
     NumericalDamping, OutputDimension, OutputKind, PlasticPoint, Quantity, RayleighDamping, Region,
     RemoteBehavior, RemoteForce, STANDARD_GRAVITY, Section, SectionKind, SensitivityStep, SetKind,
     StaticStep, SteadyStateDynamicsStep, Step, StepKind, StepLimit, SurfaceInteraction,
@@ -788,6 +788,15 @@ pub(crate) fn contact_target(fe: &FeModel) -> Target {
 }
 
 /// Pressure and surface traction act on element faces, in 2D models on their edges.
+/// What the region of a step of `kind` picks: the surface nodes of a design region, the
+/// rotating parts or element sets of a complex frequency step.
+fn step_region_picks(kind: &StepKind, fe: &FeModel) -> (&'static [Source], Target) {
+    match kind {
+        StepKind::ComplexFrequency(_) => (ELEMENT_SOURCES, Target::Faces),
+        _ => (NODE_SOURCES, face_target(fe)),
+    }
+}
+
 pub(crate) fn face_target(fe: &FeModel) -> Target {
     if fe.properties.space.is_2d() {
         Target::Edges
@@ -796,15 +805,39 @@ pub(crate) fn face_target(fe: &FeModel) -> Target {
     }
 }
 
-/// The components of a force; 2D models have none along z.
-fn force_rows(ui: &mut Ui, force: &mut [f64; 3], two_d: bool, units: UnitSystem) {
-    let count = if two_d { 2 } else { 3 };
-    let labels = ["F1", "F2", "F3"].into_iter().zip(Field::VECTOR);
-    for (value, (label, field)) in force.iter_mut().zip(labels).take(count) {
+/// Rows of the components of a force, moment or pressure, each with its table button.
+#[allow(clippy::too_many_arguments)]
+fn component_rows(
+    ui: &mut Ui,
+    values: &mut [f64],
+    tables: &mut [Option<plx_model::ValueTable>; 3],
+    labels: &[&str],
+    fields: &[Field],
+    quantity: Quantity,
+    load_name: &str,
+    period: f64,
+    units: UnitSystem,
+) {
+    for (c, value) in values.iter_mut().enumerate() {
+        let (label, field) = (labels[c], fields[c]);
         ui.label(label);
-        expose::field(ui, field, |ui| {
-            ui.add(numeric::quantity(value, units, Quantity::Force).speed(1.0))
-        });
+        let start = *value;
+        crate::value_table::value_with_table(
+            ui,
+            egui::Id::new(("load value table", c)),
+            &mut tables[c],
+            &format!("{label} of {load_name}"),
+            label,
+            quantity,
+            units,
+            start,
+            period,
+            |ui| {
+                expose::field(ui, field, |ui| {
+                    ui.add(numeric::quantity(value, units, quantity).speed(1.0))
+                })
+            },
+        );
         ui.end_row();
     }
 }
@@ -1251,7 +1284,7 @@ fn draft_region(draft: &Draft) -> Option<&RegionDraft> {
         Draft::Constraint(c) => Some(c.region()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
         Draft::DefinedField(_, field, r) if field.kind.takes_region() => Some(r),
-        Draft::Step(step, r) if step.kind.design_region().is_some() => Some(r),
+        Draft::Step(step, r) if step.kind.region().is_some() => Some(r),
         _ => None,
     }
 }
@@ -1271,7 +1304,7 @@ fn draft_region_mut(draft: &mut Draft) -> Option<&mut RegionDraft> {
         Draft::Constraint(c) => Some(c.region_mut()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
         Draft::DefinedField(_, field, r) if field.kind.takes_region() => Some(r),
-        Draft::Step(step, r) if step.kind.design_region().is_some() => Some(r),
+        Draft::Step(step, r) if step.kind.region().is_some() => Some(r),
         _ => None,
     }
 }
@@ -1333,11 +1366,17 @@ const MOVING: &str = "Moving_Load";
 /// Whether the boundary condition dialog offers a preview of the motion: a prescribed
 /// displacement that follows an amplitude of the model.
 fn previews_motion(bc: &BoundaryCondition, fe: &FeModel) -> bool {
-    matches!(bc.kind, BoundaryKind::Displacement(_))
-        && bc
-            .amplitude
-            .as_deref()
-            .is_some_and(|a| fe.amplitude(a).is_some())
+    motion_of(bc, fe).is_some()
+}
+
+/// The motion a displacement boundary condition prescribes over time, if it follows an
+/// amplitude or tables.
+fn motion_of(bc: &BoundaryCondition, fe: &FeModel) -> Option<crate::motion_preview::Motion> {
+    let BoundaryKind::Displacement(displacement) = &bc.kind else {
+        return None;
+    };
+    let amplitude = bc.amplitude.as_deref().and_then(|a| fe.amplitude(a));
+    crate::motion_preview::Motion::of(displacement, amplitude)
 }
 
 /// The boundary condition kinds of the dialog: label, default name and the kind.
@@ -2017,6 +2056,7 @@ impl Editor {
                         kind: kind.clone(),
                         amplitude: None,
                         factor_amplitude: None,
+                        tables: Default::default(),
                     },
                     load_region(&kind, None, fe, &FeMesh::default()),
                 )
@@ -2234,12 +2274,9 @@ impl Editor {
             }
             TreeItem::Step(i) => {
                 let step = fe.steps.get(i)?.clone();
-                let design = step
-                    .kind
-                    .design_region()
-                    .cloned()
-                    .unwrap_or(Region::Nodes(Vec::new()));
-                let region = RegionDraft::from_region(&design, NODE_SOURCES, face_target(fe), mesh);
+                let own = (step.kind.region().cloned()).unwrap_or(Region::Nodes(Vec::new()));
+                let (sources, target) = step_region_picks(&step.kind, fe);
+                let region = RegionDraft::from_region(&own, sources, target, mesh);
                 (Draft::Step(step, region), i)
             }
             TreeItem::BoundaryCondition(s, i) => {
@@ -2452,12 +2489,8 @@ impl Editor {
             return None;
         };
         let preview = self.motion.as_mut()?;
-        let BoundaryKind::Displacement(Displacement { values, .. }) = bc.kind else {
-            return None;
-        };
-        let amplitude = model.fe.amplitude(bc.amplitude.as_deref()?)?;
-        let values = [values[0], values[1], values[2]];
-        Some(preview.frame(now, model, region.region(), values, amplitude))
+        let motion = motion_of(bc, &model.fe)?;
+        Some(preview.frame(now, model, region.region(), &motion))
     }
 
     /// Whether clicks in the 3D view pick for this dialog.
@@ -2837,11 +2870,35 @@ impl Editor {
                     .and_then(Result::ok);
                 step_form(ui, step, self.index, &model.fe, &model.mesh, sectors);
                 crate::connections::step_contacts(ui, &model.fe, step, self.index);
-                if step.kind.design_region().is_some() {
-                    region.ui_labeled(ui, model, "Design region", "design region", true);
-                    ui.label("");
-                    ui.weak("Surface nodes that may move; the solver ignores inner nodes.");
-                    ui.end_row();
+                // The kind may have changed: the region picks what the new kind takes.
+                let (sources, target) = step_region_picks(&step.kind, &model.fe);
+                if region.sources != sources {
+                    *region = region.converted(sources, target, &model.mesh).0;
+                }
+                match step.kind {
+                    StepKind::Sensitivity(_) => {
+                        region.ui_labeled(ui, model, "Design region", "design region", true);
+                        ui.label("");
+                        ui.weak("Surface nodes that may move; the solver ignores inner nodes.");
+                        ui.end_row();
+                    }
+                    StepKind::ComplexFrequency(_) => {
+                        region.ui_labeled(ui, model, "Rotating parts", "rotating parts", true);
+                        ui.label("");
+                        ui.weak(if region.is_empty() {
+                            "None picked: the whole model rotates."
+                        } else {
+                            "Only these rotate; the rest of the model stands still."
+                        });
+                        ui.end_row();
+                        ui.label("");
+                        ui.weak(
+                            "The rotating materials need a density.\n\
+                             Results are the complex modes only.",
+                        );
+                        ui.end_row();
+                    }
+                    _ => {}
                 }
             }
             Draft::BoundaryCondition(step, bc, region) => {
@@ -2890,13 +2947,11 @@ impl Editor {
                     _ if two_d => vec![0, 1],
                     _ => (0..6).collect(),
                 };
-                let values = match &mut bc.kind {
-                    BoundaryKind::Displacement(displacement) => Some(&mut displacement.values),
-                    _ => None,
-                };
-                if let Some(values) = values {
+                let period = step_kind.map_or(1.0, StepKind::period);
+                let bc_name = bc.name.clone();
+                if let BoundaryKind::Displacement(displacement) = &mut bc.kind {
                     for i in dofs {
-                        let (value, label) = (&mut values[i], DOF_LABELS[i]);
+                        let (value, label) = (&mut displacement.values[i], DOF_LABELS[i]);
                         let mut set = value.is_some();
                         ui.checkbox(&mut set, label);
                         let mut number = value.unwrap_or(0.0);
@@ -2906,14 +2961,38 @@ impl Editor {
                         } else {
                             Quantity::Angle
                         };
-                        let field = numeric::quantity(&mut number, units, quantity).speed(0.01);
                         let path = if i < 3 {
                             Field::VECTOR[i]
                         } else {
                             Field::ROTATION[i - 3]
                         };
-                        expose::field(ui, path, |ui| ui.add_enabled(set, field));
+                        // A held degree of freedom can follow a table instead of the value.
+                        if set {
+                            let start = number;
+                            crate::value_table::value_with_table(
+                                ui,
+                                egui::Id::new(("bc value table", i)),
+                                &mut displacement.tables[i],
+                                &format!("{label} of {bc_name}"),
+                                label,
+                                quantity,
+                                units,
+                                start,
+                                period,
+                                |ui| {
+                                    let field =
+                                        numeric::quantity(&mut number, units, quantity).speed(0.01);
+                                    expose::field(ui, path, |ui| ui.add(field))
+                                },
+                            );
+                        } else {
+                            let field = numeric::quantity(&mut number, units, quantity).speed(0.01);
+                            expose::field(ui, path, |ui| ui.add_enabled(false, field));
+                        }
                         *value = set.then_some(number);
+                        if !set {
+                            displacement.tables[i] = None;
+                        }
                         ui.end_row();
                     }
                 }
@@ -2952,6 +3031,13 @@ impl Editor {
                             }
                         },
                     );
+                    if let BoundaryKind::Displacement(displacement) = &bc.kind
+                        && (0..6).any(|d| displacement.table(d).is_some())
+                    {
+                        ui.label("");
+                        ui.weak("Values with a table (T) follow it instead of the amplitude.");
+                        ui.end_row();
+                    }
                     if !previews_motion(bc, &model.fe) {
                         self.motion = None;
                     } else if toggle {
@@ -3006,6 +3092,7 @@ impl Editor {
                             {
                                 let moved = load_target(&kind) != load_target(&load.kind);
                                 load.kind = kind;
+                                load.tables = Default::default();
                                 rename_default(&mut load.name, current, name, &taken);
                                 if moved {
                                     let (sources, target) = load_picks(&load.kind, &model.fe);
@@ -3023,6 +3110,12 @@ impl Editor {
                 if !matches!(load.kind, LoadKind::Pressure(_)) {
                     load.distribution = None;
                 }
+                // Tables of components the kind does not have are dropped.
+                for c in load.kind.table_components()..3 {
+                    load.tables[c] = None;
+                }
+                let period = step_kind.map_or(1.0, StepKind::period);
+                let load_name = load.name.clone();
                 match &mut load.kind {
                     LoadKind::Moment(moment) => {
                         if two_d {
@@ -3030,17 +3123,17 @@ impl Editor {
                             ui.weak("Moments need a 3D model.");
                             ui.end_row();
                         } else {
-                            let labels = ["M1", "M2", "M3"].into_iter().zip(Field::VECTOR);
-                            for (value, (label, field)) in moment.iter_mut().zip(labels) {
-                                ui.label(label);
-                                expose::field(ui, field, |ui| {
-                                    ui.add(
-                                        numeric::quantity(value, units, Quantity::Moment)
-                                            .speed(1.0),
-                                    )
-                                });
-                                ui.end_row();
-                            }
+                            component_rows(
+                                ui,
+                                moment,
+                                &mut load.tables,
+                                &["M1", "M2", "M3"],
+                                &Field::VECTOR,
+                                Quantity::Moment,
+                                &load_name,
+                                period,
+                                units,
+                            );
                         }
                         ui.label("");
                         ui.weak(
@@ -3050,18 +3143,33 @@ impl Editor {
                         ui.end_row();
                     }
                     LoadKind::Pressure(pressure) => {
-                        ui.label("Pressure");
-                        expose::field(ui, Field::Value, |ui| {
-                            ui.add(
-                                numeric::quantity(pressure, units, Quantity::Pressure).speed(0.1),
-                            )
-                        });
-                        ui.end_row();
+                        component_rows(
+                            ui,
+                            std::slice::from_mut(pressure),
+                            &mut load.tables,
+                            &["Pressure"],
+                            &[Field::Value],
+                            Quantity::Pressure,
+                            &load_name,
+                            period,
+                            units,
+                        );
                         let reference = &mut load.distribution;
                         distribution_row(ui, "load distribution", reference, &model.fe);
                     }
                     LoadKind::Force { value, each_node } => {
-                        force_rows(ui, value, two_d, units);
+                        let count = if two_d { 2 } else { 3 };
+                        component_rows(
+                            ui,
+                            &mut value[..count],
+                            &mut load.tables,
+                            &["F1", "F2", "F3"],
+                            &Field::VECTOR,
+                            Quantity::Force,
+                            &load_name,
+                            period,
+                            units,
+                        );
                         ui.label("");
                         ui.checkbox(each_node, "Apply to all nodes individually");
                         ui.end_row();
@@ -3352,6 +3460,11 @@ impl Editor {
                     "Amplitude"
                 };
                 amplitude_row(ui, label, "load amplitude", &mut load.amplitude, &model.fe);
+                if (0..3).any(|c| load.table(c).is_some()) {
+                    ui.label("");
+                    ui.weak("Values with a table (T) follow it instead of the amplitude.");
+                    ui.end_row();
+                }
                 if let Some(factor) = factor {
                     let label = format!("Amplitude {factor}");
                     let reference = &mut load.factor_amplitude;
@@ -3809,7 +3922,17 @@ impl Editor {
                 StepKind::Buckle(settings) => validate_buckle_step(settings)?,
                 StepKind::HeatTransfer(settings)
                 | StepKind::CoupledTempDisp(settings)
-                | StepKind::UncoupledTempDisp(settings) => validate_heat_transfer_step(settings)?,
+                | StepKind::UncoupledTempDisp(settings) => {
+                    validate_heat_transfer_step(settings)?;
+                    if let Some(problem) = settings.increments.problem() {
+                        return Err(problem);
+                    }
+                }
+                StepKind::Static(settings) => {
+                    if let Some(problem) = settings.problem() {
+                        return Err(problem);
+                    }
+                }
                 StepKind::Sensitivity(settings) => {
                     if let Some(problem) = settings.problem() {
                         return Err(problem);
@@ -3831,6 +3954,9 @@ impl Editor {
                     }
                 }
                 StepKind::Visco(settings) => {
+                    if let Some(problem) = settings.increments.problem() {
+                        return Err(problem);
+                    }
                     if settings.creep_tolerance <= 0.0 {
                         return Err("The creep strain tolerance must be positive.".into());
                     }
@@ -3840,7 +3966,6 @@ impl Editor {
                         return Err(problem);
                     }
                 }
-                StepKind::Static(_) => {}
             }
         }
         Ok(())
@@ -4012,8 +4137,8 @@ impl Editor {
                 put(&mut fe.cross_sections, index, cross_section);
             }
             Draft::Step(mut step, region) => {
-                if let Some(design) = step.kind.design_region_mut() {
-                    *design = region.region();
+                if let Some(own) = step.kind.region_mut() {
+                    *own = region.region();
                 }
                 match index.and_then(|i| fe.steps.get_mut(i)) {
                     // The dialog edits the settings; the step's items stay.
@@ -5960,7 +6085,7 @@ fn step_form(
         }
         StepKind::ModalDynamics(settings) => modal_dynamics_form(ui, settings, units),
         StepKind::SteadyStateDynamics(settings) => steady_state_form(ui, settings, units),
-        StepKind::ComplexFrequency(settings) => complex_frequency_form(ui, settings, units),
+        StepKind::ComplexFrequency(settings) => complex_frequency_form(ui, settings, fe),
         StepKind::Buckle(settings) => buckle_form(ui, settings),
         StepKind::HeatTransfer(settings) => heat_transfer_form(ui, settings, units, false),
         StepKind::CoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, true),
@@ -5975,7 +6100,7 @@ fn step_form(
         && fe.has_hyperelastic()
     {
         ui.label("");
-        ui.weak("Nonlinear geometry is on: the model has hyperelastic materials.");
+        ui.weak("Large deformations are on: the model has hyperelastic materials.");
         ui.end_row();
     }
 }
@@ -5984,7 +6109,6 @@ fn step_form(
 /// strain tolerance of the automatic increments.
 fn visco_form(ui: &mut Ui, settings: &mut ViscoStep, units: UnitSystem) {
     increments_form(ui, &mut settings.increments, units, true);
-    solver_row(ui, &mut settings.increments.solver);
     ui.label("Creep strain tolerance");
     ui.add(
         numeric::drag_value(&mut settings.creep_tolerance)
@@ -6071,7 +6195,6 @@ fn heat_transfer_form(
     settings.deltmx = limited.then_some(deltmx);
     ui.end_row();
     increments_form(ui, &mut settings.increments, units, coupled);
-    solver_row(ui, &mut settings.increments.solver);
     if !settings.steady_state {
         ui.label("");
         ui.weak("Transient: materials need density and specific heat.");
@@ -6838,7 +6961,8 @@ fn nodal_diameter_rows(ui: &mut Ui, range: &mut Option<[u32; 2]>, sectors: u32) 
 /// Settings of a complex frequency step: the rotation, the stress stiffening by it, the
 /// numbers of modes and the solver. The step is complete on its own; the solver preloads and
 /// computes the eigenmodes in steps of its own.
-fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep, units: UnitSystem) {
+fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep, fe: &FeModel) {
+    let units = fe.properties.units;
     ui.label("Rotational speed");
     expose::field(ui, Field::Speed, |ui| {
         ui.add(numeric::quantity(&mut settings.speed, units, Quantity::RotationalSpeed).speed(1.0))
@@ -6855,25 +6979,73 @@ fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep, unit
     };
     ui.weak(format!("= {} rpm", numeric::format_physical(rpm)));
     ui.end_row();
-    for ((value, label), field) in (settings.point.iter_mut())
-        .zip(["Axis point X", "Axis point Y", "Axis point Z"])
-        .zip(Field::LOCATION)
-    {
-        ui.label(label);
-        expose::field(ui, field, |ui| {
-            ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.1))
-        });
-        ui.end_row();
-    }
-    for ((value, label), field) in (settings.axis.iter_mut())
-        .zip(["Axis direction X", "Axis direction Y", "Axis direction Z"])
-        .zip(Field::AXIS)
-    {
-        ui.label(label);
-        expose::field(ui, field, |ui| {
-            ui.add(numeric::drag_value(value).speed(0.01))
-        });
-        ui.end_row();
+    // The axis: the z axis of a coordinate system, or a point and a direction.
+    const TYPED: &str = "Point and direction";
+    ui.label("Rotation axis");
+    egui::ComboBox::from_id_salt("rotation axis")
+        .selected_text(match &settings.system {
+            Some(name) => format!("z axis of {name}"),
+            None => TYPED.to_string(),
+        })
+        .width(crate::dock::fit_width(ui, 200.0))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut settings.system, None, TYPED);
+            for system in &fe.coordinate_systems {
+                let name = Some(system.name.clone());
+                let label = format!("z axis of {}", system.name);
+                ui.selectable_value(&mut settings.system, name, label);
+            }
+        })
+        .response
+        .on_hover_text(
+            "A coordinate system (Features > Coordinate System) puts the axis through its \
+             origin along its z axis, e.g. one placed at the hub by picking on the geometry.",
+        );
+    ui.end_row();
+    if settings.system.is_some() {
+        match settings.axis_in(fe) {
+            Ok((point, axis)) => {
+                ui.label("");
+                let length = |v: f64| shown(v, units, Quantity::Length);
+                let number = |v: f64| numeric::format_physical((v * 1e6).round() / 1e6);
+                ui.weak(format!(
+                    "through ({}, {}, {}),\ndirection ({}, {}, {})",
+                    length(point[0]),
+                    length(point[1]),
+                    length(point[2]),
+                    number(axis[0]),
+                    number(axis[1]),
+                    number(axis[2]),
+                ));
+                ui.end_row();
+            }
+            Err(problem) => {
+                ui.label("");
+                ui.colored_label(ui.visuals().error_fg_color, problem);
+                ui.end_row();
+            }
+        }
+    } else {
+        for ((value, label), field) in (settings.point.iter_mut())
+            .zip(["Axis point X", "Axis point Y", "Axis point Z"])
+            .zip(Field::LOCATION)
+        {
+            ui.label(label);
+            expose::field(ui, field, |ui| {
+                ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.1))
+            });
+            ui.end_row();
+        }
+        for ((value, label), field) in (settings.axis.iter_mut())
+            .zip(["Axis direction X", "Axis direction Y", "Axis direction Z"])
+            .zip(Field::AXIS)
+        {
+            ui.label(label);
+            expose::field(ui, field, |ui| {
+                ui.add(numeric::drag_value(value).speed(0.01))
+            });
+            ui.end_row();
+        }
     }
     ui.label("Stress stiffening");
     ui.checkbox(&mut settings.stiffening, "Centrifugal prestress")
@@ -6896,9 +7068,6 @@ fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep, unit
     ui.add(numeric::drag_value(&mut settings.num_modes).range(least..=10_000));
     ui.end_row();
     solver_row(ui, &mut settings.solver);
-    ui.label("");
-    ui.weak("Rotates the whole model; the materials\nneed a density. Results are the\ncomplex modes only.");
-    ui.end_row();
 }
 
 fn validate_frequency_step(settings: &FrequencyStep) -> Result<(), String> {
@@ -6940,82 +7109,157 @@ fn validate_buckle_step(settings: &BuckleStep) -> Result<(), String> {
 
 fn static_form(ui: &mut Ui, settings: &mut StaticStep, units: UnitSystem) {
     increments_form(ui, settings, units, true);
-    solver_row(ui, &mut settings.solver);
 }
 
-/// Nonlinear geometry and increments of a step with a time period; `mechanical`
-/// shows the geometric nonlinearity, which only steps with displacements have.
+/// Duration, result frames and large deformations of a step that runs over a (pseudo)
+/// time, then under Advanced the increments and the equation solver, all automatic by
+/// default. `mechanical` shows the large deformations, which only steps with displacements
+/// have.
 fn increments_form(ui: &mut Ui, settings: &mut StaticStep, units: UnitSystem, mechanical: bool) {
+    ui.label("Duration").on_hover_text(
+        "Length of the step. Without an amplitude the loads ramp up linearly over it; for \
+         rate-independent materials only its ratio to the amplitudes matters.",
+    );
+    expose::field(ui, Field::Duration, |ui| {
+        ui.add(numeric::physical(
+            &mut settings.duration,
+            units,
+            Quantity::Time,
+        ))
+    });
+    ui.end_row();
+    ui.label("Frames").on_hover_text(
+        "Result frames kept over the duration, evenly spaced; the last one at the end. The \
+         solver takes as many increments as it needs and ends one on every frame.",
+    );
+    expose::field(ui, Field::Frames, |ui| {
+        ui.add(numeric::count(&mut settings.frames).range(1..=StaticStep::MAX_FRAMES))
+    });
+    ui.end_row();
+    if settings.frames > 1 {
+        ui.label("");
+        ui.weak(format!(
+            "A frame every {}",
+            shown(settings.frame_interval(), units, Quantity::Time)
+        ));
+        ui.end_row();
+    }
     if mechanical {
         ui.label("");
-        ui.checkbox(&mut settings.nlgeom, "Nonlinear geometry (Nlgeom)");
+        let was = settings.nlgeom;
+        ui.checkbox(&mut settings.nlgeom, "Large deformations (Nlgeom)")
+            .on_hover_text(
+                "Large displacements and rotations: the equilibrium is found in the deformed \
+                 shape, loads follow it, stiffening and snap-through show. Each increment \
+                 iterates. Off, the deformations are small (linear unless contact or \
+                 plasticity make the step nonlinear).",
+            );
         ui.end_row();
+        // A nonlinear step is usually looked at over its load history.
+        if settings.nlgeom && !was && settings.frames == 1 {
+            settings.frames = 10;
+        }
     }
-    ui.label("Incrementation");
-    egui::ComboBox::from_id_salt("incrementation")
-        .selected_text(incrementation_label(settings.incrementation))
-        .show_ui(ui, |ui| {
-            for choice in [
-                Incrementation::Default,
-                Incrementation::Automatic,
-                Incrementation::Direct,
-            ] {
-                let label = incrementation_label(choice);
-                ui.selectable_value(&mut settings.incrementation, choice, label);
-            }
+
+    // Advanced: open while something in it differs from the defaults.
+    let id = ui.id().with("increments advanced");
+    let custom = settings.control != IncrementControl::default()
+        || settings.solver != LinearSolverChoice::Automatic;
+    let mut advanced = ui.data(|d| d.get_temp(id)).unwrap_or(custom);
+    ui.label("");
+    ui.checkbox(&mut advanced, "Advanced settings");
+    ui.end_row();
+    ui.data_mut(|d| d.insert_temp(id, advanced));
+    let automatic = StaticStep {
+        control: IncrementControl::default(),
+        ..settings.clone()
+    }
+    .plan(settings.nlgeom);
+    if advanced {
+        ui.label("Increments");
+        let mut fixed = matches!(settings.control.size, IncrementSize::Fixed(_));
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut fixed, false, "Automatic")
+                .on_hover_text(
+                    "Grow after increments that converge easily, are cut back after failed ones.",
+                );
+            ui.radio_value(&mut fixed, true, "Fixed").on_hover_text(
+                "Always the same size, shortened to end on the frames. An increment that \
+                 does not converge fails the step.",
+            );
         });
-    ui.end_row();
-    let custom = settings.incrementation != Incrementation::Default;
-    let automatic = settings.incrementation == Incrementation::Automatic;
-    ui.label("Max. increments");
-    ui.add_enabled(
-        custom,
-        numeric::drag_value(&mut settings.max_increments).range(1..=1_000_000),
-    );
-    ui.end_row();
-    for (label, value, enabled, field) in [
-        (
-            "Time period",
-            &mut settings.time_period,
-            custom,
-            Some(Field::TimePeriod),
-        ),
-        (
-            "Initial increment",
-            &mut settings.initial_increment,
-            custom,
-            Some(Field::InitialIncrement),
-        ),
-        (
-            "Min. increment",
-            &mut settings.min_increment,
-            automatic,
-            None,
-        ),
-        (
-            "Max. increment",
-            &mut settings.max_increment,
-            automatic,
-            None,
-        ),
-    ] {
-        ui.label(label);
-        let mut add =
-            |ui: &mut Ui| ui.add_enabled(enabled, numeric::physical(value, units, Quantity::Time));
-        match field {
-            Some(field) => expose::field(ui, field, add),
-            None => add(ui),
-        };
         ui.end_row();
+        match (fixed, settings.control.size) {
+            (true, IncrementSize::Automatic) => {
+                settings.control.size = IncrementSize::Fixed(automatic.initial)
+            }
+            (false, IncrementSize::Fixed(_)) => settings.control.size = IncrementSize::Automatic,
+            _ => {}
+        }
+        if let IncrementSize::Fixed(dt) = &mut settings.control.size {
+            ui.label("    Size");
+            ui.add(numeric::physical(dt, units, Quantity::Time));
+            ui.end_row();
+        } else {
+            let rows: [(&str, &str, &mut Option<f64>, f64); 3] = [
+                (
+                    "    Initial",
+                    "Size of the first increment. Automatic: a frame interval, with large \
+                     deformations at most a tenth of the duration; never more than the \
+                     largest increment.",
+                    &mut settings.control.initial,
+                    automatic.initial,
+                ),
+                (
+                    "    Smallest",
+                    "The step fails when cutbacks would make an increment shorter. \
+                     Automatic: 1e-5 of the duration.",
+                    &mut settings.control.minimum,
+                    automatic.minimum,
+                ),
+                (
+                    "    Largest",
+                    "No increment gets longer. Automatic: the duration (the frames still \
+                     end increments).",
+                    &mut settings.control.maximum,
+                    automatic.maximum,
+                ),
+            ];
+            for (label, hint, value, derived) in rows {
+                ui.label(label).on_hover_text(hint);
+                optional_time(ui, value, derived, units);
+                ui.end_row();
+            }
+        }
+        ui.label("Increment limit").on_hover_text(
+            "Stops the step after this many increments. Off, the step takes as many as it \
+             needs; the smallest increment still stops one that gets stuck.",
+        );
+        let mut limited = settings.control.limit.is_some();
+        let mut limit = settings.control.limit.unwrap_or(1000);
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut limited, "");
+            ui.add_enabled(limited, numeric::count(&mut limit).range(1..=u32::MAX));
+        });
+        ui.end_row();
+        settings.control.limit = limited.then_some(limit);
+        solver_row(ui, &mut settings.solver);
     }
 }
 
-fn incrementation_label(incrementation: Incrementation) -> &'static str {
-    match incrementation {
-        Incrementation::Default => "Default",
-        Incrementation::Automatic => "Automatic",
-        Incrementation::Direct => "Direct",
-    }
+/// A time that is derived unless the box is ticked: unticked, the derived value is shown
+/// greyed out; ticking starts from it.
+fn optional_time(ui: &mut Ui, value: &mut Option<f64>, derived: f64, units: UnitSystem) {
+    let mut set = value.is_some();
+    let mut shown_value = value.unwrap_or(derived);
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut set, "").on_hover_text("Off: automatic");
+        ui.add_enabled(
+            set,
+            numeric::physical(&mut shown_value, units, Quantity::Time),
+        );
+    });
+    *value = set.then_some(shown_value);
 }
 
 #[cfg(test)]
@@ -7438,6 +7682,7 @@ mod tests {
             kind: LoadKind::Pressure(1.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         let mut editor = Editor::create(NewItem::Step, &fe).unwrap();
         if let Draft::Step(step, _) = &mut editor.draft {
@@ -7517,6 +7762,7 @@ mod tests {
                 kind: LoadKind::Pressure(1.0),
                 amplitude: None,
                 factor_amplitude: None,
+                tables: Default::default(),
             },
             Load {
                 distribution: None,
@@ -7530,6 +7776,7 @@ mod tests {
                 },
                 amplitude: None,
                 factor_amplitude: None,
+                tables: Default::default(),
             },
         ];
         // A heat transfer step after it keeps the temperature and the film only.
@@ -7602,6 +7849,7 @@ mod tests {
             kind: LoadKind::force([1.0, 0.0, 0.0]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         assert!(set_visible(&mut fe, &TreeItem::Load(0, 0), false));
         assert!(!fe.steps[0].loads[0].visible);
@@ -7699,6 +7947,7 @@ mod tests {
             },
             amplitude: Some("Amplitude-1".into()),
             factor_amplitude: Some("Amplitude-1".into()),
+            tables: Default::default(),
         };
         fe.steps[0].loads.push(film.clone());
         let mut editor = Editor::edit(&TreeItem::Amplitude(0), &fe, &FeMesh::default()).unwrap();
@@ -7761,6 +8010,7 @@ mod tests {
             kind: LoadKind::Pressure(1.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         model.fe.steps.push(step);
         let mut pair = ContactPair::new("Contact_Pair-1", "Interaction-1");

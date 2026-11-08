@@ -3347,6 +3347,7 @@ S
             kind: LoadKind::Gravity([0.0, 0.0, -gravity]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         let solid = Section {
             name: "Section-1".into(),

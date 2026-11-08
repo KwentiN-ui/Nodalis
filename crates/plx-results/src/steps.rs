@@ -146,12 +146,12 @@ impl StepRecord {
     pub fn new(name: &str, kind: &plx_model::StepKind, solver_steps: Vec<u32>) -> Self {
         use plx_model::StepKind as K;
         let time_period = match kind {
-            K::Static(s) => Some(s.time_period),
+            K::Static(s) => Some(s.duration),
             K::HeatTransfer(s) | K::CoupledTempDisp(s) | K::UncoupledTempDisp(s) => {
-                Some(s.increments.time_period)
+                Some(s.increments.duration)
             }
             K::Dynamic(s) => Some(s.duration),
-            K::Visco(s) => Some(s.increments.time_period),
+            K::Visco(s) => Some(s.increments.duration),
             K::ModalDynamics(s) => Some(s.time_period),
             _ => None,
         };
