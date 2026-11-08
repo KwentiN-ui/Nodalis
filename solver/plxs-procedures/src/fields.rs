@@ -51,9 +51,8 @@ pub fn add_mode(
     imaginary: Option<&[f64]>,
 ) {
     let order = node_order(ctx.model);
-    let zeros = vec![0.0; u.len()];
     let rows = |u: &[f64]| -> Vec<[f32; 3]> {
-        let (reported, _) = ctx.table.reported(ctx.model, u, &zeros);
+        let reported = ctx.table.reported_displacements(u);
         (order.iter())
             .map(|&(_, i)| {
                 let at = i as usize * 3;
@@ -390,7 +389,12 @@ pub fn build_fields_with(
         })
         .unzip();
     // Internal unknowns (thickness change of plane stress nodes) are no displacements.
-    let (u, reactions) = &table.reported(model, u, reactions);
+    // The reported forces cost an element stiffness of every plane element: only for `RF`.
+    let (u, reactions) = &if has("RF") {
+        table.reported(model, u, reactions)
+    } else {
+        (table.reported_displacements(u), Vec::new())
+    };
     if has("U") {
         fields.push(vector_field("DISP", ["D1", "D2", "D3"], &order, u));
     }
