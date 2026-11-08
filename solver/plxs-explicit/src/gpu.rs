@@ -537,7 +537,11 @@ impl Engine {
             // Every dispatch in a pass of its own, timed by the card.
             for k in 0..steps.len() {
                 let offset = (k as u64 * self.stride) as u32;
-                let passes: [(&(wgpu::ComputePipeline, wgpu::BindGroup), &[u32], (u32, u32)); 3] = [
+                let passes: [(
+                    &(wgpu::ComputePipeline, wgpu::BindGroup),
+                    &[u32],
+                    (u32, u32),
+                ); 3] = [
                     (&self.advance, &[offset], self.groups),
                     (&self.product, &[], self.product_groups),
                     (&self.accelerate, &[offset], self.groups),
