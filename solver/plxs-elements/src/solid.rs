@@ -546,6 +546,32 @@ impl SolidElement {
         self.hourglass_stiffness(coords, d, &mean, volume, out);
     }
 
+    /// The hourglass base vectors of the eight-node brick.
+    pub const HOURGLASS_BASE: [[f64; 8]; 4] = [
+        [1.0, 1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0],
+        [1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0],
+        [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0],
+        [-1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0],
+    ];
+
+    /// `ε` of the hourglass stiffness `ε Σ_α γ_α γ_αᵀ ⊗ I` of the uniform-strain
+    /// hexahedron (Young's modulus from the isotropic material matrix).
+    pub(crate) fn hourglass_coefficient(
+        &self,
+        d: &[[f64; 6]; 6],
+        mean: &[[f64; 3]],
+        volume: f64,
+    ) -> f64 {
+        let mu = d[3][3];
+        let lambda = d[0][1];
+        let young = mu * (3.0 * lambda + 2.0 * mu) / (lambda + mu);
+        let bb: f64 = mean
+            .iter()
+            .map(|m| m[0] * m[0] + m[1] * m[1] + m[2] * m[2])
+            .sum();
+        0.004 * young * volume * bb / 8.0
+    }
+
     /// Adds the hourglass control stiffness of the uniform-strain hexahedron to `out`
     /// (Young's modulus from the isotropic material matrix).
     pub(crate) fn hourglass_stiffness(
@@ -557,21 +583,8 @@ impl SolidElement {
         out: &mut [f64],
     ) {
         let ndof = self.dof_count_3d();
-        let mu = d[3][3];
-        let lambda = d[0][1];
-        let young = mu * (3.0 * lambda + 2.0 * mu) / (lambda + mu);
-        let bb: f64 = mean
-            .iter()
-            .map(|m| m[0] * m[0] + m[1] * m[1] + m[2] * m[2])
-            .sum();
-        let epsilon = 0.004 * young * volume * bb / 8.0;
-        const H: [[f64; 8]; 4] = [
-            [1.0, 1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0],
-            [1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0],
-            [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0],
-            [-1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0],
-        ];
-        for h in &H {
+        let epsilon = self.hourglass_coefficient(d, mean, volume);
+        for h in &Self::HOURGLASS_BASE {
             // Flanagan-Belytschko: γ = h − Σ_j (h·x_j) b_j, orthogonal to the linear
             // displacement fields. CalculiX subtracts the term of the global z coordinate
             // only (j = 3), which was identified from its stiffness matrices of distorted and

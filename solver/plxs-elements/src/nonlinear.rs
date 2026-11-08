@@ -73,6 +73,19 @@ fn det3(a: &[[f64; 3]; 3]) -> f64 {
         + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0])
 }
 
+/// The integration points of an element as [`SolidElement::nodal_gradients`] gives them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NodalGradients {
+    /// Per point: the weight times the Jacobian determinant (the volume the point stands
+    /// for), and the Cartesian derivatives of the shape functions per node.
+    pub points: Vec<(f64, Vec<[f64; 3]>)>,
+    /// For C3D8R: `ε` of its hourglass stiffness `ε Σ_α γ_α γ_αᵀ ⊗ I`, whose vectors
+    /// `γ_α = h_α − (h_α · z) ∂N/∂z` take the base vectors `h_α` of
+    /// `SolidElement::HOURGLASS_BASE`, the nodal `z` coordinates and the (only) point's
+    /// derivatives.
+    pub hourglass: Option<f64>,
+}
+
 /// The displacement-gradient operator at one point: `l[(k * 3 + c) * ndof + col]`.
 struct Gradient {
     l: Vec<f64>,
@@ -168,6 +181,40 @@ impl SolidElement {
                     .collect();
                 (gradients, None)
             }
+        }
+    }
+
+    /// The integration points of an element whose displacement gradient is
+    /// `Σ_a u_a ⊗ ∇N_a` at every point, as the graphics card takes them: `None` for the
+    /// incompatible-mode element and for expanded plane elements, whose operators are not of
+    /// that form.
+    pub fn nodal_gradients(
+        &self,
+        coords: &[[f64; 3]],
+        d_elastic: &[[f64; 6]; 6],
+    ) -> Option<NodalGradients> {
+        if self.expansion().is_some() {
+            return None;
+        }
+        match self.formulation {
+            Formulation::Standard => Some(NodalGradients {
+                points: (0..self.rule.len())
+                    .map(|ip| {
+                        let (det, dndx) = self.rule_point(ip, coords);
+                        (det * self.rule.weights[ip], dndx)
+                    })
+                    .collect(),
+                hourglass: None,
+            }),
+            Formulation::Reduced => {
+                let (volume, mean) = self.mean_gradients(coords);
+                let epsilon = self.hourglass_coefficient(d_elastic, &mean, volume);
+                Some(NodalGradients {
+                    points: vec![(volume, mean)],
+                    hourglass: Some(epsilon),
+                })
+            }
+            Formulation::Incompatible => None,
         }
     }
 
@@ -453,6 +500,76 @@ mod tests {
                 assert!((ku - fe[a]).abs() < 1e-10 * fscale, "{kind}: f_int differs");
             }
         }
+    }
+
+    #[test]
+    fn nodal_gradients_give_the_stiffness_times_the_displacements() {
+        let d = isotropic(210_000.0, 0.3);
+        for kind in [
+            ElementType::C3D8,
+            ElementType::C3D8R,
+            ElementType::C3D20R,
+            ElementType::C3D4,
+            ElementType::C3D10,
+            ElementType::C3D15,
+        ] {
+            let (e, coords) = distorted(kind);
+            let ndof = e.dof_count();
+            let mut k = Vec::new();
+            e.stiffness(&coords, &d, &mut k);
+            let u = displacements(ndof, 1e-3);
+            let gradients = e.nodal_gradients(&coords, &d).unwrap();
+            let mut f = vec![0.0; ndof];
+            for (w, g) in &gradients.points {
+                let mut h = [[0.0; 3]; 3];
+                for (a, ga) in g.iter().enumerate() {
+                    for (k, hk) in h.iter_mut().enumerate() {
+                        for (c, hkc) in hk.iter_mut().enumerate() {
+                            *hkc += u[3 * a + k] * ga[c];
+                        }
+                    }
+                }
+                let strain = [
+                    h[0][0],
+                    h[1][1],
+                    h[2][2],
+                    h[0][1] + h[1][0],
+                    h[1][2] + h[2][1],
+                    h[2][0] + h[0][2],
+                ];
+                let s: Vec<f64> = (0..6).map(|r| dot6(&d[r], &strain)).collect();
+                let sm = [[s[0], s[3], s[5]], [s[3], s[1], s[4]], [s[5], s[4], s[2]]];
+                for (a, ga) in g.iter().enumerate() {
+                    for k in 0..3 {
+                        f[3 * a + k] += w * (0..3).map(|c| sm[k][c] * ga[c]).sum::<f64>();
+                    }
+                }
+            }
+            if let Some(epsilon) = gradients.hourglass {
+                let g = &gradients.points[0].1;
+                for h in &SolidElement::HOURGLASS_BASE {
+                    let hz: f64 = (0..8).map(|a| h[a] * coords[a][2]).sum();
+                    let gamma: Vec<f64> = (0..8).map(|a| h[a] - hz * g[a][2]).collect();
+                    for k in 0..3 {
+                        let q: f64 = (0..8).map(|a| gamma[a] * u[3 * a + k]).sum();
+                        for a in 0..8 {
+                            f[3 * a + k] += epsilon * gamma[a] * q;
+                        }
+                    }
+                }
+            }
+            let scale = f.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            for a in 0..ndof {
+                let ku: f64 = (0..ndof).map(|c| k[a * ndof + c] * u[c]).sum();
+                assert!(
+                    (ku - f[a]).abs() < 1e-10 * scale,
+                    "{kind}: {ku} vs {}",
+                    f[a]
+                );
+            }
+        }
+        let (e, coords) = distorted(ElementType::C3D8I);
+        assert!(e.nodal_gradients(&coords, &d).is_none());
     }
 
     #[test]

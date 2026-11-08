@@ -1276,8 +1276,9 @@ fn run_with_gpu(dir: &Path, job: &str, input: &str, mode: &str) -> (String, Stri
 }
 
 /// A bar of `kind` elements, moving at the start, held at one end and pulled at the other
-/// by a growing load: the same on the graphics card as on the processor.
-fn gpu_matches_processor(kind: &str, job: &str, pulse: bool) {
+/// by a growing load: the same on the graphics card as on the processor. `how` is in the
+/// message that names the card: how it forms the forces.
+fn gpu_matches_processor(kind: &str, job: &str, pulse: bool, how: &str) {
     let (length, side, cells) = (0.1, 0.01, 20);
     let c = (E / RHO).sqrt();
     let period = 3.0 * length / c;
@@ -1312,6 +1313,7 @@ fn gpu_matches_processor(kind: &str, job: &str, pulse: bool) {
         eprintln!("no graphics card with double precision: {log}");
         return;
     }
+    assert!(log.contains(how), "{kind}: not by {how}:\n{log}");
     for heading in [
         "displacements",
         "velocities",
@@ -1341,17 +1343,23 @@ fn gpu_matches_processor(kind: &str, job: &str, pulse: bool) {
 
 #[test]
 fn time_steps_on_the_graphics_card_match_the_processor() {
-    gpu_matches_processor("C3D8", "gpu-c3d8", false);
+    gpu_matches_processor("C3D8", "gpu-c3d8", false, "element forces");
 }
 
 #[test]
 fn a_load_pulse_on_the_graphics_card_matches_the_processor() {
-    gpu_matches_processor("C3D8", "gpu-pulse", true);
+    gpu_matches_processor("C3D8", "gpu-pulse", true, "element forces");
 }
 
 #[test]
 fn time_steps_of_reduced_elements_on_the_graphics_card_match_the_processor() {
-    gpu_matches_processor("C3D8R", "gpu-c3d8r", false);
+    gpu_matches_processor("C3D8R", "gpu-c3d8r", false, "element forces");
+}
+
+/// The incompatible modes have no element kernel yet: the matrices.
+#[test]
+fn time_steps_of_incompatible_modes_on_the_graphics_card_match_the_processor() {
+    gpu_matches_processor("C3D8I", "gpu-c3d8i", false, "motion within a frame");
 }
 
 /// A free S8R plate (100 × 100 mm, 1 mm) starting at 2 m/s normal to itself: the initial
