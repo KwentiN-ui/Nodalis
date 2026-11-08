@@ -650,6 +650,27 @@ impl ElementTable {
         self.entries.len()
     }
 
+    /// The displacements of [`Self::reported`] alone, without the element stiffness the
+    /// reported forces need.
+    pub fn reported_displacements(&self, u: &[f64]) -> Vec<f64> {
+        let mut u_out = u.to_vec();
+        if self.formulations.iter().all(|f| f.expansion().is_none()) {
+            return u_out;
+        }
+        for entry in &self.entries {
+            let Some(x) = self.formulation(entry).expansion() else {
+                continue;
+            };
+            let reported = x.reported_displacements(&self.gather(entry, u));
+            for (a, value) in reported.iter().enumerate() {
+                for k in 0..3 {
+                    u_out[entry.dofs[3 * a + k] as usize] = value[k];
+                }
+            }
+        }
+        u_out
+    }
+
     /// Displacements and nodal forces as they are reported (`.frd`, `.dat`): what the
     /// solver computes, except at the nodes of plane and axisymmetric elements, which report
     /// the thickness average of their expanded nodes' displacements and the sum of their

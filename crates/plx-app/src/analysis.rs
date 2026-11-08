@@ -34,6 +34,8 @@ pub struct Analysis {
     /// The item of the model each item of the solver's analysis came from, which leads the
     /// solver's diagnostics back to the tree.
     origins: plx_model::Origins,
+    /// The active steps, a line each, for the solver report.
+    step_lines: Vec<String>,
 }
 
 /// Why an analysis did not start, with the item of the model it is about when the lowering
@@ -96,6 +98,10 @@ pub struct RunView {
     pub seconds: f32,
     pub progress: Option<String>,
     pub lines: Vec<String>,
+    /// Where the time of the solver went, once it has finished.
+    pub profile: Option<plx_solve::JobProfile>,
+    /// The steps solved, a line each, for the solver report.
+    pub steps: Vec<String>,
     /// Lines of the solve copied so far, also those dropped from `lines` since.
     pub copied: usize,
     pub filter: String,
@@ -139,6 +145,14 @@ impl RunView {
                 event = MonitorEvent::OpenResults;
             }
             ui.separator();
+            let info = crate::solver_profile::ReportInfo {
+                name,
+                state: self.state,
+                seconds: self.seconds,
+                steps: &self.steps,
+            };
+            crate::solver_profile::buttons(ui, self.profile.as_ref(), &info);
+            ui.separator();
             ui.label("Filter:");
             ui.add(
                 egui::TextEdit::singleline(&mut self.filter)
@@ -162,19 +176,22 @@ impl RunView {
             }
             dropped_note(ui, self.copied - self.lines.len().min(self.copied));
         });
-        let area = egui::ScrollArea::both()
-            .id_salt("solve output")
-            .auto_shrink([false, false])
-            .stick_to_bottom(true);
-        if self.filter.is_empty() {
-            crate::virtual_table::lines(ui, area, &self.lines);
-        } else {
-            let needle = self.filter.to_lowercase();
-            let shown: Vec<&String> = (self.lines.iter())
-                .filter(|line| line.to_lowercase().contains(&needle))
-                .collect();
-            crate::virtual_table::lines(ui, area, &shown);
-        }
+        let (lines, filter) = (&self.lines, &self.filter);
+        crate::solver_profile::with_output(ui, self.profile.as_ref(), |ui| {
+            let area = egui::ScrollArea::both()
+                .id_salt("solve output")
+                .auto_shrink([false, false])
+                .stick_to_bottom(true);
+            if filter.is_empty() {
+                crate::virtual_table::lines(ui, area, lines);
+            } else {
+                let needle = filter.to_lowercase();
+                let shown: Vec<&String> = (lines.iter())
+                    .filter(|line| line.to_lowercase().contains(&needle))
+                    .collect();
+                crate::virtual_table::lines(ui, area, &shown);
+            }
+        });
         event
     }
 }
@@ -418,6 +435,10 @@ impl Analysis {
             initial.apply(&mut lowered.analysis)?;
         }
         let overlaps = std::mem::take(&mut lowered.resolved_overlaps);
+        let step_lines = (fe.steps.iter())
+            .filter(|s| s.active)
+            .map(crate::solver_profile::step_line)
+            .collect();
         let origins = lowered.origins.clone();
         let prepared = prepare(lowered, &fe, &continuation.inherited_steps);
         let copied = copy_result_files(&fe, work_dir);
@@ -458,12 +479,23 @@ impl Analysis {
             finished: None,
             status: JobStatus::Running,
             origins,
+            step_lines,
         })
     }
 
     /// The item of the model each item of the solver's analysis came from.
     pub fn origins(&self) -> &plx_model::Origins {
         &self.origins
+    }
+
+    /// Where the time of the solver went, once the run has finished with results.
+    pub fn profile(&self) -> Option<plx_solve::JobProfile> {
+        self.job.profile()
+    }
+
+    /// The active steps, a line each, for the solver report.
+    pub fn step_lines(&self) -> &[String] {
+        &self.step_lines
     }
 
     /// Adds a line of nodalis's own to the monitor output.
@@ -559,6 +591,7 @@ impl Analysis {
     pub fn monitor(&mut self, ui: &mut egui::Ui) -> MonitorEvent {
         let mut event = MonitorEvent::None;
         let status = self.status;
+        let profile = self.job.profile();
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(status == JobStatus::Running, egui::Button::new("Kill"))
@@ -574,6 +607,14 @@ impl Analysis {
             {
                 event = MonitorEvent::OpenResults;
             }
+            ui.separator();
+            let info = crate::solver_profile::ReportInfo {
+                name: &self.name,
+                state: Self::status_text(status),
+                seconds: self.seconds(),
+                steps: &self.step_lines,
+            };
+            crate::solver_profile::buttons(ui, profile.as_ref(), &info);
             ui.separator();
             ui.label("Filter:");
             ui.add(
@@ -603,21 +644,22 @@ impl Analysis {
             }
             dropped_note(ui, self.dropped);
         });
-        let area = egui::ScrollArea::both()
-            .id_salt("analysis output")
-            .auto_shrink([false, false])
-            .stick_to_bottom(true);
-        if self.filter.is_empty() {
-            crate::virtual_table::lines(ui, area, &self.output);
-        } else {
-            let needle = self.filter.to_lowercase();
-            let shown: Vec<&String> = self
-                .output
-                .iter()
-                .filter(|line| line.to_lowercase().contains(&needle))
-                .collect();
-            crate::virtual_table::lines(ui, area, &shown);
-        }
+        let (output, filter) = (&self.output, &self.filter);
+        crate::solver_profile::with_output(ui, profile.as_ref(), |ui| {
+            let area = egui::ScrollArea::both()
+                .id_salt("analysis output")
+                .auto_shrink([false, false])
+                .stick_to_bottom(true);
+            if filter.is_empty() {
+                crate::virtual_table::lines(ui, area, output);
+            } else {
+                let needle = filter.to_lowercase();
+                let shown: Vec<&String> = (output.iter())
+                    .filter(|line| line.to_lowercase().contains(&needle))
+                    .collect();
+                crate::virtual_table::lines(ui, area, &shown);
+            }
+        });
         event
     }
 

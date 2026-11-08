@@ -582,8 +582,8 @@ impl Procedure for ComplexFrequencyProcedure {
                 );
             }
             fields.retain(|f| f.name != "FORC" && f.name != "ENER");
-            let (re, _) = ctx.table.reported(ctx.model, &x_re, &zero);
-            let (im, _) = ctx.table.reported(ctx.model, &x_im, &zero);
+            let re = ctx.table.reported_displacements(&x_re);
+            let im = ctx.table.reported_displacements(&x_im);
             let variables = crate::fields::requested_variables(step);
             if variables.iter().any(|v| v == "PU") {
                 let at = fields

@@ -351,14 +351,19 @@ impl Hyperelastic {
         }
     }
 
-    fn isochoric_invariants(c: &Mat3, j: f64) -> (f64, f64) {
+    /// `Ī1 = J^(-2/3) I1` and `Ī2 = J^(-4/3) I2`, with `j23 = J^(-2/3)`.
+    fn isochoric_invariants_with(c: &Mat3, j23: f64) -> (f64, f64) {
         let i1 = c[0][0] + c[1][1] + c[2][2];
         let trace_c2: f64 = (0..3)
             .flat_map(|a| (0..3).map(move |b| (a, b)))
             .map(|(a, b)| c[a][b] * c[b][a])
             .sum();
         let i2 = 0.5 * (i1 * i1 - trace_c2);
-        (i1 * j.powf(-2.0 / 3.0), i2 * j.powf(-4.0 / 3.0))
+        (i1 * j23, i2 * (j23 * j23))
+    }
+
+    fn isochoric_invariants(c: &Mat3, j: f64) -> (f64, f64) {
+        Self::isochoric_invariants_with(c, j.powf(-2.0 / 3.0))
     }
 
     /// The second Piola-Kirchhoff stress for an engineering Green-Lagrange strain.
@@ -398,9 +403,12 @@ impl Hyperelastic {
                 s
             }
             invariant => {
-                let (i1, i2) = Self::isochoric_invariants(&c, j);
+                // One power per stress: the tangent's central differences evaluate the
+                // stress thirteen times at every integration point.
+                // J^(-2/3) = det(C)^(-1/3); the cube root costs a fraction of `powf`.
+                let j23 = 1.0 / det.cbrt();
+                let (i1, i2) = Self::isochoric_invariants_with(&c, j23);
                 let (_, w1, w2) = invariant.invariant_derivatives(i1, i2);
-                let j23 = j.powf(-2.0 / 3.0);
                 // S̄ = 2 [(W₁ + Ī1 W₂) 1 - W₂ C̄] with C̄ = J^(-2/3) C.
                 let mut s_bar = [[0.0; 3]; 3];
                 for a in 0..3 {
