@@ -169,6 +169,31 @@ pub trait MaterialLaw: Send + Sync {
     }
     /// The elastic matrix (for hourglass control and incompatible modes).
     fn elastic_matrix(&self) -> [[f64; 6]; 6];
+    /// The law as the kernels on the graphics card compute it, `None` where they have
+    /// none.
+    fn kernel_law(&self) -> Option<KernelLaw> {
+        None
+    }
+}
+
+/// A material law in the form the kernels on the graphics card take.
+#[derive(Clone, Debug, PartialEq)]
+pub enum KernelLaw {
+    /// `σ = D ε` with [`MaterialLaw::elastic_matrix`] (Saint Venant-Kirchhoff on the
+    /// Green-Lagrange strain under NLGEOM).
+    Elastic,
+    /// Small-strain J2 plasticity without creep ([`J2Plastic`]): the return mapping on the
+    /// state variables of [`plastic::STATE_SIZE`].
+    J2 {
+        shear: f64,
+        bulk: f64,
+        /// The yield stress against the equivalent plastic strain: piecewise linear,
+        /// constant beyond its ends.
+        isotropic: Vec<(f64, f64)>,
+        /// The stress of the back stress against the equivalent plastic strain (empty
+        /// without kinematic hardening).
+        kinematic: Vec<(f64, f64)>,
+    },
 }
 
 impl MaterialLaw for LinearElastic {
@@ -191,6 +216,10 @@ impl MaterialLaw for LinearElastic {
 
     fn elastic_matrix(&self) -> [[f64; 6]; 6] {
         self.matrix()
+    }
+
+    fn kernel_law(&self) -> Option<KernelLaw> {
+        Some(KernelLaw::Elastic)
     }
 }
 

@@ -2,8 +2,58 @@
 
 use plxs_gpu::{Double, Gpu, Options, Use, wgpu};
 
+use crate::elements::{Material, STATE_SIZE};
 use crate::sliced::{SLICE, Sliced};
 use crate::{Elements, ForceModel, MAX_CHUNK, Reached, Setup, Start};
+
+/// Values per material in the materials buffer of the element kernels (`MAT` in
+/// `elements.wgsl`): kind, elastic matrix, shear and bulk modulus, start and length of the
+/// isotropic and the kinematic curve (pairs behind the blocks).
+const MATERIAL_BLOCK: usize = 44;
+
+/// The state variables of one family of elements on the card, value by value
+/// (`[(point · STATE_SIZE + s) · count + e]`).
+struct History {
+    buffer: wgpu::Buffer,
+    count: usize,
+    points: usize,
+    /// Per element the index of its first state variable in the processor's vector.
+    state: Vec<u32>,
+}
+
+/// One material block: kind, elastic matrix, shear and bulk modulus, the two curves.
+type Block<'a> = (f32, [[f64; 6]; 6], f64, f64, [&'a [(f64, f64)]; 2]);
+
+/// The materials buffer: the blocks, then the curves.
+fn materials(materials: &[Material]) -> Vec<f32> {
+    let mut out = vec![0.0f32; MATERIAL_BLOCK * materials.len()];
+    for (i, m) in materials.iter().enumerate() {
+        let (kind, d, shear, bulk, curves): Block<'_> = match m {
+            Material::Elastic(d) => (0.0, *d, 0.0, 0.0, [&[], &[]]),
+            Material::J2 {
+                shear,
+                bulk,
+                isotropic,
+                kinematic,
+            } => (1.0, [[0.0; 6]; 6], *shear, *bulk, [isotropic, kinematic]),
+        };
+        let block = &mut out[i * MATERIAL_BLOCK..(i + 1) * MATERIAL_BLOCK];
+        block[0] = kind;
+        for (k, v) in d.iter().flatten().enumerate() {
+            block[1 + k] = *v as f32;
+        }
+        block[37] = shear as f32;
+        block[38] = bulk as f32;
+        for (j, curve) in curves.iter().enumerate() {
+            let start = out.len();
+            out.extend(curve.iter().flat_map(|&(x, y)| [x as f32, y as f32]));
+            let block = &mut out[i * MATERIAL_BLOCK..(i + 1) * MATERIAL_BLOCK];
+            block[39 + 2 * j] = start as f32;
+            block[40 + 2 * j] = curve.len() as f32;
+        }
+    }
+    out
+}
 
 const GROUP: usize = 256;
 /// Threads per work group of the element kernels.
@@ -63,6 +113,7 @@ pub(crate) struct Engine {
     energy: wgpu::Buffer,
     staging: wgpu::Buffer,
     passes: Vec<Pass>,
+    histories: Vec<History>,
     /// `PLXS_GPU_TRACE`: the time of every kind of dispatch on the card.
     trace: Option<Trace>,
 }
@@ -188,6 +239,7 @@ impl Engine {
         };
         use Use::*;
         let mut passes = Vec::new();
+        let mut histories = Vec::new();
         let layout = gpu.layout(
             "advance",
             &[
@@ -247,7 +299,7 @@ impl Engine {
                 });
             }
             ForceModel::Elements(elements) => {
-                Self::element_passes(&gpu, elements, n, &u, &v, &fs, &mut passes)?;
+                histories = Self::element_passes(&gpu, elements, n, &u, &v, &fs, &mut passes)?;
             }
         }
         let layout = gpu.layout(
@@ -316,6 +368,7 @@ impl Engine {
             energy,
             staging,
             passes,
+            histories,
             trace,
         })
     }
@@ -330,7 +383,8 @@ impl Engine {
         v: &wgpu::Buffer,
         fs: &wgpu::Buffer,
         passes: &mut Vec<Pass>,
-    ) -> Result<(), String> {
+    ) -> Result<Vec<History>, String> {
+        let mut histories = Vec::new();
         use Use::*;
         let too_large = || format!("the model is too large for the buffers of {}", gpu.name);
         // The positions of every DOF's element forces.
@@ -371,16 +425,14 @@ impl Engine {
         }
         let fint = gpu.storage("element forces", 4 * total as u64);
         let fvis = gpu.storage("element viscous forces", 4 * total as u64);
-        let materials: Vec<f32> = elements
-            .materials
-            .iter()
-            .flat_map(|d| d.iter().flatten().map(|&x| x as f32))
-            .collect();
-        let materials = gpu.init("materials", bytemuck::cast_slice(&materials));
+        let materials = gpu.init(
+            "materials",
+            bytemuck::cast_slice(&materials(&elements.materials)),
+        );
         let layout = gpu.layout(
             "elements",
             &[
-                Uniform, Read, Read, Read, Read, Read, Read, Read, Read, Write, Write,
+                Uniform, Read, Read, Read, Read, Read, Read, Read, Read, Write, Write, Write,
             ],
         );
         for (family, &base) in elements.families.iter().zip(&bases) {
@@ -392,6 +444,22 @@ impl Engine {
             if !gpu.fits(4 * gradients.len() as u64) {
                 return Err(too_large());
             }
+            let history = if family.history {
+                let bytes = (8 * STATE_SIZE * family.points * count) as u64;
+                if !gpu.fits(bytes) {
+                    return Err(too_large());
+                }
+                let buffer = gpu.storage("state variables", bytes);
+                histories.push(History {
+                    buffer: buffer.clone(),
+                    count,
+                    points: family.points,
+                    state: family.state.clone(),
+                });
+                buffer
+            } else {
+                gpu.storage("no state variables", 16)
+            };
             let source = include_str!("elements.wgsl")
                 .replace("__NN__", &family.nodes.to_string())
                 .replace("__NP__", &family.points.to_string())
@@ -437,6 +505,7 @@ impl Engine {
                         materials.as_entire_binding(),
                         fint.as_entire_binding(),
                         fvis.as_entire_binding(),
+                        history.as_entire_binding(),
                     ],
                 ),
                 step: false,
@@ -474,7 +543,7 @@ impl Engine {
             groups,
             kind: 2,
         });
-        Ok(())
+        Ok(histories)
     }
 
     pub(crate) fn load(&mut self, start: &Start<'_>) -> Result<(), String> {
@@ -515,7 +584,56 @@ impl Engine {
         energy.extend_from_slice(start.viscous);
         energy.resize(6 * n, 0.0);
         q.write_buffer(&self.energy, 0, bytemuck::cast_slice(&energy));
+        for h in &self.histories {
+            let mut values = vec![0.0_f64; STATE_SIZE * h.points * h.count];
+            for (e, &first) in h.state.iter().enumerate() {
+                if first == u32::MAX {
+                    continue;
+                }
+                for k in 0..STATE_SIZE * h.points {
+                    let at = first as usize + k;
+                    let value = start.material.get(at).ok_or_else(|| {
+                        format!("{} state variables, wanted {at}", start.material.len())
+                    })?;
+                    values[k * h.count + e] = *value;
+                }
+            }
+            self.gpu.write(&h.buffer, 0, bytemuck::cast_slice(&values));
+        }
         Ok(())
+    }
+
+    /// Writes the state variables on the card into `material`.
+    pub(crate) fn read_state(&mut self, material: &mut [f64]) -> Result<(), String> {
+        for h in &self.histories {
+            let bytes = (8 * STATE_SIZE * h.points * h.count) as u64;
+            let staging = self.gpu.staging("state variables", bytes);
+            let mut encoder =
+                self.gpu
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("read state"),
+                    });
+            encoder.copy_buffer_to_buffer(&h.buffer, 0, &staging, 0, bytes);
+            self.gpu.queue.submit([encoder.finish()]);
+            let values: Vec<f64> = self
+                .gpu
+                .map(&staging, |b| bytemuck::cast_slice::<u8, f64>(b).to_vec())?;
+            for (e, &first) in h.state.iter().enumerate() {
+                if first == u32::MAX {
+                    continue;
+                }
+                for k in 0..STATE_SIZE * h.points {
+                    if let Some(slot) = material.get_mut(first as usize + k) {
+                        *slot = values[k * h.count + e];
+                    }
+                }
+            }
+        }
+        match self.gpu.take_error() {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     pub(crate) fn run(

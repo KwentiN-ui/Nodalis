@@ -148,9 +148,9 @@ What is different from implicit integration:
 
 ==== On the graphics card <dynamic-gpu>
 
-The time steps of an elastic model (no contact, elastic materials, no prescribed motion
-that changes during the step, supports without equations or local systems) run on a
-discrete graphics card from 30 000 DOFs, when the setting
+The time steps of a model without contact (no prescribed motion that changes during the
+step, supports without equations or local systems) run on a discrete graphics card from
+30 000 DOFs, when the setting
 #ui("Graphics card") > #ui("Use for the solver") is on (@settings). Each time step then
 computes the forces element by element, one thread of the card per element, sums them per
 node, and does a few vector updates, many times faster than the processor. No stiffness
@@ -161,7 +161,10 @@ instead; under large deformations (NLGEOM) such a model stays on the processor. 
 element kernels, large deformations run on the card too: Green-Lagrange strain, Saint
 Venant-Kirchhoff stress, and the bulk and hourglass viscosity in the deformed shape, as on
 the processor. Every 100 time steps the card stops for the processor to check the stable
-time step of the deformed elements.
+time step of the deformed elements. Materials: elastic ones, and J2 plasticity (`*PLASTIC`,
+isotropic or kinematic hardening) under small strains, whose state variables the card keeps
+in double precision. Plasticity under NLGEOM, creep and hyperelastic materials keep the time
+steps on the processor for now.
 
 Most cards compute double precision far slower than single precision (a sixty-fourth on an
 RTX 4070), and Metal on macOS has none. The displacements, velocities, accelerations, loads
