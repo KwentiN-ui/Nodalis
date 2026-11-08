@@ -31,14 +31,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 use rayon::prelude::*;
 use wgpu::util::DeviceExt;
 
+pub use plxs_gpu::{Detection, detect};
+use plxs_gpu::{Double, Gpu, Options, block_on, wgpu};
+
 use crate::amg::GpuMode;
 use crate::bsr::{Bsr, Scalar};
 
 /// Automatic mode: systems of at least this many unknowns go to the card.
 pub const GPU_FROM: usize = 100_000;
 /// Block rows per slice of the sliced storage (`SLICE` in the shaders).
-/// Percent of the card's memory budget the solver's buffers may take.
-const MEMORY_SHARE_PERCENT: u8 = 60;
 const SLICE: usize = 32;
 /// Block rows per window sorted by length.
 const WINDOW: usize = 256;
@@ -47,23 +48,26 @@ const DENSE_COARSE_MAX: usize = 4096;
 const PRODUCT_GROUP: usize = 64;
 const VECTOR_GROUP: usize = 256;
 
-/// The device, its pipelines, and errors the driver reported outside of error scopes.
+/// The device and its pipelines.
 struct Context {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    name: String,
-    limits: wgpu::Limits,
+    gpu: Gpu,
     product_module: wgpu::ShaderModule,
     product_layout: wgpu::BindGroupLayout,
     product_pipeline_layout: wgpu::PipelineLayout,
     products: Mutex<HashMap<(usize, usize), Arc<wgpu::ComputePipeline>>>,
     vector_layout: wgpu::BindGroupLayout,
     vector: Arc<wgpu::ComputePipeline>,
-    /// Whether the card computes in double precision (the conjugate gradients run on
-    /// it then), and their pipelines, built at the first use.
-    f64: bool,
+    /// The pipelines of the conjugate gradients, built at the first use when the card
+    /// computes in double precision.
     cg: OnceLock<Result<CgPipelines, String>>,
-    error: Arc<Mutex<Option<String>>>,
+}
+
+impl std::ops::Deref for Context {
+    type Target = Gpu;
+
+    fn deref(&self) -> &Gpu {
+        &self.gpu
+    }
 }
 
 /// The pipelines of the conjugate gradients on the card (auto layouts).
@@ -89,121 +93,14 @@ fn context(any: bool) -> Result<&'static Context, String> {
         .map_err(Clone::clone)
 }
 
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    pollster::block_on(future)
-}
-
-fn describe(info: &wgpu::AdapterInfo) -> String {
-    let kind = match info.device_type {
-        wgpu::DeviceType::DiscreteGpu => "discrete",
-        wgpu::DeviceType::IntegratedGpu => "integrated",
-        wgpu::DeviceType::VirtualGpu => "virtual",
-        wgpu::DeviceType::Cpu => "software",
-        wgpu::DeviceType::Other => "other",
-    };
-    format!("{} ({kind})", info.name)
-}
-
-/// What the solver finds for the graphics card, without opening it: for the settings.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Detection {
-    /// Every adapter, with its kind, e.g. "NVIDIA GeForce RTX 4070 (discrete)".
-    pub adapters: Vec<String>,
-    /// The adapter the automatic mode would use: the first discrete one.
-    pub chosen: Option<String>,
-    /// Whether the chosen one computes in double precision, so that the conjugate
-    /// gradients run on it too (otherwise only the multigrid cycle).
-    pub double_precision: bool,
-    /// The graphics API the chosen one is driven by (Vulkan, DirectX 12, Metal).
-    pub backend: Option<String>,
-}
-
-/// Lists the graphics adapters and tells which one the automatic mode takes. Cheap
-/// against opening a device, but still a driver call: run it off the user interface.
-pub fn detect() -> Detection {
-    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
-    descriptor.backends = wgpu::Backends::PRIMARY;
-    let instance = wgpu::Instance::new(descriptor);
-    let adapters = block_on(instance.enumerate_adapters(wgpu::Backends::PRIMARY));
-    let mut detection = Detection {
-        adapters: adapters.iter().map(|a| describe(&a.get_info())).collect(),
-        ..Default::default()
-    };
-    // Vulkan and DirectX list the same card twice.
-    let mut seen = std::collections::HashSet::new();
-    detection.adapters.retain(|a| seen.insert(a.clone()));
-    if let Some(adapter) = adapters
-        .iter()
-        .find(|a| a.get_info().device_type == wgpu::DeviceType::DiscreteGpu)
-    {
-        let info = adapter.get_info();
-        detection.chosen = Some(describe(&info));
-        detection.double_precision = adapter.features().contains(wgpu::Features::SHADER_F64);
-        detection.backend = Some(info.backend.to_str().to_owned());
-    }
-    detection
-}
-
 fn open(any: bool) -> Result<Context, String> {
-    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
-    descriptor.backends = wgpu::Backends::PRIMARY;
-    // The solver's buffers stop at a share of the memory budget the driver reports, so
-    // that the user interface (which draws on the same card with a device of its own) and
-    // the desktop keep theirs: a card with 2 GB filled by a large model made the window's
-    // renderer fail and the desktop stutter. Uploads go in pieces of 16 MB, so the
-    // threshold also suits the small staging heap of cards without resizable BAR.
-    descriptor.memory_budget_thresholds = wgpu::MemoryBudgetThresholds {
-        for_resource_creation: Some(MEMORY_SHARE_PERCENT),
-        for_device_loss: None,
-    };
-    let instance = wgpu::Instance::new(descriptor);
-    let adapters = block_on(instance.enumerate_adapters(wgpu::Backends::PRIMARY));
-    let rank = |t: wgpu::DeviceType| match t {
-        wgpu::DeviceType::DiscreteGpu => 0,
-        wgpu::DeviceType::IntegratedGpu => 1,
-        wgpu::DeviceType::VirtualGpu => 2,
-        wgpu::DeviceType::Other => 3,
-        wgpu::DeviceType::Cpu => 4,
-    };
-    let found: Vec<String> = adapters.iter().map(|a| describe(&a.get_info())).collect();
-    let adapter = adapters
-        .into_iter()
-        .filter(|a| any || a.get_info().device_type == wgpu::DeviceType::DiscreteGpu)
-        .min_by_key(|a| rank(a.get_info().device_type))
-        .ok_or_else(|| {
-            if found.is_empty() {
-                "no graphics card found".to_owned()
-            } else {
-                format!("no discrete graphics card (found {})", found.join(", "))
-            }
-        })?;
-    let info = adapter.get_info();
-    let supported = adapter.limits();
-    let limits = wgpu::Limits {
-        max_storage_buffer_binding_size: supported.max_storage_buffer_binding_size,
-        max_buffer_size: supported.max_buffer_size,
-        ..Default::default()
-    };
-    let f64 = adapter.features().contains(wgpu::Features::SHADER_F64);
-    let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("plxs multigrid"),
-        required_features: if f64 {
-            wgpu::Features::SHADER_F64
-        } else {
-            wgpu::Features::empty()
-        },
-        required_limits: limits.clone(),
-        experimental_features: wgpu::ExperimentalFeatures::disabled(),
-        memory_hints: wgpu::MemoryHints::Performance,
-        trace: wgpu::Trace::Off,
-    }))
-    .map_err(|e| format!("{}: {e}", describe(&info)))?;
-    let error: Arc<Mutex<Option<String>>> = Arc::default();
-    let sink = error.clone();
-    device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
-        let mut slot = sink.lock().unwrap_or_else(|e| e.into_inner());
-        slot.get_or_insert_with(|| e.to_string());
-    }));
+    let gpu = Gpu::open(Options {
+        label: "plxs multigrid",
+        any_adapter: any,
+        double: Double::IfAvailable,
+        timestamps: false,
+    })?;
+    let device = &gpu.device;
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let storage = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
         binding,
@@ -268,22 +165,17 @@ fn open(any: bool) -> Result<Context, String> {
         cache: None,
     });
     if let Some(e) = block_on(scope.pop()) {
-        return Err(format!("{}: {e}", describe(&info)));
+        return Err(format!("{}: {e}", gpu.name));
     }
     Ok(Context {
-        device,
-        queue,
-        name: describe(&info),
-        limits,
         product_module,
         product_layout,
         product_pipeline_layout,
         products: Mutex::default(),
         vector_layout,
         vector: Arc::new(vector),
-        f64,
         cg: OnceLock::new(),
-        error,
+        gpu,
     })
 }
 
@@ -363,10 +255,6 @@ impl Context {
                 )
             })
             .clone()
-    }
-
-    fn take_error(&self) -> Option<String> {
-        self.error.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 }
 
@@ -1413,22 +1301,9 @@ fn coefficients(lambdas: &[f64], degree: usize, level: usize, c: Coefficient) ->
     }
 }
 
-/// Writes `bytes` to the start of `buffer` in pieces, each staged and submitted on its
-/// own, so that the staging memory stays small (a single write would stage the whole
-/// buffer at once, and the staging heap of a card can be much smaller than its memory).
+/// Writes `bytes` to the start of `buffer` in pieces (see [`Gpu::write`]).
 fn write(ctx: &Context, buffer: &wgpu::Buffer, bytes: &[u8]) {
-    const PIECE: usize = 16 << 20;
-    for (i, piece) in bytes.chunks(PIECE).enumerate() {
-        ctx.queue.write_buffer(buffer, (i * PIECE) as u64, piece);
-        if (i + 1) % 4 == 0 {
-            ctx.queue.submit([]);
-            let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
-        }
-    }
-    if bytes.len() > PIECE {
-        ctx.queue.submit([]);
-        let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
-    }
+    ctx.gpu.write(buffer, 0, bytes);
 }
 
 fn entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {

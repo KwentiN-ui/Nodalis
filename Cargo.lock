@@ -3620,6 +3620,14 @@ name = "plxs-explicit"
 version = "0.2.10"
 dependencies = [
  "bytemuck",
+ "plxs-gpu",
+]
+
+[[package]]
+name = "plxs-gpu"
+version = "0.2.10"
+dependencies = [
+ "bytemuck",
  "pollster 1.0.1",
  "wgpu",
 ]
@@ -3641,9 +3649,8 @@ dependencies = [
  "bytemuck",
  "faer",
  "plxs-core",
- "pollster 1.0.1",
+ "plxs-gpu",
  "rayon",
- "wgpu",
  "windows-sys 0.61.2",
 ]
 
