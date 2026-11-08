@@ -395,7 +395,8 @@ impl Engine {
             let source = include_str!("elements.wgsl")
                 .replace("__NN__", &family.nodes.to_string())
                 .replace("__NP__", &family.points.to_string())
-                .replace("__HG__", if family.hourglass { "true" } else { "false" });
+                .replace("__HG__", if family.hourglass { "true" } else { "false" })
+                .replace("__NL__", if elements.nlgeom { "true" } else { "false" });
             let groups = gpu.fold(count, ELEMENT_GROUP);
             let dims = gpu.uniform(
                 "element dims",
