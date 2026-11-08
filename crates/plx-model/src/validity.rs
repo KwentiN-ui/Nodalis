@@ -219,6 +219,13 @@ impl FeModel {
                                 (self.coordinate_system_or_global(&joint.system).is_none()).then(
                                     || format!("Coordinate System {} does not exist", joint.system),
                                 )
+                            })
+                            .or_else(|| {
+                                // The axis from faces that have none (an origin that cannot
+                                // be found is the selection's problem).
+                                (self.joint_origin(mesh, joint).is_ok())
+                                    .then(|| self.joint_frame(mesh, joint).err())
+                                    .flatten()
                             }),
                         _ => None,
                     }),
@@ -294,6 +301,12 @@ impl FeModel {
                     .or_else(|| self.missing_amplitude([&bc.amplitude]))
                     .or_else(|| self.missing_distribution(&bc.distribution))
                     .or_else(|| match &bc.kind {
+                        crate::BoundaryKind::Displacement(displacement) => {
+                            table_problem((0..6).map(|d| displacement.table(d)))
+                        }
+                        _ => None,
+                    })
+                    .or_else(|| match &bc.kind {
                         // An unknown coordinate system, or no node in the pinball region.
                         crate::BoundaryKind::Displacement(displacement) => {
                             match self.formulation(mesh, s, i) {
@@ -344,6 +357,7 @@ impl FeModel {
                             self.missing_amplitude([&load.amplitude, &load.factor_amplitude])
                         })
                         .or_else(|| self.missing_distribution(&load.distribution))
+                        .or_else(|| table_problem((0..3).map(|c| load.table(c))))
                         .or_else(|| match &load.kind {
                             // An unknown coordinate system, or no node in the pinball region.
                             LoadKind::RemoteForce(remote)
@@ -470,6 +484,13 @@ impl FeModel {
             .find(|name| self.amplitude(name).is_none())
             .map(|name| format!("Amplitude {name} does not exist"))
     }
+}
+
+/// Why the solver would reject the first of the tables, if it would.
+fn table_problem<'a>(
+    tables: impl Iterator<Item = Option<&'a crate::ValueTable>>,
+) -> Option<String> {
+    tables.flatten().find_map(crate::ValueTable::points_problem)
 }
 
 impl Section {
