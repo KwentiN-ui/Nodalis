@@ -132,10 +132,11 @@ pub fn with_output(
     ui.horizontal_top(|ui| {
         let height = ui.available_height();
         ui.allocate_ui_with_layout(
-            egui::vec2(340.0, height),
+            egui::vec2(410.0, height),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
-                egui::ScrollArea::vertical()
+                // Both ways: a long phase name or a large count scrolls instead of being cut.
+                egui::ScrollArea::both()
                     .id_salt("solver profile")
                     .auto_shrink([false, false])
                     .show(ui, |ui| table(ui, profile));
@@ -191,7 +192,7 @@ pub fn table(ui: &mut egui::Ui, profile: &JobProfile) {
 
 /// A bar as long as the share, with the percentage on it.
 fn share_bar(ui: &mut egui::Ui, share: f64, color: egui::Color32) {
-    let size = egui::vec2(90.0, ui.spacing().interact_size.y * 0.8);
+    let size = egui::vec2(80.0, ui.spacing().interact_size.y * 0.8);
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
