@@ -148,8 +148,7 @@ What is different from implicit integration:
 
 ==== On the graphics card <dynamic-gpu>
 
-The time steps of a model without contact and without prescribed motion that changes
-during the step run on a discrete graphics card from 30 000 DOFs, when the setting
+The time steps of a model without contact run on a discrete graphics card from 30 000 DOFs, when the setting
 #ui("Graphics card") > #ui("Use for the solver") is on (@settings). Each time step then
 computes the forces element by element, one thread of the card per element, sums them per
 node, and does a few vector updates, many times faster than the processor. No stiffness
@@ -180,8 +179,10 @@ reports checks it: on test models the card agrees with the processor to 1e-4 of 
 value. The reaction forces of thin shells are small differences of the large forces
 across the thickness; there the card's rounding shows at about a percent of the largest
 reaction. The last time step of every frame, which computes the stresses of the frame, runs on
-the processor. Between the corners of their amplitudes, loads follow them linearly over at
-most 256 time steps; the corners themselves are kept.
+the processor. Between the corners of their amplitudes, loads and prescribed displacements
+follow them linearly over at most 256 time steps; the corners themselves are kept. The work
+of prescribed displacements (from the reactions at their DOFs) counts as external work on
+the card as on the processor.
 
 The solver log names the card ("explicit: time steps on ..."). A card without double
 precision, a model too large for its memory or any error leaves the time steps on the

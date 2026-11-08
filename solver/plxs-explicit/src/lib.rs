@@ -54,17 +54,24 @@ pub struct Setup<'a> {
     pub reduction: &'a Reduction,
     /// `α` of the damping force `α m v`.
     pub alpha: f64,
+    /// Whether the prescribed displacements change: the card then also adds up the work
+    /// of their reactions.
+    pub prescribed_motion: bool,
 }
 
 /// The state at the start of a run of steps: the reduced displacements, half-step
-/// velocities and accelerations, the prescribed displacements `g` (constant over the run),
-/// the displacements and velocities of the DOFs (`T q + g`, `T q̇`), and the internal,
-/// viscous (with damping) and external forces at it.
+/// velocities and accelerations, the prescribed displacements `g` and their rate over the
+/// last step (over the first step when there was none, so that the first step sees no
+/// prescribed acceleration), the displacements and velocities of the DOFs (`T q + g`,
+/// `T q̇ + ġ`), the internal, viscous (with damping) and external forces at it, and the
+/// reactions of the prescribed DOFs (empty: zero) for the work of the prescribed motion.
 pub struct Start<'a> {
     pub q: &'a [f64],
     pub qdot: &'a [f64],
     pub a: &'a [f64],
     pub prescribed: &'a [f64],
+    pub prescribed_rate: &'a [f64],
+    pub reactions: &'a [f64],
     pub u: &'a [f64],
     pub v: &'a [f64],
     pub internal: &'a [f64],
@@ -86,8 +93,13 @@ pub struct Reached {
     pub u: Vec<f64>,
     pub v: Vec<f64>,
     pub internal_work: f64,
+    /// With the work of the prescribed displacements.
     pub external_work: f64,
     pub dissipation: f64,
+    /// The rate of the prescribed displacements over the last step.
+    pub prescribed_rate: Vec<f64>,
+    /// The reactions of the last step (empty without prescribed motion).
+    pub reactions: Vec<f64>,
 }
 
 /// The explicit time steps of one step on the graphics card.
@@ -138,19 +150,24 @@ impl Engine {
     }
 
     /// Queues the time steps `steps` (`(h, c)`: the step and the factor of the velocity
-    /// update, `½ (h_before + h)`), at most [`MAX_CHUNK`], with the loads going linearly
-    /// from `from` to `to` over them.
-    pub fn run(&mut self, steps: &[(f64, f64)], from: &[f64], to: &[f64]) -> Result<(), String> {
+    /// update, `½ (h_before + h)`), at most [`MAX_CHUNK`], with the loads and the
+    /// prescribed displacements going linearly from the first to the second over them.
+    pub fn run(
+        &mut self,
+        steps: &[(f64, f64)],
+        loads: [&[f64]; 2],
+        prescribed: [&[f64]; 2],
+    ) -> Result<(), String> {
         if steps.len() > MAX_CHUNK {
             return Err(format!("at most {MAX_CHUNK} time steps per run"));
         }
         #[cfg(feature = "gpu")]
         {
-            self.inner.run(steps, from, to)
+            self.inner.run(steps, loads, prescribed)
         }
         #[cfg(not(feature = "gpu"))]
         {
-            let _ = (steps, from, to);
+            let _ = (steps, loads, prescribed);
             Err("built without graphics card support".to_owned())
         }
     }

@@ -1,6 +1,6 @@
 // The forces at the new time in double precision (the element forces, the loads
 // interpolated over the chunk, the mass-proportional damping), the work of the step per
-// DOF (trapezoidal rule) and the residual `p − f_int − f_v`, which `sparse.wgsl` reduces
+// DOF (trapezoidal rule) and the residual `p − f_int − f_v − M g̈`, which `sparse.wgsl` reduces
 // and turns into the reduced accelerations.
 
 struct Dims {
@@ -15,6 +15,9 @@ struct Step {
     c: f64,
     s: f64,
     alpha: f64,
+    // `s` of the step before (the prescribed displacements' start of this step).
+    s_before: f64,
+    pad: f64,
 }
 
 @group(0) @binding(0) var<uniform> dims: Dims;
@@ -30,6 +33,8 @@ struct Step {
 // The internal, external and viscous forces of the step before, then the work of the
 // internal, external and viscous forces so far.
 @group(0) @binding(8) var<storage, read_write> energy: array<f64>;
+// The prescribed motion (`expand.wgsl`): its acceleration at `3n`.
+@group(0) @binding(9) var<storage, read> g: array<f64>;
 
 @compute @workgroup_size(256)
 fn accelerate(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
@@ -49,5 +54,5 @@ fn accelerate(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_i
     energy[i] = f_int;
     energy[n + i] = p;
     energy[2u * n + i] = f_v;
-    residual[i] = p - f_int - f_v;
+    residual[i] = p - f_int - f_v - mass[i] * g[3u * n + i];
 }

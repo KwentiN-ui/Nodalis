@@ -108,6 +108,8 @@ struct StepParams {
     c: f64,
     s: f64,
     alpha: f64,
+    s_before: f64,
+    pad: f64,
 }
 
 /// The sizes the shaders read (`Dims`; the element kernels name the fields `count`,
@@ -148,7 +150,12 @@ pub(crate) struct Engine {
     q: wgpu::Buffer,
     qd: wgpu::Buffer,
     a: wgpu::Buffer,
+    /// The prescribed motion (`expand.wgsl`): g at the chunk's start and end, rate,
+    /// acceleration, increment.
     g: wgpu::Buffer,
+    /// The reactions of the last step and the work of the prescribed displacements, when
+    /// the setup has prescribed motion.
+    reaction: Option<wgpu::Buffer>,
     loads: wgpu::Buffer,
     energy: wgpu::Buffer,
     staging: wgpu::Buffer,
@@ -267,12 +274,15 @@ impl Engine {
         let a = gpu.storage("a", reduced);
         let rq = gpu.storage("reduced residual", reduced);
         let residual = gpu.storage("residual", f64s);
-        let g = gpu.storage("prescribed", f64s);
+        let g = gpu.storage("prescribed", 5 * f64s);
+        let reaction = setup
+            .prescribed_motion
+            .then(|| gpu.storage("reactions", 2 * f64s));
         let fs = gpu.storage("forces", 2 * f64s);
         let loads = gpu.storage("loads", 2 * f64s);
         let energy = gpu.storage("energy", 6 * f64s);
         let mass = gpu.init("mass", bytemuck::cast_slice(setup.mass));
-        let staging = gpu.staging("staging", 5 * f64s + 3 * reduced);
+        let staging = gpu.staging("staging", 8 * f64s + 3 * reduced);
         let stride = u64::from(gpu.limits.min_uniform_buffer_offset_alignment)
             .max(std::mem::size_of::<StepParams>() as u64);
         let params = gpu.buffer(&wgpu::BufferDescriptor {
@@ -342,7 +352,9 @@ impl Engine {
         });
         let layout = gpu.layout(
             "expand",
-            &[Uniform, Read, Read, Read, Read, Read, Write, Write, Write],
+            &[
+                Uniform, Dynamic, Read, Read, Write, Read, Read, Write, Write, Write,
+            ],
         );
         passes.push(Pass {
             pipeline: gpu.pipeline(include_str!("expand.wgsl"), "expand", &layout, &[]),
@@ -350,6 +362,7 @@ impl Engine {
                 &layout,
                 vec![
                     dims.as_entire_binding(),
+                    step_binding(),
                     q.as_entire_binding(),
                     qd.as_entire_binding(),
                     g.as_entire_binding(),
@@ -360,14 +373,16 @@ impl Engine {
                     du.as_entire_binding(),
                 ],
             ),
-            step: false,
+            step: true,
             groups,
             kind: 0,
         });
         let histories = Self::element_passes(&gpu, setup.elements, n, &u, &v, &fs, &mut passes)?;
         let layout = gpu.layout(
             "accelerate",
-            &[Uniform, Dynamic, Read, Write, Read, Read, Read, Read, Write],
+            &[
+                Uniform, Dynamic, Read, Write, Read, Read, Read, Read, Write, Read,
+            ],
         );
         passes.push(Pass {
             pipeline: gpu.pipeline(include_str!("accelerate.wgsl"), "accelerate", &layout, &[]),
@@ -383,6 +398,7 @@ impl Engine {
                     loads.as_entire_binding(),
                     fs.as_entire_binding(),
                     energy.as_entire_binding(),
+                    g.as_entire_binding(),
                 ],
             ),
             step: true,
@@ -407,6 +423,32 @@ impl Engine {
                 ),
                 step: false,
                 groups: reduced_groups,
+                kind: 3,
+            });
+        }
+        // The work of the prescribed displacements.
+        if let Some(reaction) = &reaction {
+            let layout = gpu.layout(
+                "react",
+                &[Uniform, Read, Read, Read, Read, Read, Read, Write],
+            );
+            passes.push(Pass {
+                pipeline: gpu.pipeline(include_str!("react.wgsl"), "react", &layout, &[]),
+                bind: gpu.bind(
+                    &layout,
+                    vec![
+                        dims.as_entire_binding(),
+                        a.as_entire_binding(),
+                        transform.0.as_entire_binding(),
+                        transform.1.as_entire_binding(),
+                        mass.as_entire_binding(),
+                        residual.as_entire_binding(),
+                        g.as_entire_binding(),
+                        reaction.as_entire_binding(),
+                    ],
+                ),
+                step: false,
+                groups,
                 kind: 3,
             });
         }
@@ -484,6 +526,7 @@ impl Engine {
             qd,
             a,
             g,
+            reaction,
             loads,
             energy,
             staging,
@@ -740,6 +783,7 @@ impl Engine {
             start.u,
             start.v,
             start.prescribed,
+            start.prescribed_rate,
             start.internal,
             start.viscous,
             start.loads,
@@ -756,11 +800,25 @@ impl Engine {
         let q = &self.gpu.queue;
         q.write_buffer(&self.u, 0, bytemuck::cast_slice(start.u));
         q.write_buffer(&self.v, 0, bytemuck::cast_slice(start.v));
-        q.write_buffer(&self.g, 0, bytemuck::cast_slice(start.prescribed));
+        let bytes = 8 * n as u64;
+        // g at the start (also as the end, until a run gives its own), its rate; no
+        // acceleration and increment yet.
+        let mut g = Vec::with_capacity(5 * n);
+        g.extend_from_slice(start.prescribed);
+        g.extend_from_slice(start.prescribed);
+        g.extend_from_slice(start.prescribed_rate);
+        g.resize(5 * n, 0.0);
+        self.gpu.write(&self.g, 0, bytemuck::cast_slice(&g));
+        if let Some(reaction) = &self.reaction {
+            let mut values = vec![0.0; 2 * n];
+            if start.reactions.len() == n {
+                values[..n].copy_from_slice(start.reactions);
+            }
+            self.gpu.write(reaction, 0, bytemuck::cast_slice(&values));
+        }
         q.write_buffer(&self.q, 0, bytemuck::cast_slice(start.q));
         q.write_buffer(&self.qd, 0, bytemuck::cast_slice(start.qdot));
         q.write_buffer(&self.a, 0, bytemuck::cast_slice(start.a));
-        let bytes = 8 * n as u64;
         q.write_buffer(&self.loads, 0, bytemuck::cast_slice(start.loads));
         q.write_buffer(&self.loads, bytes, bytemuck::cast_slice(start.loads));
         let mut energy = Vec::with_capacity(6 * n);
@@ -824,26 +882,32 @@ impl Engine {
     pub(crate) fn run(
         &mut self,
         steps: &[(f64, f64)],
-        from: &[f64],
-        to: &[f64],
+        loads: [&[f64]; 2],
+        prescribed: [&[f64]; 2],
     ) -> Result<(), String> {
         if steps.is_empty() {
             return Ok(());
         }
         let n = self.n;
-        if from.len() != n || to.len() != n {
-            return Err("the loads have the wrong length".to_owned());
+        if loads.iter().chain(&prescribed).any(|x| x.len() != n) {
+            return Err(
+                "the loads or the prescribed displacements have the wrong length".to_owned(),
+            );
         }
         let total: f64 = steps.iter().map(|s| s.0).sum();
         let mut params = vec![0u8; self.stride as usize * steps.len()];
         let mut elapsed = 0.0;
+        let fraction = |t: f64| if total > 0.0 { t / total } else { 1.0 };
         for (k, &(h, c)) in steps.iter().enumerate() {
+            let s_before = if k == 0 { 0.0 } else { fraction(elapsed) };
             elapsed += h;
             let p = StepParams {
                 h,
                 c,
-                s: if total > 0.0 { elapsed / total } else { 1.0 },
+                s: fraction(elapsed),
                 alpha: self.alpha,
+                s_before,
+                pad: 0.0,
             };
             let at = k * self.stride as usize;
             params[at..at + std::mem::size_of::<StepParams>()]
@@ -852,8 +916,10 @@ impl Engine {
         let q = &self.gpu.queue;
         q.write_buffer(&self.params, 0, &params);
         let bytes = 8 * n as u64;
-        q.write_buffer(&self.loads, 0, bytemuck::cast_slice(from));
-        q.write_buffer(&self.loads, bytes, bytemuck::cast_slice(to));
+        q.write_buffer(&self.loads, 0, bytemuck::cast_slice(loads[0]));
+        q.write_buffer(&self.loads, bytes, bytemuck::cast_slice(loads[1]));
+        q.write_buffer(&self.g, 0, bytemuck::cast_slice(prescribed[0]));
+        q.write_buffer(&self.g, bytes, bytemuck::cast_slice(prescribed[1]));
         let started = std::time::Instant::now();
         let mut encoder = self
             .gpu
@@ -942,21 +1008,33 @@ impl Engine {
         encoder.copy_buffer_to_buffer(&self.u, 0, &self.staging, 0, bytes);
         encoder.copy_buffer_to_buffer(&self.v, 0, &self.staging, bytes, bytes);
         encoder.copy_buffer_to_buffer(&self.energy, 3 * bytes, &self.staging, 2 * bytes, 3 * bytes);
-        let at = 5 * bytes;
+        // The rate of the prescribed displacements; the reactions and their work.
+        encoder.copy_buffer_to_buffer(&self.g, 2 * bytes, &self.staging, 5 * bytes, bytes);
+        if let Some(reaction) = &self.reaction {
+            encoder.copy_buffer_to_buffer(reaction, 0, &self.staging, 6 * bytes, 2 * bytes);
+        }
+        let at = 8 * bytes;
         encoder.copy_buffer_to_buffer(&self.q, 0, &self.staging, at, reduced);
         encoder.copy_buffer_to_buffer(&self.qd, 0, &self.staging, at + reduced, reduced);
         encoder.copy_buffer_to_buffer(&self.a, 0, &self.staging, at + 2 * reduced, reduced);
         self.gpu.queue.submit([encoder.finish()]);
+        let prescribed = self.reaction.is_some();
         let reached = self.gpu.map(&self.staging, |bytes| {
             let data: &[f64] = bytemuck::cast_slice(bytes);
             let sum = |k: usize| data[k * n..(k + 1) * n].iter().sum::<f64>();
-            let tail = &data[5 * n..];
+            let tail = &data[8 * n..];
             Reached {
                 u: data[..n].to_vec(),
                 v: data[n..2 * n].to_vec(),
                 internal_work: sum(2),
-                external_work: sum(3),
+                external_work: sum(3) + if prescribed { sum(7) } else { 0.0 },
                 dissipation: sum(4),
+                prescribed_rate: data[5 * n..6 * n].to_vec(),
+                reactions: if prescribed {
+                    data[6 * n..7 * n].to_vec()
+                } else {
+                    Vec::new()
+                },
                 q: tail[..r].to_vec(),
                 qdot: tail[r..2 * r].to_vec(),
                 a: tail[2 * r..3 * r].to_vec(),

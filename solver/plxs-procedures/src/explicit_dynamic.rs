@@ -475,6 +475,27 @@ fn missing_density(model: &Model, element: u32) -> Error {
 /// How the external loads vary over the step: a sum of reference vectors times their
 /// amplitude (one per amplitude name), which costs a vector sum per time step instead of
 /// an assembly; or assembled in every step where that does not reproduce them.
+/// The step times inside the step at which one of the amplitudes `names` has a corner,
+/// ascending.
+fn amplitude_corners<'n>(
+    ctx: &ProcedureContext<'_>,
+    names: impl Iterator<Item = &'n String>,
+    start_total: f64,
+    period: f64,
+) -> Vec<f64> {
+    let mut corners: Vec<f64> = names
+        .filter_map(|name| ctx.model.amplitude(name))
+        .flat_map(|a| {
+            let offset = a.shift_x - if a.total_time { start_total } else { 0.0 };
+            a.points.iter().map(move |&(t, _)| t + offset)
+        })
+        .filter(|&t| t > 0.0 && t < period)
+        .collect();
+    corners.sort_by(f64::total_cmp);
+    corners.dedup();
+    corners
+}
+
 struct LoadHistory {
     groups: Vec<(Option<String>, Vec<f64>)>,
     per_step: bool,
@@ -496,18 +517,7 @@ impl LoadHistory {
                 names.push(name.clone());
             }
         }
-        let mut corners: Vec<f64> = names
-            .iter()
-            .flatten()
-            .filter_map(|name| ctx.model.amplitude(name))
-            .flat_map(|a| {
-                let offset = a.shift_x - if a.total_time { start_total } else { 0.0 };
-                a.points.iter().map(move |&(t, _)| t + offset)
-            })
-            .filter(|&t| t > 0.0 && t < period)
-            .collect();
-        corners.sort_by(f64::total_cmp);
-        corners.dedup();
+        let corners = amplitude_corners(ctx, names.iter().flatten(), start_total, period);
         let mut groups = Vec::new();
         for name in names {
             let mut only = step.clone();
@@ -1795,7 +1805,7 @@ impl Procedure for ExplicitDynamic {
         let requests = energy_requests(step);
 
         // The time steps on the graphics card.
-        let mut gpu = if contact.is_none() && !varying && beta_r == 0.0 && !finite_rotations {
+        let mut gpu = if contact.is_none() && beta_r == 0.0 && !finite_rotations {
             gpu_engine(
                 ctx,
                 step,
@@ -1804,10 +1814,23 @@ impl Procedure for ExplicitDynamic {
                 &reduced_mass,
                 &data.mass,
                 alpha_r,
+                varying,
                 progress,
             )
         } else {
             None
+        };
+        // The corners of the prescribed displacements' amplitudes: the card interpolates
+        // them linearly over a chunk as it does the loads.
+        let g_corners = if gpu.is_some() && varying {
+            amplitude_corners(
+                ctx,
+                step.boundaries.iter().filter_map(|b| b.amplitude.as_ref()),
+                start_total,
+                period,
+            )
+        } else {
+            Vec::new()
         };
         let frames = ((period / interval) - 1e-9).ceil().max(1.0) as u32;
         let event_frames = parameters.event_frames && has_contact;
@@ -1882,11 +1905,27 @@ impl Procedure for ExplicitDynamic {
                         GpuRun,
                         String,
                     > {
+                        // The rate of the prescribed displacements over the last step, or
+                        // over the first one when there was none.
+                        let rate: Vec<f64> = if !varying {
+                            vec![0.0; n]
+                        } else if h_prev > 0.0 {
+                            g_cur
+                                .iter()
+                                .zip(&g_prev)
+                                .map(|(c, p)| (c - p) / h_prev)
+                                .collect()
+                        } else {
+                            let next = g_at(ctx, &set, time + h).map_err(|e| e.to_string())?;
+                            next.iter().zip(&g_cur).map(|(x, c)| (x - c) / h).collect()
+                        };
                         engine.load(&plxs_explicit::Start {
                             q: &q,
                             qdot: &qdot,
                             a: &a_red,
                             prescribed: &g_cur,
+                            prescribed_rate: &rate,
+                            reactions: &reactions_prev,
                             u: &u,
                             v: &v_half,
                             internal: &forces.internal,
@@ -1895,6 +1934,7 @@ impl Procedure for ExplicitDynamic {
                             material: &material,
                         })?;
                         let mut from = p.clone();
+                        let mut g_from = g_cur.clone();
                         let mut done = 0;
                         while done < count - 1 {
                             // The card interpolates the loads linearly over a chunk: a chunk
@@ -1902,7 +1942,9 @@ impl Procedure for ExplicitDynamic {
                             // across a corner is a chunk of its own.
                             let mut chunk = (count - 1 - done).min(plxs_explicit::MAX_CHUNK);
                             let t_begin = time + done as f64 * h;
-                            if let Some(corner) = loads.next_corner(t_begin + 1e-9 * h) {
+                            let after = t_begin + 1e-9 * h;
+                            let next_g = g_corners.iter().copied().find(|&t| t > after);
+                            for corner in [loads.next_corner(after), next_g].into_iter().flatten() {
                                 let within = ((corner - t_begin) / h + 1e-9).floor().max(1.0);
                                 if within < chunk as f64 {
                                     chunk = within as usize;
@@ -1921,8 +1963,14 @@ impl Procedure for ExplicitDynamic {
                             let to = loads
                                 .at(ctx, step, t_end, start_total, period)
                                 .map_err(|e| e.to_string())?;
-                            engine.run(&steps, &from, &to)?;
+                            let g_to = if varying {
+                                g_at(ctx, &set, t_end).map_err(|e| e.to_string())?
+                            } else {
+                                g_from.clone()
+                            };
+                            engine.run(&steps, [&from, &to], [&g_from, &g_to])?;
                             from = to;
+                            g_from = g_to;
                             done += chunk;
                             if let Some(every) = check
                                 && (offset + done).is_multiple_of(every)
@@ -1947,6 +1995,7 @@ impl Procedure for ExplicitDynamic {
                                     reached,
                                     material: state_of(engine)?,
                                     loads: from,
+                                    prescribed: g_from,
                                     taken: done,
                                     checked: Some((dt, omega)),
                                 });
@@ -1957,6 +2006,7 @@ impl Procedure for ExplicitDynamic {
                             reached,
                             material: state_of(engine)?,
                             loads: from,
+                            prescribed: g_from,
                             taken: done,
                             checked: None,
                         })
@@ -1968,6 +2018,7 @@ impl Procedure for ExplicitDynamic {
                             reached,
                             material: state,
                             loads: p_reached,
+                            prescribed: g_reached,
                             taken,
                             checked,
                         }) => {
@@ -1993,6 +2044,15 @@ impl Procedure for ExplicitDynamic {
                             steps_done += taken;
                             frame_steps += taken;
                             p = p_reached;
+                            if varying {
+                                g_prev = g_reached
+                                    .iter()
+                                    .zip(&reached.prescribed_rate)
+                                    .map(|(g, r)| g - h * r)
+                                    .collect();
+                                reactions_prev = reached.reactions;
+                            }
+                            g_cur = g_reached;
                             ctx.profile.add(Phase::Solve, started);
                             let started = std::time::Instant::now();
                             forces = kernel.forces(
@@ -2401,6 +2461,8 @@ struct GpuRun {
     /// The material state, when elements have state variables.
     material: Option<Vec<f64>>,
     loads: Vec<f64>,
+    /// The prescribed displacements reached.
+    prescribed: Vec<f64>,
     taken: usize,
     checked: Option<(f64, Vec<f64>)>,
 }
@@ -2422,6 +2484,7 @@ fn gpu_engine(
     reduced_mass: &ReducedMass,
     mass: &[f64],
     alpha: f64,
+    prescribed_motion: bool,
     progress: &mut dyn Progress,
 ) -> Option<plxs_explicit::Engine> {
     use plxs_linalg::amg::GpuMode;
@@ -2447,6 +2510,7 @@ fn gpu_engine(
                 mass,
                 reduction: &reduction,
                 alpha,
+                prescribed_motion,
             },
             any,
         )

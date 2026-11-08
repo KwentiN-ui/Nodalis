@@ -105,15 +105,27 @@ fn swing(constrained: bool) {
     }
     let extra = Sparse::from_entries(r as usize, extra);
     let tt = transform.transpose(r as usize);
-    let prescribed: Vec<f64> = (0..n)
-        .map(|i| if i == held && constrained { 1e-4 } else { 0.0 })
-        .collect();
+    let h = 0.25 * 2.0 / (2.0 * (4.0e6_f64 * 2.0).sqrt());
+    // Constrained: the held DOF moves from 1e-4 at 0.02 m/s and stops after 300 steps,
+    // inside the second chunk.
+    let prescribed_at = |t: f64| -> Vec<f64> {
+        (0..n)
+            .map(|i| {
+                if i == held && constrained {
+                    1e-4 + 0.02 * t.min(300.0 * h)
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    };
     let alpha = 3.0;
     let setup = Setup {
         elements: &elements,
         mass: &mass,
         reduction: &reduction,
         alpha,
+        prescribed_motion: constrained,
     };
     let mut engine = match Engine::new(&setup, true) {
         Ok(e) => e,
@@ -128,7 +140,6 @@ fn swing(constrained: bool) {
         p[0] = 1.0e3 * t / 1e-3;
         p
     };
-    let h = 0.25 * 2.0 / (2.0 * (4.0e6_f64 * 2.0).sqrt());
     let steps = 3 * MAX_CHUNK + 17;
     // Reference: central differences in double precision.
     let expand = |q: &[f64], g: &[f64]| -> Vec<f64> {
@@ -138,8 +149,20 @@ fn swing(constrained: bool) {
     let zero = vec![0.0; n];
     let mut q: Vec<f64> = vec![0.0; r as usize];
     let mut qdot: Vec<f64> = (0..r as usize).map(|j| 0.01 + 1e-5 * j as f64).collect();
-    let mut u = expand(&q, &prescribed);
-    let mut v = expand(&qdot, &zero);
+    // The prescribed motion as the card takes it: linear over each chunk.
+    let mut g = prescribed_at(0.0);
+    let first = MAX_CHUNK.min(steps);
+    let g_first = prescribed_at(first as f64 * h);
+    let mut rate: Vec<f64> = (0..n)
+        .map(|i| (g_first[i] - g[i]) / first as f64 / h)
+        .collect();
+    let rate0 = rate.clone();
+    let mut u = expand(&q, &g);
+    let mut v: Vec<f64> = expand(&qdot, &zero)
+        .iter()
+        .zip(&rate)
+        .map(|(a, b)| a + b)
+        .collect();
     let forces = |u: &[f64], v: &[f64]| {
         let (fi, mut fv) = elements.forces(u, v, &mut []);
         for i in 0..n {
@@ -147,19 +170,28 @@ fn swing(constrained: bool) {
         }
         (fi, fv)
     };
-    let accel = |p: &[f64], fi: &[f64], fv: &[f64]| -> Vec<f64> {
-        let residual: Vec<f64> = (0..n).map(|i| p[i] - fi[i] - fv[i]).collect();
-        reduction.inverse_mass.multiply(&tt.multiply(&residual))
+    // The reduced accelerations and the reactions `M T a − residual`.
+    let accel = |p: &[f64], fi: &[f64], fv: &[f64], ga: &[f64]| -> (Vec<f64>, Vec<f64>) {
+        let residual: Vec<f64> = (0..n)
+            .map(|i| p[i] - fi[i] - fv[i] - mass[i] * ga[i])
+            .collect();
+        let a = reduction.inverse_mass.multiply(&tt.multiply(&residual));
+        let ta = transform.multiply(&a);
+        let reactions = (0..n).map(|i| mass[i] * ta[i] - residual[i]).collect();
+        (a, reactions)
     };
     let (fi0, fv0) = forces(&u, &v);
     let p0 = load(0.0);
-    let a0 = accel(&p0, &fi0, &fv0);
+    let (a0, reactions0) = accel(&p0, &fi0, &fv0, &zero);
+    let mut reactions = reactions0.clone();
     engine
         .load(&Start {
             q: &q,
             qdot: &qdot,
             a: &a0,
-            prescribed: &prescribed,
+            prescribed: &g,
+            prescribed_rate: &rate0,
+            reactions: &reactions0,
             u: &u,
             v: &v,
             internal: &fi0,
@@ -180,7 +212,9 @@ fn swing(constrained: bool) {
             .collect();
         let from = load(t);
         let to = load(t + chunk as f64 * h);
-        engine.run(&list, &from, &to).unwrap();
+        let g_from = prescribed_at(t);
+        let g_to = prescribed_at(t + chunk as f64 * h);
+        engine.run(&list, [&from, &to], [&g_from, &g_to]).unwrap();
         for (j, &(h, cf)) in list.iter().enumerate() {
             for (qd, a) in qdot.iter_mut().zip(&a) {
                 *qd += cf * a;
@@ -188,11 +222,23 @@ fn swing(constrained: bool) {
             for (qi, qd) in q.iter_mut().zip(&qdot) {
                 *qi += h * qd;
             }
-            let u_new = expand(&q, &prescribed);
+            let s = (j + 1) as f64 / chunk as f64;
+            let g_new: Vec<f64> = (0..n)
+                .map(|i| g_from[i] + s * (g_to[i] - g_from[i]))
+                .collect();
+            let dg: Vec<f64> = (0..n).map(|i| g_new[i] - g[i]).collect();
+            let rate_new: Vec<f64> = dg.iter().map(|d| d / h).collect();
+            let g_acc: Vec<f64> = (0..n).map(|i| (rate_new[i] - rate[i]) / cf).collect();
+            g = g_new;
+            rate = rate_new;
+            let u_new = expand(&q, &g);
             let du: Vec<f64> = u_new.iter().zip(&u).map(|(a, b)| a - b).collect();
             u = u_new;
-            v = expand(&qdot, &zero);
-            let s = (j + 1) as f64 / chunk as f64;
+            v = expand(&qdot, &zero)
+                .iter()
+                .zip(&rate)
+                .map(|(a, b)| a + b)
+                .collect();
             let p_new: Vec<f64> = (0..n).map(|i| from[i] + s * (to[i] - from[i])).collect();
             let (fi_new, fv_new) = forces(&u, &v);
             for i in 0..n {
@@ -200,7 +246,14 @@ fn swing(constrained: bool) {
                 work[1] += du[i] * 0.5 * (p[i] + p_new[i]);
                 work[2] += du[i] * 0.5 * (fv[i] + fv_new[i]);
             }
-            a = accel(&p_new, &fi_new, &fv_new);
+            let (a_new, reactions_new) = accel(&p_new, &fi_new, &fv_new, &g_acc);
+            for i in 0..n {
+                if dg[i] != 0.0 {
+                    work[1] += dg[i] * 0.5 * (reactions[i] + reactions_new[i]);
+                }
+            }
+            a = a_new;
+            reactions = reactions_new;
             (fi, fv, p) = (fi_new, fv_new, p_new);
         }
         t += chunk as f64 * h;
@@ -242,7 +295,15 @@ fn swing(constrained: bool) {
             "work {got} instead of {want}"
         );
     }
-    assert_eq!(reached.u[held], prescribed[held]);
+    assert!(
+        (reached.u[held] - g[held]).abs() < 1e-15,
+        "{} {}",
+        reached.u[held],
+        g[held]
+    );
+    if constrained {
+        assert!((g[held] - 1e-4 - 0.02 * 300.0 * h).abs() < 1e-12);
+    }
     // The coupled masses act: the kinetic energy of the reduced velocities differs.
     if constrained {
         assert!(extra.multiply(&reached.qdot).iter().any(|x| *x != 0.0));

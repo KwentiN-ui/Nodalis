@@ -13,6 +13,9 @@ struct Step {
     c: f64,
     s: f64,
     alpha: f64,
+    // `s` of the step before (the prescribed displacements' start of this step).
+    s_before: f64,
+    pad: f64,
 }
 
 @group(0) @binding(0) var<uniform> dims: Dims;

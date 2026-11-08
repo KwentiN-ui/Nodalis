@@ -344,6 +344,7 @@ fn swing_with(nlgeom: bool, speed: f64, plastic: bool, hyper: bool, dense: bool)
         mass: &mass,
         reduction: &reduction,
         alpha,
+        prescribed_motion: false,
     };
     let mut engine = match Engine::new(&setup, true) {
         Ok(e) => e,
@@ -401,6 +402,8 @@ fn swing_with(nlgeom: bool, speed: f64, plastic: bool, hyper: bool, dense: bool)
             qdot: &pick(&v),
             a: &pick(&a0),
             prescribed: &vec![0.0; n],
+            prescribed_rate: &vec![0.0; n],
+            reactions: &[],
             u: &u,
             v: &v,
             internal: &fi0,
@@ -421,7 +424,8 @@ fn swing_with(nlgeom: bool, speed: f64, plastic: bool, hyper: bool, dense: bool)
             .collect();
         let from = load(t);
         let to = load(t + chunk as f64 * h);
-        engine.run(&list, &from, &to).unwrap();
+        let zero = vec![0.0; n];
+        engine.run(&list, [&from, &to], [&zero, &zero]).unwrap();
         for (j, &(h, cf)) in list.iter().enumerate() {
             let mut du = vec![0.0; n];
             for i in 0..n {

@@ -1900,3 +1900,70 @@ fn scaled_shell_inertia_lifts_the_time_step_and_keeps_the_bending() {
         "swings at {f1} Hz scaled, {f0} Hz with the full inertia"
     );
 }
+
+/// A bar held at one end and pulled at the other by a prescribed displacement that rises,
+/// holds and falls back (an amplitude with corners inside the frames): the card steps the
+/// prescribed motion and adds up the work of its reactions as the processor does.
+#[test]
+fn prescribed_motion_on_the_graphics_card_matches_the_processor() {
+    let (length, side, cells) = (0.1, 0.01, 20);
+    let c = (E / RHO).sqrt();
+    let (period, frames) = (3.0 * length / c, 30);
+    let mut input = bar_mesh(cells, 2, 2, [length, side, side], "C3D8");
+    writeln!(
+        input,
+        "*Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
+         *Solid section, Elset=EALL, Material=STEEL\n\
+         *Amplitude, Name=PULL\n0, 0, {}, 1, {}, 1, {}, 0.2\n\
+         *Step\n*Dynamic, Integration=Explicit\n{}, {period}\n\
+         *Boundary\nEND0, 1, 3, 0\n\
+         *Boundary, Amplitude=PULL\nEND1, 1, 1, 1e-5\n\
+         *Node print, Nset=END0, Totals=Only\nRF\n\
+         *Node print, Nset=END1, Totals=Only\nRF\n\
+         *Node print, Nset=END1\nU, V\n\
+         *El print, Elset=EALL, Totals=Only\nALLIE, ALLKE, ALLWK\n*End step",
+        0.213 * period,
+        0.457 * period,
+        0.811 * period,
+        period / frames as f64
+    )
+    .unwrap();
+    let dir = work_dir("gpu-prescribed");
+    let (cpu, _) = run_with_gpu(&dir, "cpu", &input, "off");
+    let (gpu, log) = run_with_gpu(&dir, "gpu", &input, "on");
+    clean(&dir);
+    if log.lines().any(|l| {
+        l.contains("explicit: time steps on the processor")
+            && (l.contains("no graphics card") || l.contains("double precision"))
+    }) {
+        eprintln!("no graphics card with double precision: {log}");
+        return;
+    }
+    assert!(log.contains("element forces"), "not on the card:\n{log}");
+    assert!(!log.contains("card failed"), "{log}");
+    for heading in [
+        "displacements",
+        "velocities",
+        "total force",
+        "total model internal energy",
+        "total model kinetic energy",
+        "total model external work",
+    ] {
+        let (a, b) = (blocks(&cpu, heading), blocks(&gpu, heading));
+        assert_eq!(a.len() % frames, 0, "{heading}\n{log}");
+        assert_eq!(a.len(), b.len(), "{heading}");
+        let largest = a
+            .iter()
+            .flat_map(|(_, r)| r.iter().flatten())
+            .fold(0.0_f64, |m, x| m.max(x.abs()));
+        assert!(largest > 0.0, "{heading}");
+        for ((t, ra), (_, rb)) in a.iter().zip(&b) {
+            for (x, y) in ra.iter().flatten().zip(rb.iter().flatten()) {
+                assert!(
+                    (x - y).abs() <= 1e-4 * largest,
+                    "{heading} at {t} s: {x} on the processor, {y} on the card"
+                );
+            }
+        }
+    }
+}
