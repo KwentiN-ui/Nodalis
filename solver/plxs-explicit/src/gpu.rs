@@ -4,7 +4,11 @@ use std::sync::{Arc, Mutex};
 
 use wgpu::util::DeviceExt;
 
-use crate::{Csr, MAX_CHUNK, Reached, Setup, Start};
+use crate::sliced::{SLICE, Sliced};
+
+// A workgroup of the product holds whole slices.
+const _: () = assert!(GROUP.is_multiple_of(SLICE));
+use crate::{MAX_CHUNK, Reached, Setup, Start};
 
 const GROUP: usize = 256;
 
@@ -23,8 +27,8 @@ struct StepParams {
 struct Dims {
     n: u32,
     groups_x: u32,
-    pad0: u32,
-    pad1: u32,
+    positions: u32,
+    pad: u32,
 }
 
 pub(crate) struct Engine {
@@ -34,6 +38,7 @@ pub(crate) struct Engine {
     n: usize,
     alpha: f64,
     groups: (u32, u32),
+    product_groups: (u32, u32),
     stride: u64,
     params: wgpu::Buffer,
     u: wgpu::Buffer,
@@ -44,8 +49,7 @@ pub(crate) struct Engine {
     energy: wgpu::Buffer,
     staging: wgpu::Buffer,
     advance: (wgpu::ComputePipeline, wgpu::BindGroup),
-    stiffness: (wgpu::ComputePipeline, wgpu::BindGroup),
-    viscous: (wgpu::ComputePipeline, wgpu::BindGroup),
+    product: (wgpu::ComputePipeline, wgpu::BindGroup),
     accelerate: (wgpu::ComputePipeline, wgpu::BindGroup),
     error: Arc<Mutex<Option<String>>>,
 }
@@ -161,10 +165,8 @@ impl Engine {
             max_buffer_size: supported.max_buffer_size,
             ..Default::default()
         };
-        let largest = 8 * 6 * n as u64;
-        let largest = largest
-            .max(4 * setup.stiffness.val.len() as u64)
-            .max(4 * setup.viscous.val.len() as u64);
+        let sliced = Sliced::new(setup.stiffness, setup.viscous);
+        let largest = (8 * 6 * n as u64).max(8 * sliced.val.len() as u64);
         if largest > limits.max_storage_buffer_binding_size || largest > limits.max_buffer_size {
             return Err(format!("the model is too large for the buffers of {name}"));
         }
@@ -220,15 +222,12 @@ impl Engine {
         let loads = storage("loads", 3 * f64s);
         let energy = storage("energy", 6 * f64s);
         let im = init("inverse mass", bytemuck::cast_slice(setup.inverse_mass));
-        let matrix = |csr: &Csr, label: &str| {
-            (
-                init(label, bytemuck::cast_slice(&csr.ptr)),
-                init(label, bytemuck::cast_slice(&csr.col)),
-                init(label, bytemuck::cast_slice(&csr.val)),
-            )
-        };
-        let k = matrix(setup.stiffness, "stiffness");
-        let c = matrix(setup.viscous, "viscous");
+        let slice_start = init("slices", bytemuck::cast_slice(&sliced.start));
+        let slice_rows = init("rows", bytemuck::cast_slice(&sliced.rows));
+        let slice_col = init("columns", bytemuck::cast_slice(&sliced.col));
+        let slice_val = init("values", bytemuck::cast_slice(&sliced.val));
+        let positions = sliced.rows.len();
+        drop(sliced);
         let staging = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("staging"),
             size: 6 * f64s,
@@ -243,20 +242,28 @@ impl Engine {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let groups = n.div_ceil(GROUP);
         let max_groups = limits.max_compute_workgroups_per_dimension.max(1) as usize;
-        let groups_x = groups.min(max_groups);
-        let groups = (groups_x as u32, groups.div_ceil(groups_x) as u32);
-        let dims = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("dims"),
-            contents: bytemuck::bytes_of(&Dims {
-                n: n as u32,
-                groups_x: groups.0,
-                pad0: 0,
-                pad1: 0,
-            }),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        let fold = |threads: usize| {
+            let groups = threads.div_ceil(GROUP);
+            let groups_x = groups.min(max_groups);
+            (groups_x as u32, groups.div_ceil(groups_x) as u32)
+        };
+        let groups = fold(n);
+        let product_groups = fold(positions);
+        let dims_of = |groups: (u32, u32)| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("dims"),
+                contents: bytemuck::bytes_of(&Dims {
+                    n: n as u32,
+                    groups_x: groups.0,
+                    positions: positions as u32,
+                    pad: 0,
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            })
+        };
+        let dims = dims_of(groups);
+        let product_dims = dims_of(product_groups);
         let step_binding = wgpu::BindingResource::Buffer(wgpu::BufferBinding {
             buffer: &params,
             offset: 0,
@@ -308,31 +315,28 @@ impl Engine {
         let product_layout = layout(
             &device,
             "product",
-            &[Uniform, Read, Write, Read, Read, Read],
+            &[Uniform, Read, Write, Read, Read, Read, Read],
         );
-        let product = |entry: &str, m: &(wgpu::Buffer, wgpu::Buffer, wgpu::Buffer)| {
-            (
-                pipeline(
-                    &device,
-                    include_str!("product.wgsl"),
-                    entry,
-                    &product_layout,
-                ),
-                bind(
-                    &product_layout,
-                    vec![
-                        dims.as_entire_binding(),
-                        dv.as_entire_binding(),
-                        fs.as_entire_binding(),
-                        m.0.as_entire_binding(),
-                        m.1.as_entire_binding(),
-                        m.2.as_entire_binding(),
-                    ],
-                ),
-            )
-        };
-        let stiffness = product("stiffness", &k);
-        let viscous = product("viscous", &c);
+        let product = (
+            pipeline(
+                &device,
+                include_str!("product.wgsl"),
+                "product",
+                &product_layout,
+            ),
+            bind(
+                &product_layout,
+                vec![
+                    product_dims.as_entire_binding(),
+                    dv.as_entire_binding(),
+                    fs.as_entire_binding(),
+                    slice_start.as_entire_binding(),
+                    slice_rows.as_entire_binding(),
+                    slice_col.as_entire_binding(),
+                    slice_val.as_entire_binding(),
+                ],
+            ),
+        );
         let accelerate_layout = layout(
             &device,
             "accelerate",
@@ -370,6 +374,7 @@ impl Engine {
             n,
             alpha: setup.alpha,
             groups,
+            product_groups,
             stride,
             params,
             u,
@@ -380,8 +385,7 @@ impl Engine {
             energy,
             staging,
             advance,
-            stiffness,
-            viscous,
+            product,
             accelerate,
             error,
         })
@@ -471,11 +475,9 @@ impl Engine {
                 pass.set_pipeline(&self.advance.0);
                 pass.set_bind_group(0, &self.advance.1, &[offset]);
                 pass.dispatch_workgroups(self.groups.0, self.groups.1, 1);
-                for (pipeline, group) in [&self.stiffness, &self.viscous] {
-                    pass.set_pipeline(pipeline);
-                    pass.set_bind_group(0, group, &[]);
-                    pass.dispatch_workgroups(self.groups.0, self.groups.1, 1);
-                }
+                pass.set_pipeline(&self.product.0);
+                pass.set_bind_group(0, &self.product.1, &[]);
+                pass.dispatch_workgroups(self.product_groups.0, self.product_groups.1, 1);
                 pass.set_pipeline(&self.accelerate.0);
                 pass.set_bind_group(0, &self.accelerate.1, &[offset]);
                 pass.dispatch_workgroups(self.groups.0, self.groups.1, 1);

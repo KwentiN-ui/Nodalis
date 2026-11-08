@@ -162,7 +162,10 @@ precision, on the motion since the start of the frame. Their rounding error is r
 that motion and does not add up from step to step, and the energy balance the solver
 reports checks it: on test models the card agrees with the processor to 1e-4 of the largest
 value. The last time step of every frame, which computes the stresses of the frame, runs on
-the processor. Loads follow their amplitudes linearly over at most 256 time steps.
+the processor. Between the corners of their amplitudes, loads follow them linearly over at
+most 256 time steps; the corners themselves are kept. Both products run in one pass over the
+common pattern of the two matrices, stored so that neighbouring threads of the card read
+neighbouring values.
 
 The solver log names the card ("explicit: time steps on ..."). A card without double
 precision, a model too large for its memory or any error leaves the time steps on the

@@ -14,10 +14,11 @@
 //! reports checks the result; cards without double precision leave the step to the
 //! processor.
 //!
-//! **One step** is four dispatches: [`advance`](../advance.wgsl) (velocities, displacements,
-//! the single precision increments), the products `K Δu` and `C v`
-//! ([`product`](../product.wgsl)), and [`accelerate`](../accelerate.wgsl) (forces, work,
-//! accelerations). A chunk of up to [`MAX_CHUNK`] steps goes to the card as one command
+//! **One step** is three dispatches: [`advance`](../advance.wgsl) (velocities, displacements,
+//! the single precision increments), the products `K Δu` and `C v` in one pass over the
+//! common pattern of both, stored in slices of rows so that neighbouring threads read
+//! neighbouring values ([`product`](../product.wgsl)), and [`accelerate`](../accelerate.wgsl)
+//! (forces, work, accelerations). A chunk of up to [`MAX_CHUNK`] steps goes to the card as one command
 //! buffer; the loads are interpolated linearly between the chunk's ends, so the caller
 //! chooses chunks short against the amplitudes.
 //!
@@ -28,6 +29,8 @@
 
 #[cfg(feature = "gpu")]
 mod gpu;
+#[cfg(any(feature = "gpu", test))]
+mod sliced;
 
 /// The most time steps one [`Engine::run`] takes.
 pub const MAX_CHUNK: usize = 256;

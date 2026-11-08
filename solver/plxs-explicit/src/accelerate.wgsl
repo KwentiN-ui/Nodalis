@@ -5,8 +5,8 @@
 struct Dims {
     n: u32,
     groups_x: u32,
-    pad0: u32,
-    pad1: u32,
+    positions: u32,
+    pad: u32,
 }
 
 struct Step {
