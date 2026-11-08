@@ -101,7 +101,8 @@ explicit: stable time step 4.31e-7 s (element 1534), about 6.96e+5 time steps fo
 
 #ui("Frames") work as with implicit integration: the time steps within a frame are equal, so
 that each frame falls exactly on a time step. The solver reports its progress per frame, with
-the time steps done, the remaining time and the energy balance.
+the time steps done, the remaining time, the energy balance and, when the graphics card
+computes them, the share of the time steps it took.
 
 What is different from implicit integration:
 
@@ -132,9 +133,12 @@ What is different from implicit integration:
   contact pairs are in force. A lowered stiffness lets the surfaces overlap a little more
   under the same pressure.
 - *Large deformations* (NLGEOM) take finite strains and rotations; plasticity and
-  hyperelastic materials work with and without it. The stable time step is found anew every
-  100 time steps, since squeezed elements get stiffer; the bulk viscosity acts in the
-  deformed configuration, so that a spinning part is not braked.
+  hyperelastic materials work with and without it. Squeezed elements get stiffer: every 100
+  time steps the solver measures the shortest distance between two nodes of every element,
+  and when one has changed by 2.5 % since the last check (and every 1000 time steps in any
+  case) it finds the stable time step anew. The bulk viscosity acts in the deformed
+  configuration, so that a spinning part is not braked. Without NLGEOM a rotating part
+  strains and grows; the output warns once elements have turned by more than about 6°.
 - C3D8R elements get a viscous hourglass control in addition to their hourglass stiffness;
   its work is part of ALLVD.
 
@@ -148,21 +152,25 @@ What is different from implicit integration:
 
 ==== On the graphics card <dynamic-gpu>
 
-The time steps of a model without contact (no prescribed motion that changes during the
-step, supports without equations or local systems) run on a discrete graphics card from
-30 000 DOFs, when the setting
+The time steps of a model run on a discrete graphics card from 30 000 DOFs, or from 2 000
+elements under large deformations or with contact, when the setting
 #ui("Graphics card") > #ui("Use for the solver") is on (@settings). Each time step then
 computes the forces element by element, one thread of the card per element, sums them per
 node, and does a few vector updates, many times faster than the processor. No stiffness
 matrix is built for that; C3D8I and the plane and axisymmetric elements take their
-condensed operators. Models with U1 blocks, membranes or springs make the card form the
-forces as a product with the stiffness matrix and one with the viscous matrix (bulk
-viscosity and hourglass control) instead; under large deformations (NLGEOM) such a model
-stays on the processor. With the
-element kernels, large deformations run on the card too: Green-Lagrange strain, Saint
+condensed operators. U1 blocks and springs act on the card as constant stiffness blocks,
+and so do membranes under small strains; membranes under large deformations (NLGEOM) and
+gaps keep the time steps on the processor. Constraints (equations, ties, rigid bodies
+under small rotations, local systems, the expansion of shells and beams) go to the card
+as the transformation from the unknowns to the DOFs; where they couple the mass (the
+fibres of shells with scaled inertia, a tie), the card inverts each coupled group of up
+to 48 unknowns on its own, and a larger group or rigid bodies turning by finite angles
+keep the time steps on the processor. Large deformations run on the card too: Green-Lagrange strain, Saint
 Venant-Kirchhoff stress, and the bulk and hourglass viscosity in the deformed shape, as on
-the processor. Every 100 time steps the card stops for the processor to check the stable
-time step of the deformed elements. Materials: elastic ones, and J2 plasticity (`*PLASTIC`,
+the processor. Every 100 time steps the card measures the shortest distance between two
+nodes of every element; when one has changed by 2.5 % since the last check, and every 1000
+time steps in any case, the processor computes the stable time step of the deformed
+elements again. Materials: elastic ones, and J2 plasticity (`*PLASTIC`,
 isotropic or kinematic hardening), under large deformations at finite strains as on the
 processor, whose state variables the card keeps in double precision, and hyperelastic
 materials (`*HYPERELASTIC`, all strain energy models). Creep, and plasticity or
@@ -170,14 +178,28 @@ hyperelasticity in plane stress elements, keep the time steps on the processor f
 
 Most cards compute double precision far slower than single precision (a sixty-fourth on an
 RTX 4070), and Metal on macOS has none. The displacements, velocities, accelerations, loads
-and energies therefore stay in double precision; only the two products run in single
-precision: the element forces on the displacements relative to the element's first node,
-the products on the motion since the start of the frame. Their rounding error is relative
-to that motion and does not add up from step to step, and the energy balance the solver
+and energies therefore stay in double precision; only the element forces run in single
+precision, on the displacements relative to the element's first node (the constant blocks
+in double precision). Their rounding error is relative to the motion within the element
+and does not add up from step to step, and the energy balance the solver
 reports checks it: on test models the card agrees with the processor to 1e-4 of the largest
-value. The last time step of every frame, which computes the stresses of the frame, runs on
-the processor. Between the corners of their amplitudes, loads follow them linearly over at
-most 256 time steps; the corners themselves are kept.
+value. The reaction forces of thin shells are small differences of the large forces
+across the thickness; there the card's rounding shows at about a percent of the largest
+reaction. The last time step of every frame, which computes the stresses of the frame, runs on
+the processor. Between the corners of their amplitudes, loads and prescribed displacements
+follow them linearly over at most 256 time steps; the corners themselves are kept. The work
+of prescribed displacements (from the reactions at their DOFs) counts as external work on
+the card as on the processor.
+
+Penalty contact runs on the card too, node to surface and surface to surface: the closest
+point on the candidate faces, the rounded linear, exponential and tabular pressure
+relations, friction with stick and slip, contact damping and the cap on the contact
+stiffness, all in double precision. The processor only searches new candidate faces,
+after a step in which a contact node moved further than the search reach, and writes the
+event frames: the card stops at the step where a contact opens or closes, the processor
+writes the frame and the card goes on. Contact on shells works on their expanded faces. Mortar
+and tied contact, faces with more than eight nodes and models whose nodes carry rotations
+keep the time steps on the processor.
 
 The solver log names the card ("explicit: time steps on ..."). A card without double
 precision, a model too large for its memory or any error leaves the time steps on the

@@ -489,13 +489,9 @@ fn an_elastic_bar_bounces_off_a_wall_surface_to_surface() {
     check_bar_on_wall("Surface to surface", "wall-s2s");
 }
 
-/// A block (2 × 2 CPE4, 10 mm) sliding at `v0` on a steel plate under gravity stops after
-/// `v0² / (2 μ g)`.
-#[test]
-fn a_block_sliding_on_a_plate_stops_by_friction() {
-    let (v0, mu, g) = (0.3, 0.3, 9.81);
-    let stop = v0 / (mu * g);
-    let distance = v0 * v0 / (2.0 * mu * g);
+/// A block (2 × 2 CPE4, 10 mm) sliding at `v0` on a steel plate under gravity `g` with
+/// friction `mu`.
+fn sliding_block(v0: f64, mu: f64, g: f64) -> String {
     let mut s = String::from("*Node\n");
     for j in 0..2 {
         for i in 0..=20 {
@@ -557,6 +553,17 @@ fn a_block_sliding_on_a_plate_stops_by_friction() {
          *Node print, Nset=CORNER\nU\n*End step"
     )
     .unwrap();
+    s
+}
+
+/// A block (2 × 2 CPE4, 10 mm) sliding at `v0` on a steel plate under gravity stops after
+/// `v0² / (2 μ g)`.
+#[test]
+fn a_block_sliding_on_a_plate_stops_by_friction() {
+    let (v0, mu, g) = (0.3, 0.3, 9.81);
+    let stop = v0 / (mu * g);
+    let distance = v0 * v0 / (2.0 * mu * g);
+    let s = sliding_block(v0, mu, g);
     let dir = work_dir("slide");
     let (dat, log) = run(&dir, "slide", &s);
     clean(&dir);
@@ -1366,6 +1373,40 @@ fn gpu_matches_processor_with(
     } else {
         bar_mesh(cells, 2, 2, [length, side, side], kind)
     };
+    // `blocks`: an elastic bar with a membrane skin on its top face and springs at its
+    // far end, which the card takes as constant blocks.
+    if law == "blocks" {
+        let id = |i: usize, j: usize, k: usize| 1 + i + (cells + 1) * (j + 3 * k);
+        input.push_str("*Element, Type=M3D4, Elset=SKIN\n");
+        for j in 0..2 {
+            for i in 0..cells {
+                writeln!(
+                    input,
+                    "{}, {}, {}, {}, {}",
+                    1001 + i + cells * j,
+                    id(i, j, 2),
+                    id(i + 1, j, 2),
+                    id(i + 1, j + 1, 2),
+                    id(i, j + 1, 2)
+                )
+                .unwrap();
+            }
+        }
+        writeln!(
+            input,
+            "*Membrane section, Elset=SKIN, Material=STEEL\n{}\n\
+             *Element, Type=SPRING1, Elset=GROUND\n2001, {}\n2002, {}\n\
+             *Spring, Elset=GROUND\n2\n1e5\n\
+             *Element, Type=SPRING2, Elset=TIE\n2003, {}, {}\n\
+             *Spring, Elset=TIE\n2, 3\n2e5",
+            side / 10.0,
+            id(cells, 0, 0),
+            id(cells, 2, 2),
+            id(cells / 2, 0, 0),
+            id(cells / 2, 2, 2)
+        )
+        .unwrap();
+    }
     let thickness = if plane && !kind.starts_with("CA") {
         format!("{side}\n")
     } else {
@@ -1510,6 +1551,18 @@ fn rubber_on_the_graphics_card_matches_the_processor() {
 }
 
 /// The incompatible modes: dense operators.
+#[test]
+fn membranes_and_springs_on_the_graphics_card_match_the_processor() {
+    gpu_matches_processor_with(
+        "C3D8",
+        "gpu-blocks",
+        false,
+        "element forces",
+        false,
+        "blocks",
+    );
+}
+
 #[test]
 fn time_steps_of_incompatible_modes_on_the_graphics_card_match_the_processor() {
     gpu_matches_processor("C3D8I", "gpu-c3d8i", false, "element forces");
@@ -1709,6 +1762,120 @@ fn released_shell_strip(job: &str, full: bool) -> (Vec<f64>, String) {
     (crossings, log)
 }
 
+/// A shell strip (expanded to bricks, tied to its nodes by constraints) with the scaled
+/// inertia of its fibres swings from its static deflection, and a block tied to the strip
+/// by an equation follows: the card steps with the constraints and the coupled masses as
+/// the processor does.
+#[test]
+fn shells_with_constraints_on_the_graphics_card_match_the_processor() {
+    let (length, width, thickness, cells) = (0.05, 0.01, 0.001, 10);
+    let (hx, hy) = (length / (2 * cells) as f64, width / 4.0);
+    let id = |i: usize, j: usize| i * 5 + j + 1;
+    let mut input = String::from("*Node\n");
+    for i in 0..=2 * cells {
+        for j in 0..=4 {
+            if i % 2 == 1 && j % 2 == 1 {
+                continue;
+            }
+            writeln!(
+                input,
+                "{}, {}, {}, 0",
+                id(i, j),
+                i as f64 * hx,
+                j as f64 * hy
+            )
+            .unwrap();
+        }
+    }
+    input.push_str("*Element, Type=S8R, Elset=EALL\n");
+    for a in 0..cells {
+        for b in 0..2 {
+            let (i, j) = (2 * a, 2 * b);
+            writeln!(
+                input,
+                "{}, {}, {}, {}, {}, {}, {}, {}, {}",
+                a * 2 + b + 1,
+                id(i, j),
+                id(i + 2, j),
+                id(i + 2, j + 2),
+                id(i, j + 2),
+                id(i + 1, j),
+                id(i + 2, j + 1),
+                id(i + 1, j + 2),
+                id(i, j + 1)
+            )
+            .unwrap();
+        }
+    }
+    let end = |i: usize| {
+        (0..=4)
+            .map(|j| id(i, j).to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let swing = 0.0021;
+    let frames = 6;
+    write!(
+        input,
+        "*Nset, Nset=END0\n{}\n*Nset, Nset=END1\n{}\n*Nset, Nset=MID\n{}\n\
+         *Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
+         *Shell section, Elset=EALL, Material=STEEL\n{thickness}\n\
+         *Boundary\nEND0, 1, 6, 0\n\
+         *Equation\n2\n{}, 3, 1.0, {}, 3, -1.0\n\
+         *Step\n*Static\n*Cload\nEND1, 3, 2\n*End step\n\
+         *Step\n*Dynamic, Integration=Explicit\n{}, {swing}\n*Cload, Op=New\n\
+         *Node print, Nset=END1\nU, V\n*Node print, Nset=END0, Totals=Only\nRF\n\
+         *El print, Elset=EALL, Totals=Only\nALLIE, ALLKE, ALLWK\n*End step\n",
+        end(0),
+        end(2 * cells),
+        end(cells),
+        id(cells, 4),
+        id(cells, 0),
+        swing / frames as f64
+    )
+    .unwrap();
+    let dir = work_dir("gpu-shells");
+    let (cpu, _) = run_with_gpu(&dir, "cpu", &input, "off");
+    let (gpu, log) = run_with_gpu(&dir, "gpu", &input, "on");
+    clean(&dir);
+    if log.lines().any(|l| {
+        l.contains("explicit: time steps on the processor")
+            && (l.contains("no graphics card") || l.contains("double precision"))
+    }) {
+        eprintln!("no graphics card with double precision: {log}");
+        return;
+    }
+    assert!(log.contains("element forces"), "not on the card:\n{log}");
+    assert!(log.contains("the mass couples"), "no coupled mass:\n{log}");
+    // The reactions are small differences of the large forces across the thin thickness
+    // (the bending couple): the single precision of the element forces on the card shows
+    // in them at a few percent of the largest, while the motion agrees to 1e-4.
+    for (heading, tolerance) in [
+        ("displacements", 1e-4),
+        ("velocities", 1e-4),
+        ("total force", 5e-2),
+        ("total model internal energy", 1e-4),
+        ("total model kinetic energy", 1e-4),
+        ("total model external work", 1e-4),
+    ] {
+        let (a, b) = (blocks(&cpu, heading), blocks(&gpu, heading));
+        assert_eq!(a.len(), frames, "{heading}\n{log}");
+        assert_eq!(a.len(), b.len(), "{heading}");
+        let largest = a
+            .iter()
+            .flat_map(|(_, r)| r.iter().flatten())
+            .fold(0.0_f64, |m, x| m.max(x.abs()));
+        for ((t, ra), (_, rb)) in a.iter().zip(&b) {
+            for (x, y) in ra.iter().flatten().zip(rb.iter().flatten()) {
+                assert!(
+                    (x - y).abs() <= tolerance * largest,
+                    "{heading} at {t} s: {x} on the processor, {y} on the card"
+                );
+            }
+        }
+    }
+}
+
 /// The thickness of a thin shell no longer sets the time step, and the strip swings at the
 /// frequency it has with its full inertia.
 #[test]
@@ -1739,4 +1906,477 @@ fn scaled_shell_inertia_lifts_the_time_step_and_keeps_the_bending() {
         (f1 - f0).abs() < 0.02 * f0,
         "swings at {f1} Hz scaled, {f0} Hz with the full inertia"
     );
+}
+
+/// A bar held at one end and pulled at the other by a prescribed displacement that rises,
+/// holds and falls back (an amplitude with corners inside the frames): the card steps the
+/// prescribed motion and adds up the work of its reactions as the processor does.
+#[test]
+fn prescribed_motion_on_the_graphics_card_matches_the_processor() {
+    let (length, side, cells) = (0.1, 0.01, 20);
+    let c = (E / RHO).sqrt();
+    let (period, frames) = (3.0 * length / c, 30);
+    let mut input = bar_mesh(cells, 2, 2, [length, side, side], "C3D8");
+    writeln!(
+        input,
+        "*Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
+         *Solid section, Elset=EALL, Material=STEEL\n\
+         *Amplitude, Name=PULL\n0, 0, {}, 1, {}, 1, {}, 0.2\n\
+         *Step\n*Dynamic, Integration=Explicit\n{}, {period}\n\
+         *Boundary\nEND0, 1, 3, 0\n\
+         *Boundary, Amplitude=PULL\nEND1, 1, 1, 1e-5\n\
+         *Node print, Nset=END0, Totals=Only\nRF\n\
+         *Node print, Nset=END1, Totals=Only\nRF\n\
+         *Node print, Nset=END1\nU, V\n\
+         *El print, Elset=EALL, Totals=Only\nALLIE, ALLKE, ALLWK\n*End step",
+        0.213 * period,
+        0.457 * period,
+        0.811 * period,
+        period / frames as f64
+    )
+    .unwrap();
+    let dir = work_dir("gpu-prescribed");
+    let (cpu, _) = run_with_gpu(&dir, "cpu", &input, "off");
+    let (gpu, log) = run_with_gpu(&dir, "gpu", &input, "on");
+    clean(&dir);
+    if log.lines().any(|l| {
+        l.contains("explicit: time steps on the processor")
+            && (l.contains("no graphics card") || l.contains("double precision"))
+    }) {
+        eprintln!("no graphics card with double precision: {log}");
+        return;
+    }
+    assert!(log.contains("element forces"), "not on the card:\n{log}");
+    assert!(!log.contains("card failed"), "{log}");
+    for heading in [
+        "displacements",
+        "velocities",
+        "total force",
+        "total model internal energy",
+        "total model kinetic energy",
+        "total model external work",
+    ] {
+        let (a, b) = (blocks(&cpu, heading), blocks(&gpu, heading));
+        assert_eq!(a.len() % frames, 0, "{heading}\n{log}");
+        assert_eq!(a.len(), b.len(), "{heading}");
+        let largest = a
+            .iter()
+            .flat_map(|(_, r)| r.iter().flatten())
+            .fold(0.0_f64, |m, x| m.max(x.abs()));
+        assert!(largest > 0.0, "{heading}");
+        for ((t, ra), (_, rb)) in a.iter().zip(&b) {
+            for (x, y) in ra.iter().flatten().zip(rb.iter().flatten()) {
+                assert!(
+                    (x - y).abs() <= 1e-4 * largest,
+                    "{heading} at {t} s: {x} on the processor, {y} on the card"
+                );
+            }
+        }
+    }
+}
+
+/// `input` on the graphics card as on the processor: the blocks under `headings` agree to
+/// `tolerance` of their largest value.
+fn contact_on_the_card(job: &str, input: &str, headings: &[&str], tolerance: f64) {
+    let dir = work_dir(job);
+    let (cpu, _) = run_with_gpu(&dir, "cpu", input, "off");
+    let (gpu, log) = run_with_gpu(&dir, "gpu", input, "on");
+    clean(&dir);
+    if std::env::var("PLXS_TEST_LOG").is_ok() {
+        eprintln!("{log}");
+    }
+    if log.lines().any(|l| {
+        l.contains("explicit: time steps on the processor")
+            && (l.contains("no graphics card") || l.contains("double precision"))
+    }) {
+        eprintln!("no graphics card with double precision: {log}");
+        return;
+    }
+    assert!(log.contains("element forces"), "not on the card:\n{log}");
+    assert!(!log.contains("card failed"), "{log}");
+    for heading in headings {
+        let (a, b) = (blocks(&cpu, heading), blocks(&gpu, heading));
+        assert!(!a.is_empty(), "{heading}\n{log}");
+        assert_eq!(a.len(), b.len(), "{heading}\n{log}");
+        let largest = a
+            .iter()
+            .flat_map(|(_, r)| r.iter().flatten())
+            .fold(0.0_f64, |m, x| m.max(x.abs()));
+        for ((t, ra), (tb, rb)) in a.iter().zip(&b) {
+            assert!(
+                (t - tb).abs() <= 1e-9 * t.abs().max(1e-12),
+                "{heading}: {t} {tb}"
+            );
+            for (x, y) in ra.iter().flatten().zip(rb.iter().flatten()) {
+                assert!(
+                    (x - y).abs() <= tolerance * largest,
+                    "{job} {heading} at {t} s: {x} on the processor, {y} on the card"
+                );
+            }
+        }
+    }
+}
+
+/// The bar of [`bar_on_wall`] bounces off the wall on the card as on the processor.
+fn bar_on_wall_on_the_card(kind: &str, job: &str) {
+    let (bar, gap, v0) = (0.1, 1e-5, 1.0);
+    let c = (E / RHO).sqrt();
+    let duration = 2.0 * bar / c;
+    let period = gap / v0 + 1.5 * duration;
+    let input = bar_on_wall(kind, 20, gap, v0, period / 30.0, period);
+    contact_on_the_card(
+        job,
+        &input,
+        &[
+            "total force",
+            "velocities",
+            "total model internal energy",
+            "total model kinetic energy",
+            "total model damping dissipation",
+        ],
+        1e-4,
+    );
+}
+
+#[test]
+fn a_bar_bounces_off_a_wall_node_to_surface_on_the_graphics_card() {
+    bar_on_wall_on_the_card("Node to surface", "gpu-wall-n2s");
+}
+
+#[test]
+fn a_bar_bounces_off_a_wall_surface_to_surface_on_the_graphics_card() {
+    bar_on_wall_on_the_card("Surface to surface", "gpu-wall-s2s");
+}
+
+/// The block of [`sliding_block`] slides on the card as on the processor: friction on the
+/// edges of plane elements, new searches as it slides along the plate.
+#[test]
+fn a_block_sliding_by_friction_on_the_graphics_card() {
+    let input = sliding_block(0.3, 0.3, 9.81).replace(
+        "*Node print, Nset=CORNER\nU\n",
+        "*Node print, Nset=CORNER\nU, V\n",
+    );
+    contact_on_the_card("gpu-slide", &input, &["displacements", "velocities"], 1e-4);
+}
+
+/// Event frames of an impact on the card at the same times as on the processor.
+#[test]
+fn event_frames_on_the_graphics_card_match_the_processor() {
+    let (bar, gap, v0) = (0.1, 1e-5, 1.0);
+    let c = (E / RHO).sqrt();
+    let period = gap / v0 + 1.5 * 2.0 * bar / c;
+    let input = bar_on_wall("Node to surface", 20, gap, v0, period / 4.0, period).replace(
+        "*Dynamic, Integration=Explicit\n",
+        "*Dynamic, Integration=Explicit, Events\n",
+    );
+    contact_on_the_card(
+        "gpu-events",
+        &input,
+        &["total force", "velocities", "total model kinetic energy"],
+        1e-4,
+    );
+}
+
+/// Exponential and tabular pressure-overclosure relations on the card.
+#[test]
+fn soft_contact_relations_on_the_graphics_card_match_the_processor() {
+    let (bar, gap, v0) = (0.1, 1e-5, 1.0);
+    let c = (E / RHO).sqrt();
+    let period = gap / v0 + 1.5 * 2.0 * bar / c;
+    for (kind, behavior, job) in [
+        (
+            "Surface to surface",
+            "Exponential\n2e-5, 1e6",
+            "gpu-exponential",
+        ),
+        (
+            "Node to surface",
+            "Tabular\n0, 0\n1e9, 1e-5\n3e9, 2e-5",
+            "gpu-tabular",
+        ),
+    ] {
+        let input = bar_on_wall(kind, 20, gap, v0, period / 30.0, period).replace(
+            "Pressure-overclosure=Linear\n1e15",
+            &format!("Pressure-overclosure={behavior}"),
+        );
+        contact_on_the_card(
+            job,
+            &input,
+            &["total force", "velocities", "total model internal energy"],
+            1e-4,
+        );
+    }
+}
+
+/// A steel block (2 × 2 × 1 C3D8, 10 mm) dropping at 1 m/s onto a clamped S8R plate
+/// (40 × 40 mm, 1 mm): the contact on the plate's shell nodes runs on the card as on the
+/// processor.
+#[test]
+fn a_block_hitting_a_shell_plate_on_the_graphics_card() {
+    let mut s = String::from("*Node\n");
+    // Plate nodes on a 9 × 9 grid (5 mm), midside nodes included.
+    let id = |i: usize, j: usize| 1 + i + 9 * j;
+    for j in 0..9 {
+        for i in 0..9 {
+            if i % 2 == 1 && j % 2 == 1 {
+                continue;
+            }
+            writeln!(
+                s,
+                "{}, {}, {}, 0",
+                id(i, j),
+                0.005 * i as f64,
+                0.005 * j as f64
+            )
+            .unwrap();
+        }
+    }
+    // Block nodes 3 × 3 × 2 above the middle of the plate.
+    let z0 = 1.5e-3;
+    let bid = |i: usize, j: usize, k: usize| 1001 + i + 3 * j + 9 * k;
+    for k in 0..2 {
+        for j in 0..3 {
+            for i in 0..3 {
+                writeln!(
+                    s,
+                    "{}, {}, {}, {}",
+                    bid(i, j, k),
+                    0.01 + 0.01 * i as f64,
+                    0.01 + 0.01 * j as f64,
+                    z0 + 0.01 * k as f64
+                )
+                .unwrap();
+            }
+        }
+    }
+    s.push_str("*Element, Type=S8R, Elset=PLATE\n");
+    for j in 0..4 {
+        for i in 0..4 {
+            let (a, b) = (2 * i, 2 * j);
+            writeln!(
+                s,
+                "{}, {}, {}, {}, {}, {}, {}, {}, {}",
+                1 + i + 4 * j,
+                id(a, b),
+                id(a + 2, b),
+                id(a + 2, b + 2),
+                id(a, b + 2),
+                id(a + 1, b),
+                id(a + 2, b + 1),
+                id(a + 1, b + 2),
+                id(a, b + 1)
+            )
+            .unwrap();
+        }
+    }
+    s.push_str("*Element, Type=C3D8, Elset=BLOCK\n");
+    for j in 0..2 {
+        for i in 0..2 {
+            writeln!(
+                s,
+                "{}, {}, {}, {}, {}, {}, {}, {}, {}",
+                101 + i + 2 * j,
+                bid(i, j, 0),
+                bid(i + 1, j, 0),
+                bid(i + 1, j + 1, 0),
+                bid(i, j + 1, 0),
+                bid(i, j, 1),
+                bid(i + 1, j, 1),
+                bid(i + 1, j + 1, 1),
+                bid(i, j + 1, 1)
+            )
+            .unwrap();
+        }
+    }
+    s.push_str("*Nset, Nset=EDGE\n");
+    for j in 0..9 {
+        for i in 0..9 {
+            if (i == 0 || i == 8 || j == 0 || j == 8) && !(i % 2 == 1 && j % 2 == 1) {
+                writeln!(s, "{}", id(i, j)).unwrap();
+            }
+        }
+    }
+    writeln!(
+        s,
+        "*Nset, Nset=BLOCKN, Generate\n1001, 1018, 1\n*Nset, Nset=WATCH\n1005, {}\n\
+         *Elset, Elset=EALL\nPLATE, BLOCK\n\
+         *Surface, Name=SLAVE, Type=Element\nBLOCK, S1\n\
+         *Surface, Name=MASTER, Type=Element\nPLATE, SPOS\n\
+         *Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
+         *Solid section, Elset=BLOCK, Material=STEEL\n\
+         *Shell section, Elset=PLATE, Material=STEEL\n0.001\n\
+         *Surface interaction, Name=SI\n*Surface behavior, Pressure-overclosure=Linear\n1e14\n\
+         *Friction\n0.2, 1e12\n\
+         *Contact pair, Interaction=SI, Type=Surface to surface\nSLAVE, MASTER\n\
+         *Initial conditions, Type=Velocity\nBLOCKN, 3, -1\n\
+         *Step\n*Dynamic, Integration=Explicit\n0.0001, 0.002\n*Boundary\nEDGE, 1, 6, 0\n\
+         *Node print, Nset=WATCH\nU, V\n*End step",
+        id(4, 4)
+    )
+    .unwrap();
+    contact_on_the_card(
+        "gpu-shell-contact",
+        &s,
+        &["displacements", "velocities"],
+        1e-3,
+    );
+}
+
+/// A free steel cube (one C3D8, 10 mm) spinning at 10 rad/s about z: without NLGEOM the
+/// step warns once it has turned by more than about 6°, with NLGEOM it does not.
+#[test]
+fn a_spinning_cube_without_nlgeom_warns() {
+    let mut s = String::from("*Node\n");
+    let corners = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 1.0],
+        [1.0, 1.0, 1.0],
+        [0.0, 1.0, 1.0],
+    ];
+    for (i, c) in corners.iter().enumerate() {
+        writeln!(
+            s,
+            "{}, {}, {}, {}",
+            i + 1,
+            0.01 * c[0],
+            0.01 * c[1],
+            0.01 * c[2]
+        )
+        .unwrap();
+    }
+    s.push_str("*Element, Type=C3D8, Elset=EALL\n1, 1, 2, 3, 4, 5, 6, 7, 8\n");
+    writeln!(
+        s,
+        "*Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
+         *Solid section, Elset=EALL, Material=STEEL\n*Initial conditions, Type=Velocity"
+    )
+    .unwrap();
+    let omega = 10.0;
+    for (i, c) in corners.iter().enumerate() {
+        let (x, y) = (0.01 * (c[0] - 0.5), 0.01 * (c[1] - 0.5));
+        writeln!(
+            s,
+            "{}, 1, {}\n{}, 2, {}",
+            i + 1,
+            -omega * y,
+            i + 1,
+            omega * x
+        )
+        .unwrap();
+    }
+    s.push_str(
+        "*Nset, Nset=CORNER\n1\n*Step\n*Dynamic, Integration=Explicit\n0.005, 0.02\n\
+         *Node print, Nset=CORNER\nU\n*End step\n",
+    );
+    let dir = work_dir("turn-warning");
+    for (job, nlgeom) in [("small", false), ("large", true)] {
+        let input = if nlgeom {
+            s.replace("*Step\n", "*Step, Nlgeom\n")
+        } else {
+            s.clone()
+        };
+        let (_, log) = run(&dir, job, &input);
+        assert_eq!(log.contains("without NLGEOM"), !nlgeom, "{job}:\n{log}");
+    }
+    clean(&dir);
+}
+
+/// A free steel bar (10 × 1 × 1 C3D8, 100 × 10 × 10 mm) with rigid bodies on its lower
+/// end edges, spinning at 50 rad/s about a vertical axis, with NLGEOM: the rotation of a
+/// body about its own edge moves no member, and once the body has turned the rotated rows
+/// would make it an unknown without mass. It is held at zero and the step runs through.
+#[test]
+fn rigid_bodies_on_edges_turn_explicitly_under_nlgeom() {
+    let mut input = bar_mesh(10, 1, 1, [0.1, 0.01, 0.01], "C3D8");
+    writeln!(
+        input,
+        "*Node\n1001, 0, 0.005, 0\n1002, 0, 0.005, 0\n1003, 0.1, 0.005, 0\n1004, 0.1, 0.005, 0\n\
+         *Nset, Nset=EDGE0\n1, 12\n*Nset, Nset=EDGE1\n11, 22\n*Nset, Nset=MID\n6\n\
+         *Rigid body, Nset=EDGE0, Ref node=1001, Rot node=1002\n\
+         *Rigid body, Nset=EDGE1, Ref node=1003, Rot node=1004\n\
+         *Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
+         *Solid section, Elset=EALL, Material=STEEL\n*Initial conditions, Type=Velocity"
+    )
+    .unwrap();
+    let omega = 50.0;
+    for k in 0..=1 {
+        for j in 0..=1 {
+            for i in 0..=10 {
+                let id = 1 + i + 11 * (j + 2 * k);
+                let (x, y) = (0.01 * i as f64 - 0.05, 0.01 * j as f64 - 0.005);
+                writeln!(input, "{id}, 1, {}\n{id}, 2, {}", -omega * y, omega * x).unwrap();
+            }
+        }
+    }
+    input.push_str(
+        "*Step, Nlgeom\n*Dynamic, Integration=Explicit\n0.0005, 0.001\n\
+         *Node print, Nset=MID\nU\n*End step\n",
+    );
+    let dir = work_dir("rigid-edges");
+    let (dat, log) = run(&dir, "edges", &input);
+    clean(&dir);
+    assert!(log.contains("held at zero"), "{log}");
+    assert_eq!(blocks(&dat, "displacements").len(), 2, "{log}");
+}
+
+/// A steel bar (10 × 1 × 1 C3D8) on rigid bodies along its lower end edges, one held, one
+/// sliding, sagging under gravity with NLGEOM: the bodies hardly turn, keep their
+/// constraints of the start and go to the card, which agrees with the processor. Spinning
+/// the bar instead turns them beyond 1°, and the steps go on on the processor.
+#[test]
+fn rigid_supports_under_nlgeom_on_the_graphics_card() {
+    let mut input = bar_mesh(10, 1, 1, [0.1, 0.01, 0.01], "C3D8");
+    writeln!(
+        input,
+        "*Node\n1001, 0, 0.005, 0\n1002, 0, 0.005, 0\n1003, 0.1, 0.005, 0\n1004, 0.1, 0.005, 0\n\
+         *Nset, Nset=EDGE0\n1, 12\n*Nset, Nset=EDGE1\n11, 22\n*Nset, Nset=MID\n6\n\
+         *Rigid body, Nset=EDGE0, Ref node=1001, Rot node=1002\n\
+         *Rigid body, Nset=EDGE1, Ref node=1003, Rot node=1004\n\
+         *Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
+         *Solid section, Elset=EALL, Material=STEEL\n\
+         *Step, Nlgeom\n*Dynamic, Integration=Explicit\n0.0002, 0.0006\n\
+         *Boundary\n1001, 1, 3, 0\n1003, 2, 3, 0\n*Dload\nEALL, GRAV, 1000, 0, 0, -1\n\
+         *Node print, Nset=MID\nU, V\n*End step"
+    )
+    .unwrap();
+    contact_on_the_card(
+        "gpu-rigid-supports",
+        &input,
+        &["displacements", "velocities"],
+        1e-4,
+    );
+    // Without the supports' conditions and spinning about a vertical axis.
+    let mut spinning = input
+        .replace(
+            "*Boundary\n1001, 1, 3, 0\n1003, 2, 3, 0\n*Dload\nEALL, GRAV, 1000, 0, 0, -1\n",
+            "",
+        )
+        .replace(
+            "*Step, Nlgeom",
+            "*Initial conditions, Type=Velocity\n*Step, Nlgeom",
+        );
+    let mut velocities = String::new();
+    for k in 0..=1 {
+        for j in 0..=1 {
+            for i in 0..=10 {
+                let id = 1 + i + 11 * (j + 2 * k);
+                let (x, y) = (0.01 * i as f64 - 0.05, 0.01 * j as f64 - 0.005);
+                writeln!(velocities, "{id}, 1, {}\n{id}, 2, {}", -50.0 * y, 50.0 * x).unwrap();
+            }
+        }
+    }
+    spinning = spinning.replace(
+        "*Initial conditions, Type=Velocity\n",
+        &format!("*Initial conditions, Type=Velocity\n{velocities}"),
+    );
+    let dir = work_dir("gpu-rigid-spinning");
+    let (_, log) = run_with_gpu(&dir, "spin", &spinning, "on");
+    clean(&dir);
+    if !log.contains("no graphics card") && !log.contains("double precision)") {
+        assert!(log.contains("has turned by more than"), "{log}");
+    }
 }

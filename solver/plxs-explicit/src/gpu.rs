@@ -2,9 +2,9 @@
 
 use plxs_gpu::{Double, Gpu, Options, Use, wgpu};
 
+use crate::contact::{self, CDims, SLOT, STATE};
 use crate::elements::{Isochoric, Material, STATE_SIZE, Volumetric};
-use crate::sliced::{SLICE, Sliced};
-use crate::{Elements, ForceModel, MAX_CHUNK, Reached, Setup, Start};
+use crate::{Candidates, Elements, MAX_CHUNK, Ran, Reached, Setup, Sparse, Start};
 
 /// Values per material in the materials buffer of the element kernels (`MAT` in
 /// `elements.wgsl`), see [`materials`].
@@ -101,9 +101,6 @@ const GROUP: usize = 256;
 /// Threads per work group of the element kernels.
 const ELEMENT_GROUP: usize = 64;
 
-// A workgroup of the product holds whole slices.
-const _: () = assert!(GROUP.is_multiple_of(SLICE));
-
 /// The parameters of one step as the shaders read them (`Step`).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -112,6 +109,9 @@ struct StepParams {
     c: f64,
     s: f64,
     alpha: f64,
+    s_before: f64,
+    /// The index of the time step in the run (`contact_gate`).
+    index: f64,
 }
 
 /// The sizes the shaders read (`Dims`; the element kernels name the fields `count`,
@@ -121,12 +121,12 @@ struct StepParams {
 struct Dims {
     n: u32,
     groups_x: u32,
-    positions: u32,
-    relative: u32,
+    base: u32,
+    pad: u32,
 }
 
 /// The kinds of dispatches, as the trace reports them.
-const KINDS: [&str; 4] = ["advance", "forces", "gather", "accelerate"];
+const KINDS: [&str; 5] = ["advance", "forces", "gather", "accelerate", "contact"];
 
 /// One dispatch of a time step.
 struct Pass {
@@ -137,25 +137,242 @@ struct Pass {
     groups: (u32, u32),
     /// Index into [`KINDS`].
     kind: usize,
+    /// With contact: the offset of its dispatch in the indirect arguments (all passes but
+    /// the gate, which stops the others by zeroing them).
+    indirect: Option<u64>,
+}
+
+impl Pass {
+    fn dispatch(
+        &self,
+        pass: &mut wgpu::ComputePass<'_>,
+        offsets: &[u32],
+        args: Option<&wgpu::Buffer>,
+    ) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind, if self.step { offsets } else { &[] });
+        match (self.indirect, args) {
+            (Some(at), Some(args)) => pass.dispatch_workgroups_indirect(args, at),
+            _ => pass.dispatch_workgroups(self.groups.0, self.groups.1, 1),
+        }
+    }
+}
+
+/// The watch over the time step (`guard.wgsl`).
+struct GuardGpu {
+    pipeline: wgpu::ComputePipeline,
+    bind: wgpu::BindGroup,
+    groups: (u32, u32),
+    reference: wgpu::Buffer,
+    result: wgpu::Buffer,
+    staging: wgpu::Buffer,
+    count: usize,
+}
+
+/// The contact on the card (`contact.wgsl`).
+struct ContactGpu {
+    contact: crate::Contact,
+    dims: CDims,
+    cdims: wgpu::Buffer,
+    ints: wgpu::Buffer,
+    reals: wgpu::Buffer,
+    coords: wgpu::Buffer,
+    state: wgpu::Buffer,
+    rows: wgpu::Buffer,
+    flags: wgpu::Buffer,
+    flag_staging: wgpu::Buffer,
+    args: wgpu::Buffer,
+    /// Per search: the lists, the positions of the checked nodes, the slots.
+    lists: wgpu::Buffer,
+    prepared: wgpu::Buffer,
+    slots: wgpu::Buffer,
+    layout: wgpu::BindGroupLayout,
+    gate_layout: wgpu::BindGroupLayout,
+    /// The passes: gate, point, rows, cap, gather, check.
+    passes: [usize; 6],
+}
+
+/// Flags of `contact.wgsl`.
+const FLAGS: usize = 8;
+
+/// The most passes of a time step with contact (their indirect dispatches).
+const MAX_PASSES: usize = 256;
+
+impl ContactGpu {
+    fn new(
+        gpu: &Gpu,
+        contact: &crate::Contact,
+        candidates: &Candidates<'_>,
+        mass: &[f64],
+    ) -> Result<Self, String> {
+        let n = mass.len();
+        if contact.coordinates.len() != n || contact.moving.len() != n {
+            return Err(format!(
+                "contact coordinates for {} DOFs, wanted {n}",
+                contact.coordinates.len()
+            ));
+        }
+        let mut dims = CDims {
+            n: n as u32,
+            events_from: u32::MAX,
+            ..Default::default()
+        };
+        let (ints, reals) = contact::pack(contact, &mut dims)?;
+        let points = contact.points.len();
+        // The rows per DOF, then `1/√m` of the DOFs that move.
+        let mut rows = vec![0.0; 2 * n];
+        for (i, (&m, &moving)) in mass.iter().zip(&contact.moving).enumerate() {
+            if moving && m > 0.0 {
+                rows[n + i] = 1.0 / m.sqrt();
+            }
+        }
+        use Use::*;
+        // The gate also writes the indirect dispatches, which the other passes must not
+        // bind (a buffer is either storage or dispatch arguments in a dispatch).
+        let uses = [
+            Uniform, Dynamic, Read, Read, Read, Read, Read, Read, Read, Write, Write, Write, Write,
+            Write, Write,
+        ];
+        let layout = gpu.layout("contact", &uses[..14]);
+        let gate_layout = gpu.layout("contact gate", &uses);
+        let empty = gpu.storage("contact lists", 16);
+        let mut c = Self {
+            contact: contact.clone(),
+            dims,
+            cdims: gpu.buffer(&wgpu::BufferDescriptor {
+                label: Some("contact dims"),
+                size: std::mem::size_of::<CDims>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            ints: gpu.init("contact faces and points", bytemuck::cast_slice(&ints)),
+            reals: gpu.init("contact data", bytemuck::cast_slice(&reals)),
+            coords: gpu.init(
+                "contact coordinates",
+                bytemuck::cast_slice(&contact.coordinates),
+            ),
+            state: gpu.init(
+                "contact state",
+                bytemuck::cast_slice(&contact::state_values(points, None)),
+            ),
+            rows: gpu.init("contact rows", bytemuck::cast_slice(&rows)),
+            flags: gpu.buffer(&wgpu::BufferDescriptor {
+                label: Some("contact flags"),
+                size: 4 * FLAGS as u64,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }),
+            flag_staging: gpu.staging("contact flags", 4 * FLAGS as u64),
+            args: gpu.buffer(&wgpu::BufferDescriptor {
+                label: Some("contact dispatches"),
+                size: 12 * MAX_PASSES as u64,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::INDIRECT
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            lists: empty.clone(),
+            prepared: empty.clone(),
+            slots: empty,
+            layout,
+            gate_layout,
+            passes: [0; 6],
+        };
+        c.upload(gpu, candidates)?;
+        Ok(c)
+    }
+
+    /// The buffers of a search.
+    fn upload(&mut self, gpu: &Gpu, candidates: &Candidates<'_>) -> Result<(), String> {
+        let (lists, slots) = contact::lists(&self.contact, candidates, &mut self.dims)?;
+        self.lists = gpu.init("contact lists", bytemuck::cast_slice(&lists));
+        self.prepared = gpu.init(
+            "contact positions",
+            bytemuck::cast_slice(candidates.prepared),
+        );
+        self.slots = gpu.storage("contact slots", 8 * (SLOT * slots.max(1)) as u64);
+        Ok(())
+    }
+
+    /// The threads of the passes after the gate: points, gathered nodes, points, gathered
+    /// nodes, checked nodes.
+    fn counts(&self) -> [usize; 5] {
+        let d = &self.dims;
+        let points = d.points as usize;
+        let nodes = d.gnodes as usize;
+        [points, nodes, points, nodes, d.checks as usize]
+    }
+
+    fn bind(
+        &self,
+        gpu: &Gpu,
+        params: &wgpu::Buffer,
+        u: &wgpu::Buffer,
+        v: &wgpu::Buffer,
+        fs: &wgpu::Buffer,
+    ) -> [wgpu::BindGroup; 2] {
+        let resources = || {
+            vec![
+                self.cdims.as_entire_binding(),
+                wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: params,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(std::mem::size_of::<StepParams>() as u64),
+                }),
+                self.ints.as_entire_binding(),
+                self.reals.as_entire_binding(),
+                self.lists.as_entire_binding(),
+                self.prepared.as_entire_binding(),
+                self.coords.as_entire_binding(),
+                u.as_entire_binding(),
+                v.as_entire_binding(),
+                self.state.as_entire_binding(),
+                self.slots.as_entire_binding(),
+                self.rows.as_entire_binding(),
+                fs.as_entire_binding(),
+                self.flags.as_entire_binding(),
+            ]
+        };
+        let mut gate = resources();
+        gate.push(self.args.as_entire_binding());
+        [
+            gpu.bind(&self.layout, resources()),
+            gpu.bind(&self.gate_layout, gate),
+        ]
+    }
 }
 
 pub(crate) struct Engine {
     pub(crate) gpu: Gpu,
+    /// DOFs and reduced unknowns.
     n: usize,
+    r: usize,
     alpha: f64,
-    /// Matrices: the forces are products with the motion since the reference state.
-    relative: bool,
     stride: u64,
     params: wgpu::Buffer,
     u: wgpu::Buffer,
     v: wgpu::Buffer,
+    q: wgpu::Buffer,
+    qd: wgpu::Buffer,
     a: wgpu::Buffer,
-    uref: wgpu::Buffer,
+    /// The prescribed motion (`expand.wgsl`): g at the chunk's start and end, rate,
+    /// acceleration, increment.
+    g: wgpu::Buffer,
+    /// The reactions of the last step and the work of the prescribed displacements, when
+    /// the setup has prescribed motion.
+    reaction: Option<wgpu::Buffer>,
     loads: wgpu::Buffer,
     energy: wgpu::Buffer,
     staging: wgpu::Buffer,
     passes: Vec<Pass>,
     histories: Vec<History>,
+    fs: wgpu::Buffer,
+    contact: Option<ContactGpu>,
+    guard: Option<GuardGpu>,
+    /// From which time step of a run a contact event stops it.
+    pub(crate) events_from: u32,
     /// `PLXS_GPU_TRACE`: the time of every kind of dispatch on the card.
     trace: Option<Trace>,
 }
@@ -171,7 +388,7 @@ struct Trace {
     timed: usize,
     /// Seconds per kind of dispatch over the timed steps; wall clock of the runs; time
     /// steps, timed steps.
-    kernels: [f64; 4],
+    kernels: [f64; 5],
     wall: f64,
     steps: usize,
     timed_steps: usize,
@@ -222,9 +439,17 @@ fn single(values: &[f64]) -> Vec<f32> {
 
 impl Engine {
     pub(crate) fn new(setup: &Setup<'_>, any: bool) -> Result<Self, String> {
-        let n = setup.inverse_mass.len();
-        if n == 0 {
+        let n = setup.mass.len();
+        let reduction = setup.reduction;
+        let r = reduction.len();
+        if n == 0 || r == 0 {
             return Err("no unknowns".to_owned());
+        }
+        if reduction.transform.rows() != n {
+            return Err(format!(
+                "the constraints have {} rows for {n} DOFs",
+                reduction.transform.rows()
+            ));
         }
         let tracing = std::env::var("PLXS_GPU_TRACE").is_ok_and(|v| v != "0");
         let gpu = Gpu::open(Options {
@@ -232,46 +457,68 @@ impl Engine {
             any_adapter: any,
             double: Double::Required,
             timestamps: tracing,
+            // The state of a step takes a few hundred MB even for large models, and the
+            // budget would refuse the upload and read-back buffers on cards whose shared
+            // heap the desktop fills.
+            memory_share: false,
         })?;
         let too_large = || format!("the model is too large for the buffers of {}", gpu.name);
-        if !gpu.fits(8 * 6 * n as u64) {
+        let entries = reduction
+            .transform
+            .val
+            .len()
+            .max(reduction.inverse_mass.val.len());
+        if !gpu.fits(8 * 6 * n as u64) || !gpu.fits(8 * entries as u64 + 8 * n as u64) {
             return Err(too_large());
         }
-        let relative = matches!(setup.forces, ForceModel::Matrices { .. });
+        // Out of memory and internal errors as well as validation errors: a buffer the
+        // device cannot allocate is invalid without a validation error of its own.
+        let memory = gpu.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let internal = gpu.device.push_error_scope(wgpu::ErrorFilter::Internal);
         let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let f64s = 8 * n as u64;
+        let reduced = 8 * r as u64;
         let u = gpu.storage("u", f64s);
         let v = gpu.storage("v", f64s);
-        let a = gpu.storage("a", f64s);
         let du = gpu.storage("du", f64s);
-        let uref = gpu.storage("uref", if relative { f64s } else { 16 });
-        let dv = gpu.storage("dv", if relative { 2 * 4 * n as u64 } else { 16 });
+        let q = gpu.storage("q", reduced);
+        let qd = gpu.storage("q dot", reduced);
+        let a = gpu.storage("a", reduced);
+        let rq = gpu.storage("reduced residual", reduced);
+        let residual = gpu.storage("residual", f64s);
+        let g = gpu.storage("prescribed", 5 * f64s);
+        let reaction = setup
+            .prescribed_motion
+            .then(|| gpu.storage("reactions", 2 * f64s));
         let fs = gpu.storage("forces", 2 * f64s);
-        let loads = gpu.storage("loads", 3 * f64s);
+        let loads = gpu.storage("loads", 2 * f64s);
         let energy = gpu.storage("energy", 6 * f64s);
-        let im = gpu.init("inverse mass", bytemuck::cast_slice(setup.inverse_mass));
-        let staging = gpu.staging("staging", 6 * f64s);
+        let mass = gpu.init("mass", bytemuck::cast_slice(setup.mass));
+        let staging = gpu.staging("staging", 10 * f64s + 3 * reduced);
         let stride = u64::from(gpu.limits.min_uniform_buffer_offset_alignment)
             .max(std::mem::size_of::<StepParams>() as u64);
-        let params = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        let params = gpu.buffer(&wgpu::BufferDescriptor {
             label: Some("steps"),
-            size: stride * MAX_CHUNK as u64,
+            // One more for the contact gate after the last time step.
+            size: stride * (MAX_CHUNK + 1) as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let groups = gpu.fold(n, GROUP);
-        let dims_of = |count: usize, groups: (u32, u32), positions: usize| {
+        let reduced_groups = gpu.fold(r, GROUP);
+        let dims_of = |count: usize, groups: (u32, u32)| {
             gpu.uniform(
                 "dims",
                 bytemuck::bytes_of(&Dims {
                     n: count as u32,
                     groups_x: groups.0,
-                    positions: positions as u32,
-                    relative: u32::from(relative),
+                    base: 0,
+                    pad: 0,
                 }),
             )
         };
-        let dims = dims_of(n, groups, 0);
+        let dims = dims_of(n, groups);
+        let reduced_dims = dims_of(r, reduced_groups);
         let step_binding = || {
             wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                 buffer: &params,
@@ -279,74 +526,122 @@ impl Engine {
                 size: wgpu::BufferSize::new(std::mem::size_of::<StepParams>() as u64),
             })
         };
+        // A sparse matrix as the shaders read it: the row pointers, then the columns; the
+        // values. Empty buffers hold one zero.
+        let sparse = |name: &str, m: &Sparse| {
+            let mut index = m.ptr.clone();
+            index.extend_from_slice(&m.col);
+            let values = if m.val.is_empty() {
+                vec![0.0]
+            } else {
+                m.val.clone()
+            };
+            (
+                gpu.init(name, bytemuck::cast_slice(&index)),
+                gpu.init(name, bytemuck::cast_slice(&values)),
+            )
+        };
+        let transform = sparse("T", &reduction.transform);
+        let transposed = sparse("T transposed", &reduction.transform.transpose(r));
+        let inverse = sparse("inverse mass", &reduction.inverse_mass);
         use Use::*;
         let mut passes = Vec::new();
-        let mut histories = Vec::new();
-        let layout = gpu.layout(
-            "advance",
-            &[
-                Uniform, Dynamic, Write, Write, Read, Write, Read, Write, Read,
-            ],
-        );
+        // With contact: the gate first in every time step.
+        let mut contact = match setup.contact {
+            Some((c, candidates)) => Some(ContactGpu::new(&gpu, c, &candidates, setup.mass)?),
+            None => None,
+        };
+        let contact_bind = contact.as_ref().map(|c| c.bind(&gpu, &params, &u, &v, &fs));
+        let contact_pipeline = |layout: &wgpu::BindGroupLayout, entry: &str| {
+            gpu.pipeline(include_str!("contact.wgsl"), entry, layout, &[])
+        };
+        if let (Some(c), Some(bind)) = (&mut contact, &contact_bind) {
+            c.passes[0] = passes.len();
+            passes.push(Pass {
+                pipeline: contact_pipeline(&c.gate_layout, "contact_gate"),
+                bind: bind[1].clone(),
+                step: true,
+                groups: (1, 1),
+                kind: 4,
+                indirect: None,
+            });
+        }
+        let layout = gpu.layout("advance", &[Uniform, Dynamic, Write, Write, Read]);
         passes.push(Pass {
             pipeline: gpu.pipeline(include_str!("advance.wgsl"), "advance", &layout, &[]),
             bind: gpu.bind(
                 &layout,
                 vec![
+                    reduced_dims.as_entire_binding(),
+                    step_binding(),
+                    q.as_entire_binding(),
+                    qd.as_entire_binding(),
+                    a.as_entire_binding(),
+                ],
+            ),
+            step: true,
+            groups: reduced_groups,
+            kind: 0,
+            indirect: None,
+        });
+        let layout = gpu.layout(
+            "expand",
+            &[
+                Uniform, Dynamic, Read, Read, Write, Read, Read, Write, Write, Write,
+            ],
+        );
+        passes.push(Pass {
+            pipeline: gpu.pipeline(include_str!("expand.wgsl"), "expand", &layout, &[]),
+            bind: gpu.bind(
+                &layout,
+                vec![
                     dims.as_entire_binding(),
                     step_binding(),
+                    q.as_entire_binding(),
+                    qd.as_entire_binding(),
+                    g.as_entire_binding(),
+                    transform.0.as_entire_binding(),
+                    transform.1.as_entire_binding(),
                     u.as_entire_binding(),
                     v.as_entire_binding(),
-                    a.as_entire_binding(),
                     du.as_entire_binding(),
-                    uref.as_entire_binding(),
-                    dv.as_entire_binding(),
-                    im.as_entire_binding(),
                 ],
             ),
             step: true,
             groups,
             kind: 0,
+            indirect: None,
         });
-        match setup.forces {
-            ForceModel::Matrices { stiffness, viscous } => {
-                let sliced = Sliced::new(stiffness, viscous);
-                if !gpu.fits(8 * sliced.val.len() as u64) {
-                    return Err(too_large());
-                }
-                let positions = sliced.rows.len();
-                let product_groups = gpu.fold(positions, GROUP);
-                let layout = gpu.layout("product", &[Uniform, Read, Write, Read, Read, Read, Read]);
+        let histories = Self::element_passes(&gpu, setup.elements, n, &u, &v, &fs, &mut passes)?;
+        // The springs of the contact into the forces.
+        if let (Some(c), Some(bind)) = (&mut contact, &contact_bind) {
+            let counts = c.counts();
+            for (k, entry) in [
+                "contact_point",
+                "contact_rows",
+                "contact_cap",
+                "contact_gather",
+                "contact_check",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                c.passes[k + 1] = passes.len();
                 passes.push(Pass {
-                    pipeline: gpu.pipeline(include_str!("product.wgsl"), "product", &layout, &[]),
-                    bind: gpu.bind(
-                        &layout,
-                        vec![
-                            dims_of(n, product_groups, positions).as_entire_binding(),
-                            dv.as_entire_binding(),
-                            fs.as_entire_binding(),
-                            gpu.init("slices", bytemuck::cast_slice(&sliced.start))
-                                .as_entire_binding(),
-                            gpu.init("rows", bytemuck::cast_slice(&sliced.rows))
-                                .as_entire_binding(),
-                            gpu.init("columns", bytemuck::cast_slice(&sliced.col))
-                                .as_entire_binding(),
-                            gpu.init("values", bytemuck::cast_slice(&sliced.val))
-                                .as_entire_binding(),
-                        ],
-                    ),
-                    step: false,
-                    groups: product_groups,
-                    kind: 1,
+                    pipeline: contact_pipeline(&c.layout, entry),
+                    bind: bind[0].clone(),
+                    step: true,
+                    groups: gpu.fold(counts[k], 64),
+                    kind: 4,
+                    indirect: None,
                 });
-            }
-            ForceModel::Elements(elements) => {
-                histories = Self::element_passes(&gpu, elements, n, &u, &v, &fs, &mut passes)?;
             }
         }
         let layout = gpu.layout(
             "accelerate",
-            &[Uniform, Dynamic, Read, Write, Read, Read, Read, Read, Write],
+            &[
+                Uniform, Dynamic, Read, Write, Read, Read, Read, Read, Write, Read,
+            ],
         );
         passes.push(Pass {
             pipeline: gpu.pipeline(include_str!("accelerate.wgsl"), "accelerate", &layout, &[]),
@@ -356,17 +651,121 @@ impl Engine {
                     dims.as_entire_binding(),
                     step_binding(),
                     v.as_entire_binding(),
-                    a.as_entire_binding(),
+                    residual.as_entire_binding(),
                     du.as_entire_binding(),
-                    im.as_entire_binding(),
+                    mass.as_entire_binding(),
                     loads.as_entire_binding(),
                     fs.as_entire_binding(),
                     energy.as_entire_binding(),
+                    g.as_entire_binding(),
                 ],
             ),
             step: true,
             groups,
             kind: 3,
+            indirect: None,
+        });
+        // The reduced residual `Tᵀ r` and the reduced accelerations `M_q⁻¹ Tᵀ r`.
+        let layout = gpu.layout("sparse", &[Uniform, Read, Read, Read, Write]);
+        let pipeline = gpu.pipeline(include_str!("sparse.wgsl"), "sparse", &layout, &[]);
+        for (matrix, x, y) in [(&transposed, &residual, &rq), (&inverse, &rq, &a)] {
+            passes.push(Pass {
+                pipeline: pipeline.clone(),
+                bind: gpu.bind(
+                    &layout,
+                    vec![
+                        reduced_dims.as_entire_binding(),
+                        matrix.0.as_entire_binding(),
+                        matrix.1.as_entire_binding(),
+                        x.as_entire_binding(),
+                        y.as_entire_binding(),
+                    ],
+                ),
+                step: false,
+                groups: reduced_groups,
+                kind: 3,
+                indirect: None,
+            });
+        }
+        // The work of the prescribed displacements.
+        if let Some(reaction) = &reaction {
+            let layout = gpu.layout(
+                "react",
+                &[Uniform, Read, Read, Read, Read, Read, Read, Write],
+            );
+            passes.push(Pass {
+                pipeline: gpu.pipeline(include_str!("react.wgsl"), "react", &layout, &[]),
+                bind: gpu.bind(
+                    &layout,
+                    vec![
+                        dims.as_entire_binding(),
+                        a.as_entire_binding(),
+                        transform.0.as_entire_binding(),
+                        transform.1.as_entire_binding(),
+                        mass.as_entire_binding(),
+                        residual.as_entire_binding(),
+                        g.as_entire_binding(),
+                        reaction.as_entire_binding(),
+                    ],
+                ),
+                step: false,
+                groups,
+                kind: 3,
+                indirect: None,
+            });
+        }
+        // With contact every pass but the gate is dispatched indirectly.
+        if contact.is_some() && passes.len() > MAX_PASSES {
+            return Err(format!(
+                "{} passes per time step with contact",
+                passes.len()
+            ));
+        }
+        if let Some(c) = &contact {
+            for (i, p) in passes.iter_mut().enumerate() {
+                if i != c.passes[0] {
+                    p.indirect = Some(12 * i as u64);
+                }
+            }
+        }
+        let guard = setup.guard.filter(|g| !g.is_empty()).map(|g| {
+            let count = g.len();
+            let groups = gpu.fold(count, 64);
+            let dims = gpu.uniform(
+                "guard dims",
+                bytemuck::bytes_of(&Dims {
+                    n: count as u32,
+                    groups_x: groups.0,
+                    base: 0,
+                    pad: 0,
+                }),
+            );
+            let reference = gpu.storage("guard reference", 4 * count as u64);
+            let result = gpu.storage("guard result", 4);
+            let layout = gpu.layout("guard", &[Uniform, Read, Read, Read, Read, Read, Write]);
+            GuardGpu {
+                pipeline: gpu.pipeline(include_str!("guard.wgsl"), "guard", &layout, &[]),
+                bind: gpu.bind(
+                    &layout,
+                    vec![
+                        dims.as_entire_binding(),
+                        gpu.init("guard offsets", bytemuck::cast_slice(&g.offsets))
+                            .as_entire_binding(),
+                        gpu.init("guard dofs", bytemuck::cast_slice(&g.dofs))
+                            .as_entire_binding(),
+                        gpu.init("guard coordinates", bytemuck::cast_slice(&g.coordinates))
+                            .as_entire_binding(),
+                        u.as_entire_binding(),
+                        reference.as_entire_binding(),
+                        result.as_entire_binding(),
+                    ],
+                ),
+                groups,
+                reference,
+                result,
+                staging: gpu.staging("guard result", 16),
+                count,
+            }
         });
         let timed = (QUERIES / (2 * passes.len())).min(MAX_CHUNK);
         let trace = (gpu.timestamps && timed > 0).then(|| {
@@ -377,7 +776,7 @@ impl Engine {
                     ty: wgpu::QueryType::Timestamp,
                     count,
                 }),
-                resolve: gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                resolve: gpu.buffer(&wgpu::BufferDescriptor {
                     label: Some("trace"),
                     size: 8 * u64::from(count),
                     usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
@@ -386,32 +785,73 @@ impl Engine {
                 read: gpu.staging("trace", 8 * u64::from(count)),
                 period: f64::from(gpu.queue.get_timestamp_period()) * 1e-9,
                 timed,
-                kernels: [0.0; 4],
+                kernels: [0.0; 5],
                 wall: 0.0,
                 steps: 0,
                 timed_steps: 0,
             }
         });
-        if let Some(e) = plxs_gpu::block_on(scope.pop()) {
-            return Err(format!("{}: {e}", gpu.name));
+        let validation = plxs_gpu::block_on(scope.pop());
+        let internal = plxs_gpu::block_on(internal.pop());
+        let memory = plxs_gpu::block_on(memory.pop());
+        let errors: Vec<String> = [memory, internal]
+            .into_iter()
+            .flatten()
+            .map(|e| e.to_string())
+            .chain(gpu.take_error())
+            .chain(validation.map(|e| e.to_string()))
+            .collect();
+        if !errors.is_empty() {
+            // What this run holds on the card, for a failure for want of memory.
+            let held = gpu
+                .device
+                .generate_allocator_report()
+                .map(|mut r| {
+                    let mb = |b: u64| b as f64 / 1048576.0;
+                    r.allocations.sort_by_key(|a| std::cmp::Reverse(a.size));
+                    let largest: Vec<String> = r
+                        .allocations
+                        .iter()
+                        .take(4)
+                        .map(|a| format!("{} {:.1} MB", a.name, mb(a.size)))
+                        .collect();
+                    format!(
+                        "; this run holds {:.1} MB in {} buffers (largest: {}), {:.1} MB \
+                         reserved in {} blocks",
+                        mb(r.total_allocated_bytes),
+                        r.allocations.len(),
+                        largest.join(", "),
+                        mb(r.total_reserved_bytes),
+                        r.blocks.len()
+                    )
+                })
+                .unwrap_or_default();
+            return Err(format!("{}: {}{held}", gpu.name, errors.join("; ")));
         }
         Ok(Self {
             gpu,
             n,
+            r,
             alpha: setup.alpha,
-            relative,
             stride,
             params,
             u,
             v,
+            q,
+            qd,
             a,
-            uref,
+            g,
+            reaction,
             loads,
             energy,
             staging,
             passes,
             histories,
             trace,
+            fs,
+            contact,
+            guard,
+            events_from: u32::MAX,
         })
     }
 
@@ -430,11 +870,13 @@ impl Engine {
         use Use::*;
         let too_large = || format!("the model is too large for the buffers of {}", gpu.name);
         // The positions of every DOF's element forces.
+        let rows: usize = elements.blocks.iter().map(|b| b.dofs.len()).sum();
         let total: usize = elements
             .families
             .iter()
             .map(|f| 3 * f.nodes * f.count)
-            .sum();
+            .sum::<usize>()
+            + rows;
         if total == 0 {
             return Err("no elements".to_owned());
         }
@@ -457,6 +899,28 @@ impl Engine {
             }
             bases.push(base);
             base += nd * family.count;
+        }
+        // The block rows behind the element forces, and their entries.
+        let block_base = base;
+        let mut block_ptr = vec![0u32];
+        let mut block_columns = Vec::new();
+        let mut block_values: Vec<f64> = Vec::new();
+        for block in &elements.blocks {
+            let m = block.dofs.len();
+            for (i, &dof) in block.dofs.iter().enumerate() {
+                if dof as usize >= n {
+                    return Err(format!("DOF {dof} of {n}"));
+                }
+                lists[dof as usize].push((block_base + block_ptr.len() - 1) as u32);
+                for (j, &col) in block.dofs.iter().enumerate() {
+                    let k = block.stiffness[i * m + j];
+                    if k != 0.0 {
+                        block_columns.push(col);
+                        block_values.push(k);
+                    }
+                }
+                block_ptr.push(block_columns.len() as u32);
+            }
         }
         let mut ptr = Vec::with_capacity(n + 1);
         ptr.push(0u32);
@@ -516,8 +980,8 @@ impl Engine {
                 bytemuck::bytes_of(&Dims {
                     n: count as u32,
                     groups_x: groups.0,
-                    positions: base as u32,
-                    relative: 0,
+                    base: base as u32,
+                    pad: 0,
                 }),
             );
             passes.push(Pass {
@@ -556,6 +1020,49 @@ impl Engine {
                 step: false,
                 groups,
                 kind: 1,
+                indirect: None,
+            });
+        }
+        if rows > 0 {
+            if !gpu.fits(12 * block_values.len() as u64 + 4) {
+                return Err(too_large());
+            }
+            let groups = gpu.fold(rows, ELEMENT_GROUP);
+            let dims = gpu.uniform(
+                "block dims",
+                bytemuck::bytes_of(&Dims {
+                    n: rows as u32,
+                    groups_x: groups.0,
+                    base: block_base as u32,
+                    pad: 0,
+                }),
+            );
+            let layout = gpu.layout("blocks", &[Uniform, Read, Read, Read, Read, Write]);
+            // An empty buffer cannot be bound.
+            if block_values.is_empty() {
+                block_columns.push(0);
+                block_values.push(0.0);
+            }
+            passes.push(Pass {
+                pipeline: gpu.pipeline(include_str!("blocks.wgsl"), "blocks", &layout, &[]),
+                bind: gpu.bind(
+                    &layout,
+                    vec![
+                        dims.as_entire_binding(),
+                        u.as_entire_binding(),
+                        gpu.init("block pointers", bytemuck::cast_slice(&block_ptr))
+                            .as_entire_binding(),
+                        gpu.init("block columns", bytemuck::cast_slice(&block_columns))
+                            .as_entire_binding(),
+                        gpu.init("block values", bytemuck::cast_slice(&block_values))
+                            .as_entire_binding(),
+                        fint.as_entire_binding(),
+                    ],
+                ),
+                step: false,
+                groups,
+                kind: 1,
+                indirect: None,
             });
         }
         let groups = gpu.fold(n, GROUP);
@@ -564,8 +1071,8 @@ impl Engine {
             bytemuck::bytes_of(&Dims {
                 n: n as u32,
                 groups_x: groups.0,
-                positions: positions.len() as u32,
-                relative: 0,
+                base: positions.len() as u32,
+                pad: 0,
             }),
         );
         let layout = gpu.layout("gather", &[Uniform, Read, Read, Read, Read, Write]);
@@ -587,42 +1094,59 @@ impl Engine {
             step: false,
             groups,
             kind: 2,
+            indirect: None,
         });
         Ok(histories)
     }
 
     pub(crate) fn load(&mut self, start: &Start<'_>) -> Result<(), String> {
-        let n = self.n;
+        let (n, r) = (self.n, self.r);
         for x in [
             start.u,
             start.v,
-            start.a,
+            start.prescribed,
+            start.prescribed_rate,
             start.internal,
             start.viscous,
             start.loads,
         ] {
             if x.len() != n {
-                return Err(format!("{} values for {n} unknowns", x.len()));
+                return Err(format!("{} values for {n} DOFs", x.len()));
+            }
+        }
+        for x in [start.q, start.qdot, start.a] {
+            if x.len() != r {
+                return Err(format!("{} values for {r} reduced unknowns", x.len()));
             }
         }
         let q = &self.gpu.queue;
         q.write_buffer(&self.u, 0, bytemuck::cast_slice(start.u));
         q.write_buffer(&self.v, 0, bytemuck::cast_slice(start.v));
-        q.write_buffer(&self.a, 0, bytemuck::cast_slice(start.a));
+        if let Some(c) = &self.contact {
+            let values = contact::state_values(c.contact.points.len(), start.contact);
+            self.gpu.write(&c.state, 0, bytemuck::cast_slice(&values));
+        }
         let bytes = 8 * n as u64;
+        // g at the start (also as the end, until a run gives its own), its rate; no
+        // acceleration and increment yet.
+        let mut g = Vec::with_capacity(5 * n);
+        g.extend_from_slice(start.prescribed);
+        g.extend_from_slice(start.prescribed);
+        g.extend_from_slice(start.prescribed_rate);
+        g.resize(5 * n, 0.0);
+        self.gpu.write(&self.g, 0, bytemuck::cast_slice(&g));
+        if let Some(reaction) = &self.reaction {
+            let mut values = vec![0.0; 2 * n];
+            if start.reactions.len() == n {
+                values[..n].copy_from_slice(start.reactions);
+            }
+            self.gpu.write(reaction, 0, bytemuck::cast_slice(&values));
+        }
+        q.write_buffer(&self.q, 0, bytemuck::cast_slice(start.q));
+        q.write_buffer(&self.qd, 0, bytemuck::cast_slice(start.qdot));
+        q.write_buffer(&self.a, 0, bytemuck::cast_slice(start.a));
         q.write_buffer(&self.loads, 0, bytemuck::cast_slice(start.loads));
         q.write_buffer(&self.loads, bytes, bytemuck::cast_slice(start.loads));
-        // The reference of the products; the element forces are whole.
-        if self.relative {
-            q.write_buffer(&self.uref, 0, bytemuck::cast_slice(start.u));
-            q.write_buffer(&self.loads, 2 * bytes, bytemuck::cast_slice(start.internal));
-        } else {
-            q.write_buffer(
-                &self.loads,
-                2 * bytes,
-                bytemuck::cast_slice(&vec![0.0_f64; n]),
-            );
-        }
         let mut energy = Vec::with_capacity(6 * n);
         energy.extend_from_slice(start.internal);
         energy.extend_from_slice(start.loads);
@@ -646,6 +1170,27 @@ impl Engine {
             self.gpu.write(&h.buffer, 0, bytemuck::cast_slice(&values));
         }
         Ok(())
+    }
+
+    /// Uploads the candidates of a new search.
+    pub(crate) fn candidates(&mut self, candidates: &Candidates<'_>) -> Result<(), String> {
+        let Some(c) = &mut self.contact else {
+            return Err("no contact on the card".to_owned());
+        };
+        c.upload(&self.gpu, candidates)?;
+        let bind = c.bind(&self.gpu, &self.params, &self.u, &self.v, &self.fs);
+        let counts = c.counts();
+        for (k, &at) in c.passes.iter().enumerate() {
+            let pass = &mut self.passes[at];
+            pass.bind = bind[usize::from(k == 0)].clone();
+            if k > 0 {
+                pass.groups = self.gpu.fold(counts[k - 1], 64);
+            }
+        }
+        match self.gpu.take_error() {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// Writes the state variables on the card into `material`.
@@ -684,36 +1229,66 @@ impl Engine {
     pub(crate) fn run(
         &mut self,
         steps: &[(f64, f64)],
-        from: &[f64],
-        to: &[f64],
-    ) -> Result<(), String> {
+        loads: [&[f64]; 2],
+        prescribed: [&[f64]; 2],
+    ) -> Result<Ran, String> {
         if steps.is_empty() {
-            return Ok(());
+            return Ok(Ran::default());
         }
         let n = self.n;
-        if from.len() != n || to.len() != n {
-            return Err("the loads have the wrong length".to_owned());
+        if loads.iter().chain(&prescribed).any(|x| x.len() != n) {
+            return Err(
+                "the loads or the prescribed displacements have the wrong length".to_owned(),
+            );
         }
         let total: f64 = steps.iter().map(|s| s.0).sum();
-        let mut params = vec![0u8; self.stride as usize * steps.len()];
+        // One more for the gate after the last time step.
+        let mut params = vec![0u8; self.stride as usize * (steps.len() + 1)];
         let mut elapsed = 0.0;
+        let fraction = |t: f64| if total > 0.0 { t / total } else { 1.0 };
         for (k, &(h, c)) in steps.iter().enumerate() {
+            let s_before = if k == 0 { 0.0 } else { fraction(elapsed) };
             elapsed += h;
             let p = StepParams {
                 h,
                 c,
-                s: if total > 0.0 { elapsed / total } else { 1.0 },
+                s: fraction(elapsed),
                 alpha: self.alpha,
+                s_before,
+                index: k as f64,
             };
             let at = k * self.stride as usize;
             params[at..at + std::mem::size_of::<StepParams>()]
                 .copy_from_slice(bytemuck::bytes_of(&p));
         }
+        let last = StepParams {
+            index: steps.len() as f64,
+            ..bytemuck::Zeroable::zeroed()
+        };
+        let at = steps.len() * self.stride as usize;
+        params[at..at + std::mem::size_of::<StepParams>()]
+            .copy_from_slice(bytemuck::bytes_of(&last));
         let q = &self.gpu.queue;
         q.write_buffer(&self.params, 0, &params);
         let bytes = 8 * n as u64;
-        q.write_buffer(&self.loads, 0, bytemuck::cast_slice(from));
-        q.write_buffer(&self.loads, bytes, bytemuck::cast_slice(to));
+        q.write_buffer(&self.loads, 0, bytemuck::cast_slice(loads[0]));
+        q.write_buffer(&self.loads, bytes, bytemuck::cast_slice(loads[1]));
+        q.write_buffer(&self.g, 0, bytemuck::cast_slice(prescribed[0]));
+        q.write_buffer(&self.g, bytes, bytemuck::cast_slice(prescribed[1]));
+        // The contact: the dispatches of all passes, no flags yet.
+        if let Some(c) = &mut self.contact {
+            c.dims.events_from = self.events_from;
+            c.dims.arg_words = 3 * self.passes.len() as u32;
+            q.write_buffer(&c.cdims, 0, bytemuck::bytes_of(&c.dims));
+            let args: Vec<u32> = self
+                .passes
+                .iter()
+                .flat_map(|p| [p.groups.0, p.groups.1, 1])
+                .collect();
+            q.write_buffer(&c.args, 0, bytemuck::cast_slice(&args));
+            q.write_buffer(&c.flags, 0, bytemuck::cast_slice(&[0u32; FLAGS]));
+        }
+        let args = self.contact.as_ref().map(|c| &c.args);
         let started = std::time::Instant::now();
         let mut encoder = self
             .gpu
@@ -737,10 +1312,7 @@ impl Engine {
                             end_of_pass_write_index: Some(at + 1),
                         }),
                     });
-                    pass.set_pipeline(&p.pipeline);
-                    let offsets = [offset(k)];
-                    pass.set_bind_group(0, &p.bind, if p.step { &offsets[..] } else { &[] });
-                    pass.dispatch_workgroups(p.groups.0, p.groups.1, 1);
+                    p.dispatch(&mut pass, &[offset(k)], args);
                 }
             }
             let count = (2 * timed * self.passes.len()) as u32;
@@ -753,13 +1325,21 @@ impl Engine {
                 timestamp_writes: None,
             });
             for k in timed..steps.len() {
-                let offsets = [offset(k)];
                 for p in &self.passes {
-                    pass.set_pipeline(&p.pipeline);
-                    pass.set_bind_group(0, &p.bind, if p.step { &offsets[..] } else { &[] });
-                    pass.dispatch_workgroups(p.groups.0, p.groups.1, 1);
+                    p.dispatch(&mut pass, &[offset(k)], args);
                 }
             }
+        }
+        // The gate once more: whether the last time step opened or closed a contact.
+        if let Some(c) = &self.contact {
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("contact gate"),
+                    timestamp_writes: None,
+                });
+                self.passes[c.passes[0]].dispatch(&mut pass, &[offset(steps.len())], None);
+            }
+            encoder.copy_buffer_to_buffer(&c.flags, 0, &c.flag_staging, 0, 4 * FLAGS as u64);
         }
         // The parameter buffer is written again by the next run: wait for this one first.
         self.gpu.queue.submit([encoder.finish()]);
@@ -768,7 +1348,7 @@ impl Engine {
             let kinds: Vec<usize> = self.passes.iter().map(|p| p.kind).collect();
             let times = self.gpu.map(&t.read, |bytes| {
                 let stamps: &[u64] = bytemuck::cast_slice(bytes);
-                let mut times = [0.0; 4];
+                let mut times = [0.0; 5];
                 for k in 0..timed * kinds.len() {
                     let ticks = stamps[2 * k + 1].saturating_sub(stamps[2 * k]);
                     times[kinds[k % kinds.len()]] += ticks as f64 * t.period;
@@ -782,40 +1362,173 @@ impl Engine {
             t.steps += steps.len();
             t.timed_steps += timed;
         }
+        let mut ran = Ran {
+            steps: steps.len(),
+            ..Default::default()
+        };
+        if let Some(c) = &self.contact {
+            let flags: Vec<u32> = self.gpu.map(&c.flag_staging, |b| {
+                bytemuck::cast_slice::<u8, u32>(b).to_vec()
+            })?;
+            if flags[2] != 0 && (flags[2] as usize) < steps.len() {
+                ran.steps = flags[2] as usize;
+                ran.search = flags[3] & 1 != 0;
+            }
+            ran.event = flags[4] != 0;
+        }
         match self.gpu.take_error() {
             Some(e) => Err(e),
-            None => Ok(()),
+            None => Ok(ran),
         }
     }
 
+    pub(crate) fn read_values(&mut self, dofs: &[u32]) -> Result<Vec<f64>, String> {
+        if dofs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let staging = self.gpu.staging("values", 8 * dofs.len() as u64);
+        let mut encoder = self
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("read values"),
+            });
+        for (k, &d) in dofs.iter().enumerate() {
+            if d as usize >= self.n {
+                return Err(format!("DOF {d} of {}", self.n));
+            }
+            encoder.copy_buffer_to_buffer(&self.u, 8 * u64::from(d), &staging, 8 * k as u64, 8);
+        }
+        self.gpu.queue.submit([encoder.finish()]);
+        let values = self.gpu.map(&staging, |b| {
+            bytemuck::cast_slice::<u8, f64>(&b[..8 * dofs.len()]).to_vec()
+        })?;
+        match self.gpu.take_error() {
+            Some(e) => Err(e),
+            None => Ok(values),
+        }
+    }
+
+    pub(crate) fn guard_reference(&mut self, reference: &[f32]) -> Result<(), String> {
+        let Some(g) = &self.guard else {
+            return Err("no watch over the time step on the card".to_owned());
+        };
+        if reference.len() != g.count {
+            return Err(format!(
+                "{} reference lengths for {} elements",
+                reference.len(),
+                g.count
+            ));
+        }
+        self.gpu
+            .write(&g.reference, 0, bytemuck::cast_slice(reference));
+        Ok(())
+    }
+
+    pub(crate) fn departure(&mut self) -> Result<f32, String> {
+        let Some(g) = &self.guard else {
+            return Err("no watch over the time step on the card".to_owned());
+        };
+        self.gpu.write(&g.result, 0, bytemuck::bytes_of(&1.0_f32));
+        let mut encoder = self
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("guard"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("guard"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&g.pipeline);
+            pass.set_bind_group(0, &g.bind, &[]);
+            pass.dispatch_workgroups(g.groups.0, g.groups.1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&g.result, 0, &g.staging, 0, 4);
+        self.gpu.queue.submit([encoder.finish()]);
+        let bits = self
+            .gpu
+            .map(&g.staging, |b| bytemuck::cast_slice::<u8, u32>(&b[..4])[0])?;
+        if let Some(e) = self.gpu.take_error() {
+            return Err(e);
+        }
+        Ok(f32::from_bits(bits))
+    }
+
     pub(crate) fn read(&mut self) -> Result<Reached, String> {
-        let n = self.n;
+        let (n, r) = (self.n, self.r);
         let bytes = 8 * n as u64;
+        let reduced = 8 * r as u64;
         let mut encoder = self
             .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("read"),
             });
+        // u, v, the work per DOF, then q, q̇, a.
         encoder.copy_buffer_to_buffer(&self.u, 0, &self.staging, 0, bytes);
         encoder.copy_buffer_to_buffer(&self.v, 0, &self.staging, bytes, bytes);
-        encoder.copy_buffer_to_buffer(&self.a, 0, &self.staging, 2 * bytes, bytes);
-        encoder.copy_buffer_to_buffer(&self.energy, 3 * bytes, &self.staging, 3 * bytes, 3 * bytes);
+        encoder.copy_buffer_to_buffer(&self.energy, 3 * bytes, &self.staging, 2 * bytes, 3 * bytes);
+        // The rate of the prescribed displacements; the reactions and their work.
+        encoder.copy_buffer_to_buffer(&self.g, 2 * bytes, &self.staging, 5 * bytes, bytes);
+        if let Some(reaction) = &self.reaction {
+            encoder.copy_buffer_to_buffer(reaction, 0, &self.staging, 6 * bytes, 2 * bytes);
+        }
+        // The internal and the viscous forces of the last step.
+        encoder.copy_buffer_to_buffer(&self.energy, 0, &self.staging, 8 * bytes, bytes);
+        encoder.copy_buffer_to_buffer(&self.energy, 2 * bytes, &self.staging, 9 * bytes, bytes);
+        let at = 10 * bytes;
+        encoder.copy_buffer_to_buffer(&self.q, 0, &self.staging, at, reduced);
+        encoder.copy_buffer_to_buffer(&self.qd, 0, &self.staging, at + reduced, reduced);
+        encoder.copy_buffer_to_buffer(&self.a, 0, &self.staging, at + 2 * reduced, reduced);
         self.gpu.queue.submit([encoder.finish()]);
-        let reached = self.gpu.map(&self.staging, |bytes| {
+        let prescribed = self.reaction.is_some();
+        let mut reached = self.gpu.map(&self.staging, |bytes| {
             let data: &[f64] = bytemuck::cast_slice(bytes);
             let sum = |k: usize| data[k * n..(k + 1) * n].iter().sum::<f64>();
+            let tail = &data[10 * n..];
             Reached {
                 u: data[..n].to_vec(),
                 v: data[n..2 * n].to_vec(),
-                a: data[2 * n..3 * n].to_vec(),
-                internal_work: sum(3),
-                external_work: sum(4),
-                dissipation: sum(5),
+                internal_work: sum(2),
+                external_work: sum(3) + if prescribed { sum(7) } else { 0.0 },
+                dissipation: sum(4),
+                prescribed_rate: data[5 * n..6 * n].to_vec(),
+                reactions: if prescribed {
+                    data[6 * n..7 * n].to_vec()
+                } else {
+                    Vec::new()
+                },
+                q: tail[..r].to_vec(),
+                qdot: tail[r..2 * r].to_vec(),
+                a: tail[2 * r..3 * r].to_vec(),
+                internal: data[8 * n..9 * n].to_vec(),
+                viscous: data[9 * n..10 * n].to_vec(),
+                contact: None,
             }
         })?;
         if let Some(e) = self.gpu.take_error() {
             return Err(e);
+        }
+        if let Some(c) = &self.contact
+            && !c.contact.points.is_empty()
+        {
+            let bytes = (8 * STATE * c.contact.points.len()) as u64;
+            let staging = self.gpu.staging("contact state", bytes);
+            let mut encoder =
+                self.gpu
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("read contact"),
+                    });
+            encoder.copy_buffer_to_buffer(&c.state, 0, &staging, 0, bytes);
+            self.gpu.queue.submit([encoder.finish()]);
+            let points = c.contact.points.len();
+            let state = self.gpu.map(&staging, |b| {
+                contact::state_of(&bytemuck::cast_slice::<u8, f64>(b)[..STATE * points])
+            })?;
+            reached.contact = Some(state);
         }
         if reached.u.iter().any(|x| !x.is_finite()) {
             return Err("the displacements on the graphics card are not finite".to_owned());

@@ -573,6 +573,17 @@ pub struct Elements {
     /// Large deformations (total Lagrangian: Green-Lagrange strain, Saint Venant-Kirchhoff
     /// stress, the bulk and hourglass viscosity in the current configuration).
     pub nlgeom: bool,
+    /// Constant stiffness blocks on any DOFs (general beams U1, springs, the membranes of a
+    /// geometrically linear step), computed in double precision.
+    pub blocks: Vec<Block>,
+}
+
+/// A constant stiffness on some DOFs: the force `K u`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Block {
+    pub dofs: Vec<u32>,
+    /// Row-major, `dofs.len()` squared.
+    pub stiffness: Vec<f64>,
 }
 
 /// The hourglass base vectors of the eight-node brick (the same set as the elements').
@@ -698,9 +709,19 @@ impl Elements {
         Ok(())
     }
 
-    /// The number of elements.
+    /// The number of elements and blocks.
     pub fn len(&self) -> usize {
-        self.families.iter().map(|f| f.count).sum()
+        self.families.iter().map(|f| f.count).sum::<usize>() + self.blocks.len()
+    }
+
+    /// Adds a constant block. `Err` when its stiffness does not fit its DOFs.
+    pub fn push_block(&mut self, block: Block) -> Result<(), String> {
+        let m = block.dofs.len();
+        if m == 0 || block.stiffness.len() != m * m {
+            return Err("a constant block of unexpected shape".to_owned());
+        }
+        self.blocks.push(block);
+        Ok(())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -792,6 +813,14 @@ impl Elements {
                     internal[dof as usize] += f[k];
                     viscous[dof as usize] += fv[k];
                 }
+            }
+        }
+        for block in &self.blocks {
+            let m = block.dofs.len();
+            for (i, &dof) in block.dofs.iter().enumerate() {
+                internal[dof as usize] += (0..m)
+                    .map(|j| block.stiffness[i * m + j] * u[block.dofs[j] as usize])
+                    .sum::<f64>();
             }
         }
         (internal, viscous)

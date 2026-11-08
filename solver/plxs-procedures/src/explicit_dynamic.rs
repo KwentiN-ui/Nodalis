@@ -475,6 +475,27 @@ fn missing_density(model: &Model, element: u32) -> Error {
 /// How the external loads vary over the step: a sum of reference vectors times their
 /// amplitude (one per amplitude name), which costs a vector sum per time step instead of
 /// an assembly; or assembled in every step where that does not reproduce them.
+/// The step times inside the step at which one of the amplitudes `names` has a corner,
+/// ascending.
+fn amplitude_corners<'n>(
+    ctx: &ProcedureContext<'_>,
+    names: impl Iterator<Item = &'n String>,
+    start_total: f64,
+    period: f64,
+) -> Vec<f64> {
+    let mut corners: Vec<f64> = names
+        .filter_map(|name| ctx.model.amplitude(name))
+        .flat_map(|a| {
+            let offset = a.shift_x - if a.total_time { start_total } else { 0.0 };
+            a.points.iter().map(move |&(t, _)| t + offset)
+        })
+        .filter(|&t| t > 0.0 && t < period)
+        .collect();
+    corners.sort_by(f64::total_cmp);
+    corners.dedup();
+    corners
+}
+
 struct LoadHistory {
     groups: Vec<(Option<String>, Vec<f64>)>,
     per_step: bool,
@@ -496,18 +517,7 @@ impl LoadHistory {
                 names.push(name.clone());
             }
         }
-        let mut corners: Vec<f64> = names
-            .iter()
-            .flatten()
-            .filter_map(|name| ctx.model.amplitude(name))
-            .flat_map(|a| {
-                let offset = a.shift_x - if a.total_time { start_total } else { 0.0 };
-                a.points.iter().map(move |&(t, _)| t + offset)
-            })
-            .filter(|&t| t > 0.0 && t < period)
-            .collect();
-        corners.sort_by(f64::total_cmp);
-        corners.dedup();
+        let corners = amplitude_corners(ctx, names.iter().flatten(), start_total, period);
         let mut groups = Vec::new();
         for name in names {
             let mut only = step.clone();
@@ -609,7 +619,8 @@ fn load_at(
 /// constraints couple DOFs.
 enum ReducedMass {
     Diagonal(Vec<f64>),
-    Factored(Box<LdltSolver>),
+    /// The factorization and the reduced mass itself (for the clusters on the card).
+    Factored(Box<LdltSolver>, SparseMatrix),
 }
 
 impl ReducedMass {
@@ -668,7 +679,54 @@ impl ReducedMass {
         let mut solver = LdltSolver::new(ctx.threads);
         solver.analyze(reduced.pattern())?;
         solver.factorize(&reduced)?;
-        Ok(ReducedMass::Factored(Box::new(solver)))
+        Ok(ReducedMass::Factored(Box::new(solver), reduced))
+    }
+
+    /// The constraints and the inverse reduced mass for the card: the factorized mass in
+    /// its clusters, each inverted densely. `Err` when a cluster is too large.
+    fn reduction(
+        &self,
+        set: &ConstraintSet,
+    ) -> std::result::Result<(plxs_explicit::Reduction, plxs_explicit::Clusters), String> {
+        let (ptr, col, val) = set.transform();
+        let transform = plxs_explicit::Sparse {
+            ptr: ptr.to_vec(),
+            col: col.to_vec(),
+            val: val.to_vec(),
+        };
+        match self {
+            ReducedMass::Diagonal(inverse) => {
+                let r = inverse.len();
+                let entries = (0..r as u32).map(|j| (j, j, inverse[j as usize])).collect();
+                Ok((
+                    plxs_explicit::Reduction {
+                        transform,
+                        inverse_mass: plxs_explicit::Sparse::from_entries(r, entries),
+                    },
+                    plxs_explicit::Clusters {
+                        coupled: 0,
+                        largest: 1,
+                    },
+                ))
+            }
+            ReducedMass::Factored(_, mass) => {
+                let r = mass.dimension();
+                let pattern = mass.pattern();
+                let mut entries = Vec::with_capacity(2 * mass.values().len());
+                for c in 0..r {
+                    let start = pattern.col_ptr()[c] as usize;
+                    for (k, &row) in pattern.column(c).iter().enumerate() {
+                        let value = mass.values()[start + k];
+                        entries.push((row, c as u32, value));
+                        if row != c as u32 {
+                            entries.push((c as u32, row, value));
+                        }
+                    }
+                }
+                let mass = plxs_explicit::Sparse::from_entries(r, entries);
+                plxs_explicit::Reduction::new(transform, &mass)
+            }
+        }
     }
 
     /// `x ← (Tᵀ M_L T)⁻¹ x`.
@@ -678,7 +736,7 @@ impl ReducedMass {
                 x.iter_mut().zip(inverse).for_each(|(v, m)| *v *= m);
                 Ok(())
             }
-            ReducedMass::Factored(solver) => solver.solve(x),
+            ReducedMass::Factored(solver, _) => solver.solve(x),
         }
     }
 }
@@ -1233,6 +1291,32 @@ const CONTACT_DAMPING: f64 = 0.5;
 /// Under NLGEOM the stable time step is found anew every so many time steps.
 const NLGEOM_CHECK_STEPS: u64 = 100;
 
+/// Rigid bodies that have turned by less than this (about 0.06°) keep their constraints
+/// of the start under NLGEOM: the members then stretch by about `θ² / 2` of their
+/// distance, 5e-7 at most. A body free to turn must not stay longer: its members, rotated
+/// linearly, strain the elements by `θ² / 2`, which holds a pendulum at about a degree.
+const SMALL_ROTATION: f64 = 1e-3;
+
+/// Rotations of elements without NLGEOM above which the step warns (about 6°): a
+/// rotation by `θ` strains an element by about `θ² / 2` under small deformations.
+const TURN_WARNING: f64 = 0.1;
+
+/// Every this many checks of [`NLGEOM_CHECK_STEPS`] the frequencies are computed even
+/// when the watch over the elements' lengths does not ask for it.
+const NLGEOM_EXACT_CHECKS: usize = 10;
+
+/// The watch over the time step under NLGEOM: every element with three DOFs per node.
+fn element_guard(table: &ElementTable, model: &Model) -> plxs_explicit::Guard {
+    let mut guard = plxs_explicit::Guard::default();
+    for entry in &table.entries {
+        let coords = table.coordinates(model, entry);
+        if entry.dofs.len() == 3 * coords.len() && coords.len() > 1 {
+            guard.push(&coords, &entry.dofs);
+        }
+    }
+    guard
+}
+
 /// Most event frames (contact closing or opening) between two result frames.
 const MAX_EVENT_FRAMES: u64 = 32;
 
@@ -1253,6 +1337,9 @@ struct ExplicitContact {
     /// Points whose stiffness was capped, and the smallest factor.
     capped: usize,
     smallest: f64,
+    /// Searches for candidates so far, and how many of them the card has.
+    searches: u64,
+    uploaded: std::cell::Cell<u64>,
 }
 
 impl ExplicitContact {
@@ -1282,6 +1369,8 @@ impl ExplicitContact {
             last: None,
             capped: 0,
             smallest: 1.0,
+            searches: 0,
+            uploaded: std::cell::Cell::new(0),
         }
     }
 
@@ -1318,6 +1407,7 @@ impl ExplicitContact {
         if moved >= self.reach || moved.is_nan() {
             ctx.contact.prepare(coords, u);
             self.prepared = current;
+            self.searches += 1;
         }
         ctx.contact.damping = Some(plxs_contact::Damping {
             velocities: v.to_vec(),
@@ -1387,6 +1477,197 @@ impl ExplicitContact {
         self.states = evaluation.states();
         self.last = Some(evaluation);
         (springs, damping)
+    }
+
+    /// A new search for candidates at `u` (the card asks for it).
+    fn search(&mut self, ctx: &mut ProcedureContext<'_>, u: &[f64]) {
+        ctx.contact.prepare(&ctx.model.nodes.coordinates, u);
+        self.prepared = Self::gather(&self.nodes, u);
+        self.searches += 1;
+    }
+
+    /// The state of the points for the card: pair by pair, with the factors on their
+    /// stiffness.
+    fn gpu_state(&self, ctx: &ProcedureContext<'_>) -> plxs_explicit::ContactState {
+        use plxs_core::state::ContactStatus;
+        let mut state = plxs_explicit::ContactState::default();
+        for (pi, pair) in ctx.contact.pairs.iter().enumerate() {
+            for p in 0..pair.points.len() {
+                let s = self
+                    .states
+                    .get(pi)
+                    .and_then(|s| s.get(p))
+                    .copied()
+                    .unwrap_or_default();
+                state.status.push(match s.status {
+                    ContactStatus::Open => 0,
+                    ContactStatus::Stick => 1,
+                    ContactStatus::Slip => 2,
+                });
+                state.slip.push(s.slip);
+                state.gap.push(s.gap);
+                state.pressure.push(s.pressure);
+                state.scale.push(
+                    ctx.contact
+                        .stiffness_scale
+                        .get(pi)
+                        .and_then(|s| s.get(p))
+                        .copied()
+                        .unwrap_or(1.0),
+                );
+            }
+        }
+        state
+    }
+
+    /// Takes the state the card reached.
+    fn take_gpu_state(
+        &mut self,
+        ctx: &mut ProcedureContext<'_>,
+        state: &plxs_explicit::ContactState,
+    ) {
+        use plxs_core::state::{ContactPointState, ContactStatus};
+        let mut k = 0;
+        let mut states = Vec::with_capacity(ctx.contact.pairs.len());
+        ctx.contact
+            .stiffness_scale
+            .resize(ctx.contact.pairs.len(), Vec::new());
+        for (pi, pair) in ctx.contact.pairs.iter().enumerate() {
+            let count = pair.points.len();
+            let scales = &mut ctx.contact.stiffness_scale[pi];
+            scales.resize(count, 1.0);
+            let mut points = Vec::with_capacity(count);
+            for scale in scales.iter_mut() {
+                let new = state.scale[k];
+                if *scale == 1.0 && new < 1.0 {
+                    self.capped += 1;
+                }
+                if new < 1.0 {
+                    self.smallest = self.smallest.min(new);
+                }
+                *scale = new;
+                points.push(ContactPointState {
+                    status: match state.status[k] {
+                        0 => ContactStatus::Open,
+                        1 => ContactStatus::Stick,
+                        _ => ContactStatus::Slip,
+                    },
+                    gap: state.gap[k],
+                    pressure: state.pressure[k],
+                    slip: state.slip[k],
+                });
+                k += 1;
+            }
+            states.push(points);
+        }
+        self.states = states;
+    }
+
+    /// The candidates of the last search for the card: the faces of all pairs numbered on.
+    fn gpu_candidates(ctx: &ProcedureContext<'_>) -> Vec<Vec<u32>> {
+        let mut out = Vec::new();
+        let mut offset = 0u32;
+        for pair in &ctx.contact.pairs {
+            let candidates = pair.candidates();
+            for p in 0..pair.points.len() {
+                out.push(
+                    candidates
+                        .get(p)
+                        .map(|c| c.iter().map(|f| f + offset).collect())
+                        .unwrap_or_default(),
+                );
+            }
+            offset += pair.master.len() as u32;
+        }
+        out
+    }
+
+    /// The contact for the card, when every pair has its kernel there: penalty pairs
+    /// node-to-face or face-to-face, not tied.
+    fn gpu_contact(
+        &self,
+        ctx: &ProcedureContext<'_>,
+        mass: &[f64],
+    ) -> std::result::Result<plxs_explicit::Contact, String> {
+        use plxs_contact::geometry::Planar;
+        use plxs_contact::law::Law;
+        let n = mass.len();
+        let coordinates: Vec<f64> = ctx
+            .model
+            .nodes
+            .coordinates
+            .iter()
+            .flat_map(|c| c.iter().copied())
+            .collect();
+        if coordinates.len() != n {
+            return Err("contact with other than three DOFs per node".to_owned());
+        }
+        let mut out = plxs_explicit::Contact {
+            coordinates,
+            moving: (0..n).map(|i| !self.fixed[i] && mass[i] > 0.0).collect(),
+            reach: self.reach,
+            stiffness: CONTACT_STIFFNESS,
+            damping: CONTACT_DAMPING,
+            rounding: plxs_contact::ROUNDING,
+            beside: plxs_contact::BESIDE_TOLERANCE,
+            checked: self.nodes.clone(),
+            ..Default::default()
+        };
+        for (pi, pair) in ctx.contact.pairs.iter().enumerate() {
+            if pair.mortar || !pair.mortar_nodes.is_empty() {
+                return Err("mortar contact".to_owned());
+            }
+            let law = match &pair.law {
+                Law::Linear { k, sigma_inf } => plxs_explicit::ContactLaw::Linear {
+                    k: *k,
+                    sigma_inf: *sigma_inf,
+                },
+                Law::Exponential { c0, p0 } => {
+                    plxs_explicit::ContactLaw::Exponential { c0: *c0, p0: *p0 }
+                }
+                Law::Tabular(points) => plxs_explicit::ContactLaw::Tabular(points.clone()),
+                Law::Tied { .. } => return Err("tied contact".to_owned()),
+            };
+            out.pairs.push(plxs_explicit::ContactPair {
+                node_to_face: pair.kind == plxs_core::contact::ContactKind::NodeToSurface,
+                law,
+                friction: pair.friction.map(|f| (f.mu, f.stick)),
+                clearance: pair.clearance,
+                typical: pair.typical,
+                compression_only: pair.compression_only,
+                edges: pair.master.first().is_some_and(|f| f.planar.is_some()),
+                active: pair.active,
+            });
+            for face in &pair.master {
+                if face.nodes.len() > 8 {
+                    return Err(format!("contact faces of {} nodes", face.nodes.len()));
+                }
+                out.faces.push(plxs_explicit::ContactFace {
+                    nodes: face.nodes.clone(),
+                    corners: face.corners as u8,
+                    quadratic: face.quadratic,
+                    planar: match face.planar {
+                        None => 0,
+                        Some(Planar::Thickness(_)) => 1,
+                        Some(Planar::Axisymmetric) => 2,
+                    },
+                });
+            }
+            for (p, point) in pair.points.iter().enumerate() {
+                if point.nodes.len() > 8 {
+                    return Err(format!("contact points on {} nodes", point.nodes.len()));
+                }
+                out.points.push(plxs_explicit::ContactPoint {
+                    pair: pi as u32,
+                    nodes: point.nodes.clone(),
+                    weights: point.weights.clone(),
+                    area: point.area,
+                    cutoff: pair.cutoff[p],
+                    initial_gap: pair.initial[p].map_or(0.0, |(_, g)| g),
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// Whether some point is closed now that was open before, or the other way round.
@@ -1494,7 +1775,7 @@ impl Procedure for ExplicitDynamic {
         let started = std::time::Instant::now();
         let mut reduced_mass = ReducedMass::new(ctx, &set, &data.mass, fibre_mass.as_ref())?;
         ctx.profile.add(Phase::Factorization, started);
-        if let ReducedMass::Factored(_) = reduced_mass {
+        if let ReducedMass::Factored(..) = reduced_mass {
             progress.event(ProgressEvent::Info(
                 "explicit: constraints couple the mass; the reduced mass is factorized once".into(),
             ));
@@ -1604,14 +1885,71 @@ impl Procedure for ExplicitDynamic {
         // Rigid bodies and joints turning by finite angles (NLGEOM): the constraints are
         // linearized at the current rotations in every time step and the members put
         // where the rotation takes them.
-        let finite_rotations = step.nlgeom && ctx.constraints.has_finite_rotations();
-        let rotated_set = |ctx: &ProcedureContext<'_>, u: &[f64]| {
-            ctx.constraints
-                .at_rotations(u)
-                .step_set(ctx.model.nodes.len(), &active, &spc_end.dofs)
+        // Rigid bodies that have turned by less than `SMALL_ROTATION` (supports, mostly) keep
+        // the constraints of the start, which the card can take; once one turns farther the
+        // steps go on with finite rotations on the processor. Joints always turn.
+        let finite_capable = step.nlgeom && ctx.constraints.has_finite_rotations();
+        let rotation_dofs: Vec<u32> = {
+            let mut nodes: Vec<u32> = ctx.constraints.rigid.iter().map(|r| r.rotation).collect();
+            nodes.sort_unstable();
+            nodes.dedup();
+            nodes
+                .iter()
+                .flat_map(|&node| (0..3).map(move |k| 3 * node + k))
+                .collect()
         };
+        let largest_rotation = |values: &[f64]| {
+            values
+                .chunks(3)
+                .map(|t| t.iter().map(|x| x * x).sum::<f64>().sqrt())
+                .fold(0.0_f64, f64::max)
+        };
+        let rotations_of = |u: &[f64]| -> Vec<f64> {
+            rotation_dofs
+                .iter()
+                .map(|&d| u.get(d as usize).copied().unwrap_or(0.0))
+                .collect()
+        };
+        let mut finite_rotations = finite_capable
+            && (!ctx.constraints.joint_rows.is_empty()
+                || largest_rotation(&rotations_of(&motion.u)) > SMALL_ROTATION);
+        let watch_rotations = finite_capable && !finite_rotations;
+        // Rotations held at zero because the rotated rows refer to them only by a vanishing
+        // coefficient (`ModelConstraints::hold`).
+        let mut held: Vec<u32> = Vec::new();
+        let rotated_set = |ctx: &ProcedureContext<'_>, u: &[f64], held: &[u32]| {
+            let mut rotated = ctx.constraints.at_rotations(u);
+            rotated.hold(held);
+            rotated.step_set(ctx.model.nodes.len(), &active, &spc_end.dofs)
+        };
+        // The set at the rotations `u`, holding the rotations that would become unknowns
+        // beside those of `base`.
+        let settled =
+            |ctx: &ProcedureContext<'_>, u: &[f64], held: &mut Vec<u32>, base: &ConstraintSet| {
+                let mut next = rotated_set(ctx, u, held);
+                let old: std::collections::HashSet<u32> = base.free.iter().copied().collect();
+                let added: Vec<u32> = next
+                    .free
+                    .iter()
+                    .copied()
+                    .filter(|d| !old.contains(d))
+                    .filter(|d| ctx.constraints.rigid.iter().any(|r| r.rotation == d / 3))
+                    .collect();
+                if !added.is_empty() {
+                    held.extend(added);
+                    held.sort_unstable();
+                    held.dedup();
+                    next = rotated_set(ctx, u, held);
+                }
+                next
+            };
+        let held_note =
+            "explicit: rotations of rigid bodies that no member follows are held at zero";
         if finite_rotations && motion.u.iter().any(|v| *v != 0.0) {
-            set = rotated_set(ctx, &motion.u);
+            set = settled(ctx, &motion.u, &mut held, &set);
+            if !held.is_empty() {
+                progress.event(ProgressEvent::Info(held_note.into()));
+            }
             reduced_mass = ReducedMass::new(ctx, &set, &data.mass, fibre_mass.as_ref())?;
         }
         let varying = step.boundaries.iter().any(|b| {
@@ -1746,18 +2084,60 @@ impl Procedure for ExplicitDynamic {
             .map(|e| nodal_average_scalar(ctx.table, ctx.model, e));
         let requests = energy_requests(step);
 
+        // Under NLGEOM the shortest distances in the elements watch the time step: the
+        // frequencies are computed again when one has changed by 5 %, or after
+        // `NLGEOM_EXACT_CHECKS` checks.
+        let guard = step.nlgeom.then(|| element_guard(ctx.table, ctx.model));
+        let mut guard_reference: Vec<f32> =
+            guard.as_ref().map(|g| g.lengths(&u)).unwrap_or_default();
         // The time steps on the graphics card.
-        let mut gpu = if contact.is_none()
-            && !varying
-            && beta_r == 0.0
-            && set.is_selection()
-            && matches!(reduced_mass, ReducedMass::Diagonal(_))
-            && ctx.table.membranes.is_empty()
-            && ctx.table.discrete.is_empty()
-        {
-            gpu_engine(ctx, step, &kernel, &set, &data.mass, alpha_r, progress)
+        let mut gpu = if beta_r == 0.0 && !finite_rotations {
+            gpu_engine(
+                ctx,
+                step,
+                &kernel,
+                &set,
+                &reduced_mass,
+                &data.mass,
+                alpha_r,
+                varying,
+                contact.as_ref(),
+                guard.as_ref(),
+                progress,
+            )
         } else {
+            // Say why, where the card would have been chosen.
+            let mode = plxs_linalg::amg::GpuMode::from_environment();
+            let wanted = match mode {
+                plxs_linalg::amg::GpuMode::Off => false,
+                plxs_linalg::amg::GpuMode::Automatic => {
+                    gpu_worth(ctx, step.nlgeom, contact.is_some())
+                }
+                plxs_linalg::amg::GpuMode::On => true,
+            };
+            if wanted {
+                let why = if finite_rotations {
+                    "rigid bodies or joints turning by finite angles"
+                } else {
+                    "stiffness-proportional damping"
+                };
+                progress.event(ProgressEvent::Info(format!(
+                    "explicit: time steps on the processor ({why})"
+                )));
+            }
             None
+        };
+        // The corners of the prescribed displacements' amplitudes: the card interpolates
+        // them linearly over a chunk as it does the loads.
+        let g_corners = if gpu.is_some() && varying {
+            amplitude_corners(
+                ctx,
+                step.boundaries.iter().filter_map(|b| b.amplitude.as_ref()),
+                start_total,
+                period,
+            )
+        } else {
+            Vec::new()
         };
         let frames = ((period / interval) - 1e-9).ceil().max(1.0) as u32;
         let event_frames = parameters.event_frames && has_contact;
@@ -1777,6 +2157,10 @@ impl Procedure for ExplicitDynamic {
         // An event in the last time step: the next one is written as an event frame.
         let mut event_pending = false;
         let mut omega_now: Option<Vec<f64>> = None;
+        // The time steps the card took, and the watch over rotations without NLGEOM.
+        let mut card_steps: u64 = 0;
+        let turns = (!step.nlgeom).then(|| element_guard(ctx.table, ctx.model));
+        let mut turn_warned = false;
         for frame in first_frame..=last_frame {
             if ctx.cancel.is_cancelled() {
                 ctx.contact.stiffness_scale.clear();
@@ -1804,19 +2188,22 @@ impl Procedure for ExplicitDynamic {
             // processor computes with the fields of the frame. Under NLGEOM the card stops
             // where the processor would check the stable time step on the deformed elements
             // (every `NLGEOM_CHECK_STEPS` steps), and starts again with the new step.
-            while let Some(engine) = gpu.as_mut() {
-                let remaining = t_frame - time;
-                let count = (remaining / dt_max * (1.0 - 1e-12)).ceil().max(1.0) as usize;
-                if count <= 1 {
-                    break;
-                }
-                {
-                    let h = remaining / count as f64;
-                    let started = std::time::Instant::now();
-                    let visc: Vec<f64> = (0..n).map(|i| forces.viscous[i] + f_damp[i]).collect();
-                    let a_now = set.expand(&a_red, &zero);
-                    // The material state on the card, when elements have state variables.
-                    let state_of = |engine: &mut plxs_explicit::Engine| -> std::result::Result<
+            // With contact the card stops for a new search of candidates and for an
+            // event frame, which the processor writes before the card goes on.
+            'steps: loop {
+                while let Some(engine) = gpu.as_mut() {
+                    let remaining = t_frame - time;
+                    let count = (remaining / dt_max * (1.0 - 1e-12)).ceil().max(1.0) as usize;
+                    if count <= 1 {
+                        break;
+                    }
+                    {
+                        let h = remaining / count as f64;
+                        let started = std::time::Instant::now();
+                        let visc: Vec<f64> =
+                            (0..n).map(|i| forces.viscous[i] + f_damp[i]).collect();
+                        // The material state on the card, when elements have state variables.
+                        let state_of = |engine: &mut plxs_explicit::Engine| -> std::result::Result<
                         Option<Vec<f64>>,
                         String,
                     > {
@@ -1827,22 +2214,65 @@ impl Procedure for ExplicitDynamic {
                         engine.read_state(&mut state)?;
                         Ok(Some(state))
                     };
-                    let check = step.nlgeom.then_some(NLGEOM_CHECK_STEPS as usize);
-                    let offset = steps_done as usize;
-                    let run = |engine: &mut plxs_explicit::Engine| -> std::result::Result<
+                        let check = step.nlgeom.then_some(NLGEOM_CHECK_STEPS as usize);
+                        let offset = steps_done as usize;
+                        // The time step of the frame from which a contact that opens or closes
+                        // stops the card for an event frame, as the processor spaces them.
+                        let events_at: Option<u64> =
+                            (event_frames && events_in_frame < MAX_EVENT_FRAMES).then(|| {
+                                let expected = ((t_frame - frame_start) / h).max(1.0) as u64;
+                                last_event_step.map_or(0, |last| last + expected / MAX_EVENT_FRAMES)
+                            });
+                        let contact_state = contact.as_ref().map(|c| c.gpu_state(ctx));
+                        let frame_steps_now = frame_steps;
+                        let run = |engine: &mut plxs_explicit::Engine| -> std::result::Result<
                         GpuRun,
                         String,
                     > {
+                        // The rate of the prescribed displacements over the last step, or
+                        // over the first one when there was none.
+                        let rate: Vec<f64> = if !varying {
+                            vec![0.0; n]
+                        } else if h_prev > 0.0 {
+                            g_cur
+                                .iter()
+                                .zip(&g_prev)
+                                .map(|(c, p)| (c - p) / h_prev)
+                                .collect()
+                        } else {
+                            let next = g_at(ctx, &set, time + h).map_err(|e| e.to_string())?;
+                            next.iter().zip(&g_cur).map(|(x, c)| (x - c) / h).collect()
+                        };
+                        if let Some(c) = &contact
+                            && c.uploaded.get() != c.searches
+                        {
+                            let faces = ExplicitContact::gpu_candidates(ctx);
+                            engine.candidates(&plxs_explicit::Candidates {
+                                faces: &faces,
+                                prepared: &c.prepared,
+                            })?;
+                            c.uploaded.set(c.searches);
+                        }
+                        if !guard_reference.is_empty() {
+                            engine.guard_reference(&guard_reference)?;
+                        }
                         engine.load(&plxs_explicit::Start {
+                            q: &q,
+                            qdot: &qdot,
+                            a: &a_red,
+                            prescribed: &g_cur,
+                            prescribed_rate: &rate,
+                            reactions: &reactions_prev,
                             u: &u,
                             v: &v_half,
-                            a: &a_now,
                             internal: &forces.internal,
                             viscous: &visc,
                             loads: &p,
                             material: &material,
+                            contact: contact_state.as_ref(),
                         })?;
                         let mut from = p.clone();
+                        let mut g_from = g_cur.clone();
                         let mut done = 0;
                         while done < count - 1 {
                             // The card interpolates the loads linearly over a chunk: a chunk
@@ -1850,7 +2280,9 @@ impl Procedure for ExplicitDynamic {
                             // across a corner is a chunk of its own.
                             let mut chunk = (count - 1 - done).min(plxs_explicit::MAX_CHUNK);
                             let t_begin = time + done as f64 * h;
-                            if let Some(corner) = loads.next_corner(t_begin + 1e-9 * h) {
+                            let after = t_begin + 1e-9 * h;
+                            let next_g = g_corners.iter().copied().find(|&t| t > after);
+                            for corner in [loads.next_corner(after), next_g].into_iter().flatten() {
                                 let within = ((corner - t_begin) / h + 1e-9).floor().max(1.0);
                                 if within < chunk as f64 {
                                     chunk = within as usize;
@@ -1869,12 +2301,51 @@ impl Procedure for ExplicitDynamic {
                             let to = loads
                                 .at(ctx, step, t_end, start_total, period)
                                 .map_err(|e| e.to_string())?;
-                            engine.run(&steps, &from, &to)?;
-                            from = to;
-                            done += chunk;
+                            let g_to = if varying {
+                                g_at(ctx, &set, t_end).map_err(|e| e.to_string())?
+                            } else {
+                                g_from.clone()
+                            };
+                            engine.events_from(events_at.map(|at| {
+                                at.saturating_sub(frame_steps_now + done as u64) as usize
+                            }));
+                            let ran = engine.run(&steps, [&from, &to], [&g_from, &g_to])?;
+                            if ran.steps < chunk {
+                                // Stopped early: the loads where it stopped.
+                                let t_taken = time + (done + ran.steps) as f64 * h;
+                                from = loads
+                                    .at(ctx, step, t_taken, start_total, period)
+                                    .map_err(|e| e.to_string())?;
+                                if varying {
+                                    g_from = g_at(ctx, &set, t_taken).map_err(|e| e.to_string())?;
+                                }
+                            } else {
+                                from = to;
+                                g_from = g_to;
+                            }
+                            done += ran.steps;
+                            let turned = watch_rotations
+                                && largest_rotation(&engine.read_values(&rotation_dofs)?)
+                                    > SMALL_ROTATION;
+                            if ran.search || ran.event || turned {
+                                let reached = engine.read()?;
+                                return Ok(GpuRun {
+                                    reached,
+                                    material: state_of(engine)?,
+                                    loads: from,
+                                    prescribed: g_from,
+                                    taken: done,
+                                    checked: None,
+                                    search: ran.search,
+                                    event: ran.event,
+                                    turned,
+                                });
+                            }
                             if let Some(every) = check
                                 && (offset + done).is_multiple_of(every)
                                 && done < count - 1
+                                && ((offset + done).is_multiple_of(every * NLGEOM_EXACT_CHECKS)
+                                    || engine.departure()? < plxs_explicit::GUARD_RATIO)
                             {
                                 let reached = engine.read()?;
                                 let omega = current_frequencies(
@@ -1895,8 +2366,12 @@ impl Procedure for ExplicitDynamic {
                                     reached,
                                     material: state_of(engine)?,
                                     loads: from,
+                                    prescribed: g_from,
                                     taken: done,
                                     checked: Some((dt, omega)),
+                                    search: false,
+                                    event: false,
+                                    turned: false,
                                 });
                             }
                         }
@@ -1905,352 +2380,522 @@ impl Procedure for ExplicitDynamic {
                             reached,
                             material: state_of(engine)?,
                             loads: from,
+                            prescribed: g_from,
                             taken: done,
                             checked: None,
+                            search: false,
+                            event: false,
+                            turned: false,
                         })
                     };
-                    let outcome = run(engine);
-                    let mut again = false;
-                    match outcome {
-                        Ok(GpuRun {
-                            reached,
-                            material: state,
-                            loads: p_reached,
-                            taken,
-                            checked,
-                        }) => {
-                            if let Some(state) = state {
-                                material = state;
+                        let outcome = run(engine);
+                        let mut again = false;
+                        match outcome {
+                            Ok(GpuRun {
+                                mut reached,
+                                material: state,
+                                loads: p_reached,
+                                prescribed: g_reached,
+                                taken,
+                                checked,
+                                search,
+                                event,
+                                turned,
+                            }) => {
+                                if let Some(state) = state {
+                                    material = state;
+                                }
+                                if let Some((dt, omega)) = checked {
+                                    again = true;
+                                    dt_max = dt;
+                                    omega_now = Some(omega);
+                                    if let Some(g) = &guard {
+                                        guard_reference = g.lengths(&reached.u);
+                                    }
+                                }
+                                let taken = taken as u64;
+                                if let (Some(c), Some(state)) = (contact.as_mut(), &reached.contact)
+                                {
+                                    c.take_gpu_state(ctx, state);
+                                }
+                                let gpu_forces = contact.is_some().then(|| {
+                                    (
+                                        std::mem::take(&mut reached.internal),
+                                        std::mem::take(&mut reached.viscous),
+                                    )
+                                });
+                                u = reached.u;
+                                v_half = reached.v;
+                                q = reached.q;
+                                qdot = reached.qdot;
+                                a_red = reached.a;
+                                energies.internal += reached.internal_work;
+                                energies.external_work += reached.external_work;
+                                energies.dissipation += reached.dissipation;
+                                time += taken as f64 * h;
+                                h_prev = h;
+                                steps_done += taken;
+                                card_steps += taken;
+                                frame_steps += taken;
+                                p = p_reached;
+                                if varying {
+                                    g_prev = g_reached
+                                        .iter()
+                                        .zip(&reached.prescribed_rate)
+                                        .map(|(g, r)| g - h * r)
+                                        .collect();
+                                    reactions_prev = reached.reactions;
+                                }
+                                g_cur = g_reached;
+                                ctx.profile.add(Phase::Solve, started);
+                                let started = std::time::Instant::now();
+                                forces = kernel.forces(
+                                    &u,
+                                    &v_half,
+                                    h,
+                                    start_total + time,
+                                    &mut material,
+                                    None,
+                                );
+                                f_damp =
+                                    damping_force(&v_half, &forces.internal, &forces.internal, 0.0);
+                                // With contact the forces the card reached, its springs included.
+                                if let Some((internal, viscous)) = gpu_forces {
+                                    forces.internal = internal;
+                                    forces.viscous =
+                                        viscous.iter().zip(&f_damp).map(|(v, d)| v - d).collect();
+                                }
+                                ctx.profile.add(Phase::Assembly, started);
+                                if let Some(c) = contact.as_mut()
+                                    && search
+                                {
+                                    c.search(ctx, &u);
+                                    again = true;
+                                }
+                                if event {
+                                    // The next time step is an event frame (on the processor).
+                                    event_pending = true;
+                                    events_in_frame += 1;
+                                    last_event_step = Some(frame_steps - 1);
+                                    again = false;
+                                }
+                                if turned {
+                                    // On with finite rotations, on the processor.
+                                    progress.event(ProgressEvent::Info(format!(
+                                        "explicit: a rigid body has turned by more than {}° at \
+                                         {} s; the time steps go on with finite rotations on \
+                                         the processor",
+                                        short(SMALL_ROTATION.to_degrees()),
+                                        short(time)
+                                    )));
+                                    finite_rotations = true;
+                                    let next = settled(ctx, &u, &mut held, &set);
+                                    if !held.is_empty() {
+                                        progress.event(ProgressEvent::Info(held_note.into()));
+                                    }
+                                    let pick = |values: &[f64]| -> Vec<f64> {
+                                        next.free.iter().map(|&d| values[d as usize]).collect()
+                                    };
+                                    let a_full = set.expand(&a_red, &zero);
+                                    let v_full = set.expand(&qdot, &zero);
+                                    q = pick(&u);
+                                    qdot = pick(&v_full);
+                                    a_red = pick(&a_full);
+                                    set = next;
+                                    reduced_mass = ReducedMass::new(
+                                        ctx,
+                                        &set,
+                                        &data.mass,
+                                        fibre_mass.as_ref(),
+                                    )?;
+                                    gpu = None;
+                                    again = false;
+                                }
                             }
-                            if let Some((dt, omega)) = checked {
-                                again = true;
-                                dt_max = dt;
-                                omega_now = Some(omega);
-                            }
-                            let taken = taken as u64;
-                            u = reached.u;
-                            v_half = reached.v;
-                            q = free.iter().map(|&d| u[d]).collect();
-                            qdot = free.iter().map(|&d| v_half[d]).collect();
-                            a_red = free.iter().map(|&d| reached.a[d]).collect();
-                            energies.internal += reached.internal_work;
-                            energies.external_work += reached.external_work;
-                            energies.dissipation += reached.dissipation;
-                            time += taken as f64 * h;
-                            h_prev = h;
-                            steps_done += taken;
-                            frame_steps += taken;
-                            p = p_reached;
-                            ctx.profile.add(Phase::Solve, started);
-                            let started = std::time::Instant::now();
-                            forces = kernel.forces(
-                                &u,
-                                &v_half,
-                                h,
-                                start_total + time,
-                                &mut material,
-                                None,
-                            );
-                            f_damp =
-                                damping_force(&v_half, &forces.internal, &forces.internal, 0.0);
-                            ctx.profile.add(Phase::Assembly, started);
-                        }
-                        Err(e) => {
-                            progress.event(ProgressEvent::Warning(format!(
+                            Err(e) => {
+                                progress.event(ProgressEvent::Warning(format!(
                                 "explicit: the graphics card failed ({e}); the time steps go on on the processor"
                             )));
-                            gpu = None;
+                                gpu = None;
+                            }
+                        }
+                        if !again {
+                            break;
                         }
                     }
-                    if !again {
-                        break;
-                    }
                 }
-            }
-            loop {
-                if frame_steps > 0
-                    && frame_steps.is_multiple_of(CANCEL_STEPS)
-                    && ctx.cancel.is_cancelled()
-                {
-                    ctx.contact.stiffness_scale.clear();
-                    return Ok(StepOutcome::Cancelled);
-                }
-                // Under NLGEOM the elements change their stable time step as they deform.
-                if step.nlgeom && steps_done > 0 && steps_done.is_multiple_of(NLGEOM_CHECK_STEPS) {
-                    let started = std::time::Instant::now();
-                    let omega =
-                        current_frequencies(ctx.table, ctx.model, true, &u, &data, &kernel.offsets);
-                    let now = stable_time_step_of(&omega, data.other_omega, beta_r);
-                    dt_max = (now.stable * contact_step).min(fixed_step.unwrap_or(f64::INFINITY));
-                    if !dt_max.is_finite() {
-                        dt_max = interval;
-                    }
-                    omega_now = Some(omega);
-                    ctx.profile.add(Phase::Assembly, started);
-                }
-                // Equal steps to the end of the frame.
-                let remaining = t_frame - time;
-                let count = (remaining / dt_max * (1.0 - 1e-12)).ceil().max(1.0);
-                h = remaining / count;
-                let last_of_frame = count <= 1.0;
-                let t_next = if last_of_frame { t_frame } else { time + h };
-                let write_event = event_pending && !last_of_frame;
-                event_pending = false;
-                let started = std::time::Instant::now();
-                let g_next = if varying {
-                    g_at(ctx, &set, t_next)?
-                } else {
-                    g_cur.clone()
-                };
-                // Velocities and displacements.
-                let c = 0.5 * (h_prev + h);
-                for (qd, a) in qdot.iter_mut().zip(&a_red) {
-                    *qd += c * a;
-                }
-                for (qi, qd) in q.iter_mut().zip(&qdot) {
-                    *qi += h * qd;
-                }
-                // With finite rotations: the members on their rotated places, the
-                // constraints linearized there, and the acceleration `Ṫ q̇` the turning
-                // constraints give the members at constant `q̇` (centripetal).
-                let mut turning: Option<Vec<f64>> = None;
-                let u_next = if finite_rotations {
-                    let mut u_next = set.expand(&q, &g_next);
-                    ctx.constraints.project_rigid(&mut u_next, &spc_end.dofs);
-                    let next_set = rotated_set(ctx, &u_next);
-                    if next_set.free != set.free {
-                        return Err(Error::Unsupported(
-                            "explicit: the rotated constraints chose other independent DOFs".into(),
-                        ));
-                    }
-                    let before = set.expand(&qdot, &zero);
-                    let after = next_set.expand(&qdot, &zero);
-                    turning = Some(
-                        before
-                            .iter()
-                            .zip(&after)
-                            .map(|(b, a)| (a - b) / h)
-                            .collect(),
-                    );
-                    set = next_set;
-                    let started = std::time::Instant::now();
-                    reduced_mass = ReducedMass::new(ctx, &set, &data.mass, fibre_mass.as_ref())?;
-                    ctx.profile.add(Phase::Factorization, started);
-                    u_next
-                } else {
-                    set.expand(&q, &g_next)
-                };
-                let mut v_next = set.expand(&qdot, &zero);
-                if varying {
-                    for ((v, gn), gc) in v_next.iter_mut().zip(&g_next).zip(&g_cur) {
-                        *v += (gn - gc) / h;
-                    }
-                }
-                ctx.profile.add(Phase::Vectors, started);
-                // Forces at the new time.
-                let started = std::time::Instant::now();
-                let fields =
-                    (last_of_frame || write_event).then_some((&mut stresses, &mut strains));
-                let mut new_forces = kernel.forces(
-                    &u_next,
-                    &v_next,
-                    h,
-                    start_total + t_next,
-                    &mut material,
-                    fields,
-                );
-                ctx.profile.add(Phase::Assembly, started);
-                if let Some(contact) = contact.as_mut() {
-                    let started = std::time::Instant::now();
-                    let before = event_frames.then(|| contact.states.clone());
-                    let (springs, damping) = contact.forces(ctx, &u_next, &v_next, h, &data.mass);
-                    new_forces.add_contact(&springs, &damping);
-                    // A contact that closed or opened: the next time step is an event frame
-                    // (at most `MAX_EVENT_FRAMES` per frame, spread over it).
-                    let expected = ((t_frame - frame_start) / h).max(1.0) as u64;
-                    if let Some(before) = before
-                        && events_in_frame < MAX_EVENT_FRAMES
-                        && last_event_step
-                            .is_none_or(|last| frame_steps >= last + expected / MAX_EVENT_FRAMES)
-                        && ExplicitContact::changed(&before, &contact.states)
+                loop {
+                    if frame_steps > 0
+                        && frame_steps.is_multiple_of(CANCEL_STEPS)
+                        && ctx.cancel.is_cancelled()
                     {
-                        event_pending = true;
-                        events_in_frame += 1;
-                        last_event_step = Some(frame_steps);
+                        ctx.contact.stiffness_scale.clear();
+                        return Ok(StepOutcome::Cancelled);
                     }
-                    ctx.profile.add(Phase::Contact, started);
-                }
-                let started = std::time::Instant::now();
-                let p_next = loads.at(ctx, step, t_next, start_total, period)?;
-                ctx.profile.add(Phase::Loads, started);
-                let started = std::time::Instant::now();
-                let f_damp_next = if alpha_r != 0.0 || beta_r != 0.0 {
-                    damping_force(&v_next, &new_forces.internal, &forces.internal, h)
-                } else {
-                    vec![0.0; n]
-                };
-                if varying {
-                    let h_back = if h_prev > 0.0 { h_prev } else { h };
-                    for i in 0..n {
-                        g_acc[i] = ((g_next[i] - g_cur[i]) / h - (g_cur[i] - g_prev[i]) / h_back)
-                            / (0.5 * (h + h_back));
+                    // Under NLGEOM the elements change their stable time step as they deform.
+                    if step.nlgeom
+                        && steps_done > 0
+                        && steps_done.is_multiple_of(NLGEOM_CHECK_STEPS)
+                        && guard.as_ref().is_some_and(|g| {
+                            steps_done
+                                .is_multiple_of(NLGEOM_CHECK_STEPS * NLGEOM_EXACT_CHECKS as u64)
+                                || g.departure(&guard_reference, &u) < plxs_explicit::GUARD_RATIO
+                        })
+                    {
+                        let started = std::time::Instant::now();
+                        let omega = current_frequencies(
+                            ctx.table,
+                            ctx.model,
+                            true,
+                            &u,
+                            &data,
+                            &kernel.offsets,
+                        );
+                        let now = stable_time_step_of(&omega, data.other_omega, beta_r);
+                        dt_max =
+                            (now.stable * contact_step).min(fixed_step.unwrap_or(f64::INFINITY));
+                        if !dt_max.is_finite() {
+                            dt_max = interval;
+                        }
+                        omega_now = Some(omega);
+                        if let Some(g) = &guard {
+                            guard_reference = g.lengths(&u);
+                        }
+                        ctx.profile.add(Phase::Assembly, started);
                     }
-                    if h_prev == 0.0 {
-                        g_acc.iter_mut().for_each(|g| *g = 0.0);
+                    // Equal steps to the end of the frame.
+                    let remaining = t_frame - time;
+                    let count = (remaining / dt_max * (1.0 - 1e-12)).ceil().max(1.0);
+                    h = remaining / count;
+                    let last_of_frame = count <= 1.0;
+                    let t_next = if last_of_frame { t_frame } else { time + h };
+                    let write_event = event_pending && !last_of_frame;
+                    event_pending = false;
+                    let started = std::time::Instant::now();
+                    let g_next = if varying {
+                        g_at(ctx, &set, t_next)?
+                    } else {
+                        g_cur.clone()
+                    };
+                    // A rigid body that turned beyond `SMALL_ROTATION`: on with finite
+                    // rotations.
+                    if watch_rotations
+                        && !finite_rotations
+                        && largest_rotation(&rotations_of(&u)) > SMALL_ROTATION
+                    {
+                        progress.event(ProgressEvent::Info(format!(
+                            "explicit: a rigid body has turned by more than {}° at {} s; the \
+                             time steps go on with finite rotations",
+                            short(SMALL_ROTATION.to_degrees()),
+                            short(time)
+                        )));
+                        finite_rotations = true;
+                        let next = settled(ctx, &u, &mut held, &set);
+                        if !held.is_empty() {
+                            progress.event(ProgressEvent::Info(held_note.into()));
+                        }
+                        let pick = |values: &[f64]| -> Vec<f64> {
+                            next.free.iter().map(|&d| values[d as usize]).collect()
+                        };
+                        let a_full = set.expand(&a_red, &zero);
+                        let v_full = set.expand(&qdot, &zero);
+                        q = pick(&u);
+                        qdot = pick(&v_full);
+                        a_red = pick(&a_full);
+                        set = next;
+                        reduced_mass =
+                            ReducedMass::new(ctx, &set, &data.mass, fibre_mass.as_ref())?;
                     }
-                }
-                let extra: Option<Vec<f64>> = match &turning {
-                    Some(t) => Some(
-                        t.iter()
-                            .zip(&g_acc)
-                            .map(|(t, g)| t + if varying { *g } else { 0.0 })
-                            .collect(),
-                    ),
-                    None => varying.then(|| g_acc.clone()),
-                };
-                let r = residual(&p_next, &new_forces, &f_damp_next, extra.as_deref());
-                a_red = accelerate(&set, &reduced_mass, &r)?;
-                // Energies over the step (trapezoidal rule of the forces).
-                let mut w_int = 0.0;
-                let mut w_ext = 0.0;
-                let mut w_diss = 0.0;
-                for i in 0..n {
-                    let du = u_next[i] - u[i];
-                    if du == 0.0 {
-                        continue;
+                    // Velocities and displacements.
+                    let c = 0.5 * (h_prev + h);
+                    for (qd, a) in qdot.iter_mut().zip(&a_red) {
+                        *qd += c * a;
                     }
-                    w_int += du * 0.5 * (forces.internal[i] + new_forces.internal[i]);
-                    w_ext += du * 0.5 * (p[i] + p_next[i]);
-                    w_diss += du
-                        * 0.5
-                        * (forces.viscous[i] + new_forces.viscous[i] + f_damp[i] + f_damp_next[i]);
-                }
-                energies.internal += w_int;
-                energies.external_work += w_ext;
-                energies.dissipation += w_diss;
-                if varying {
-                    a_full = set.expand(&a_red, &zero);
-                    let reactions = reaction(&a_full, &g_acc, &p_next, &new_forces, &f_damp_next);
-                    for i in 0..n {
-                        let dg = g_next[i] - g_cur[i];
-                        if dg != 0.0 {
-                            // The prescribed motion's work counts as external work: the
-                            // reaction forces of the reduction, minus the loads there.
-                            energies.external_work += dg * 0.5 * (reactions_prev[i] + reactions[i]);
+                    for (qi, qd) in q.iter_mut().zip(&qdot) {
+                        *qi += h * qd;
+                    }
+                    // With finite rotations: the members on their rotated places, the
+                    // constraints linearized there, and the acceleration `Ṫ q̇` the turning
+                    // constraints give the members at constant `q̇` (centripetal).
+                    let mut turning: Option<Vec<f64>> = None;
+                    let u_next = if finite_rotations {
+                        let mut u_next = set.expand(&q, &g_next);
+                        ctx.constraints.project_rigid(&mut u_next, &spc_end.dofs);
+                        let was_held = held.len();
+                        let next_set = settled(ctx, &u_next, &mut held, &set);
+                        if was_held == 0 && !held.is_empty() {
+                            progress.event(ProgressEvent::Info(held_note.into()));
+                        }
+                        let before = set.expand(&qdot, &zero);
+                        if next_set.free != set.free {
+                            // The rotated constraints chose other independent DOFs (a
+                            // rotation of a rigid body's point became the dependent DOF of
+                            // a row): the unknowns are the values of the new ones (the
+                            // accelerations follow from the forces at the new place).
+                            let pick = |values: &[f64]| -> Vec<f64> {
+                                next_set.free.iter().map(|&d| values[d as usize]).collect()
+                            };
+                            q = pick(&u_next);
+                            qdot = pick(&before);
+                        }
+                        let after = next_set.expand(&qdot, &zero);
+                        turning = Some(
+                            before
+                                .iter()
+                                .zip(&after)
+                                .map(|(b, a)| (a - b) / h)
+                                .collect(),
+                        );
+                        set = next_set;
+                        let started = std::time::Instant::now();
+                        reduced_mass =
+                            ReducedMass::new(ctx, &set, &data.mass, fibre_mass.as_ref())?;
+                        ctx.profile.add(Phase::Factorization, started);
+                        u_next
+                    } else {
+                        set.expand(&q, &g_next)
+                    };
+                    let mut v_next = set.expand(&qdot, &zero);
+                    if varying {
+                        for ((v, gn), gc) in v_next.iter_mut().zip(&g_next).zip(&g_cur) {
+                            *v += (gn - gc) / h;
                         }
                     }
-                    reactions_prev = reactions;
-                }
-                g_prev = std::mem::replace(&mut g_cur, g_next);
-                u = u_next;
-                v_half = v_next;
-                forces = new_forces;
-                p = p_next;
-                f_damp = f_damp_next;
-                h_prev = h;
-                time = t_next;
-                steps_done += 1;
-                frame_steps += 1;
-                ctx.profile.add(Phase::Vectors, started);
-
-                if last_of_frame || write_event {
-                    // The frame: full-step velocities and the accelerations.
+                    ctx.profile.add(Phase::Vectors, started);
+                    // Forces at the new time.
                     let started = std::time::Instant::now();
-                    a_full = set.expand(&a_red, &g_acc);
-                    let v_full: Vec<f64> = v_half
-                        .iter()
-                        .zip(&a_full)
-                        .map(|(v, a)| v + 0.5 * h * a)
-                        .collect();
-                    energies.kinetic = kinetic(&v_full);
-                    let total_energy = energies.kinetic + energies.internal + energies.dissipation;
-                    largest_energy = largest_energy
-                        .max(energies.kinetic)
-                        .max(energies.internal.abs())
-                        .max(energies.external_work.abs());
-                    balance = (total_energy - initial_energy - energies.external_work).abs()
-                        / largest_energy.max(f64::MIN_POSITIVE);
-                    if balance > ENERGY_WARNING && !balance_warned && largest_energy > 0.0 {
-                        balance_warned = true;
-                        progress.event(ProgressEvent::Warning(format!(
+                    let fields =
+                        (last_of_frame || write_event).then_some((&mut stresses, &mut strains));
+                    let mut new_forces = kernel.forces(
+                        &u_next,
+                        &v_next,
+                        h,
+                        start_total + t_next,
+                        &mut material,
+                        fields,
+                    );
+                    ctx.profile.add(Phase::Assembly, started);
+                    if let Some(contact) = contact.as_mut() {
+                        let started = std::time::Instant::now();
+                        let before = event_frames.then(|| contact.states.clone());
+                        let (springs, damping) =
+                            contact.forces(ctx, &u_next, &v_next, h, &data.mass);
+                        new_forces.add_contact(&springs, &damping);
+                        // A contact that closed or opened: the next time step is an event frame
+                        // (at most `MAX_EVENT_FRAMES` per frame, spread over it).
+                        let expected = ((t_frame - frame_start) / h).max(1.0) as u64;
+                        if let Some(before) = before
+                            && events_in_frame < MAX_EVENT_FRAMES
+                            && last_event_step.is_none_or(|last| {
+                                frame_steps >= last + expected / MAX_EVENT_FRAMES
+                            })
+                            && ExplicitContact::changed(&before, &contact.states)
+                        {
+                            event_pending = true;
+                            events_in_frame += 1;
+                            last_event_step = Some(frame_steps);
+                        }
+                        ctx.profile.add(Phase::Contact, started);
+                    }
+                    let started = std::time::Instant::now();
+                    let p_next = loads.at(ctx, step, t_next, start_total, period)?;
+                    ctx.profile.add(Phase::Loads, started);
+                    let started = std::time::Instant::now();
+                    let f_damp_next = if alpha_r != 0.0 || beta_r != 0.0 {
+                        damping_force(&v_next, &new_forces.internal, &forces.internal, h)
+                    } else {
+                        vec![0.0; n]
+                    };
+                    if varying {
+                        let h_back = if h_prev > 0.0 { h_prev } else { h };
+                        for i in 0..n {
+                            g_acc[i] = ((g_next[i] - g_cur[i]) / h
+                                - (g_cur[i] - g_prev[i]) / h_back)
+                                / (0.5 * (h + h_back));
+                        }
+                        if h_prev == 0.0 {
+                            g_acc.iter_mut().for_each(|g| *g = 0.0);
+                        }
+                    }
+                    let extra: Option<Vec<f64>> = match &turning {
+                        Some(t) => Some(
+                            t.iter()
+                                .zip(&g_acc)
+                                .map(|(t, g)| t + if varying { *g } else { 0.0 })
+                                .collect(),
+                        ),
+                        None => varying.then(|| g_acc.clone()),
+                    };
+                    let r = residual(&p_next, &new_forces, &f_damp_next, extra.as_deref());
+                    a_red = accelerate(&set, &reduced_mass, &r)?;
+                    // Energies over the step (trapezoidal rule of the forces).
+                    let mut w_int = 0.0;
+                    let mut w_ext = 0.0;
+                    let mut w_diss = 0.0;
+                    for i in 0..n {
+                        let du = u_next[i] - u[i];
+                        if du == 0.0 {
+                            continue;
+                        }
+                        w_int += du * 0.5 * (forces.internal[i] + new_forces.internal[i]);
+                        w_ext += du * 0.5 * (p[i] + p_next[i]);
+                        w_diss += du
+                            * 0.5
+                            * (forces.viscous[i]
+                                + new_forces.viscous[i]
+                                + f_damp[i]
+                                + f_damp_next[i]);
+                    }
+                    energies.internal += w_int;
+                    energies.external_work += w_ext;
+                    energies.dissipation += w_diss;
+                    if varying {
+                        a_full = set.expand(&a_red, &zero);
+                        let reactions =
+                            reaction(&a_full, &g_acc, &p_next, &new_forces, &f_damp_next);
+                        for i in 0..n {
+                            let dg = g_next[i] - g_cur[i];
+                            if dg != 0.0 {
+                                // The prescribed motion's work counts as external work: the
+                                // reaction forces of the reduction, minus the loads there.
+                                energies.external_work +=
+                                    dg * 0.5 * (reactions_prev[i] + reactions[i]);
+                            }
+                        }
+                        reactions_prev = reactions;
+                    }
+                    g_prev = std::mem::replace(&mut g_cur, g_next);
+                    u = u_next;
+                    v_half = v_next;
+                    forces = new_forces;
+                    p = p_next;
+                    f_damp = f_damp_next;
+                    h_prev = h;
+                    time = t_next;
+                    steps_done += 1;
+                    frame_steps += 1;
+                    ctx.profile.add(Phase::Vectors, started);
+
+                    if last_of_frame || write_event {
+                        // The frame: full-step velocities and the accelerations.
+                        let started = std::time::Instant::now();
+                        a_full = set.expand(&a_red, &g_acc);
+                        let v_full: Vec<f64> = v_half
+                            .iter()
+                            .zip(&a_full)
+                            .map(|(v, a)| v + 0.5 * h * a)
+                            .collect();
+                        energies.kinetic = kinetic(&v_full);
+                        let total_energy =
+                            energies.kinetic + energies.internal + energies.dissipation;
+                        largest_energy = largest_energy
+                            .max(energies.kinetic)
+                            .max(energies.internal.abs())
+                            .max(energies.external_work.abs());
+                        balance = (total_energy - initial_energy - energies.external_work).abs()
+                            / largest_energy.max(f64::MIN_POSITIVE);
+                        if balance > ENERGY_WARNING && !balance_warned && largest_energy > 0.0 {
+                            balance_warned = true;
+                            progress.event(ProgressEvent::Warning(format!(
                             "explicit: the energy balance is off by {} % at {} s; the time step may be \
                              too large for the model",
                             short(100.0 * balance),
                             short(time)
                         )));
-                    }
-                    motion = Motion {
-                        u: u.clone(),
-                        v: v_full,
-                        a: a_full.clone(),
-                    };
-                    let mut reactions: Vec<f64> = (0..n)
-                        .map(|i| forces.internal[i] + forces.viscous[i] + f_damp[i])
-                        .collect();
-                    ctx.constraints
-                        .transfer_forces(&mut reactions, &spc_end.dofs, &active);
-                    if let Some(contact) = &contact {
-                        ctx.state.contact.clone_from(&contact.states);
-                        ctx.contact.last.clone_from(&contact.last);
-                    }
-                    record += 1;
-                    let total = start_total + time;
-                    if !requests.is_empty() {
-                        write_energies(
-                            ctx.results,
-                            &requests,
-                            &energies,
-                            (ctx.step_number, record, total),
-                        );
-                    }
-                    let mut current_material = material_template.clone();
-                    current_material.values.clone_from(&material);
-                    if write_event || crate::static_linear::writes_increment(step, frame, frames) {
-                        write_increment(
-                            ctx,
-                            step,
-                            record,
-                            total,
-                            &motion,
-                            &reactions,
-                            (&stresses, &strains),
-                            carried_nodal.as_deref(),
-                            Some(&current_material),
-                        );
-                    }
-                    crate::history::write_history_with_velocities(
-                        ctx.results,
-                        ctx.model,
-                        ctx.table,
-                        step,
-                        (ctx.step_number, record, total),
-                        (&motion.u, Some(&motion.v)),
-                        &reactions,
-                        &stresses,
-                        &strains,
-                        Some(&current_material),
-                    );
-                    if let Some(evaluation) = contact.as_ref().and_then(|c| c.last.as_ref()) {
-                        for request in &step.outputs.contact_print {
-                            let blocks = plxs_contact::output::history_blocks(
-                                &ctx.contact,
-                                evaluation,
-                                request,
-                                &ctx.model.nodes.ids,
-                                ctx.step_number,
+                        }
+                        motion = Motion {
+                            u: u.clone(),
+                            v: v_full,
+                            a: a_full.clone(),
+                        };
+                        let mut reactions: Vec<f64> = (0..n)
+                            .map(|i| forces.internal[i] + forces.viscous[i] + f_damp[i])
+                            .collect();
+                        ctx.constraints
+                            .transfer_forces(&mut reactions, &spc_end.dofs, &active);
+                        if let Some(contact) = &contact {
+                            ctx.state.contact.clone_from(&contact.states);
+                            ctx.contact.last.clone_from(&contact.last);
+                        }
+                        record += 1;
+                        let total = start_total + time;
+                        if !requests.is_empty() {
+                            write_energies(
+                                ctx.results,
+                                &requests,
+                                &energies,
+                                (ctx.step_number, record, total),
+                            );
+                        }
+                        let mut current_material = material_template.clone();
+                        current_material.values.clone_from(&material);
+                        if write_event
+                            || crate::static_linear::writes_increment(step, frame, frames)
+                        {
+                            write_increment(
+                                ctx,
+                                step,
                                 record,
                                 total,
+                                &motion,
+                                &reactions,
+                                (&stresses, &strains),
+                                carried_nodal.as_deref(),
+                                Some(&current_material),
                             );
-                            ctx.results.history.extend(blocks);
                         }
+                        crate::history::write_history_with_velocities(
+                            ctx.results,
+                            ctx.model,
+                            ctx.table,
+                            step,
+                            (ctx.step_number, record, total),
+                            (&motion.u, Some(&motion.v)),
+                            &reactions,
+                            &stresses,
+                            &strains,
+                            Some(&current_material),
+                        );
+                        if let Some(evaluation) = contact.as_ref().and_then(|c| c.last.as_ref()) {
+                            for request in &step.outputs.contact_print {
+                                let blocks = plxs_contact::output::history_blocks(
+                                    &ctx.contact,
+                                    evaluation,
+                                    request,
+                                    &ctx.model.nodes.ids,
+                                    ctx.step_number,
+                                    record,
+                                    total,
+                                );
+                                ctx.results.history.extend(blocks);
+                            }
+                        }
+                        ctx.profile.add(Phase::Results, started);
                     }
-                    ctx.profile.add(Phase::Results, started);
-                }
-                if last_of_frame {
-                    break;
+                    if last_of_frame {
+                        break 'steps;
+                    }
+                    if write_event && gpu.is_some() {
+                        continue 'steps;
+                    }
                 }
             }
 
+            if let Some(turns) = &turns
+                && !turn_warned
+            {
+                let largest = turns.largest_turn(&u);
+                if largest > TURN_WARNING {
+                    turn_warned = true;
+                    progress.event(ProgressEvent::Warning(format!(
+                        "explicit: elements have turned by {}° at {} s without NLGEOM: under \
+                         small deformations a rotation strains them and they grow; switch on \
+                         NLGEOM for large rotations",
+                        short(largest.to_degrees()),
+                        short(time)
+                    )));
+                }
+            }
             ctx.sta.push(StaRow {
                 step: ctx.step_number,
                 increment: record,
@@ -2274,7 +2919,7 @@ impl Procedure for ExplicitDynamic {
                 let elapsed = run_started.elapsed().as_secs_f64();
                 let left = elapsed * (end - time) / (time - start).max(f64::MIN_POSITIVE);
                 progress.event(ProgressEvent::Info(format!(
-                    "explicit: {} s of {} s, {steps_done} time steps{}, energy balance {} %{}",
+                    "explicit: {} s of {} s, {steps_done} time steps{}, energy balance {} %{}{}",
                     short(time),
                     short(period),
                     if omega_now.is_some() {
@@ -2283,6 +2928,14 @@ impl Procedure for ExplicitDynamic {
                         format!(" of {} s", short(h))
                     },
                     short(100.0 * balance),
+                    if card_steps > 0 {
+                        format!(
+                            ", {} % on the graphics card",
+                            short(100.0 * card_steps as f64 / steps_done.max(1) as f64)
+                        )
+                    } else {
+                        String::new()
+                    },
                     if frame < last_frame {
                         format!(", about {:.0} s left", left)
                     } else {
@@ -2349,85 +3002,119 @@ struct GpuRun {
     /// The material state, when elements have state variables.
     material: Option<Vec<f64>>,
     loads: Vec<f64>,
+    /// The prescribed displacements reached.
+    prescribed: Vec<f64>,
     taken: usize,
     checked: Option<(f64, Vec<f64>)>,
+    /// The card stopped for a search of candidates, for an event frame, or because a
+    /// rigid body turned beyond `SMALL_ROTATION`.
+    search: bool,
+    event: bool,
+    turned: bool,
 }
 
 /// Models of at least this many DOFs go to a discrete graphics card in the automatic
 /// mode (`PLXS_GPU` unset); smaller ones are not worth the transfers.
 const GPU_FROM: usize = 30_000;
 
+/// Under large deformations or with contact a time step costs the processor more per
+/// element: from this many elements the card takes it.
+const GPU_ELEMENTS_FROM: usize = 2_000;
+
+/// Whether the automatic mode takes the card for the model.
+fn gpu_worth(ctx: &ProcedureContext<'_>, nlgeom: bool, contact: bool) -> bool {
+    ctx.table.dofs.len() >= GPU_FROM
+        || ((nlgeom || contact) && ctx.table.entries.len() >= GPU_ELEMENTS_FROM)
+}
+
 /// The engine for the time steps of a linear model on the graphics card
 /// ([`plxs_explicit`]), when the mode (`PLXS_GPU`, the setting of the application) and the
 /// card allow: the element kernels or else the stiffness and the viscous matrix, the
 /// inverse lumped mass on the free DOFs.
+#[allow(clippy::too_many_arguments)]
 fn gpu_engine(
     ctx: &mut ProcedureContext<'_>,
     step: &Step,
     kernel: &Kernel<'_>,
     set: &ConstraintSet,
+    reduced_mass: &ReducedMass,
     mass: &[f64],
     alpha: f64,
+    prescribed_motion: bool,
+    contact: Option<&ExplicitContact>,
+    guard: Option<&plxs_explicit::Guard>,
     progress: &mut dyn Progress,
 ) -> Option<plxs_explicit::Engine> {
     use plxs_linalg::amg::GpuMode;
-    let n = ctx.table.dofs.len();
+    let worth = gpu_worth(ctx, step.nlgeom, contact.is_some());
     let mode = GpuMode::from_environment();
     let any = match mode {
-        GpuMode::Off => return None,
-        GpuMode::Automatic if n < GPU_FROM => return None,
+        GpuMode::Off => {
+            if worth {
+                progress.event(ProgressEvent::Info(
+                    "explicit: time steps on the processor (the graphics card is switched off \
+                     in the settings or by PLXS_GPU)"
+                        .into(),
+                ));
+            }
+            return None;
+        }
+        GpuMode::Automatic if !worth => return None,
         GpuMode::Automatic => false,
         GpuMode::On => true,
     };
     let started = std::time::Instant::now();
-    let mut inverse = vec![0.0; n];
-    for &dof in &set.free {
-        let m = mass[dof as usize];
-        if m > 0.0 {
-            inverse[dof as usize] = 1.0 / m;
-        }
-    }
-    // Element by element where all elements have kernels, otherwise by the matrices.
-    let opened = match gpu_elements(ctx, kernel, step.nlgeom) {
-        Some(elements) => plxs_explicit::Engine::new(
+    // Element by element, the constraints by `T` and the coupled mass in clusters; where
+    // an element or a material has no kernel yet or a constraint couples too many
+    // unknowns, the steps stay on the processor.
+    let mut clusters = None;
+    let opened = gpu_elements(ctx, kernel, step.nlgeom).and_then(|elements| {
+        let gpu_contact = contact.map(|c| c.gpu_contact(ctx, mass)).transpose()?;
+        let candidates = ExplicitContact::gpu_candidates(ctx);
+        let (reduction, sizes) = reduced_mass.reduction(set)?;
+        clusters = Some(sizes);
+        plxs_explicit::Engine::new(
             &plxs_explicit::Setup {
-                forces: plxs_explicit::ForceModel::Elements(&elements),
-                inverse_mass: &inverse,
+                elements: &elements,
+                mass,
+                reduction: &reduction,
                 alpha,
+                prescribed_motion,
+                contact: gpu_contact.as_ref().zip(contact).map(|(g, c)| {
+                    (
+                        g,
+                        plxs_explicit::Candidates {
+                            faces: &candidates,
+                            prepared: &c.prepared,
+                        },
+                    )
+                }),
+                guard,
             },
             any,
         )
-        .map(|engine| {
-            (
-                engine,
-                "element forces in single precision, state in double precision",
-            )
-        }),
-        // Large deformations need the kernels.
-        None if step.nlgeom || ctx.table.has_nonlinear_material() => Err(
-            "large deformations and nonlinear materials need element kernels, which not all \
-             elements and materials have yet"
-                .to_owned(),
-        ),
-        None => gpu_matrices(ctx, kernel, &inverse, alpha, any).map(|engine| {
-            (
-                engine,
-                "forces in single precision from the motion within a frame, state in double \
-                 precision",
-            )
-        }),
-    };
+    });
+    if let Some(c) = contact {
+        c.uploaded.set(c.searches);
+    }
+    if let Some(c) = clusters.filter(|c| c.coupled > 0) {
+        progress.event(ProgressEvent::Info(format!(
+            "explicit: the mass couples {} groups of unknowns, the largest of {}",
+            c.coupled, c.largest
+        )));
+    }
     match opened {
-        Ok((engine, how)) => {
+        Ok(engine) => {
             ctx.profile.add(Phase::Assembly, started);
             progress.event(ProgressEvent::Info(format!(
-                "explicit: time steps on {} ({how})",
+                "explicit: time steps on {} (element forces in single precision, state in \
+                 double precision)",
                 engine.device()
             )));
             Some(engine)
         }
         Err(e) => {
-            if mode == GpuMode::On || n >= GPU_FROM {
+            if mode == GpuMode::On || worth {
                 progress.event(ProgressEvent::Info(format!(
                     "explicit: time steps on the processor ({e})"
                 )));
@@ -2439,19 +3126,13 @@ fn gpu_engine(
 
 /// The elements for the kernels on the card, when every element and its material have one
 /// (solid elements by their nodal gradients or their general operators, elastic or J2
-/// materials without creep, hyperelastic ones, no constant blocks).
+/// materials without creep, hyperelastic ones), with the constant blocks (U1 elements,
+/// springs and, under small strains, native membranes).
 fn gpu_elements(
     ctx: &ProcedureContext<'_>,
     kernel: &Kernel<'_>,
     nlgeom: bool,
-) -> Option<plxs_explicit::Elements> {
-    // `PLXS_GPU_FORCES=matrices`: the matrices anyway, for measurements (until the
-    // kernels cover all elements and the matrices go).
-    if !ctx.table.linear_blocks.is_empty()
-        || std::env::var("PLXS_GPU_FORCES").is_ok_and(|v| v.eq_ignore_ascii_case("matrices"))
-    {
-        return None;
-    }
+) -> std::result::Result<plxs_explicit::Elements, String> {
     use plxs_materials::hyper::{Isochoric, Volumetric};
     let mut elements = plxs_explicit::Elements {
         nlgeom,
@@ -2462,7 +3143,14 @@ fn gpu_elements(
         let coords = ctx.table.coordinates(ctx.model, entry);
         let law = ctx.table.law(entry, nlgeom);
         let elastic = law.elastic_matrix();
-        let (material, state) = match law.kernel_law()? {
+        let kind = formulation.kind;
+        let Some(kernel_law) = law.kernel_law() else {
+            return Err(format!(
+                "the material of the {kind:?} elements has no kernel on the card yet (creep, \
+                 or plasticity or hyperelasticity in plane stress)"
+            ));
+        };
+        let (material, state) = match kernel_law {
             plxs_materials::KernelLaw::Elastic => (plxs_explicit::Material::Elastic(elastic), None),
             plxs_materials::KernelLaw::J2 {
                 shear,
@@ -2501,7 +3189,7 @@ fn gpu_elements(
             ),
         };
         if entry.dofs.len() != 3 * coords.len() || viscosity.g.len() != entry.dofs.len() {
-            return None;
+            return Err(format!("{kind:?} elements have no kernel on the card yet"));
         }
         let (points, matrix, hourglass) = match formulation.nodal_gradients(&coords, &elastic) {
             Some(g) => (plxs_explicit::Points::Nodal(g.points), None, g.hourglass),
@@ -2517,107 +3205,48 @@ fn gpu_elements(
                 coordinates: coords.clone(),
             }),
             (None, false) => None,
-            (None, true) => return None,
+            (None, true) => {
+                return Err(format!(
+                    "{kind:?} elements have hourglass viscosity but no kernel for it"
+                ));
+            }
         };
-        elements
-            .push(plxs_explicit::Element {
-                dofs: entry.dofs.clone(),
-                points,
-                matrix,
-                material,
-                state,
-                bulk: viscosity.rate * viscosity.volume,
-                mean: viscosity.g.clone(),
-                hourglass,
-            })
-            .ok()?;
+        elements.push(plxs_explicit::Element {
+            dofs: entry.dofs.clone(),
+            points,
+            matrix,
+            material,
+            state,
+            bulk: viscosity.rate * viscosity.volume,
+            mean: viscosity.g.clone(),
+            hourglass,
+        })?;
     }
-    (!elements.is_empty()).then_some(elements)
-}
-
-/// The engine with the stiffness and the viscous matrix (bulk viscosity and hourglass
-/// control, linear in the velocities under small strains).
-fn gpu_matrices(
-    ctx: &mut ProcedureContext<'_>,
-    kernel: &Kernel<'_>,
-    inverse: &[f64],
-    alpha: f64,
-    any: bool,
-) -> std::result::Result<plxs_explicit::Engine, String> {
-    let n = ctx.table.dofs.len();
-    if ctx.stiffness.is_none() {
-        let mut k = SparseMatrix::zeros(ctx.pattern.clone());
-        plxs_assembly::assemble_stiffness(ctx.table, ctx.model, &mut k);
-        ctx.stiffness = Some(k);
+    // Constant blocks: U1 elements, the linear stiffness of native membranes under small
+    // strains (their force is `K u` then) and springs. Membranes under NLGEOM and gaps
+    // stay on the processor.
+    for block in &ctx.table.linear_blocks {
+        if block.membrane && nlgeom {
+            return Err("membranes under large deformations have no kernel on the card yet".into());
+        }
+        elements.push_block(plxs_explicit::Block {
+            dofs: block.dofs.clone(),
+            stiffness: block.stiffness.clone(),
+        })?;
     }
-    let k = ctx.stiffness.as_ref().expect("assembled");
-    let mut entries = Vec::with_capacity(2 * k.values().len());
-    let pattern = k.pattern();
-    for col in 0..n {
-        let start = pattern.col_ptr()[col] as usize;
-        for (offset, &row) in pattern.column(col).iter().enumerate() {
-            let value = k.values()[start + offset];
-            entries.push((row, col as u32, value));
-            if row as usize != col {
-                entries.push((col as u32, row, value));
-            }
-        }
+    for element in &ctx.table.discrete {
+        let Some(stiffness) = element.spring_stiffness() else {
+            return Err("gaps have no kernel on the card yet".into());
+        };
+        elements.push_block(plxs_explicit::Block {
+            dofs: element.dofs.clone(),
+            stiffness,
+        })?;
     }
-    let stiffness = plxs_explicit::Csr::from_entries(n, entries);
-    // The viscous matrix element by element: the bulk viscosity `c V g gᵀ`, the hourglass
-    // control column by column.
-    let mut entries = Vec::new();
-    for (entry, viscosity) in ctx.table.entries.iter().zip(kernel.viscosity) {
-        let dofs = &entry.dofs;
-        let m = dofs.len();
-        let factor = viscosity.rate * viscosity.volume;
-        let mut ce = vec![0.0; m * m];
-        if factor != 0.0 && viscosity.g.len() == m {
-            for a in 0..m {
-                for b in 0..m {
-                    ce[a * m + b] += factor * viscosity.g[a] * viscosity.g[b];
-                }
-            }
-        }
-        if viscosity.hourglass > 0.0 {
-            let coords = ctx.table.coordinates(ctx.model, entry);
-            let mut unit = vec![0.0; m];
-            for b in 0..m {
-                unit[b] = 1.0;
-                let mut column = vec![0.0; m];
-                hourglass_forces(
-                    &coords,
-                    &viscosity.g,
-                    &unit,
-                    viscosity.hourglass,
-                    &mut column,
-                );
-                unit[b] = 0.0;
-                for a in 0..m {
-                    ce[a * m + b] += column[a];
-                }
-            }
-        }
-        for a in 0..m {
-            for b in 0..m {
-                if ce[a * m + b] != 0.0 {
-                    entries.push((dofs[a], dofs[b], ce[a * m + b]));
-                }
-            }
-        }
+    if elements.is_empty() {
+        return Err("no elements".into());
     }
-    let viscous = plxs_explicit::Csr::from_entries(n, entries);
-    plxs_explicit::Engine::new(
-        &plxs_explicit::Setup {
-            forces: plxs_explicit::ForceModel::Matrices {
-                stiffness: &stiffness,
-                viscous: &viscous,
-            },
-            inverse_mass: inverse,
-            alpha,
-        },
-        any,
-    )
+    Ok(elements)
 }
 
 /// The damping of an explicit step: `(α_R, β_R)`. A damping ratio damps the mass-

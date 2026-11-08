@@ -42,7 +42,7 @@ use law::{FrictionLaw, Law};
 /// How far (in typical master edge lengths) a face-to-face point may lie beside the closest
 /// master face and still touch it: points over a convex edge between two faces project
 /// onto the edge with a small sideways offset.
-const BESIDE_TOLERANCE: f64 = 0.01;
+pub const BESIDE_TOLERANCE: f64 = 0.01;
 
 /// A point of the slave side a spring acts on: a slave node (node-to-face) or an integration
 /// point of a slave face (face-to-face).
@@ -1166,6 +1166,11 @@ impl Pair {
         dofs.sort_unstable();
         dofs.dedup();
         dofs
+    }
+
+    /// The candidate master faces of every point from the last [`ContactModel::prepare`].
+    pub fn candidates(&self) -> &[Vec<u32>] {
+        &self.candidates
     }
 
     /// Natural coordinates of a slave point's current position and the slave face normal

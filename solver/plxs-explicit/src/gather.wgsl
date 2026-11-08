@@ -4,8 +4,8 @@
 struct Dims {
     n: u32,
     groups_x: u32,
-    positions: u32,
-    relative: u32,
+    base: u32,
+    pad: u32,
 }
 
 @group(0) @binding(0) var<uniform> dims: Dims;

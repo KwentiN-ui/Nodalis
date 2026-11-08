@@ -99,6 +99,7 @@ fn open(any: bool) -> Result<Context, String> {
         any_adapter: any,
         double: Double::IfAvailable,
         timestamps: false,
+        memory_share: true,
     })?;
     let device = &gpu.device;
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);

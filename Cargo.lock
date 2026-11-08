@@ -3624,6 +3624,7 @@ dependencies = [
  "plxs-core",
  "plxs-gpu",
  "plxs-materials",
+ "rayon",
 ]
 
 [[package]]

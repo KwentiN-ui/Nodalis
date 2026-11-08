@@ -298,3 +298,24 @@ fn a_double_pendulum_with_a_long_time_step_runs_through() {
     assert!((end.0 - 0.3).abs() < 1e-9, "ends at {} s", end.0);
     assert!(end.1[1] < -0.5 * LENGTH, "the pendulum falls: {:?}", end.1);
 }
+
+/// The double pendulum of [`a_double_pendulum_with_a_long_time_step_runs_through`] with
+/// explicit time steps: as the bodies turn, the constraints linearized at their rotations
+/// pivot on other DOFs, and the reduced unknowns follow them.
+#[test]
+fn an_explicit_double_pendulum_runs_through() {
+    let dir = work_dir("explicit-double");
+    let step = "*Step, Nlgeom\n*Dynamic, Integration=Explicit\n0.03, 0.3\n*Boundary\n304, 1, 2, 0\n\
+                *Dload\nEALL, GRAV, 9.81, 0, -1, 0\n*Node print, Nset=TIPNODE\nU\n*End step\n";
+    let input = plates(&format!(
+        "*Node\n304, 0, {h}, 0\n305, 0, {h}, 0\n\
+         *Rigid body, Nset=CLAMP, Ref node=304, Rot node=305\n{}{step}",
+        joined("1, 2"),
+        h = HEIGHT / 2.0
+    ));
+    let rows = run(&dir, "double", &input);
+    let _ = std::fs::remove_dir_all(&dir);
+    let end = rows.last().unwrap();
+    assert!((end.0 - 0.3).abs() < 1e-9, "ends at {} s", end.0);
+    assert!(end.1[1] < -0.5 * LENGTH, "the pendulum falls: {:?}", end.1);
+}
