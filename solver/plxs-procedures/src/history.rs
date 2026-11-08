@@ -147,7 +147,12 @@ pub fn write_history_with_velocities(
             });
         }
     }
-    let velocities = velocities.map(|v| table.reported(model, v, &vec![0.0; v.len()]).0);
+    // The reported values only for a `*NODE PRINT`: the forces of plane and axisymmetric
+    // elements cost an element stiffness each.
+    if step.outputs.node_print.iter().all(|r| r.set.is_none()) {
+        return;
+    }
+    let velocities = velocities.map(|v| table.reported_displacements(v));
     let (u, forces) = &table.reported(model, u, forces);
     for request in &step.outputs.node_print {
         let Some(set) = request.set.as_deref() else {

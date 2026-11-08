@@ -364,13 +364,8 @@ impl SolidElement {
     ) -> Option<ReportedNodal> {
         let x = self.expansion.as_deref()?;
         let coords3 = x.coordinates(coords);
-        let mut k3 = Vec::new();
-        self.stiffness_3d(&coords3, d, &mut k3);
         let u3 = x.expand(u);
-        let n3 = u3.len();
-        let f3: Vec<f64> = (0..n3)
-            .map(|i| (0..n3).map(|j| k3[i * n3 + j] * u3[j]).sum())
-            .collect();
+        let f3 = self.linear_force_3d(&coords3, d, &u3);
         let mut condensed = vec![0.0; self.dof_count()];
         x.condense_vector(&f3, &mut condensed);
         Some(ReportedNodal {
@@ -378,6 +373,36 @@ impl SolidElement {
             forces: x.reported_forces(&f3),
             condensed,
         })
+    }
+
+    /// `K₃ u₃` of the 3D element. With the full displacement formulation as `Σ Bᵀ D B u₃`
+    /// over the integration points, without the element matrix (a 2D model's results ask
+    /// for it of every element at every written increment); the other formulations
+    /// multiply their matrix.
+    fn linear_force_3d(&self, coords: &[[f64; 3]], d: &[[f64; 6]; 6], u3: &[f64]) -> Vec<f64> {
+        let n3 = u3.len();
+        if self.formulation != Formulation::Standard {
+            let mut k3 = Vec::new();
+            self.stiffness_3d(coords, d, &mut k3);
+            return (0..n3)
+                .map(|i| (0..n3).map(|j| k3[i * n3 + j] * u3[j]).sum())
+                .collect();
+        }
+        let mut f3 = vec![0.0; n3];
+        let mut b = vec![0.0; 6 * n3];
+        for (&p, &w) in self.rule.points.iter().zip(&self.rule.weights) {
+            let point = self.point(p, coords);
+            Self::fill_b(&point.dndx, &mut b);
+            let strain: [f64; 6] =
+                std::array::from_fn(|r| (0..n3).map(|c| b[r * n3 + c] * u3[c]).sum());
+            let stress: [f64; 6] =
+                std::array::from_fn(|r| (0..6).map(|k| d[r][k] * strain[k]).sum());
+            let f = point.det * w;
+            for (c, out) in f3.iter_mut().enumerate() {
+                *out += f * (0..6).map(|r| b[r * n3 + c] * stress[r]).sum::<f64>();
+            }
+        }
+        f3
     }
 
     /// Number of faces (edges of 2D elements) that can carry a pressure.
@@ -1025,6 +1050,42 @@ fn solve_dense(a: &mut [f64], m: usize, b: &[f64], n: usize) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_linear_force_is_the_stiffness_times_the_displacements() {
+        let d = isotropic(210_000.0, 0.3);
+        for kind in [
+            ElementType::C3D20,
+            ElementType::C3D20R,
+            ElementType::C3D10,
+            ElementType::C3D15,
+            ElementType::C3D8,
+            ElementType::C3D8R,
+            ElementType::C3D8I,
+        ] {
+            let e = solid(kind).unwrap();
+            let coords: Vec<[f64; 3]> = (e.family.node_coordinates().iter().enumerate())
+                .map(|(i, c)| {
+                    let s = (i as f64 * 0.731).sin();
+                    [
+                        2.0 * c[0] + 0.1 * s,
+                        1.5 * c[1] - 0.05 * s,
+                        c[2] + 0.07 * s * s,
+                    ]
+                })
+                .collect();
+            let n = e.dof_count_3d();
+            let u: Vec<f64> = (0..n).map(|i| 1e-3 * (i as f64 * 0.37).sin()).collect();
+            let mut k = Vec::new();
+            e.stiffness_3d(&coords, &d, &mut k);
+            let f = e.linear_force_3d(&coords, &d, &u);
+            let scale = f.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            for (a, fa) in f.iter().enumerate() {
+                let ku: f64 = (0..n).map(|c| k[a * n + c] * u[c]).sum();
+                assert!((ku - fa).abs() < 1e-12 * scale, "{kind}: {ku} vs {fa}");
+            }
+        }
+    }
 
     fn isotropic(e: f64, nu: f64) -> [[f64; 6]; 6] {
         let l = e * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
