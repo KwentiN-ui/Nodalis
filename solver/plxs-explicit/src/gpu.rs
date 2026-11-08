@@ -2,13 +2,12 @@
 
 use plxs_gpu::{Double, Gpu, Options, Use, wgpu};
 
-use crate::elements::{Material, STATE_SIZE};
+use crate::elements::{Isochoric, Material, STATE_SIZE, Volumetric};
 use crate::sliced::{SLICE, Sliced};
 use crate::{Elements, ForceModel, MAX_CHUNK, Reached, Setup, Start};
 
 /// Values per material in the materials buffer of the element kernels (`MAT` in
-/// `elements.wgsl`): kind, elastic matrix, shear and bulk modulus, start and length of the
-/// isotropic and the kinematic curve (pairs behind the blocks).
+/// `elements.wgsl`), see [`materials`].
 const MATERIAL_BLOCK: usize = 44;
 
 /// The state variables of one family of elements on the card, value by value
@@ -21,46 +20,81 @@ struct History {
     state: Vec<u32>,
 }
 
-/// One material block: kind (0 elastic, 1 J2, 2 J2 at finite strains), elastic matrix,
-/// shear and bulk modulus, the two curves.
-type Block<'a> = (f32, [[f64; 6]; 6], f64, f64, [&'a [(f64, f64)]; 2]);
-
-/// The materials buffer: the blocks, then the curves.
-fn materials(materials: &[Material]) -> Vec<f32> {
+/// The materials buffer: the blocks, then the curves. A block holds the kind (0 elastic,
+/// 1 J2, 2 J2 at finite strains, 3 hyperelastic) and
+/// - elastic: the elastic matrix at 1..37;
+/// - J2: shear and bulk modulus at 37, 38, start and length of the isotropic and the
+///   kinematic curve at 39..43 (pairs behind the blocks);
+/// - hyperelastic: at 1 the volumetric model (0 polynomial, 1 Arruda-Boyce), its
+///   coefficients at 2..5, at 5 the isochoric model (0 polynomial, 1 Arruda-Boyce,
+///   2 Ogden), at 6 its number of terms, the terms from 7 (polynomial `(i, j, C_ij)`,
+///   Arruda-Boyce `(μ, λm)`, Ogden `(μ_p, α_p)`).
+fn materials(materials: &[Material]) -> Result<Vec<f32>, String> {
     let mut out = vec![0.0f32; MATERIAL_BLOCK * materials.len()];
     for (i, m) in materials.iter().enumerate() {
-        let (kind, d, shear, bulk, curves): Block<'_> = match m {
-            Material::Elastic(d) => (0.0, *d, 0.0, 0.0, [&[], &[]]),
+        let at = i * MATERIAL_BLOCK;
+        match m {
+            Material::Elastic(d) => {
+                for (k, v) in d.iter().flatten().enumerate() {
+                    out[at + 1 + k] = *v as f32;
+                }
+            }
             Material::J2 {
                 shear,
                 bulk,
                 isotropic,
                 kinematic,
                 finite,
-            } => (
-                if *finite { 2.0 } else { 1.0 },
-                [[0.0; 6]; 6],
-                *shear,
-                *bulk,
-                [isotropic, kinematic],
-            ),
-        };
-        let block = &mut out[i * MATERIAL_BLOCK..(i + 1) * MATERIAL_BLOCK];
-        block[0] = kind;
-        for (k, v) in d.iter().flatten().enumerate() {
-            block[1 + k] = *v as f32;
-        }
-        block[37] = shear as f32;
-        block[38] = bulk as f32;
-        for (j, curve) in curves.iter().enumerate() {
-            let start = out.len();
-            out.extend(curve.iter().flat_map(|&(x, y)| [x as f32, y as f32]));
-            let block = &mut out[i * MATERIAL_BLOCK..(i + 1) * MATERIAL_BLOCK];
-            block[39 + 2 * j] = start as f32;
-            block[40 + 2 * j] = curve.len() as f32;
+            } => {
+                out[at] = if *finite { 2.0 } else { 1.0 };
+                out[at + 37] = *shear as f32;
+                out[at + 38] = *bulk as f32;
+                for (j, curve) in [isotropic, kinematic].iter().enumerate() {
+                    let start = out.len();
+                    out.extend(curve.iter().flat_map(|&(x, y)| [x as f32, y as f32]));
+                    out[at + 39 + 2 * j] = start as f32;
+                    out[at + 40 + 2 * j] = curve.len() as f32;
+                }
+            }
+            Material::Hyperelastic {
+                isochoric,
+                volumetric,
+            } => {
+                out[at] = 3.0;
+                let (kind, coefficients) = match volumetric {
+                    Volumetric::Polynomial(c) => (0.0, c.clone()),
+                    Volumetric::ArrudaBoyce(c) => (1.0, vec![*c]),
+                };
+                let (model, terms): (f32, Vec<f64>) = match isochoric {
+                    Isochoric::Polynomial(t) => (
+                        0.0,
+                        t.iter()
+                            .flat_map(|&(i, j, c)| [f64::from(i), f64::from(j), c])
+                            .collect(),
+                    ),
+                    Isochoric::ArrudaBoyce { mu, locking } => (1.0, vec![*mu, *locking]),
+                    Isochoric::Ogden(t) => (2.0, t.iter().flat_map(|&(m, a)| [m, a]).collect()),
+                };
+                if coefficients.len() > 3 || terms.len() > 27 {
+                    return Err("a hyperelastic material with too many terms".to_owned());
+                }
+                out[at + 1] = kind;
+                for (k, c) in coefficients.iter().enumerate() {
+                    out[at + 2 + k] = *c as f32;
+                }
+                out[at + 5] = model;
+                out[at + 6] = match isochoric {
+                    Isochoric::Polynomial(t) => t.len(),
+                    Isochoric::ArrudaBoyce { .. } => 1,
+                    Isochoric::Ogden(t) => t.len(),
+                } as f32;
+                for (k, c) in terms.iter().enumerate() {
+                    out[at + 7 + k] = *c as f32;
+                }
+            }
         }
     }
-    out
+    Ok(out)
 }
 
 const GROUP: usize = 256;
@@ -435,7 +469,7 @@ impl Engine {
         let fvis = gpu.storage("element viscous forces", 4 * total as u64);
         let materials = gpu.init(
             "materials",
-            bytemuck::cast_slice(&materials(&elements.materials)),
+            bytemuck::cast_slice(&materials(&elements.materials)?),
         );
         let layout = gpu.layout(
             "elements",

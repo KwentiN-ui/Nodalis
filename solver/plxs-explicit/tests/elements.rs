@@ -4,7 +4,8 @@
 //! software renderers too); elsewhere it says so and passes.
 
 use plxs_explicit::{
-    Element, Elements, Engine, ForceModel, Hourglass, MAX_CHUNK, Material, Setup, Start,
+    Element, Elements, Engine, ForceModel, Hourglass, Isochoric, MAX_CHUNK, Material, Setup, Start,
+    Volumetric,
 };
 
 /// The trilinear brick's natural node coordinates.
@@ -70,9 +71,21 @@ fn a_block_of_bricks_yields_far_as_on_the_processor() {
     swing(true, 60.0, true);
 }
 
+/// Under NLGEOM, hyperelastic: Mooney-Rivlin, Ogden and Arruda-Boyce with the moduli of
+/// steel, so that the time step stays.
+#[test]
+fn a_block_of_hyperelastic_bricks_swings_far_as_on_the_processor() {
+    swing_with(true, 400.0, false, true);
+}
+
 /// A cantilever block of bricks starting with `speed` across, pulled at its free end;
 /// `plastic`: of J2 materials.
 fn swing(nlgeom: bool, speed: f64, plastic: bool) {
+    swing_with(nlgeom, speed, plastic, false);
+}
+
+/// `swing`, `hyper`: of hyperelastic materials.
+fn swing_with(nlgeom: bool, speed: f64, plastic: bool, hyper: bool) {
     if std::env::var("PLXS_GPU").is_ok_and(|v| v.eq_ignore_ascii_case("off")) {
         return;
     }
@@ -153,6 +166,32 @@ fn swing(nlgeom: bool, speed: f64, plastic: bool) {
                                 isotropic,
                                 kinematic,
                                 finite: nlgeom,
+                            }
+                        } else if hyper {
+                            let mu = young / 2.6;
+                            let inverse_d = young / (3.0 * 0.4) / 2.0;
+                            match (i + j + k) % 3 {
+                                0 => Material::Hyperelastic {
+                                    isochoric: Isochoric::Polynomial(vec![
+                                        (1, 0, 0.4 * mu),
+                                        (0, 1, 0.1 * mu),
+                                    ]),
+                                    volumetric: Volumetric::Polynomial(vec![inverse_d]),
+                                },
+                                1 => Material::Hyperelastic {
+                                    isochoric: Isochoric::Ogden(vec![
+                                        (0.9 * mu, 1.3),
+                                        (0.1 * mu, -2.0),
+                                    ]),
+                                    volumetric: Volumetric::Polynomial(vec![inverse_d, 0.0]),
+                                },
+                                _ => Material::Hyperelastic {
+                                    isochoric: Isochoric::ArrudaBoyce {
+                                        mu: mu * 0.95,
+                                        locking: 2.5,
+                                    },
+                                    volumetric: Volumetric::ArrudaBoyce(inverse_d),
+                                },
                             }
                         } else {
                             Material::Elastic(isotropic(young, 0.3))

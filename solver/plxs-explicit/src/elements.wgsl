@@ -356,6 +356,111 @@ fn finite_j2(m: u32, strain: array<f32, 6>, ip: u32, c: u32, e: u32) -> array<f3
     return to_vector(tau + ta + transpose(ta) + ta * ai);
 }
 
+// x^k for a small whole k ≥ 0.
+fn whole_power(x: f32, k: u32) -> f32 {
+    var p = 1.0;
+    for (var i = 0u; i < k; i++) {
+        p *= x;
+    }
+    return p;
+}
+
+// The hyperelastic law of the material block `m` (see `materials` in `gpu.rs`) for the
+// Green-Lagrange strain: the second Piola-Kirchhoff stress, formed from `M = C − 1` as
+// `hyperelastic` in `elements.rs` does, so that small strains keep their digits.
+fn hyperelastic(m: u32, strain: array<f32, 6>) -> array<f32, 6> {
+    let mx = mat3x3<f32>(
+        vec3<f32>(2.0 * strain[0], strain[3], strain[5]),
+        vec3<f32>(strain[3], 2.0 * strain[1], strain[4]),
+        vec3<f32>(strain[5], strain[4], 2.0 * strain[2]),
+    );
+    let mm = mx * mx;
+    let tr = mx[0][0] + mx[1][1] + mx[2][2];
+    let tr2 = mm[0][0] + mm[1][1] + mm[2][2];
+    let i2 = 0.5 * (tr * tr - tr2);
+    let det_m = determinant(mx);
+    let dm1 = tr + i2 + det_m;
+    let det = 1.0 + dm1;
+    let j = sqrt(det);
+    let jm1 = dm1 / (1.0 + j);
+    var dudj = 0.0;
+    if materials[m + 1u] == 0.0 {
+        for (var k = 0u; k < 3u; k++) {
+            let power = 2u * k + 2u;
+            dudj += materials[m + 2u + k] * f32(power) * whole_power(jm1, power - 1u);
+        }
+    } else {
+        dudj = materials[m + 2u] * jm1 * (j + 1.0) / j;
+    }
+    let pressure = j * dudj;
+    let log_j = 0.5 * log1p(dm1);
+    let identity = mat3x3<f32>(
+        vec3<f32>(1.0, 0.0, 0.0),
+        vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(0.0, 0.0, 1.0),
+    );
+    // C⁻¹ − 1.
+    let n = (1.0 / det) * (mm - (1.0 + tr) * mx - det_m * identity);
+    let model = u32(materials[m + 5u]);
+    let terms = u32(materials[m + 6u]);
+    var s = mat3x3<f32>();
+    if model == 2u {
+        // Ogden: Kirchhoff principal stresses on the principal stretches.
+        let eig = eigen(mx);
+        var tau = vec3<f32>(pressure, pressure, pressure);
+        for (var t = 0u; t < terms; t++) {
+            let mu = materials[m + 7u + 2u * t];
+            let alpha = materials[m + 8u + 2u * t];
+            var p = vec3<f32>();
+            for (var a = 0u; a < 3u; a++) {
+                p[a] = expm1(alpha * (0.5 * log1p(eig.values[a]) - log_j / 3.0));
+            }
+            let mean = (p.x + p.y + p.z) / 3.0;
+            tau += 2.0 * mu / alpha * (p - vec3<f32>(mean, mean, mean));
+        }
+        s = rebuild(eig.vectors, tau / (vec3<f32>(1.0, 1.0, 1.0) + eig.values));
+    } else {
+        let j23m1 = expm1(-2.0 / 3.0 * log_j);
+        let j43m1 = expm1(-4.0 / 3.0 * log_j);
+        let j23 = 1.0 + j23m1;
+        // Ī1 − 3 and Ī2 − 3.
+        let x = 3.0 * j23m1 + j23 * tr;
+        let y = 3.0 * j43m1 + (1.0 + j43m1) * (2.0 * tr + i2);
+        var w1 = 0.0;
+        var w2 = 0.0;
+        if model == 0u {
+            for (var t = 0u; t < terms; t++) {
+                let i = u32(materials[m + 7u + 3u * t]);
+                let k = u32(materials[m + 8u + 3u * t]);
+                let c = materials[m + 9u + 3u * t];
+                if i > 0u {
+                    w1 += c * f32(i) * whole_power(x, i - 1u) * whole_power(y, k);
+                }
+                if k > 0u {
+                    w2 += c * f32(k) * whole_power(x, i) * whole_power(y, k - 1u);
+                }
+            }
+        } else {
+            // Arruda-Boyce: the inverse Langevin series.
+            let coefficients = array<f32, 5>(0.5, 0.05, 0.0104761905, 0.00271428571, 0.000770315399);
+            let mu = materials[m + 7u];
+            let locking2 = materials[m + 8u] * materials[m + 8u];
+            let i1 = 3.0 + x;
+            var factor = mu;
+            for (var k = 0u; k < 5u; k++) {
+                w1 += factor * coefficients[k] * f32(k + 1u) * whole_power(i1, k);
+                factor /= locking2;
+            }
+        }
+        // S̄ = a 1 − b C; S = J^(−2/3) (S̄ − ⅓ (S̄ : C) C⁻¹) + p C⁻¹.
+        let a = 2.0 * (w1 + (3.0 + x) * w2);
+        let b = 2.0 * w2 * j23;
+        let share = b / 3.0 * (tr + tr2) - (a - b) * tr / 3.0;
+        s = j23 * (-(a - b) * n - b * mx + share * (identity + n)) + pressure * (identity + n);
+    }
+    return to_vector(s);
+}
+
 @compute @workgroup_size(64)
 fn elements(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     let e = (wid.y * dims.groups_x + wid.x) * 64u + li;
@@ -419,6 +524,8 @@ fn elements(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_ind
             s = j2(m, strain, ip, c, e);
         } else if kind == 2u {
             s = finite_j2(m, strain, ip, c, e);
+        } else if kind == 3u {
+            s = hyperelastic(m, strain);
         } else {
             for (var r = 0u; r < 6u; r++) {
                 var sum = 0.0;
