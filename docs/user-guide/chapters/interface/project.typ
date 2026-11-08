@@ -343,4 +343,8 @@ Nodalis (meshing, model checks, restart, keeping the results) around those of Ca
     double-click on its name does the same. An analysis still being solved in the background
     opens once it is done.],
   [Clear Finished], [Removes the analyses that are done from the list.],
+  [Profile], [Shows where the solver spent its time for the picked analysis, left of the
+    output, once it is done (@solver-profile).],
+  [Copy Report], [Copies the version, the system, the size of the model and the profile of the
+    picked analysis as text, e.g. for an issue on GitHub.],
 )

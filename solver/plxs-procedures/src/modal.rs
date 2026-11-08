@@ -702,9 +702,8 @@ impl Procedure for SteadyStateProcedure {
             if variables.iter().any(|v| v == "PU") {
                 let u_re = superpose(&modes.modes, &re, n);
                 let u_im = superpose(&modes.modes, &im, n);
-                let zero = vec![0.0; n];
-                let (a, _) = ctx.table.reported(ctx.model, &u_re, &zero);
-                let (b, _) = ctx.table.reported(ctx.model, &u_im, &zero);
+                let a = ctx.table.reported_displacements(&u_re);
+                let b = ctx.table.reported_displacements(&u_im);
                 let order = crate::fields::node_order(ctx.model);
                 fields.push(magnitude_phase(
                     "PDISP",

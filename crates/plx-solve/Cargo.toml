@@ -10,6 +10,7 @@ repository.workspace = true
 rayon.workspace = true
 plx-results.workspace = true
 plxs-core.workspace = true
+plxs-procedures.workspace = true
 plxs-session.workspace = true
 
 [dev-dependencies]

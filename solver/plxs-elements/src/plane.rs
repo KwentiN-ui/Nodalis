@@ -53,7 +53,21 @@ enum Layer {
     Top,
 }
 
+/// `cos` and `sin` of the angle of the bottom, middle and top layer of an axisymmetric
+/// segment, computed once (the assembly asks for them at every node in every iteration).
+static LAYER_ROTATIONS: std::sync::LazyLock<[(f64, f64); 3]> = std::sync::LazyLock::new(|| {
+    [Layer::Bottom, Layer::Middle, Layer::Top].map(|layer| {
+        let phi = layer.sign() * HALF_ANGLE;
+        (phi.cos(), phi.sin())
+    })
+});
+
 impl Layer {
+    /// `(cos φ, sin φ)` of the layer's angle `φ` in an axisymmetric segment.
+    fn rotation(self) -> (f64, f64) {
+        LAYER_ROTATIONS[self as usize]
+    }
+
     fn sign(self) -> f64 {
         match self {
             Layer::Bottom => -1.0,
@@ -183,8 +197,8 @@ impl Expansion {
                         [c[0], c[1], c[2] + 0.5 * s * self.thickness]
                     }
                     PlaneKind::Axisymmetric => {
-                        let phi = s * HALF_ANGLE;
-                        [c[0] * phi.cos(), c[1], c[0] * phi.sin()]
+                        let (cos, sin) = layer.rotation();
+                        [c[0] * cos, c[1], c[0] * sin]
                     }
                 }
             })

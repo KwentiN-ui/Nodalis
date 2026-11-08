@@ -17,7 +17,7 @@ use plxs_assembly::{
     NonlinearInput, Spc, add_membrane_pressures, assemble_nonlinear, load_vector,
     loads::add_carried_loads, membrane_pressures, rotate_concentrated_loads,
 };
-use plxs_constraints::ConstraintSet;
+use plxs_constraints::{ConstraintSet, ReducedPattern};
 use plxs_core::step::{DefaultAmplitude, Incrementation, Procedure as ProcedureKind};
 use plxs_core::{Convergence, Divergence, Error, Progress, ProgressEvent, Result, Step, Stop};
 use plxs_linalg::SparseMatrix;
@@ -250,6 +250,9 @@ impl Procedure for NonlinearStatic {
         // Rigid bodies follow finite rotations under NLGEOM.
         let large_rotations = step.nlgeom && constraints.has_finite_rotations();
         let mut k = SparseMatrix::zeros(ctx.pattern.clone());
+        // The pattern of `Tᵀ K T` and where each entry of `K` lands, kept over the Newton
+        // iterations and increments while the matrix pattern and `T` stay.
+        let mut reducer: Option<ReducedPattern> = None;
         // Contact: *MODEL CHANGE / *CHANGE FRICTION of the step, then a contact state per
         // slave point.
         for warning in ctx.contact.begin_step(step, ctx.state) {
@@ -416,6 +419,7 @@ impl Procedure for NonlinearStatic {
                     (visco && cetol > 0.0).then_some(cetol),
                     &mut equations,
                     large_rotations.then_some((active.as_slice(), spc_end.dofs.as_slice())),
+                    &mut reducer,
                 )?;
                 match result {
                     Ok(converged) => break converged,
@@ -669,6 +673,7 @@ impl NonlinearStatic {
         cetol: Option<f64>,
         equations: &mut Equations,
         large_rotations: Option<(&[bool], &[u32])>,
+        reducer: &mut Option<ReducedPattern>,
     ) -> Result<std::result::Result<Converged, Failure>> {
         let total_dofs = ctx.table.dofs.len();
         // Start from the converged displacements, u = T v + g_start. A change of the
@@ -891,7 +896,7 @@ impl NonlinearStatic {
             // Solve Tᵀ K T Δv = Tᵀ r and correct u = T v + g.
             iteration += 1;
             let started = Instant::now();
-            let k_reduced = set.reduce(k);
+            let k_reduced = set.reduce_cached(k, reducer);
             ctx.profile.add(Phase::Reduction, started);
             let started = Instant::now();
             let coordinates = || Unknowns::from_free(&set.free, 3, &ctx.model.nodes.coordinates);
