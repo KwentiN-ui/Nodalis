@@ -230,6 +230,10 @@ impl Engine {
         if !gpu.fits(8 * 6 * n as u64) {
             return Err(too_large());
         }
+        // Out of memory and internal errors as well as validation errors: a buffer the
+        // device cannot allocate is invalid without a validation error of its own.
+        let memory = gpu.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let internal = gpu.device.push_error_scope(wgpu::ErrorFilter::Internal);
         let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let f64s = 8 * n as u64;
         let u = gpu.storage("u", f64s);
@@ -342,8 +346,18 @@ impl Engine {
                 timed_steps: 0,
             }
         });
-        if let Some(e) = plxs_gpu::block_on(scope.pop()) {
-            return Err(format!("{}: {e}", gpu.name));
+        let validation = plxs_gpu::block_on(scope.pop());
+        let internal = plxs_gpu::block_on(internal.pop());
+        let memory = plxs_gpu::block_on(memory.pop());
+        let errors: Vec<String> = [memory, internal]
+            .into_iter()
+            .flatten()
+            .map(|e| e.to_string())
+            .chain(gpu.take_error())
+            .chain(validation.map(|e| e.to_string()))
+            .collect();
+        if !errors.is_empty() {
+            return Err(format!("{}: {}", gpu.name, errors.join("; ")));
         }
         Ok(Self {
             gpu,
