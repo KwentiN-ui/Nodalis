@@ -2107,3 +2107,117 @@ fn soft_contact_relations_on_the_graphics_card_match_the_processor() {
         );
     }
 }
+
+/// A steel block (2 × 2 × 1 C3D8, 10 mm) dropping at 1 m/s onto a clamped S8R plate
+/// (40 × 40 mm, 1 mm): the contact on the plate's shell nodes runs on the card as on the
+/// processor.
+#[test]
+fn a_block_hitting_a_shell_plate_on_the_graphics_card() {
+    let mut s = String::from("*Node\n");
+    // Plate nodes on a 9 × 9 grid (5 mm), midside nodes included.
+    let id = |i: usize, j: usize| 1 + i + 9 * j;
+    for j in 0..9 {
+        for i in 0..9 {
+            if i % 2 == 1 && j % 2 == 1 {
+                continue;
+            }
+            writeln!(
+                s,
+                "{}, {}, {}, 0",
+                id(i, j),
+                0.005 * i as f64,
+                0.005 * j as f64
+            )
+            .unwrap();
+        }
+    }
+    // Block nodes 3 × 3 × 2 above the middle of the plate.
+    let z0 = 1.5e-3;
+    let bid = |i: usize, j: usize, k: usize| 1001 + i + 3 * j + 9 * k;
+    for k in 0..2 {
+        for j in 0..3 {
+            for i in 0..3 {
+                writeln!(
+                    s,
+                    "{}, {}, {}, {}",
+                    bid(i, j, k),
+                    0.01 + 0.01 * i as f64,
+                    0.01 + 0.01 * j as f64,
+                    z0 + 0.01 * k as f64
+                )
+                .unwrap();
+            }
+        }
+    }
+    s.push_str("*Element, Type=S8R, Elset=PLATE\n");
+    for j in 0..4 {
+        for i in 0..4 {
+            let (a, b) = (2 * i, 2 * j);
+            writeln!(
+                s,
+                "{}, {}, {}, {}, {}, {}, {}, {}, {}",
+                1 + i + 4 * j,
+                id(a, b),
+                id(a + 2, b),
+                id(a + 2, b + 2),
+                id(a, b + 2),
+                id(a + 1, b),
+                id(a + 2, b + 1),
+                id(a + 1, b + 2),
+                id(a, b + 1)
+            )
+            .unwrap();
+        }
+    }
+    s.push_str("*Element, Type=C3D8, Elset=BLOCK\n");
+    for j in 0..2 {
+        for i in 0..2 {
+            writeln!(
+                s,
+                "{}, {}, {}, {}, {}, {}, {}, {}, {}",
+                101 + i + 2 * j,
+                bid(i, j, 0),
+                bid(i + 1, j, 0),
+                bid(i + 1, j + 1, 0),
+                bid(i, j + 1, 0),
+                bid(i, j, 1),
+                bid(i + 1, j, 1),
+                bid(i + 1, j + 1, 1),
+                bid(i, j + 1, 1)
+            )
+            .unwrap();
+        }
+    }
+    s.push_str("*Nset, Nset=EDGE\n");
+    for j in 0..9 {
+        for i in 0..9 {
+            if (i == 0 || i == 8 || j == 0 || j == 8) && !(i % 2 == 1 && j % 2 == 1) {
+                writeln!(s, "{}", id(i, j)).unwrap();
+            }
+        }
+    }
+    writeln!(
+        s,
+        "*Nset, Nset=BLOCKN, Generate\n1001, 1018, 1\n*Nset, Nset=WATCH\n1005, {}\n\
+         *Elset, Elset=EALL\nPLATE, BLOCK\n\
+         *Surface, Name=SLAVE, Type=Element\nBLOCK, S1\n\
+         *Surface, Name=MASTER, Type=Element\nPLATE, SPOS\n\
+         *Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
+         *Solid section, Elset=BLOCK, Material=STEEL\n\
+         *Shell section, Elset=PLATE, Material=STEEL\n0.001\n\
+         *Surface interaction, Name=SI\n*Surface behavior, Pressure-overclosure=Linear\n1e14\n\
+         *Friction\n0.2, 1e12\n\
+         *Contact pair, Interaction=SI, Type=Surface to surface\nSLAVE, MASTER\n\
+         *Initial conditions, Type=Velocity\nBLOCKN, 3, -1\n\
+         *Step\n*Dynamic, Integration=Explicit\n0.0001, 0.002\n*Boundary\nEDGE, 1, 6, 0\n\
+         *Node print, Nset=WATCH\nU, V\n*End step",
+        id(4, 4)
+    )
+    .unwrap();
+    contact_on_the_card(
+        "gpu-shell-contact",
+        &s,
+        &["displacements", "velocities"],
+        1e-3,
+    );
+}

@@ -190,8 +190,9 @@ relations, friction with stick and slip, contact damping and the cap on the cont
 stiffness, all in double precision. The processor only searches new candidate faces,
 after a step in which a contact node moved further than the search reach, and writes the
 event frames: the card stops at the step where a contact opens or closes, the processor
-writes the frame and the card goes on. Mortar and tied contact, faces with more than eight
-nodes and contact on shell or beam nodes keep the time steps on the processor.
+writes the frame and the card goes on. Contact on shells works on their expanded faces. Mortar
+and tied contact, faces with more than eight nodes and models whose nodes carry rotations
+keep the time steps on the processor.
 
 The solver log names the card ("explicit: time steps on ..."). A card without double
 precision, a model too large for its memory or any error leaves the time steps on the
