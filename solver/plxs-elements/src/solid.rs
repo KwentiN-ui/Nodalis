@@ -1067,7 +1067,11 @@ mod tests {
             let coords: Vec<[f64; 3]> = (e.family.node_coordinates().iter().enumerate())
                 .map(|(i, c)| {
                     let s = (i as f64 * 0.731).sin();
-                    [2.0 * c[0] + 0.1 * s, 1.5 * c[1] - 0.05 * s, c[2] + 0.07 * s * s]
+                    [
+                        2.0 * c[0] + 0.1 * s,
+                        1.5 * c[1] - 0.05 * s,
+                        c[2] + 0.07 * s * s,
+                    ]
                 })
                 .collect();
             let n = e.dof_count_3d();
