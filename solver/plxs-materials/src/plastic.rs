@@ -352,6 +352,7 @@ impl MaterialLaw for J2Plastic {
                 .kinematic
                 .as_ref()
                 .map_or_else(Vec::new, |c| c.points.clone()),
+            finite: false,
         })
     }
 
