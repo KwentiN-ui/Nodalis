@@ -5167,6 +5167,8 @@ impl ProjectApp {
         let solve = selected.and_then(|id| self.solves.iter().find(|s| s.id == id));
         let output: Vec<&str> = solve.map(|s| s.output()).unwrap_or_default();
         let dropped = solve.map_or(0, |s| s.dropped());
+        let profile = solve.filter(|s| !s.active()).and_then(|s| s.profile());
+        let steps = solve.map(|s| s.step_lines().to_vec()).unwrap_or_default();
         ui.horizontal(|ui| {
             let row = rows.iter().find(|r| Some(r.id) == selected);
             let active = row.is_some_and(|r| r.active);
@@ -5201,6 +5203,16 @@ impl ProjectApp {
                 clear = true;
             }
             ui.separator();
+            if let Some(row) = row {
+                let info = crate::solver_profile::ReportInfo {
+                    name: &row.name,
+                    state: &row.state,
+                    seconds: row.seconds.unwrap_or(0.0),
+                    steps: &steps,
+                };
+                crate::solver_profile::buttons(ui, profile.as_ref(), &info);
+                ui.separator();
+            }
             ui.label("Filter:");
             ui.add(
                 egui::TextEdit::singleline(&mut filter)
@@ -5269,7 +5281,7 @@ impl ProjectApp {
             );
             ui.separator();
             // The lines go one below the other, not in the row of the list.
-            ui.vertical(|ui| {
+            ui.vertical(|ui| crate::solver_profile::with_output(ui, profile.as_ref(), |ui| {
                 let area = egui::ScrollArea::both()
                     .id_salt(("monitor output", selected))
                     .auto_shrink([false, false])
@@ -5283,7 +5295,7 @@ impl ProjectApp {
                         .collect();
                     crate::virtual_table::lines(ui, area, &shown);
                 }
-            });
+            }));
         });
         self.monitor.filter = filter;
         if pick.is_some() {
