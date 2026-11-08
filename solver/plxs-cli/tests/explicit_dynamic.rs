@@ -1245,17 +1245,23 @@ fn run_with_gpu(dir: &Path, job: &str, input: &str, mode: &str) -> (String, Stri
 
 /// A bar of `kind` elements, moving at the start, held at one end and pulled at the other
 /// by a growing load: the same on the graphics card as on the processor.
-fn gpu_matches_processor(kind: &str, job: &str) {
+fn gpu_matches_processor(kind: &str, job: &str, pulse: bool) {
     let (length, side, cells) = (0.1, 0.01, 20);
     let c = (E / RHO).sqrt();
     let period = 3.0 * length / c;
     let frames = 30;
     let mut input = bar_mesh(cells, 2, 2, [length, side, side], kind);
+    // A pulse has corners inside the frames, which the chunks on the card must not cut.
+    let amplitude = if pulse {
+        format!("0, 0, {}, 1, {}, 0", 0.137 * period, 0.291 * period)
+    } else {
+        format!("0, 0, {period}, 1")
+    };
     writeln!(
         input,
         "*Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
          *Solid section, Elset=EALL, Material=STEEL\n\
-         *Amplitude, Name=RAMP\n0, 0, {period}, 1\n\
+         *Amplitude, Name=RAMP\n{amplitude}\n\
          *Initial conditions, Type=Velocity\nALL, 2, 0.5\n\
          *Step\n*Dynamic, Integration=Explicit\n{}, {period}\n\
          *Boundary\nEND0, 1, 3, 0\n\
@@ -1303,10 +1309,15 @@ fn gpu_matches_processor(kind: &str, job: &str) {
 
 #[test]
 fn time_steps_on_the_graphics_card_match_the_processor() {
-    gpu_matches_processor("C3D8", "gpu-c3d8");
+    gpu_matches_processor("C3D8", "gpu-c3d8", false);
+}
+
+#[test]
+fn a_load_pulse_on_the_graphics_card_matches_the_processor() {
+    gpu_matches_processor("C3D8", "gpu-pulse", true);
 }
 
 #[test]
 fn time_steps_of_reduced_elements_on_the_graphics_card_match_the_processor() {
-    gpu_matches_processor("C3D8R", "gpu-c3d8r");
+    gpu_matches_processor("C3D8R", "gpu-c3d8r", false);
 }

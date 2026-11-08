@@ -393,6 +393,8 @@ fn missing_density(model: &Model, element: u32) -> Error {
 struct LoadHistory {
     groups: Vec<(Option<String>, Vec<f64>)>,
     per_step: bool,
+    /// The step times at which an amplitude of the loads has a corner, ascending.
+    corners: Vec<f64>,
 }
 
 impl LoadHistory {
@@ -409,6 +411,18 @@ impl LoadHistory {
                 names.push(name.clone());
             }
         }
+        let mut corners: Vec<f64> = names
+            .iter()
+            .flatten()
+            .filter_map(|name| ctx.model.amplitude(name))
+            .flat_map(|a| {
+                let offset = a.shift_x - if a.total_time { start_total } else { 0.0 };
+                a.points.iter().map(move |&(t, _)| t + offset)
+            })
+            .filter(|&t| t > 0.0 && t < period)
+            .collect();
+        corners.sort_by(f64::total_cmp);
+        corners.dedup();
         let mut groups = Vec::new();
         for name in names {
             let mut only = step.clone();
@@ -427,6 +441,7 @@ impl LoadHistory {
         let mut history = Self {
             groups,
             per_step: false,
+            corners,
         };
         // The decomposition must give the loads the assembly gives.
         for fraction in [0.0, 0.37, 1.0] {
@@ -444,6 +459,11 @@ impl LoadHistory {
             }
         }
         Ok(history)
+    }
+
+    /// The first corner of an amplitude after `time`.
+    fn next_corner(&self, time: f64) -> Option<f64> {
+        self.corners.iter().copied().find(|&t| t > time)
     }
 
     fn at(
@@ -1663,7 +1683,17 @@ impl Procedure for ExplicitDynamic {
                         let mut from = p.clone();
                         let mut done = 0;
                         while done < count - 1 {
-                            let chunk = (count - 1 - done).min(plxs_explicit::MAX_CHUNK);
+                            // The card interpolates the loads linearly over a chunk: a chunk
+                            // stays within a straight piece of the amplitudes, the time step
+                            // across a corner is a chunk of its own.
+                            let mut chunk = (count - 1 - done).min(plxs_explicit::MAX_CHUNK);
+                            let t_begin = time + done as f64 * h;
+                            if let Some(corner) = loads.next_corner(t_begin + 1e-9 * h) {
+                                let within = ((corner - t_begin) / h + 1e-9).floor().max(1.0);
+                                if within < chunk as f64 {
+                                    chunk = within as usize;
+                                }
+                            }
                             let steps: Vec<(f64, f64)> = (0..chunk)
                                 .map(|j| {
                                     let c = if done + j == 0 { 0.5 * (h_prev + h) } else { h };
