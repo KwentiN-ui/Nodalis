@@ -520,6 +520,7 @@ mod tests {
             kind: LoadKind::Pressure(-100.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
 
         let check = |model: &Model| {
@@ -710,6 +711,7 @@ mod tests {
             },
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
 
         let check = |model: &Model| {

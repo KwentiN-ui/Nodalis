@@ -12473,6 +12473,7 @@ mod tests {
             kind: plx_model::LoadKind::force([0.0, -10.0, 0.0]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         model.steps.push(step);
         let force = plx_model::ValuePath::new(

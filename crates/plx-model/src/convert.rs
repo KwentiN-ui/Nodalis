@@ -194,6 +194,14 @@ impl FeModel {
                     BoundaryKind::Submodel { .. } | BoundaryKind::Symmetry { .. } => {}
                     BoundaryKind::Displacement(remote) => {
                         convert_displacements(&mut remote.values, &c);
+                        for (i, table) in remote.tables.iter_mut().enumerate() {
+                            let quantity = if i < 3 {
+                                Quantity::Length
+                            } else {
+                                Quantity::Angle
+                            };
+                            convert_table(table, quantity, &c);
+                        }
                         c.option(&mut remote.pinball, Quantity::Length);
                         if let Some(location) = &mut remote.location {
                             // The angle of cylindrical coordinates stays.
@@ -209,6 +217,11 @@ impl FeModel {
                 }
             }
             for load in &mut step.loads {
+                if let Some(quantity) = load.kind.table_quantity() {
+                    for table in &mut load.tables {
+                        convert_table(table, quantity, &c);
+                    }
+                }
                 match &mut load.kind {
                     LoadKind::Moment(moment) => c.all(moment, Quantity::Moment),
                     LoadKind::PreTension {
@@ -354,13 +367,17 @@ impl FeModel {
 
 impl StaticStep {
     fn convert_units(&mut self, c: &Conversion) {
+        c.value(&mut self.duration, Quantity::Time);
+        let control = &mut self.control;
+        if let crate::IncrementSize::Fixed(dt) = &mut control.size {
+            c.value(dt, Quantity::Time);
+        }
         for time in [
-            &mut self.initial_increment,
-            &mut self.time_period,
-            &mut self.min_increment,
-            &mut self.max_increment,
+            &mut control.initial,
+            &mut control.minimum,
+            &mut control.maximum,
         ] {
-            c.value(time, Quantity::Time);
+            c.option(time, Quantity::Time);
         }
     }
 }
@@ -504,6 +521,14 @@ fn convert_modal_damping(damping: &mut Option<crate::ModalDamping>, c: &Conversi
     }
 }
 
+/// The times and values of a time table.
+fn convert_table(table: &mut Option<crate::ValueTable>, quantity: Quantity, c: &Conversion) {
+    for point in table.iter_mut().flat_map(|t| t.points.iter_mut()) {
+        c.value(&mut point[0], Quantity::Time);
+        c.value(&mut point[1], quantity);
+    }
+}
+
 /// Displacements (lengths) and rotations (angles) of a boundary condition.
 fn convert_displacements(values: &mut [Option<f64>; 6], c: &Conversion) {
     for (i, value) in values.iter_mut().enumerate() {
@@ -556,6 +581,7 @@ mod tests {
             kind: LoadKind::Pressure(2.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         step.loads.push(Load {
             distribution: None,
@@ -566,6 +592,7 @@ mod tests {
             kind: LoadKind::force([1000.0, 0.0, 0.0]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         model.steps.push(step);
         assert!(model.convert_units(UnitSystem::MTonSC).is_empty());

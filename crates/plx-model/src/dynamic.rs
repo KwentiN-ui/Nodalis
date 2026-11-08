@@ -171,6 +171,16 @@ impl FeModel {
                 }
             }
         }
+        // Time tables of components count like amplitudes in step time.
+        for table in step.tables() {
+            for pair in table.table.points.windows(2) {
+                let (t0, t1) = (pair[0][0], pair[1][0]);
+                let gap = t1 - t0;
+                if gap > 0.0 && t1 > 0.0 && t0 < duration {
+                    shortest = Some(shortest.map_or(gap, |s| s.min(gap)));
+                }
+            }
+        }
         shortest
     }
 }
@@ -251,6 +261,7 @@ mod tests {
             kind: crate::LoadKind::Pressure(1.0),
             amplitude: Some("Pulse".into()),
             factor_amplitude: None,
+            tables: Default::default(),
             distribution: None,
         });
         // The segment at 5 s lies behind the step.

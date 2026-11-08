@@ -1556,6 +1556,7 @@ mod tests {
             kind: LoadKind::Pressure(100.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         model.fe.steps.push(step);
         model
@@ -1708,6 +1709,7 @@ mod tests {
             kind: LoadKind::Pressure(10.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         model.fe.steps.push(step);
         model

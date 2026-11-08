@@ -1148,6 +1148,7 @@ mod tests {
             kind: plx_model::LoadKind::Pressure(5e6),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         // A second step pressing harder, to show the contacts of a step.
         if std::env::var_os("PLX_CONTACT_DEMO_STEPS").is_some() {
@@ -1255,8 +1256,7 @@ mod tests {
             amplitude: None,
         });
         if let plx_model::StepKind::Static(settings) = &mut step.kind {
-            settings.incrementation = plx_model::Incrementation::Automatic;
-            settings.initial_increment = 0.1;
+            settings.control.initial = Some(0.1);
         }
         model.steps.push(step);
         let project = single(None, &mesh, &model, None);

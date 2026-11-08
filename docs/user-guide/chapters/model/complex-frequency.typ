@@ -12,7 +12,15 @@ holds the rotation, and no static or frequency step has to come before it.
 #fields(
   [Rotational speed], [Speed of the rotation in radians per time; the line below shows it in
     rpm.],
-  [Axis point X, Y, Z], [A point on the rotation axis.],
+  [Rotating parts], [The parts (or an element set) that rotate. With none picked the whole
+    model rotates; otherwise only the picked parts carry the centrifugal load and the Coriolis
+    forces, and the rest of the model stands still.],
+  [Rotation axis], [#ui("Point and direction") types the axis below. #ui("z axis of ...")
+    takes the z axis of a coordinate system (#menu("Features", "Coordinate System")) through
+    its origin, for example one placed at the hub by picking on the geometry; the line below
+    shows the axis it gives. The axis follows the coordinate system when it is moved or
+    renamed.],
+  [Axis point X, Y, Z], [A point on the rotation axis (with #ui("Point and direction")).],
   [Axis direction X, Y, Z], [Direction of the rotation axis (default z).],
   [Stress stiffening: Centrifugal prestress], [Stress stiffening and spin softening. Computes the eigenmodes of the structure
     preloaded by its centrifugal forces (default on): the stresses of the preload stiffen it,
@@ -29,13 +37,32 @@ holds the rotation, and no static or frequency step has to come before it.
   [Equation solver], [As in a Frequency step.],
 )
 
-The rotation acts on the whole model, so every material needs a density. The solver computes
+The rotating parts need a density. The solver computes
 the step in up to three steps of its own: with stress stiffening a static preload by the
 centrifugal forces, then the eigenmodes (with stress stiffening as a perturbation of the
 preload), then the complex modes. Only the complex modes are kept as results. The step starts
 from the state of the step before it: a bolt preload of an earlier Static step stays in place
 and stiffens the rotor as well. Loads of the step itself have no effect; the boundary
 conditions hold in all three solver steps.
+
+=== A rotor on a standing structure
+
+With #ui("Rotating parts") a rotor turns on a structure that stands still, e.g. the blades and
+hub of a wind turbine on its nacelle and tower, or a disk on a shaft in a housing. The rotor is
+described in its rotating frame (centrifugal prestress, spin softening and Coriolis forces), the
+standing parts in the fixed frame, and both are joined at their common nodes or ties. This is
+exact for a rotor that is axisymmetric (a disk, or a bladed wheel with at least three blades on a
+stiff support): its stiffness and mass seen from the standing side do not change while it turns.
+
+For a rotor that is not axisymmetric on a flexible support, such as three blades on a tower, the
+coupled system changes with the rotor position and really is time-periodic: the standing
+structure sees the blades pass. The step then computes the modes for the rotor frozen in the
+position it is modeled in. This is the usual approach of commercial codes, and it is good for
+the frequencies of rotor and tower modes as long as they lie apart. Where a rotor mode at
+frequency f meets the tower, the standing side sees it at f ± n·Ω (n the nodal diameter,
+Ω the speed); resonances near these crossings and the 3P excitation of the tower need a
+multi-blade (Coleman) or Floquet analysis, which the step does not do. The Campbell diagram
+(see the results chapter) shows the stationary frame frequencies f ± n·Ω.
 
 The model check (@model-check) warns about a Coriolis step at speed 0 ("No rotation").
 
