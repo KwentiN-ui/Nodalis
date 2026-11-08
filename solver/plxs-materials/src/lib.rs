@@ -182,8 +182,8 @@ pub enum KernelLaw {
     /// `σ = D ε` with [`MaterialLaw::elastic_matrix`] (Saint Venant-Kirchhoff on the
     /// Green-Lagrange strain under NLGEOM).
     Elastic,
-    /// Small-strain J2 plasticity without creep ([`J2Plastic`]): the return mapping on the
-    /// state variables of [`plastic::STATE_SIZE`].
+    /// J2 plasticity without creep ([`J2Plastic`], [`FiniteStrainJ2`]): the return mapping
+    /// on the state variables of [`plastic::STATE_SIZE`].
     J2 {
         shear: f64,
         bulk: f64,
@@ -193,6 +193,9 @@ pub enum KernelLaw {
         /// The stress of the back stress against the equivalent plastic strain (empty
         /// without kinematic hardening).
         kinematic: Vec<(f64, f64)>,
+        /// At finite strains ([`FiniteStrainJ2`]): the return mapping on the logarithmic
+        /// elastic strain, the state's plastic slots holding `C_p⁻¹ − 1`.
+        finite: bool,
     },
 }
 

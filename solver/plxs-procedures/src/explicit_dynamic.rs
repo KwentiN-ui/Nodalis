@@ -2430,7 +2430,7 @@ fn gpu_engine(
 
 /// The elements for the kernels on the card, when every element and its material have one
 /// (solid elements whose displacement gradient is the sum of nodal gradients, elastic or
-/// small-strain J2 materials, no constant blocks).
+/// J2 materials without creep, no constant blocks).
 fn gpu_elements(
     ctx: &ProcedureContext<'_>,
     kernel: &Kernel<'_>,
@@ -2459,12 +2459,14 @@ fn gpu_elements(
                 bulk,
                 isotropic,
                 kinematic,
+                finite,
             } => (
                 plxs_explicit::Material::J2 {
                     shear,
                     bulk,
                     isotropic,
                     kinematic,
+                    finite,
                 },
                 Some(ctx.table.layout.offsets[index] as usize * STATE_SIZE),
             ),

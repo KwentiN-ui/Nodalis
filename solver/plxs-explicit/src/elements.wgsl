@@ -86,33 +86,33 @@ fn curve(start: u32, len: u32, x: f32) -> vec2<f32> {
 }
 
 // The radial return of the processor's J2 law (rate independent) for the material block
-// `m` at point `ip` of element `e`: the stress; the state variables advance.
-fn j2(m: u32, strain: array<f32, 6>, ip: u32, c: u32, e: u32) -> array<f32, 6> {
+// `m` at point `ip` of element `e` on the elastic trial strain `el` (tensor components):
+// the stress and, where the point flows, the plastic strain increment. The equivalent
+// plastic strain and the back stress advance; the plastic strain slots are the caller's.
+struct Return {
+    s: array<f32, 6>,
+    dep: array<f32, 6>,
+    flowed: bool,
+}
+
+fn radial(m: u32, el: array<f32, 6>, ip: u32, c: u32, e: u32) -> Return {
     let mu = materials[m + 37u];
     let bulk = materials[m + 38u];
     let iso = vec2<u32>(u32(materials[m + 39u]), u32(materials[m + 40u]));
     let kin = vec2<u32>(u32(materials[m + 41u]), u32(materials[m + 42u]));
     let at = ip * STATE;
     let peeq = history[at * c + e];
-    var el = array<f32, 6>();
-    for (var k = 0u; k < 6u; k++) {
-        var total = strain[k];
-        if k >= 3u {
-            total = 0.5 * total;
-        }
-        el[k] = f32(f64(total) - history[(at + 1u + k) * c + e]);
-    }
+    var r = Return();
     let trace = el[0] + el[1] + el[2];
     let mean = trace / 3.0;
-    var s = array<f32, 6>();
     var xi = array<f32, 6>();
     for (var k = 0u; k < 6u; k++) {
         var d = el[k];
         if k < 3u {
             d -= mean;
         }
-        s[k] = 2.0 * mu * d;
-        xi[k] = s[k] - f32(history[(at + 7u + k) * c + e]);
+        r.s[k] = 2.0 * mu * d;
+        xi[k] = r.s[k] - f32(history[(at + 7u + k) * c + e]);
     }
     let xn = sqrt(xi[0] * xi[0] + xi[1] * xi[1] + xi[2] * xi[2]
         + 2.0 * (xi[3] * xi[3] + xi[4] * xi[4] + xi[5] * xi[5]));
@@ -148,17 +148,212 @@ fn j2(m: u32, strain: array<f32, 6>, ip: u32, c: u32, e: u32) -> array<f32, 6> {
         let delta_kappa = curve(kin.x, kin.y, p + dg).x - kappa0;
         for (var k = 0u; k < 6u; k++) {
             let n = xi[k] / xn;
-            let dep = dg * 1.22474487139 * n;
-            history[(at + 1u + k) * c + e] += f64(dep);
+            r.dep[k] = dg * 1.22474487139 * n;
             history[(at + 7u + k) * c + e] += f64(delta_kappa * 0.81649658093 * n);
-            s[k] -= 2.0 * mu * dep;
+            r.s[k] -= 2.0 * mu * r.dep[k];
         }
         history[at * c + e] = peeq + f64(dg);
+        r.flowed = true;
     }
     for (var k = 0u; k < 3u; k++) {
-        s[k] += bulk * trace;
+        r.s[k] += bulk * trace;
     }
-    return s;
+    return r;
+}
+
+// The small-strain J2 law of the engineering strain: the stress.
+fn j2(m: u32, strain: array<f32, 6>, ip: u32, c: u32, e: u32) -> array<f32, 6> {
+    let at = ip * STATE;
+    var el = array<f32, 6>();
+    for (var k = 0u; k < 6u; k++) {
+        var total = strain[k];
+        if k >= 3u {
+            total = 0.5 * total;
+        }
+        el[k] = f32(f64(total) - history[(at + 1u + k) * c + e]);
+    }
+    let r = radial(m, el, ip, c, e);
+    if r.flowed {
+        for (var k = 0u; k < 6u; k++) {
+            history[(at + 1u + k) * c + e] += f64(r.dep[k]);
+        }
+    }
+    return r.s;
+}
+
+// Eigenvalues and eigenvectors (`vectors[i][a]`: component i of the a-th) of a symmetric
+// matrix by cyclic Jacobi rotations. Matrices here are indexed `m[i][j]` for row i and
+// column j; all of them are symmetric.
+struct Eigen {
+    values: vec3<f32>,
+    vectors: mat3x3<f32>,
+}
+
+fn eigen(m: mat3x3<f32>) -> Eigen {
+    var a = m;
+    var v = mat3x3<f32>(
+        vec3<f32>(1.0, 0.0, 0.0),
+        vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(0.0, 0.0, 1.0),
+    );
+    for (var sweep = 0u; sweep < 10u; sweep++) {
+        let off = abs(a[0][1]) + abs(a[0][2]) + abs(a[1][2]);
+        let scale = abs(a[0][0]) + abs(a[1][1]) + abs(a[2][2]) + off;
+        if off <= 1e-8 * scale {
+            break;
+        }
+        for (var r = 0u; r < 3u; r++) {
+            // The pairs (0, 1), (0, 2), (1, 2).
+            let p = select(0u, 1u, r == 2u);
+            let q = min(r + 1u, 2u);
+            let apq = a[p][q];
+            if apq == 0.0 {
+                continue;
+            }
+            let theta = (a[q][q] - a[p][p]) / (2.0 * apq);
+            var t = 1.0;
+            if theta != 0.0 {
+                t = sign(theta) / (abs(theta) + sqrt(theta * theta + 1.0));
+            }
+            let cs = 1.0 / sqrt(t * t + 1.0);
+            let sn = t * cs;
+            for (var k = 0u; k < 3u; k++) {
+                let akp = a[k][p];
+                let akq = a[k][q];
+                a[k][p] = cs * akp - sn * akq;
+                a[k][q] = sn * akp + cs * akq;
+            }
+            for (var k = 0u; k < 3u; k++) {
+                let apk = a[p][k];
+                let aqk = a[q][k];
+                a[p][k] = cs * apk - sn * aqk;
+                a[q][k] = sn * apk + cs * aqk;
+            }
+            for (var k = 0u; k < 3u; k++) {
+                let vkp = v[k][p];
+                let vkq = v[k][q];
+                v[k][p] = cs * vkp - sn * vkq;
+                v[k][q] = sn * vkp + cs * vkq;
+            }
+        }
+    }
+    return Eigen(vec3<f32>(a[0][0], a[1][1], a[2][2]), v);
+}
+
+// `Σ_a f_a v_a v_aᵀ` of the eigenvectors `v`.
+fn rebuild(v: mat3x3<f32>, f: vec3<f32>) -> mat3x3<f32> {
+    var out = mat3x3<f32>();
+    for (var i = 0u; i < 3u; i++) {
+        for (var j = 0u; j < 3u; j++) {
+            out[i][j] = f.x * v[i][0] * v[j][0] + f.y * v[i][1] * v[j][1] + f.z * v[i][2] * v[j][2];
+        }
+    }
+    return out;
+}
+
+// `ln(1 + x)`, accurate near zero (2 artanh(x / (2 + x)) as a series).
+fn log1p(x: f32) -> f32 {
+    if abs(x) > 0.5 {
+        return log(max(1.0 + x, 1e-30));
+    }
+    let t = x / (2.0 + x);
+    let t2 = t * t;
+    var sum = 0.0;
+    var power = t;
+    for (var k = 1u; k < 18u; k += 2u) {
+        sum += power / f32(k);
+        power *= t2;
+    }
+    return 2.0 * sum;
+}
+
+// `exp(x) − 1`, accurate near zero.
+fn expm1(x: f32) -> f32 {
+    if abs(x) > 0.5 {
+        return exp(x) - 1.0;
+    }
+    var sum = 0.0;
+    var term = x;
+    for (var k = 2u; k < 14u; k++) {
+        sum += term;
+        term *= x / f32(k);
+    }
+    return sum;
+}
+
+// `(1 + a) (1 + b) (1 + a) − 1` of symmetric `a` and `b`, without the identity.
+fn around(a: mat3x3<f32>, b: mat3x3<f32>) -> mat3x3<f32> {
+    // Products of symmetric matrices: `a * b` is the transpose of the product in the row
+    // and column order used here, `ab + ba` and `aba` are the same either way.
+    let ab = a * b;
+    return 2.0 * a + b + a * a + ab + transpose(ab) + ab * a;
+}
+
+fn to_matrix(t: array<f32, 6>) -> mat3x3<f32> {
+    return mat3x3<f32>(
+        vec3<f32>(t[0], t[3], t[5]),
+        vec3<f32>(t[3], t[1], t[4]),
+        vec3<f32>(t[5], t[4], t[2]),
+    );
+}
+
+fn to_vector(m: mat3x3<f32>) -> array<f32, 6> {
+    return array<f32, 6>(m[0][0], m[1][1], m[2][2], m[0][1], m[1][2], m[2][0]);
+}
+
+// The processor's finite-strain J2 law (`FiniteStrainJ2`) of the Green-Lagrange strain
+// (engineering components): the second Piola-Kirchhoff stress. With the stretch
+// `U = √(1 + 2E) = 1 + A`, `U⁻¹ = 1 + A'` and the state's `P = C_p⁻¹ − 1`: the trial
+// `b_e − 1 = around(A, P)`, its logarithmic strain, the return mapping on the Kirchhoff
+// stress, `C_p⁻¹ − 1 = around(A', exp(2 ε_e) − 1)` and `S = U⁻¹ τ U⁻¹`. Every matrix is
+// a difference to the identity, so that single precision holds the small strains.
+fn finite_j2(m: u32, strain: array<f32, 6>, ip: u32, c: u32, e: u32) -> array<f32, 6> {
+    let at = ip * STATE;
+    let two_e = mat3x3<f32>(
+        vec3<f32>(2.0 * strain[0], strain[3], strain[5]),
+        vec3<f32>(strain[3], 2.0 * strain[1], strain[4]),
+        vec3<f32>(strain[5], strain[4], 2.0 * strain[2]),
+    );
+    let stretch = eigen(two_e);
+    var fa = vec3<f32>();
+    var fi = vec3<f32>();
+    for (var k = 0u; k < 3u; k++) {
+        let l = stretch.values[k];
+        let s = sqrt(max(1.0 + l, 1e-30));
+        fa[k] = l / (1.0 + s);
+        fi[k] = -fa[k] / s;
+    }
+    let a = rebuild(stretch.vectors, fa);
+    let ai = rebuild(stretch.vectors, fi);
+    var plastic = array<f32, 6>();
+    for (var k = 0u; k < 6u; k++) {
+        plastic[k] = f32(history[(at + 1u + k) * c + e]);
+    }
+    let trial_b = eigen(around(a, to_matrix(plastic)));
+    var logs = vec3<f32>();
+    for (var k = 0u; k < 3u; k++) {
+        logs[k] = 0.5 * log1p(trial_b.values[k]);
+    }
+    let trial = to_vector(rebuild(trial_b.vectors, logs));
+    let r = radial(m, trial, ip, c, e);
+    if r.flowed {
+        var elastic = array<f32, 6>();
+        for (var k = 0u; k < 6u; k++) {
+            elastic[k] = trial[k] - r.dep[k];
+        }
+        let be = eigen(to_matrix(elastic));
+        var exps = vec3<f32>();
+        for (var k = 0u; k < 3u; k++) {
+            exps[k] = expm1(2.0 * be.values[k]);
+        }
+        let cp = to_vector(around(ai, rebuild(be.vectors, exps)));
+        for (var k = 0u; k < 6u; k++) {
+            history[(at + 1u + k) * c + e] = f64(cp[k]);
+        }
+    }
+    let tau = to_matrix(r.s);
+    let ta = ai * tau;
+    return to_vector(tau + ta + transpose(ta) + ta * ai);
 }
 
 @compute @workgroup_size(64)
@@ -222,6 +417,8 @@ fn elements(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_ind
         var s = array<f32, 6>();
         if kind == 1u {
             s = j2(m, strain, ip, c, e);
+        } else if kind == 2u {
+            s = finite_j2(m, strain, ip, c, e);
         } else {
             for (var r = 0u; r < 6u; r++) {
                 var sum = 0.0;

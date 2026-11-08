@@ -1399,24 +1399,16 @@ fn plastic_flow_on_the_graphics_card_matches_the_processor() {
     gpu_matches_processor_with("C3D8R", "gpu-plastic", false, "element forces", false, true);
 }
 
-/// Plasticity under NLGEOM (finite strain J2) has no kernel yet: the processor.
+/// Plasticity under NLGEOM: J2 at finite strains in the element kernels.
 #[test]
-fn plastic_flow_under_nlgeom_stays_on_the_processor() {
-    let dir = work_dir("gpu-plastic-nlgeom");
-    let mut input = bar_mesh(4, 1, 1, [0.04, 0.01, 0.01], "C3D8R");
-    writeln!(
-        input,
-        "*Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Plastic\n300e6, 0\n*Density\n{RHO}\n\
-         *Solid section, Elset=EALL, Material=STEEL\n\
-         *Step, Nlgeom\n*Dynamic, Integration=Explicit\n1e-6, 1e-5\n\
-         *Boundary\nEND0, 1, 3, 0\n*Node print, Nset=END1\nU\n*End step"
-    )
-    .unwrap();
-    let (_, log) = run_with_gpu(&dir, "nlgeom", &input, "on");
-    clean(&dir);
-    assert!(
-        log.contains("time steps on the processor (large deformations and nonlinear materials"),
-        "{log}"
+fn plastic_flow_under_nlgeom_on_the_graphics_card_matches_the_processor() {
+    gpu_matches_processor_with(
+        "C3D8R",
+        "gpu-plastic-nlgeom",
+        false,
+        "element forces",
+        true,
+        true,
     );
 }
 
