@@ -2261,9 +2261,8 @@ const GPU_FROM: usize = 30_000;
 
 /// The engine for the time steps of a linear model on the graphics card
 /// ([`plxs_explicit`]), when the mode (`PLXS_GPU`, the setting of the application) and the
-/// card allow: the stiffness and the viscous matrix (bulk viscosity and hourglass control,
-/// linear in the velocities under small strains) in single precision, the inverse lumped
-/// mass on the free DOFs.
+/// card allow: the element kernels or else the stiffness and the viscous matrix, the
+/// inverse lumped mass on the free DOFs.
 fn gpu_engine(
     ctx: &mut ProcedureContext<'_>,
     kernel: &Kernel<'_>,
@@ -2282,6 +2281,112 @@ fn gpu_engine(
         GpuMode::On => true,
     };
     let started = std::time::Instant::now();
+    let mut inverse = vec![0.0; n];
+    for &dof in &set.free {
+        let m = mass[dof as usize];
+        if m > 0.0 {
+            inverse[dof as usize] = 1.0 / m;
+        }
+    }
+    // Element by element where all elements have kernels, otherwise by the matrices.
+    let opened = match gpu_elements(ctx, kernel) {
+        Some(elements) => plxs_explicit::Engine::new(
+            &plxs_explicit::Setup {
+                forces: plxs_explicit::ForceModel::Elements(&elements),
+                inverse_mass: &inverse,
+                alpha,
+            },
+            any,
+        )
+        .map(|engine| {
+            (
+                engine,
+                "element forces in single precision, state in double precision",
+            )
+        }),
+        None => gpu_matrices(ctx, kernel, &inverse, alpha, any).map(|engine| {
+            (
+                engine,
+                "forces in single precision from the motion within a frame, state in double \
+                 precision",
+            )
+        }),
+    };
+    match opened {
+        Ok((engine, how)) => {
+            ctx.profile.add(Phase::Assembly, started);
+            progress.event(ProgressEvent::Info(format!(
+                "explicit: time steps on {} ({how})",
+                engine.device()
+            )));
+            Some(engine)
+        }
+        Err(e) => {
+            if mode == GpuMode::On || n >= GPU_FROM {
+                progress.event(ProgressEvent::Info(format!(
+                    "explicit: time steps on the processor ({e})"
+                )));
+            }
+            None
+        }
+    }
+}
+
+/// The elements for the kernels on the card, when every element has one (solid elements
+/// whose displacement gradient is the sum of nodal gradients, no constant blocks).
+fn gpu_elements(
+    ctx: &ProcedureContext<'_>,
+    kernel: &Kernel<'_>,
+) -> Option<plxs_explicit::Elements> {
+    // `PLXS_GPU_FORCES=matrices`: the matrices anyway, for measurements (until the
+    // kernels cover all elements and the matrices go).
+    if !ctx.table.linear_blocks.is_empty()
+        || std::env::var("PLXS_GPU_FORCES").is_ok_and(|v| v.eq_ignore_ascii_case("matrices"))
+    {
+        return None;
+    }
+    let mut elements = plxs_explicit::Elements::default();
+    for (entry, viscosity) in ctx.table.entries.iter().zip(kernel.viscosity) {
+        let formulation = ctx.table.formulation(entry);
+        let coords = ctx.table.coordinates(ctx.model, entry);
+        let elastic = ctx.table.law(entry, false).elastic_matrix();
+        let gradients = formulation.nodal_gradients(&coords, &elastic)?;
+        if entry.dofs.len() != 3 * coords.len() || viscosity.g.len() != entry.dofs.len() {
+            return None;
+        }
+        let hourglass = match (gradients.hourglass, viscosity.hourglass > 0.0) {
+            (Some(stiffness), _) => Some(plxs_explicit::Hourglass {
+                stiffness,
+                viscosity: viscosity.hourglass,
+                coordinates: coords.clone(),
+            }),
+            (None, false) => None,
+            (None, true) => return None,
+        };
+        elements
+            .push(plxs_explicit::Element {
+                dofs: entry.dofs.clone(),
+                points: gradients.points,
+                elastic,
+                bulk: viscosity.rate * viscosity.volume,
+                mean: viscosity.g.clone(),
+                hourglass,
+            })
+            .ok()?;
+    }
+    (!elements.is_empty()).then_some(elements)
+}
+
+/// The engine with the stiffness and the viscous matrix (bulk viscosity and hourglass
+/// control, linear in the velocities under small strains).
+fn gpu_matrices(
+    ctx: &mut ProcedureContext<'_>,
+    kernel: &Kernel<'_>,
+    inverse: &[f64],
+    alpha: f64,
+    any: bool,
+) -> std::result::Result<plxs_explicit::Engine, String> {
+    let n = ctx.table.dofs.len();
     if ctx.stiffness.is_none() {
         let mut k = SparseMatrix::zeros(ctx.pattern.clone());
         plxs_assembly::assemble_stiffness(ctx.table, ctx.model, &mut k);
@@ -2344,38 +2449,17 @@ fn gpu_engine(
         }
     }
     let viscous = plxs_explicit::Csr::from_entries(n, entries);
-    let mut inverse = vec![0.0; n];
-    for &dof in &set.free {
-        let m = mass[dof as usize];
-        if m > 0.0 {
-            inverse[dof as usize] = 1.0 / m;
-        }
-    }
-    let setup = plxs_explicit::Setup {
-        stiffness: &stiffness,
-        viscous: &viscous,
-        inverse_mass: &inverse,
-        alpha,
-    };
-    match plxs_explicit::Engine::new(&setup, any) {
-        Ok(engine) => {
-            ctx.profile.add(Phase::Assembly, started);
-            progress.event(ProgressEvent::Info(format!(
-                "explicit: time steps on {} (forces in single precision from the motion within \
-                 a frame, state in double precision)",
-                engine.device()
-            )));
-            Some(engine)
-        }
-        Err(e) => {
-            if mode == GpuMode::On || n >= GPU_FROM {
-                progress.event(ProgressEvent::Info(format!(
-                    "explicit: time steps on the processor ({e})"
-                )));
-            }
-            None
-        }
-    }
+    plxs_explicit::Engine::new(
+        &plxs_explicit::Setup {
+            forces: plxs_explicit::ForceModel::Matrices {
+                stiffness: &stiffness,
+                viscous: &viscous,
+            },
+            inverse_mass: inverse,
+            alpha,
+        },
+        any,
+    )
 }
 
 /// The damping of an explicit step: `(α_R, β_R)`. A damping ratio damps the mass-

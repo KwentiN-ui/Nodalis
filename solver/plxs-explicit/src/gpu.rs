@@ -3,12 +3,14 @@
 use plxs_gpu::{Double, Gpu, Options, Use, wgpu};
 
 use crate::sliced::{SLICE, Sliced};
+use crate::{Elements, ForceModel, MAX_CHUNK, Reached, Setup, Start};
+
+const GROUP: usize = 256;
+/// Threads per work group of the element kernels.
+const ELEMENT_GROUP: usize = 64;
 
 // A workgroup of the product holds whole slices.
 const _: () = assert!(GROUP.is_multiple_of(SLICE));
-use crate::{MAX_CHUNK, Reached, Setup, Start};
-
-const GROUP: usize = 256;
 
 /// The parameters of one step as the shaders read them (`Step`).
 #[repr(C)]
@@ -20,21 +22,37 @@ struct StepParams {
     alpha: f64,
 }
 
+/// The sizes the shaders read (`Dims`; the element kernels name the fields `count`,
+/// `groups_x`, `base`).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Dims {
     n: u32,
     groups_x: u32,
     positions: u32,
-    pad: u32,
+    relative: u32,
+}
+
+/// The kinds of dispatches, as the trace reports them.
+const KINDS: [&str; 4] = ["advance", "forces", "gather", "accelerate"];
+
+/// One dispatch of a time step.
+struct Pass {
+    pipeline: wgpu::ComputePipeline,
+    bind: wgpu::BindGroup,
+    /// Whether it reads the step's parameters (a dynamic offset).
+    step: bool,
+    groups: (u32, u32),
+    /// Index into [`KINDS`].
+    kind: usize,
 }
 
 pub(crate) struct Engine {
     pub(crate) gpu: Gpu,
     n: usize,
     alpha: f64,
-    groups: (u32, u32),
-    product_groups: (u32, u32),
+    /// Matrices: the forces are products with the motion since the reference state.
+    relative: bool,
     stride: u64,
     params: wgpu::Buffer,
     u: wgpu::Buffer,
@@ -44,54 +62,70 @@ pub(crate) struct Engine {
     loads: wgpu::Buffer,
     energy: wgpu::Buffer,
     staging: wgpu::Buffer,
-    advance: (wgpu::ComputePipeline, wgpu::BindGroup),
-    product: (wgpu::ComputePipeline, wgpu::BindGroup),
-    accelerate: (wgpu::ComputePipeline, wgpu::BindGroup),
+    passes: Vec<Pass>,
     /// `PLXS_GPU_TRACE`: the time of every kind of dispatch on the card.
     trace: Option<Trace>,
 }
 
-/// The times the card took, from its timestamps: each dispatch of a traced run in a pass of
-/// its own.
+/// The times the card took, from its timestamps: each dispatch of the first time steps of
+/// a traced run in a pass of its own.
 struct Trace {
     queries: wgpu::QuerySet,
     resolve: wgpu::Buffer,
     read: wgpu::Buffer,
     period: f64,
-    /// Seconds in advance, product, accelerate; wall clock of the runs; time steps.
-    kernels: [f64; 3],
+    /// Time steps per run that are timed (the query set holds at most [`QUERIES`]).
+    timed: usize,
+    /// Seconds per kind of dispatch over the timed steps; wall clock of the runs; time
+    /// steps, timed steps.
+    kernels: [f64; 4],
     wall: f64,
     steps: usize,
+    timed_steps: usize,
 }
 
-/// Queries of one run: begin and end of three passes per time step.
-const QUERIES: u32 = 6 * MAX_CHUNK as u32;
+/// The most queries of a query set.
+const QUERIES: usize = 4096;
 
 impl Drop for Engine {
     fn drop(&mut self) {
         if let Some(t) = &self.trace
-            && t.steps > 0
+            && t.timed_steps > 0
         {
-            let ms = |s: f64| 1e3 * s / t.steps as f64;
+            let kernels: Vec<String> = KINDS
+                .iter()
+                .zip(t.kernels)
+                .filter(|&(_, s)| s > 0.0)
+                .map(|(name, s)| format!("{name} {:.3} ms", 1e3 * s / t.timed_steps as f64))
+                .collect();
             eprintln!(
-                " gpu trace: {} time steps, per step {:.3} ms wall clock, on the card: advance \
-                 {:.3} ms, product {:.3} ms, accelerate {:.3} ms",
+                " gpu trace: {} time steps, per step {:.3} ms wall clock, on the card: {}",
                 t.steps,
-                ms(t.wall),
-                ms(t.kernels[0]),
-                ms(t.kernels[1]),
-                ms(t.kernels[2])
+                1e3 * t.wall / t.steps as f64,
+                kernels.join(", ")
             );
         }
     }
 }
 
-/// A dispatch of the traced loop: pipeline and bind group, dynamic offsets, work groups.
-type TimedPass<'a> = (
-    &'a (wgpu::ComputePipeline, wgpu::BindGroup),
-    &'a [u32],
-    (u32, u32),
-);
+/// The element kernels' data, value by value (`[k * count + e]`).
+fn transpose<T: Copy + Default>(values: &[T], count: usize) -> Vec<T> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let size = values.len() / count;
+    let mut out = vec![T::default(); values.len()];
+    for e in 0..count {
+        for k in 0..size {
+            out[k * count + e] = values[e * size + k];
+        }
+    }
+    out
+}
+
+fn single(values: &[f64]) -> Vec<f32> {
+    values.iter().map(|&x| x as f32).collect()
+}
 
 impl Engine {
     pub(crate) fn new(setup: &Setup<'_>, any: bool) -> Result<Self, String> {
@@ -106,83 +140,67 @@ impl Engine {
             double: Double::Required,
             timestamps: tracing,
         })?;
-        let sliced = Sliced::new(setup.stiffness, setup.viscous);
-        let largest = (8 * 6 * n as u64).max(8 * sliced.val.len() as u64);
-        if !gpu.fits(largest) {
-            return Err(format!(
-                "the model is too large for the buffers of {}",
-                gpu.name
-            ));
+        let too_large = || format!("the model is too large for the buffers of {}", gpu.name);
+        if !gpu.fits(8 * 6 * n as u64) {
+            return Err(too_large());
         }
+        let relative = matches!(setup.forces, ForceModel::Matrices { .. });
         let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let storage = |label: &str, bytes: u64| gpu.storage(label, bytes);
-        let init = |label: &str, contents: &[u8]| gpu.init(label, contents);
         let f64s = 8 * n as u64;
-        let u = storage("u", f64s);
-        let v = storage("v", f64s);
-        let a = storage("a", f64s);
-        let du = storage("du", f64s);
-        let uref = storage("uref", f64s);
-        let dv = storage("dv", 2 * 4 * n as u64);
-        let fs = storage("fs", 2 * 4 * n as u64);
-        let loads = storage("loads", 3 * f64s);
-        let energy = storage("energy", 6 * f64s);
-        let im = init("inverse mass", bytemuck::cast_slice(setup.inverse_mass));
-        let slice_start = init("slices", bytemuck::cast_slice(&sliced.start));
-        let slice_rows = init("rows", bytemuck::cast_slice(&sliced.rows));
-        let slice_col = init("columns", bytemuck::cast_slice(&sliced.col));
-        let slice_val = init("values", bytemuck::cast_slice(&sliced.val));
-        let positions = sliced.rows.len();
-        drop(sliced);
+        let u = gpu.storage("u", f64s);
+        let v = gpu.storage("v", f64s);
+        let a = gpu.storage("a", f64s);
+        let du = gpu.storage("du", f64s);
+        let uref = gpu.storage("uref", if relative { f64s } else { 16 });
+        let dv = gpu.storage("dv", if relative { 2 * 4 * n as u64 } else { 16 });
+        let fs = gpu.storage("forces", 2 * f64s);
+        let loads = gpu.storage("loads", 3 * f64s);
+        let energy = gpu.storage("energy", 6 * f64s);
+        let im = gpu.init("inverse mass", bytemuck::cast_slice(setup.inverse_mass));
         let staging = gpu.staging("staging", 6 * f64s);
-        let device = &gpu.device;
         let stride = u64::from(gpu.limits.min_uniform_buffer_offset_alignment)
             .max(std::mem::size_of::<StepParams>() as u64);
-        let params = device.create_buffer(&wgpu::BufferDescriptor {
+        let params = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("steps"),
             size: stride * MAX_CHUNK as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let groups = gpu.fold(n, GROUP);
-        let product_groups = gpu.fold(positions, GROUP);
-        let dims_of = |groups: (u32, u32)| {
+        let dims_of = |count: usize, groups: (u32, u32), positions: usize| {
             gpu.uniform(
                 "dims",
                 bytemuck::bytes_of(&Dims {
-                    n: n as u32,
+                    n: count as u32,
                     groups_x: groups.0,
                     positions: positions as u32,
-                    pad: 0,
+                    relative: u32::from(relative),
                 }),
             )
         };
-        let dims = dims_of(groups);
-        let product_dims = dims_of(product_groups);
-        let step_binding = wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-            buffer: &params,
-            offset: 0,
-            size: wgpu::BufferSize::new(std::mem::size_of::<StepParams>() as u64),
-        });
-        let bind = |layout: &wgpu::BindGroupLayout, resources| gpu.bind(layout, resources);
-        let layout = |label: &str, uses: &[Use]| gpu.layout(label, uses);
-        let pipeline = |source: &str, entry: &str, layout: &wgpu::BindGroupLayout| {
-            gpu.pipeline(source, entry, layout, &[])
+        let dims = dims_of(n, groups, 0);
+        let step_binding = || {
+            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: &params,
+                offset: 0,
+                size: wgpu::BufferSize::new(std::mem::size_of::<StepParams>() as u64),
+            })
         };
         use Use::*;
-        let advance_layout = layout(
+        let mut passes = Vec::new();
+        let layout = gpu.layout(
             "advance",
             &[
                 Uniform, Dynamic, Write, Write, Read, Write, Read, Write, Read,
             ],
         );
-        let advance = (
-            pipeline(include_str!("advance.wgsl"), "advance", &advance_layout),
-            bind(
-                &advance_layout,
+        passes.push(Pass {
+            pipeline: gpu.pipeline(include_str!("advance.wgsl"), "advance", &layout, &[]),
+            bind: gpu.bind(
+                &layout,
                 vec![
                     dims.as_entire_binding(),
-                    step_binding.clone(),
+                    step_binding(),
                     u.as_entire_binding(),
                     v.as_entire_binding(),
                     a.as_entire_binding(),
@@ -192,38 +210,57 @@ impl Engine {
                     im.as_entire_binding(),
                 ],
             ),
-        );
-        let product_layout = layout("product", &[Uniform, Read, Write, Read, Read, Read, Read]);
-        let product = (
-            pipeline(include_str!("product.wgsl"), "product", &product_layout),
-            bind(
-                &product_layout,
-                vec![
-                    product_dims.as_entire_binding(),
-                    dv.as_entire_binding(),
-                    fs.as_entire_binding(),
-                    slice_start.as_entire_binding(),
-                    slice_rows.as_entire_binding(),
-                    slice_col.as_entire_binding(),
-                    slice_val.as_entire_binding(),
-                ],
-            ),
-        );
-        let accelerate_layout = layout(
+            step: true,
+            groups,
+            kind: 0,
+        });
+        match setup.forces {
+            ForceModel::Matrices { stiffness, viscous } => {
+                let sliced = Sliced::new(stiffness, viscous);
+                if !gpu.fits(8 * sliced.val.len() as u64) {
+                    return Err(too_large());
+                }
+                let positions = sliced.rows.len();
+                let product_groups = gpu.fold(positions, GROUP);
+                let layout = gpu.layout("product", &[Uniform, Read, Write, Read, Read, Read, Read]);
+                passes.push(Pass {
+                    pipeline: gpu.pipeline(include_str!("product.wgsl"), "product", &layout, &[]),
+                    bind: gpu.bind(
+                        &layout,
+                        vec![
+                            dims_of(n, product_groups, positions).as_entire_binding(),
+                            dv.as_entire_binding(),
+                            fs.as_entire_binding(),
+                            gpu.init("slices", bytemuck::cast_slice(&sliced.start))
+                                .as_entire_binding(),
+                            gpu.init("rows", bytemuck::cast_slice(&sliced.rows))
+                                .as_entire_binding(),
+                            gpu.init("columns", bytemuck::cast_slice(&sliced.col))
+                                .as_entire_binding(),
+                            gpu.init("values", bytemuck::cast_slice(&sliced.val))
+                                .as_entire_binding(),
+                        ],
+                    ),
+                    step: false,
+                    groups: product_groups,
+                    kind: 1,
+                });
+            }
+            ForceModel::Elements(elements) => {
+                Self::element_passes(&gpu, elements, n, &u, &v, &fs, &mut passes)?;
+            }
+        }
+        let layout = gpu.layout(
             "accelerate",
             &[Uniform, Dynamic, Read, Write, Read, Read, Read, Read, Write],
         );
-        let accelerate = (
-            pipeline(
-                include_str!("accelerate.wgsl"),
-                "accelerate",
-                &accelerate_layout,
-            ),
-            bind(
-                &accelerate_layout,
+        passes.push(Pass {
+            pipeline: gpu.pipeline(include_str!("accelerate.wgsl"), "accelerate", &layout, &[]),
+            bind: gpu.bind(
+                &layout,
                 vec![
                     dims.as_entire_binding(),
-                    step_binding,
+                    step_binding(),
                     v.as_entire_binding(),
                     a.as_entire_binding(),
                     du.as_entire_binding(),
@@ -233,29 +270,33 @@ impl Engine {
                     energy.as_entire_binding(),
                 ],
             ),
-        );
-        let trace = gpu.timestamps.then(|| Trace {
-            queries: device.create_query_set(&wgpu::QuerySetDescriptor {
-                label: Some("trace"),
-                ty: wgpu::QueryType::Timestamp,
-                count: QUERIES,
-            }),
-            resolve: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("trace"),
-                size: 8 * u64::from(QUERIES),
-                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            }),
-            read: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("trace"),
-                size: 8 * u64::from(QUERIES),
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }),
-            period: f64::from(gpu.queue.get_timestamp_period()) * 1e-9,
-            kernels: [0.0; 3],
-            wall: 0.0,
-            steps: 0,
+            step: true,
+            groups,
+            kind: 3,
+        });
+        let timed = (QUERIES / (2 * passes.len())).min(MAX_CHUNK);
+        let trace = (gpu.timestamps && timed > 0).then(|| {
+            let count = (2 * passes.len() * timed) as u32;
+            Trace {
+                queries: gpu.device.create_query_set(&wgpu::QuerySetDescriptor {
+                    label: Some("trace"),
+                    ty: wgpu::QueryType::Timestamp,
+                    count,
+                }),
+                resolve: gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("trace"),
+                    size: 8 * u64::from(count),
+                    usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                }),
+                read: gpu.staging("trace", 8 * u64::from(count)),
+                period: f64::from(gpu.queue.get_timestamp_period()) * 1e-9,
+                timed,
+                kernels: [0.0; 4],
+                wall: 0.0,
+                steps: 0,
+                timed_steps: 0,
+            }
         });
         if let Some(e) = plxs_gpu::block_on(scope.pop()) {
             return Err(format!("{}: {e}", gpu.name));
@@ -264,8 +305,7 @@ impl Engine {
             gpu,
             n,
             alpha: setup.alpha,
-            groups,
-            product_groups,
+            relative,
             stride,
             params,
             u,
@@ -275,11 +315,165 @@ impl Engine {
             loads,
             energy,
             staging,
-            advance,
-            product,
-            accelerate,
+            passes,
             trace,
         })
+    }
+
+    /// The dispatches of the element forces: one per family, then the sum per DOF into
+    /// `fs`.
+    fn element_passes(
+        gpu: &Gpu,
+        elements: &Elements,
+        n: usize,
+        u: &wgpu::Buffer,
+        v: &wgpu::Buffer,
+        fs: &wgpu::Buffer,
+        passes: &mut Vec<Pass>,
+    ) -> Result<(), String> {
+        use Use::*;
+        let too_large = || format!("the model is too large for the buffers of {}", gpu.name);
+        // The positions of every DOF's element forces.
+        let total: usize = elements
+            .families
+            .iter()
+            .map(|f| 3 * f.nodes * f.count)
+            .sum();
+        if total == 0 {
+            return Err("no elements".to_owned());
+        }
+        if total >= u32::MAX as usize || !gpu.fits(4 * total as u64) {
+            return Err(too_large());
+        }
+        let mut lists: Vec<Vec<u32>> = vec![Vec::new(); n];
+        let mut base = 0;
+        let mut bases = Vec::with_capacity(elements.families.len());
+        for family in &elements.families {
+            let nd = 3 * family.nodes;
+            for e in 0..family.count {
+                for k in 0..nd {
+                    let dof = family.dofs[e * nd + k] as usize;
+                    if dof >= n {
+                        return Err(format!("DOF {dof} of {n}"));
+                    }
+                    lists[dof].push((base + k * family.count + e) as u32);
+                }
+            }
+            bases.push(base);
+            base += nd * family.count;
+        }
+        let mut ptr = Vec::with_capacity(n + 1);
+        ptr.push(0u32);
+        let mut positions = Vec::with_capacity(total);
+        for list in lists {
+            positions.extend(list);
+            ptr.push(positions.len() as u32);
+        }
+        let fint = gpu.storage("element forces", 4 * total as u64);
+        let fvis = gpu.storage("element viscous forces", 4 * total as u64);
+        let materials: Vec<f32> = elements
+            .materials
+            .iter()
+            .flat_map(|d| d.iter().flatten().map(|&x| x as f32))
+            .collect();
+        let materials = gpu.init("materials", bytemuck::cast_slice(&materials));
+        let layout = gpu.layout(
+            "elements",
+            &[
+                Uniform, Read, Read, Read, Read, Read, Read, Read, Read, Write, Write,
+            ],
+        );
+        for (family, &base) in elements.families.iter().zip(&bases) {
+            if family.count == 0 {
+                continue;
+            }
+            let count = family.count;
+            let gradients = transpose(&single(&family.gradients), count);
+            if !gpu.fits(4 * gradients.len() as u64) {
+                return Err(too_large());
+            }
+            let source = include_str!("elements.wgsl")
+                .replace("__NN__", &family.nodes.to_string())
+                .replace("__NP__", &family.points.to_string())
+                .replace("__HG__", if family.hourglass { "true" } else { "false" });
+            let groups = gpu.fold(count, ELEMENT_GROUP);
+            let dims = gpu.uniform(
+                "element dims",
+                bytemuck::bytes_of(&Dims {
+                    n: count as u32,
+                    groups_x: groups.0,
+                    positions: base as u32,
+                    relative: 0,
+                }),
+            );
+            passes.push(Pass {
+                pipeline: gpu.pipeline(&source, "elements", &layout, &[]),
+                bind: gpu.bind(
+                    &layout,
+                    vec![
+                        dims.as_entire_binding(),
+                        u.as_entire_binding(),
+                        v.as_entire_binding(),
+                        gpu.init(
+                            "dofs",
+                            bytemuck::cast_slice(&transpose(&family.dofs, count)),
+                        )
+                        .as_entire_binding(),
+                        gpu.init("gradients", bytemuck::cast_slice(&gradients))
+                            .as_entire_binding(),
+                        gpu.init(
+                            "viscosity",
+                            bytemuck::cast_slice(&transpose(&single(&family.viscosity), count)),
+                        )
+                        .as_entire_binding(),
+                        gpu.init(
+                            "hourglass",
+                            bytemuck::cast_slice(&transpose(&single(&family.control), count)),
+                        )
+                        .as_entire_binding(),
+                        gpu.init("material", bytemuck::cast_slice(&family.material))
+                            .as_entire_binding(),
+                        materials.as_entire_binding(),
+                        fint.as_entire_binding(),
+                        fvis.as_entire_binding(),
+                    ],
+                ),
+                step: false,
+                groups,
+                kind: 1,
+            });
+        }
+        let groups = gpu.fold(n, GROUP);
+        let dims = gpu.uniform(
+            "gather dims",
+            bytemuck::bytes_of(&Dims {
+                n: n as u32,
+                groups_x: groups.0,
+                positions: positions.len() as u32,
+                relative: 0,
+            }),
+        );
+        let layout = gpu.layout("gather", &[Uniform, Read, Read, Read, Read, Write]);
+        passes.push(Pass {
+            pipeline: gpu.pipeline(include_str!("gather.wgsl"), "gather", &layout, &[]),
+            bind: gpu.bind(
+                &layout,
+                vec![
+                    dims.as_entire_binding(),
+                    gpu.init("pointers", bytemuck::cast_slice(&ptr))
+                        .as_entire_binding(),
+                    gpu.init("positions", bytemuck::cast_slice(&positions))
+                        .as_entire_binding(),
+                    fint.as_entire_binding(),
+                    fvis.as_entire_binding(),
+                    fs.as_entire_binding(),
+                ],
+            ),
+            step: false,
+            groups,
+            kind: 2,
+        });
+        Ok(())
     }
 
     pub(crate) fn load(&mut self, start: &Start<'_>) -> Result<(), String> {
@@ -298,13 +492,22 @@ impl Engine {
         }
         let q = &self.gpu.queue;
         q.write_buffer(&self.u, 0, bytemuck::cast_slice(start.u));
-        q.write_buffer(&self.uref, 0, bytemuck::cast_slice(start.u));
         q.write_buffer(&self.v, 0, bytemuck::cast_slice(start.v));
         q.write_buffer(&self.a, 0, bytemuck::cast_slice(start.a));
         let bytes = 8 * n as u64;
         q.write_buffer(&self.loads, 0, bytemuck::cast_slice(start.loads));
         q.write_buffer(&self.loads, bytes, bytemuck::cast_slice(start.loads));
-        q.write_buffer(&self.loads, 2 * bytes, bytemuck::cast_slice(start.internal));
+        // The reference of the products; the element forces are whole.
+        if self.relative {
+            q.write_buffer(&self.uref, 0, bytemuck::cast_slice(start.u));
+            q.write_buffer(&self.loads, 2 * bytes, bytemuck::cast_slice(start.internal));
+        } else {
+            q.write_buffer(
+                &self.loads,
+                2 * bytes,
+                bytemuck::cast_slice(&vec![0.0_f64; n]),
+            );
+        }
         let mut energy = Vec::with_capacity(6 * n);
         energy.extend_from_slice(start.internal);
         energy.extend_from_slice(start.loads);
@@ -354,17 +557,14 @@ impl Engine {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("explicit"),
             });
+        let offset = |k: usize| (k as u64 * self.stride) as u32;
+        // The first steps of a traced run: every dispatch in a pass of its own, timed by
+        // the card.
+        let timed = self.trace.as_ref().map_or(0, |t| t.timed.min(steps.len()));
         if let Some(t) = &self.trace {
-            // Every dispatch in a pass of its own, timed by the card.
-            for k in 0..steps.len() {
-                let offset = (k as u64 * self.stride) as u32;
-                let passes: [TimedPass<'_>; 3] = [
-                    (&self.advance, &[offset], self.groups),
-                    (&self.product, &[], self.product_groups),
-                    (&self.accelerate, &[offset], self.groups),
-                ];
-                for (j, (stage, offsets, groups)) in passes.into_iter().enumerate() {
-                    let at = (6 * k + 2 * j) as u32;
+            for k in 0..timed {
+                for (j, p) in self.passes.iter().enumerate() {
+                    let at = (2 * (k * self.passes.len() + j)) as u32;
                     let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                         label: Some("traced"),
                         timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
@@ -373,43 +573,41 @@ impl Engine {
                             end_of_pass_write_index: Some(at + 1),
                         }),
                     });
-                    pass.set_pipeline(&stage.0);
-                    pass.set_bind_group(0, &stage.1, offsets);
-                    pass.dispatch_workgroups(groups.0, groups.1, 1);
+                    pass.set_pipeline(&p.pipeline);
+                    let offsets = [offset(k)];
+                    pass.set_bind_group(0, &p.bind, if p.step { &offsets[..] } else { &[] });
+                    pass.dispatch_workgroups(p.groups.0, p.groups.1, 1);
                 }
             }
-            let count = 6 * steps.len() as u32;
+            let count = (2 * timed * self.passes.len()) as u32;
             encoder.resolve_query_set(&t.queries, 0..count, &t.resolve, 0);
             encoder.copy_buffer_to_buffer(&t.resolve, 0, &t.read, 0, 8 * u64::from(count));
-        } else {
+        }
+        if timed < steps.len() {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("explicit"),
                 timestamp_writes: None,
             });
-            for k in 0..steps.len() {
-                let offset = (k as u64 * self.stride) as u32;
-                pass.set_pipeline(&self.advance.0);
-                pass.set_bind_group(0, &self.advance.1, &[offset]);
-                pass.dispatch_workgroups(self.groups.0, self.groups.1, 1);
-                pass.set_pipeline(&self.product.0);
-                pass.set_bind_group(0, &self.product.1, &[]);
-                pass.dispatch_workgroups(self.product_groups.0, self.product_groups.1, 1);
-                pass.set_pipeline(&self.accelerate.0);
-                pass.set_bind_group(0, &self.accelerate.1, &[offset]);
-                pass.dispatch_workgroups(self.groups.0, self.groups.1, 1);
+            for k in timed..steps.len() {
+                let offsets = [offset(k)];
+                for p in &self.passes {
+                    pass.set_pipeline(&p.pipeline);
+                    pass.set_bind_group(0, &p.bind, if p.step { &offsets[..] } else { &[] });
+                    pass.dispatch_workgroups(p.groups.0, p.groups.1, 1);
+                }
             }
         }
         // The parameter buffer is written again by the next run: wait for this one first.
         self.gpu.queue.submit([encoder.finish()]);
         self.gpu.wait()?;
         if let Some(t) = &mut self.trace {
-            let count = 6 * steps.len();
+            let kinds: Vec<usize> = self.passes.iter().map(|p| p.kind).collect();
             let times = self.gpu.map(&t.read, |bytes| {
                 let stamps: &[u64] = bytemuck::cast_slice(bytes);
-                let mut times = [0.0; 3];
-                for k in 0..count / 2 {
+                let mut times = [0.0; 4];
+                for k in 0..timed * kinds.len() {
                     let ticks = stamps[2 * k + 1].saturating_sub(stamps[2 * k]);
-                    times[k % 3] += ticks as f64 * t.period;
+                    times[kinds[k % kinds.len()]] += ticks as f64 * t.period;
                 }
                 times
             })?;
@@ -418,6 +616,7 @@ impl Engine {
             }
             t.wall += started.elapsed().as_secs_f64();
             t.steps += steps.len();
+            t.timed_steps += timed;
         }
         match self.gpu.take_error() {
             Some(e) => Err(e),

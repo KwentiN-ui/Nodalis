@@ -122,8 +122,8 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
     /// The card, e.g. "NVIDIA GeForce RTX 4070 (discrete)".
     pub name: String,
-    /// The limits the device was opened with: the defaults, with the largest buffers the
-    /// adapter supports.
+    /// The limits the device was opened with: the defaults, with the largest buffers and
+    /// the most storage buffers per shader the adapter supports.
     pub limits: wgpu::Limits,
     /// Whether the shaders compute in double precision.
     pub f64: bool,
@@ -172,6 +172,7 @@ impl Gpu {
         let limits = wgpu::Limits {
             max_storage_buffer_binding_size: supported.max_storage_buffer_binding_size,
             max_buffer_size: supported.max_buffer_size,
+            max_storage_buffers_per_shader_stage: supported.max_storage_buffers_per_shader_stage,
             ..Default::default()
         };
         let mut features = wgpu::Features::empty();

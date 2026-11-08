@@ -5,22 +5,26 @@
 //! **Precision.** Consumer cards compute double precision at a fraction of the single
 //! precision rate (1/64 on an RTX 4070) and Metal has none. The state stays in double
 //! precision: displacements, velocities, accelerations, the loads and the work of the
-//! forces. The expensive part, the products of the stiffness and the viscous matrix, runs in
-//! single precision on *relative* quantities: the displacements since a reference state
-//! (the start of the frame, whose internal forces the processor computed in double
-//! precision) and the velocities. The rounding error of a product is then relative to the
-//! motion within a frame, not to the displacements as a whole, and it does not accumulate:
+//! forces. The expensive part, the forces, runs in single precision on *relative*
+//! quantities: the element forces on the displacements relative to the element's first
+//! node; the products of the stiffness and the viscous matrix on the displacements since a
+//! reference state (the start of the frame, whose internal forces the processor computed
+//! in double precision) and the velocities. The rounding error is then relative to the
+//! motion within an element or a frame, not to the displacements as a whole, and it does not accumulate:
 //! the forces are formed anew from the state in every step. The energy balance the solver
 //! reports checks the result; cards without double precision leave the step to the
 //! processor.
 //!
-//! **One step** is three dispatches: [`advance`](../advance.wgsl) (velocities, displacements,
-//! the single precision increments), the products `K Δu` and `C v` in one pass over the
-//! common pattern of both, stored in slices of rows so that neighbouring threads read
-//! neighbouring values ([`product`](../product.wgsl)), and [`accelerate`](../accelerate.wgsl)
-//! (forces, work, accelerations). A chunk of up to [`MAX_CHUNK`] steps goes to the card as one command
-//! buffer; the loads are interpolated linearly between the chunk's ends, so the caller
-//! chooses chunks short against the amplitudes.
+//! **One step** is a few dispatches: [`advance`](../advance.wgsl) (velocities,
+//! displacements), the forces, and [`accelerate`](../accelerate.wgsl) (forces, work,
+//! accelerations). The forces come either from the elements ([`Elements`],
+//! [`elements`](../elements.wgsl) per family of elements, one thread per element, then
+//! [`gather`](../gather.wgsl) sums them per DOF in double precision; no matrix is built), or
+//! as the products `K Δu` and `C v` of the matrices in one pass over the common pattern of
+//! both, stored in slices of rows so that neighbouring threads read neighbouring values
+//! ([`product`](../product.wgsl)). A chunk of up to [`MAX_CHUNK`] steps goes to the card as
+//! one command buffer; the loads are interpolated linearly between the chunk's ends, so the
+//! caller chooses chunks short against the amplitudes.
 //!
 //! Without the feature `gpu` the crate only says that there is no card ([`Engine::new`]
 //! fails).
@@ -31,6 +35,9 @@
 mod gpu;
 #[cfg(any(feature = "gpu", test))]
 mod sliced;
+
+mod elements;
+pub use elements::{Element, Elements, Family, Hourglass, MAX_NODES};
 
 /// The most time steps one [`Engine::run`] takes.
 pub const MAX_CHUNK: usize = 256;
@@ -82,11 +89,22 @@ impl Csr {
     }
 }
 
-/// What the card needs once per step: the matrices, the inverse lumped mass (0 on the DOFs
+/// How the card forms the internal and viscous forces.
+pub enum ForceModel<'a> {
+    /// The products of the stiffness and the viscous matrix with the motion since the
+    /// reference state.
+    Matrices {
+        stiffness: &'a Csr,
+        viscous: &'a Csr,
+    },
+    /// Element by element from the displacements and velocities ([`Elements`]).
+    Elements(&'a Elements),
+}
+
+/// What the card needs once per step: the forces, the inverse lumped mass (0 on the DOFs
 /// that do not move: held, or no element uses them) and the mass-proportional damping.
 pub struct Setup<'a> {
-    pub stiffness: &'a Csr,
-    pub viscous: &'a Csr,
+    pub forces: ForceModel<'a>,
     pub inverse_mass: &'a [f64],
     /// `α` of the damping force `α m v`.
     pub alpha: f64,

@@ -6,7 +6,8 @@ struct Dims {
     n: u32,
     groups_x: u32,
     positions: u32,
-    pad: u32,
+    // Whether the forces are products with the motion since the reference state.
+    relative: u32,
 }
 
 struct Step {
@@ -40,5 +41,7 @@ fn advance(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_inde
     } else {
         du[i] = f64(0.0);
     }
-    dv[i] = vec2<f32>(f32(u[i] - uref[i]), f32(v[i]));
+    if dims.relative != 0u {
+        dv[i] = vec2<f32>(f32(u[i] - uref[i]), f32(v[i]));
+    }
 }

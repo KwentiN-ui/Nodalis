@@ -151,27 +151,31 @@ What is different from implicit integration:
 The time steps of a linear model (no contact, no large deformations, elastic materials, no
 prescribed motion that changes during the step, supports without equations or local
 systems) run on a discrete graphics card from 30 000 DOFs, when the setting
-#ui("Graphics card") > #ui("Use for the solver") is on (@settings). Each time step is then a
-product with the stiffness matrix and one with the viscous matrix (bulk viscosity and
-hourglass control) and a few vector updates, which the card does many times faster than the
-processor.
+#ui("Graphics card") > #ui("Use for the solver") is on (@settings). Each time step then
+computes the forces element by element, one thread of the card per element, sums them per
+node, and does a few vector updates, many times faster than the processor. No stiffness
+matrix is built for that. Elements without such a kernel yet (C3D8I, plane and
+axisymmetric elements, U1 blocks) make the card form the forces as a product with the
+stiffness matrix and one with the viscous matrix (bulk viscosity and hourglass control)
+instead.
 
 Most cards compute double precision far slower than single precision (a sixty-fourth on an
 RTX 4070), and Metal on macOS has none. The displacements, velocities, accelerations, loads
 and energies therefore stay in double precision; only the two products run in single
-precision, on the motion since the start of the frame. Their rounding error is relative to
-that motion and does not add up from step to step, and the energy balance the solver
+precision: the element forces on the displacements relative to the element's first node,
+the products on the motion since the start of the frame. Their rounding error is relative
+to that motion and does not add up from step to step, and the energy balance the solver
 reports checks it: on test models the card agrees with the processor to 1e-4 of the largest
 value. The last time step of every frame, which computes the stresses of the frame, runs on
 the processor. Between the corners of their amplitudes, loads follow them linearly over at
-most 256 time steps; the corners themselves are kept. Both products run in one pass over the
-common pattern of the two matrices, stored so that neighbouring threads of the card read
-neighbouring values.
+most 256 time steps; the corners themselves are kept.
 
 The solver log names the card ("explicit: time steps on ..."). A card without double
 precision, a model too large for its memory or any error leaves the time steps on the
 processor, with the reason in the log. `PLXS_GPU=off` keeps them on the processor, and
 `PLXS_GPU=on` uses any adapter (software renderers included) for models of any size.
+`PLXS_GPU_TRACE=1` prints the time of every kind of dispatch on the card at the end of
+the step.
 
 ==== Mass scaling
 

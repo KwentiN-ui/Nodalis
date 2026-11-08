@@ -1,12 +1,13 @@
 // The forces at the new time in double precision (the reference forces plus the single
-// precision products, the loads interpolated over the chunk, the mass-proportional
-// damping), the work of the step per DOF (trapezoidal rule) and the accelerations.
+// precision products, or the element forces; the loads interpolated over the chunk; the
+// mass-proportional damping), the work of the step per DOF (trapezoidal rule) and the accelerations.
 
 struct Dims {
     n: u32,
     groups_x: u32,
     positions: u32,
-    pad: u32,
+    // Whether the forces are products with the motion since the reference state.
+    relative: u32,
 }
 
 struct Step {
@@ -24,7 +25,7 @@ struct Step {
 @group(0) @binding(5) var<storage, read> im: array<f64>;
 // p at the start of the chunk, p at its end, the internal forces of the reference state.
 @group(0) @binding(6) var<storage, read> loads: array<f64>;
-@group(0) @binding(7) var<storage, read> fs: array<f32>;
+@group(0) @binding(7) var<storage, read> fs: array<f64>;
 // The internal, external and viscous forces of the step before, then the work of the
 // internal, external and viscous forces so far.
 @group(0) @binding(8) var<storage, read_write> energy: array<f64>;
@@ -37,12 +38,12 @@ fn accelerate(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_i
         return;
     }
     let p = loads[i] + step.s * (loads[n + i] - loads[i]);
-    let f_int = loads[2u * n + i] + f64(fs[i]);
+    let f_int = loads[2u * n + i] + fs[i];
     var m = f64(0.0);
     if im[i] > f64(0.0) {
         m = f64(1.0) / im[i];
     }
-    let f_v = f64(fs[n + i]) + step.alpha * m * v[i];
+    let f_v = fs[n + i] + step.alpha * m * v[i];
     let d = du[i];
     let half = f64(0.5);
     energy[3u * n + i] += d * half * (energy[i] + f_int);

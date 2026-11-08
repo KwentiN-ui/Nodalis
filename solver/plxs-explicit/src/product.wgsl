@@ -15,13 +15,14 @@ struct Dims {
     groups_x: u32,
     // Positions (slices times `SLICE`).
     positions: u32,
-    pad: u32,
+    // Whether the forces are products with the motion since the reference state.
+    relative: u32,
 }
 
 @group(0) @binding(0) var<uniform> dims: Dims;
 // The displacement increment and the velocity of each unknown.
 @group(0) @binding(1) var<storage, read> dv: array<vec2<f32>>;
-@group(0) @binding(2) var<storage, read_write> fs: array<f32>;
+@group(0) @binding(2) var<storage, read_write> fs: array<f64>;
 @group(0) @binding(3) var<storage, read> start: array<u32>;
 @group(0) @binding(4) var<storage, read> rows: array<u32>;
 @group(0) @binding(5) var<storage, read> col: array<u32>;
@@ -46,6 +47,6 @@ fn product(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_inde
         let k = first + j * SLICE + lane;
         s += val[k] * dv[col[k]];
     }
-    fs[row] = s.x;
-    fs[dims.n + row] = s.y;
+    fs[row] = f64(s.x);
+    fs[dims.n + row] = f64(s.y);
 }

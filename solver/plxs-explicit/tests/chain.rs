@@ -2,7 +2,7 @@
 //! in double precision on the processor. Runs where a card with double precision is found
 //! (`PLXS_GPU=on` takes software renderers too); elsewhere it says so and passes.
 
-use plxs_explicit::{Csr, Engine, MAX_CHUNK, Setup, Start};
+use plxs_explicit::{Csr, Engine, ForceModel, MAX_CHUNK, Setup, Start};
 
 /// `n` masses `m` in a row, springs `k` between them and to a wall at the first; the last
 /// DOF is held. A dashpot `c` parallel to every spring.
@@ -35,8 +35,10 @@ fn a_chain_of_springs_swings_as_on_the_processor() {
     inverse[n - 1] = 0.0;
     let alpha = 3.0;
     let setup = Setup {
-        stiffness: &k,
-        viscous: &c,
+        forces: ForceModel::Matrices {
+            stiffness: &k,
+            viscous: &c,
+        },
         inverse_mass: &inverse,
         alpha,
     };
