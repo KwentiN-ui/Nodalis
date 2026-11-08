@@ -1279,10 +1279,25 @@ fn run_with_gpu(dir: &Path, job: &str, input: &str, mode: &str) -> (String, Stri
 /// by a growing load: the same on the graphics card as on the processor. `how` is in the
 /// message that names the card: how it forms the forces.
 fn gpu_matches_processor(kind: &str, job: &str, pulse: bool, how: &str) {
+    gpu_matches_processor_with(kind, job, pulse, how, false);
+}
+
+/// [`gpu_matches_processor`], under NLGEOM over ten times the time in three frames, with a
+/// hundred times the start velocity, which bends the bar by about a third of its length.
+fn gpu_matches_processor_with(kind: &str, job: &str, pulse: bool, how: &str, nlgeom: bool) {
+    let (speed, step) = if nlgeom {
+        (50.0, "*Step, Nlgeom")
+    } else {
+        (0.5, "*Step")
+    };
     let (length, side, cells) = (0.1, 0.01, 20);
     let c = (E / RHO).sqrt();
-    let period = 3.0 * length / c;
-    let frames = 30;
+    // Under NLGEOM long frames, so that the card stops in them for the time step checks.
+    let (period, frames) = if nlgeom {
+        (30.0 * length / c, 3)
+    } else {
+        (3.0 * length / c, 30)
+    };
     let mut input = bar_mesh(cells, 2, 2, [length, side, side], kind);
     // A pulse has corners inside the frames, which the chunks on the card must not cut.
     let amplitude = if pulse {
@@ -1295,8 +1310,8 @@ fn gpu_matches_processor(kind: &str, job: &str, pulse: bool, how: &str) {
         "*Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
          *Solid section, Elset=EALL, Material=STEEL\n\
          *Amplitude, Name=RAMP\n{amplitude}\n\
-         *Initial conditions, Type=Velocity\nALL, 2, 0.5\n\
-         *Step\n*Dynamic, Integration=Explicit\n{}, {period}\n\
+         *Initial conditions, Type=Velocity\nALL, 2, {speed}\n\
+         {step}\n*Dynamic, Integration=Explicit\n{}, {period}\n\
          *Boundary\nEND0, 1, 3, 0\n\
          *Cload, Amplitude=RAMP\nEND1, 1, 2000\n\
          *Node print, Nset=END0, Totals=Only\nRF\n\
@@ -1354,6 +1369,16 @@ fn a_load_pulse_on_the_graphics_card_matches_the_processor() {
 #[test]
 fn time_steps_of_reduced_elements_on_the_graphics_card_match_the_processor() {
     gpu_matches_processor("C3D8R", "gpu-c3d8r", false, "element forces");
+}
+
+#[test]
+fn large_deformations_on_the_graphics_card_match_the_processor() {
+    gpu_matches_processor_with("C3D8", "gpu-nlgeom", false, "element forces", true);
+}
+
+#[test]
+fn large_deformations_of_reduced_elements_on_the_graphics_card_match_the_processor() {
+    gpu_matches_processor_with("C3D8R", "gpu-nlgeom-r", true, "element forces", true);
 }
 
 /// The incompatible modes have no element kernel yet: the matrices.

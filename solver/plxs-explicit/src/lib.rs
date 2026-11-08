@@ -1,5 +1,6 @@
-//! Explicit time steps on the graphics card: central differences with a lumped mass for a
-//! linear model (small strains, elastic materials, no contact), by compute shaders through
+//! Explicit time steps on the graphics card: central differences with a lumped mass for an
+//! elastic model (small strains, or large deformations with the element kernels; no
+//! contact), by compute shaders through
 //! wgpu (Vulkan, DirectX 12 or Metal).
 //!
 //! **Precision.** Consumer cards compute double precision at a fraction of the single

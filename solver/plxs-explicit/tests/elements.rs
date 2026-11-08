@@ -47,6 +47,17 @@ fn isotropic(young: f64, poisson: f64) -> [[f64; 6]; 6] {
 
 #[test]
 fn a_block_of_bricks_swings_as_on_the_processor() {
+    swing(false, 0.3);
+}
+
+/// Under NLGEOM, swinging far enough that the rotations matter.
+#[test]
+fn a_block_of_bricks_swings_far_as_on_the_processor() {
+    swing(true, 400.0);
+}
+
+/// A cantilever block of bricks starting with `speed` across, pulled at its free end.
+fn swing(nlgeom: bool, speed: f64) {
     if std::env::var("PLXS_GPU").is_ok_and(|v| v.eq_ignore_ascii_case("off")) {
         return;
     }
@@ -57,7 +68,10 @@ fn a_block_of_bricks_swings_as_on_the_processor() {
     let nodes = (nx + 1) * (ny + 1) * (nz + 1);
     let n = 3 * nodes;
     let mut mass = vec![0.0; n];
-    let mut elements = Elements::default();
+    let mut elements = Elements {
+        nlgeom,
+        ..Default::default()
+    };
     let dt_e = s[0] / (young / rho).sqrt();
     for k in 0..nz {
         for j in 0..ny {
@@ -159,7 +173,7 @@ fn a_block_of_bricks_swings_as_on_the_processor() {
     let mut v: Vec<f64> = (0..n)
         .map(|i| {
             if inverse[i] > 0.0 && i % 3 == 2 {
-                0.3
+                speed
             } else {
                 0.0
             }
@@ -229,6 +243,7 @@ fn a_block_of_bricks_swings_as_on_the_processor() {
     let reached = engine.read().unwrap();
     let largest = u.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
     assert!(largest > 1e-6, "{largest}");
+    eprintln!("largest displacement {largest} m");
     let off = u
         .iter()
         .zip(&reached.u)
