@@ -86,7 +86,6 @@ pub struct NodalGradients {
     pub hourglass: Option<f64>,
 }
 
-
 /// The displacement-gradient operators of the integration points, in one buffer:
 /// `l[(ip * 9 + k * 3 + c) * ndof + col]`.
 struct Gradients {
