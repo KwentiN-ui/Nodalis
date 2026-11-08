@@ -2016,6 +2016,23 @@ impl Procedure for ExplicitDynamic {
                 progress,
             )
         } else {
+            // Say why, where the card would have been chosen.
+            let mode = plxs_linalg::amg::GpuMode::from_environment();
+            let wanted = match mode {
+                plxs_linalg::amg::GpuMode::Off => false,
+                plxs_linalg::amg::GpuMode::Automatic => n >= GPU_FROM,
+                plxs_linalg::amg::GpuMode::On => true,
+            };
+            if wanted {
+                let why = if finite_rotations {
+                    "rigid bodies or joints turning by finite angles"
+                } else {
+                    "stiffness-proportional damping"
+                };
+                progress.event(ProgressEvent::Info(format!(
+                    "explicit: time steps on the processor ({why})"
+                )));
+            }
             None
         };
         // The corners of the prescribed displacements' amplitudes: the card interpolates
