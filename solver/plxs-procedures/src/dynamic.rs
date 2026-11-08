@@ -997,8 +997,7 @@ pub(crate) fn write_increment(
     let has = |v: &str| variables.iter().any(|x| x == v);
     let order = node_order(ctx.model);
     if has("V") {
-        let zero = vec![0.0; motion.v.len()];
-        let (v, _) = ctx.table.reported(ctx.model, &motion.v, &zero);
+        let v = ctx.table.reported_displacements(&motion.v);
         let field = ResultField {
             name: "VELO".into(),
             components: vec!["V1".into(), "V2".into(), "V3".into()],
@@ -1014,8 +1013,7 @@ pub(crate) fn write_increment(
         fields.insert(at, field);
     }
     if has("A") {
-        let zero = vec![0.0; motion.a.len()];
-        let (a, _) = ctx.table.reported(ctx.model, &motion.a, &zero);
+        let a = ctx.table.reported_displacements(&motion.a);
         let field = ResultField {
             name: "ACCE".into(),
             components: vec!["A1".into(), "A2".into(), "A3".into()],
