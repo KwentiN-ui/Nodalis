@@ -17,6 +17,8 @@ use plx_results::SolverResults;
 use plxs_core::{CancelToken, Error, ProgressEvent};
 
 pub use plxs_core::{Diagnostic, DiagnosticCode};
+pub use plxs_procedures::profile::{Phase, Profile};
+pub use plxs_session::JobProfile;
 
 pub mod live;
 pub mod process;
@@ -127,6 +129,8 @@ pub struct Run {
     /// A model check computes no results: it is complete without them.
     check: bool,
     diagnostics: Arc<Mutex<Option<Vec<Diagnostic>>>>,
+    /// Where the time of the run went, once results were written.
+    profile: plxs_session::ProfileSink,
 }
 
 /// An analysis lowered from the model for the solver, which validates it first.
@@ -433,7 +437,9 @@ impl Run {
             "************************************************************".to_owned(),
         ]));
         let cancel = CancelToken::new();
+        let profile = plxs_session::ProfileSink::default();
         let options = plxs_session::JobOptions {
+            profile_sink: (!check).then(|| Arc::clone(&profile)),
             threads: threads as usize,
             pool: Some(pool(threads)?),
             write_files: false,
@@ -593,7 +599,20 @@ impl Run {
             status: JobStatus::Running,
             check,
             diagnostics,
+            profile,
         })
+    }
+
+    /// Where the time of the run went, once it has finished with results (also of a step
+    /// that did not converge, or of a stopped run).
+    pub fn profile(&self) -> Option<JobProfile> {
+        if self.status == JobStatus::Running {
+            return None;
+        }
+        self.profile
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// What the solver found, typed, once the run has finished: the findings of a model
@@ -835,6 +854,13 @@ S
         assert_eq!(read, *solved);
         assert!(run.file("inp").is_file());
         assert!(run.file("sta").is_file());
+        // Every run measures where its time went, with the size of the model.
+        let profile = run.profile().expect("a finished run has a profile");
+        assert_eq!(profile.nodes, 8);
+        assert_eq!(profile.elements, 1);
+        assert_eq!(profile.degrees_of_freedom, 24);
+        assert!(profile.phases.count(Phase::Assembly) > 0);
+        assert!(profile.total >= profile.writing);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

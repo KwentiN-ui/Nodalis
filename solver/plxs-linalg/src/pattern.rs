@@ -134,7 +134,10 @@ impl SparseMatrix {
     }
 
     pub fn fill_zero(&mut self) {
-        self.values.iter_mut().for_each(|v| *v = 0.0);
+        // In parallel for the large matrices of an assembly in every Newton iteration.
+        self.values
+            .par_chunks_mut(1 << 16)
+            .for_each(|chunk| chunk.fill(0.0));
     }
 
     /// Adds a value to the entry `(i, j)`; `(j, i)` is the same entry. Panics when the
@@ -146,6 +149,27 @@ impl SparseMatrix {
             .position(row, col)
             .unwrap_or_else(|| panic!("entry ({i}, {j}) is not in the sparsity pattern"));
         self.values[k] += value;
+    }
+
+    /// Where the upper triangle of a block at the global indices `dofs` lands in the values,
+    /// in the order [`Self::add_block`] adds it: row `a`, columns `b >= a`. Looking the
+    /// positions up is most of the cost of [`Self::add_block`]; an assembly can look them up
+    /// in parallel and add the blocks after. Panics when the pattern lacks an entry.
+    pub fn block_positions(&self, dofs: &[u32], out: &mut Vec<u32>) {
+        let m = dofs.len();
+        out.clear();
+        out.reserve(m * (m + 1) / 2);
+        for a in 0..m {
+            for b in a..m {
+                let (i, j) = (dofs[a], dofs[b]);
+                let (row, col) = if i <= j { (i, j) } else { (j, i) };
+                let k = self
+                    .pattern
+                    .position(row, col)
+                    .unwrap_or_else(|| panic!("entry ({i}, {j}) is not in the sparsity pattern"));
+                out.push(k as u32);
+            }
+        }
     }
 
     /// Adds a dense symmetric block (row-major `m x m`) at the global indices `dofs`; only
