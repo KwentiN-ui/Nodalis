@@ -390,7 +390,7 @@ pub fn format_event(event: &ProgressEvent) -> Vec<String> {
             format!(" increment size= {size:e}"),
             format!(" actual step time= {step_time:e}"),
         ],
-        ProgressEvent::Iteration { iteration, .. } => vec![format!(" iteration {iteration}")],
+        ProgressEvent::Iteration { iteration, residual, correction, .. } => vec![format!(" iteration {iteration}  residual {residual:.3e} correction {correction:.3e}")],
         ProgressEvent::Cutback { reason, .. } => {
             vec![format!(" *INFO: increment cut back: {reason}")]
         }

@@ -52,6 +52,43 @@ pub(crate) struct Engine {
     product: (wgpu::ComputePipeline, wgpu::BindGroup),
     accelerate: (wgpu::ComputePipeline, wgpu::BindGroup),
     error: Arc<Mutex<Option<String>>>,
+    /// `PLXS_GPU_TRACE`: the time of every kind of dispatch on the card.
+    trace: Option<Trace>,
+}
+
+/// The times the card took, from its timestamps: each dispatch of a traced run in a pass of
+/// its own.
+struct Trace {
+    queries: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    read: wgpu::Buffer,
+    period: f64,
+    /// Seconds in advance, product, accelerate; wall clock of the runs; time steps.
+    kernels: [f64; 3],
+    wall: f64,
+    steps: usize,
+}
+
+/// Queries of one run: begin and end of three passes per time step.
+const QUERIES: u32 = 6 * MAX_CHUNK as u32;
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        if let Some(t) = &self.trace
+            && t.steps > 0
+        {
+            let ms = |s: f64| 1e3 * s / t.steps as f64;
+            eprintln!(
+                " gpu trace: {} time steps, per step {:.3} ms wall clock, on the card: advance \
+                 {:.3} ms, product {:.3} ms, accelerate {:.3} ms",
+                t.steps,
+                ms(t.wall),
+                ms(t.kernels[0]),
+                ms(t.kernels[1]),
+                ms(t.kernels[2])
+            );
+        }
+    }
 }
 
 fn describe(info: &wgpu::AdapterInfo) -> String {
@@ -159,6 +196,8 @@ impl Engine {
         if !adapter.features().contains(wgpu::Features::SHADER_F64) {
             return Err(format!("{name} computes no double precision"));
         }
+        let tracing = std::env::var("PLXS_GPU_TRACE").is_ok_and(|v| v != "0")
+            && adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         let supported = adapter.limits();
         let limits = wgpu::Limits {
             max_storage_buffer_binding_size: supported.max_storage_buffer_binding_size,
@@ -172,7 +211,11 @@ impl Engine {
         }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("plxs explicit"),
-            required_features: wgpu::Features::SHADER_F64,
+            required_features: if tracing {
+                wgpu::Features::SHADER_F64 | wgpu::Features::TIMESTAMP_QUERY
+            } else {
+                wgpu::Features::SHADER_F64
+            },
             required_limits: limits.clone(),
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
             memory_hints: wgpu::MemoryHints::Performance,
@@ -364,6 +407,29 @@ impl Engine {
                 ],
             ),
         );
+        let trace = tracing.then(|| Trace {
+            queries: device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("trace"),
+                ty: wgpu::QueryType::Timestamp,
+                count: QUERIES,
+            }),
+            resolve: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("trace"),
+                size: 8 * u64::from(QUERIES),
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }),
+            read: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("trace"),
+                size: 8 * u64::from(QUERIES),
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            period: f64::from(queue.get_timestamp_period()) * 1e-9,
+            kernels: [0.0; 3],
+            wall: 0.0,
+            steps: 0,
+        });
         if let Some(e) = pollster::block_on(scope.pop()) {
             return Err(format!("{name}: {e}"));
         }
@@ -388,6 +454,7 @@ impl Engine {
             product,
             accelerate,
             error,
+            trace,
         })
     }
 
@@ -460,12 +527,40 @@ impl Engine {
         let bytes = 8 * n as u64;
         q.write_buffer(&self.loads, 0, bytemuck::cast_slice(from));
         q.write_buffer(&self.loads, bytes, bytemuck::cast_slice(to));
+        let started = std::time::Instant::now();
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("explicit"),
             });
-        {
+        if let Some(t) = &self.trace {
+            // Every dispatch in a pass of its own, timed by the card.
+            for k in 0..steps.len() {
+                let offset = (k as u64 * self.stride) as u32;
+                let passes: [(&(wgpu::ComputePipeline, wgpu::BindGroup), &[u32], (u32, u32)); 3] = [
+                    (&self.advance, &[offset], self.groups),
+                    (&self.product, &[], self.product_groups),
+                    (&self.accelerate, &[offset], self.groups),
+                ];
+                for (j, (stage, offsets, groups)) in passes.into_iter().enumerate() {
+                    let at = (6 * k + 2 * j) as u32;
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("traced"),
+                        timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                            query_set: &t.queries,
+                            beginning_of_pass_write_index: Some(at),
+                            end_of_pass_write_index: Some(at + 1),
+                        }),
+                    });
+                    pass.set_pipeline(&stage.0);
+                    pass.set_bind_group(0, &stage.1, offsets);
+                    pass.dispatch_workgroups(groups.0, groups.1, 1);
+                }
+            }
+            let count = 6 * steps.len() as u32;
+            encoder.resolve_query_set(&t.queries, 0..count, &t.resolve, 0);
+            encoder.copy_buffer_to_buffer(&t.resolve, 0, &t.read, 0, 8 * u64::from(count));
+        } else {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("explicit"),
                 timestamp_writes: None,
@@ -488,6 +583,30 @@ impl Engine {
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
             .map_err(|e| e.to_string())?;
+        if let Some(t) = &mut self.trace {
+            let count = 6 * steps.len();
+            let (tx, rx) = std::sync::mpsc::channel();
+            t.read.map_async(wgpu::MapMode::Read, .., move |r| {
+                let _ = tx.send(r);
+            });
+            self.device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .map_err(|e| e.to_string())?;
+            rx.recv()
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+            {
+                let view = t.read.get_mapped_range(..).map_err(|e| e.to_string())?;
+                let stamps: &[u64] = bytemuck::cast_slice(&view);
+                for k in 0..count / 2 {
+                    let ticks = stamps[2 * k + 1].saturating_sub(stamps[2 * k]);
+                    t.kernels[k % 3] += ticks as f64 * t.period;
+                }
+            }
+            t.read.unmap();
+            t.wall += started.elapsed().as_secs_f64();
+            t.steps += steps.len();
+        }
         match self.take_error() {
             Some(e) => Err(e),
             None => Ok(()),
