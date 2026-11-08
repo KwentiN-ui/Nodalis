@@ -1324,7 +1324,11 @@ fn gpu_matches_processor_with(kind: &str, job: &str, pulse: bool, how: &str, nlg
     let (cpu, _) = run_with_gpu(&dir, "cpu", &input, "off");
     let (gpu, log) = run_with_gpu(&dir, "gpu", &input, "on");
     clean(&dir);
-    if !log.contains("explicit: time steps on ") {
+    // Only a missing card skips the comparison, not a fallback for another reason.
+    if log.lines().any(|l| {
+        l.contains("explicit: time steps on the processor")
+            && (l.contains("no graphics card") || l.contains("double precision"))
+    }) {
         eprintln!("no graphics card with double precision: {log}");
         return;
     }
