@@ -3617,7 +3617,7 @@ dependencies = [
 
 [[package]]
 name = "plxs-explicit"
-version = "0.2.8"
+version = "0.2.10"
 dependencies = [
  "bytemuck",
  "pollster 1.0.1",
