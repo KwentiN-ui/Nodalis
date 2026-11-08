@@ -303,14 +303,13 @@ impl Procedure for NonlinearDynamic {
             Some(ratio) => {
                 let fitted = fit_damping(ctx, &set, &k0, &m, ratio, parameters.solver, progress)?;
                 // An automatic step fits its damping once.
-                if let Some(segment) = ctx.segment.as_mut() {
-                    if fitted.alpha > 0.0 && fitted.beta > 0.0 {
-                        let w2 = std::f64::consts::TAU * ratio.upper;
-                        segment.lowest =
-                            Some(fitted.alpha / (fitted.beta * w2) / std::f64::consts::TAU);
-                    } else if ratio.lower.is_none() {
-                        segment.rigid_damping = Some(fitted);
-                    }
+                if let Some(segment) = ctx.segment.as_mut()
+                    && fitted.alpha > 0.0
+                    && fitted.beta > 0.0
+                {
+                    let w2 = std::f64::consts::TAU * ratio.upper;
+                    segment.lowest =
+                        Some(fitted.alpha / (fitted.beta * w2) / std::f64::consts::TAU);
                 }
                 fitted
             }
