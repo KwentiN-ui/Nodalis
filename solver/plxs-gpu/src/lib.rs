@@ -227,8 +227,28 @@ impl Gpu {
     }
 
     /// A storage buffer of `bytes` (at least 16), which copies may fill and read.
+    /// Creates a buffer. One the device cannot allocate is noted as the device's error
+    /// ([`Gpu::take_error`]) with its label and size, which the error of a later use of
+    /// the invalid buffer does not tell.
+    pub fn buffer(&self, desc: &wgpu::BufferDescriptor<'_>) -> wgpu::Buffer {
+        let memory = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let buffer = self.device.create_buffer(desc);
+        if let Some(e) = block_on(memory.pop()) {
+            let mut slot = self.error.lock().unwrap_or_else(|e| e.into_inner());
+            slot.get_or_insert_with(|| {
+                format!(
+                    "buffer '{}' of {:.1} MB ({:?}): {e}",
+                    desc.label.unwrap_or(""),
+                    desc.size as f64 / 1048576.0,
+                    desc.usage
+                )
+            });
+        }
+        buffer
+    }
+
     pub fn storage(&self, label: &str, bytes: u64) -> wgpu::Buffer {
-        self.device.create_buffer(&wgpu::BufferDescriptor {
+        self.buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: bytes.max(16),
             usage: wgpu::BufferUsages::STORAGE
@@ -257,7 +277,7 @@ impl Gpu {
     /// A uniform buffer holding `contents` (a multiple of 4 bytes), not mapped at creation
     /// either.
     pub fn uniform(&self, label: &str, contents: &[u8]) -> wgpu::Buffer {
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+        let buffer = self.buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: (contents.len() as u64).max(16).next_multiple_of(16),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -269,7 +289,7 @@ impl Gpu {
 
     /// A buffer the processor reads back, of `bytes`.
     pub fn staging(&self, label: &str, bytes: u64) -> wgpu::Buffer {
-        self.device.create_buffer(&wgpu::BufferDescriptor {
+        self.buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: bytes.max(16),
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,

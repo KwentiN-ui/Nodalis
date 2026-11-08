@@ -247,7 +247,7 @@ impl Engine {
         let staging = gpu.staging("staging", 6 * f64s);
         let stride = u64::from(gpu.limits.min_uniform_buffer_offset_alignment)
             .max(std::mem::size_of::<StepParams>() as u64);
-        let params = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        let params = gpu.buffer(&wgpu::BufferDescriptor {
             label: Some("steps"),
             size: stride * MAX_CHUNK as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -331,7 +331,7 @@ impl Engine {
                     ty: wgpu::QueryType::Timestamp,
                     count,
                 }),
-                resolve: gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                resolve: gpu.buffer(&wgpu::BufferDescriptor {
                     label: Some("trace"),
                     size: 8 * u64::from(count),
                     usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
@@ -361,12 +361,21 @@ impl Engine {
             let held = gpu
                 .device
                 .generate_allocator_report()
-                .map(|r| {
+                .map(|mut r| {
                     let mb = |b: u64| b as f64 / 1048576.0;
+                    r.allocations.sort_by_key(|a| std::cmp::Reverse(a.size));
+                    let largest: Vec<String> = r
+                        .allocations
+                        .iter()
+                        .take(4)
+                        .map(|a| format!("{} {:.1} MB", a.name, mb(a.size)))
+                        .collect();
                     format!(
-                        "; this run holds {:.1} MB in {} buffers, {:.1} MB reserved in {} blocks",
+                        "; this run holds {:.1} MB in {} buffers (largest: {}), {:.1} MB \
+                         reserved in {} blocks",
                         mb(r.total_allocated_bytes),
                         r.allocations.len(),
+                        largest.join(", "),
                         mb(r.total_reserved_bytes),
                         r.blocks.len()
                     )
