@@ -2,8 +2,9 @@
 
 use plxs_gpu::{Double, Gpu, Options, Use, wgpu};
 
+use crate::contact::{self, CDims, SLOT, STATE};
 use crate::elements::{Isochoric, Material, STATE_SIZE, Volumetric};
-use crate::{Elements, MAX_CHUNK, Reached, Setup, Sparse, Start};
+use crate::{Candidates, Elements, MAX_CHUNK, Ran, Reached, Setup, Sparse, Start};
 
 /// Values per material in the materials buffer of the element kernels (`MAT` in
 /// `elements.wgsl`), see [`materials`].
@@ -109,7 +110,8 @@ struct StepParams {
     s: f64,
     alpha: f64,
     s_before: f64,
-    pad: f64,
+    /// The index of the time step in the run (`contact_gate`).
+    index: f64,
 }
 
 /// The sizes the shaders read (`Dims`; the element kernels name the fields `count`,
@@ -124,7 +126,7 @@ struct Dims {
 }
 
 /// The kinds of dispatches, as the trace reports them.
-const KINDS: [&str; 4] = ["advance", "forces", "gather", "accelerate"];
+const KINDS: [&str; 5] = ["advance", "forces", "gather", "accelerate", "contact"];
 
 /// One dispatch of a time step.
 struct Pass {
@@ -135,6 +137,200 @@ struct Pass {
     groups: (u32, u32),
     /// Index into [`KINDS`].
     kind: usize,
+    /// With contact: the offset of its dispatch in the indirect arguments (all passes but
+    /// the gate, which stops the others by zeroing them).
+    indirect: Option<u64>,
+}
+
+impl Pass {
+    fn dispatch(
+        &self,
+        pass: &mut wgpu::ComputePass<'_>,
+        offsets: &[u32],
+        args: Option<&wgpu::Buffer>,
+    ) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind, if self.step { offsets } else { &[] });
+        match (self.indirect, args) {
+            (Some(at), Some(args)) => pass.dispatch_workgroups_indirect(args, at),
+            _ => pass.dispatch_workgroups(self.groups.0, self.groups.1, 1),
+        }
+    }
+}
+
+/// The contact on the card (`contact.wgsl`).
+struct ContactGpu {
+    contact: crate::Contact,
+    dims: CDims,
+    cdims: wgpu::Buffer,
+    ints: wgpu::Buffer,
+    reals: wgpu::Buffer,
+    coords: wgpu::Buffer,
+    state: wgpu::Buffer,
+    rows: wgpu::Buffer,
+    flags: wgpu::Buffer,
+    flag_staging: wgpu::Buffer,
+    args: wgpu::Buffer,
+    /// Per search: the lists, the positions of the checked nodes, the slots.
+    lists: wgpu::Buffer,
+    prepared: wgpu::Buffer,
+    slots: wgpu::Buffer,
+    layout: wgpu::BindGroupLayout,
+    gate_layout: wgpu::BindGroupLayout,
+    /// The passes: gate, point, rows, cap, gather, check.
+    passes: [usize; 6],
+}
+
+/// Flags of `contact.wgsl`.
+const FLAGS: usize = 8;
+
+/// The most passes of a time step with contact (their indirect dispatches).
+const MAX_PASSES: usize = 256;
+
+impl ContactGpu {
+    fn new(
+        gpu: &Gpu,
+        contact: &crate::Contact,
+        candidates: &Candidates<'_>,
+        mass: &[f64],
+    ) -> Result<Self, String> {
+        let n = mass.len();
+        if contact.coordinates.len() != n || contact.moving.len() != n {
+            return Err(format!(
+                "contact coordinates for {} DOFs, wanted {n}",
+                contact.coordinates.len()
+            ));
+        }
+        let mut dims = CDims {
+            n: n as u32,
+            events_from: u32::MAX,
+            ..Default::default()
+        };
+        let (ints, reals) = contact::pack(contact, &mut dims)?;
+        let points = contact.points.len();
+        // The rows per DOF, then `1/√m` of the DOFs that move.
+        let mut rows = vec![0.0; 2 * n];
+        for (i, (&m, &moving)) in mass.iter().zip(&contact.moving).enumerate() {
+            if moving && m > 0.0 {
+                rows[n + i] = 1.0 / m.sqrt();
+            }
+        }
+        use Use::*;
+        // The gate also writes the indirect dispatches, which the other passes must not
+        // bind (a buffer is either storage or dispatch arguments in a dispatch).
+        let uses = [
+            Uniform, Dynamic, Read, Read, Read, Read, Read, Read, Read, Write, Write, Write, Write,
+            Write, Write,
+        ];
+        let layout = gpu.layout("contact", &uses[..14]);
+        let gate_layout = gpu.layout("contact gate", &uses);
+        let empty = gpu.storage("contact lists", 16);
+        let mut c = Self {
+            contact: contact.clone(),
+            dims,
+            cdims: gpu.buffer(&wgpu::BufferDescriptor {
+                label: Some("contact dims"),
+                size: std::mem::size_of::<CDims>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            ints: gpu.init("contact faces and points", bytemuck::cast_slice(&ints)),
+            reals: gpu.init("contact data", bytemuck::cast_slice(&reals)),
+            coords: gpu.init(
+                "contact coordinates",
+                bytemuck::cast_slice(&contact.coordinates),
+            ),
+            state: gpu.init(
+                "contact state",
+                bytemuck::cast_slice(&contact::state_values(points, None)),
+            ),
+            rows: gpu.init("contact rows", bytemuck::cast_slice(&rows)),
+            flags: gpu.buffer(&wgpu::BufferDescriptor {
+                label: Some("contact flags"),
+                size: 4 * FLAGS as u64,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }),
+            flag_staging: gpu.staging("contact flags", 4 * FLAGS as u64),
+            args: gpu.buffer(&wgpu::BufferDescriptor {
+                label: Some("contact dispatches"),
+                size: 12 * MAX_PASSES as u64,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::INDIRECT
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            lists: empty.clone(),
+            prepared: empty.clone(),
+            slots: empty,
+            layout,
+            gate_layout,
+            passes: [0; 6],
+        };
+        c.upload(gpu, candidates)?;
+        Ok(c)
+    }
+
+    /// The buffers of a search.
+    fn upload(&mut self, gpu: &Gpu, candidates: &Candidates<'_>) -> Result<(), String> {
+        let (lists, slots) = contact::lists(&self.contact, candidates, &mut self.dims)?;
+        self.lists = gpu.init("contact lists", bytemuck::cast_slice(&lists));
+        self.prepared = gpu.init(
+            "contact positions",
+            bytemuck::cast_slice(candidates.prepared),
+        );
+        self.slots = gpu.storage("contact slots", 8 * (SLOT * slots.max(1)) as u64);
+        Ok(())
+    }
+
+    /// The threads of the passes after the gate: points, gathered nodes, points, gathered
+    /// nodes, checked nodes.
+    fn counts(&self) -> [usize; 5] {
+        let d = &self.dims;
+        let points = d.points as usize;
+        let nodes = d.gnodes as usize;
+        [points, nodes, points, nodes, d.checks as usize]
+    }
+
+    fn bind(
+        &self,
+        gpu: &Gpu,
+        params: &wgpu::Buffer,
+        u: &wgpu::Buffer,
+        v: &wgpu::Buffer,
+        fs: &wgpu::Buffer,
+    ) -> [wgpu::BindGroup; 2] {
+        let resources = || {
+            vec![
+                self.cdims.as_entire_binding(),
+                wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: params,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(std::mem::size_of::<StepParams>() as u64),
+                }),
+                self.ints.as_entire_binding(),
+                self.reals.as_entire_binding(),
+                self.lists.as_entire_binding(),
+                self.prepared.as_entire_binding(),
+                self.coords.as_entire_binding(),
+                u.as_entire_binding(),
+                v.as_entire_binding(),
+                self.state.as_entire_binding(),
+                self.slots.as_entire_binding(),
+                self.rows.as_entire_binding(),
+                fs.as_entire_binding(),
+                self.flags.as_entire_binding(),
+            ]
+        };
+        let mut gate = resources();
+        gate.push(self.args.as_entire_binding());
+        [
+            gpu.bind(&self.layout, resources()),
+            gpu.bind(&self.gate_layout, gate),
+        ]
+    }
 }
 
 pub(crate) struct Engine {
@@ -161,6 +357,10 @@ pub(crate) struct Engine {
     staging: wgpu::Buffer,
     passes: Vec<Pass>,
     histories: Vec<History>,
+    fs: wgpu::Buffer,
+    contact: Option<ContactGpu>,
+    /// From which time step of a run a contact event stops it.
+    pub(crate) events_from: u32,
     /// `PLXS_GPU_TRACE`: the time of every kind of dispatch on the card.
     trace: Option<Trace>,
 }
@@ -176,7 +376,7 @@ struct Trace {
     timed: usize,
     /// Seconds per kind of dispatch over the timed steps; wall clock of the runs; time
     /// steps, timed steps.
-    kernels: [f64; 4],
+    kernels: [f64; 5],
     wall: f64,
     steps: usize,
     timed_steps: usize,
@@ -282,12 +482,13 @@ impl Engine {
         let loads = gpu.storage("loads", 2 * f64s);
         let energy = gpu.storage("energy", 6 * f64s);
         let mass = gpu.init("mass", bytemuck::cast_slice(setup.mass));
-        let staging = gpu.staging("staging", 8 * f64s + 3 * reduced);
+        let staging = gpu.staging("staging", 10 * f64s + 3 * reduced);
         let stride = u64::from(gpu.limits.min_uniform_buffer_offset_alignment)
             .max(std::mem::size_of::<StepParams>() as u64);
         let params = gpu.buffer(&wgpu::BufferDescriptor {
             label: Some("steps"),
-            size: stride * MAX_CHUNK as u64,
+            // One more for the contact gate after the last time step.
+            size: stride * (MAX_CHUNK + 1) as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -333,6 +534,26 @@ impl Engine {
         let inverse = sparse("inverse mass", &reduction.inverse_mass);
         use Use::*;
         let mut passes = Vec::new();
+        // With contact: the gate first in every time step.
+        let mut contact = match setup.contact {
+            Some((c, candidates)) => Some(ContactGpu::new(&gpu, c, &candidates, setup.mass)?),
+            None => None,
+        };
+        let contact_bind = contact.as_ref().map(|c| c.bind(&gpu, &params, &u, &v, &fs));
+        let contact_pipeline = |layout: &wgpu::BindGroupLayout, entry: &str| {
+            gpu.pipeline(include_str!("contact.wgsl"), entry, layout, &[])
+        };
+        if let (Some(c), Some(bind)) = (&mut contact, &contact_bind) {
+            c.passes[0] = passes.len();
+            passes.push(Pass {
+                pipeline: contact_pipeline(&c.gate_layout, "contact_gate"),
+                bind: bind[1].clone(),
+                step: true,
+                groups: (1, 1),
+                kind: 4,
+                indirect: None,
+            });
+        }
         let layout = gpu.layout("advance", &[Uniform, Dynamic, Write, Write, Read]);
         passes.push(Pass {
             pipeline: gpu.pipeline(include_str!("advance.wgsl"), "advance", &layout, &[]),
@@ -349,6 +570,7 @@ impl Engine {
             step: true,
             groups: reduced_groups,
             kind: 0,
+            indirect: None,
         });
         let layout = gpu.layout(
             "expand",
@@ -376,8 +598,33 @@ impl Engine {
             step: true,
             groups,
             kind: 0,
+            indirect: None,
         });
         let histories = Self::element_passes(&gpu, setup.elements, n, &u, &v, &fs, &mut passes)?;
+        // The springs of the contact into the forces.
+        if let (Some(c), Some(bind)) = (&mut contact, &contact_bind) {
+            let counts = c.counts();
+            for (k, entry) in [
+                "contact_point",
+                "contact_rows",
+                "contact_cap",
+                "contact_gather",
+                "contact_check",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                c.passes[k + 1] = passes.len();
+                passes.push(Pass {
+                    pipeline: contact_pipeline(&c.layout, entry),
+                    bind: bind[0].clone(),
+                    step: true,
+                    groups: gpu.fold(counts[k], 64),
+                    kind: 4,
+                    indirect: None,
+                });
+            }
+        }
         let layout = gpu.layout(
             "accelerate",
             &[
@@ -404,6 +651,7 @@ impl Engine {
             step: true,
             groups,
             kind: 3,
+            indirect: None,
         });
         // The reduced residual `Tᵀ r` and the reduced accelerations `M_q⁻¹ Tᵀ r`.
         let layout = gpu.layout("sparse", &[Uniform, Read, Read, Read, Write]);
@@ -424,6 +672,7 @@ impl Engine {
                 step: false,
                 groups: reduced_groups,
                 kind: 3,
+                indirect: None,
             });
         }
         // The work of the prescribed displacements.
@@ -450,7 +699,22 @@ impl Engine {
                 step: false,
                 groups,
                 kind: 3,
+                indirect: None,
             });
+        }
+        // With contact every pass but the gate is dispatched indirectly.
+        if contact.is_some() && passes.len() > MAX_PASSES {
+            return Err(format!(
+                "{} passes per time step with contact",
+                passes.len()
+            ));
+        }
+        if let Some(c) = &contact {
+            for (i, p) in passes.iter_mut().enumerate() {
+                if i != c.passes[0] {
+                    p.indirect = Some(12 * i as u64);
+                }
+            }
         }
         let timed = (QUERIES / (2 * passes.len())).min(MAX_CHUNK);
         let trace = (gpu.timestamps && timed > 0).then(|| {
@@ -470,7 +734,7 @@ impl Engine {
                 read: gpu.staging("trace", 8 * u64::from(count)),
                 period: f64::from(gpu.queue.get_timestamp_period()) * 1e-9,
                 timed,
-                kernels: [0.0; 4],
+                kernels: [0.0; 5],
                 wall: 0.0,
                 steps: 0,
                 timed_steps: 0,
@@ -533,6 +797,9 @@ impl Engine {
             passes,
             histories,
             trace,
+            fs,
+            contact,
+            events_from: u32::MAX,
         })
     }
 
@@ -701,6 +968,7 @@ impl Engine {
                 step: false,
                 groups,
                 kind: 1,
+                indirect: None,
             });
         }
         if rows > 0 {
@@ -742,6 +1010,7 @@ impl Engine {
                 step: false,
                 groups,
                 kind: 1,
+                indirect: None,
             });
         }
         let groups = gpu.fold(n, GROUP);
@@ -773,6 +1042,7 @@ impl Engine {
             step: false,
             groups,
             kind: 2,
+            indirect: None,
         });
         Ok(histories)
     }
@@ -800,6 +1070,10 @@ impl Engine {
         let q = &self.gpu.queue;
         q.write_buffer(&self.u, 0, bytemuck::cast_slice(start.u));
         q.write_buffer(&self.v, 0, bytemuck::cast_slice(start.v));
+        if let Some(c) = &self.contact {
+            let values = contact::state_values(c.contact.points.len(), start.contact);
+            self.gpu.write(&c.state, 0, bytemuck::cast_slice(&values));
+        }
         let bytes = 8 * n as u64;
         // g at the start (also as the end, until a run gives its own), its rate; no
         // acceleration and increment yet.
@@ -846,6 +1120,27 @@ impl Engine {
         Ok(())
     }
 
+    /// Uploads the candidates of a new search.
+    pub(crate) fn candidates(&mut self, candidates: &Candidates<'_>) -> Result<(), String> {
+        let Some(c) = &mut self.contact else {
+            return Err("no contact on the card".to_owned());
+        };
+        c.upload(&self.gpu, candidates)?;
+        let bind = c.bind(&self.gpu, &self.params, &self.u, &self.v, &self.fs);
+        let counts = c.counts();
+        for (k, &at) in c.passes.iter().enumerate() {
+            let pass = &mut self.passes[at];
+            pass.bind = bind[usize::from(k == 0)].clone();
+            if k > 0 {
+                pass.groups = self.gpu.fold(counts[k - 1], 64);
+            }
+        }
+        match self.gpu.take_error() {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
     /// Writes the state variables on the card into `material`.
     pub(crate) fn read_state(&mut self, material: &mut [f64]) -> Result<(), String> {
         for h in &self.histories {
@@ -884,9 +1179,9 @@ impl Engine {
         steps: &[(f64, f64)],
         loads: [&[f64]; 2],
         prescribed: [&[f64]; 2],
-    ) -> Result<(), String> {
+    ) -> Result<Ran, String> {
         if steps.is_empty() {
-            return Ok(());
+            return Ok(Ran::default());
         }
         let n = self.n;
         if loads.iter().chain(&prescribed).any(|x| x.len() != n) {
@@ -895,7 +1190,8 @@ impl Engine {
             );
         }
         let total: f64 = steps.iter().map(|s| s.0).sum();
-        let mut params = vec![0u8; self.stride as usize * steps.len()];
+        // One more for the gate after the last time step.
+        let mut params = vec![0u8; self.stride as usize * (steps.len() + 1)];
         let mut elapsed = 0.0;
         let fraction = |t: f64| if total > 0.0 { t / total } else { 1.0 };
         for (k, &(h, c)) in steps.iter().enumerate() {
@@ -907,12 +1203,19 @@ impl Engine {
                 s: fraction(elapsed),
                 alpha: self.alpha,
                 s_before,
-                pad: 0.0,
+                index: k as f64,
             };
             let at = k * self.stride as usize;
             params[at..at + std::mem::size_of::<StepParams>()]
                 .copy_from_slice(bytemuck::bytes_of(&p));
         }
+        let last = StepParams {
+            index: steps.len() as f64,
+            ..bytemuck::Zeroable::zeroed()
+        };
+        let at = steps.len() * self.stride as usize;
+        params[at..at + std::mem::size_of::<StepParams>()]
+            .copy_from_slice(bytemuck::bytes_of(&last));
         let q = &self.gpu.queue;
         q.write_buffer(&self.params, 0, &params);
         let bytes = 8 * n as u64;
@@ -920,6 +1223,20 @@ impl Engine {
         q.write_buffer(&self.loads, bytes, bytemuck::cast_slice(loads[1]));
         q.write_buffer(&self.g, 0, bytemuck::cast_slice(prescribed[0]));
         q.write_buffer(&self.g, bytes, bytemuck::cast_slice(prescribed[1]));
+        // The contact: the dispatches of all passes, no flags yet.
+        if let Some(c) = &mut self.contact {
+            c.dims.events_from = self.events_from;
+            c.dims.arg_words = 3 * self.passes.len() as u32;
+            q.write_buffer(&c.cdims, 0, bytemuck::bytes_of(&c.dims));
+            let args: Vec<u32> = self
+                .passes
+                .iter()
+                .flat_map(|p| [p.groups.0, p.groups.1, 1])
+                .collect();
+            q.write_buffer(&c.args, 0, bytemuck::cast_slice(&args));
+            q.write_buffer(&c.flags, 0, bytemuck::cast_slice(&[0u32; FLAGS]));
+        }
+        let args = self.contact.as_ref().map(|c| &c.args);
         let started = std::time::Instant::now();
         let mut encoder = self
             .gpu
@@ -943,10 +1260,7 @@ impl Engine {
                             end_of_pass_write_index: Some(at + 1),
                         }),
                     });
-                    pass.set_pipeline(&p.pipeline);
-                    let offsets = [offset(k)];
-                    pass.set_bind_group(0, &p.bind, if p.step { &offsets[..] } else { &[] });
-                    pass.dispatch_workgroups(p.groups.0, p.groups.1, 1);
+                    p.dispatch(&mut pass, &[offset(k)], args);
                 }
             }
             let count = (2 * timed * self.passes.len()) as u32;
@@ -959,13 +1273,21 @@ impl Engine {
                 timestamp_writes: None,
             });
             for k in timed..steps.len() {
-                let offsets = [offset(k)];
                 for p in &self.passes {
-                    pass.set_pipeline(&p.pipeline);
-                    pass.set_bind_group(0, &p.bind, if p.step { &offsets[..] } else { &[] });
-                    pass.dispatch_workgroups(p.groups.0, p.groups.1, 1);
+                    p.dispatch(&mut pass, &[offset(k)], args);
                 }
             }
+        }
+        // The gate once more: whether the last time step opened or closed a contact.
+        if let Some(c) = &self.contact {
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("contact gate"),
+                    timestamp_writes: None,
+                });
+                self.passes[c.passes[0]].dispatch(&mut pass, &[offset(steps.len())], None);
+            }
+            encoder.copy_buffer_to_buffer(&c.flags, 0, &c.flag_staging, 0, 4 * FLAGS as u64);
         }
         // The parameter buffer is written again by the next run: wait for this one first.
         self.gpu.queue.submit([encoder.finish()]);
@@ -974,7 +1296,7 @@ impl Engine {
             let kinds: Vec<usize> = self.passes.iter().map(|p| p.kind).collect();
             let times = self.gpu.map(&t.read, |bytes| {
                 let stamps: &[u64] = bytemuck::cast_slice(bytes);
-                let mut times = [0.0; 4];
+                let mut times = [0.0; 5];
                 for k in 0..timed * kinds.len() {
                     let ticks = stamps[2 * k + 1].saturating_sub(stamps[2 * k]);
                     times[kinds[k % kinds.len()]] += ticks as f64 * t.period;
@@ -988,9 +1310,23 @@ impl Engine {
             t.steps += steps.len();
             t.timed_steps += timed;
         }
+        let mut ran = Ran {
+            steps: steps.len(),
+            ..Default::default()
+        };
+        if let Some(c) = &self.contact {
+            let flags: Vec<u32> = self.gpu.map(&c.flag_staging, |b| {
+                bytemuck::cast_slice::<u8, u32>(b).to_vec()
+            })?;
+            if flags[2] != 0 && (flags[2] as usize) < steps.len() {
+                ran.steps = flags[2] as usize;
+                ran.search = flags[3] & 1 != 0;
+            }
+            ran.event = flags[4] != 0;
+        }
         match self.gpu.take_error() {
             Some(e) => Err(e),
-            None => Ok(()),
+            None => Ok(ran),
         }
     }
 
@@ -1013,16 +1349,19 @@ impl Engine {
         if let Some(reaction) = &self.reaction {
             encoder.copy_buffer_to_buffer(reaction, 0, &self.staging, 6 * bytes, 2 * bytes);
         }
-        let at = 8 * bytes;
+        // The internal and the viscous forces of the last step.
+        encoder.copy_buffer_to_buffer(&self.energy, 0, &self.staging, 8 * bytes, bytes);
+        encoder.copy_buffer_to_buffer(&self.energy, 2 * bytes, &self.staging, 9 * bytes, bytes);
+        let at = 10 * bytes;
         encoder.copy_buffer_to_buffer(&self.q, 0, &self.staging, at, reduced);
         encoder.copy_buffer_to_buffer(&self.qd, 0, &self.staging, at + reduced, reduced);
         encoder.copy_buffer_to_buffer(&self.a, 0, &self.staging, at + 2 * reduced, reduced);
         self.gpu.queue.submit([encoder.finish()]);
         let prescribed = self.reaction.is_some();
-        let reached = self.gpu.map(&self.staging, |bytes| {
+        let mut reached = self.gpu.map(&self.staging, |bytes| {
             let data: &[f64] = bytemuck::cast_slice(bytes);
             let sum = |k: usize| data[k * n..(k + 1) * n].iter().sum::<f64>();
-            let tail = &data[8 * n..];
+            let tail = &data[10 * n..];
             Reached {
                 u: data[..n].to_vec(),
                 v: data[n..2 * n].to_vec(),
@@ -1038,10 +1377,32 @@ impl Engine {
                 q: tail[..r].to_vec(),
                 qdot: tail[r..2 * r].to_vec(),
                 a: tail[2 * r..3 * r].to_vec(),
+                internal: data[8 * n..9 * n].to_vec(),
+                viscous: data[9 * n..10 * n].to_vec(),
+                contact: None,
             }
         })?;
         if let Some(e) = self.gpu.take_error() {
             return Err(e);
+        }
+        if let Some(c) = &self.contact
+            && !c.contact.points.is_empty()
+        {
+            let bytes = (8 * STATE * c.contact.points.len()) as u64;
+            let staging = self.gpu.staging("contact state", bytes);
+            let mut encoder =
+                self.gpu
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("read contact"),
+                    });
+            encoder.copy_buffer_to_buffer(&c.state, 0, &staging, 0, bytes);
+            self.gpu.queue.submit([encoder.finish()]);
+            let points = c.contact.points.len();
+            let state = self.gpu.map(&staging, |b| {
+                contact::state_of(&bytemuck::cast_slice::<u8, f64>(b)[..STATE * points])
+            })?;
+            reached.contact = Some(state);
         }
         if reached.u.iter().any(|x| !x.is_finite()) {
             return Err("the displacements on the graphics card are not finite".to_owned());

@@ -148,7 +148,7 @@ What is different from implicit integration:
 
 ==== On the graphics card <dynamic-gpu>
 
-The time steps of a model without contact run on a discrete graphics card from 30 000 DOFs, when the setting
+The time steps of a model run on a discrete graphics card from 30 000 DOFs, when the setting
 #ui("Graphics card") > #ui("Use for the solver") is on (@settings). Each time step then
 computes the forces element by element, one thread of the card per element, sums them per
 node, and does a few vector updates, many times faster than the processor. No stiffness
@@ -183,6 +183,15 @@ the processor. Between the corners of their amplitudes, loads and prescribed dis
 follow them linearly over at most 256 time steps; the corners themselves are kept. The work
 of prescribed displacements (from the reactions at their DOFs) counts as external work on
 the card as on the processor.
+
+Penalty contact runs on the card too, node to surface and surface to surface: the closest
+point on the candidate faces, the rounded linear, exponential and tabular pressure
+relations, friction with stick and slip, contact damping and the cap on the contact
+stiffness, all in double precision. The processor only searches new candidate faces,
+after a step in which a contact node moved further than the search reach, and writes the
+event frames: the card stops at the step where a contact opens or closes, the processor
+writes the frame and the card goes on. Mortar and tied contact, faces with more than eight
+nodes and contact on shell or beam nodes keep the time steps on the processor.
 
 The solver log names the card ("explicit: time steps on ..."). A card without double
 precision, a model too large for its memory or any error leaves the time steps on the

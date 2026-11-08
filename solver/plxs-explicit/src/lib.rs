@@ -34,8 +34,12 @@
 #[cfg(feature = "gpu")]
 mod gpu;
 
+mod contact;
 mod elements;
 mod reduction;
+pub use contact::{
+    Candidates, Contact, ContactFace, ContactLaw, ContactPair, ContactPoint, ContactState,
+};
 pub use elements::{
     Block, Element, Elements, Family, Hourglass, Isochoric, MAX_NODES, Material, Points,
     STATE_SIZE, Volumetric,
@@ -57,6 +61,9 @@ pub struct Setup<'a> {
     /// Whether the prescribed displacements change: the card then also adds up the work
     /// of their reactions.
     pub prescribed_motion: bool,
+    /// The contact pairs with the candidates of their last search, `None` without
+    /// contact.
+    pub contact: Option<(&'a Contact, Candidates<'a>)>,
 }
 
 /// The state at the start of a run of steps: the reduced displacements, half-step
@@ -80,6 +87,8 @@ pub struct Start<'a> {
     /// The material state ([`STATE_SIZE`] per integration point; see [`Element::state`]),
     /// empty when no element has state variables.
     pub material: &'a [f64],
+    /// The state of the contact points (`None`: open, at full stiffness).
+    pub contact: Option<&'a ContactState>,
 }
 
 /// The state the card reached: the reduced displacements, half-step velocities and
@@ -100,6 +109,22 @@ pub struct Reached {
     pub prescribed_rate: Vec<f64>,
     /// The reactions of the last step (empty without prescribed motion).
     pub reactions: Vec<f64>,
+    /// The internal and the viscous forces (with the damping `α m v`) at the end.
+    pub internal: Vec<f64>,
+    pub viscous: Vec<f64>,
+    /// The state of the contact points (`None` without contact).
+    pub contact: Option<ContactState>,
+}
+
+/// How a run of time steps ended: the time steps taken and, when it stopped early, why.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Ran {
+    pub steps: usize,
+    /// A contact node moved farther than the candidates cover: search again.
+    pub search: bool,
+    /// A contact opened or closed in the last time step taken (from the step
+    /// [`Engine::events_from`] allows on, the run stops there).
+    pub event: bool,
 }
 
 /// The explicit time steps of one step on the graphics card.
@@ -149,15 +174,42 @@ impl Engine {
         }
     }
 
-    /// Queues the time steps `steps` (`(h, c)`: the step and the factor of the velocity
+    /// Uploads the candidates of a new search.
+    pub fn candidates(&mut self, candidates: &Candidates<'_>) -> Result<(), String> {
+        #[cfg(feature = "gpu")]
+        {
+            self.inner.candidates(candidates)
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            let _ = candidates;
+            Err("built without graphics card support".to_owned())
+        }
+    }
+
+    /// From which time step of the next runs (counted from the first of the run) a contact
+    /// that opens or closes stops the run, for an event frame; `None`: never.
+    pub fn events_from(&mut self, from: Option<usize>) {
+        #[cfg(feature = "gpu")]
+        {
+            self.inner.events_from = from.map_or(u32::MAX, |f| f.min(u32::MAX as usize) as u32);
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            let _ = from;
+        }
+    }
+
+    /// Runs the time steps `steps` (`(h, c)`: the step and the factor of the velocity
     /// update, `½ (h_before + h)`), at most [`MAX_CHUNK`], with the loads and the
     /// prescribed displacements going linearly from the first to the second over them.
+    /// Waits for them; with contact the run can stop early ([`Ran`]).
     pub fn run(
         &mut self,
         steps: &[(f64, f64)],
         loads: [&[f64]; 2],
         prescribed: [&[f64]; 2],
-    ) -> Result<(), String> {
+    ) -> Result<Ran, String> {
         if steps.len() > MAX_CHUNK {
             return Err(format!("at most {MAX_CHUNK} time steps per run"));
         }

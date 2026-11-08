@@ -489,13 +489,9 @@ fn an_elastic_bar_bounces_off_a_wall_surface_to_surface() {
     check_bar_on_wall("Surface to surface", "wall-s2s");
 }
 
-/// A block (2 × 2 CPE4, 10 mm) sliding at `v0` on a steel plate under gravity stops after
-/// `v0² / (2 μ g)`.
-#[test]
-fn a_block_sliding_on_a_plate_stops_by_friction() {
-    let (v0, mu, g) = (0.3, 0.3, 9.81);
-    let stop = v0 / (mu * g);
-    let distance = v0 * v0 / (2.0 * mu * g);
+/// A block (2 × 2 CPE4, 10 mm) sliding at `v0` on a steel plate under gravity `g` with
+/// friction `mu`.
+fn sliding_block(v0: f64, mu: f64, g: f64) -> String {
     let mut s = String::from("*Node\n");
     for j in 0..2 {
         for i in 0..=20 {
@@ -557,6 +553,17 @@ fn a_block_sliding_on_a_plate_stops_by_friction() {
          *Node print, Nset=CORNER\nU\n*End step"
     )
     .unwrap();
+    s
+}
+
+/// A block (2 × 2 CPE4, 10 mm) sliding at `v0` on a steel plate under gravity stops after
+/// `v0² / (2 μ g)`.
+#[test]
+fn a_block_sliding_on_a_plate_stops_by_friction() {
+    let (v0, mu, g) = (0.3, 0.3, 9.81);
+    let stop = v0 / (mu * g);
+    let distance = v0 * v0 / (2.0 * mu * g);
+    let s = sliding_block(v0, mu, g);
     let dir = work_dir("slide");
     let (dat, log) = run(&dir, "slide", &s);
     clean(&dir);
@@ -1965,5 +1972,138 @@ fn prescribed_motion_on_the_graphics_card_matches_the_processor() {
                 );
             }
         }
+    }
+}
+
+/// `input` on the graphics card as on the processor: the blocks under `headings` agree to
+/// `tolerance` of their largest value.
+fn contact_on_the_card(job: &str, input: &str, headings: &[&str], tolerance: f64) {
+    let dir = work_dir(job);
+    let (cpu, _) = run_with_gpu(&dir, "cpu", input, "off");
+    let (gpu, log) = run_with_gpu(&dir, "gpu", input, "on");
+    clean(&dir);
+    if std::env::var("PLXS_TEST_LOG").is_ok() {
+        eprintln!("{log}");
+    }
+    if log.lines().any(|l| {
+        l.contains("explicit: time steps on the processor")
+            && (l.contains("no graphics card") || l.contains("double precision"))
+    }) {
+        eprintln!("no graphics card with double precision: {log}");
+        return;
+    }
+    assert!(log.contains("element forces"), "not on the card:\n{log}");
+    assert!(!log.contains("card failed"), "{log}");
+    for heading in headings {
+        let (a, b) = (blocks(&cpu, heading), blocks(&gpu, heading));
+        assert!(!a.is_empty(), "{heading}\n{log}");
+        assert_eq!(a.len(), b.len(), "{heading}\n{log}");
+        let largest = a
+            .iter()
+            .flat_map(|(_, r)| r.iter().flatten())
+            .fold(0.0_f64, |m, x| m.max(x.abs()));
+        for ((t, ra), (tb, rb)) in a.iter().zip(&b) {
+            assert!(
+                (t - tb).abs() <= 1e-9 * t.abs().max(1e-12),
+                "{heading}: {t} {tb}"
+            );
+            for (x, y) in ra.iter().flatten().zip(rb.iter().flatten()) {
+                assert!(
+                    (x - y).abs() <= tolerance * largest,
+                    "{job} {heading} at {t} s: {x} on the processor, {y} on the card"
+                );
+            }
+        }
+    }
+}
+
+/// The bar of [`bar_on_wall`] bounces off the wall on the card as on the processor.
+fn bar_on_wall_on_the_card(kind: &str, job: &str) {
+    let (bar, gap, v0) = (0.1, 1e-5, 1.0);
+    let c = (E / RHO).sqrt();
+    let duration = 2.0 * bar / c;
+    let period = gap / v0 + 1.5 * duration;
+    let input = bar_on_wall(kind, 20, gap, v0, period / 30.0, period);
+    contact_on_the_card(
+        job,
+        &input,
+        &[
+            "total force",
+            "velocities",
+            "total model internal energy",
+            "total model kinetic energy",
+            "total model damping dissipation",
+        ],
+        1e-4,
+    );
+}
+
+#[test]
+fn a_bar_bounces_off_a_wall_node_to_surface_on_the_graphics_card() {
+    bar_on_wall_on_the_card("Node to surface", "gpu-wall-n2s");
+}
+
+#[test]
+fn a_bar_bounces_off_a_wall_surface_to_surface_on_the_graphics_card() {
+    bar_on_wall_on_the_card("Surface to surface", "gpu-wall-s2s");
+}
+
+/// The block of [`sliding_block`] slides on the card as on the processor: friction on the
+/// edges of plane elements, new searches as it slides along the plate.
+#[test]
+fn a_block_sliding_by_friction_on_the_graphics_card() {
+    let input = sliding_block(0.3, 0.3, 9.81).replace(
+        "*Node print, Nset=CORNER\nU\n",
+        "*Node print, Nset=CORNER\nU, V\n",
+    );
+    contact_on_the_card("gpu-slide", &input, &["displacements", "velocities"], 1e-4);
+}
+
+/// Event frames of an impact on the card at the same times as on the processor.
+#[test]
+fn event_frames_on_the_graphics_card_match_the_processor() {
+    let (bar, gap, v0) = (0.1, 1e-5, 1.0);
+    let c = (E / RHO).sqrt();
+    let period = gap / v0 + 1.5 * 2.0 * bar / c;
+    let input = bar_on_wall("Node to surface", 20, gap, v0, period / 4.0, period).replace(
+        "*Dynamic, Integration=Explicit\n",
+        "*Dynamic, Integration=Explicit, Events\n",
+    );
+    contact_on_the_card(
+        "gpu-events",
+        &input,
+        &["total force", "velocities", "total model kinetic energy"],
+        1e-4,
+    );
+}
+
+/// Exponential and tabular pressure-overclosure relations on the card.
+#[test]
+fn soft_contact_relations_on_the_graphics_card_match_the_processor() {
+    let (bar, gap, v0) = (0.1, 1e-5, 1.0);
+    let c = (E / RHO).sqrt();
+    let period = gap / v0 + 1.5 * 2.0 * bar / c;
+    for (kind, behavior, job) in [
+        (
+            "Surface to surface",
+            "Exponential\n2e-5, 1e6",
+            "gpu-exponential",
+        ),
+        (
+            "Node to surface",
+            "Tabular\n0, 0\n1e9, 1e-5\n3e9, 2e-5",
+            "gpu-tabular",
+        ),
+    ] {
+        let input = bar_on_wall(kind, 20, gap, v0, period / 30.0, period).replace(
+            "Pressure-overclosure=Linear\n1e15",
+            &format!("Pressure-overclosure={behavior}"),
+        );
+        contact_on_the_card(
+            job,
+            &input,
+            &["total force", "velocities", "total model internal energy"],
+            1e-4,
+        );
     }
 }

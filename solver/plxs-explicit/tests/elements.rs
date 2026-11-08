@@ -345,6 +345,7 @@ fn swing_with(nlgeom: bool, speed: f64, plastic: bool, hyper: bool, dense: bool)
         reduction: &reduction,
         alpha,
         prescribed_motion: false,
+        contact: None,
     };
     let mut engine = match Engine::new(&setup, true) {
         Ok(e) => e,
@@ -410,6 +411,7 @@ fn swing_with(nlgeom: bool, speed: f64, plastic: bool, hyper: bool, dense: bool)
             viscous: &fv0,
             loads: &p0,
             material: &start_state,
+            contact: None,
         })
         .unwrap();
     let mut a = a0;

@@ -126,6 +126,7 @@ fn swing(constrained: bool) {
         reduction: &reduction,
         alpha,
         prescribed_motion: constrained,
+        contact: None,
     };
     let mut engine = match Engine::new(&setup, true) {
         Ok(e) => e,
@@ -198,6 +199,7 @@ fn swing(constrained: bool) {
             viscous: &fv0,
             loads: &p0,
             material: &[],
+            contact: None,
         })
         .unwrap();
     let mut a = a0;
