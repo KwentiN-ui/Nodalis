@@ -2823,7 +2823,16 @@ fn gpu_engine(
     let n = ctx.table.dofs.len();
     let mode = GpuMode::from_environment();
     let any = match mode {
-        GpuMode::Off => return None,
+        GpuMode::Off => {
+            if n >= GPU_FROM {
+                progress.event(ProgressEvent::Info(
+                    "explicit: time steps on the processor (the graphics card is switched off \
+                     in the settings or by PLXS_GPU)"
+                        .into(),
+                ));
+            }
+            return None;
+        }
         GpuMode::Automatic if n < GPU_FROM => return None,
         GpuMode::Automatic => false,
         GpuMode::On => true,
