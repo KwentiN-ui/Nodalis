@@ -1738,8 +1738,7 @@ impl Procedure for ExplicitDynamic {
         let requests = energy_requests(step);
 
         // The time steps of a linear model on the graphics card.
-        let mut gpu = if !step.nlgeom
-            && !ctx.table.has_nonlinear_material()
+        let mut gpu = if !ctx.table.has_nonlinear_material()
             && contact.is_none()
             && !varying
             && beta_r == 0.0
@@ -1748,7 +1747,7 @@ impl Procedure for ExplicitDynamic {
             && ctx.table.membranes.is_empty()
             && ctx.table.discrete.is_empty()
         {
-            gpu_engine(ctx, &kernel, &set, &data.mass, alpha_r, progress)
+            gpu_engine(ctx, step, &kernel, &set, &data.mass, alpha_r, progress)
         } else {
             None
         };
@@ -1794,17 +1793,24 @@ impl Procedure for ExplicitDynamic {
             let mut events_in_frame: u64 = 0;
             let mut last_event_step: Option<u64> = None;
             // On the graphics card: all time steps of the frame but the last, which the
-            // processor computes with the fields of the frame.
-            if let Some(engine) = gpu.as_mut() {
+            // processor computes with the fields of the frame. Under NLGEOM the card stops
+            // where the processor would check the stable time step on the deformed elements
+            // (every `NLGEOM_CHECK_STEPS` steps), and starts again with the new step.
+            while let Some(engine) = gpu.as_mut() {
                 let remaining = t_frame - time;
                 let count = (remaining / dt_max * (1.0 - 1e-12)).ceil().max(1.0) as usize;
-                if count > 1 {
+                if count <= 1 {
+                    break;
+                }
+                {
                     let h = remaining / count as f64;
                     let started = std::time::Instant::now();
                     let visc: Vec<f64> = (0..n).map(|i| forces.viscous[i] + f_damp[i]).collect();
                     let a_now = set.expand(&a_red, &zero);
+                    let check = step.nlgeom.then_some(NLGEOM_CHECK_STEPS as usize);
+                    let offset = steps_done as usize;
                     let run = |engine: &mut plxs_explicit::Engine| -> std::result::Result<
-                        (plxs_explicit::Reached, Vec<f64>),
+                        GpuRun,
                         String,
                     > {
                         engine.load(&plxs_explicit::Start {
@@ -1829,6 +1835,9 @@ impl Procedure for ExplicitDynamic {
                                     chunk = within as usize;
                                 }
                             }
+                            if let Some(every) = check {
+                                chunk = chunk.min(every - (offset + done) % every);
+                            }
                             let steps: Vec<(f64, f64)> = (0..chunk)
                                 .map(|j| {
                                     let c = if done + j == 0 { 0.5 * (h_prev + h) } else { h };
@@ -1842,12 +1851,55 @@ impl Procedure for ExplicitDynamic {
                             engine.run(&steps, &from, &to)?;
                             from = to;
                             done += chunk;
+                            if let Some(every) = check
+                                && (offset + done).is_multiple_of(every)
+                                && done < count - 1
+                            {
+                                let reached = engine.read()?;
+                                let omega = current_frequencies(
+                                    ctx.table,
+                                    ctx.model,
+                                    true,
+                                    &reached.u,
+                                    &data,
+                                    &kernel.offsets,
+                                );
+                                let now = stable_time_step_of(&omega, data.other_omega, beta_r);
+                                let mut dt = (now.stable * contact_step)
+                                    .min(fixed_step.unwrap_or(f64::INFINITY));
+                                if !dt.is_finite() {
+                                    dt = interval;
+                                }
+                                return Ok(GpuRun {
+                                    reached,
+                                    loads: from,
+                                    taken: done,
+                                    checked: Some((dt, omega)),
+                                });
+                            }
                         }
-                        Ok((engine.read()?, from))
+                        Ok(GpuRun {
+                            reached: engine.read()?,
+                            loads: from,
+                            taken: done,
+                            checked: None,
+                        })
                     };
-                    match run(engine) {
-                        Ok((reached, p_reached)) => {
-                            let taken = (count - 1) as u64;
+                    let outcome = run(engine);
+                    let mut again = false;
+                    match outcome {
+                        Ok(GpuRun {
+                            reached,
+                            loads: p_reached,
+                            taken,
+                            checked,
+                        }) => {
+                            if let Some((dt, omega)) = checked {
+                                again = true;
+                                dt_max = dt;
+                                omega_now = Some(omega);
+                            }
+                            let taken = taken as u64;
                             u = reached.u;
                             v_half = reached.v;
                             q = free.iter().map(|&d| u[d]).collect();
@@ -1856,7 +1908,7 @@ impl Procedure for ExplicitDynamic {
                             energies.internal += reached.internal_work;
                             energies.external_work += reached.external_work;
                             energies.dissipation += reached.dissipation;
-                            time += (count - 1) as f64 * h;
+                            time += taken as f64 * h;
                             h_prev = h;
                             steps_done += taken;
                             frame_steps += taken;
@@ -1881,6 +1933,9 @@ impl Procedure for ExplicitDynamic {
                             )));
                             gpu = None;
                         }
+                    }
+                    if !again {
+                        break;
                     }
                 }
             }
@@ -2255,6 +2310,16 @@ impl Procedure for ExplicitDynamic {
     }
 }
 
+/// What a run of time steps on the graphics card reached: the state, the loads at its end,
+/// the time steps taken and, under NLGEOM, the last check of the stable time step (the
+/// step and the element frequencies).
+struct GpuRun {
+    reached: plxs_explicit::Reached,
+    loads: Vec<f64>,
+    taken: usize,
+    checked: Option<(f64, Vec<f64>)>,
+}
+
 /// Models of at least this many DOFs go to a discrete graphics card in the automatic
 /// mode (`PLXS_GPU` unset); smaller ones are not worth the transfers.
 const GPU_FROM: usize = 30_000;
@@ -2265,6 +2330,7 @@ const GPU_FROM: usize = 30_000;
 /// inverse lumped mass on the free DOFs.
 fn gpu_engine(
     ctx: &mut ProcedureContext<'_>,
+    step: &Step,
     kernel: &Kernel<'_>,
     set: &ConstraintSet,
     mass: &[f64],
@@ -2289,7 +2355,7 @@ fn gpu_engine(
         }
     }
     // Element by element where all elements have kernels, otherwise by the matrices.
-    let opened = match gpu_elements(ctx, kernel) {
+    let opened = match gpu_elements(ctx, kernel, step.nlgeom) {
         Some(elements) => plxs_explicit::Engine::new(
             &plxs_explicit::Setup {
                 forces: plxs_explicit::ForceModel::Elements(&elements),
@@ -2304,6 +2370,10 @@ fn gpu_engine(
                 "element forces in single precision, state in double precision",
             )
         }),
+        // Large deformations need the kernels.
+        None if step.nlgeom => Err(
+            "large deformations need element kernels, which not all elements have yet".to_owned(),
+        ),
         None => gpu_matrices(ctx, kernel, &inverse, alpha, any).map(|engine| {
             (
                 engine,
@@ -2337,6 +2407,7 @@ fn gpu_engine(
 fn gpu_elements(
     ctx: &ProcedureContext<'_>,
     kernel: &Kernel<'_>,
+    nlgeom: bool,
 ) -> Option<plxs_explicit::Elements> {
     // `PLXS_GPU_FORCES=matrices`: the matrices anyway, for measurements (until the
     // kernels cover all elements and the matrices go).
@@ -2345,11 +2416,14 @@ fn gpu_elements(
     {
         return None;
     }
-    let mut elements = plxs_explicit::Elements::default();
+    let mut elements = plxs_explicit::Elements {
+        nlgeom,
+        ..Default::default()
+    };
     for (entry, viscosity) in ctx.table.entries.iter().zip(kernel.viscosity) {
         let formulation = ctx.table.formulation(entry);
         let coords = ctx.table.coordinates(ctx.model, entry);
-        let elastic = ctx.table.law(entry, false).elastic_matrix();
+        let elastic = ctx.table.law(entry, nlgeom).elastic_matrix();
         let gradients = formulation.nodal_gradients(&coords, &elastic)?;
         if entry.dofs.len() != 3 * coords.len() || viscosity.g.len() != entry.dofs.len() {
             return None;
