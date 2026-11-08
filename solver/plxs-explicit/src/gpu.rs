@@ -357,7 +357,22 @@ impl Engine {
             .chain(validation.map(|e| e.to_string()))
             .collect();
         if !errors.is_empty() {
-            return Err(format!("{}: {}", gpu.name, errors.join("; ")));
+            // What this run holds on the card, for a failure for want of memory.
+            let held = gpu
+                .device
+                .generate_allocator_report()
+                .map(|r| {
+                    let mb = |b: u64| b as f64 / 1048576.0;
+                    format!(
+                        "; this run holds {:.1} MB in {} buffers, {:.1} MB reserved in {} blocks",
+                        mb(r.total_allocated_bytes),
+                        r.allocations.len(),
+                        mb(r.total_reserved_bytes),
+                        r.blocks.len()
+                    )
+                })
+                .unwrap_or_default();
+            return Err(format!("{}: {}{held}", gpu.name, errors.join("; ")));
         }
         Ok(Self {
             gpu,
