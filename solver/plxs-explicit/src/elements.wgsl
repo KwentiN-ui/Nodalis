@@ -33,6 +33,12 @@ struct Dims {
 @group(0) @binding(8) var<storage, read> materials: array<f32>;
 @group(0) @binding(9) var<storage, read_write> fint: array<f32>;
 @group(0) @binding(10) var<storage, read_write> fvis: array<f32>;
+// The state variables of the plastic elements: `[(ip * STATE + s) * count + e]`.
+@group(0) @binding(11) var<storage, read_write> history: array<f64>;
+
+// Values per material block (see `gpu.rs`) and state variables per point.
+const MAT: u32 = 44u;
+const STATE: u32 = 14u;
 
 const HOURGLASS = array<array<f32, 8>, 4>(
     array<f32, 8>(1.0, 1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0),
@@ -56,6 +62,103 @@ const CORNERS = array<vec3<f32>, 8>(
 // `det(m) m⁻ᵀ` of a matrix with the columns a, b, c.
 fn cofactors(m: mat3x3<f32>) -> mat3x3<f32> {
     return mat3x3<f32>(cross(m[1], m[2]), cross(m[2], m[0]), cross(m[0], m[1]));
+}
+
+// Value and slope of the piecewise linear curve at `start` (`len` pairs), constant beyond
+// its ends.
+fn curve(start: u32, len: u32, x: f32) -> vec2<f32> {
+    if len == 0u {
+        return vec2<f32>(0.0, 0.0);
+    }
+    let x0 = materials[start];
+    if x < x0 {
+        return vec2<f32>(materials[start + 1u], 0.0);
+    }
+    for (var i = 0u; i + 1u < len; i++) {
+        let a = start + 2u * i;
+        let xb = materials[a + 2u];
+        if x <= xb {
+            let slope = (materials[a + 3u] - materials[a + 1u]) / (xb - materials[a]);
+            return vec2<f32>(materials[a + 1u] + (x - materials[a]) * slope, slope);
+        }
+    }
+    return vec2<f32>(materials[start + 2u * len - 1u], 0.0);
+}
+
+// The radial return of the processor's J2 law (rate independent) for the material block
+// `m` at point `ip` of element `e`: the stress; the state variables advance.
+fn j2(m: u32, strain: array<f32, 6>, ip: u32, c: u32, e: u32) -> array<f32, 6> {
+    let mu = materials[m + 37u];
+    let bulk = materials[m + 38u];
+    let iso = vec2<u32>(u32(materials[m + 39u]), u32(materials[m + 40u]));
+    let kin = vec2<u32>(u32(materials[m + 41u]), u32(materials[m + 42u]));
+    let at = ip * STATE;
+    let peeq = history[at * c + e];
+    var el = array<f32, 6>();
+    for (var k = 0u; k < 6u; k++) {
+        var total = strain[k];
+        if k >= 3u {
+            total = 0.5 * total;
+        }
+        el[k] = f32(f64(total) - history[(at + 1u + k) * c + e]);
+    }
+    let trace = el[0] + el[1] + el[2];
+    let mean = trace / 3.0;
+    var s = array<f32, 6>();
+    var xi = array<f32, 6>();
+    for (var k = 0u; k < 6u; k++) {
+        var d = el[k];
+        if k < 3u {
+            d -= mean;
+        }
+        s[k] = 2.0 * mu * d;
+        xi[k] = s[k] - f32(history[(at + 7u + k) * c + e]);
+    }
+    let xn = sqrt(xi[0] * xi[0] + xi[1] * xi[1] + xi[2] * xi[2]
+        + 2.0 * (xi[3] * xi[3] + xi[4] * xi[4] + xi[5] * xi[5]));
+    let q = 1.22474487139 * xn;
+    let p = f32(peeq);
+    let yield_stress = curve(iso.x, iso.y, p).x;
+    if q - yield_stress > 1e-9 * max(yield_stress, 0.0) && xn > 0.0 {
+        let kappa0 = curve(kin.x, kin.y, p).x;
+        var lo = 0.0;
+        var hi = q / (3.0 * mu);
+        var dg = (q - yield_stress)
+            / (3.0 * mu + curve(kin.x, kin.y, p).y + curve(iso.x, iso.y, p).y);
+        for (var it = 0u; it < 40u; it++) {
+            let ki = curve(kin.x, kin.y, p + dg);
+            let is = curve(iso.x, iso.y, p + dg);
+            let g = q - 3.0 * mu * dg - (ki.x - kappa0) - is.x;
+            if abs(g) <= 1e-6 * max(q, 1.0) {
+                break;
+            }
+            if g > 0.0 {
+                lo = dg;
+            } else {
+                hi = dg;
+            }
+            let next = dg + g / (3.0 * mu + ki.y + is.y);
+            if next > lo && next < hi {
+                dg = next;
+            } else {
+                dg = 0.5 * (lo + hi);
+            }
+        }
+        dg = clamp(dg, 0.0, q / (3.0 * mu));
+        let delta_kappa = curve(kin.x, kin.y, p + dg).x - kappa0;
+        for (var k = 0u; k < 6u; k++) {
+            let n = xi[k] / xn;
+            let dep = dg * 1.22474487139 * n;
+            history[(at + 1u + k) * c + e] += f64(dep);
+            history[(at + 7u + k) * c + e] += f64(delta_kappa * 0.81649658093 * n);
+            s[k] -= 2.0 * mu * dep;
+        }
+        history[at * c + e] = peeq + f64(dg);
+    }
+    for (var k = 0u; k < 3u; k++) {
+        s[k] += bulk * trace;
+    }
+    return s;
 }
 
 @compute @workgroup_size(64)
@@ -83,7 +186,8 @@ fn elements(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_ind
         fv[k] = 0.0;
         gc[k] = 0.0;
     }
-    let m = material[e] * 36u;
+    let m = material[e] * MAT;
+    let kind = u32(materials[m]);
     for (var ip = 0u; ip < NP; ip++) {
         let at = ip * PS;
         let w = gradients[at * c + e];
@@ -116,12 +220,16 @@ fn elements(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_ind
             strain[5] += dot(h[2], h[0]);
         }
         var s = array<f32, 6>();
-        for (var r = 0u; r < 6u; r++) {
-            var sum = 0.0;
-            for (var q = 0u; q < 6u; q++) {
-                sum += materials[m + 6u * r + q] * strain[q];
+        if kind == 1u {
+            s = j2(m, strain, ip, c, e);
+        } else {
+            for (var r = 0u; r < 6u; r++) {
+                var sum = 0.0;
+                for (var q = 0u; q < 6u; q++) {
+                    sum += materials[m + 1u + 6u * r + q] * strain[q];
+                }
+                s[r] = sum;
             }
-            s[r] = sum;
         }
         var p = mat3x3<f32>(
             vec3<f32>(s[0], s[3], s[5]),

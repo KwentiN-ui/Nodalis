@@ -1737,9 +1737,8 @@ impl Procedure for ExplicitDynamic {
             .map(|e| nodal_average_scalar(ctx.table, ctx.model, e));
         let requests = energy_requests(step);
 
-        // The time steps of a linear model on the graphics card.
-        let mut gpu = if !ctx.table.has_nonlinear_material()
-            && contact.is_none()
+        // The time steps on the graphics card.
+        let mut gpu = if contact.is_none()
             && !varying
             && beta_r == 0.0
             && set.is_selection()
@@ -1807,6 +1806,18 @@ impl Procedure for ExplicitDynamic {
                     let started = std::time::Instant::now();
                     let visc: Vec<f64> = (0..n).map(|i| forces.viscous[i] + f_damp[i]).collect();
                     let a_now = set.expand(&a_red, &zero);
+                    // The material state on the card, when elements have state variables.
+                    let state_of = |engine: &mut plxs_explicit::Engine| -> std::result::Result<
+                        Option<Vec<f64>>,
+                        String,
+                    > {
+                        if material.is_empty() {
+                            return Ok(None);
+                        }
+                        let mut state = material.clone();
+                        engine.read_state(&mut state)?;
+                        Ok(Some(state))
+                    };
                     let check = step.nlgeom.then_some(NLGEOM_CHECK_STEPS as usize);
                     let offset = steps_done as usize;
                     let run = |engine: &mut plxs_explicit::Engine| -> std::result::Result<
@@ -1820,6 +1831,7 @@ impl Procedure for ExplicitDynamic {
                             internal: &forces.internal,
                             viscous: &visc,
                             loads: &p,
+                            material: &material,
                         })?;
                         let mut from = p.clone();
                         let mut done = 0;
@@ -1872,14 +1884,17 @@ impl Procedure for ExplicitDynamic {
                                 }
                                 return Ok(GpuRun {
                                     reached,
+                                    material: state_of(engine)?,
                                     loads: from,
                                     taken: done,
                                     checked: Some((dt, omega)),
                                 });
                             }
                         }
+                        let reached = engine.read()?;
                         Ok(GpuRun {
-                            reached: engine.read()?,
+                            reached,
+                            material: state_of(engine)?,
                             loads: from,
                             taken: done,
                             checked: None,
@@ -1890,10 +1905,14 @@ impl Procedure for ExplicitDynamic {
                     match outcome {
                         Ok(GpuRun {
                             reached,
+                            material: state,
                             loads: p_reached,
                             taken,
                             checked,
                         }) => {
+                            if let Some(state) = state {
+                                material = state;
+                            }
                             if let Some((dt, omega)) = checked {
                                 again = true;
                                 dt_max = dt;
@@ -2310,11 +2329,16 @@ impl Procedure for ExplicitDynamic {
     }
 }
 
+// The kernels on the card keep the state variables of the processor's J2 law.
+const _: () = assert!(plxs_explicit::STATE_SIZE == STATE_SIZE);
+
 /// What a run of time steps on the graphics card reached: the state, the loads at its end,
 /// the time steps taken and, under NLGEOM, the last check of the stable time step (the
 /// step and the element frequencies).
 struct GpuRun {
     reached: plxs_explicit::Reached,
+    /// The material state, when elements have state variables.
+    material: Option<Vec<f64>>,
     loads: Vec<f64>,
     taken: usize,
     checked: Option<(f64, Vec<f64>)>,
@@ -2371,8 +2395,10 @@ fn gpu_engine(
             )
         }),
         // Large deformations need the kernels.
-        None if step.nlgeom => Err(
-            "large deformations need element kernels, which not all elements have yet".to_owned(),
+        None if step.nlgeom || ctx.table.has_nonlinear_material() => Err(
+            "large deformations and nonlinear materials need element kernels, which not all \
+             elements and materials have yet"
+                .to_owned(),
         ),
         None => gpu_matrices(ctx, kernel, &inverse, alpha, any).map(|engine| {
             (
@@ -2402,8 +2428,9 @@ fn gpu_engine(
     }
 }
 
-/// The elements for the kernels on the card, when every element has one (solid elements
-/// whose displacement gradient is the sum of nodal gradients, no constant blocks).
+/// The elements for the kernels on the card, when every element and its material have one
+/// (solid elements whose displacement gradient is the sum of nodal gradients, elastic or
+/// small-strain J2 materials, no constant blocks).
 fn gpu_elements(
     ctx: &ProcedureContext<'_>,
     kernel: &Kernel<'_>,
@@ -2420,10 +2447,28 @@ fn gpu_elements(
         nlgeom,
         ..Default::default()
     };
-    for (entry, viscosity) in ctx.table.entries.iter().zip(kernel.viscosity) {
+    for (index, (entry, viscosity)) in ctx.table.entries.iter().zip(kernel.viscosity).enumerate() {
         let formulation = ctx.table.formulation(entry);
         let coords = ctx.table.coordinates(ctx.model, entry);
-        let elastic = ctx.table.law(entry, nlgeom).elastic_matrix();
+        let law = ctx.table.law(entry, nlgeom);
+        let elastic = law.elastic_matrix();
+        let (material, state) = match law.kernel_law()? {
+            plxs_materials::KernelLaw::Elastic => (plxs_explicit::Material::Elastic(elastic), None),
+            plxs_materials::KernelLaw::J2 {
+                shear,
+                bulk,
+                isotropic,
+                kinematic,
+            } => (
+                plxs_explicit::Material::J2 {
+                    shear,
+                    bulk,
+                    isotropic,
+                    kinematic,
+                },
+                Some(ctx.table.layout.offsets[index] as usize * STATE_SIZE),
+            ),
+        };
         let gradients = formulation.nodal_gradients(&coords, &elastic)?;
         if entry.dofs.len() != 3 * coords.len() || viscosity.g.len() != entry.dofs.len() {
             return None;
@@ -2441,7 +2486,8 @@ fn gpu_elements(
             .push(plxs_explicit::Element {
                 dofs: entry.dofs.clone(),
                 points: gradients.points,
-                elastic,
+                material,
+                state,
                 bulk: viscosity.rate * viscosity.volume,
                 mean: viscosity.g.clone(),
                 hourglass,

@@ -84,6 +84,7 @@ fn a_chain_of_springs_swings_as_on_the_processor() {
             internal: &fi0,
             viscous: &fv0,
             loads: &p0,
+            material: &[],
         })
         .unwrap();
     let mut a = a0;
