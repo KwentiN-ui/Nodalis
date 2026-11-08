@@ -1291,6 +1291,26 @@ const CONTACT_DAMPING: f64 = 0.5;
 /// Under NLGEOM the stable time step is found anew every so many time steps.
 const NLGEOM_CHECK_STEPS: u64 = 100;
 
+/// Rotations of elements without NLGEOM above which the step warns (about 6°): a
+/// rotation by `θ` strains an element by about `θ² / 2` under small deformations.
+const TURN_WARNING: f64 = 0.1;
+
+/// Every this many checks of [`NLGEOM_CHECK_STEPS`] the frequencies are computed even
+/// when the watch over the elements' lengths does not ask for it.
+const NLGEOM_EXACT_CHECKS: usize = 10;
+
+/// The watch over the time step under NLGEOM: every element with three DOFs per node.
+fn element_guard(table: &ElementTable, model: &Model) -> plxs_explicit::Guard {
+    let mut guard = plxs_explicit::Guard::default();
+    for entry in &table.entries {
+        let coords = table.coordinates(model, entry);
+        if entry.dofs.len() == 3 * coords.len() && coords.len() > 1 {
+            guard.push(&coords, &entry.dofs);
+        }
+    }
+    guard
+}
+
 /// Most event frames (contact closing or opening) between two result frames.
 const MAX_EVENT_FRAMES: u64 = 32;
 
@@ -2001,6 +2021,12 @@ impl Procedure for ExplicitDynamic {
             .map(|e| nodal_average_scalar(ctx.table, ctx.model, e));
         let requests = energy_requests(step);
 
+        // Under NLGEOM the shortest distances in the elements watch the time step: the
+        // frequencies are computed again when one has changed by 5 %, or after
+        // `NLGEOM_EXACT_CHECKS` checks.
+        let guard = step.nlgeom.then(|| element_guard(ctx.table, ctx.model));
+        let mut guard_reference: Vec<f32> =
+            guard.as_ref().map(|g| g.lengths(&u)).unwrap_or_default();
         // The time steps on the graphics card.
         let mut gpu = if beta_r == 0.0 && !finite_rotations {
             gpu_engine(
@@ -2013,6 +2039,7 @@ impl Procedure for ExplicitDynamic {
                 alpha_r,
                 varying,
                 contact.as_ref(),
+                guard.as_ref(),
                 progress,
             )
         } else {
@@ -2020,7 +2047,9 @@ impl Procedure for ExplicitDynamic {
             let mode = plxs_linalg::amg::GpuMode::from_environment();
             let wanted = match mode {
                 plxs_linalg::amg::GpuMode::Off => false,
-                plxs_linalg::amg::GpuMode::Automatic => n >= GPU_FROM,
+                plxs_linalg::amg::GpuMode::Automatic => {
+                    gpu_worth(ctx, step.nlgeom, contact.is_some())
+                }
                 plxs_linalg::amg::GpuMode::On => true,
             };
             if wanted {
@@ -2065,6 +2094,10 @@ impl Procedure for ExplicitDynamic {
         // An event in the last time step: the next one is written as an event frame.
         let mut event_pending = false;
         let mut omega_now: Option<Vec<f64>> = None;
+        // The time steps the card took, and the watch over rotations without NLGEOM.
+        let mut card_steps: u64 = 0;
+        let turns = (!step.nlgeom).then(|| element_guard(ctx.table, ctx.model));
+        let mut turn_warned = false;
         for frame in first_frame..=last_frame {
             if ctx.cancel.is_cancelled() {
                 ctx.contact.stiffness_scale.clear();
@@ -2157,6 +2190,9 @@ impl Procedure for ExplicitDynamic {
                             })?;
                             c.uploaded.set(c.searches);
                         }
+                        if !guard_reference.is_empty() {
+                            engine.guard_reference(&guard_reference)?;
+                        }
                         engine.load(&plxs_explicit::Start {
                             q: &q,
                             qdot: &qdot,
@@ -2241,6 +2277,8 @@ impl Procedure for ExplicitDynamic {
                             if let Some(every) = check
                                 && (offset + done).is_multiple_of(every)
                                 && done < count - 1
+                                && ((offset + done).is_multiple_of(every * NLGEOM_EXACT_CHECKS)
+                                    || engine.departure()? < plxs_explicit::GUARD_RATIO)
                             {
                                 let reached = engine.read()?;
                                 let omega = current_frequencies(
@@ -2301,6 +2339,9 @@ impl Procedure for ExplicitDynamic {
                                     again = true;
                                     dt_max = dt;
                                     omega_now = Some(omega);
+                                    if let Some(g) = &guard {
+                                        guard_reference = g.lengths(&reached.u);
+                                    }
                                 }
                                 let taken = taken as u64;
                                 if let (Some(c), Some(state)) = (contact.as_mut(), &reached.contact)
@@ -2324,6 +2365,7 @@ impl Procedure for ExplicitDynamic {
                                 time += taken as f64 * h;
                                 h_prev = h;
                                 steps_done += taken;
+                                card_steps += taken;
                                 frame_steps += taken;
                                 p = p_reached;
                                 if varying {
@@ -2392,6 +2434,11 @@ impl Procedure for ExplicitDynamic {
                     if step.nlgeom
                         && steps_done > 0
                         && steps_done.is_multiple_of(NLGEOM_CHECK_STEPS)
+                        && guard.as_ref().is_some_and(|g| {
+                            steps_done
+                                .is_multiple_of(NLGEOM_CHECK_STEPS * NLGEOM_EXACT_CHECKS as u64)
+                                || g.departure(&guard_reference, &u) < plxs_explicit::GUARD_RATIO
+                        })
                     {
                         let started = std::time::Instant::now();
                         let omega = current_frequencies(
@@ -2409,6 +2456,9 @@ impl Procedure for ExplicitDynamic {
                             dt_max = interval;
                         }
                         omega_now = Some(omega);
+                        if let Some(g) = &guard {
+                            guard_reference = g.lengths(&u);
+                        }
                         ctx.profile.add(Phase::Assembly, started);
                     }
                     // Equal steps to the end of the frame.
@@ -2691,6 +2741,21 @@ impl Procedure for ExplicitDynamic {
                 }
             }
 
+            if let Some(turns) = &turns
+                && !turn_warned
+            {
+                let largest = turns.largest_turn(&u);
+                if largest > TURN_WARNING {
+                    turn_warned = true;
+                    progress.event(ProgressEvent::Warning(format!(
+                        "explicit: elements have turned by {}° at {} s without NLGEOM: under \
+                         small deformations a rotation strains them and they grow; switch on \
+                         NLGEOM for large rotations",
+                        short(largest.to_degrees()),
+                        short(time)
+                    )));
+                }
+            }
             ctx.sta.push(StaRow {
                 step: ctx.step_number,
                 increment: record,
@@ -2714,7 +2779,7 @@ impl Procedure for ExplicitDynamic {
                 let elapsed = run_started.elapsed().as_secs_f64();
                 let left = elapsed * (end - time) / (time - start).max(f64::MIN_POSITIVE);
                 progress.event(ProgressEvent::Info(format!(
-                    "explicit: {} s of {} s, {steps_done} time steps{}, energy balance {} %{}",
+                    "explicit: {} s of {} s, {steps_done} time steps{}, energy balance {} %{}{}",
                     short(time),
                     short(period),
                     if omega_now.is_some() {
@@ -2723,6 +2788,14 @@ impl Procedure for ExplicitDynamic {
                         format!(" of {} s", short(h))
                     },
                     short(100.0 * balance),
+                    if card_steps > 0 {
+                        format!(
+                            ", {} % on the graphics card",
+                            short(100.0 * card_steps as f64 / steps_done.max(1) as f64)
+                        )
+                    } else {
+                        String::new()
+                    },
                     if frame < last_frame {
                         format!(", about {:.0} s left", left)
                     } else {
@@ -2802,6 +2875,16 @@ struct GpuRun {
 /// mode (`PLXS_GPU` unset); smaller ones are not worth the transfers.
 const GPU_FROM: usize = 30_000;
 
+/// Under large deformations or with contact a time step costs the processor more per
+/// element: from this many elements the card takes it.
+const GPU_ELEMENTS_FROM: usize = 2_000;
+
+/// Whether the automatic mode takes the card for the model.
+fn gpu_worth(ctx: &ProcedureContext<'_>, nlgeom: bool, contact: bool) -> bool {
+    ctx.table.dofs.len() >= GPU_FROM
+        || ((nlgeom || contact) && ctx.table.entries.len() >= GPU_ELEMENTS_FROM)
+}
+
 /// The engine for the time steps of a linear model on the graphics card
 /// ([`plxs_explicit`]), when the mode (`PLXS_GPU`, the setting of the application) and the
 /// card allow: the element kernels or else the stiffness and the viscous matrix, the
@@ -2817,14 +2900,15 @@ fn gpu_engine(
     alpha: f64,
     prescribed_motion: bool,
     contact: Option<&ExplicitContact>,
+    guard: Option<&plxs_explicit::Guard>,
     progress: &mut dyn Progress,
 ) -> Option<plxs_explicit::Engine> {
     use plxs_linalg::amg::GpuMode;
-    let n = ctx.table.dofs.len();
+    let worth = gpu_worth(ctx, step.nlgeom, contact.is_some());
     let mode = GpuMode::from_environment();
     let any = match mode {
         GpuMode::Off => {
-            if n >= GPU_FROM {
+            if worth {
                 progress.event(ProgressEvent::Info(
                     "explicit: time steps on the processor (the graphics card is switched off \
                      in the settings or by PLXS_GPU)"
@@ -2833,7 +2917,7 @@ fn gpu_engine(
             }
             return None;
         }
-        GpuMode::Automatic if n < GPU_FROM => return None,
+        GpuMode::Automatic if !worth => return None,
         GpuMode::Automatic => false,
         GpuMode::On => true,
     };
@@ -2863,6 +2947,7 @@ fn gpu_engine(
                         },
                     )
                 }),
+                guard,
             },
             any,
         )
@@ -2887,7 +2972,7 @@ fn gpu_engine(
             Some(engine)
         }
         Err(e) => {
-            if mode == GpuMode::On || n >= GPU_FROM {
+            if mode == GpuMode::On || worth {
                 progress.event(ProgressEvent::Info(format!(
                     "explicit: time steps on the processor ({e})"
                 )));

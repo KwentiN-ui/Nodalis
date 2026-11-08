@@ -158,6 +158,17 @@ impl Pass {
     }
 }
 
+/// The watch over the time step (`guard.wgsl`).
+struct GuardGpu {
+    pipeline: wgpu::ComputePipeline,
+    bind: wgpu::BindGroup,
+    groups: (u32, u32),
+    reference: wgpu::Buffer,
+    result: wgpu::Buffer,
+    staging: wgpu::Buffer,
+    count: usize,
+}
+
 /// The contact on the card (`contact.wgsl`).
 struct ContactGpu {
     contact: crate::Contact,
@@ -359,6 +370,7 @@ pub(crate) struct Engine {
     histories: Vec<History>,
     fs: wgpu::Buffer,
     contact: Option<ContactGpu>,
+    guard: Option<GuardGpu>,
     /// From which time step of a run a contact event stops it.
     pub(crate) events_from: u32,
     /// `PLXS_GPU_TRACE`: the time of every kind of dispatch on the card.
@@ -716,6 +728,45 @@ impl Engine {
                 }
             }
         }
+        let guard = setup.guard.filter(|g| !g.is_empty()).map(|g| {
+            let count = g.len();
+            let groups = gpu.fold(count, 64);
+            let dims = gpu.uniform(
+                "guard dims",
+                bytemuck::bytes_of(&Dims {
+                    n: count as u32,
+                    groups_x: groups.0,
+                    base: 0,
+                    pad: 0,
+                }),
+            );
+            let reference = gpu.storage("guard reference", 4 * count as u64);
+            let result = gpu.storage("guard result", 4);
+            let layout = gpu.layout("guard", &[Uniform, Read, Read, Read, Read, Read, Write]);
+            GuardGpu {
+                pipeline: gpu.pipeline(include_str!("guard.wgsl"), "guard", &layout, &[]),
+                bind: gpu.bind(
+                    &layout,
+                    vec![
+                        dims.as_entire_binding(),
+                        gpu.init("guard offsets", bytemuck::cast_slice(&g.offsets))
+                            .as_entire_binding(),
+                        gpu.init("guard dofs", bytemuck::cast_slice(&g.dofs))
+                            .as_entire_binding(),
+                        gpu.init("guard coordinates", bytemuck::cast_slice(&g.coordinates))
+                            .as_entire_binding(),
+                        u.as_entire_binding(),
+                        reference.as_entire_binding(),
+                        result.as_entire_binding(),
+                    ],
+                ),
+                groups,
+                reference,
+                result,
+                staging: gpu.staging("guard result", 16),
+                count,
+            }
+        });
         let timed = (QUERIES / (2 * passes.len())).min(MAX_CHUNK);
         let trace = (gpu.timestamps && timed > 0).then(|| {
             let count = (2 * passes.len() * timed) as u32;
@@ -799,6 +850,7 @@ impl Engine {
             trace,
             fs,
             contact,
+            guard,
             events_from: u32::MAX,
         })
     }
@@ -1328,6 +1380,53 @@ impl Engine {
             Some(e) => Err(e),
             None => Ok(ran),
         }
+    }
+
+    pub(crate) fn guard_reference(&mut self, reference: &[f32]) -> Result<(), String> {
+        let Some(g) = &self.guard else {
+            return Err("no watch over the time step on the card".to_owned());
+        };
+        if reference.len() != g.count {
+            return Err(format!(
+                "{} reference lengths for {} elements",
+                reference.len(),
+                g.count
+            ));
+        }
+        self.gpu
+            .write(&g.reference, 0, bytemuck::cast_slice(reference));
+        Ok(())
+    }
+
+    pub(crate) fn departure(&mut self) -> Result<f32, String> {
+        let Some(g) = &self.guard else {
+            return Err("no watch over the time step on the card".to_owned());
+        };
+        self.gpu.write(&g.result, 0, bytemuck::bytes_of(&1.0_f32));
+        let mut encoder = self
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("guard"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("guard"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&g.pipeline);
+            pass.set_bind_group(0, &g.bind, &[]);
+            pass.dispatch_workgroups(g.groups.0, g.groups.1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&g.result, 0, &g.staging, 0, 4);
+        self.gpu.queue.submit([encoder.finish()]);
+        let bits = self
+            .gpu
+            .map(&g.staging, |b| bytemuck::cast_slice::<u8, u32>(&b[..4])[0])?;
+        if let Some(e) = self.gpu.take_error() {
+            return Err(e);
+        }
+        Ok(f32::from_bits(bits))
     }
 
     pub(crate) fn read(&mut self) -> Result<Reached, String> {

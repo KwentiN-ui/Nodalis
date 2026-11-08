@@ -66,8 +66,8 @@ killed. A step it cannot compute yet is reported when the analysis runs (@model-
     are shared as described above.],
   [Graphics card], [#ui("Use for the solver") (default on) lets the iterative
     equation solver run on a discrete graphics card for models of 100 000 equations and more
-    (@equation-solver), and the time steps of explicit Dynamic steps of linear models from
-    30 000 DOFs (@dynamic-gpu). Below it the card the solver found is shown with its graphics interface,
+    (@equation-solver), and the time steps of explicit Dynamic steps from 30 000 DOFs, or
+    from 2 000 elements under large deformations or with contact (@dynamic-gpu). Below it the card the solver found is shown with its graphics interface,
     and whether the conjugate gradients run on it too (cards with double precision) or only
     the multigrid cycle. Without a discrete card, or switched off, the solver runs on the
     processor. Switch it off when the card is weak or its memory is needed elsewhere; the

@@ -10,6 +10,7 @@ repository.workspace = true
 # The time steps on the graphics card (feature `gpu`).
 plxs-gpu = { workspace = true, optional = true }
 bytemuck = { workspace = true, optional = true }
+rayon.workspace = true
 
 [features]
 gpu = ["dep:plxs-gpu", "dep:bytemuck"]

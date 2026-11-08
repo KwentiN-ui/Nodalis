@@ -101,7 +101,8 @@ explicit: stable time step 4.31e-7 s (element 1534), about 6.96e+5 time steps fo
 
 #ui("Frames") work as with implicit integration: the time steps within a frame are equal, so
 that each frame falls exactly on a time step. The solver reports its progress per frame, with
-the time steps done, the remaining time and the energy balance.
+the time steps done, the remaining time, the energy balance and, when the graphics card
+computes them, the share of the time steps it took.
 
 What is different from implicit integration:
 
@@ -132,9 +133,12 @@ What is different from implicit integration:
   contact pairs are in force. A lowered stiffness lets the surfaces overlap a little more
   under the same pressure.
 - *Large deformations* (NLGEOM) take finite strains and rotations; plasticity and
-  hyperelastic materials work with and without it. The stable time step is found anew every
-  100 time steps, since squeezed elements get stiffer; the bulk viscosity acts in the
-  deformed configuration, so that a spinning part is not braked.
+  hyperelastic materials work with and without it. Squeezed elements get stiffer: every 100
+  time steps the solver measures the shortest distance between two nodes of every element,
+  and when one has changed by 2.5 % since the last check (and every 1000 time steps in any
+  case) it finds the stable time step anew. The bulk viscosity acts in the deformed
+  configuration, so that a spinning part is not braked. Without NLGEOM a rotating part
+  strains and grows; the output warns once elements have turned by more than about 6°.
 - C3D8R elements get a viscous hourglass control in addition to their hourglass stiffness;
   its work is part of ALLVD.
 
@@ -148,7 +152,8 @@ What is different from implicit integration:
 
 ==== On the graphics card <dynamic-gpu>
 
-The time steps of a model run on a discrete graphics card from 30 000 DOFs, when the setting
+The time steps of a model run on a discrete graphics card from 30 000 DOFs, or from 2 000
+elements under large deformations or with contact, when the setting
 #ui("Graphics card") > #ui("Use for the solver") is on (@settings). Each time step then
 computes the forces element by element, one thread of the card per element, sums them per
 node, and does a few vector updates, many times faster than the processor. No stiffness
@@ -162,8 +167,10 @@ fibres of shells with scaled inertia, a tie), the card inverts each coupled grou
 to 48 unknowns on its own, and a larger group or rigid bodies turning by finite angles
 keep the time steps on the processor. Large deformations run on the card too: Green-Lagrange strain, Saint
 Venant-Kirchhoff stress, and the bulk and hourglass viscosity in the deformed shape, as on
-the processor. Every 100 time steps the card stops for the processor to check the stable
-time step of the deformed elements. Materials: elastic ones, and J2 plasticity (`*PLASTIC`,
+the processor. Every 100 time steps the card measures the shortest distance between two
+nodes of every element; when one has changed by 2.5 % since the last check, and every 1000
+time steps in any case, the processor computes the stable time step of the deformed
+elements again. Materials: elastic ones, and J2 plasticity (`*PLASTIC`,
 isotropic or kinematic hardening), under large deformations at finite strains as on the
 processor, whose state variables the card keeps in double precision, and hyperelastic
 materials (`*HYPERELASTIC`, all strain energy models). Creep, and plasticity or

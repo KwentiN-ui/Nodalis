@@ -235,7 +235,8 @@ fn gpu_ui(ui: &mut egui::Ui, gpu: &mut bool) {
     ui.vertical(|ui| {
         ui.checkbox(gpu, "Use for the solver").on_hover_text(format!(
             "Iterative solves of {} equations and more, and the explicit time steps of models \
-             of 30 000 DOFs and more, run on a discrete graphics card, which has many times the memory bandwidth \
+             of 30 000 DOFs and more (2 000 elements under large deformations or with \
+             contact), run on a discrete graphics card, which has many times the memory bandwidth \
              of the processor. The solver takes at most 60 % of the card's memory and falls \
              back to the processor when the model does not fit. Integrated graphics share the \
              processor's memory and are not used. Applies to analyses started from now on.",

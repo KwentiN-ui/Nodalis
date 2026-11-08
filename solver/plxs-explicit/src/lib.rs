@@ -1,6 +1,6 @@
 //! Explicit time steps on the graphics card: central differences with a lumped mass,
 //! constraints `u = T q + g` and the reduced mass inverted in clusters ([`Reduction`]),
-//! for a model without contact (with the element kernels: elastic materials under small strains
+//! for a model with or without contact (with the element kernels: elastic materials under small strains
 //! or large deformations, J2 plasticity at small or finite strains, hyperelasticity, and
 //! constant stiffness blocks), by compute shaders through wgpu (Vulkan, DirectX 12 or
 //! Metal).
@@ -36,6 +36,7 @@ mod gpu;
 
 mod contact;
 mod elements;
+mod guard;
 mod reduction;
 pub use contact::{
     Candidates, Contact, ContactFace, ContactLaw, ContactPair, ContactPoint, ContactState,
@@ -44,6 +45,7 @@ pub use elements::{
     Block, Element, Elements, Family, Hourglass, Isochoric, MAX_NODES, Material, Points,
     STATE_SIZE, Volumetric,
 };
+pub use guard::{GUARD_RATIO, Guard};
 pub use reduction::{Clusters, MAX_CLUSTER, Reduction, Sparse};
 
 /// The most time steps one [`Engine::run`] takes.
@@ -64,6 +66,9 @@ pub struct Setup<'a> {
     /// The contact pairs with the candidates of their last search, `None` without
     /// contact.
     pub contact: Option<(&'a Contact, Candidates<'a>)>,
+    /// The elements whose shortest distances watch the time step under large
+    /// deformations ([`Engine::departure`]), `None` under small ones.
+    pub guard: Option<&'a Guard>,
 }
 
 /// The state at the start of a run of steps: the reduced displacements, half-step
@@ -234,6 +239,32 @@ impl Engine {
         #[cfg(not(feature = "gpu"))]
         {
             let _ = material;
+            Err("built without graphics card support".to_owned())
+        }
+    }
+
+    /// Takes the squared lengths ([`Guard::lengths`]) that [`Self::departure`] compares
+    /// with.
+    pub fn guard_reference(&mut self, reference: &[f32]) -> Result<(), String> {
+        #[cfg(feature = "gpu")]
+        {
+            self.inner.guard_reference(reference)
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            let _ = reference;
+            Err("built without graphics card support".to_owned())
+        }
+    }
+
+    /// [`Guard::departure`] at the displacements on the card.
+    pub fn departure(&mut self) -> Result<f32, String> {
+        #[cfg(feature = "gpu")]
+        {
+            self.inner.departure()
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
             Err("built without graphics card support".to_owned())
         }
     }

@@ -2221,3 +2221,66 @@ fn a_block_hitting_a_shell_plate_on_the_graphics_card() {
         1e-3,
     );
 }
+
+/// A free steel cube (one C3D8, 10 mm) spinning at 10 rad/s about z: without NLGEOM the
+/// step warns once it has turned by more than about 6°, with NLGEOM it does not.
+#[test]
+fn a_spinning_cube_without_nlgeom_warns() {
+    let mut s = String::from("*Node\n");
+    let corners = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 1.0],
+        [1.0, 1.0, 1.0],
+        [0.0, 1.0, 1.0],
+    ];
+    for (i, c) in corners.iter().enumerate() {
+        writeln!(
+            s,
+            "{}, {}, {}, {}",
+            i + 1,
+            0.01 * c[0],
+            0.01 * c[1],
+            0.01 * c[2]
+        )
+        .unwrap();
+    }
+    s.push_str("*Element, Type=C3D8, Elset=EALL\n1, 1, 2, 3, 4, 5, 6, 7, 8\n");
+    writeln!(
+        s,
+        "*Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
+         *Solid section, Elset=EALL, Material=STEEL\n*Initial conditions, Type=Velocity"
+    )
+    .unwrap();
+    let omega = 10.0;
+    for (i, c) in corners.iter().enumerate() {
+        let (x, y) = (0.01 * (c[0] - 0.5), 0.01 * (c[1] - 0.5));
+        writeln!(
+            s,
+            "{}, 1, {}\n{}, 2, {}",
+            i + 1,
+            -omega * y,
+            i + 1,
+            omega * x
+        )
+        .unwrap();
+    }
+    s.push_str(
+        "*Nset, Nset=CORNER\n1\n*Step\n*Dynamic, Integration=Explicit\n0.005, 0.02\n\
+         *Node print, Nset=CORNER\nU\n*End step\n",
+    );
+    let dir = work_dir("turn-warning");
+    for (job, nlgeom) in [("small", false), ("large", true)] {
+        let input = if nlgeom {
+            s.replace("*Step\n", "*Step, Nlgeom\n")
+        } else {
+            s.clone()
+        };
+        let (_, log) = run(&dir, job, &input);
+        assert_eq!(log.contains("without NLGEOM"), !nlgeom, "{job}:\n{log}");
+    }
+    clean(&dir);
+}

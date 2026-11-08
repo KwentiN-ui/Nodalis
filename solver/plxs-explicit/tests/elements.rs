@@ -346,6 +346,7 @@ fn swing_with(nlgeom: bool, speed: f64, plastic: bool, hyper: bool, dense: bool)
         alpha,
         prescribed_motion: false,
         contact: None,
+        guard: None,
     };
     let mut engine = match Engine::new(&setup, true) {
         Ok(e) => e,

@@ -127,6 +127,7 @@ fn swing(constrained: bool) {
         alpha,
         prescribed_motion: constrained,
         contact: None,
+        guard: None,
     };
     let mut engine = match Engine::new(&setup, true) {
         Ok(e) => e,
