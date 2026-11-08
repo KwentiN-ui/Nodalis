@@ -217,7 +217,7 @@ fn threads_ui(ui: &mut egui::Ui, threads: &mut u32) {
 
 /// The graphics cards the solver finds, detected once on a thread of its own (a driver
 /// call that can take a moment) when the solver page is first shown.
-fn gpu_detection(ctx: &egui::Context) -> Option<&'static plxs_linalg::gpu::Detection> {
+pub(crate) fn gpu_detection(ctx: &egui::Context) -> Option<&'static plxs_linalg::gpu::Detection> {
     static DETECTION: std::sync::OnceLock<plxs_linalg::gpu::Detection> = std::sync::OnceLock::new();
     static STARTED: std::sync::Once = std::sync::Once::new();
     STARTED.call_once(|| {
