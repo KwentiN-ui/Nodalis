@@ -1353,3 +1353,67 @@ fn a_load_pulse_on_the_graphics_card_matches_the_processor() {
 fn time_steps_of_reduced_elements_on_the_graphics_card_match_the_processor() {
     gpu_matches_processor("C3D8R", "gpu-c3d8r", false);
 }
+
+/// A free S8R plate (100 × 100 mm, 1 mm) starting at 2 m/s normal to itself: the initial
+/// velocity of the shell nodes moves their expanded section, so the kinetic energy is
+/// `½ m v²` and the plate flies off without straining.
+#[test]
+fn a_shell_plate_keeps_its_initial_velocity() {
+    let (side, thickness, v0, cells) = (0.1, 0.001, 2.0, 4);
+    let h = side / (2 * cells) as f64;
+    let id = |i: usize, j: usize| j * (2 * cells + 1) + i + 1;
+    let mut input = String::from("*Node, Nset=NALL\n");
+    for j in 0..=2 * cells {
+        for i in 0..=2 * cells {
+            if i % 2 == 1 && j % 2 == 1 {
+                continue;
+            }
+            writeln!(input, "{}, {}, {}, 0", id(i, j), i as f64 * h, j as f64 * h).unwrap();
+        }
+    }
+    input.push_str("*Element, Type=S8R, Elset=EALL\n");
+    for b in 0..cells {
+        for a in 0..cells {
+            let (i, j) = (2 * a, 2 * b);
+            writeln!(
+                input,
+                "{}, {}, {}, {}, {}, {}, {}, {}, {}",
+                b * cells + a + 1,
+                id(i, j),
+                id(i + 2, j),
+                id(i + 2, j + 2),
+                id(i, j + 2),
+                id(i + 1, j),
+                id(i + 2, j + 1),
+                id(i + 1, j + 2),
+                id(i, j + 1)
+            )
+            .unwrap();
+        }
+    }
+    let period = 1e-5;
+    write!(
+        input,
+        "*Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
+         *Shell section, Elset=EALL, Material=STEEL\n{thickness}\n\
+         *Initial conditions, Type=Velocity\nNALL, 3, {v0}\n\
+         *Step\n*Dynamic, Integration=Explicit\n{period}, {period}\n\
+         *El print, Elset=EALL, Totals=Only\nALLIE, ALLKE\n*End step"
+    )
+    .unwrap();
+    let dir = work_dir("shell-velocity");
+    let (dat, log) = run(&dir, "shell-velocity", &input);
+    clean(&dir);
+    let last = |name: &str| blocks(&dat, name).last().unwrap().1[0][0];
+    let kinetic = last("total model kinetic energy");
+    let expected = 0.5 * RHO * side * side * thickness * v0 * v0;
+    assert!(
+        (kinetic - expected).abs() < 1e-6 * expected,
+        "kinetic energy {kinetic} J, expected {expected} J\n{log}"
+    );
+    let internal = last("total model internal energy");
+    assert!(
+        internal.abs() < 1e-9 * expected,
+        "internal energy {internal} J\n{log}"
+    );
+}

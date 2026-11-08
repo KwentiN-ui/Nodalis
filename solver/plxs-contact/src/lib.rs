@@ -1191,26 +1191,48 @@ impl Pair {
         if candidates.is_empty() {
             return None;
         }
-        let slave_nodes: HashSet<u32> = point.nodes.iter().copied().collect();
-        let mut best: Option<(f64, bool, u32, [f64; 2], geometry::FacePoint)> = None;
-        for &f in candidates {
-            let face = &self.master[f as usize];
-            if face.nodes.iter().any(|n| slave_nodes.contains(n)) {
-                continue;
+        // The candidates nearest first (by the bounding boxes of their nodes), so that a
+        // face the point projects into is found early and the faces whose box lies farther
+        // away than it need no projection.
+        let mut order: Vec<(f64, u32)> = candidates
+            .iter()
+            .filter(|&&f| {
+                !self.master[f as usize]
+                    .nodes
+                    .iter()
+                    .any(|n| point.nodes.contains(n))
+            })
+            .map(|&f| (self.master[f as usize].box_distance(current, x), f))
+            .collect();
+        order.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let mut best: Option<(f64, bool, u32, [f64; 2])> = None;
+        for (reach, f) in order {
+            if let Some((d, true, ..)) = best
+                && reach > d
+            {
+                break;
             }
-            let (natural, fp) = face.project(current, x);
-            let distance = geometry::norm(sub(x, fp.x));
+            let face = &self.master[f as usize];
+            let natural = face.project_natural(current, x);
+            let distance = geometry::norm(sub(x, face.point(current, natural)));
             let interior = face.is_interior(natural);
-            // Prefer a face the point projects into; among those the closest.
+            // Prefer a face the point projects into; among those the closest (the first of
+            // equally close ones in the order of the candidates).
             let better = match &best {
                 None => true,
-                Some((d, i, ..)) => (interior && !i) || (interior == *i && distance < *d),
+                Some((d, i, g, _)) => {
+                    (interior && !i)
+                        || (interior == *i && (distance < *d || (distance == *d && f < *g)))
+                }
             };
             if better {
-                best = Some((distance, interior, f, natural, fp));
+                best = Some((distance, interior, f, natural));
             }
         }
-        best.map(|(_, _, f, natural, fp)| (f, natural, fp, x))
+        best.map(|(_, _, f, natural)| {
+            let fp = self.master[f as usize].at(current, natural);
+            (f, natural, fp, x)
+        })
     }
 
     /// One point: its result and, when a spring exists, the element.
