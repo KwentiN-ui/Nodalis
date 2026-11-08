@@ -69,6 +69,7 @@ mod sketch;
 mod solution_monitor;
 mod solve_fingerprint;
 mod solver_check;
+mod solver_profile;
 mod sound;
 mod status;
 mod study;

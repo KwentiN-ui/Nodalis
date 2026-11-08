@@ -3549,6 +3549,7 @@ dependencies = [
  "plx-results",
  "plxs-core",
  "plxs-input",
+ "plxs-procedures",
  "plxs-session",
  "rayon",
  "windows-sys 0.61.2",

@@ -214,6 +214,16 @@ impl BackgroundSolve {
         self.before.len() + solver + self.after.len()
     }
 
+    /// Where the time of the solver went, once it has finished with results.
+    pub fn profile(&self) -> Option<plx_solve::JobProfile> {
+        self.analysis.as_ref()?.profile()
+    }
+
+    /// The steps solved, a line each, for the solver report.
+    pub fn step_lines(&self) -> &[String] {
+        self.analysis.as_ref().map_or(&[], Analysis::step_lines)
+    }
+
     /// The lines dropped from the front of the solver's output in a long run.
     pub fn dropped(&self) -> usize {
         self.analysis

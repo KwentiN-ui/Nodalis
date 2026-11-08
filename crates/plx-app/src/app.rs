@@ -570,6 +570,10 @@ impl AnalysisWindow {
         run.seconds = solve.seconds();
         run.progress = solve.progress();
         run.copy(&solve.output(), solve.output_total());
+        if run.profile.is_none() && !solve.active() {
+            run.profile = solve.profile();
+            run.steps = solve.step_lines().to_vec();
+        }
     }
 
     /// The project's solve is done: the analysis takes the mesh it made and the results it
