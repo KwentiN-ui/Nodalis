@@ -151,7 +151,17 @@ impl Procedure for HybridDynamic {
                     return other;
                 }
             }
-            // The damping is fitted once.
+            // The damping is fitted once. With rigid body or mechanism modes the implicit
+            // parts keep the stiffness-proportional damping they fitted and the explicit
+            // parts have none (mass-proportional damping would brake the free motion).
+            if let Some(rayleigh) = done.rigid_damping {
+                for (clone, keep) in [(&mut implicit_step, true), (&mut explicit_step, false)] {
+                    if let ProcedureKind::Dynamic(d) = &mut clone.procedure {
+                        d.damping_ratio = None;
+                        d.rayleigh = keep.then_some(rayleigh);
+                    }
+                }
+            }
             if let Some(lowest) = done.lowest {
                 for clone in [&mut implicit_step, &mut explicit_step] {
                     if let ProcedureKind::Dynamic(d) = &mut clone.procedure
@@ -169,6 +179,7 @@ impl Procedure for HybridDynamic {
                 start: done.reached,
                 first: false,
                 lowest: None,
+                rigid_damping: None,
                 ..done
             };
             if segment.start >= period - tolerance {
