@@ -52,7 +52,42 @@ pub enum Material {
         /// stress, the plastic slots of the state holding `C_p⁻¹ − 1`.
         finite: bool,
     },
+    /// A hyperelastic strain energy (the processor's `Hyperelastic`) of the Green-Lagrange
+    /// strain: the second Piola-Kirchhoff stress, no state variables.
+    Hyperelastic {
+        isochoric: Isochoric,
+        volumetric: Volumetric,
+    },
 }
+
+/// The isochoric part of a hyperelastic strain energy, as `*HYPERELASTIC` defines it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Isochoric {
+    /// `Σ C_ij (Ī1 − 3)^i (Ī2 − 3)^j` as `(i, j, C_ij)` (at most nine terms, `i + j ≤ 3`).
+    Polynomial(Vec<(i32, i32, f64)>),
+    /// Arruda-Boyce: `μ Σ_k c_k / λm^(2k−2) (Ī1^k − 3^k)`, five terms.
+    ArrudaBoyce { mu: f64, locking: f64 },
+    /// Ogden: `Σ 2 μ_p / α_p² (Σ_a λ̄_a^α_p − 3)` as `(μ_p, α_p)` (at most three).
+    Ogden(Vec<(f64, f64)>),
+}
+
+/// The volumetric part `U(J)` of a hyperelastic strain energy.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Volumetric {
+    /// `Σ (J − 1)^(2k) / D_k` holding `1 / D_k` (at most three).
+    Polynomial(Vec<f64>),
+    /// `((J² − 1) / 2 − ln J) / D` holding `1 / D`.
+    ArrudaBoyce(f64),
+}
+
+/// The coefficients of the inverse Langevin series in the Arruda-Boyce energy.
+pub(crate) const ARRUDA_BOYCE: [f64; 5] = [
+    0.5,
+    1.0 / 20.0,
+    11.0 / 1050.0,
+    19.0 / 7000.0,
+    519.0 / 673_750.0,
+];
 
 /// Value and slope of a piecewise linear curve, constant beyond its ends.
 fn curve(points: &[(f64, f64)], x: f64) -> (f64, f64) {
@@ -85,6 +120,10 @@ impl Material {
             Material::Elastic(d) => {
                 std::array::from_fn(|r| d[r].iter().zip(strain).map(|(a, b)| a * b).sum())
             }
+            Material::Hyperelastic {
+                isochoric,
+                volumetric,
+            } => hyperelastic(isochoric, volumetric, strain),
             Material::J2 {
                 shear,
                 bulk,
@@ -238,6 +277,113 @@ impl Radial<'_> {
         }
         (stress, flow)
     }
+}
+
+/// The second Piola-Kirchhoff stress of a hyperelastic energy for the Green-Lagrange strain
+/// (engineering components), as the processor's `Hyperelastic` (Holzapfel, sections 6.4 and
+/// 6.5) but formed from `M = C − 1`, so that single precision on the card holds small
+/// strains: `det C − 1 = tr M + I₂(M) + det M`, `C⁻¹ − 1 = (M² − (1 + tr M) M − det M) / det C`
+/// (Cayley-Hamilton) and the isochoric stress written without the identity's share.
+fn hyperelastic(isochoric: &Isochoric, volumetric: &Volumetric, e: &[f64; 6]) -> [f64; 6] {
+    let m = [
+        [2.0 * e[0], e[3], e[5]],
+        [e[3], 2.0 * e[1], e[4]],
+        [e[5], e[4], 2.0 * e[2]],
+    ];
+    let mm = multiply(&m, &m);
+    let tr = m[0][0] + m[1][1] + m[2][2];
+    let tr2 = mm[0][0] + mm[1][1] + mm[2][2];
+    let i2 = 0.5 * (tr * tr - tr2);
+    let det_m = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    let dm1 = tr + i2 + det_m;
+    let det = 1.0 + dm1;
+    if det.is_nan() || det <= 0.0 {
+        return [f64::NAN; 6];
+    }
+    let j = det.sqrt();
+    let jm1 = dm1 / (1.0 + j);
+    let pressure = j * match volumetric {
+        Volumetric::Polynomial(inverse) => (inverse.iter().enumerate())
+            .map(|(k, a)| {
+                let power = 2 * k as i32 + 2;
+                a * f64::from(power) * jm1.powi(power - 1)
+            })
+            .sum(),
+        Volumetric::ArrudaBoyce(a) => a * jm1 * (j + 1.0) / j,
+    };
+    let log_j = 0.5 * dm1.ln_1p();
+    let n: Mat3 = std::array::from_fn(|a| {
+        std::array::from_fn(|b| {
+            let identity = if a == b { 1.0 } else { 0.0 };
+            (mm[a][b] - (1.0 + tr) * m[a][b] - det_m * identity) / det
+        })
+    });
+    let s: Mat3 = match isochoric {
+        Isochoric::Ogden(terms) => {
+            let (values, v) = eigen(&m);
+            let mut tau = [pressure; 3];
+            for &(mu, alpha) in terms {
+                let p = values.map(|l| (alpha * (0.5 * l.ln_1p() - log_j / 3.0)).exp_m1());
+                let mean = (p[0] + p[1] + p[2]) / 3.0;
+                for a in 0..3 {
+                    tau[a] += 2.0 * mu / alpha * (p[a] - mean);
+                }
+            }
+            std::array::from_fn(|r| {
+                std::array::from_fn(|q| {
+                    (0..3)
+                        .map(|a| tau[a] / (1.0 + values[a]) * v[r][a] * v[q][a])
+                        .sum()
+                })
+            })
+        }
+        invariant => {
+            let j23m1 = (-2.0 / 3.0 * log_j).exp_m1();
+            let j43m1 = (-4.0 / 3.0 * log_j).exp_m1();
+            let j23 = 1.0 + j23m1;
+            // Ī1 − 3 and Ī2 − 3.
+            let x = 3.0 * j23m1 + j23 * tr;
+            let y = 3.0 * j43m1 + (1.0 + j43m1) * (2.0 * tr + i2);
+            let (w1, w2) = match invariant {
+                Isochoric::Polynomial(terms) => {
+                    let (mut w1, mut w2) = (0.0, 0.0);
+                    for &(i, k, c) in terms {
+                        if i > 0 {
+                            w1 += c * f64::from(i) * x.powi(i - 1) * y.powi(k);
+                        }
+                        if k > 0 {
+                            w2 += c * f64::from(k) * x.powi(i) * y.powi(k - 1);
+                        }
+                    }
+                    (w1, w2)
+                }
+                Isochoric::ArrudaBoyce { mu, locking } => {
+                    let i1 = 3.0 + x;
+                    let w1 = (ARRUDA_BOYCE.iter().enumerate())
+                        .map(|(k, c)| {
+                            mu * c / locking.powi(2 * k as i32) * (k + 1) as f64 * i1.powi(k as i32)
+                        })
+                        .sum();
+                    (w1, 0.0)
+                }
+                Isochoric::Ogden(_) => unreachable!(),
+            };
+            // S̄ = a 1 − b C; S = J^(−2/3) (S̄ − ⅓ (S̄ : C) C⁻¹) + p C⁻¹.
+            let a = 2.0 * (w1 + (3.0 + x) * w2);
+            let b = 2.0 * w2 * j23;
+            let share = b / 3.0 * (tr + tr2) - (a - b) * tr / 3.0;
+            std::array::from_fn(|r| {
+                std::array::from_fn(|q| {
+                    let identity = if r == q { 1.0 } else { 0.0 };
+                    let dev = -(a - b) * n[r][q] - b * m[r][q] + share * (identity + n[r][q]);
+                    j23 * dev + pressure * (identity + n[r][q])
+                })
+            })
+        }
+    };
+    vector(&s)
 }
 
 /// The symmetric matrix of tensor components `[xx, yy, zz, xy, yz, zx]`.
@@ -409,7 +555,7 @@ impl Elements {
             return Err("hourglass control for an element other than C3D8R".to_owned());
         }
         let state = match (&element.material, element.state) {
-            (Material::Elastic(_), _) => u32::MAX,
+            (Material::Elastic(_) | Material::Hyperelastic { .. }, _) => u32::MAX,
             (Material::J2 { .. }, Some(state)) if state < u32::MAX as usize => state as u32,
             (Material::J2 { .. }, _) => {
                 return Err("a plastic element without state variables".to_owned());

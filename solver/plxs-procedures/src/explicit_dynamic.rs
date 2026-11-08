@@ -2430,7 +2430,7 @@ fn gpu_engine(
 
 /// The elements for the kernels on the card, when every element and its material have one
 /// (solid elements whose displacement gradient is the sum of nodal gradients, elastic or
-/// J2 materials without creep, no constant blocks).
+/// J2 materials without creep, hyperelastic ones, no constant blocks).
 fn gpu_elements(
     ctx: &ProcedureContext<'_>,
     kernel: &Kernel<'_>,
@@ -2443,6 +2443,7 @@ fn gpu_elements(
     {
         return None;
     }
+    use plxs_materials::hyper::{Isochoric, Volumetric};
     let mut elements = plxs_explicit::Elements {
         nlgeom,
         ..Default::default()
@@ -2469,6 +2470,25 @@ fn gpu_elements(
                     finite,
                 },
                 Some(ctx.table.layout.offsets[index] as usize * STATE_SIZE),
+            ),
+            plxs_materials::KernelLaw::Hyperelastic {
+                isochoric,
+                volumetric,
+            } => (
+                plxs_explicit::Material::Hyperelastic {
+                    isochoric: match isochoric {
+                        Isochoric::Polynomial(t) => plxs_explicit::Isochoric::Polynomial(t),
+                        Isochoric::ArrudaBoyce { mu, locking } => {
+                            plxs_explicit::Isochoric::ArrudaBoyce { mu, locking }
+                        }
+                        Isochoric::Ogden(t) => plxs_explicit::Isochoric::Ogden(t),
+                    },
+                    volumetric: match volumetric {
+                        Volumetric::Polynomial(c) => plxs_explicit::Volumetric::Polynomial(c),
+                        Volumetric::ArrudaBoyce(a) => plxs_explicit::Volumetric::ArrudaBoyce(a),
+                    },
+                },
+                None,
             ),
         };
         let gradients = formulation.nodal_gradients(&coords, &elastic)?;

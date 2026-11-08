@@ -1,7 +1,7 @@
 //! Explicit time steps on the graphics card: central differences with a lumped mass for a
 //! model without contact (with the element kernels: elastic materials under small strains
-//! or large deformations, J2 plasticity at small or finite strains; with the matrices: linear
-//! models), by compute shaders through wgpu (Vulkan, DirectX 12 or Metal).
+//! or large deformations, J2 plasticity at small or finite strains, hyperelasticity; with
+//! the matrices: linear models), by compute shaders through wgpu (Vulkan, DirectX 12 or Metal).
 //!
 //! **Precision.** Consumer cards compute double precision at a fraction of the single
 //! precision rate (1/64 on an RTX 4070) and Metal has none. The state stays in double
@@ -38,7 +38,9 @@ mod gpu;
 mod sliced;
 
 mod elements;
-pub use elements::{Element, Elements, Family, Hourglass, MAX_NODES, Material, STATE_SIZE};
+pub use elements::{
+    Element, Elements, Family, Hourglass, Isochoric, MAX_NODES, Material, STATE_SIZE, Volumetric,
+};
 
 /// The most time steps one [`Engine::run`] takes.
 pub const MAX_CHUNK: usize = 256;

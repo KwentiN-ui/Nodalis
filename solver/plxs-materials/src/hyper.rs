@@ -29,7 +29,7 @@ use plxs_core::material::{Hyperelastic as Definition, HyperelasticModel, Materia
 use plxs_core::{Error, Result};
 
 use crate::finite::eigen_symmetric;
-use crate::{LinearElastic, MaterialInput, MaterialLaw, MaterialOutput};
+use crate::{KernelLaw, LinearElastic, MaterialInput, MaterialLaw, MaterialOutput};
 
 type Mat3 = [[f64; 3]; 3];
 
@@ -45,7 +45,7 @@ const ARRUDA_BOYCE: [f64; 5] = [
 
 /// The volumetric part `U(J)` of the strain energy.
 #[derive(Clone, Debug, PartialEq)]
-enum Volumetric {
+pub enum Volumetric {
     /// `Σ (J - 1)^(2k) / D_k`, holding `1 / D_k` (zero for a missing term).
     Polynomial(Vec<f64>),
     /// `((J² - 1) / 2 - ln J) / D`, holding `1 / D`.
@@ -86,7 +86,7 @@ impl Volumetric {
 
 /// The isochoric part of the strain energy.
 #[derive(Clone, Debug, PartialEq)]
-enum Isochoric {
+pub enum Isochoric {
     /// `Σ C_ij (Ī1 - 3)^i (Ī2 - 3)^j` as `(i, j, C_ij)`.
     Polynomial(Vec<(i32, i32, f64)>),
     /// `μ Σ_k c_k / λm^(2k-2) (Ī1^k - 3^k)`.
@@ -484,6 +484,13 @@ impl MaterialLaw for Hyperelastic {
 
     fn elastic_matrix(&self) -> [[f64; 6]; 6] {
         self.initial.matrix()
+    }
+
+    fn kernel_law(&self) -> Option<KernelLaw> {
+        Some(KernelLaw::Hyperelastic {
+            isochoric: self.isochoric.clone(),
+            volumetric: self.volumetric.clone(),
+        })
     }
 }
 
