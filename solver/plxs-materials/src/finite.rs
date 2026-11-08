@@ -194,7 +194,7 @@ impl MaterialLaw for FiniteStrainJ2 {
                 finite: true,
             }),
             // Hencky, not Saint Venant-Kirchhoff, inside the yield surface.
-            KernelLaw::Elastic => None,
+            KernelLaw::Elastic | KernelLaw::Hyperelastic { .. } => None,
         }
     }
 

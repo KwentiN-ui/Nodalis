@@ -163,8 +163,9 @@ Venant-Kirchhoff stress, and the bulk and hourglass viscosity in the deformed sh
 the processor. Every 100 time steps the card stops for the processor to check the stable
 time step of the deformed elements. Materials: elastic ones, and J2 plasticity (`*PLASTIC`,
 isotropic or kinematic hardening), under large deformations at finite strains as on the
-processor, whose state variables the card keeps in double precision. Creep and hyperelastic
-materials keep the time steps on the processor for now.
+processor, whose state variables the card keeps in double precision, and hyperelastic
+materials (`*HYPERELASTIC`, all strain energy models). Creep keeps the time steps on the
+processor for now.
 
 Most cards compute double precision far slower than single precision (a sixty-fourth on an
 RTX 4070), and Metal on macOS has none. The displacements, velocities, accelerations, loads

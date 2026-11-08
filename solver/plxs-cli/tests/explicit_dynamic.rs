@@ -1279,7 +1279,7 @@ fn run_with_gpu(dir: &Path, job: &str, input: &str, mode: &str) -> (String, Stri
 /// by a growing load: the same on the graphics card as on the processor. `how` is in the
 /// message that names the card: how it forms the forces.
 fn gpu_matches_processor(kind: &str, job: &str, pulse: bool, how: &str) {
-    gpu_matches_processor_with(kind, job, pulse, how, false, false);
+    gpu_matches_processor_with(kind, job, pulse, how, false, "elastic");
 }
 
 /// [`gpu_matches_processor`], under NLGEOM over ten times the time in three frames, with a
@@ -1291,17 +1291,24 @@ fn gpu_matches_processor_with(
     pulse: bool,
     how: &str,
     nlgeom: bool,
-    plastic: bool,
+    law: &str,
 ) {
-    let (speed, step) = match (nlgeom, plastic) {
+    let (speed, step) = match (nlgeom, law) {
         (true, _) => (50.0, "*Step, Nlgeom"),
-        (false, true) => (20.0, "*Step"),
-        (false, false) => (0.5, "*Step"),
+        (false, "plastic") => (20.0, "*Step"),
+        (false, _) => (0.5, "*Step"),
     };
-    let plasticity = if plastic {
-        "*Plastic\n300e6, 0\n350e6, 0.002\n450e6, 0.2\n"
-    } else {
-        ""
+    // Ogden rubber with the moduli of steel, so that the time step stays.
+    let (mu, bulk) = (E / 2.6, E / 1.2);
+    let material = match law {
+        "plastic" => format!("*Elastic\n{E}, 0.3\n*Plastic\n300e6, 0\n350e6, 0.002\n450e6, 0.2\n"),
+        "rubber" => format!(
+            "*Hyperelastic, Ogden, N=2\n{}, 1.3, {}, -2.0, {}, 0\n",
+            0.9 * mu,
+            0.1 * mu,
+            2.0 / bulk
+        ),
+        _ => format!("*Elastic\n{E}, 0.3\n"),
     };
     let (length, side, cells) = (0.1, 0.01, 20);
     let c = (E / RHO).sqrt();
@@ -1320,7 +1327,7 @@ fn gpu_matches_processor_with(
     };
     writeln!(
         input,
-        "*Material, Name=STEEL\n*Elastic\n{E}, 0.3\n{plasticity}*Density\n{RHO}\n\
+        "*Material, Name=STEEL\n{material}*Density\n{RHO}\n\
          *Solid section, Elset=EALL, Material=STEEL\n\
          *Amplitude, Name=RAMP\n{amplitude}\n\
          *Initial conditions, Type=Velocity\nALL, 2, {speed}\n\
@@ -1386,17 +1393,38 @@ fn time_steps_of_reduced_elements_on_the_graphics_card_match_the_processor() {
 
 #[test]
 fn large_deformations_on_the_graphics_card_match_the_processor() {
-    gpu_matches_processor_with("C3D8", "gpu-nlgeom", false, "element forces", true, false);
+    gpu_matches_processor_with(
+        "C3D8",
+        "gpu-nlgeom",
+        false,
+        "element forces",
+        true,
+        "elastic",
+    );
 }
 
 #[test]
 fn large_deformations_of_reduced_elements_on_the_graphics_card_match_the_processor() {
-    gpu_matches_processor_with("C3D8R", "gpu-nlgeom-r", true, "element forces", true, false);
+    gpu_matches_processor_with(
+        "C3D8R",
+        "gpu-nlgeom-r",
+        true,
+        "element forces",
+        true,
+        "elastic",
+    );
 }
 
 #[test]
 fn plastic_flow_on_the_graphics_card_matches_the_processor() {
-    gpu_matches_processor_with("C3D8R", "gpu-plastic", false, "element forces", false, true);
+    gpu_matches_processor_with(
+        "C3D8R",
+        "gpu-plastic",
+        false,
+        "element forces",
+        false,
+        "plastic",
+    );
 }
 
 /// Plasticity under NLGEOM: J2 at finite strains in the element kernels.
@@ -1408,7 +1436,20 @@ fn plastic_flow_under_nlgeom_on_the_graphics_card_matches_the_processor() {
         false,
         "element forces",
         true,
+        "plastic",
+    );
+}
+
+/// Hyperelastic (Ogden) under NLGEOM in the element kernels.
+#[test]
+fn rubber_on_the_graphics_card_matches_the_processor() {
+    gpu_matches_processor_with(
+        "C3D8",
+        "gpu-rubber",
+        false,
+        "element forces",
         true,
+        "rubber",
     );
 }
 

@@ -197,6 +197,11 @@ pub enum KernelLaw {
         /// elastic strain, the state's plastic slots holding `C_p⁻¹ − 1`.
         finite: bool,
     },
+    /// A hyperelastic strain energy ([`Hyperelastic`]), without state variables.
+    Hyperelastic {
+        isochoric: hyper::Isochoric,
+        volumetric: hyper::Volumetric,
+    },
 }
 
 impl MaterialLaw for LinearElastic {
