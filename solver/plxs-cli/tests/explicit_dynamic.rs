@@ -1196,6 +1196,38 @@ fn an_automatic_step_goes_explicit_through_the_impact_only() {
     assert!(!before.is_empty() && before.iter().all(|v| (v - v0).abs() < 1e-3 * v0));
 }
 
+/// A damping ratio on a model with a free body is fitted once in an automatic step, not
+/// again in every part.
+#[test]
+fn an_automatic_step_fits_its_damping_once() {
+    let (cells, v0) = (20, 1.0);
+    let duration = 2.0 * 0.1 / (E / RHO).sqrt();
+    let arrival = 30.0 * duration;
+    let period = arrival + 20.0 * duration;
+    let input = bar_on_wall(
+        "Node to surface",
+        cells,
+        arrival * v0,
+        v0,
+        period / 25.0,
+        period,
+    )
+    .replace("Integration=Explicit", "Integration=Automatic")
+    .replace(
+        "*Boundary\nWALLN",
+        "*Damping, Ratio=0.02, Upper=1e5\n*Boundary\nWALLN",
+    );
+    let dir = work_dir("automatic-damping");
+    let (_, log) = run(&dir, "automatic-damping", &input);
+    clean(&dir);
+    assert!(log.contains("automatic: explicit from"), "{log}");
+    assert_eq!(
+        log.matches("computing the lowest eigenfrequencies").count(),
+        1,
+        "{log}"
+    );
+}
+
 /// `SWITCH=0` keeps an automatic step implicit: the same results as an implicit step.
 #[test]
 fn an_automatic_step_with_switch_factor_zero_stays_implicit() {

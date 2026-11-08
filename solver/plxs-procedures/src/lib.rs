@@ -128,6 +128,9 @@ pub struct Segment {
     /// Out: the lowest eigenfrequency a damping ratio was fitted to, which the next parts
     /// take instead of computing it again.
     pub lowest: Option<f64>,
+    /// Out: the damping an implicit part fitted to a model with rigid body or mechanism
+    /// modes (stiffness-proportional only), which the next parts take as it is.
+    pub rigid_damping: Option<plxs_core::step::Rayleigh>,
 }
 
 /// A procedure computes a step on the context.
