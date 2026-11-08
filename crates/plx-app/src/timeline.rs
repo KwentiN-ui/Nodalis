@@ -123,6 +123,9 @@ pub fn layout(view: &ResultsView, width: f32) -> Layout {
     layout
 }
 
+/// The colour of the parts of a step integrated explicitly.
+const EXPLICIT: Color32 = Color32::from_rgb(206, 120, 52);
+
 /// The colour of a step's segment.
 fn family_color(family: StepFamily) -> Color32 {
     match family {
@@ -184,6 +187,36 @@ pub fn show(ui: &mut Ui, view: &ResultsView, hide: &mut bool) -> Option<usize> {
             painter.rect_filled(bar, 3.0, fill);
             if step.inherited_from.is_some() {
                 hatch(&painter, bar);
+            }
+        }
+        // The parts the solver integrated explicitly (automatic switching), with their
+        // name where it fits.
+        let span = step.end_time - step.start_time;
+        if span > 0.0 && step.is_timed() && !step.has_positions() {
+            let at = |t: f64| {
+                let fraction = ((t - step.start_time) / span).clamp(0.0, 1.0) as f32;
+                x(segment.left + fraction * (segment.right - segment.left))
+            };
+            let color = if shown {
+                EXPLICIT
+            } else {
+                EXPLICIT.gamma_multiply(0.6)
+            };
+            for &(from, to) in &step.explicit {
+                let part = Rect::from_min_max(
+                    pos2(at(from), bar.top()),
+                    pos2(at(to).max(at(from) + 2.0), bar.bottom()),
+                );
+                painter.rect_filled(part, 1.0, color);
+                if part.width() > 46.0 {
+                    painter.text(
+                        part.center(),
+                        Align2::CENTER_CENTER,
+                        "explicit",
+                        small.clone(),
+                        Color32::WHITE,
+                    );
+                }
             }
         }
         // The name above the segment, cut to its width.
@@ -365,6 +398,9 @@ pub fn tooltip(view: &ResultsView, index: usize) -> String {
             ));
         }
         match (place.attempts, place.iterations) {
+            (_, Some(steps)) if place.explicit => {
+                lines.push(format!("Explicit: {steps} time steps"))
+            }
             (Some(attempts), Some(iterations)) if attempts > 1 => lines.push(format!(
                 "Cut back: {attempts} attempts, {iterations} iterations"
             )),

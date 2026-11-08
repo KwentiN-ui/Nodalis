@@ -425,7 +425,9 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                             crate::DynamicMethod::Modal { modes } => {
                                 Some((Slot::Count(modes), ValueKind::Count))
                             }
-                            crate::DynamicMethod::Direct => None,
+                            crate::DynamicMethod::Direct
+                            | crate::DynamicMethod::Explicit
+                            | crate::DynamicMethod::Automatic => None,
                         };
                     }
                     return match (field, &mut d.damping) {

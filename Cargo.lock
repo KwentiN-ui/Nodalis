@@ -3445,6 +3445,7 @@ dependencies = [
  "plx-results",
  "plx-solve",
  "plxs-core",
+ "plxs-explicit",
  "plxs-linalg",
  "plxs-session",
  "png",
@@ -3572,6 +3573,7 @@ dependencies = [
  "plx-io",
  "plxs-core",
  "plxs-elements",
+ "plxs-explicit",
  "plxs-input",
  "plxs-linalg",
  "plxs-output",
@@ -3611,6 +3613,15 @@ name = "plxs-elements"
 version = "0.2.10"
 dependencies = [
  "plxs-core",
+]
+
+[[package]]
+name = "plxs-explicit"
+version = "0.2.10"
+dependencies = [
+ "bytemuck",
+ "pollster 1.0.1",
+ "wgpu",
 ]
 
 [[package]]
@@ -3663,7 +3674,9 @@ dependencies = [
  "plxs-contact",
  "plxs-core",
  "plxs-elements",
+ "plxs-explicit",
  "plxs-linalg",
+ "plxs-materials",
  "plxs-output",
  "rayon",
 ]

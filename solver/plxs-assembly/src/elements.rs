@@ -169,6 +169,7 @@ impl ElementTable {
         let mut membrane_of = vec![u32::MAX; model.elements.len()];
         let mut entry_of = Vec::with_capacity(model.elements.len());
         let mut discrete = Vec::new();
+        let mut inverted: Vec<u32> = Vec::new();
         for (index, element) in model.elements.iter().enumerate() {
             let family = element.kind.family();
             if matches!(family, ElementFamily::Spring | ElementFamily::Gap) {
@@ -339,6 +340,13 @@ impl ElementTable {
             };
             let nodes = Self::node_indices(model, element)?;
             let f = &formulations[formulation as usize];
+            let coords: Vec<[f64; 3]> = nodes
+                .iter()
+                .map(|&n| model.nodes.coordinates[n as usize])
+                .collect();
+            if f.inverted(&coords) {
+                inverted.push(element.id);
+            }
             for &n in &nodes {
                 connected[n as usize] = true;
                 uses_z[n as usize] |= f.uses_out_of_plane();
@@ -357,6 +365,28 @@ impl ElementTable {
                 dofs: dof_list,
                 density,
             });
+        }
+        if !inverted.is_empty() {
+            const SHOWN: usize = 10;
+            let mut list = inverted
+                .iter()
+                .take(SHOWN)
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            if inverted.len() > SHOWN {
+                list.push_str(&format!(" and {} more", inverted.len() - SHOWN));
+            }
+            return Err(Error::input(
+                "*ELEMENT",
+                format!(
+                    "{} element(s) turned inside out or folded (negative Jacobian at an \
+                     integration point): {list}; for shells and beams this is the solid they \
+                     are expanded to, check the element shape at sharp bends and curved \
+                     faces against the thickness and the offset",
+                    inverted.len()
+                ),
+            ));
         }
         // Nodes that multi-point constraints tie in (the original nodes and helper nodes of
         // expanded shells and beams, reference nodes) work through those constraints; their

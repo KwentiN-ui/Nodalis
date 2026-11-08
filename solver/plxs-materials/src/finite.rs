@@ -178,6 +178,19 @@ impl MaterialLaw for FiniteStrainJ2 {
         self.inner.elastic_matrix()
     }
 
+    /// The stress alone: one evaluation instead of the thirteen of the tangent's central
+    /// differences.
+    fn stress_without_tangent(
+        &self,
+        input: &MaterialInput,
+        state: &mut [f64],
+    ) -> ([f64; 6], [f64; 6]) {
+        (
+            self.evaluate(&input.strain, input, state, true).0,
+            input.strain,
+        )
+    }
+
     // Symmetrising a 6×6 array by index pairs reads better than iterator chains here.
     #[allow(clippy::needless_range_loop)]
     fn stress(&self, input: &MaterialInput, state: &mut [f64]) -> MaterialOutput {

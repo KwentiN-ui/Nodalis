@@ -399,7 +399,9 @@ pub fn format_event(event: &ProgressEvent) -> Vec<String> {
         }
         ProgressEvent::Warning(text) => vec![format!("*WARNING: {text}")],
         ProgressEvent::Info(text) => vec![format!(" *INFO: {text}")],
-        ProgressEvent::IncrementDone { .. } | ProgressEvent::StepDone { .. } => Vec::new(),
+        ProgressEvent::IncrementDone { .. }
+        | ProgressEvent::StepDone { .. }
+        | ProgressEvent::Integration { .. } => Vec::new(),
         ProgressEvent::JobDone => vec![" Job finished".into()],
     }
 }

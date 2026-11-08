@@ -2868,7 +2868,7 @@ impl Editor {
                 let sectors = (model.fe.cyclic_tie())
                     .and_then(|t| t.cyclic_sectors(&model.mesh))
                     .and_then(Result::ok);
-                step_form(ui, step, self.index, &model.fe, sectors);
+                step_form(ui, step, self.index, &model.fe, &model.mesh, sectors);
                 crate::connections::step_contacts(ui, &model.fe, step, self.index);
                 // The kind may have changed: the region picks what the new kind takes.
                 let (sources, target) = step_region_picks(&step.kind, &model.fe);
@@ -6031,6 +6031,7 @@ fn step_form(
     step: &mut Step,
     index: Option<usize>,
     fe: &FeModel,
+    mesh: &FeMesh,
     cyclic_sectors: Option<u32>,
 ) {
     let creating = index.is_none();
@@ -6040,6 +6041,11 @@ fn step_form(
         StepKind::Dynamic(settings) => Some(DynamicContext {
             amplitude_interval: fe.amplitude_interval(step, settings.duration),
             starts_from: dynamic_start(fe, index),
+            stable_step: settings
+                .method
+                .uses_explicit()
+                .then(|| stable_step_estimate(ui.ctx(), fe, mesh, !settings.full_shell_inertia))
+                .flatten(),
         }),
         _ => None,
     };
@@ -6203,6 +6209,35 @@ struct DynamicContext {
     amplitude_interval: Option<f64>,
     /// "rest", "the state at the end of step Preload", ...
     starts_from: String,
+    /// Explicit integration: the stable time step estimated from the mesh.
+    stable_step: Option<plx_model::StableStepEstimate>,
+}
+
+/// [`FeModel::explicit_time_step_estimate`], kept between frames of the dialog while the
+/// mesh, the sections and the materials stay.
+fn stable_step_estimate(
+    ctx: &egui::Context,
+    fe: &FeModel,
+    mesh: &FeMesh,
+    scaled_shells: bool,
+) -> Option<plx_model::StableStepEstimate> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    scaled_shells.hash(&mut hasher);
+    mesh.elements().len().hash(&mut hasher);
+    mesh.node_count().hash(&mut hasher);
+    format!("{:?}{:?}", fe.sections, fe.materials).hash(&mut hasher);
+    let key = hasher.finish();
+    let id = egui::Id::new("explicit stable step estimate");
+    type Cached = (u64, Option<plx_model::StableStepEstimate>);
+    if let Some((k, estimate)) = ctx.data(|d| d.get_temp::<Cached>(id))
+        && k == key
+    {
+        return estimate;
+    }
+    let estimate = fe.explicit_time_step_estimate(mesh, scaled_shells);
+    ctx.data_mut(|d| d.insert_temp::<Cached>(id, (key, estimate.clone())));
+    estimate
 }
 
 /// What a Dynamic step at `index` (`None`: a new one at the end) starts from: the state the
@@ -6222,7 +6257,16 @@ fn dynamic_start(fe: &FeModel, index: Option<usize>) -> String {
         .collect();
     let mut parts = Vec::new();
     if let Some(previous) = previous {
-        parts.push(format!("the state at the end of {}", previous.name));
+        // A Dynamic step before names its integration: the state (displacements,
+        // velocities, stresses, contact) carries over between implicit and explicit
+        // integration, the accelerations are found anew with this step's mass.
+        let method = match &previous.kind {
+            StepKind::Dynamic(d) if d.method.is_explicit() => " (explicit)",
+            StepKind::Dynamic(d) if matches!(d.method, DynamicMethod::Automatic) => " (automatic)",
+            StepKind::Dynamic(d) if matches!(d.method, DynamicMethod::Direct) => " (implicit)",
+            _ => "",
+        };
+        parts.push(format!("the state at the end of {}{method}", previous.name));
     }
     if !dynamic_before && !velocities.is_empty() {
         parts.push(format!("initial velocity {}", velocities.join(", ")));
@@ -6276,41 +6320,117 @@ fn dynamic_form(
     ));
     ui.end_row();
     let modal = matches!(settings.method, DynamicMethod::Modal { .. });
+    let explicit = settings.method.is_explicit();
     ui.label("");
     ui.add_enabled(
         !modal,
         egui::Checkbox::new(&mut settings.event_frames, "Frames at contact events"),
     )
-    .on_hover_text(
+    .on_hover_text(if explicit {
+        "Also a frame whenever a contact closes or opens (within a few time steps), \
+         between the evenly spaced frames."
+    } else {
         "Also a frame whenever a contact closes or opens and at the sub-steps of an \
-         impact, between the evenly spaced frames. Only with direct integration.",
-    );
+         impact, between the evenly spaced frames. Not with modal superposition."
+    });
     ui.end_row();
 
-    ui.label("Method").on_hover_text(
-        "Direct integration solves all equations in every time step and takes contact, \
-         large deformations and plasticity. Modal superposition computes the lowest \
-         eigenmodes first and integrates them exactly: every time step then costs almost \
-         nothing, for linear models.",
-    );
+    ui.label("Method").on_hover_text(settings.method.hint());
     egui::ComboBox::from_id_salt("dynamic method")
         .selected_text(settings.method.label())
         .show_ui(ui, |ui| {
-            let mut choice = modal;
-            ui.selectable_value(&mut choice, false, DynamicMethod::Direct.label());
-            ui.selectable_value(&mut choice, true, DynamicMethod::Modal { modes: 0 }.label());
-            if choice != modal {
-                settings.method = if choice {
-                    settings.large_deformations = false;
-                    DynamicMethod::Modal {
-                        modes: DynamicMethod::DEFAULT_MODES,
+            // 0 implicit, 1 explicit, 2 automatic, 3 modal.
+            let current = match settings.method {
+                DynamicMethod::Direct => 0,
+                DynamicMethod::Explicit => 1,
+                DynamicMethod::Automatic => 2,
+                DynamicMethod::Modal { .. } => 3,
+            };
+            let mut choice = current;
+            for (i, method) in [
+                DynamicMethod::Direct,
+                DynamicMethod::Explicit,
+                DynamicMethod::Automatic,
+                DynamicMethod::Modal { modes: 0 },
+            ]
+            .iter()
+            .enumerate()
+            {
+                ui.selectable_value(&mut choice, i, method.label())
+                    .on_hover_text(method.hint());
+            }
+            if choice != current {
+                settings.method = match choice {
+                    0 => DynamicMethod::Direct,
+                    1 => DynamicMethod::Explicit,
+                    2 => DynamicMethod::Automatic,
+                    _ => {
+                        settings.large_deformations = false;
+                        DynamicMethod::Modal {
+                            modes: DynamicMethod::DEFAULT_MODES,
+                        }
                     }
-                } else {
-                    DynamicMethod::Direct
                 };
             }
         });
     ui.end_row();
+    let automatic = matches!(settings.method, DynamicMethod::Automatic);
+    if explicit || automatic {
+        match &context.stable_step {
+            Some(estimate) => {
+                let scaled = settings.mass_scaling.filter(|t| *t > estimate.time_step);
+                let steps = (settings.duration / scaled.unwrap_or(estimate.time_step)).ceil();
+                let place = match estimate.thickness {
+                    Some(t) => format!(
+                        "{}, {} thickness",
+                        estimate.section,
+                        shown(t, units, Quantity::Length)
+                    ),
+                    None => estimate.section.clone(),
+                };
+                ui.label("");
+                if automatic {
+                    let factor = settings
+                        .switch_factor
+                        .unwrap_or(DynamicStep::DEFAULT_SWITCH_FACTOR);
+                    let explicit_step = scaled.unwrap_or(estimate.time_step);
+                    ui.weak(if factor > 0.0 {
+                        format!(
+                            "Stable time step ~ {} ({place}),\nexplicit where implicit steps \
+                             fall below {}",
+                            shown(explicit_step, units, Quantity::Time),
+                            shown(factor * explicit_step, units, Quantity::Time)
+                        )
+                    } else {
+                        "Switch factor 0: implicit throughout".into()
+                    });
+                } else {
+                    ui.weak(format!(
+                        "Stable time step ~ {} ({place}),\n{}about {} steps for the duration",
+                        shown(estimate.time_step, units, Quantity::Time),
+                        match scaled {
+                            Some(t) =>
+                                format!("{} with mass scaling, ", shown(t, units, Quantity::Time)),
+                            None => String::new(),
+                        },
+                        numeric::fit(steps, |t| t.len() <= 8)
+                    ));
+                }
+                ui.end_row();
+                if steps > 1e6 && explicit {
+                    ui.label("");
+                    ui.weak("Consider a shorter duration or\nmass scaling (Advanced).");
+                    ui.end_row();
+                }
+            }
+            None if explicit => {
+                ui.label("");
+                ui.weak("The solver finds the time step from the mesh.");
+                ui.end_row();
+            }
+            None => {}
+        }
+    }
     if let DynamicMethod::Modal { modes } = &mut settings.method {
         ui.label("    Modes").on_hover_text(
             "The lowest eigenmodes superposed. The highest of them must lie above the \
@@ -6400,6 +6520,10 @@ fn dynamic_form(
                 ui.label("        Upper frequency");
                 ui.add(numeric::physical(f2, units, Quantity::Frequency));
                 ui.end_row();
+            } else if explicit {
+                ui.label("");
+                ui.weak("At the lowest eigenfrequency, mass-\nproportional (explicit)");
+                ui.end_row();
             } else {
                 ui.label("");
                 ui.weak(format!(
@@ -6437,7 +6561,7 @@ fn dynamic_form(
          with modal superposition.",
     );
     ui.end_row();
-    if settings.large_deformations {
+    if settings.large_deformations && !explicit {
         ui.label("");
         ui.weak("Time steps are split where needed.");
         ui.end_row();
@@ -6452,7 +6576,10 @@ fn dynamic_form(
     let custom = settings.time_step != TimeStep::Automatic
         || settings.frequency_limit.is_some()
         || settings.numerical_damping != NumericalDamping::Normal
-        || settings.solver != LinearSolverChoice::Automatic;
+        || settings.solver != LinearSolverChoice::Automatic
+        || ((explicit || automatic)
+            && (settings.mass_scaling.is_some() || settings.full_shell_inertia))
+        || (automatic && settings.switch_factor.is_some());
     let mut advanced = ui.data(|d| d.get_temp(id)).unwrap_or(custom);
     ui.label("");
     ui.checkbox(&mut advanced, "Advanced settings");
@@ -6463,10 +6590,12 @@ fn dynamic_form(
         let mut fixed = matches!(settings.time_step, TimeStep::Fixed(_));
         ui.horizontal(|ui| {
             ui.radio_value(&mut fixed, false, "Automatic")
-                .on_hover_text(
+                .on_hover_text(if explicit {
+                    "The stable time step of the mesh."
+                } else {
                     "Short enough for the frames, a tenth of the shortest segment of the \
-                 amplitudes the loads follow, and the frequency limit.",
-                );
+                 amplitudes the loads follow, and the frequency limit."
+                });
             ui.radio_value(&mut fixed, true, "At most");
         });
         ui.end_row();
@@ -6482,35 +6611,102 @@ fn dynamic_form(
             ui.add(numeric::physical(dt, units, Quantity::Time));
             ui.end_row();
         }
-        ui.label("Max. frequency").on_hover_text(
-            "The time step resolves vibrations up to this frequency with 20 steps per period. \
-             Higher ones are damped out by the numerical damping.",
-        );
-        let mut limited = settings.frequency_limit.is_some();
-        let mut limit =
-            (settings.frequency_limit).unwrap_or_else(|| integration.resolved_frequency());
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut limited, "");
-            ui.add_enabled(
-                limited,
-                numeric::physical(&mut limit, units, Quantity::Frequency),
+        if automatic {
+            ui.label("Switch factor").on_hover_text(
+                "Implicit time steps shorter than this many stable explicit time steps go \
+                 on explicitly: an implicit step costs about as much as 30 to 100 explicit \
+                 ones. 0 never switches; a large value switches at the first impact.",
             );
-        });
-        ui.end_row();
-        settings.frequency_limit = limited.then_some(limit);
-        ui.label("Numerical damping").on_hover_text(
-            "Removes the high frequencies the time step cannot resolve. Normal damps them \
-             slightly, None conserves the energy, Strong damps them as much as possible.",
-        );
-        egui::ComboBox::from_id_salt("numerical damping")
-            .selected_text(settings.numerical_damping.label())
-            .show_ui(ui, |ui| {
-                for choice in NumericalDamping::ALL {
-                    ui.selectable_value(&mut settings.numerical_damping, choice, choice.label());
-                }
+            let mut factor = settings
+                .switch_factor
+                .unwrap_or(DynamicStep::DEFAULT_SWITCH_FACTOR);
+            ui.add(
+                numeric::drag_value(&mut factor)
+                    .range(0.0..=1e6)
+                    .speed(1.0)
+                    .max_decimals(3),
+            );
+            ui.end_row();
+            settings.switch_factor =
+                (factor != DynamicStep::DEFAULT_SWITCH_FACTOR).then_some(factor);
+        }
+        if explicit || automatic {
+            ui.label("Mass scaling").on_hover_text(
+                "Elements whose stable time step is shorter than this one get the mass that \
+                 lifts it there (small or thin elements). The solver reports the mass added; \
+                 above a few per cent of the model it changes the response.",
+            );
+            let mut scaled = settings.mass_scaling.is_some();
+            let mut target = settings.mass_scaling.unwrap_or_else(|| {
+                context
+                    .stable_step
+                    .as_ref()
+                    .map_or(settings.frame_interval(), |e| 2.0 * e.time_step)
             });
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut scaled, "To time step");
+                ui.add_enabled(
+                    scaled,
+                    numeric::physical(&mut target, units, Quantity::Time),
+                );
+            });
+            ui.end_row();
+            settings.mass_scaling = scaled.then_some(target);
+            ui.label("Shell inertia").on_hover_text(
+                "Scaled: shells get more inertia in their thickness modes only (stretch, \
+                 shear and rotation through the thickness), so that their thickness does \
+                 not set the time step; translations and the mass stay as they are. Full: \
+                 the whole inertia, with a time step several times shorter for thin shells.",
+            );
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut settings.full_shell_inertia, false, "Scaled");
+                ui.radio_value(&mut settings.full_shell_inertia, true, "Full");
+            });
+            ui.end_row();
+        }
+        if !explicit {
+            ui.label("Max. frequency").on_hover_text(
+                "The time step resolves vibrations up to this frequency with 20 steps per period. \
+             Higher ones are damped out by the numerical damping.",
+            );
+            let mut limited = settings.frequency_limit.is_some();
+            let mut limit =
+                (settings.frequency_limit).unwrap_or_else(|| integration.resolved_frequency());
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut limited, "");
+                ui.add_enabled(
+                    limited,
+                    numeric::physical(&mut limit, units, Quantity::Frequency),
+                );
+            });
+            ui.end_row();
+            settings.frequency_limit = limited.then_some(limit);
+            ui.label("Numerical damping").on_hover_text(
+                "Removes the high frequencies the time step cannot resolve. Normal damps them \
+             slightly, None conserves the energy, Strong damps them as much as possible.",
+            );
+            egui::ComboBox::from_id_salt("numerical damping")
+                .selected_text(settings.numerical_damping.label())
+                .show_ui(ui, |ui| {
+                    for choice in NumericalDamping::ALL {
+                        ui.selectable_value(
+                            &mut settings.numerical_damping,
+                            choice,
+                            choice.label(),
+                        );
+                    }
+                });
+            ui.end_row();
+            solver_row(ui, &mut settings.solver);
+        }
+    }
+    if explicit {
+        ui.label("");
+        ui.weak(
+            "Loads act at once; give a load an\namplitude for a ramp or pulse.\nMaterials need a density.",
+        );
         ui.end_row();
-        solver_row(ui, &mut settings.solver);
+        return;
     }
     // Recomputed: the settings may have changed above.
     let integration = settings.integration(context.amplitude_interval);

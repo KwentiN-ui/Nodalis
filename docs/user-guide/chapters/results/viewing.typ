@@ -138,6 +138,11 @@ results with a single increment have none.
 #screenshot("results-timeline.png", [The timeline of three static steps and a frequency step
   with the frequency of each mode])
 
+In a Dynamic step with #ui("Automatic (implicit/explicit)") (@dynamic-automatic) the parts the
+solver integrated explicitly are orange, labelled #ui("explicit") where they are wide enough;
+the rest of the step was integrated implicitly. Hovering over an increment of an explicit part
+tells how many explicit time steps it took instead of the iterations.
+
 #screenshot("results-step-list.png", [The #ui("Step") list: each step of the FE model with its kind,
   its increments and the time it covers])
 

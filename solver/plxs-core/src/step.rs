@@ -325,7 +325,12 @@ pub struct Dynamic {
     pub solver: EquationSolver,
     /// `ALPHA=`: numerical damping of the HHT-alpha integration (`-1/3..0`).
     pub alpha: Option<f64>,
-    pub explicit: bool,
+    /// How the equation of motion is integrated over time (`INTEGRATION=`, Nodalis; ccx's
+    /// `EXPLICIT` reads as [`Integration::Explicit`]).
+    #[serde(default)]
+    pub integration: Integration,
+    /// Implicit: the time increments. Explicit: `initial` is the interval of the result
+    /// frames; the time step follows from the stability of the mesh.
     pub increments: Incrementation,
     /// `*DAMPING, ALPHA=, BETA=` in the step: Rayleigh damping.
     pub rayleigh: Option<Rayleigh>,
@@ -339,6 +344,54 @@ pub struct Dynamic {
     /// into, so the results show the contact events between the frames.
     #[serde(default)]
     pub event_frames: bool,
+}
+
+/// How a `*DYNAMIC` step integrates the equation of motion.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum Integration {
+    /// The α-method of Hilber, Hughes and Taylor with Newton iterations where the model is
+    /// nonlinear: unconditionally stable, one equation system per increment.
+    #[default]
+    Implicit,
+    /// Central differences with a lumped mass: many small time steps below the stability
+    /// limit of the mesh, no equation system.
+    Explicit(ExplicitControls),
+    /// Implicit while the motion is smooth, explicit through impacts and where the
+    /// implicit increments would have to become tiny.
+    Automatic {
+        explicit: ExplicitControls,
+        /// Implicit sub-increments below this multiple of the stable explicit time step
+        /// switch to explicit (`SWITCH=`; 0 never switches).
+        switch_factor: f64,
+    },
+}
+
+impl Integration {
+    /// The default factor of [`Integration::Automatic`].
+    pub const DEFAULT_SWITCH_FACTOR: f64 = 30.0;
+
+    /// The explicit controls of an explicit or automatic step.
+    pub fn explicit(&self) -> Option<&ExplicitControls> {
+        match self {
+            Integration::Implicit => None,
+            Integration::Explicit(c) | Integration::Automatic { explicit: c, .. } => Some(c),
+        }
+    }
+}
+
+/// What the explicit integration of a step may be told.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ExplicitControls {
+    /// `MASS SCALING=`: elements whose stable time step lies below this target get the mass
+    /// that lifts them to it.
+    pub mass_scaling: Option<f64>,
+    /// `TIME STEP=`: the time step is at most this long (the stable one if shorter).
+    pub time_step: Option<f64>,
+    /// `SHELL INERTIA=FULL`: no selective mass scaling of expanded shells (by default the
+    /// inertia of their thickness modes is raised so that the thickness does not limit the
+    /// time step).
+    #[serde(default)]
+    pub full_shell_inertia: bool,
 }
 
 /// A damping ratio fitted as Rayleigh damping between two frequencies (cycles per time).

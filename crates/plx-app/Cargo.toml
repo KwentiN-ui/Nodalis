@@ -34,6 +34,7 @@ plx-solve.workspace = true
 plxs-core.workspace = true
 # The multigrid cycle of the iterative solver on a discrete graphics card.
 plxs-linalg = { workspace = true, features = ["gpu"] }
+plxs-explicit = { workspace = true, features = ["gpu"] }
 png.workspace = true
 rfd.workspace = true
 ron.workspace = true

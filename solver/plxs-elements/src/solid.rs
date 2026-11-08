@@ -416,6 +416,15 @@ impl SolidElement {
         cartesian_gradients(&self.reference_gradients[ip], coords)
     }
 
+    /// Whether a three-dimensional element is turned inside out or folded: its Jacobian
+    /// determinant is zero or negative at an integration point. Its stiffness then has
+    /// negative eigenvalues, an implicit solution diverges and an explicit one grows without
+    /// bound. Plane and axisymmetric elements are not checked (`false`).
+    pub fn inverted(&self, coords: &[[f64; 3]]) -> bool {
+        self.expansion.is_none()
+            && (0..self.rule.points.len()).any(|ip| self.rule_point(ip, coords).0 <= 0.0)
+    }
+
     /// Element volume (of the full circumference for axisymmetric elements).
     pub fn volume(&self, coords: &[[f64; 3]]) -> f64 {
         if let Some(x) = &self.expansion {
@@ -1047,6 +1056,29 @@ mod tests {
     }
 
     #[test]
+    fn a_folded_element_is_inverted() {
+        for kind in all_kinds() {
+            let e = solid(kind).unwrap();
+            let coords = match e.family {
+                Family::Hex8 | Family::Hex20 => unit_cube(e.family),
+                _ => reference(e.family),
+            };
+            assert!(!e.inverted(&coords), "{kind}");
+            // Mirrored: turned inside out.
+            let mirrored: Vec<[f64; 3]> = coords.iter().map(|c| [-c[0], c[1], c[2]]).collect();
+            assert!(e.inverted(&mirrored), "{kind}");
+        }
+        // A brick whose top face is pushed through its bottom on one side only: positive
+        // at some integration points, negative at others.
+        let e = solid(ElementType::C3D8).unwrap();
+        let mut coords = unit_cube(Family::Hex8);
+        for c in coords.iter_mut().filter(|c| c[2] > 0.5 && c[0] > 0.5) {
+            c[2] = -2.0;
+        }
+        assert!(e.inverted(&coords));
+    }
+
+    #[test]
     fn volumes_are_right() {
         for kind in all_kinds() {
             let e = solid(kind).unwrap();
@@ -1392,6 +1424,50 @@ impl SolidElement {
         full.rule = rule;
         full.formulation = formulation;
         Some(full)
+    }
+
+    /// The volume of the element and the volume average of its shape function gradients
+    /// as a row over its DOFs (`g[3a + c] = (1/V) ∫ ∂N_a/∂x_c dV`), in the reference
+    /// configuration: `g · v` is the mean volumetric strain rate of the nodal velocities
+    /// `v`, and `V (g · v) g` the nodal forces of a unit pressure rate (the linear bulk
+    /// viscosity of explicit time integration). Plane and axisymmetric elements average over
+    /// their expanded element and return the row on their 2D DOFs and the volume of the
+    /// thickness or the full circumference.
+    pub fn volume_mean_gradients(&self, coords: &[[f64; 3]]) -> (f64, Vec<f64>) {
+        let expanded;
+        let (coords3, x) = match self.expansion.as_deref() {
+            Some(x) => {
+                expanded = x.coordinates(coords);
+                (expanded.as_slice(), Some(x))
+            }
+            None => (coords, None),
+        };
+        let rule = self.mass_rule();
+        let nodes = self.family.node_count();
+        let mut g3 = vec![0.0; 3 * nodes];
+        let mut volume = 0.0;
+        for (&p, &w) in rule.points.iter().zip(&rule.weights) {
+            let point = self.point(p, coords3);
+            let dv = point.det * w;
+            volume += dv;
+            for (a, d) in point.dndx.iter().enumerate() {
+                for c in 0..3 {
+                    g3[3 * a + c] += dv * d[c];
+                }
+            }
+        }
+        if volume > 0.0 {
+            g3.iter_mut().for_each(|g| *g /= volume);
+        }
+        match x {
+            None => (volume, g3),
+            Some(x) => {
+                let mut g2 = vec![0.0; self.dof_count()];
+                x.condense_vector(&g3, &mut g2);
+                g2.iter_mut().for_each(|g| *g /= x.scale);
+                (volume * x.scale, g2)
+            }
+        }
     }
 
     /// Consistent mass matrix (row-major `3n × 3n`) for the density `rho`:

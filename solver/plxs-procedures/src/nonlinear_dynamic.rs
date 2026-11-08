@@ -193,6 +193,9 @@ struct Failed {
     reason: String,
     /// The contact status changed in one of the last iterations.
     contact_changing: bool,
+    /// Not failed: the increment would have to be split below the shortest sub-increment
+    /// of an automatic step's implicit part, which goes on explicitly.
+    switch: bool,
 }
 
 impl Procedure for NonlinearDynamic {
@@ -207,9 +210,9 @@ impl Procedure for NonlinearDynamic {
                 "NonlinearDynamic needs a *DYNAMIC step".into(),
             ));
         };
-        if parameters.explicit {
+        if parameters.integration != plxs_core::step::Integration::Implicit {
             return Err(Error::Unsupported(format!(
-                "procedure not implemented yet: *DYNAMIC, EXPLICIT (step {})",
+                "NonlinearDynamic integrates implicitly only (step {})",
                 step.name
             )));
         }
@@ -228,7 +231,12 @@ impl Procedure for NonlinearDynamic {
         ctx.table.require_elastic()?;
         let scheme = Scheme::of(parameters);
         let n = ctx.table.dofs.len();
-        let start_total = ctx.state.total_time;
+        // A part of a step that switches between the integrators: from `start` to `end` of
+        // the step time, on the state the part before it ended with.
+        let segment = ctx.segment.clone();
+        let (start, end) = segment.as_ref().map_or((0.0, period), |s| (s.start, s.end));
+        let shortest = segment.as_ref().map_or(0.0, |s| s.shortest);
+        let start_total = ctx.state.total_time - start;
 
         let started = std::time::Instant::now();
         if ctx.stiffness.is_none() {
@@ -256,8 +264,10 @@ impl Procedure for NonlinearDynamic {
         )));
         // Contact: *MODEL CHANGE / *CHANGE FRICTION of the step, then a contact state per
         // slave point.
-        for warning in ctx.contact.begin_step(step, ctx.state) {
-            progress.event(ProgressEvent::Warning(warning));
+        if segment.as_ref().is_none_or(|s| s.first) {
+            for warning in ctx.contact.begin_step(step, ctx.state) {
+                progress.event(ProgressEvent::Warning(warning));
+            }
         }
         let has_contact = ctx.contact.is_active();
 
@@ -290,7 +300,20 @@ impl Procedure for NonlinearDynamic {
             set.reduced_len()
         )));
         let rayleigh = match parameters.damping_ratio {
-            Some(ratio) => fit_damping(ctx, &set, &k0, &m, ratio, parameters.solver, progress)?,
+            Some(ratio) => {
+                let fitted = fit_damping(ctx, &set, &k0, &m, ratio, parameters.solver, progress)?;
+                // An automatic step fits its damping once.
+                if let Some(segment) = ctx.segment.as_mut() {
+                    if fitted.alpha > 0.0 && fitted.beta > 0.0 {
+                        let w2 = std::f64::consts::TAU * ratio.upper;
+                        segment.lowest =
+                            Some(fitted.alpha / (fitted.beta * w2) / std::f64::consts::TAU);
+                    } else if ratio.lower.is_none() {
+                        segment.rigid_damping = Some(fitted);
+                    }
+                }
+                fitted
+            }
             None => {
                 let r = parameters.rayleigh.unwrap_or_default();
                 if r.alpha != 0.0 || r.beta != 0.0 {
@@ -316,7 +339,10 @@ impl Procedure for NonlinearDynamic {
             spc_dofs: spc_end.dofs.clone(),
             active,
             large_rotations,
-            previous: ctx.state.displacements.values.clone(),
+            previous: match &segment {
+                Some(s) => s.previous.clone(),
+                None => ctx.state.displacements.values.clone(),
+            },
             start_total,
             period,
             discrete: table.discrete.iter().collect(),
@@ -351,14 +377,14 @@ impl Procedure for NonlinearDynamic {
         {
             motion.u = initial_values(ctx.model, ctx.table, &ctx.model.initial.displacements);
         }
-        let (load, warnings) = load_at(ctx, step, 0.0, start_total, period)?;
+        let (load, warnings) = load_at(ctx, step, start, start_total, period)?;
         for warning in warnings {
             progress.event(ProgressEvent::Warning(warning));
         }
         let at_start = assemble_nonlinear(
             ctx.table,
             ctx.model,
-            &input(step, &motion.u, initial, start_total),
+            &input(step, &motion.u, initial, start_total + start),
             ctx.state,
             None,
         );
@@ -418,14 +444,14 @@ impl Procedure for NonlinearDynamic {
 
         let kinetic = 0.5 * dot(&motion.v, &multiply(&setup.m, &motion.v));
         let mut state = At {
-            time: 0.0,
+            time: start,
             internal: internal.clone(),
             damping: cv_start,
             energies: Energies {
                 internal: 0.5 * dot(&motion.u, &internal),
                 kinetic,
-                external_work: 0.0,
-                dissipation: 0.0,
+                external_work: segment.as_ref().map_or(0.0, |s| s.external_work),
+                dissipation: segment.as_ref().map_or(0.0, |s| s.dissipation),
             },
             motion,
             load,
@@ -467,9 +493,11 @@ impl Procedure for NonlinearDynamic {
         let mut increment = 0u32;
         // The number of the frames written (the increments of the results): the events of
         // an increment take numbers of their own before it.
-        let mut record = 0u32;
+        let mut record = segment.as_ref().map_or(0, |s| s.record);
         let mut events: Vec<At> = Vec::new();
-        while state.time < period * (1.0 - 1e-12) {
+        // Why an automatic step's implicit part stopped early.
+        let mut stopped: Option<String> = None;
+        'increments: while state.time < end - period * 1e-12 {
             if ctx.cancel.is_cancelled() {
                 return Ok(StepOutcome::Cancelled);
             }
@@ -489,12 +517,12 @@ impl Procedure for NonlinearDynamic {
                 size = (size * 1.5).min(maximum);
             }
             let (last, t1) = if increments.direct {
-                let end = increment as f64 * size;
-                let last = end >= period * (1.0 - 1e-9);
-                (last, if last { period } else { end })
+                let to = start + increment as f64 * size;
+                let last = to >= end - period * 1e-9;
+                (last, if last { end } else { to })
             } else {
-                let last = size >= (period - state.time) * (1.0 - 1e-9);
-                (last, if last { period } else { state.time + size })
+                let last = size >= (end - state.time) - period * 1e-9;
+                (last, if last { end } else { state.time + size })
             };
             let total = start_total + t1;
             progress.event(ProgressEvent::Increment {
@@ -509,6 +537,13 @@ impl Procedure for NonlinearDynamic {
             // when one of them is too coarse for the motion.
             let from_time = state.time;
             let (next, iterations) = loop {
+                if shortest > 0.0 && (t1 - from_time) / f64::from(parts) < shortest {
+                    stopped = Some(format!(
+                        "the implicit increments would have to be shorter than {} s",
+                        short(shortest)
+                    ));
+                    break 'increments;
+                }
                 let started = std::time::Instant::now();
                 let mut current = state.clone();
                 events.clear();
@@ -543,7 +578,15 @@ impl Procedure for NonlinearDynamic {
                             // the modes the time step does not resolve settle there (the
                             // numerical damping takes them out of the equilibrium start),
                             // which is no error of the motion.
-                            if error > ACCURACY && parts < ACCURACY_PARTS && increment > 1 {
+                            // An automatic step's implicit part takes the accuracy it gets
+                            // at its shortest increments (the switch is for increments that
+                            // must be short, not for those that resolve a vibration).
+                            let finer = (t1 - from_time) / f64::from(2 * parts);
+                            if error > ACCURACY
+                                && parts < ACCURACY_PARTS
+                                && increment > 1
+                                && finer >= shortest
+                            {
                                 too_coarse = true;
                                 break;
                             }
@@ -573,6 +616,14 @@ impl Procedure for NonlinearDynamic {
                     continue;
                 }
                 if let Some(failed) = failure {
+                    if shortest > 0.0 {
+                        stopped = Some(if failed.switch {
+                            failed.reason
+                        } else {
+                            format!("{} (implicit)", failed.reason)
+                        });
+                        break 'increments;
+                    }
                     return Ok(StepOutcome::Diverged {
                         increment,
                         failure: plxs_core::Failure::NoConvergence(Convergence {
@@ -701,8 +752,16 @@ impl Procedure for NonlinearDynamic {
         ctx.state.loads = None;
         ctx.state.stresses = state.stresses;
         ctx.state.strains = state.strains;
+        let reached = state.time;
+        if let Some(s) = ctx.segment.as_mut() {
+            s.record = record;
+            s.reached = reached;
+            s.external_work = state.energies.external_work;
+            s.dissipation = state.energies.dissipation;
+            s.stopped = stopped;
+        }
         ctx.state.material = state.material;
-        ctx.state.total_time = start_total + period;
+        ctx.state.total_time = start_total + reached;
         ctx.state.steps_done = ctx.step_number;
         Ok(StepOutcome::Converged)
     }
@@ -1172,6 +1231,28 @@ fn advance(
         });
     }
     let middle = from.time + split * (t1 - from.time);
+    // An automatic step goes on explicitly rather than in sub-increments this short: an
+    // interval that halves would fall below the shortest (a cut before a predicted impact
+    // may leave one piece shorter, which costs one increment only).
+    let shortest = ctx.segment.as_ref().map_or(0.0, |s| s.shortest);
+    if shortest > 0.0 && t1 - from.time < 2.0 * shortest {
+        return Ok(Err(Failed {
+            cause: Divergence::TooSlow,
+            reason: if cut == 0 {
+                format!(
+                    "an impact needs implicit increments shorter than {} s",
+                    short(shortest)
+                )
+            } else {
+                format!(
+                    "the implicit increments would have to be shorter than {} s",
+                    short(shortest)
+                )
+            },
+            contact_changing: false,
+            switch: true,
+        }));
+    }
     let next = (depth + 1, cuts + cut);
     let (half, first) = match advance(
         ctx, setup, equations, progress, from, middle, increment, next, events,
@@ -1469,6 +1550,7 @@ fn attempt(
                 cause: Divergence::NotFinite,
                 reason: "an element is turned inside out (the residual is not finite)".into(),
                 contact_changing: changing,
+                switch: false,
             }));
         }
         let largest = |x: &[f64]| x.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
@@ -1620,6 +1702,7 @@ fn attempt(
                     cause: Divergence::IterationLimit,
                     reason: format!("no convergence after {MAX_ITERATIONS} iterations"),
                     contact_changing: changing,
+                    switch: false,
                 }));
             }
             // A held tangent whose iteration did not halve the residual is assembled afresh
@@ -1741,6 +1824,7 @@ fn attempt(
                 cause: Divergence::NotFinite,
                 reason: "the solution correction is not finite".into(),
                 contact_changing: changing,
+                switch: false,
             }));
         }
         for (ui, d) in u.iter_mut().zip(&du) {

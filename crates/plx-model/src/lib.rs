@@ -85,7 +85,7 @@ pub use detection::{
     auto_detection_tolerance, auto_geometry_detection_tolerance,
 };
 pub use distribution::{Distribution, DistributionKind, Interpolation, Sampler, parse_points};
-pub use dynamic::{Integration, RayleighFit, StepLimit};
+pub use dynamic::{Integration, RayleighFit, StableStepEstimate, StepLimit};
 pub use element_type::{PartElementType, element_type_options};
 pub use exposed::{Exposed, Field, ItemRef, ValuePath};
 pub use features::{
@@ -1211,6 +1211,20 @@ pub struct DynamicStep {
     /// rigid bodies turn by finite angles. Off, the motion is linear (small deformations).
     #[serde(default)]
     pub large_deformations: bool,
+    /// Explicit integration: the stable time step mass scaling raises the elements to
+    /// (they get the mass that needs); `None` scales nothing.
+    #[serde(default)]
+    pub mass_scaling: Option<f64>,
+    /// Automatic method: implicit time steps shorter than this multiple of the stable
+    /// explicit time step go on explicitly; `None` takes the default
+    /// ([`DynamicStep::DEFAULT_SWITCH_FACTOR`]), 0 never switches.
+    #[serde(default)]
+    pub switch_factor: Option<f64>,
+    /// Explicit integration: expanded shells keep the whole inertia of their thickness
+    /// modes. Off (the default), the solver raises it so that the thickness does not set
+    /// the time step (selective mass scaling; translations unchanged).
+    #[serde(default)]
+    pub full_shell_inertia: bool,
 }
 
 fn default_true() -> bool {
@@ -1230,6 +1244,9 @@ impl Default for DynamicStep {
             numerical_damping: NumericalDamping::Normal,
             solver: LinearSolverChoice::Automatic,
             large_deformations: false,
+            mass_scaling: None,
+            switch_factor: None,
+            full_shell_inertia: false,
         }
     }
 }
@@ -1237,6 +1254,10 @@ impl Default for DynamicStep {
 impl DynamicStep {
     /// The most frames a step may keep.
     pub const MAX_FRAMES: u32 = 100_000;
+
+    /// The switch factor of the Automatic method when none is given: an implicit time step
+    /// costs about as much as 30 to 100 explicit ones.
+    pub const DEFAULT_SWITCH_FACTOR: f64 = 30.0;
 
     /// What is wrong with the settings, if anything.
     pub fn problem(&self) -> Option<String> {
@@ -1255,6 +1276,20 @@ impl DynamicStep {
             return Some(
                 "A fixed time step must be greater than 0 and no longer than the duration.".into(),
             );
+        }
+        if let Some(t) = self.mass_scaling
+            && !(t > 0.0 && t <= self.duration)
+        {
+            return Some(
+                "The mass scaling time step must be greater than 0 and no longer than the \
+                 duration."
+                    .into(),
+            );
+        }
+        if let Some(k) = self.switch_factor
+            && !(k >= 0.0 && k.is_finite())
+        {
+            return Some("The switch factor must be 0 or greater.".into());
         }
         if let Some(f) = self.frequency_limit
             && (f.is_nan() || f <= 0.0)
@@ -1312,6 +1347,13 @@ pub enum DynamicMethod {
     /// exact in the modes it has; the modes must reach above the frequencies the loads
     /// excite.
     Modal { modes: u32 },
+    /// Explicit integration (central differences, lumped mass): many small time steps
+    /// below the stability limit of the mesh, no equation system. For impacts, crashes and
+    /// drop tests with buckling and plasticity.
+    Explicit,
+    /// Implicit while the motion is smooth, explicit through impacts and wherever the
+    /// implicit time steps would have to become tiny; the solver switches within the step.
+    Automatic,
 }
 
 impl DynamicMethod {
@@ -1320,9 +1362,45 @@ impl DynamicMethod {
 
     pub fn label(&self) -> &'static str {
         match self {
-            DynamicMethod::Direct => "Direct integration",
+            DynamicMethod::Direct => "Implicit (direct integration)",
             DynamicMethod::Modal { .. } => "Modal superposition",
+            DynamicMethod::Explicit => "Explicit",
+            DynamicMethod::Automatic => "Automatic (implicit/explicit)",
         }
+    }
+
+    /// What the method is for, as the dialog explains it.
+    pub fn hint(&self) -> &'static str {
+        match self {
+            DynamicMethod::Direct => {
+                "Large implicit time steps with an equation system each: smooth motions, \
+                 vibrations, slow drop tests. Takes contact, large deformations and plasticity."
+            }
+            DynamicMethod::Modal { .. } => {
+                "Superposes the lowest eigenmodes: fine steps and long durations of linear \
+                 models come cheap."
+            }
+            DynamicMethod::Explicit => {
+                "Thousands of tiny time steps without equation solving: impacts, crashes, drop \
+                 tests with buckling and plasticity. Each step must be shorter than a wave \
+                 needs to cross the smallest element; the estimate is shown below."
+            }
+            DynamicMethod::Automatic => {
+                "Implicit while the motion is smooth, explicit through impacts and wherever the \
+                 implicit time steps would have to become tiny: a drop, a hit, then the slow \
+                 motion afterwards. The output and the solver log show where it switched."
+            }
+        }
+    }
+
+    /// Whether the method integrates explicitly.
+    pub fn is_explicit(&self) -> bool {
+        matches!(self, DynamicMethod::Explicit)
+    }
+
+    /// Whether the method integrates explicitly at least in parts of the step.
+    pub fn uses_explicit(&self) -> bool {
+        matches!(self, DynamicMethod::Explicit | DynamicMethod::Automatic)
     }
 }
 

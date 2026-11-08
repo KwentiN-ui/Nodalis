@@ -156,6 +156,17 @@ pub trait MaterialLaw: Send + Sync {
     ) -> (MaterialOutput, [f64; 6]) {
         (self.stress(input, state), input.strain)
     }
+    /// [`MaterialLaw::stress_and_strain`] without the tangent: the stress and its strain,
+    /// for an explicit integration, which never needs a tangent. Laws whose tangent costs
+    /// more than their stress give a cheaper version.
+    fn stress_without_tangent(
+        &self,
+        input: &MaterialInput,
+        state: &mut [f64],
+    ) -> ([f64; 6], [f64; 6]) {
+        let (output, strain) = self.stress_and_strain(input, state);
+        (output.stress, strain)
+    }
     /// The elastic matrix (for hourglass control and incompatible modes).
     fn elastic_matrix(&self) -> [[f64; 6]; 6];
 }

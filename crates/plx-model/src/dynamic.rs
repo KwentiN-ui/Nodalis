@@ -268,3 +268,170 @@ mod tests {
         assert_eq!(model.amplitude_interval(&step, 1.0), Some(0.001));
     }
 }
+
+/// A rough stable time step of explicit integration, from the mesh and the materials
+/// (the solver computes the exact one from the element eigenvalues): the characteristic
+/// length of the elements (see [`characteristic_length`]), or the node spacing through a
+/// shell's thickness (expanded shells have their nodes there, unless the solver scales the
+/// inertia of their thickness modes), divided by the dilatational wave speed, with the
+/// solver's safety factor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StableStepEstimate {
+    pub time_step: f64,
+    /// The section whose elements limit it.
+    pub section: String,
+    /// The shell thickness when the spacing through it limits the step.
+    pub thickness: Option<f64>,
+}
+
+impl FeModel {
+    /// See [`StableStepEstimate`]; `None` without sections that have an elastic material
+    /// with a density. `scaled_shells`: the solver scales the inertia of the shells'
+    /// thickness modes, the spacing through the thickness does not count.
+    pub fn explicit_time_step_estimate(
+        &self,
+        mesh: &plx_mesh::FeMesh,
+        scaled_shells: bool,
+    ) -> Option<StableStepEstimate> {
+        use crate::SectionKind;
+        use plx_mesh::ElementShape;
+        let mut best: Option<StableStepEstimate> = None;
+        for section in &self.sections {
+            let Some(material) = self.materials.iter().find(|m| m.name == section.material) else {
+                continue;
+            };
+            let (Some(rho), Some(elastic)) = (material.density, material.elastic.as_ref()) else {
+                continue;
+            };
+            let nu = elastic.poisson.clamp(-0.99, 0.499);
+            let modulus = elastic.young * (1.0 - nu) / ((1.0 + nu) * (1.0 - 2.0 * nu));
+            if !(rho > 0.0 && modulus > 0.0) {
+                continue;
+            }
+            let speed = (modulus / rho).sqrt();
+            let mut shortest = f64::INFINITY;
+            let mut through_thickness = None;
+            for id in section.region.elements(mesh) {
+                let Some(element) = mesh.element(id) else {
+                    continue;
+                };
+                let coords: Vec<[f64; 3]> =
+                    element.nodes.iter().filter_map(|&n| mesh.node(n)).collect();
+                if let Some(length) = characteristic_length(element.shape, &coords)
+                    && length < shortest
+                {
+                    shortest = length;
+                    through_thickness = None;
+                }
+                if let SectionKind::Shell { thickness, .. } = section.kind
+                    && !scaled_shells
+                {
+                    let quadratic =
+                        matches!(element.shape, ElementShape::Tri6 | ElementShape::Quad8);
+                    let spacing = if quadratic {
+                        0.41 * thickness
+                    } else {
+                        thickness
+                    };
+                    if spacing > 0.0 && spacing < shortest {
+                        shortest = spacing;
+                        through_thickness = Some(thickness);
+                    }
+                }
+            }
+            if !shortest.is_finite() {
+                continue;
+            }
+            let time_step = SAFETY * shortest / speed;
+            if best.as_ref().is_none_or(|b| time_step < b.time_step) {
+                best = Some(StableStepEstimate {
+                    time_step,
+                    section: section.name.clone(),
+                    thickness: through_thickness,
+                });
+            }
+        }
+        best
+    }
+}
+
+/// The fraction of the stable time step the solver takes (with its bulk viscosity).
+const SAFETY: f64 = 0.85;
+
+/// The length a wave crosses in an element's stable time step: the smallest altitude of a
+/// tetrahedron or triangle, the shortest edge of other shapes (both from the corners), and
+/// for quadratic elements 0.41 of it (the midside nodes carry two thirds of the lumped
+/// mass of an edge: a quadratic bar element of length `L` has `Δt = 0.41 L/c`); 0.3 for
+/// the ten-node tetrahedron, whose corners keep very little of the lumped mass (checked
+/// against the solver's element eigenvalues on a C3D10 cantilever).
+pub fn characteristic_length(shape: plx_mesh::ElementShape, coords: &[[f64; 3]]) -> Option<f64> {
+    use plx_mesh::ElementShape::*;
+    let sub = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let cross = |a: [f64; 3], b: [f64; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let norm = |a: [f64; 3]| (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+    let (corners, quadratic) = match shape {
+        Line2 => (2, false),
+        Line3 => (2, true),
+        Tri3 => (3, false),
+        Tri6 => (3, true),
+        Quad4 => (4, false),
+        Quad8 => (4, true),
+        Tet4 => (4, false),
+        Tet10 => (4, true),
+        Wedge6 => (6, false),
+        Wedge15 => (6, true),
+        Hex8 => (8, false),
+        Hex20 => (8, true),
+    };
+    if coords.len() < corners {
+        return None;
+    }
+    let c = &coords[..corners];
+    let length = match shape {
+        Tet4 | Tet10 => {
+            let volume = (sub(c[1], c[0])
+                .iter()
+                .zip(cross(sub(c[2], c[0]), sub(c[3], c[0])))
+                .map(|(a, b)| a * b)
+                .sum::<f64>()
+                / 6.0)
+                .abs();
+            let faces = [[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]];
+            let largest = faces
+                .iter()
+                .map(|f| 0.5 * norm(cross(sub(c[f[1]], c[f[0]]), sub(c[f[2]], c[f[0]]))))
+                .fold(0.0_f64, f64::max);
+            (largest > 0.0).then(|| 3.0 * volume / largest)?
+        }
+        Tri3 | Tri6 => {
+            let area = 0.5 * norm(cross(sub(c[1], c[0]), sub(c[2], c[0])));
+            let longest = (0..3)
+                .map(|i| norm(sub(c[(i + 1) % 3], c[i])))
+                .fold(0.0_f64, f64::max);
+            (longest > 0.0).then(|| 2.0 * area / longest)?
+        }
+        _ => {
+            let mut shortest = f64::INFINITY;
+            for (i, a) in c.iter().enumerate() {
+                for b in &c[i + 1..] {
+                    let d = norm(sub(*a, *b));
+                    if d > 0.0 {
+                        shortest = shortest.min(d);
+                    }
+                }
+            }
+            shortest.is_finite().then_some(shortest)?
+        }
+    };
+    Some(match shape {
+        Tet10 => 0.3 * length,
+        _ if quadratic => 0.41 * length,
+        _ => length,
+    })
+}
