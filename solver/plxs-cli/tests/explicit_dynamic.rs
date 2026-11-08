@@ -131,6 +131,48 @@ fn bar_mesh(nx: usize, ny: usize, nz: usize, size: [f64; 3], kind: &str) -> Stri
     s
 }
 
+/// A strip of `nx × ny` four-node plane or axisymmetric elements over `size` starting at
+/// `x0`, with the node sets ALL, END0 (x = x0) and END1 (the far end).
+fn plane_mesh(nx: usize, ny: usize, x0: f64, size: [f64; 2], kind: &str) -> String {
+    let id = |i: usize, j: usize| 1 + i + (nx + 1) * j;
+    let mut s = String::from("*Node, Nset=ALL\n");
+    for j in 0..=ny {
+        for i in 0..=nx {
+            writeln!(
+                s,
+                "{}, {}, {}, 0",
+                id(i, j),
+                x0 + size[0] * i as f64 / nx as f64,
+                size[1] * j as f64 / ny as f64
+            )
+            .unwrap();
+        }
+    }
+    writeln!(s, "*Element, Type={kind}, Elset=EALL").unwrap();
+    let mut e = 0;
+    for j in 0..ny {
+        for i in 0..nx {
+            e += 1;
+            writeln!(
+                s,
+                "{e}, {}, {}, {}, {}",
+                id(i, j),
+                id(i + 1, j),
+                id(i + 1, j + 1),
+                id(i, j + 1)
+            )
+            .unwrap();
+        }
+    }
+    for (name, i) in [("END0", 0), ("END1", nx)] {
+        writeln!(s, "*Nset, Nset={name}").unwrap();
+        for j in 0..=ny {
+            writeln!(s, "{},", id(i, j)).unwrap();
+        }
+    }
+    s
+}
+
 const E: f64 = 2.1e11;
 const RHO: f64 = 7850.0;
 
@@ -1318,7 +1360,17 @@ fn gpu_matches_processor_with(
     } else {
         (3.0 * length / c, 30)
     };
-    let mut input = bar_mesh(cells, 2, 2, [length, side, side], kind);
+    let plane = kind.starts_with("CP") || kind.starts_with("CA");
+    let mut input = if plane {
+        plane_mesh(cells, 2, 0.05, [length, side], kind)
+    } else {
+        bar_mesh(cells, 2, 2, [length, side, side], kind)
+    };
+    let thickness = if plane && !kind.starts_with("CA") {
+        format!("{side}\n")
+    } else {
+        String::new()
+    };
     // A pulse has corners inside the frames, which the chunks on the card must not cut.
     let amplitude = if pulse {
         format!("0, 0, {}, 1, {}, 0", 0.137 * period, 0.291 * period)
@@ -1328,7 +1380,7 @@ fn gpu_matches_processor_with(
     writeln!(
         input,
         "*Material, Name=STEEL\n{material}*Density\n{RHO}\n\
-         *Solid section, Elset=EALL, Material=STEEL\n\
+         *Solid section, Elset=EALL, Material=STEEL\n{thickness}\
          *Amplitude, Name=RAMP\n{amplitude}\n\
          *Initial conditions, Type=Velocity\nALL, 2, {speed}\n\
          {step}\n*Dynamic, Integration=Explicit\n{}, {period}\n\
@@ -1457,10 +1509,52 @@ fn rubber_on_the_graphics_card_matches_the_processor() {
     );
 }
 
-/// The incompatible modes have no element kernel yet: the matrices.
+/// The incompatible modes: dense operators.
 #[test]
 fn time_steps_of_incompatible_modes_on_the_graphics_card_match_the_processor() {
-    gpu_matches_processor("C3D8I", "gpu-c3d8i", false, "motion within a frame");
+    gpu_matches_processor("C3D8I", "gpu-c3d8i", false, "element forces");
+}
+
+#[test]
+fn large_deformations_of_incompatible_modes_on_the_graphics_card_match_the_processor() {
+    gpu_matches_processor_with(
+        "C3D8I",
+        "gpu-c3d8i-nl",
+        false,
+        "element forces",
+        true,
+        "elastic",
+    );
+}
+
+/// Plane strain, plane stress and axisymmetric elements (the reduced ones with their
+/// condensed hourglass stiffness): dense operators.
+#[test]
+fn plane_elements_on_the_graphics_card_match_the_processor() {
+    for kind in ["CPE4", "CPS4R", "CAX4R"] {
+        gpu_matches_processor(kind, &format!("gpu-{kind}"), false, "element forces");
+    }
+}
+
+#[test]
+fn plane_elements_under_nlgeom_on_the_graphics_card_match_the_processor() {
+    for (kind, law) in [
+        ("CPE4", "plastic"),
+        ("CPE4R", "elastic"),
+        ("CAX4", "elastic"),
+        ("CAX4R", "plastic"),
+        ("CPS4", "elastic"),
+        ("CPS4R", "elastic"),
+    ] {
+        gpu_matches_processor_with(
+            kind,
+            &format!("gpu-{kind}-nl"),
+            false,
+            "element forces",
+            true,
+            law,
+        );
+    }
 }
 
 /// A free S8R plate (100 × 100 mm, 1 mm) starting at 2 m/s normal to itself: the initial

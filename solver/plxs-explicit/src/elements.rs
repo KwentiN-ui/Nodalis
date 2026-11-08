@@ -462,14 +462,40 @@ fn eigen(m: &Mat3) -> ([f64; 3], Mat3) {
     ([a[0][0], a[1][1], a[2][2]], v)
 }
 
+/// The displacement gradients of an element's integration points.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Points {
+    /// `H = Σ_a u_a ⊗ ∇N_a`: per point the volume and the shape function derivatives per
+    /// node.
+    Nodal(Vec<(f64, Vec<[f64; 3]>)>),
+    /// A general operator `H_kc = Σ_j L[(3k + c) · ndof + j] u_j` (the incompatible-mode
+    /// brick, the expanded plane and axisymmetric elements): per point the volume and `L`.
+    Dense(Vec<(f64, Vec<f64>)>),
+}
+
+impl Points {
+    pub fn len(&self) -> usize {
+        match self {
+            Points::Nodal(p) => p.len(),
+            Points::Dense(p) => p.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// One element.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Element {
     /// Three per node.
     pub dofs: Vec<u32>,
-    /// Per integration point: the volume it stands for and the shape function derivatives
-    /// per node.
-    pub points: Vec<(f64, Vec<[f64; 3]>)>,
+    /// Per integration point the volume it stands for and its displacement gradient.
+    pub points: Points,
+    /// A constant stiffness to add (row-major, three DOFs per node squared): the condensed
+    /// hourglass control of a reduced plane or axisymmetric element.
+    pub matrix: Option<Vec<f64>>,
     pub material: Material,
     /// With a material that has state variables: the index of the first one of its first
     /// point in the material state ([`STATE_SIZE`] per point, the points in a row).
@@ -487,16 +513,25 @@ pub struct Family {
     pub nodes: usize,
     pub points: usize,
     pub hourglass: bool,
+    /// General operators ([`Points::Dense`]) instead of nodal gradients.
+    pub dense: bool,
+    /// A constant stiffness per element ([`Element::matrix`]).
+    pub matrix: bool,
     pub count: usize,
     /// `count × 3 nodes`.
     pub dofs: Vec<u32>,
-    /// Per element and point the volume, then the derivatives node by node:
-    /// `count × points × (1 + 3 nodes)`.
+    /// Per element and point ([`Family::point_size`] values) the volume, then
+    /// - nodal: the derivatives node by node;
+    /// - dense: the operator's response to a unit translation in each direction
+    ///   (`Σ_a L[(3k + c) · ndof + 3a + d]` at `9 d + 3k + c`, so that the displacements
+    ///   relative to the first node give the gradient), then `L` row by row.
     pub gradients: Vec<f64>,
     /// Per element `c V`, then `g`: `count × (1 + 3 nodes)`.
     pub viscosity: Vec<f64>,
     /// Per element `ε`, `κ`, then the coordinates relative to the first node:
-    /// `count × (2 + 3 nodes)`, empty without hourglass control.
+    /// `count × (2 + 3 nodes)` with hourglass control; with a constant stiffness `K`
+    /// (row-major) and its response to unit translations (`Σ_a K[i · ndof + 3a + d]` at
+    /// `ndof² + d · ndof + i`): `count × (ndof² + 3 ndof)`; else empty.
     pub control: Vec<f64>,
     /// Per element its index into [`Elements::materials`].
     pub material: Vec<u32>,
@@ -509,7 +544,23 @@ pub struct Family {
 impl Family {
     /// Values per element and point in [`Family::gradients`].
     pub fn point_size(&self) -> usize {
-        1 + 3 * self.nodes
+        if self.dense {
+            1 + 27 + 27 * self.nodes
+        } else {
+            1 + 3 * self.nodes
+        }
+    }
+
+    /// Values per element in [`Family::control`].
+    pub fn control_size(&self) -> usize {
+        let nd = 3 * self.nodes;
+        if self.hourglass {
+            2 + nd
+        } else if self.matrix {
+            nd * nd + 3 * nd
+        } else {
+            0
+        }
     }
 }
 
@@ -536,21 +587,29 @@ impl Elements {
     /// Adds an element to the family of its shape. `Err` when it does not fit the kernels.
     pub fn push(&mut self, element: Element) -> Result<(), String> {
         let nodes = element.dofs.len() / 3;
+        let nd = 3 * nodes;
         let points = element.points.len();
+        let shaped = match &element.points {
+            Points::Nodal(p) => p.iter().all(|(_, g)| g.len() == nodes),
+            Points::Dense(p) => p.iter().all(|(_, l)| l.len() == 9 * nd),
+        };
         if nodes == 0
-            || element.dofs.len() != 3 * nodes
+            || element.dofs.len() != nd
             || points == 0
-            || element.points.iter().any(|(_, g)| g.len() != nodes)
-            || element.mean.len() != 3 * nodes
+            || !shaped
+            || element.mean.len() != nd
+            || element.matrix.as_ref().is_some_and(|m| m.len() != nd * nd)
         {
             return Err("an element of unexpected shape".to_owned());
         }
+        let dense = matches!(element.points, Points::Dense(_));
+        let matrix = element.matrix.is_some();
         if nodes > MAX_NODES {
             return Err(format!("an element of {nodes} nodes"));
         }
         let hourglass = element.hourglass.is_some();
         if let Some(h) = &element.hourglass
-            && (nodes != 8 || points != 1 || h.coordinates.len() != 8)
+            && (nodes != 8 || points != 1 || h.coordinates.len() != 8 || dense || matrix)
         {
             return Err("hourglass control for an element other than C3D8R".to_owned());
         }
@@ -568,17 +627,21 @@ impl Elements {
                 self.materials.len() - 1
             }
         } as u32;
-        let family = match self
-            .families
-            .iter()
-            .position(|f| f.nodes == nodes && f.points == points && f.hourglass == hourglass)
-        {
+        let family = match self.families.iter().position(|f| {
+            f.nodes == nodes
+                && f.points == points
+                && f.hourglass == hourglass
+                && f.dense == dense
+                && f.matrix == matrix
+        }) {
             Some(i) => &mut self.families[i],
             None => {
                 self.families.push(Family {
                     nodes,
                     points,
                     hourglass,
+                    dense,
+                    matrix,
                     ..Default::default()
                 });
                 self.families.last_mut().expect("pushed")
@@ -586,15 +649,44 @@ impl Elements {
         };
         family.count += 1;
         family.dofs.extend_from_slice(&element.dofs);
-        for (w, g) in &element.points {
-            family.gradients.push(*w);
-            family.gradients.extend(g.iter().flatten());
+        match &element.points {
+            Points::Nodal(p) => {
+                for (w, g) in p {
+                    family.gradients.push(*w);
+                    family.gradients.extend(g.iter().flatten());
+                }
+            }
+            Points::Dense(p) => {
+                for (w, l) in p {
+                    family.gradients.push(*w);
+                    for d in 0..3 {
+                        for r in 0..9 {
+                            let row = &l[r * nd..(r + 1) * nd];
+                            family
+                                .gradients
+                                .push((0..nodes).map(|a| row[3 * a + d]).sum::<f64>());
+                        }
+                    }
+                    family.gradients.extend_from_slice(l);
+                }
+            }
         }
         family.viscosity.push(element.bulk);
         family.viscosity.extend_from_slice(&element.mean);
         family.material.push(material);
         family.state.push(state);
         family.history |= state != u32::MAX;
+        if let Some(k) = &element.matrix {
+            family.control.extend_from_slice(k);
+            for d in 0..3 {
+                for i in 0..nd {
+                    let row = &k[i * nd..(i + 1) * nd];
+                    family
+                        .control
+                        .push((0..nodes).map(|a| row[3 * a + d]).sum::<f64>());
+                }
+            }
+        }
         if let Some(h) = element.hourglass {
             family.control.push(h.stiffness);
             family.control.push(h.viscosity);
@@ -637,6 +729,7 @@ impl Elements {
                 // The current volume and `V g` of the fully integrated elements.
                 let mut current = (0.0, vec![0.0; nd]);
                 let mut reference = 0.0;
+                let u0: [f64; 3] = std::array::from_fn(|d| u[dofs[d] as usize]);
                 for ip in 0..family.points {
                     let at = (e * family.points + ip) * size;
                     let w = family.gradients[at];
@@ -647,12 +740,18 @@ impl Elements {
                         &mut state[at..at + STATE_SIZE]
                     });
                     let stress = |strain: &[f64; 6]| material.stress(strain, history);
-                    point_forces(w, g, &ue, stress, self.nlgeom, &mut f, &mut current);
+                    let operator = if family.dense {
+                        Operator::Dense { values: g, u0 }
+                    } else {
+                        Operator::Nodal(g)
+                    };
+                    point_forces(w, operator, &ue, stress, self.nlgeom, &mut f, &mut current);
                 }
                 let visc = &family.viscosity[e * (1 + nd)..(e + 1) * (1 + nd)];
+                let cs = family.control_size();
                 let control = family
                     .hourglass
-                    .then(|| &family.control[e * (2 + nd)..(e + 1) * (2 + nd)]);
+                    .then(|| &family.control[e * cs..(e + 1) * cs]);
                 let moved: Vec<f64>;
                 let (volume, mean): (f64, &[f64]) = match (self.nlgeom, control) {
                     (false, _) => (reference, &visc[1..]),
@@ -681,6 +780,14 @@ impl Elements {
                     let g = &family.gradients[e * size + 1..(e + 1) * size];
                     hourglass_forces(control, g, mean, &ue, &ve, self.nlgeom, &mut f, &mut fv);
                 }
+                if family.matrix {
+                    // K u = K u_rel + Σ_d u0_d K t_d.
+                    let k = &family.control[e * cs..(e + 1) * cs];
+                    for i in 0..nd {
+                        f[i] += (0..nd).map(|j| k[i * nd + j] * ue[j]).sum::<f64>()
+                            + (0..3).map(|d| u0[d] * k[nd * nd + d * nd + i]).sum::<f64>();
+                    }
+                }
                 for (k, &dof) in dofs.iter().enumerate() {
                     internal[dof as usize] += f[k];
                     viscous[dof as usize] += fv[k];
@@ -694,26 +801,59 @@ impl Elements {
 /// The most nodes of an element the kernels take (C3D20).
 pub const MAX_NODES: usize = 20;
 
-/// Adds `w Bᵀ σ` of one point with the derivatives `g` (three per node) to `f`, and under
-/// NLGEOM the current volume `w J` and `w J F⁻ᵀ ∇N` to `current`.
+/// The displacement gradient of a point: nodal derivatives (three per node), or a dense
+/// operator with its translation responses and the first node's displacement `u0`.
+#[derive(Clone, Copy)]
+enum Operator<'a> {
+    Nodal(&'a [f64]),
+    Dense { values: &'a [f64], u0: [f64; 3] },
+}
+
+/// Adds `w Lᵀ P` of one point to `f`, and under NLGEOM the current volume `w J` and
+/// `w cof(F) : L` (`w J F⁻ᵀ ∇N` of nodal gradients) to `current`.
 fn point_forces(
     w: f64,
-    g: &[f64],
+    operator: Operator<'_>,
     ue: &[f64],
     stress: impl FnOnce(&[f64; 6]) -> [f64; 6],
     nlgeom: bool,
     f: &mut [f64],
     current: &mut (f64, Vec<f64>),
 ) {
-    let nodes = g.len() / 3;
+    let nd = ue.len();
     let mut h = [[0.0; 3]; 3];
-    for a in 0..nodes {
-        for (k, hk) in h.iter_mut().enumerate() {
-            for (c, hkc) in hk.iter_mut().enumerate() {
-                *hkc += ue[3 * a + k] * g[3 * a + c];
+    match operator {
+        Operator::Nodal(g) => {
+            for a in 0..nd / 3 {
+                for (k, hk) in h.iter_mut().enumerate() {
+                    for (c, hkc) in hk.iter_mut().enumerate() {
+                        *hkc += ue[3 * a + k] * g[3 * a + c];
+                    }
+                }
+            }
+        }
+        Operator::Dense { values, u0 } => {
+            for k in 0..3 {
+                for c in 0..3 {
+                    let r = 3 * k + c;
+                    let l = &values[27 + r * nd..27 + (r + 1) * nd];
+                    h[k][c] = l.iter().zip(ue).map(|(a, b)| a * b).sum::<f64>()
+                        + (0..3).map(|d| u0[d] * values[9 * d + r]).sum::<f64>();
+                }
             }
         }
     }
+    // `L[(k, c)][j]`.
+    let entry = |k: usize, c: usize, j: usize| match operator {
+        Operator::Nodal(g) => {
+            if j % 3 == k {
+                g[3 * (j / 3) + c]
+            } else {
+                0.0
+            }
+        }
+        Operator::Dense { values, .. } => values[27 + (3 * k + c) * nd + j],
+    };
     // `Σ_k H_ki H_kj` under NLGEOM.
     let hh = |i: usize, j: usize| {
         if nlgeom {
@@ -747,20 +887,28 @@ fn point_forces(
             }
         }
     }
-    for a in 0..nodes {
+    for j in 0..nd {
+        let mut sum = 0.0;
         for k in 0..3 {
-            f[3 * a + k] += w * (0..3).map(|c| p[k][c] * g[3 * a + c]).sum::<f64>();
+            for c in 0..3 {
+                sum += p[k][c] * entry(k, c, j);
+            }
         }
+        f[j] += w * sum;
     }
     if nlgeom {
         // J F⁻ᵀ is the cofactor matrix of F.
         let cof = cofactors(&fm);
         let det: f64 = (0..3).map(|c| fm[0][c] * cof[0][c]).sum();
         current.0 += w * det;
-        for a in 0..nodes {
+        for j in 0..nd {
+            let mut sum = 0.0;
             for k in 0..3 {
-                current.1[3 * a + k] += w * (0..3).map(|c| cof[k][c] * g[3 * a + c]).sum::<f64>();
+                for c in 0..3 {
+                    sum += cof[k][c] * entry(k, c, j);
+                }
             }
+            current.1[j] += w * sum;
         }
     }
 }

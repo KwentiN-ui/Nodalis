@@ -809,7 +809,11 @@ impl<'a> Kernel<'a> {
                 let mut strains = stresses.clone();
                 fe.iter_mut().for_each(|f| *f = 0.0);
                 let d_elastic = law.elastic_matrix();
-                formulation.nonlinear(
+                // Under NLGEOM the elements without nodal gradients take the volume rate of
+                // their own operators for the bulk viscosity, as the kernels on the card.
+                let mut operator_volume =
+                    (nlgeom && !formulation.has_nodal_gradients()).then(|| (0.0, Vec::new()));
+                formulation.nonlinear_with_volume(
                     &coords,
                     &ue,
                     nlgeom,
@@ -852,6 +856,7 @@ impl<'a> Kernel<'a> {
                     },
                     fe,
                     None,
+                    operator_volume.as_mut(),
                 );
                 // Bulk viscosity on the mean volumetric strain rate, under NLGEOM in the
                 // current configuration (a spinning element must not see a rate).
@@ -866,12 +871,16 @@ impl<'a> Kernel<'a> {
                             .collect()
                     });
                 let moved;
-                let (volume, g): (f64, &[f64]) = match &current {
-                    Some(x) => {
+                let (volume, g): (f64, &[f64]) = match (&operator_volume, &current) {
+                    (Some((volume, dv)), _) => {
+                        moved = (*volume, dv.iter().map(|d| d / volume).collect::<Vec<_>>());
+                        (moved.0, &moved.1)
+                    }
+                    (None, Some(x)) => {
                         moved = formulation.volume_mean_gradients(x);
                         (moved.0, &moved.1)
                     }
-                    None => (viscosity.volume, &viscosity.g),
+                    (None, None) => (viscosity.volume, &viscosity.g),
                 };
                 let ve: Vec<f64> = entry.dofs.iter().map(|&dof| v[dof as usize]).collect();
                 let rate: f64 = ve.iter().zip(g).map(|(v, g)| g * v).sum();
@@ -2429,8 +2438,8 @@ fn gpu_engine(
 }
 
 /// The elements for the kernels on the card, when every element and its material have one
-/// (solid elements whose displacement gradient is the sum of nodal gradients, elastic or
-/// J2 materials without creep, hyperelastic ones, no constant blocks).
+/// (solid elements by their nodal gradients or their general operators, elastic or J2
+/// materials without creep, hyperelastic ones, no constant blocks).
 fn gpu_elements(
     ctx: &ProcedureContext<'_>,
     kernel: &Kernel<'_>,
@@ -2491,11 +2500,17 @@ fn gpu_elements(
                 None,
             ),
         };
-        let gradients = formulation.nodal_gradients(&coords, &elastic)?;
         if entry.dofs.len() != 3 * coords.len() || viscosity.g.len() != entry.dofs.len() {
             return None;
         }
-        let hourglass = match (gradients.hourglass, viscosity.hourglass > 0.0) {
+        let (points, matrix, hourglass) = match formulation.nodal_gradients(&coords, &elastic) {
+            Some(g) => (plxs_explicit::Points::Nodal(g.points), None, g.hourglass),
+            None => {
+                let o = formulation.dense_operators(&coords, &elastic);
+                (plxs_explicit::Points::Dense(o.points), o.matrix, None)
+            }
+        };
+        let hourglass = match (hourglass, viscosity.hourglass > 0.0) {
             (Some(stiffness), _) => Some(plxs_explicit::Hourglass {
                 stiffness,
                 viscosity: viscosity.hourglass,
@@ -2507,7 +2522,8 @@ fn gpu_elements(
         elements
             .push(plxs_explicit::Element {
                 dofs: entry.dofs.clone(),
-                points: gradients.points,
+                points,
+                matrix,
                 material,
                 state,
                 bulk: viscosity.rate * viscosity.volume,
