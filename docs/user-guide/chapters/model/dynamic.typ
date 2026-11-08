@@ -90,7 +90,7 @@ only follow with tiny time steps anyway, and not slow motions or long vibrations
 
 The dialog shows an estimate of the stable time step from the mesh and the materials (the
 shortest distance between two nodes of an element over the wave speed √(E(1−ν)/((1+ν)(1−2ν)ρ)),
-with the node spacing through the thickness of shells) and the number of time steps it means
+with the node spacing through the thickness of shells when they keep their full inertia) and the number of time steps it means
 for the duration. Above a million steps it suggests a shorter duration. The solver computes
 the exact stable time step at the start of the step from the highest eigenfrequency of every
 element and takes 90 % of it; the output names the element that limits it:
@@ -117,8 +117,9 @@ What is different from implicit integration:
 - Elements with reduced integration (C3D8R, C3D20R, S4R, S8R) compute several times faster
   than fully integrated ones; the model check points this out
   (#ui("Full integration in an explicit step")).
-- Plates and shells are expanded into solid elements: the time step of a thin shell follows
-  from its thickness, which can make it very short (a 0.4 mm steel sheet: about 3·10⁻⁸ s).
+- Plates and shells are expanded into solid elements with nodes through their thickness.
+  The solver raises the inertia of the thickness modes so that the thickness does not set the
+  time step (see Shell inertia below).
 - The energies are those of the lumped mass; ALLWK includes the work of prescribed
   displacements, so ALLIE + ALLKE + ALLVD − ALLWK stays at its starting value. The solver
   warns when the balance is off by more than 5 %.
@@ -191,6 +192,29 @@ mass and the step ran three times faster.
 Added mass is inertia that is not there: it slows waves and lowers eigenfrequencies where it
 sits. A few per cent spread over small elements leave the overall response almost
 unchanged; above 5 % the solver warns. Loads from gravity keep the real mass.
+
+==== Shell inertia
+
+An expanded shell has two or three nodes across its thickness, so a thin shell has
+vibrations through its thickness far faster than anything in its plane, and they would set
+the time step: 0.4 mm of steel give about 10⁻⁸ s. With #ui("Advanced settings") >
+#ui("Shell inertia") #ui("Scaled") (the default), the solver gives these nodes more inertia
+for their motion relative to each other only (selective mass scaling): the stretch and shear
+through the thickness and the rotation of the shell's normal. A common motion of the nodes
+keeps exactly the real mass, so translations, momentum, gravity and the membrane and bending
+stiffness stay as they are. The factor makes the thickness modes as slow as the in-plane ones;
+the solver reports how many elements it scaled and the largest factor:
+
+```
+explicit: 1371 shell elements with the inertia of their thickness modes scaled
+          (up to 448.1 times; translations unchanged)
+```
+
+The larger rotary inertia lowers the bending frequencies a little: a cantilever strip of 1 mm
+S8R elements, 5 mm long each, swings 0.8 % slower and computes with a five times longer time
+step. #ui("Full") keeps the whole inertia (keyword `SHELL INERTIA=FULL` on `*DYNAMIC`). Very
+distorted shell elements still limit the time step through their shape; the output names the
+element.
 
 ==== Implicit and explicit steps in a row
 

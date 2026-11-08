@@ -272,8 +272,9 @@ mod tests {
 /// A rough stable time step of explicit integration, from the mesh and the materials
 /// (the solver computes the exact one from the element eigenvalues): the characteristic
 /// length of the elements (see [`characteristic_length`]), or the node spacing through a
-/// shell's thickness (expanded shells have their nodes there), divided by the
-/// dilatational wave speed, with the solver's safety factor.
+/// shell's thickness (expanded shells have their nodes there, unless the solver scales the
+/// inertia of their thickness modes), divided by the dilatational wave speed, with the
+/// solver's safety factor.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StableStepEstimate {
     pub time_step: f64,
@@ -285,10 +286,12 @@ pub struct StableStepEstimate {
 
 impl FeModel {
     /// See [`StableStepEstimate`]; `None` without sections that have an elastic material
-    /// with a density.
+    /// with a density. `scaled_shells`: the solver scales the inertia of the shells'
+    /// thickness modes, the spacing through the thickness does not count.
     pub fn explicit_time_step_estimate(
         &self,
         mesh: &plx_mesh::FeMesh,
+        scaled_shells: bool,
     ) -> Option<StableStepEstimate> {
         use crate::SectionKind;
         use plx_mesh::ElementShape;
@@ -320,7 +323,9 @@ impl FeModel {
                     shortest = length;
                     through_thickness = None;
                 }
-                if let SectionKind::Shell { thickness, .. } = section.kind {
+                if let SectionKind::Shell { thickness, .. } = section.kind
+                    && !scaled_shells
+                {
                     let quadratic =
                         matches!(element.shape, ElementShape::Tri6 | ElementShape::Quad8);
                     let spacing = if quadratic {

@@ -117,13 +117,16 @@ impl Out {
 
 /// A number that reads back as the same `f64`: the shortest form that does, plain when that
 /// is short, else with an exponent.
-/// `MASS SCALING=` and `TIME STEP=` of an explicit or automatic `*DYNAMIC`.
+/// `MASS SCALING=`, `TIME STEP=` and `SHELL INERTIA=` of an explicit or automatic `*DYNAMIC`.
 fn explicit_controls(header: &mut String, controls: &plxs_core::step::ExplicitControls) {
     if let Some(target) = controls.mass_scaling {
         let _ = write!(header, ", Mass scaling={}", number(target));
     }
     if let Some(dt) = controls.time_step {
         let _ = write!(header, ", Time step={}", number(dt));
+    }
+    if controls.full_shell_inertia {
+        header.push_str(", Shell inertia=Full");
     }
 }
 

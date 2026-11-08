@@ -1220,6 +1220,11 @@ pub struct DynamicStep {
     /// ([`DynamicStep::DEFAULT_SWITCH_FACTOR`]), 0 never switches.
     #[serde(default)]
     pub switch_factor: Option<f64>,
+    /// Explicit integration: expanded shells keep the whole inertia of their thickness
+    /// modes. Off (the default), the solver raises it so that the thickness does not set
+    /// the time step (selective mass scaling; translations unchanged).
+    #[serde(default)]
+    pub full_shell_inertia: bool,
 }
 
 fn default_true() -> bool {
@@ -1241,6 +1246,7 @@ impl Default for DynamicStep {
             large_deformations: false,
             mass_scaling: None,
             switch_factor: None,
+            full_shell_inertia: false,
         }
     }
 }

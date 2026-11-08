@@ -387,6 +387,11 @@ pub struct ExplicitControls {
     pub mass_scaling: Option<f64>,
     /// `TIME STEP=`: the time step is at most this long (the stable one if shorter).
     pub time_step: Option<f64>,
+    /// `SHELL INERTIA=FULL`: no selective mass scaling of expanded shells (by default the
+    /// inertia of their thickness modes is raised so that the thickness does not limit the
+    /// time step).
+    #[serde(default)]
+    pub full_shell_inertia: bool,
 }
 
 /// A damping ratio fitted as Rayleigh damping between two frequencies (cycles per time).

@@ -1841,10 +1841,23 @@ impl Reader {
             "MASS SCALING",
             "TIME STEP",
             "SWITCH",
+            "SHELL INERTIA",
         ])?;
+        let full_shell_inertia = match k.value("SHELL INERTIA").map(|t| t.to_ascii_uppercase()) {
+            None => false,
+            Some(t) if t == "FULL" => true,
+            Some(t) if t == "SCALED" => false,
+            Some(other) => {
+                return Err(Error::input(
+                    "*DYNAMIC",
+                    format!("SHELL INERTIA={other}: expected FULL or SCALED"),
+                ));
+            }
+        };
         let controls = ExplicitControls {
             mass_scaling: k.number("MASS SCALING")?,
             time_step: k.number("TIME STEP")?,
+            full_shell_inertia,
         };
         let integration = match k.value("INTEGRATION").map(|t| t.to_ascii_uppercase()) {
             None if k.has("EXPLICIT") => Integration::Explicit(controls),

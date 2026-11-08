@@ -4296,6 +4296,7 @@ fn dynamic_step(settings: &DynamicStep, model: &FeModel, step: &Step) -> (ir::St
                     plx_model::TimeStep::Fixed(dt) if dt > 0.0 => Some(dt),
                     _ => None,
                 },
+                full_shell_inertia: settings.full_shell_inertia,
             }),
             increments: ir::step::Incrementation {
                 initial: Some(settings.frame_interval()),
@@ -4323,6 +4324,7 @@ fn dynamic_step(settings: &DynamicStep, model: &FeModel, step: &Step) -> (ir::St
                 explicit: ir::step::ExplicitControls {
                     mass_scaling: settings.mass_scaling,
                     time_step: None,
+                    full_shell_inertia: settings.full_shell_inertia,
                 },
                 switch_factor: settings
                     .switch_factor

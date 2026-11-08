@@ -72,6 +72,7 @@ use crate::dynamic::{
 };
 use crate::fields::{internal_energy_density, nodal_average_scalar};
 use crate::profile::Phase;
+use crate::shell_mass::{self, FibreMass, Fibres};
 use crate::{Procedure, ProcedureContext, StepOutcome};
 
 pub struct ExplicitDynamic;
@@ -103,6 +104,56 @@ pub(crate) struct ElementData {
     pub(crate) other_omega: f64,
     /// The lumped mass of every entry, one after the other in the order of the entries.
     pub(crate) lumped: Vec<f64>,
+    /// Selective mass scaling of expanded shells: per entry its factor and fibres (see
+    /// [`crate::shell_mass`]), and the nodes of every fibre.
+    pub(crate) shells: Vec<Option<ShellEntry>>,
+    pub(crate) fibre_nodes: Vec<Vec<u32>>,
+}
+
+/// An expanded shell element under selective mass scaling.
+#[derive(Clone, Debug)]
+pub(crate) struct ShellEntry {
+    pub(crate) alpha: f64,
+    /// (fibre, the element's local nodes in fibre order, their positions in the fibre).
+    pub(crate) fibres: Vec<shell_mass::ElementFibre>,
+}
+
+impl ElementData {
+    /// The mass the fibres of the scaled shells add, `None` without them; from the lumped
+    /// masses as they are (after a mass scaling).
+    pub(crate) fn fibre_mass(&self, table: &ElementTable) -> Option<FibreMass> {
+        if self.shells.iter().all(Option::is_none) {
+            return None;
+        }
+        let mut out = FibreMass::new(self.fibre_nodes.clone());
+        let mut offset = 0;
+        for (entry, shell) in table.entries.iter().zip(&self.shells) {
+            let lumped = &self.lumped[offset..offset + entry.dofs.len()];
+            offset += entry.dofs.len();
+            let Some(shell) = shell else { continue };
+            for (fibre, local, positions) in &shell.fibres {
+                let masses: Vec<f64> = local.iter().map(|&a| lumped[a * 3]).collect();
+                out.add(
+                    *fibre,
+                    positions,
+                    &shell_mass::fibre_block(shell.alpha, &masses),
+                );
+            }
+        }
+        Some(out)
+    }
+}
+
+/// The highest frequency of an element on its lumped mass, plus the fibre blocks of a
+/// scaled shell.
+fn element_frequency(ke: &[f64], lumped: &[f64], shell: Option<&ShellEntry>) -> f64 {
+    match shell {
+        Some(shell) => {
+            let (m, _) = shell_mass::element_mass(lumped, &shell.fibres, shell.alpha);
+            shell_mass::largest_frequency_dense(ke, &m, lumped.len())
+        }
+        None => largest_frequency(ke, lumped),
+    }
 }
 
 /// The linear bulk viscosity of an element, `f = c V (g · v) g` with the mean gradient row
@@ -226,16 +277,25 @@ pub(crate) fn element_data(
     table: &ElementTable,
     model: &Model,
     nlgeom: bool,
+    selective: bool,
 ) -> Result<ElementData> {
     struct PerElement {
         lumped: Vec<f64>,
         omega: f64,
         viscosity: Viscosity,
+        shell: Option<ShellEntry>,
     }
+    let fibres = if selective {
+        Fibres::of(model)
+    } else {
+        Fibres::of(&Model::default())
+    };
+    let entry_fibres = shell_mass::entry_fibres(table, &fibres);
     let per: Vec<Result<PerElement>> = table
         .entries
         .par_iter()
-        .map(|entry| {
+        .zip(entry_fibres.into_par_iter())
+        .map(|(entry, element_fibres)| {
             let rho = entry
                 .density
                 .ok_or_else(|| missing_density(model, entry.element))?;
@@ -248,11 +308,27 @@ pub(crate) fn element_data(
             let d = table.law(entry, nlgeom).elastic_matrix();
             let mut ke = Vec::new();
             formulation.stiffness(&coords, &d, &mut ke);
-            let omega = largest_frequency(&ke, &lumped);
+            // The thickness modes of a shell: their own frequency for the bulk viscosity,
+            // the scaled one for the time step.
+            let omega_own = largest_frequency(&ke, &lumped);
+            let shell = (!element_fibres.is_empty())
+                .then(|| ShellEntry {
+                    alpha: shell_mass::alpha(&coords, &element_fibres),
+                    fibres: element_fibres,
+                })
+                .filter(|s| s.alpha > 0.0);
+            let omega = match &shell {
+                Some(shell) => element_frequency(&ke, &lumped, Some(shell)).min(omega_own),
+                None => omega_own,
+            };
             // c = b₁ ρ c_d L_e with L_e = c_d Δt_e: b₁ ρ c_d² Δt_e, c_d² = (λ + 2μ)/ρ.
             let modulus = (0..3).map(|i| d[i][i]).fold(0.0_f64, f64::max);
             let (volume, g) = formulation.volume_mean_gradients(&coords);
-            let dt_e = if omega > 0.0 { 2.0 / omega } else { 0.0 };
+            let dt_e = if omega_own > 0.0 {
+                2.0 / omega_own
+            } else {
+                0.0
+            };
             let hourglass = if formulation.kind == plxs_core::element::ElementType::C3D8R
                 && coords.len() == 8
                 && ndof == 24
@@ -270,6 +346,7 @@ pub(crate) fn element_data(
                     g,
                     hourglass,
                 },
+                shell,
             })
         })
         .collect();
@@ -277,8 +354,10 @@ pub(crate) fn element_data(
     let mut omega = Vec::with_capacity(per.len());
     let mut viscosity = Vec::with_capacity(per.len());
     let mut lumped = Vec::new();
+    let mut shells = Vec::with_capacity(per.len());
     for (entry, element) in table.entries.iter().zip(per) {
         let element = element?;
+        shells.push(element.shell);
         for (&dof, m) in entry.dofs.iter().zip(&element.lumped) {
             mass[dof as usize] += m;
         }
@@ -333,6 +412,8 @@ pub(crate) fn element_data(
         viscosity,
         other_omega,
         lumped,
+        shells,
+        fibre_nodes: fibres.nodes,
     })
 }
 
@@ -366,7 +447,11 @@ fn current_frequencies(
             let d = table.law(entry, nlgeom).elastic_matrix();
             let mut ke = Vec::new();
             formulation.stiffness(&current, &d, &mut ke);
-            let omega = largest_frequency(&ke, &data.lumped[offsets[index]..offsets[index + 1]]);
+            let omega = element_frequency(
+                &ke,
+                &data.lumped[offsets[index]..offsets[index + 1]],
+                data.shells[index].as_ref(),
+            );
             // An inverted element has no meaningful frequency: keep the reference one.
             if omega.is_finite() && omega > 0.0 {
                 omega
@@ -528,14 +613,30 @@ enum ReducedMass {
 }
 
 impl ReducedMass {
-    fn new(ctx: &ProcedureContext<'_>, set: &ConstraintSet, mass: &[f64]) -> Result<Self> {
+    fn new(
+        ctx: &ProcedureContext<'_>,
+        set: &ConstraintSet,
+        mass: &[f64],
+        fibres: Option<&FibreMass>,
+    ) -> Result<Self> {
         let n = mass.len();
-        let pattern = Arc::new(Pattern::from_columns(
-            n,
-            (0..n as u32).map(|j| vec![j]).collect(),
-        ));
-        let mut m = SparseMatrix::zeros(pattern);
-        m.values_mut().copy_from_slice(mass);
+        let columns = match fibres {
+            Some(f) => f.columns(n),
+            None => (0..n as u32).map(|j| vec![j]).collect(),
+        };
+        let pattern = Arc::new(Pattern::from_columns(n, columns));
+        let mut m = SparseMatrix::zeros(pattern.clone());
+        {
+            let values = m.values_mut();
+            for (j, &mj) in mass.iter().enumerate() {
+                if let Some(p) = pattern.position(j as u32, j as u32) {
+                    values[p] = mj;
+                }
+            }
+        }
+        if let Some(f) = fibres {
+            f.add_to(&mut m);
+        }
         let reduced = set.reduce(&m);
         let r = set.reduced_len();
         // A reduced unknown without mass cannot accelerate under a force.
@@ -887,6 +988,7 @@ fn reduced_frequency(
     set: &ConstraintSet,
     reduced_mass: &ReducedMass,
     mass: &[f64],
+    fibres: Option<&FibreMass>,
 ) -> Result<f64> {
     let n = ctx.table.dofs.len();
     let r = set.reduced_len();
@@ -899,7 +1001,10 @@ fn reduced_frequency(
     let zero = vec![0.0; n];
     let mass_times = |x: &[f64]| -> Vec<f64> {
         let full = set.expand(x, &zero);
-        let weighted: Vec<f64> = full.iter().zip(mass).map(|(x, m)| x * m).collect();
+        let mut weighted: Vec<f64> = full.iter().zip(mass).map(|(x, m)| x * m).collect();
+        if let Some(f) = fibres {
+            f.add_times(&full, &mut weighted);
+        }
         set.reduce_rhs(&weighted)
     };
     let mut x: Vec<f64> = (0..r)
@@ -984,6 +1089,20 @@ fn scale_masses(
     out
 }
 
+/// Tells what the selective mass scaling of the shells did.
+fn report_shell_scaling(data: &ElementData, progress: &mut dyn Progress) {
+    let scaled: Vec<f64> = data.shells.iter().flatten().map(|s| s.alpha).collect();
+    if scaled.is_empty() {
+        return;
+    }
+    let largest = scaled.iter().copied().fold(0.0_f64, f64::max);
+    progress.event(ProgressEvent::Info(format!(
+        "explicit: {} shell elements with the inertia of their thickness modes scaled (up to {} times; translations unchanged)",
+        scaled.len(),
+        short(1.0 + largest)
+    )));
+}
+
 /// Above this fraction of added mass mass scaling warns.
 const MASS_SCALING_WARNING: f64 = 0.05;
 
@@ -1047,7 +1166,12 @@ pub(crate) fn stable_time_step_estimate(
     step: &Step,
     controls: &ExplicitControls,
 ) -> Result<f64> {
-    let mut data = element_data(ctx.table, ctx.model, step.nlgeom)?;
+    let mut data = element_data(
+        ctx.table,
+        ctx.model,
+        step.nlgeom,
+        !controls.full_shell_inertia,
+    )?;
     let contact_step = if ctx.contact.is_empty() {
         1.0
     } else {
@@ -1320,13 +1444,20 @@ impl Procedure for ExplicitDynamic {
 
         // Lumped mass, element frequencies, bulk viscosity.
         let started = std::time::Instant::now();
-        let mut data = element_data(ctx.table, ctx.model, step.nlgeom)?;
+        let mut data = element_data(
+            ctx.table,
+            ctx.model,
+            step.nlgeom,
+            !controls.full_shell_inertia,
+        )?;
         ctx.profile.add(Phase::Assembly, started);
         if let Some(target) = controls.mass_scaling.filter(|t| *t > 0.0) {
             let contact_step = if has_contact { CONTACT_STEP } else { 1.0 };
             let scaling = scale_masses(ctx.table, &mut data, target, contact_step);
             report_mass_scaling(ctx, &scaling, target, progress);
         }
+        let fibre_mass = data.fibre_mass(ctx.table);
+        report_shell_scaling(&data, progress);
 
         // Constraints: `u = T q + g`.
         let spc_end = Spc::of_step(
@@ -1352,7 +1483,7 @@ impl Procedure for ExplicitDynamic {
             set.reduced_len()
         )));
         let started = std::time::Instant::now();
-        let mut reduced_mass = ReducedMass::new(ctx, &set, &data.mass)?;
+        let mut reduced_mass = ReducedMass::new(ctx, &set, &data.mass, fibre_mass.as_ref())?;
         ctx.profile.add(Phase::Factorization, started);
         if let ReducedMass::Factored(_) = reduced_mass {
             progress.event(ProgressEvent::Info(
@@ -1362,7 +1493,8 @@ impl Procedure for ExplicitDynamic {
             // that carry stiffness to lighter nodes (a tie, an equation) can raise the
             // highest frequency of the whole: check it on the reduced system.
             let started = std::time::Instant::now();
-            let omega = reduced_frequency(ctx, &set, &reduced_mass, &data.mass)?;
+            let omega =
+                reduced_frequency(ctx, &set, &reduced_mass, &data.mass, fibre_mass.as_ref())?;
             ctx.profile.add(Phase::Assembly, started);
             let elements = data.omega.iter().copied().fold(data.other_omega, f64::max);
             if omega > elements {
@@ -1471,7 +1603,7 @@ impl Procedure for ExplicitDynamic {
         };
         if finite_rotations && motion.u.iter().any(|v| *v != 0.0) {
             set = rotated_set(ctx, &motion.u);
-            reduced_mass = ReducedMass::new(ctx, &set, &data.mass)?;
+            reduced_mass = ReducedMass::new(ctx, &set, &data.mass, fibre_mass.as_ref())?;
         }
         let varying = step.boundaries.iter().any(|b| {
             b.amplitude.is_some()
@@ -1558,7 +1690,10 @@ impl Procedure for ExplicitDynamic {
         let zero = vec![0.0; n];
         let mut a_full = set.expand(&a_red, &zero);
 
-        let kinetic = |v: &[f64]| 0.5 * v.iter().zip(mass).map(|(v, m)| m * v * v).sum::<f64>();
+        let kinetic = |v: &[f64]| {
+            0.5 * v.iter().zip(mass).map(|(v, m)| m * v * v).sum::<f64>()
+                + fibre_mass.as_ref().map_or(0.0, |f| f.energy(v))
+        };
         let mut energies = Energies {
             internal: 0.5 * dot(&u, &forces.internal),
             kinetic: kinetic(&v_half),
@@ -1816,7 +1951,7 @@ impl Procedure for ExplicitDynamic {
                     );
                     set = next_set;
                     let started = std::time::Instant::now();
-                    reduced_mass = ReducedMass::new(ctx, &set, &data.mass)?;
+                    reduced_mass = ReducedMass::new(ctx, &set, &data.mass, fibre_mass.as_ref())?;
                     ctx.profile.add(Phase::Factorization, started);
                     u_next
                 } else {

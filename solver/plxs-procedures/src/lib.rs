@@ -30,6 +30,7 @@ pub mod nonlinear;
 pub mod nonlinear_dynamic;
 pub mod profile;
 pub mod sensitivity;
+mod shell_mass;
 pub mod static_linear;
 pub mod submodel;
 pub mod thermal;

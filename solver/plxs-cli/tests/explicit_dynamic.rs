@@ -1417,3 +1417,123 @@ fn a_shell_plate_keeps_its_initial_velocity() {
         "internal energy {internal} J\n{log}"
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// Stage 6: selective mass scaling of expanded shells
+
+/// An S8R strip (50 × 10 mm, 1 mm thick, 10 × 2 elements) clamped at one end, released from
+/// its static deflection under a tip load; with `full` the shells keep their whole inertia.
+/// Returns the zero crossings of the tip and the log.
+fn released_shell_strip(job: &str, full: bool) -> (Vec<f64>, String) {
+    let (length, width, thickness, cells) = (0.05, 0.01, 0.001, 10);
+    let (hx, hy) = (length / (2 * cells) as f64, width / 4.0);
+    let id = |i: usize, j: usize| i * 5 + j + 1;
+    let mut input = String::from("*Node\n");
+    for i in 0..=2 * cells {
+        for j in 0..=4 {
+            if i % 2 == 1 && j % 2 == 1 {
+                continue;
+            }
+            writeln!(
+                input,
+                "{}, {}, {}, 0",
+                id(i, j),
+                i as f64 * hx,
+                j as f64 * hy
+            )
+            .unwrap();
+        }
+    }
+    input.push_str("*Element, Type=S8R, Elset=EALL\n");
+    for a in 0..cells {
+        for b in 0..2 {
+            let (i, j) = (2 * a, 2 * b);
+            writeln!(
+                input,
+                "{}, {}, {}, {}, {}, {}, {}, {}, {}",
+                a * 2 + b + 1,
+                id(i, j),
+                id(i + 2, j),
+                id(i + 2, j + 2),
+                id(i, j + 2),
+                id(i + 1, j),
+                id(i + 2, j + 1),
+                id(i + 1, j + 2),
+                id(i, j + 1)
+            )
+            .unwrap();
+        }
+    }
+    let end = |i: usize| {
+        (0..=4)
+            .map(|j| id(i, j).to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let swing = 0.0042;
+    write!(
+        input,
+        "*Nset, Nset=END0\n{}\n*Nset, Nset=END1\n{}\n\
+         *Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
+         *Shell section, Elset=EALL, Material=STEEL\n{thickness}\n\
+         *Boundary\nEND0, 1, 6, 0\n\
+         *Step\n*Static\n*Cload\nEND1, 3, 2\n*End step\n\
+         *Step\n*Dynamic, Integration=Explicit{}\n{}, {swing}\n*Cload, Op=New\n\
+         *Node print, Nset=END1\nU\n*End step\n",
+        end(0),
+        end(2 * cells),
+        if full { ", Shell inertia=Full" } else { "" },
+        swing / 300.0
+    )
+    .unwrap();
+    let dir = work_dir(job);
+    let (dat, log) = run(&dir, job, &input);
+    clean(&dir);
+    let tip: Vec<(f64, f64)> = blocks(&dat, "displacements")
+        .iter()
+        .map(|(t, rows)| {
+            (
+                *t,
+                rows.iter().map(|r| r[3]).sum::<f64>() / rows.len() as f64,
+            )
+        })
+        .collect();
+    let crossings = tip
+        .windows(2)
+        .filter(|w| w[0].1 * w[1].1 < 0.0)
+        .map(|w| w[0].0 + (w[1].0 - w[0].0) * w[0].1 / (w[0].1 - w[1].1))
+        .collect();
+    (crossings, log)
+}
+
+/// The thickness of a thin shell no longer sets the time step, and the strip swings at the
+/// frequency it has with its full inertia.
+#[test]
+fn scaled_shell_inertia_lifts_the_time_step_and_keeps_the_bending() {
+    let stable = |log: &str| -> f64 {
+        log.lines()
+            .find_map(|l| l.split("stable time step ").nth(1))
+            .and_then(|r| r.split_whitespace().next())
+            .and_then(|v| v.parse().ok())
+            .unwrap()
+    };
+    let (full, full_log) = released_shell_strip("shell-full", true);
+    let (scaled, scaled_log) = released_shell_strip("shell-scaled", false);
+    assert!(!full_log.contains("thickness modes scaled"), "{full_log}");
+    assert!(
+        scaled_log.contains("thickness modes scaled"),
+        "{scaled_log}"
+    );
+    let (dt_full, dt_scaled) = (stable(&full_log), stable(&scaled_log));
+    assert!(
+        dt_scaled > 3.0 * dt_full,
+        "time step {dt_scaled} s scaled, {dt_full} s with the full inertia"
+    );
+    assert!(full.len() >= 3 && scaled.len() >= 3, "{full:?} {scaled:?}");
+    let frequency = |c: &[f64]| (c.len() - 1) as f64 / (2.0 * (c[c.len() - 1] - c[0]));
+    let (f0, f1) = (frequency(&full), frequency(&scaled));
+    assert!(
+        (f1 - f0).abs() < 0.02 * f0,
+        "swings at {f1} Hz scaled, {f0} Hz with the full inertia"
+    );
+}

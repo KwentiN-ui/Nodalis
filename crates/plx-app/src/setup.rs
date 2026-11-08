@@ -6044,7 +6044,7 @@ fn step_form(
             stable_step: settings
                 .method
                 .uses_explicit()
-                .then(|| stable_step_estimate(ui.ctx(), fe, mesh))
+                .then(|| stable_step_estimate(ui.ctx(), fe, mesh, !settings.full_shell_inertia))
                 .flatten(),
         }),
         _ => None,
@@ -6219,9 +6219,11 @@ fn stable_step_estimate(
     ctx: &egui::Context,
     fe: &FeModel,
     mesh: &FeMesh,
+    scaled_shells: bool,
 ) -> Option<plx_model::StableStepEstimate> {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    scaled_shells.hash(&mut hasher);
     mesh.elements().len().hash(&mut hasher);
     mesh.node_count().hash(&mut hasher);
     format!("{:?}{:?}", fe.sections, fe.materials).hash(&mut hasher);
@@ -6233,7 +6235,7 @@ fn stable_step_estimate(
     {
         return estimate;
     }
-    let estimate = fe.explicit_time_step_estimate(mesh);
+    let estimate = fe.explicit_time_step_estimate(mesh, scaled_shells);
     ctx.data_mut(|d| d.insert_temp::<Cached>(id, (key, estimate.clone())));
     estimate
 }
@@ -6575,7 +6577,8 @@ fn dynamic_form(
         || settings.frequency_limit.is_some()
         || settings.numerical_damping != NumericalDamping::Normal
         || settings.solver != LinearSolverChoice::Automatic
-        || ((explicit || automatic) && settings.mass_scaling.is_some())
+        || ((explicit || automatic)
+            && (settings.mass_scaling.is_some() || settings.full_shell_inertia))
         || (automatic && settings.switch_factor.is_some());
     let mut advanced = ui.data(|d| d.get_temp(id)).unwrap_or(custom);
     ui.label("");
@@ -6649,6 +6652,17 @@ fn dynamic_form(
             });
             ui.end_row();
             settings.mass_scaling = scaled.then_some(target);
+            ui.label("Shell inertia").on_hover_text(
+                "Scaled: shells get more inertia in their thickness modes only (stretch, \
+                 shear and rotation through the thickness), so that their thickness does \
+                 not set the time step; translations and the mass stay as they are. Full: \
+                 the whole inertia, with a time step several times shorter for thin shells.",
+            );
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut settings.full_shell_inertia, false, "Scaled");
+                ui.radio_value(&mut settings.full_shell_inertia, true, "Full");
+            });
+            ui.end_row();
         }
         if !explicit {
             ui.label("Max. frequency").on_hover_text(

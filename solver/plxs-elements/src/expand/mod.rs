@@ -332,6 +332,21 @@ impl Expander {
         self.remap_steps(&original)?;
         let mut model = std::mem::take(&mut self.analysis.model);
         model.constraints.equations.append(&mut self.equations);
+        model.shell_fibres = self
+            .groups
+            .values()
+            .flatten()
+            .filter(|g| g.kind == Kind::Shell)
+            .map(|g| {
+                g.nodes
+                    .iter()
+                    .zip(&g.used)
+                    .filter(|(_, u)| **u)
+                    .map(|(n, _)| *n)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|f| f.len() >= 2)
+            .collect();
         let groups: BTreeMap<NodeId, Vec<Vec<NodeId>>> = self
             .groups
             .iter()
