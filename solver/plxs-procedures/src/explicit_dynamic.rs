@@ -1752,8 +1752,12 @@ impl Procedure for ExplicitDynamic {
             && beta_r == 0.0
             && set.is_selection()
             && matches!(reduced_mass, ReducedMass::Diagonal(_))
-            && ctx.table.membranes.is_empty()
-            && ctx.table.discrete.is_empty()
+            && (ctx.table.membranes.is_empty() || !step.nlgeom)
+            && ctx
+                .table
+                .discrete
+                .iter()
+                .all(|e| e.spring_stiffness().is_some())
         {
             gpu_engine(ctx, step, &kernel, &set, &data.mass, alpha_r, progress)
         } else {
@@ -2409,6 +2413,9 @@ fn gpu_engine(
              elements and materials have yet"
                 .to_owned(),
         ),
+        None if !ctx.table.membranes.is_empty() || !ctx.table.discrete.is_empty() => {
+            Err("membranes and springs need element kernels for all elements".to_owned())
+        }
         None => gpu_matrices(ctx, kernel, &inverse, alpha, any).map(|engine| {
             (
                 engine,
@@ -2439,7 +2446,8 @@ fn gpu_engine(
 
 /// The elements for the kernels on the card, when every element and its material have one
 /// (solid elements by their nodal gradients or their general operators, elastic or J2
-/// materials without creep, hyperelastic ones, no constant blocks).
+/// materials without creep, hyperelastic ones), with the constant blocks (U1 elements,
+/// springs and, under small strains, native membranes).
 fn gpu_elements(
     ctx: &ProcedureContext<'_>,
     kernel: &Kernel<'_>,
@@ -2447,9 +2455,7 @@ fn gpu_elements(
 ) -> Option<plxs_explicit::Elements> {
     // `PLXS_GPU_FORCES=matrices`: the matrices anyway, for measurements (until the
     // kernels cover all elements and the matrices go).
-    if !ctx.table.linear_blocks.is_empty()
-        || std::env::var("PLXS_GPU_FORCES").is_ok_and(|v| v.eq_ignore_ascii_case("matrices"))
-    {
+    if std::env::var("PLXS_GPU_FORCES").is_ok_and(|v| v.eq_ignore_ascii_case("matrices")) {
         return None;
     }
     use plxs_materials::hyper::{Isochoric, Volumetric};
@@ -2529,6 +2535,28 @@ fn gpu_elements(
                 bulk: viscosity.rate * viscosity.volume,
                 mean: viscosity.g.clone(),
                 hourglass,
+            })
+            .ok()?;
+    }
+    // Constant blocks: U1 elements, the linear stiffness of native membranes under small
+    // strains (their force is `K u` then) and springs. Membranes under NLGEOM and gaps
+    // stay on the processor.
+    for block in &ctx.table.linear_blocks {
+        if block.membrane && nlgeom {
+            return None;
+        }
+        elements
+            .push_block(plxs_explicit::Block {
+                dofs: block.dofs.clone(),
+                stiffness: block.stiffness.clone(),
+            })
+            .ok()?;
+    }
+    for element in &ctx.table.discrete {
+        elements
+            .push_block(plxs_explicit::Block {
+                dofs: element.dofs.clone(),
+                stiffness: element.spring_stiffness()?,
             })
             .ok()?;
     }

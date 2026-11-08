@@ -4,8 +4,8 @@
 //! software renderers too); elsewhere it says so and passes.
 
 use plxs_explicit::{
-    Element, Elements, Engine, ForceModel, Hourglass, Isochoric, MAX_CHUNK, Material, Points,
-    Setup, Start, Volumetric,
+    Block, Element, Elements, Engine, ForceModel, Hourglass, Isochoric, MAX_CHUNK, Material,
+    Points, Setup, Start, Volumetric,
 };
 
 /// The trilinear brick's natural node coordinates.
@@ -290,6 +290,42 @@ fn swing_with(nlgeom: bool, speed: f64, plastic: bool, hyper: bool, dense: bool)
         }
     }
     assert_eq!(elements.families.len(), 2);
+    // Under small strains constant blocks too: a spring on every tip node across and a
+    // stiff link between two nodes along the bar.
+    if !nlgeom {
+        for k in 0..=nz {
+            for j in 0..=ny {
+                elements
+                    .push_block(Block {
+                        dofs: vec![(3 * node(nx, j, k) + 1) as u32],
+                        stiffness: vec![1e6],
+                    })
+                    .unwrap();
+            }
+        }
+        let (a, b) = (node(2, 0, 0), node(6, ny, nz));
+        let k0 = 1e7;
+        let mut stiffness = vec![0.0; 36];
+        for d in 0..3 {
+            for (r, c, v) in [
+                (d, d, k0),
+                (d + 3, d + 3, k0),
+                (d, d + 3, -k0),
+                (d + 3, d, -k0),
+            ] {
+                stiffness[r * 6 + c] = v;
+            }
+        }
+        elements
+            .push_block(Block {
+                dofs: (0..3)
+                    .map(|d| (3 * a + d) as u32)
+                    .chain((0..3).map(|d| (3 * b + d) as u32))
+                    .collect(),
+                stiffness,
+            })
+            .unwrap();
+    }
     let mut inverse: Vec<f64> = mass.iter().map(|m| 1.0 / m).collect();
     // The face at x = 0 is held.
     for k in 0..=nz {

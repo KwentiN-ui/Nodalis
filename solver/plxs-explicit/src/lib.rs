@@ -39,8 +39,8 @@ mod sliced;
 
 mod elements;
 pub use elements::{
-    Element, Elements, Family, Hourglass, Isochoric, MAX_NODES, Material, Points, STATE_SIZE,
-    Volumetric,
+    Block, Element, Elements, Family, Hourglass, Isochoric, MAX_NODES, Material, Points,
+    STATE_SIZE, Volumetric,
 };
 
 /// The most time steps one [`Engine::run`] takes.

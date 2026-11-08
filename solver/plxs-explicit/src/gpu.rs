@@ -430,11 +430,13 @@ impl Engine {
         use Use::*;
         let too_large = || format!("the model is too large for the buffers of {}", gpu.name);
         // The positions of every DOF's element forces.
+        let rows: usize = elements.blocks.iter().map(|b| b.dofs.len()).sum();
         let total: usize = elements
             .families
             .iter()
             .map(|f| 3 * f.nodes * f.count)
-            .sum();
+            .sum::<usize>()
+            + rows;
         if total == 0 {
             return Err("no elements".to_owned());
         }
@@ -457,6 +459,28 @@ impl Engine {
             }
             bases.push(base);
             base += nd * family.count;
+        }
+        // The block rows behind the element forces, and their entries.
+        let block_base = base;
+        let mut block_ptr = vec![0u32];
+        let mut block_columns = Vec::new();
+        let mut block_values: Vec<f64> = Vec::new();
+        for block in &elements.blocks {
+            let m = block.dofs.len();
+            for (i, &dof) in block.dofs.iter().enumerate() {
+                if dof as usize >= n {
+                    return Err(format!("DOF {dof} of {n}"));
+                }
+                lists[dof as usize].push((block_base + block_ptr.len() - 1) as u32);
+                for (j, &col) in block.dofs.iter().enumerate() {
+                    let k = block.stiffness[i * m + j];
+                    if k != 0.0 {
+                        block_columns.push(col);
+                        block_values.push(k);
+                    }
+                }
+                block_ptr.push(block_columns.len() as u32);
+            }
         }
         let mut ptr = Vec::with_capacity(n + 1);
         ptr.push(0u32);
@@ -551,6 +575,47 @@ impl Engine {
                         fint.as_entire_binding(),
                         fvis.as_entire_binding(),
                         history.as_entire_binding(),
+                    ],
+                ),
+                step: false,
+                groups,
+                kind: 1,
+            });
+        }
+        if rows > 0 {
+            if !gpu.fits(12 * block_values.len() as u64 + 4) {
+                return Err(too_large());
+            }
+            let groups = gpu.fold(rows, ELEMENT_GROUP);
+            let dims = gpu.uniform(
+                "block dims",
+                bytemuck::bytes_of(&Dims {
+                    n: rows as u32,
+                    groups_x: groups.0,
+                    positions: block_base as u32,
+                    relative: 0,
+                }),
+            );
+            let layout = gpu.layout("blocks", &[Uniform, Read, Read, Read, Read, Write]);
+            // An empty buffer cannot be bound.
+            if block_values.is_empty() {
+                block_columns.push(0);
+                block_values.push(0.0);
+            }
+            passes.push(Pass {
+                pipeline: gpu.pipeline(include_str!("blocks.wgsl"), "blocks", &layout, &[]),
+                bind: gpu.bind(
+                    &layout,
+                    vec![
+                        dims.as_entire_binding(),
+                        u.as_entire_binding(),
+                        gpu.init("block pointers", bytemuck::cast_slice(&block_ptr))
+                            .as_entire_binding(),
+                        gpu.init("block columns", bytemuck::cast_slice(&block_columns))
+                            .as_entire_binding(),
+                        gpu.init("block values", bytemuck::cast_slice(&block_values))
+                            .as_entire_binding(),
+                        fint.as_entire_binding(),
                     ],
                 ),
                 step: false,

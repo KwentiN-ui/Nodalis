@@ -155,10 +155,9 @@ step, supports without equations or local systems) run on a discrete graphics ca
 computes the forces element by element, one thread of the card per element, sums them per
 node, and does a few vector updates, many times faster than the processor. No stiffness
 matrix is built for that; C3D8I and the plane and axisymmetric elements take their
-condensed operators. Models with U1 blocks, membranes or springs make the card form the
-forces as a product with the stiffness matrix and one with the viscous matrix (bulk
-viscosity and hourglass control) instead; under large deformations (NLGEOM) such a model
-stays on the processor. With the
+condensed operators. U1 blocks and springs act on the card as constant stiffness blocks,
+and so do membranes under small strains; membranes under large deformations (NLGEOM) and
+gaps keep the time steps on the processor. With the
 element kernels, large deformations run on the card too: Green-Lagrange strain, Saint
 Venant-Kirchhoff stress, and the bulk and hourglass viscosity in the deformed shape, as on
 the processor. Every 100 time steps the card stops for the processor to check the stable

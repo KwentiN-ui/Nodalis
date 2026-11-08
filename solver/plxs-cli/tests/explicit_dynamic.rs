@@ -1366,6 +1366,40 @@ fn gpu_matches_processor_with(
     } else {
         bar_mesh(cells, 2, 2, [length, side, side], kind)
     };
+    // `blocks`: an elastic bar with a membrane skin on its top face and springs at its
+    // far end, which the card takes as constant blocks.
+    if law == "blocks" {
+        let id = |i: usize, j: usize, k: usize| 1 + i + (cells + 1) * (j + 3 * k);
+        input.push_str("*Element, Type=M3D4, Elset=SKIN\n");
+        for j in 0..2 {
+            for i in 0..cells {
+                writeln!(
+                    input,
+                    "{}, {}, {}, {}, {}",
+                    1001 + i + cells * j,
+                    id(i, j, 2),
+                    id(i + 1, j, 2),
+                    id(i + 1, j + 1, 2),
+                    id(i, j + 1, 2)
+                )
+                .unwrap();
+            }
+        }
+        writeln!(
+            input,
+            "*Membrane section, Elset=SKIN, Material=STEEL\n{}\n\
+             *Element, Type=SPRING1, Elset=GROUND\n2001, {}\n2002, {}\n\
+             *Spring, Elset=GROUND\n2\n1e5\n\
+             *Element, Type=SPRING2, Elset=TIE\n2003, {}, {}\n\
+             *Spring, Elset=TIE\n2, 3\n2e5",
+            side / 10.0,
+            id(cells, 0, 0),
+            id(cells, 2, 2),
+            id(cells / 2, 0, 0),
+            id(cells / 2, 2, 2)
+        )
+        .unwrap();
+    }
     let thickness = if plane && !kind.starts_with("CA") {
         format!("{side}\n")
     } else {
@@ -1510,6 +1544,18 @@ fn rubber_on_the_graphics_card_matches_the_processor() {
 }
 
 /// The incompatible modes: dense operators.
+#[test]
+fn membranes_and_springs_on_the_graphics_card_match_the_processor() {
+    gpu_matches_processor_with(
+        "C3D8",
+        "gpu-blocks",
+        false,
+        "element forces",
+        false,
+        "blocks",
+    );
+}
+
 #[test]
 fn time_steps_of_incompatible_modes_on_the_graphics_card_match_the_processor() {
     gpu_matches_processor("C3D8I", "gpu-c3d8i", false, "element forces");
