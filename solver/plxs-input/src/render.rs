@@ -793,6 +793,13 @@ fn solver_parameter(header: &mut String, solver: EquationSolver) {
     let _ = write!(header, ", Solver={name}");
 }
 
+/// `FRAMES=` (Nodalis): result frames evenly spaced over the step.
+fn frames_parameter(header: &mut String, increments: &Incrementation) {
+    if let Some(frames) = increments.frames {
+        let _ = write!(header, ", Frames={frames}");
+    }
+}
+
 /// The incrementation line: initial, period, minimum, maximum, missing ones empty.
 fn increments_line(out: &mut Out, increments: &Incrementation) {
     let values = [
@@ -848,6 +855,7 @@ fn procedure(out: &mut Out, procedure: &Procedure) {
             if settings.increments.direct {
                 header.push_str(", Direct");
             }
+            frames_parameter(&mut header, &settings.increments);
             if settings.time_reset {
                 header.push_str(", Time reset");
             }
@@ -863,6 +871,7 @@ fn procedure(out: &mut Out, procedure: &Procedure) {
             if settings.increments.direct {
                 header.push_str(", Direct");
             }
+            frames_parameter(&mut header, &settings.increments);
             out.keyword(&header);
             increments_line(out, &settings.increments);
         }
@@ -933,6 +942,7 @@ fn procedure(out: &mut Out, procedure: &Procedure) {
             if let Some(count) = settings.frequency_count {
                 let _ = write!(header, ", Frequency={count}");
             }
+            frames_parameter(&mut header, &settings.increments);
             out.keyword(&header);
             increments_line(out, &settings.increments);
         }

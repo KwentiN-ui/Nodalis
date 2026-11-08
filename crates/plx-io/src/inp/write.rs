@@ -14,13 +14,13 @@ use plx_model::{
     Amplitude, AmplitudeTime, BeamProfile, BeamSection, BoundaryKind, BuckleStep,
     ComplexFrequencyStep, Constraint, ContactMethod, ContactPair, ContactScale, Damping,
     DefinedFieldKind, DynamicMethod, DynamicStep, FeModel, FieldOutput, Formulation, FrequencyStep,
-    GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
+    GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, IncrementPlan,
     InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep,
     ModelItem, ModelSpace, MovingFrame, NodeTie, Origins, OutputDimension, OutputKind, Quantity,
     RayleighFit, Region, RemoteBehavior, RemoteDof, Sampler, Section, SectionKind, SectorDisplay,
     SensitivityStep, StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior,
-    SurfaceInteraction, Tie, Totals, UnitSystem, ViscoStep, line_tangent, symmetry_dofs,
-    symmetry_plane,
+    SurfaceInteraction, TableOwner, Tie, Totals, UnitSystem, ViscoStep, line_tangent,
+    symmetry_dofs, symmetry_plane,
 };
 use plxs_core as ir;
 use plxs_core::mesh::{ElementRef, NodeRef};
@@ -711,6 +711,19 @@ fn lower_model_named(
     for (i, amplitude) in original.amplitudes.iter().enumerate() {
         let item = ir::ItemRef::Amplitude(ir_name(&name(&amplitude.name)));
         origins.insert(item, ModelItem::Amplitude(i));
+    }
+    for (s, step) in original.steps.iter().enumerate().filter(|(_, s)| s.active) {
+        for table in step.tables() {
+            let (item, label) = table_owner(step, &table);
+            let amplitude = ir::ItemRef::Amplitude(table_amplitude(&step.name, item, label));
+            origins.insert(
+                amplitude,
+                match table.owner {
+                    TableOwner::BoundaryCondition(i) => ModelItem::BoundaryCondition(s, i),
+                    TableOwner::Load(i) => ModelItem::Load(s, i),
+                },
+            );
+        }
     }
     ir_model.contact = ir::contact::Contact {
         interactions,
@@ -1443,7 +1456,102 @@ fn amplitudes(model: &FeModel) -> Result<Vec<ir::amplitude::Amplitude>, WriteErr
             points: amplitude.points.iter().map(|&[t, a]| (t, a)).collect(),
         });
     }
+    // Each time table of a component is an amplitude of its own, in step time, that a value
+    // of 1 follows.
+    for step in model.steps.iter().filter(|s| s.active) {
+        for table in step.tables() {
+            let (item, label) = table_owner(step, &table);
+            if let Some(reason) = table.table.points_problem() {
+                return Err(WriteError::InvalidAmplitude {
+                    item: item.to_owned(),
+                    reason,
+                });
+            }
+            let name = table_amplitude(&step.name, item, label);
+            if amplitudes.iter().any(|a| a.name == name) {
+                continue;
+            }
+            amplitudes.push(ir::amplitude::Amplitude {
+                name,
+                total_time: false,
+                shift_x: 0.0,
+                shift_y: 0.0,
+                points: table.table.points.iter().map(|&[t, v]| (t, v)).collect(),
+            });
+        }
+    }
     Ok(amplitudes)
+}
+
+/// The labels of the degrees of freedom of a displacement and the components of a load,
+/// which name the amplitudes of their tables.
+const DOF_TABLE_LABELS: [&str; 6] = ["U1", "U2", "U3", "UR1", "UR2", "UR3"];
+const FORCE_TABLE_LABELS: [&str; 3] = ["F1", "F2", "F3"];
+const MOMENT_TABLE_LABELS: [&str; 3] = ["M1", "M2", "M3"];
+
+/// The name of the item a table belongs to and the label of its component.
+fn table_owner<'a>(step: &'a Step, table: &plx_model::StepTable) -> (&'a str, &'static str) {
+    match table.owner {
+        TableOwner::BoundaryCondition(i) => (
+            &step.boundary_conditions[i].name,
+            DOF_TABLE_LABELS[table.component],
+        ),
+        TableOwner::Load(i) => {
+            let load = &step.loads[i];
+            let label = match load.kind {
+                LoadKind::Moment(_) => MOMENT_TABLE_LABELS[table.component],
+                LoadKind::Pressure(_) => "P",
+                _ => FORCE_TABLE_LABELS[table.component],
+            };
+            (&load.name, label)
+        }
+    }
+}
+
+/// The name of the amplitude of the table of component `label` of item `item` in a step,
+/// as the solver compares it.
+fn table_amplitude(step: &str, item: &str, label: &str) -> String {
+    ir_name(&name(&format!("Table~{step}~{item}~{label}")))
+}
+
+/// The values a displacement holds and the amplitude each follows: a degree of freedom with
+/// a table holds 1 and follows the amplitude of its table, the others their value and the
+/// amplitude of the boundary condition.
+fn displacement_values(
+    step: &Step,
+    bc: &plx_model::BoundaryCondition,
+    displacement: &plx_model::Displacement,
+    amplitude: &Option<String>,
+) -> ([Option<f64>; 6], [Option<String>; 6]) {
+    let values = std::array::from_fn(|d| match displacement.table(d) {
+        Some(_) => Some(1.0),
+        None => displacement.values[d],
+    });
+    let amplitudes = std::array::from_fn(|d| match displacement.table(d) {
+        Some(_) => Some(table_amplitude(&step.name, &bc.name, DOF_TABLE_LABELS[d])),
+        None => amplitude.clone(),
+    });
+    (values, amplitudes)
+}
+
+/// The components of a load's value and the amplitude each follows: a component with a
+/// table is 1 and follows the amplitude of its table.
+fn load_components<const N: usize>(
+    step: &Step,
+    load: &plx_model::Load,
+    values: [f64; N],
+    labels: [&str; N],
+    amplitude: &Option<String>,
+) -> ([f64; N], [Option<String>; N]) {
+    let values = std::array::from_fn(|c| match load.table(c) {
+        Some(_) => 1.0,
+        None => values[c],
+    });
+    let amplitudes = std::array::from_fn(|c| match load.table(c) {
+        Some(_) => Some(table_amplitude(&step.name, &load.name, labels[c])),
+        None => amplitude.clone(),
+    });
+    (values, amplitudes)
 }
 
 /// The amplitude a boundary condition or load refers to, by its name in the analysis;
@@ -2052,6 +2160,7 @@ fn joint_item(
             system: plx_model::GLOBAL.to_string(),
             location: Some(origin),
             pinball: None,
+            tables: Default::default(),
         };
         let excluded = model.directly_held_nodes_in(sets.mesh, |_| true);
         let held = model.held_translations(sets.mesh);
@@ -2759,18 +2868,21 @@ fn complex_frequency_blocks(
     if let Some(problem) = settings.problem() {
         return Err(invalid(problem));
     }
-    let Some((_, axis)) = unit_vector(settings.axis) else {
-        return Err(invalid("the rotation axis has no direction".into()));
+    let (point, axis) = settings.axis_in(context.model).map_err(invalid)?;
+    // The rotating elements; no parts picked: all of them.
+    let region = if settings.rotates_whole_model() {
+        Region::Parts(sets.mesh.parts.iter().map(|p| p.name.clone()).collect())
+    } else {
+        settings.region.clone()
     };
-    let parts: Vec<String> = sets.mesh.parts.iter().map(|p| p.name.clone()).collect();
-    let set = sets.element_set(&format!("{}_Rotation", step.name), &Region::Parts(parts))?;
+    let set = sets.element_set(&format!("{}_Rotation", step.name), &region)?;
     let rotation = Card::Dload {
         op_new: false,
         items: vec![dload(
             element_set_ref(&set),
             ir::step::DistributedLoadKind::Centrifugal {
                 omega_squared: settings.speed * settings.speed,
-                point: settings.point,
+                point,
                 axis,
             },
             &None,
@@ -2803,7 +2915,7 @@ fn complex_frequency_blocks(
             ..StaticStep::default()
         };
         blocks.push(helper(
-            static_step(&preload),
+            static_step(&preload, false),
             "Preload",
             std::mem::take(&mut first_cards),
         ));
@@ -2997,33 +3109,38 @@ fn displacement_boundaries(
     rotation: Option<&NodeRef>,
     values: &[Option<f64>; 6],
     dofs: usize,
-    amplitude: &Option<String>,
+    amplitudes: &[Option<String>; 6],
 ) -> Vec<ir::step::Boundary> {
-    // Each held degree of freedom as (target, its number there, value).
-    let held = (1..).zip(values).take(dofs).filter_map(|(dof, value)| {
-        let value = (*value)?;
-        Some(match rotation {
-            Some(rotation) if dof > 3 => (rotation, dof - 3, value),
-            _ => (nodes, dof, value),
-        })
-    });
+    // Each held degree of freedom as (target, its number there, value, amplitude).
+    let held = (1..)
+        .zip(values.iter().zip(amplitudes))
+        .take(dofs)
+        .filter_map(|(dof, (value, amplitude))| {
+            let value = (*value)?;
+            Some(match rotation {
+                Some(rotation) if dof > 3 => (rotation, dof - 3, value, amplitude),
+                _ => (nodes, dof, value, amplitude),
+            })
+        });
     let mut out = Vec::new();
-    let mut run: Option<(&NodeRef, u8, u8, f64)> = None;
-    for (target, dof, value) in held {
+    let mut run: Option<(&NodeRef, u8, u8, f64, &Option<String>)> = None;
+    for (target, dof, value, amplitude) in held {
         match &mut run {
-            Some((t, _, last, v)) if *t == target && *last + 1 == dof && *v == value => {
+            Some((t, _, last, v, a))
+                if *t == target && *last + 1 == dof && *v == value && *a == amplitude =>
+            {
                 *last = dof;
             }
             _ => {
-                if let Some((t, first, last, v)) = run {
-                    out.push(boundary(t.clone(), first, last, Some(v), amplitude.clone()));
+                if let Some((t, first, last, v, a)) = run {
+                    out.push(boundary(t.clone(), first, last, Some(v), a.clone()));
                 }
-                run = Some((target, dof, dof, value));
+                run = Some((target, dof, dof, value, amplitude));
             }
         }
     }
-    if let Some((t, first, last, v)) = run {
-        out.push(boundary(t.clone(), first, last, Some(v), amplitude.clone()));
+    if let Some((t, first, last, v, a)) = run {
+        out.push(boundary(t.clone(), first, last, Some(v), a.clone()));
     }
     out
 }
@@ -3087,20 +3204,27 @@ fn step_block<'f>(
     let dofs = if space.is_2d() { 2 } else { 6 };
     // Every how many increments the field outputs are written.
     let mut frame_every = 1;
+    // Large deformations, also when the materials switch them on: they start the automatic
+    // increments shorter.
+    let nlgeom = model.step_nlgeom(&step.kind);
     let mut ir_step = match &step.kind {
-        StepKind::Static(settings) => static_step(settings),
+        StepKind::Static(settings) => static_step(settings, nlgeom),
         StepKind::Frequency(settings) => frequency_step(settings, cyclic),
         StepKind::ComplexFrequency(settings) => complex_frequency_step(settings),
         StepKind::Buckle(settings) => buckle_step(settings),
-        StepKind::HeatTransfer(settings) => heat_transfer_step(settings, HeatKind::Heat),
-        StepKind::CoupledTempDisp(settings) => heat_transfer_step(settings, HeatKind::Coupled),
-        StepKind::UncoupledTempDisp(settings) => heat_transfer_step(settings, HeatKind::Uncoupled),
+        StepKind::HeatTransfer(settings) => heat_transfer_step(settings, HeatKind::Heat, false),
+        StepKind::CoupledTempDisp(settings) => {
+            heat_transfer_step(settings, HeatKind::Coupled, nlgeom)
+        }
+        StepKind::UncoupledTempDisp(settings) => {
+            heat_transfer_step(settings, HeatKind::Uncoupled, false)
+        }
         StepKind::Dynamic(settings) => {
             let (ir_step, per_frame) = dynamic_step(settings, model, step);
             frame_every = per_frame;
             ir_step
         }
-        StepKind::Visco(settings) => visco_step(settings),
+        StepKind::Visco(settings) => visco_step(settings, nlgeom),
         StepKind::ModalDynamics(settings) => modal_dynamics_step(settings),
         StepKind::SteadyStateDynamics(settings) => steady_state_dynamics_step(settings),
         StepKind::Sensitivity(settings) => sensitivity_step(sets, &step.name, settings)?,
@@ -3150,11 +3274,19 @@ fn step_block<'f>(
             let amplitude = amplitude_parameter(amplitudes, &bc.name, &bc.amplitude)?;
             // The translations are those of the reference node, the rotations the
             // displacements of the rotation node.
-            let held = remote.held(space);
+            let (values, dof_amplitudes) = displacement_values(step, bc, remote, &amplitude);
+            let held = remote.held(space).map(|v| v.map(|_| ()));
+            let held = std::array::from_fn(|d| held[d].and(values[d]));
             let (reference, rotation) = (NodeRef::Node(reference), NodeRef::Node(rotation));
             boundaries.push(Card::Boundary {
                 op_new: false,
-                items: displacement_boundaries(&reference, Some(&rotation), &held, 6, &amplitude),
+                items: displacement_boundaries(
+                    &reference,
+                    Some(&rotation),
+                    &held,
+                    6,
+                    &dof_amplitudes,
+                ),
             });
             continue;
         }
@@ -3212,7 +3344,8 @@ fn step_block<'f>(
         let mut items = Vec::new();
         match bc.kind {
             BoundaryKind::Displacement(ref displacement) => {
-                let values = displacement.values;
+                let (values, dof_amplitudes) =
+                    displacement_values(step, bc, displacement, &amplitude);
                 // A coordinate system of its own turns the directions of the nodes.
                 if displacement.system != plx_model::GLOBAL && rotation_node.is_none() {
                     let system = (model.coordinate_system_or_global(&displacement.system))
@@ -3252,15 +3385,20 @@ fn step_block<'f>(
                             .then(|| values[i])
                             .flatten()
                     });
-                    items =
-                        displacement_boundaries(&target, rotation.as_ref(), &held, 6, &amplitude);
+                    items = displacement_boundaries(
+                        &target,
+                        rotation.as_ref(),
+                        &held,
+                        6,
+                        &dof_amplitudes,
+                    );
                 } else {
                     items = displacement_boundaries(
                         &target,
                         rotation.as_ref(),
                         &values,
                         dofs,
-                        &amplitude,
+                        &dof_amplitudes,
                     );
                 }
             }
@@ -3396,10 +3534,13 @@ fn step_block<'f>(
                     }
                     None => (node_set_ref(&sets.node_set(&load.name, &load.region)?), 4),
                 };
+                let (moment, component_amplitudes) =
+                    load_components(step, load, moment, MOMENT_TABLE_LABELS, &amplitude);
                 let mut items = Vec::new();
                 for (dof, value) in (0..).zip(moment) {
                     if value != 0.0 && dof as usize + 4 <= dofs {
-                        items.push(cload(target.clone(), first_dof + dof, value, &amplitude));
+                        let amplitude = &component_amplitudes[dof as usize];
+                        items.push(cload(target.clone(), first_dof + dof, value, amplitude));
                     }
                 }
                 vec![Card::Cload {
@@ -3460,6 +3601,8 @@ fn step_block<'f>(
             }
             LoadKind::Pressure(pressure) => {
                 use ir::step::DistributedLoadKind::Pressure;
+                let ([pressure], [amplitude]) =
+                    load_components(step, load, [pressure], ["P"], &amplitude);
                 let mut items = Vec::new();
                 match distribution(model, &load.name, &load.distribution)? {
                     // Every face takes the pressure scaled at its center.
@@ -3527,6 +3670,8 @@ fn step_block<'f>(
                 let faces = load.region.faces(sets.mesh);
                 let edges = load.region.edges(sets.mesh);
                 let axisymmetric = space == ModelSpace::Axisymmetric;
+                let (force, component_amplitudes) =
+                    load_components(step, load, force, FORCE_TABLE_LABELS, &amplitude);
                 let mut items = Vec::new();
                 // On points the nodes share the force equally, a reference point takes it
                 // whole: the share at every node of their set. With `each_node` every node
@@ -3541,7 +3686,8 @@ fn step_block<'f>(
                     for (dof, value) in (1..).zip(force).take(dofs) {
                         if value != 0.0 {
                             let share = value / count as f64;
-                            items.push(cload(set.clone(), dof, share, &amplitude));
+                            let amplitude = &component_amplitudes[dof as usize - 1];
+                            items.push(cload(set.clone(), dof, share, amplitude));
                         }
                     }
                 } else {
@@ -3557,7 +3703,8 @@ fn step_block<'f>(
                     for (node, values) in nodal {
                         for (dof, value) in (1..).zip(values).take(dofs) {
                             if value != 0.0 {
-                                items.push(cload(NodeRef::Node(node), dof, value, &amplitude));
+                                let amplitude = &component_amplitudes[dof as usize - 1];
+                                items.push(cload(NodeRef::Node(node), dof, value, amplitude));
                             }
                         }
                     }
@@ -3970,13 +4117,13 @@ fn new_step(procedure: ir::step::Procedure) -> ir::Step {
 }
 
 /// A static step.
-fn static_step(settings: &StaticStep) -> ir::Step {
-    let increments = incrementation(settings);
+fn static_step(settings: &StaticStep, nlgeom: bool) -> ir::Step {
+    let plan = settings.plan(nlgeom);
     incremented_step(
-        settings,
+        &plan,
         ir::step::Procedure::Static(ir::step::Static {
             solver: equation_solver(settings.solver),
-            increments,
+            increments: incrementation(&plan),
             time_reset: false,
             total_time_at_start: None,
         }),
@@ -3986,13 +4133,14 @@ fn static_step(settings: &StaticStep) -> ir::Step {
 
 /// A visco step: a static step whose automatic increments the creep strain tolerance
 /// limits.
-fn visco_step(settings: &ViscoStep) -> ir::Step {
+fn visco_step(settings: &ViscoStep, nlgeom: bool) -> ir::Step {
     let increments = &settings.increments;
+    let plan = increments.plan(nlgeom);
     incremented_step(
-        increments,
+        &plan,
         ir::step::Procedure::Visco(ir::step::Visco {
             solver: equation_solver(increments.solver),
-            increments: incrementation(increments),
+            increments: incrementation(&plan),
             cetol: settings.creep_tolerance,
         }),
         increments.nlgeom,
@@ -4060,15 +4208,16 @@ enum HeatKind {
 }
 
 /// A heat transfer or coupled step.
-fn heat_transfer_step(settings: &HeatTransferStep, kind: HeatKind) -> ir::Step {
+fn heat_transfer_step(settings: &HeatTransferStep, kind: HeatKind, nlgeom: bool) -> ir::Step {
     let increments = &settings.increments;
+    let plan = increments.plan(nlgeom);
     let heat = ir::step::HeatTransfer {
         solver: equation_solver(increments.solver),
         steady_state: settings.steady_state,
-        increments: incrementation(increments),
+        increments: incrementation(&plan),
         deltmx: settings.deltmx.filter(|_| !settings.steady_state),
         frequency_count: None,
-        direct: increments.incrementation == Incrementation::Direct,
+        direct: plan.fixed,
     };
     let (procedure, nlgeom) = match kind {
         HeatKind::Heat => (ir::step::Procedure::HeatTransfer(heat), false),
@@ -4081,7 +4230,7 @@ fn heat_transfer_step(settings: &HeatTransferStep, kind: HeatKind) -> ir::Step {
             false,
         ),
     };
-    incremented_step(increments, procedure, nlgeom)
+    incremented_step(&plan, procedure, nlgeom)
 }
 
 /// A Dynamic step: fixed time steps that put the result frames exactly on time steps
@@ -4241,37 +4390,29 @@ fn modal_damping(damping: Option<&ModalDamping>) -> Option<ir::step::ModalDampin
     })
 }
 
-/// The increments of a step with a time period.
-fn incrementation(settings: &StaticStep) -> ir::step::Incrementation {
-    let mut increments = ir::step::Incrementation::default();
-    match settings.incrementation {
-        Incrementation::Default => {}
-        Incrementation::Automatic => {
-            increments.initial = Some(settings.initial_increment);
-            increments.period = Some(settings.time_period);
-            increments.minimum = Some(settings.min_increment);
-            increments.maximum = Some(settings.max_increment);
-        }
-        Incrementation::Direct => {
-            increments.initial = Some(settings.initial_increment);
-            increments.period = Some(settings.time_period);
-            increments.direct = true;
-        }
+/// The increments of a step with a duration: every value resolved, the result frames as
+/// `FRAMES=`.
+fn incrementation(plan: &IncrementPlan) -> ir::step::Incrementation {
+    ir::step::Incrementation {
+        initial: Some(plan.initial),
+        period: Some(plan.duration),
+        minimum: (!plan.fixed).then_some(plan.minimum),
+        maximum: (!plan.fixed).then_some(plan.maximum),
+        direct: plan.fixed,
+        frames: Some(plan.frames),
     }
-    increments
 }
 
-/// A step of `procedure` with the increments of `settings`.
+/// A step of `procedure` with the increments of `plan`: without a limit on their number
+/// the step takes as many as it needs.
 fn incremented_step(
-    settings: &StaticStep,
+    plan: &IncrementPlan,
     procedure: ir::step::Procedure,
     nlgeom: bool,
 ) -> ir::Step {
     let mut step = new_step(procedure);
     step.nlgeom = nlgeom;
-    if settings.incrementation != Incrementation::Default {
-        step.max_increments = settings.max_increments;
-    }
+    step.max_increments = plan.limit.unwrap_or(u32::MAX);
     step
 }
 

@@ -4,9 +4,9 @@
 use egui::Ui;
 use plx_mesh::FeMesh;
 use plx_model::{
-    CompressionOnly, Constraint, FeModel, Joint, JointKind, ModelSpace, PointDefinition, Quantity,
-    ReferencePoint, Region, RemoteBehavior, RigidBody, Spring, SpringEnd, SpringLayout, UnitSystem,
-    next_name,
+    CompressionOnly, Constraint, FeModel, Joint, JointAxis, JointKind, ModelSpace, PointDefinition,
+    Quantity, ReferencePoint, Region, RemoteBehavior, RigidBody, Spring, SpringEnd, SpringLayout,
+    UnitSystem, next_name,
 };
 
 use crate::contacts::{MasterSlave, Side};
@@ -729,11 +729,15 @@ fn joint_rows(ui: &mut Ui, model: &Model, joint: &mut Joint, pair: &mut MasterSl
         }
     }
     ui.end_row();
+    if !fe.properties.space.is_2d() {
+        axis_rows(ui, model, joint);
+    }
     let axis = if fe.properties.space.is_2d() {
         "The joint turns about the axis normal to the model plane."
     } else {
-        "The z axis of the coordinate system is the axis of a revolute, cylindrical or \
-         slider joint and the normal of a planar joint."
+        "The axis is the axis of a revolute, cylindrical or slider joint and the normal of a \
+         planar joint (z of the joint frame). Face normal and Cylinder axis take the faces of \
+         End 1 (of End 2 when End 1 has none)."
     };
     hint(
         ui,
@@ -742,6 +746,52 @@ fn joint_rows(ui: &mut Ui, model: &Model, joint: &mut Joint, pair: &mut MasterSl
              frame turns with End 1."
         ),
     );
+}
+
+/// The joint axis: where it comes from and the direction it has.
+fn axis_rows(ui: &mut Ui, model: &Model, joint: &mut Joint) {
+    let fe = &model.fe;
+    ui.label("Axis");
+    egui::ComboBox::from_id_salt("joint axis")
+        .selected_text(joint.axis.label())
+        .width(crate::dock::fit_width(ui, 200.0))
+        .show_ui(ui, |ui| {
+            for choice in JointAxis::CHOICES {
+                if ui
+                    .selectable_label(joint.axis.same_kind(choice), choice.label())
+                    .clicked()
+                    && !joint.axis.same_kind(choice)
+                {
+                    joint.axis = choice;
+                }
+            }
+        });
+    ui.end_row();
+    if let JointAxis::Direction(direction) = &mut joint.axis {
+        for (value, label) in direction.iter_mut().zip(["X", "Y", "Z"]) {
+            ui.label(format!("Axis {label}"));
+            ui.add(numeric::drag_value(value).speed(0.01));
+            ui.end_row();
+        }
+    }
+    ui.label("Axis direction");
+    match fe.joint_frame(&model.mesh, joint) {
+        Ok((_, axes)) => {
+            let [x, y, z] = axes[2].map(|v| crate::results::format_value(v as f32));
+            ui.label(format!("({x}, {y}, {z})"))
+                .on_hover_text("Global direction of the joint axis");
+        }
+        // The origin's error shows in the Joint row.
+        Err(_) if fe.joint_origin(&model.mesh, joint).is_err() => {
+            ui.weak("Choose the ends");
+        }
+        Err(error) => {
+            ui.add(
+                egui::Label::new(egui::RichText::new(error).color(crate::style::error())).wrap(),
+            );
+        }
+    }
+    ui.end_row();
 }
 
 /// Rotational stiffness about the global axes, in moment per radian.
