@@ -21,7 +21,8 @@ struct History {
     state: Vec<u32>,
 }
 
-/// One material block: kind, elastic matrix, shear and bulk modulus, the two curves.
+/// One material block: kind (0 elastic, 1 J2, 2 J2 at finite strains), elastic matrix,
+/// shear and bulk modulus, the two curves.
 type Block<'a> = (f32, [[f64; 6]; 6], f64, f64, [&'a [(f64, f64)]; 2]);
 
 /// The materials buffer: the blocks, then the curves.
@@ -35,7 +36,14 @@ fn materials(materials: &[Material]) -> Vec<f32> {
                 bulk,
                 isotropic,
                 kinematic,
-            } => (1.0, [[0.0; 6]; 6], *shear, *bulk, [isotropic, kinematic]),
+                finite,
+            } => (
+                if *finite { 2.0 } else { 1.0 },
+                [[0.0; 6]; 6],
+                *shear,
+                *bulk,
+                [isotropic, kinematic],
+            ),
         };
         let block = &mut out[i * MATERIAL_BLOCK..(i + 1) * MATERIAL_BLOCK];
         block[0] = kind;

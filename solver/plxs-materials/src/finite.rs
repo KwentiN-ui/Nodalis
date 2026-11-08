@@ -19,7 +19,7 @@
 //! creep rate.
 
 use crate::plastic::{BACK, J2Plastic, PLASTIC, STATE_SIZE, deviator};
-use crate::{MaterialInput, MaterialLaw, MaterialOutput};
+use crate::{KernelLaw, MaterialInput, MaterialLaw, MaterialOutput};
 
 type Mat3 = [[f64; 3]; 3];
 
@@ -176,6 +176,26 @@ impl MaterialLaw for FiniteStrainJ2 {
 
     fn elastic_matrix(&self) -> [[f64; 6]; 6] {
         self.inner.elastic_matrix()
+    }
+
+    fn kernel_law(&self) -> Option<KernelLaw> {
+        match self.inner.kernel_law()? {
+            KernelLaw::J2 {
+                shear,
+                bulk,
+                isotropic,
+                kinematic,
+                ..
+            } => Some(KernelLaw::J2 {
+                shear,
+                bulk,
+                isotropic,
+                kinematic,
+                finite: true,
+            }),
+            // Hencky, not Saint Venant-Kirchhoff, inside the yield surface.
+            KernelLaw::Elastic => None,
+        }
     }
 
     /// The stress alone: one evaluation instead of the thirteen of the tangent's central

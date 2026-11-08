@@ -64,6 +64,12 @@ fn a_block_of_bricks_swings_far_as_on_the_processor() {
     swing(true, 400.0, false);
 }
 
+/// Under NLGEOM and yielding: J2 at finite strains.
+#[test]
+fn a_block_of_bricks_yields_far_as_on_the_processor() {
+    swing(true, 60.0, true);
+}
+
 /// A cantilever block of bricks starting with `speed` across, pulled at its free end;
 /// `plastic`: of J2 materials.
 fn swing(nlgeom: bool, speed: f64, plastic: bool) {
@@ -146,6 +152,7 @@ fn swing(nlgeom: bool, speed: f64, plastic: bool) {
                                 bulk,
                                 isotropic,
                                 kinematic,
+                                finite: nlgeom,
                             }
                         } else {
                             Material::Elastic(isotropic(young, 0.3))

@@ -47,6 +47,10 @@ pub enum Material {
         isotropic: Vec<(f64, f64)>,
         /// The back stress's uniaxial stress against equivalent plastic strain, or empty.
         kinematic: Vec<(f64, f64)>,
+        /// At finite strains (the processor's `FiniteStrainJ2`, under NLGEOM): Hencky
+        /// elasticity in the logarithmic elastic strain, the return mapping on the Kirchhoff
+        /// stress, the plastic slots of the state holding `C_p⁻¹ − 1`.
+        finite: bool,
     },
 }
 
@@ -86,85 +90,230 @@ impl Material {
                 bulk,
                 isotropic,
                 kinematic,
+                finite,
             } => {
                 let state = state.expect("J2 has state variables");
-                j2(*shear, *bulk, isotropic, kinematic, strain, state)
+                let law = Radial {
+                    mu: *shear,
+                    bulk: *bulk,
+                    isotropic,
+                    kinematic,
+                };
+                if *finite {
+                    law.finite(strain, state)
+                } else {
+                    law.small(strain, state)
+                }
             }
         }
     }
 }
 
 /// The radial return of `J2Plastic` (rate independent).
-fn j2(
+struct Radial<'a> {
     mu: f64,
     bulk: f64,
-    isotropic: &[(f64, f64)],
-    kinematic: &[(f64, f64)],
-    strain: &[f64; 6],
-    state: &mut [f64],
-) -> [f64; 6] {
-    let e = strain;
-    let elastic: [f64; 6] = std::array::from_fn(|k| {
-        let total = if k < 3 { e[k] } else { 0.5 * e[k] };
-        total - state[1 + k]
-    });
-    let trace = elastic[0] + elastic[1] + elastic[2];
-    let mean = trace / 3.0;
-    let s_trial: [f64; 6] =
-        std::array::from_fn(|k| 2.0 * mu * (elastic[k] - if k < 3 { mean } else { 0.0 }));
-    let xi: [f64; 6] = std::array::from_fn(|k| s_trial[k] - state[7 + k]);
-    let xi_norm = (xi[0] * xi[0]
-        + xi[1] * xi[1]
-        + xi[2] * xi[2]
-        + 2.0 * (xi[3] * xi[3] + xi[4] * xi[4] + xi[5] * xi[5]))
-        .sqrt();
-    let q = 1.5_f64.sqrt() * xi_norm;
-    let peeq = state[0];
-    let yield_stress = curve(isotropic, peeq).0;
-    let hydrostatic = bulk * trace;
-    let mut stress = s_trial;
-    if q - yield_stress > 1e-9 * yield_stress.max(0.0) && xi_norm > 0.0 {
-        let kappa0 = curve(kinematic, peeq).0;
-        let overstress = |dg: f64| {
-            q - 3.0 * mu * dg
-                - (curve(kinematic, peeq + dg).0 - kappa0)
-                - curve(isotropic, peeq + dg).0
-        };
-        let hardening = |dg: f64| curve(kinematic, peeq + dg).1 + curve(isotropic, peeq + dg).1;
-        let (mut lo, mut hi) = (0.0, q / (3.0 * mu));
-        let mut dg = (q - yield_stress) / (3.0 * mu + hardening(0.0));
-        for _ in 0..100 {
-            let g = overstress(dg);
-            if g.abs() <= 1e-12 * q.max(1.0) {
-                break;
+    isotropic: &'a [(f64, f64)],
+    kinematic: &'a [(f64, f64)],
+}
+
+type Mat3 = [[f64; 3]; 3];
+
+impl Radial<'_> {
+    /// The small-strain law of the engineering strain.
+    fn small(&self, strain: &[f64; 6], state: &mut [f64]) -> [f64; 6] {
+        let e = strain;
+        let elastic: [f64; 6] = std::array::from_fn(|k| {
+            let total = if k < 3 { e[k] } else { 0.5 * e[k] };
+            total - state[1 + k]
+        });
+        let (stress, increment) = self.ret(&elastic, state);
+        if let Some(increment) = increment {
+            for k in 0..6 {
+                state[1 + k] += increment[k];
             }
-            if g > 0.0 {
-                lo = dg;
-            } else {
-                hi = dg;
+        }
+        stress
+    }
+
+    /// The finite-strain law of the Green-Lagrange strain (engineering components): the
+    /// second Piola-Kirchhoff stress. The stretch `U = 1 + A`, its inverse `1 + A'`, the
+    /// trial `b_e = U C_p⁻¹ U` and the new `C_p⁻¹ = U⁻¹ b_e U⁻¹` are formed from their
+    /// differences to the identity, as the card does in single precision.
+    fn finite(&self, strain: &[f64; 6], state: &mut [f64]) -> [f64; 6] {
+        let e = strain;
+        let two_e = [
+            [2.0 * e[0], e[3], e[5]],
+            [e[3], 2.0 * e[1], e[4]],
+            [e[5], e[4], 2.0 * e[2]],
+        ];
+        let a = spectral(&two_e, |l| l / (1.0 + (1.0 + l).sqrt()));
+        let ai = spectral(&two_e, |l| {
+            let s = (1.0 + l).sqrt();
+            -l / (1.0 + s) / s
+        });
+        let p = matrix(&std::array::from_fn(|k| state[1 + k]));
+        let b = around(&a, &p);
+        let trial = vector(&spectral(&b, |l| 0.5 * l.ln_1p()));
+        let (tau, increment) = self.ret(&trial, state);
+        if let Some(increment) = increment {
+            let elastic: [f64; 6] = std::array::from_fn(|k| trial[k] - increment[k]);
+            let be = spectral(&matrix(&elastic), |l| (2.0 * l).exp_m1());
+            let cp = vector(&around(&ai, &be));
+            state[1..7].copy_from_slice(&cp);
+        }
+        let tau = matrix(&tau);
+        let mut s = tau;
+        let at = multiply(&ai, &tau);
+        let ata = multiply(&at, &ai);
+        for i in 0..3 {
+            for j in 0..3 {
+                s[i][j] += at[i][j] + at[j][i] + ata[i][j];
             }
-            let next = dg + g / (3.0 * mu + hardening(dg));
-            dg = if next > lo && next < hi {
-                next
-            } else {
-                0.5 * (lo + hi)
+        }
+        vector(&s)
+    }
+
+    /// The stress of the elastic trial strain (tensor components) and, where it flows, the
+    /// plastic strain increment; the equivalent plastic strain and the back stress advance.
+    fn ret(&self, elastic: &[f64; 6], state: &mut [f64]) -> ([f64; 6], Option<[f64; 6]>) {
+        let (mu, isotropic, kinematic) = (self.mu, self.isotropic, self.kinematic);
+        let trace = elastic[0] + elastic[1] + elastic[2];
+        let mean = trace / 3.0;
+        let s_trial: [f64; 6] =
+            std::array::from_fn(|k| 2.0 * mu * (elastic[k] - if k < 3 { mean } else { 0.0 }));
+        let xi: [f64; 6] = std::array::from_fn(|k| s_trial[k] - state[7 + k]);
+        let xi_norm = (xi[0] * xi[0]
+            + xi[1] * xi[1]
+            + xi[2] * xi[2]
+            + 2.0 * (xi[3] * xi[3] + xi[4] * xi[4] + xi[5] * xi[5]))
+            .sqrt();
+        let q = 1.5_f64.sqrt() * xi_norm;
+        let peeq = state[0];
+        let yield_stress = curve(isotropic, peeq).0;
+        let hydrostatic = self.bulk * trace;
+        let mut stress = s_trial;
+        let mut flow = None;
+        if q - yield_stress > 1e-9 * yield_stress.max(0.0) && xi_norm > 0.0 {
+            let kappa0 = curve(kinematic, peeq).0;
+            let overstress = |dg: f64| {
+                q - 3.0 * mu * dg
+                    - (curve(kinematic, peeq + dg).0 - kappa0)
+                    - curve(isotropic, peeq + dg).0
             };
+            let hardening = |dg: f64| curve(kinematic, peeq + dg).1 + curve(isotropic, peeq + dg).1;
+            let (mut lo, mut hi) = (0.0, q / (3.0 * mu));
+            let mut dg = (q - yield_stress) / (3.0 * mu + hardening(0.0));
+            for _ in 0..100 {
+                let g = overstress(dg);
+                if g.abs() <= 1e-12 * q.max(1.0) {
+                    break;
+                }
+                if g > 0.0 {
+                    lo = dg;
+                } else {
+                    hi = dg;
+                }
+                let next = dg + g / (3.0 * mu + hardening(dg));
+                dg = if next > lo && next < hi {
+                    next
+                } else {
+                    0.5 * (lo + hi)
+                };
+            }
+            let dg = dg.clamp(0.0, q / (3.0 * mu));
+            let delta_kappa = curve(kinematic, peeq + dg).0 - kappa0;
+            let mut increment = [0.0; 6];
+            for k in 0..6 {
+                let n = xi[k] / xi_norm;
+                increment[k] = dg * 1.5_f64.sqrt() * n;
+                state[7 + k] += delta_kappa * (2.0_f64 / 3.0).sqrt() * n;
+                stress[k] -= 2.0 * mu * increment[k];
+            }
+            state[0] = peeq + dg;
+            flow = Some(increment);
         }
-        let dg = dg.clamp(0.0, q / (3.0 * mu));
-        let delta_kappa = curve(kinematic, peeq + dg).0 - kappa0;
-        for k in 0..6 {
-            let n = xi[k] / xi_norm;
-            let dep = dg * 1.5_f64.sqrt() * n;
-            state[1 + k] += dep;
-            state[7 + k] += delta_kappa * (2.0_f64 / 3.0).sqrt() * n;
-            stress[k] -= 2.0 * mu * dep;
+        for v in stress.iter_mut().take(3) {
+            *v += hydrostatic;
         }
-        state[0] = peeq + dg;
+        (stress, flow)
     }
-    for v in stress.iter_mut().take(3) {
-        *v += hydrostatic;
+}
+
+/// The symmetric matrix of tensor components `[xx, yy, zz, xy, yz, zx]`.
+fn matrix(t: &[f64; 6]) -> Mat3 {
+    [[t[0], t[3], t[5]], [t[3], t[1], t[4]], [t[5], t[4], t[2]]]
+}
+
+fn vector(m: &Mat3) -> [f64; 6] {
+    [m[0][0], m[1][1], m[2][2], m[0][1], m[1][2], m[2][0]]
+}
+
+fn multiply(a: &Mat3, b: &Mat3) -> Mat3 {
+    std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|k| a[i][k] * b[k][j]).sum()))
+}
+
+/// `(1 + a) (1 + b) (1 + a) − 1` of symmetric `a`, `b`, without forming the identity.
+fn around(a: &Mat3, b: &Mat3) -> Mat3 {
+    let aa = multiply(a, a);
+    let ab = multiply(a, b);
+    let aba = multiply(&ab, a);
+    std::array::from_fn(|i| {
+        std::array::from_fn(|j| {
+            2.0 * a[i][j] + b[i][j] + aa[i][j] + ab[i][j] + ab[j][i] + aba[i][j]
+        })
+    })
+}
+
+/// `f` of the eigenvalues of a symmetric matrix (cyclic Jacobi rotations, as the card).
+fn spectral(m: &Mat3, f: impl Fn(f64) -> f64) -> Mat3 {
+    let (values, v) = eigen(m);
+    let fa = values.map(f);
+    std::array::from_fn(|i| {
+        std::array::from_fn(|j| (0..3).map(|a| fa[a] * v[i][a] * v[j][a]).sum())
+    })
+}
+
+/// Eigenvalues and eigenvectors (columns) of a symmetric matrix.
+fn eigen(m: &Mat3) -> ([f64; 3], Mat3) {
+    let mut a = *m;
+    let mut v = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    for _ in 0..50 {
+        let off = a[0][1].abs() + a[0][2].abs() + a[1][2].abs();
+        let scale = a[0][0].abs() + a[1][1].abs() + a[2][2].abs() + off;
+        if off <= 1e-15 * scale {
+            break;
+        }
+        for (p, q) in [(0, 1), (0, 2), (1, 2)] {
+            if a[p][q] == 0.0 {
+                continue;
+            }
+            let theta = (a[q][q] - a[p][p]) / (2.0 * a[p][q]);
+            let t = if theta == 0.0 {
+                1.0
+            } else {
+                theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt())
+            };
+            let c = 1.0 / (t * t + 1.0).sqrt();
+            let s = t * c;
+            for row in a.iter_mut() {
+                let (akp, akq) = (row[p], row[q]);
+                row[p] = c * akp - s * akq;
+                row[q] = s * akp + c * akq;
+            }
+            for k in 0..3 {
+                let (apk, aqk) = (a[p][k], a[q][k]);
+                a[p][k] = c * apk - s * aqk;
+                a[q][k] = s * apk + c * aqk;
+            }
+            for row in v.iter_mut() {
+                let (vkp, vkq) = (row[p], row[q]);
+                row[p] = c * vkp - s * vkq;
+                row[q] = s * vkp + c * vkq;
+            }
+        }
     }
-    stress
+    ([a[0][0], a[1][1], a[2][2]], v)
 }
 
 /// One element.
