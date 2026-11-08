@@ -225,6 +225,10 @@ impl Engine {
             any_adapter: any,
             double: Double::Required,
             timestamps: tracing,
+            // The state of a step takes a few hundred MB even for large models, and the
+            // budget would refuse the upload and read-back buffers on cards whose shared
+            // heap the desktop fills.
+            memory_share: false,
         })?;
         let too_large = || format!("the model is too large for the buffers of {}", gpu.name);
         if !gpu.fits(8 * 6 * n as u64) {

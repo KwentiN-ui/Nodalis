@@ -112,6 +112,12 @@ pub struct Options {
     pub double: Double,
     /// Timestamp queries, when the adapter has them ([`Gpu::timestamps`]).
     pub timestamps: bool,
+    /// Buffers fail beyond [`MEMORY_SHARE_PERCENT`] of a memory heap's budget. The budget
+    /// counts every heap, also the small one of memory both the card and the processor
+    /// reach (256 MB without resizable BAR), which the desktop fills: there every upload
+    /// and read-back buffer fails ("Out of Memory") while the card's own memory is
+    /// almost empty. For solvers whose buffers are small against the card.
+    pub memory_share: bool,
 }
 
 /// An open device.
@@ -135,7 +141,7 @@ impl Gpu {
     /// Opens the adapter `options` ask for, the discrete one first. `Err` tells why there
     /// is none, for the output.
     pub fn open(options: Options) -> Result<Self, String> {
-        let instance = instance(true);
+        let instance = instance(options.memory_share);
         let adapters = block_on(instance.enumerate_adapters(wgpu::Backends::PRIMARY));
         let rank = |t: wgpu::DeviceType| match t {
             wgpu::DeviceType::DiscreteGpu => 0,
