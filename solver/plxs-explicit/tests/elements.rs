@@ -4,8 +4,8 @@
 //! software renderers too); elsewhere it says so and passes.
 
 use plxs_explicit::{
-    Block, Element, Elements, Engine, ForceModel, Hourglass, Isochoric, MAX_CHUNK, Material,
-    Points, Setup, Start, Volumetric,
+    Block, Element, Elements, Engine, Hourglass, Isochoric, MAX_CHUNK, Material, Points, Setup,
+    Start, Volumetric,
 };
 
 /// The trilinear brick's natural node coordinates.
@@ -337,7 +337,7 @@ fn swing_with(nlgeom: bool, speed: f64, plastic: bool, hyper: bool, dense: bool)
     }
     let alpha = 50.0;
     let setup = Setup {
-        forces: ForceModel::Elements(&elements),
+        elements: &elements,
         inverse_mass: &inverse,
         alpha,
     };

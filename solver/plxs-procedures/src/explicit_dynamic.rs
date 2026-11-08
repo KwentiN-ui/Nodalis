@@ -1752,12 +1752,6 @@ impl Procedure for ExplicitDynamic {
             && beta_r == 0.0
             && set.is_selection()
             && matches!(reduced_mass, ReducedMass::Diagonal(_))
-            && (ctx.table.membranes.is_empty() || !step.nlgeom)
-            && ctx
-                .table
-                .discrete
-                .iter()
-                .all(|e| e.spring_stiffness().is_some())
         {
             gpu_engine(ctx, step, &kernel, &set, &data.mass, alpha_r, progress)
         } else {
@@ -2391,44 +2385,24 @@ fn gpu_engine(
             inverse[dof as usize] = 1.0 / m;
         }
     }
-    // Element by element where all elements have kernels, otherwise by the matrices.
-    let opened = match gpu_elements(ctx, kernel, step.nlgeom) {
-        Some(elements) => plxs_explicit::Engine::new(
+    // Element by element; where an element or a material has no kernel yet, the steps
+    // stay on the processor.
+    let opened = gpu_elements(ctx, kernel, step.nlgeom).and_then(|elements| {
+        plxs_explicit::Engine::new(
             &plxs_explicit::Setup {
-                forces: plxs_explicit::ForceModel::Elements(&elements),
+                elements: &elements,
                 inverse_mass: &inverse,
                 alpha,
             },
             any,
         )
-        .map(|engine| {
-            (
-                engine,
-                "element forces in single precision, state in double precision",
-            )
-        }),
-        // Large deformations need the kernels.
-        None if step.nlgeom || ctx.table.has_nonlinear_material() => Err(
-            "large deformations and nonlinear materials need element kernels, which not all \
-             elements and materials have yet"
-                .to_owned(),
-        ),
-        None if !ctx.table.membranes.is_empty() || !ctx.table.discrete.is_empty() => {
-            Err("membranes and springs need element kernels for all elements".to_owned())
-        }
-        None => gpu_matrices(ctx, kernel, &inverse, alpha, any).map(|engine| {
-            (
-                engine,
-                "forces in single precision from the motion within a frame, state in double \
-                 precision",
-            )
-        }),
-    };
+    });
     match opened {
-        Ok((engine, how)) => {
+        Ok(engine) => {
             ctx.profile.add(Phase::Assembly, started);
             progress.event(ProgressEvent::Info(format!(
-                "explicit: time steps on {} ({how})",
+                "explicit: time steps on {} (element forces in single precision, state in \
+                 double precision)",
                 engine.device()
             )));
             Some(engine)
@@ -2452,12 +2426,7 @@ fn gpu_elements(
     ctx: &ProcedureContext<'_>,
     kernel: &Kernel<'_>,
     nlgeom: bool,
-) -> Option<plxs_explicit::Elements> {
-    // `PLXS_GPU_FORCES=matrices`: the matrices anyway, for measurements (until the
-    // kernels cover all elements and the matrices go).
-    if std::env::var("PLXS_GPU_FORCES").is_ok_and(|v| v.eq_ignore_ascii_case("matrices")) {
-        return None;
-    }
+) -> std::result::Result<plxs_explicit::Elements, String> {
     use plxs_materials::hyper::{Isochoric, Volumetric};
     let mut elements = plxs_explicit::Elements {
         nlgeom,
@@ -2468,7 +2437,14 @@ fn gpu_elements(
         let coords = ctx.table.coordinates(ctx.model, entry);
         let law = ctx.table.law(entry, nlgeom);
         let elastic = law.elastic_matrix();
-        let (material, state) = match law.kernel_law()? {
+        let kind = formulation.kind;
+        let Some(kernel_law) = law.kernel_law() else {
+            return Err(format!(
+                "the material of the {kind:?} elements has no kernel on the card yet (creep, \
+                 or plasticity or hyperelasticity in plane stress)"
+            ));
+        };
+        let (material, state) = match kernel_law {
             plxs_materials::KernelLaw::Elastic => (plxs_explicit::Material::Elastic(elastic), None),
             plxs_materials::KernelLaw::J2 {
                 shear,
@@ -2507,7 +2483,7 @@ fn gpu_elements(
             ),
         };
         if entry.dofs.len() != 3 * coords.len() || viscosity.g.len() != entry.dofs.len() {
-            return None;
+            return Err(format!("{kind:?} elements have no kernel on the card yet"));
         }
         let (points, matrix, hourglass) = match formulation.nodal_gradients(&coords, &elastic) {
             Some(g) => (plxs_explicit::Points::Nodal(g.points), None, g.hourglass),
@@ -2523,129 +2499,48 @@ fn gpu_elements(
                 coordinates: coords.clone(),
             }),
             (None, false) => None,
-            (None, true) => return None,
+            (None, true) => {
+                return Err(format!(
+                    "{kind:?} elements have hourglass viscosity but no kernel for it"
+                ));
+            }
         };
-        elements
-            .push(plxs_explicit::Element {
-                dofs: entry.dofs.clone(),
-                points,
-                matrix,
-                material,
-                state,
-                bulk: viscosity.rate * viscosity.volume,
-                mean: viscosity.g.clone(),
-                hourglass,
-            })
-            .ok()?;
+        elements.push(plxs_explicit::Element {
+            dofs: entry.dofs.clone(),
+            points,
+            matrix,
+            material,
+            state,
+            bulk: viscosity.rate * viscosity.volume,
+            mean: viscosity.g.clone(),
+            hourglass,
+        })?;
     }
     // Constant blocks: U1 elements, the linear stiffness of native membranes under small
     // strains (their force is `K u` then) and springs. Membranes under NLGEOM and gaps
     // stay on the processor.
     for block in &ctx.table.linear_blocks {
         if block.membrane && nlgeom {
-            return None;
+            return Err("membranes under large deformations have no kernel on the card yet".into());
         }
-        elements
-            .push_block(plxs_explicit::Block {
-                dofs: block.dofs.clone(),
-                stiffness: block.stiffness.clone(),
-            })
-            .ok()?;
+        elements.push_block(plxs_explicit::Block {
+            dofs: block.dofs.clone(),
+            stiffness: block.stiffness.clone(),
+        })?;
     }
     for element in &ctx.table.discrete {
-        elements
-            .push_block(plxs_explicit::Block {
-                dofs: element.dofs.clone(),
-                stiffness: element.spring_stiffness()?,
-            })
-            .ok()?;
+        let Some(stiffness) = element.spring_stiffness() else {
+            return Err("gaps have no kernel on the card yet".into());
+        };
+        elements.push_block(plxs_explicit::Block {
+            dofs: element.dofs.clone(),
+            stiffness,
+        })?;
     }
-    (!elements.is_empty()).then_some(elements)
-}
-
-/// The engine with the stiffness and the viscous matrix (bulk viscosity and hourglass
-/// control, linear in the velocities under small strains).
-fn gpu_matrices(
-    ctx: &mut ProcedureContext<'_>,
-    kernel: &Kernel<'_>,
-    inverse: &[f64],
-    alpha: f64,
-    any: bool,
-) -> std::result::Result<plxs_explicit::Engine, String> {
-    let n = ctx.table.dofs.len();
-    if ctx.stiffness.is_none() {
-        let mut k = SparseMatrix::zeros(ctx.pattern.clone());
-        plxs_assembly::assemble_stiffness(ctx.table, ctx.model, &mut k);
-        ctx.stiffness = Some(k);
+    if elements.is_empty() {
+        return Err("no elements".into());
     }
-    let k = ctx.stiffness.as_ref().expect("assembled");
-    let mut entries = Vec::with_capacity(2 * k.values().len());
-    let pattern = k.pattern();
-    for col in 0..n {
-        let start = pattern.col_ptr()[col] as usize;
-        for (offset, &row) in pattern.column(col).iter().enumerate() {
-            let value = k.values()[start + offset];
-            entries.push((row, col as u32, value));
-            if row as usize != col {
-                entries.push((col as u32, row, value));
-            }
-        }
-    }
-    let stiffness = plxs_explicit::Csr::from_entries(n, entries);
-    // The viscous matrix element by element: the bulk viscosity `c V g gᵀ`, the hourglass
-    // control column by column.
-    let mut entries = Vec::new();
-    for (entry, viscosity) in ctx.table.entries.iter().zip(kernel.viscosity) {
-        let dofs = &entry.dofs;
-        let m = dofs.len();
-        let factor = viscosity.rate * viscosity.volume;
-        let mut ce = vec![0.0; m * m];
-        if factor != 0.0 && viscosity.g.len() == m {
-            for a in 0..m {
-                for b in 0..m {
-                    ce[a * m + b] += factor * viscosity.g[a] * viscosity.g[b];
-                }
-            }
-        }
-        if viscosity.hourglass > 0.0 {
-            let coords = ctx.table.coordinates(ctx.model, entry);
-            let mut unit = vec![0.0; m];
-            for b in 0..m {
-                unit[b] = 1.0;
-                let mut column = vec![0.0; m];
-                hourglass_forces(
-                    &coords,
-                    &viscosity.g,
-                    &unit,
-                    viscosity.hourglass,
-                    &mut column,
-                );
-                unit[b] = 0.0;
-                for a in 0..m {
-                    ce[a * m + b] += column[a];
-                }
-            }
-        }
-        for a in 0..m {
-            for b in 0..m {
-                if ce[a * m + b] != 0.0 {
-                    entries.push((dofs[a], dofs[b], ce[a * m + b]));
-                }
-            }
-        }
-    }
-    let viscous = plxs_explicit::Csr::from_entries(n, entries);
-    plxs_explicit::Engine::new(
-        &plxs_explicit::Setup {
-            forces: plxs_explicit::ForceModel::Matrices {
-                stiffness: &stiffness,
-                viscous: &viscous,
-            },
-            inverse_mass: inverse,
-            alpha,
-        },
-        any,
-    )
+    Ok(elements)
 }
 
 /// The damping of an explicit step: `(α_R, β_R)`. A damping ratio damps the mass-

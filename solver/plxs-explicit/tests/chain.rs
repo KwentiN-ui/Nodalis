@@ -2,25 +2,27 @@
 //! in double precision on the processor. Runs where a card with double precision is found
 //! (`PLXS_GPU=on` takes software renderers too); elsewhere it says so and passes.
 
-use plxs_explicit::{Csr, Engine, ForceModel, MAX_CHUNK, Setup, Start};
+use plxs_explicit::{Block, Elements, Engine, MAX_CHUNK, Setup, Start};
 
-/// `n` masses `m` in a row, springs `k` between them and to a wall at the first; the last
-/// DOF is held. A dashpot `c` parallel to every spring.
-fn chain(n: usize, k: f64, c: f64) -> (Csr, Csr) {
-    let mut ks = Vec::new();
-    let mut cs = Vec::new();
-    for i in 0..n {
-        for (list, s) in [(&mut ks, k), (&mut cs, c)] {
-            list.push((i as u32, i as u32, s));
-            if i + 1 < n {
-                list.push((i as u32, i as u32, s));
-                list.push((i as u32, i as u32 + 1, -s));
-                list.push((i as u32 + 1, i as u32, -s));
-                list.push((i as u32 + 1, i as u32 + 1, s));
-            }
-        }
+/// `n` masses in a row, springs `k` between them and to a wall at the first, as constant
+/// blocks; the last DOF is held.
+fn chain(n: usize, k: f64) -> Elements {
+    let mut elements = Elements::default();
+    elements
+        .push_block(Block {
+            dofs: vec![0],
+            stiffness: vec![k],
+        })
+        .unwrap();
+    for i in 0..n - 1 {
+        elements
+            .push_block(Block {
+                dofs: vec![i as u32, i as u32 + 1],
+                stiffness: vec![k, -k, -k, k],
+            })
+            .unwrap();
     }
-    (Csr::from_entries(n, ks), Csr::from_entries(n, cs))
+    elements
 }
 
 #[test]
@@ -29,16 +31,13 @@ fn a_chain_of_springs_swings_as_on_the_processor() {
         return;
     }
     let n = 1000;
-    let (k, c) = chain(n, 4.0e6, 20.0);
+    let elements = chain(n, 4.0e6);
     let mass: Vec<f64> = (0..n).map(|i| 1.0 + 0.001 * i as f64).collect();
     let mut inverse: Vec<f64> = mass.iter().map(|m| 1.0 / m).collect();
     inverse[n - 1] = 0.0;
     let alpha = 3.0;
     let setup = Setup {
-        forces: ForceModel::Matrices {
-            stiffness: &k,
-            viscous: &c,
-        },
+        elements: &elements,
         inverse_mass: &inverse,
         alpha,
     };
@@ -61,8 +60,7 @@ fn a_chain_of_springs_swings_as_on_the_processor() {
     let mut u = vec![0.0; n];
     let mut v: Vec<f64> = (0..n).map(|i| if i + 1 < n { 0.01 } else { 0.0 }).collect();
     let forces = |u: &[f64], v: &[f64]| {
-        let fi = k.multiply(u);
-        let mut fv = c.multiply(v);
+        let (fi, mut fv) = elements.forces(u, v, &mut []);
         for i in 0..n {
             fv[i] += alpha * mass[i] * v[i];
         }

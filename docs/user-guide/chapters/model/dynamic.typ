@@ -157,8 +157,7 @@ node, and does a few vector updates, many times faster than the processor. No st
 matrix is built for that; C3D8I and the plane and axisymmetric elements take their
 condensed operators. U1 blocks and springs act on the card as constant stiffness blocks,
 and so do membranes under small strains; membranes under large deformations (NLGEOM) and
-gaps keep the time steps on the processor. With the
-element kernels, large deformations run on the card too: Green-Lagrange strain, Saint
+gaps keep the time steps on the processor. Large deformations run on the card too: Green-Lagrange strain, Saint
 Venant-Kirchhoff stress, and the bulk and hourglass viscosity in the deformed shape, as on
 the processor. Every 100 time steps the card stops for the processor to check the stable
 time step of the deformed elements. Materials: elastic ones, and J2 plasticity (`*PLASTIC`,
@@ -169,10 +168,10 @@ hyperelasticity in plane stress elements, keep the time steps on the processor f
 
 Most cards compute double precision far slower than single precision (a sixty-fourth on an
 RTX 4070), and Metal on macOS has none. The displacements, velocities, accelerations, loads
-and energies therefore stay in double precision; only the two products run in single
-precision: the element forces on the displacements relative to the element's first node,
-the products on the motion since the start of the frame. Their rounding error is relative
-to that motion and does not add up from step to step, and the energy balance the solver
+and energies therefore stay in double precision; only the element forces run in single
+precision, on the displacements relative to the element's first node (the constant blocks
+in double precision). Their rounding error is relative to the motion within the element
+and does not add up from step to step, and the energy balance the solver
 reports checks it: on test models the card agrees with the processor to 1e-4 of the largest
 value. The last time step of every frame, which computes the stresses of the frame, runs on
 the processor. Between the corners of their amplitudes, loads follow them linearly over at

@@ -3,8 +3,7 @@
 use plxs_gpu::{Double, Gpu, Options, Use, wgpu};
 
 use crate::elements::{Isochoric, Material, STATE_SIZE, Volumetric};
-use crate::sliced::{SLICE, Sliced};
-use crate::{Elements, ForceModel, MAX_CHUNK, Reached, Setup, Start};
+use crate::{Elements, MAX_CHUNK, Reached, Setup, Start};
 
 /// Values per material in the materials buffer of the element kernels (`MAT` in
 /// `elements.wgsl`), see [`materials`].
@@ -101,9 +100,6 @@ const GROUP: usize = 256;
 /// Threads per work group of the element kernels.
 const ELEMENT_GROUP: usize = 64;
 
-// A workgroup of the product holds whole slices.
-const _: () = assert!(GROUP.is_multiple_of(SLICE));
-
 /// The parameters of one step as the shaders read them (`Step`).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -121,8 +117,8 @@ struct StepParams {
 struct Dims {
     n: u32,
     groups_x: u32,
-    positions: u32,
-    relative: u32,
+    base: u32,
+    pad: u32,
 }
 
 /// The kinds of dispatches, as the trace reports them.
@@ -143,14 +139,11 @@ pub(crate) struct Engine {
     pub(crate) gpu: Gpu,
     n: usize,
     alpha: f64,
-    /// Matrices: the forces are products with the motion since the reference state.
-    relative: bool,
     stride: u64,
     params: wgpu::Buffer,
     u: wgpu::Buffer,
     v: wgpu::Buffer,
     a: wgpu::Buffer,
-    uref: wgpu::Buffer,
     loads: wgpu::Buffer,
     energy: wgpu::Buffer,
     staging: wgpu::Buffer,
@@ -237,17 +230,14 @@ impl Engine {
         if !gpu.fits(8 * 6 * n as u64) {
             return Err(too_large());
         }
-        let relative = matches!(setup.forces, ForceModel::Matrices { .. });
         let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let f64s = 8 * n as u64;
         let u = gpu.storage("u", f64s);
         let v = gpu.storage("v", f64s);
         let a = gpu.storage("a", f64s);
         let du = gpu.storage("du", f64s);
-        let uref = gpu.storage("uref", if relative { f64s } else { 16 });
-        let dv = gpu.storage("dv", if relative { 2 * 4 * n as u64 } else { 16 });
         let fs = gpu.storage("forces", 2 * f64s);
-        let loads = gpu.storage("loads", 3 * f64s);
+        let loads = gpu.storage("loads", 2 * f64s);
         let energy = gpu.storage("energy", 6 * f64s);
         let im = gpu.init("inverse mass", bytemuck::cast_slice(setup.inverse_mass));
         let staging = gpu.staging("staging", 6 * f64s);
@@ -260,18 +250,18 @@ impl Engine {
             mapped_at_creation: false,
         });
         let groups = gpu.fold(n, GROUP);
-        let dims_of = |count: usize, groups: (u32, u32), positions: usize| {
+        let dims_of = |count: usize, groups: (u32, u32)| {
             gpu.uniform(
                 "dims",
                 bytemuck::bytes_of(&Dims {
                     n: count as u32,
                     groups_x: groups.0,
-                    positions: positions as u32,
-                    relative: u32::from(relative),
+                    base: 0,
+                    pad: 0,
                 }),
             )
         };
-        let dims = dims_of(n, groups, 0);
+        let dims = dims_of(n, groups);
         let step_binding = || {
             wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                 buffer: &params,
@@ -281,12 +271,9 @@ impl Engine {
         };
         use Use::*;
         let mut passes = Vec::new();
-        let mut histories = Vec::new();
         let layout = gpu.layout(
             "advance",
-            &[
-                Uniform, Dynamic, Write, Write, Read, Write, Read, Write, Read,
-            ],
+            &[Uniform, Dynamic, Write, Write, Read, Write, Read],
         );
         passes.push(Pass {
             pipeline: gpu.pipeline(include_str!("advance.wgsl"), "advance", &layout, &[]),
@@ -299,8 +286,6 @@ impl Engine {
                     v.as_entire_binding(),
                     a.as_entire_binding(),
                     du.as_entire_binding(),
-                    uref.as_entire_binding(),
-                    dv.as_entire_binding(),
                     im.as_entire_binding(),
                 ],
             ),
@@ -308,42 +293,7 @@ impl Engine {
             groups,
             kind: 0,
         });
-        match setup.forces {
-            ForceModel::Matrices { stiffness, viscous } => {
-                let sliced = Sliced::new(stiffness, viscous);
-                if !gpu.fits(8 * sliced.val.len() as u64) {
-                    return Err(too_large());
-                }
-                let positions = sliced.rows.len();
-                let product_groups = gpu.fold(positions, GROUP);
-                let layout = gpu.layout("product", &[Uniform, Read, Write, Read, Read, Read, Read]);
-                passes.push(Pass {
-                    pipeline: gpu.pipeline(include_str!("product.wgsl"), "product", &layout, &[]),
-                    bind: gpu.bind(
-                        &layout,
-                        vec![
-                            dims_of(n, product_groups, positions).as_entire_binding(),
-                            dv.as_entire_binding(),
-                            fs.as_entire_binding(),
-                            gpu.init("slices", bytemuck::cast_slice(&sliced.start))
-                                .as_entire_binding(),
-                            gpu.init("rows", bytemuck::cast_slice(&sliced.rows))
-                                .as_entire_binding(),
-                            gpu.init("columns", bytemuck::cast_slice(&sliced.col))
-                                .as_entire_binding(),
-                            gpu.init("values", bytemuck::cast_slice(&sliced.val))
-                                .as_entire_binding(),
-                        ],
-                    ),
-                    step: false,
-                    groups: product_groups,
-                    kind: 1,
-                });
-            }
-            ForceModel::Elements(elements) => {
-                histories = Self::element_passes(&gpu, elements, n, &u, &v, &fs, &mut passes)?;
-            }
-        }
+        let histories = Self::element_passes(&gpu, setup.elements, n, &u, &v, &fs, &mut passes)?;
         let layout = gpu.layout(
             "accelerate",
             &[Uniform, Dynamic, Read, Write, Read, Read, Read, Read, Write],
@@ -399,13 +349,11 @@ impl Engine {
             gpu,
             n,
             alpha: setup.alpha,
-            relative,
             stride,
             params,
             u,
             v,
             a,
-            uref,
             loads,
             energy,
             staging,
@@ -540,8 +488,8 @@ impl Engine {
                 bytemuck::bytes_of(&Dims {
                     n: count as u32,
                     groups_x: groups.0,
-                    positions: base as u32,
-                    relative: 0,
+                    base: base as u32,
+                    pad: 0,
                 }),
             );
             passes.push(Pass {
@@ -592,8 +540,8 @@ impl Engine {
                 bytemuck::bytes_of(&Dims {
                     n: rows as u32,
                     groups_x: groups.0,
-                    positions: block_base as u32,
-                    relative: 0,
+                    base: block_base as u32,
+                    pad: 0,
                 }),
             );
             let layout = gpu.layout("blocks", &[Uniform, Read, Read, Read, Read, Write]);
@@ -629,8 +577,8 @@ impl Engine {
             bytemuck::bytes_of(&Dims {
                 n: n as u32,
                 groups_x: groups.0,
-                positions: positions.len() as u32,
-                relative: 0,
+                base: positions.len() as u32,
+                pad: 0,
             }),
         );
         let layout = gpu.layout("gather", &[Uniform, Read, Read, Read, Read, Write]);
@@ -677,17 +625,6 @@ impl Engine {
         let bytes = 8 * n as u64;
         q.write_buffer(&self.loads, 0, bytemuck::cast_slice(start.loads));
         q.write_buffer(&self.loads, bytes, bytemuck::cast_slice(start.loads));
-        // The reference of the products; the element forces are whole.
-        if self.relative {
-            q.write_buffer(&self.uref, 0, bytemuck::cast_slice(start.u));
-            q.write_buffer(&self.loads, 2 * bytes, bytemuck::cast_slice(start.internal));
-        } else {
-            q.write_buffer(
-                &self.loads,
-                2 * bytes,
-                bytemuck::cast_slice(&vec![0.0_f64; n]),
-            );
-        }
         let mut energy = Vec::with_capacity(6 * n);
         energy.extend_from_slice(start.internal);
         energy.extend_from_slice(start.loads);
