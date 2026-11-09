@@ -1453,6 +1453,72 @@ Was T15 gebaut hat:
 - Ohne f64, bei zu großer f64-Matrix (Bindungsgrenze, lavapipe 128 MB) oder bei einem
   Fehler bleibt das CG auf der CPU; der Grund steht in der Vorkonditionierer-Zeile.
 
+## Stand nach dem Multigrid für kontaktgehaltene Körper (2026-11-09, Thread "Improve multigrid for contact-held bodies")
+
+Anlass: Quentins Lasche/Seilrolle (Bolzen, Rolle, Laschen aus C3D10, 238k Gleichungen,
+die Körper nur durch Penalty-Kontakt und schwache Federn 1e-6·E·L gehalten): 20 Lösungen
+mit 90 bis 390 CG-Iterationen (Volumenkörper allein: 30 bis 50), über 80 % der Zeit im
+V-Zyklus, behaltene Hierarchie oft zu lange behalten.
+
+- Ursache 1, Aggregate über Kontaktflächen: die Stärke der Kopplung sah den Penalty-Block
+  zwischen Bolzen und Bohrung als starke Nachbarschaft, Aggregate (und damit die
+  Starrkörpermoden des tentativen Prolongators) reichten über zwei Körper hinweg. Jetzt
+  liefert `Model::node_bodies` die Zusammenhangskomponenten des Netzes über seine
+  Kontinuums- und Strukturelemente (Federn, Gaps und Kontakt verbinden nichts, ein Knoten
+  ohne Element ist ein eigener Körper), `Equations::displacement_unknowns` gibt sie als
+  `Unknowns::body` an den Solver, und `amg::aggregate` fasst nie Knoten zweier Körper
+  zusammen (die Körper werden auf die groben Ebenen vererbt). Lasche/Seilrolle: 3325 →
+  1855 Iterationen über die 20 Lösungen.
+- Ursache 2, Eigenwertschätzer: λ_max(D⁻¹A) aus 12 Potenziterationen × 1,1 lag auf der
+  Rolle 4 % zu tief (4,25 statt 4,42), der Chebyshev-Glätter verstärkte die obersten Moden
+  und der Vorkonditionierer war nicht mehr positiv definit (negatives r·z im CG, 84 statt
+  72 Iterationen). Jetzt 30 Lanczos-Schritte auf `D^-1/2 A D^-1/2` (größter Ritz-Wert per
+  Sturm-Bisektion) × 1,02 (`EIGENVALUE_STEPS`, `EIGENVALUE_MARGIN`, zum Messen
+  `PLXS_AMG_MARGIN`).
+- Ursache 3, was bleibt: die Ritz-Werte von M⁻¹A aus den CG-Koeffizienten (Lanczos-
+  Tridiagonalmatrix, `PLXS_PCG_TRACE=1` druckt die kleinsten und größten) zeigen auf der
+  Rolle ein dichtes Bündel bei 0,02 bis 0,05, dessen Vektoren zu 83 % axial sind und an den
+  Stirnflächen der Rolle bei Radius 40 bis 70 mm sitzen: die Biegung der dünnen Flansche
+  der Seilrille, nicht die Starrkörperbewegung (deren Rayleigh-Quotienten liegen bei 0,55
+  bis 1,0). Rolle allein mit festgehaltener Bohrung 84 Iterationen, Bolzen 39, Blöcke
+  25 bis 37 (kleinster Ritz-Wert dort 0,17 bis 0,28).
+- Abhilfe, Lernen aus dem ersten Lösen: das erste Lösen nach einem Aufbau hebt bis zu 96
+  Lanczos-Vektoren (f32) auf; nach der Konvergenz liefern die Ritz-Vektoren mit Werten
+  unter 0,15 × dem größten (höchstens 24, `DEFLATE_*`) zweierlei. (a) Deflation nach Frank
+  und Vuik (projiziertes DPCG: `P A x̃ = P b` mit `P = I − A W E⁻¹ Wᵀ`, `E = WᵀAW`
+  Cholesky; die Richtungskorrektur nach Saad lief in f64 auseinander, weil die Rundung in
+  span(W) wächst) für die weiteren Lösungen mit derselben Hierarchie, `Deflation::refresh`
+  zieht `AW` und `E` bei behaltener Hierarchie nach; nur im CG auf dem Prozessor. (b) Die
+  drei langsamsten werden Kandidaten des Nahnullraums (`PLXS_AMG_CANDIDATES`, 0 schaltet
+  ab): `Amg::build(a, unknowns, candidates, options)` nimmt sie zu den sechs
+  Starrkörpermoden, die nächste Faktorisierung baut die Hierarchie damit neu
+  (`candidates_pending`), grobe Blöcke 9×9 und 3×9 (feste Kernel in `bsr`; 12×12 für sechs
+  Kandidaten). Die Kandidaten gelten für alle weiteren Hierarchien des Musters
+  (`analyze` verwirft sie), jede davon lernt ihre Deflation beim ersten Lösen neu. Auf der Grafikkarte sammelt das CG keine Lanczos-Vektoren, deshalb läuft
+  das lernende Lösen eines Musters auf dem Prozessor, alles Weitere auf der Karte.
+  Seilrolle NLGEOM (4 Lösungen): 76 → 49/46/42 Iterationen (Deflation allein 63, sechs
+  Kandidaten 38, aber ein 12×12-Zyklus kostet das 1,4-Fache; drei sind netto am
+  schnellsten, −34 % Zeit je Lösen). Lasche/Seilrolle (gleiche Binary, 0 gegen 3
+  Kandidaten): 1870 → 1485 Iterationen, Lösen 124 → 105 s, Lauf 3:39 → 3:16 min (sechs
+  Kandidaten: 1622 Iterationen, 3:53 min); mit der Kostenregel unten 1348 Iterationen,
+  Lösen 94 s, Lauf 3:11 min (Ausgangsstand 3325 Iterationen).
+- Behalten oder neu bauen: statt der 1,5-fachen Iterationen wiegt `PcgSolver::factorize`
+  die Kosten: die Hierarchie bleibt, solange die Mehr-Iterationen des letzten Lösens
+  gegenüber dem ersten nach dem Aufbau, über zwei Lösungen (`STALE_HORIZON`) zum
+  gemessenen Tempo je Iteration, weniger kosten als der gemessene Aufbau; die 25 %-Regel
+  für die Diagonale und anstehende Kandidaten bleiben. `PLXS_PCG_TRACE=1` druckt die
+  Entscheidung mit den Zahlen.
+- Probiert und verworfen: ganze Hierarchie in f64 (gleiche Iterationen), Penalty 100-fach
+  weicher (gleich), Stärke 0,001 (schlechter), Chebyshev Grad 4 (70 statt 90, zu teuer),
+  adaptive Smoothed Aggregation (αSA nach Brezina u. a.: 30 Testzyklen auf `A x = 0` je
+  Vektor, Rolle 72 → 63 → 57 → 52 mit 1 bis 3 Vektoren, aber ~4 s je Runde bei 238k;
+  bleibt mit `PLXS_AMG_ADAPTIVE=n` zum Experimentieren, Default 0). Mit Federn 1e4-fach
+  steifer 83 Iterationen, erst elastische Bettung (1e8-fach) bringt 25: die Federn sind
+  nicht das Problem.
+- Offen: Lanczos-Vektoren auch im CG auf der Karte sammeln (Deflation dort), ein
+  Kandidatensatz je Körper statt global, und größere Aggregate bei größerem Nahnullraum,
+  damit die groben Ebenen nicht wachsen.
+
 ## Moden als eigener Ergebnistyp (2026-11-05, Thread "Add dedicated mode shape result type")
 
 - Eigenwertschritte (`*FREQUENCY`, `*BUCKLE`, `*COMPLEX FREQUENCY`, auch zyklisch) legen ihre

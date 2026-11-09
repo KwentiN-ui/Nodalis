@@ -185,8 +185,13 @@ The monitor shows how a solve went: for the direct solver the size of the factor
 times of ordering, factorization and solution; for the iterative one the levels of the
 multigrid hierarchy with their sizes, its memory relative to the matrix, the number of
 iterations and the remaining relative residual (below 1e-12). The results of both solvers
-agree to that accuracy. In a nonlinear step the hierarchy is rebuilt for every Newton
-iteration, which costs about as much as a few iterations of the solve.
+agree to that accuracy. In a nonlinear step the hierarchy is kept over the Newton
+iterations while that is cheaper than building it again (the monitor reports the
+rebuilds). Bodies that touch only through contact, such as a pin in a bore, are coarsened
+one by one, so that each keeps its own rigid body motion on the coarse levels; and the
+first solve with a hierarchy learns the shapes that converge slowest (the bending of thin
+walls, for example) and adds them to the coarse space of the next one, which cuts the
+iterations of the following solves by a fifth to a third on such models.
 
 On a computer with a discrete graphics card, the iterative solver runs on the card for
 models of 100 000 equations and more. It detects this by itself, and there is nothing to

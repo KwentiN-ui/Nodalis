@@ -37,12 +37,17 @@ use crate::{LdltSolver, Pattern, SparseMatrix};
 /// What the unknowns of a system are, so that the preconditioner can keep the unknowns of
 /// a node together and knows the rigid body modes: for every unknown its node (any dense
 /// numbering), its component (0, 1, 2 for the displacements; 0 for a scalar field;
-/// `u8::MAX` for a padding unknown without a mode) and the position of its node.
+/// `u8::MAX` for a padding unknown without a mode), the position of its node and,
+/// optionally, the body its node belongs to.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Unknowns {
     pub node: Vec<u32>,
     pub component: Vec<u8>,
     pub coordinates: Vec<[f64; 3]>,
+    /// The body of every unknown's node (any dense numbering), or empty when the bodies
+    /// are not known: then the whole model counts as one. Nodes of different bodies never
+    /// share an aggregate of the multigrid (see [`Amg`]).
+    pub body: Vec<u32>,
 }
 
 impl Unknowns {
@@ -57,7 +62,19 @@ impl Unknowns {
                 .iter()
                 .map(|&d| coordinates[(d / per_node) as usize])
                 .collect(),
+            body: Vec::new(),
         }
+    }
+
+    /// The same unknowns, with the body of every node (`of_node`, by the node numbers of
+    /// [`Self::node`]); see [`Self::body`].
+    pub fn with_bodies(mut self, of_node: &[u32]) -> Self {
+        self.body = self
+            .node
+            .iter()
+            .map(|&n| of_node.get(n as usize).copied().unwrap_or(0))
+            .collect();
+        self
     }
 }
 
@@ -77,6 +94,9 @@ pub struct AmgOptions {
     pub max_aggregate: usize,
     /// Whether the cycle may run on the graphics card (`PLXS_GPU`, feature `gpu`).
     pub gpu: GpuMode,
+    /// How many near-nullspace vectors the hierarchy may learn from its own slow modes
+    /// (adaptive smoothed aggregation), see [`Amg::build`]; 0 turns it off.
+    pub adaptive: usize,
 }
 
 /// Where the multigrid cycle runs (`PLXS_GPU=off|on`, automatic otherwise).
@@ -146,6 +166,7 @@ impl Default for AmgOptions {
             max_levels: env("PLXS_AMG_LEVELS", 12),
             max_aggregate: env("PLXS_AMG_MAX_AGG", 27),
             gpu: GpuMode::from_environment(),
+            adaptive: env("PLXS_AMG_ADAPTIVE", 0),
         }
     }
 }
@@ -155,6 +176,22 @@ impl Default for AmgOptions {
 struct Nullspace {
     k: usize,
     vectors: Vec<f64>,
+}
+
+impl Nullspace {
+    /// Appends a vector (length `n`) as the last column.
+    fn push(&mut self, vector: &[f64]) {
+        let n = vector.len();
+        let k = self.k + 1;
+        let mut vectors = vec![0.0; n * k];
+        for i in 0..n {
+            vectors[i * k..i * k + self.k]
+                .copy_from_slice(&self.vectors[i * self.k..(i + 1) * self.k]);
+            vectors[i * k + self.k] = vector[i];
+        }
+        self.k = k;
+        self.vectors = vectors;
+    }
 }
 
 struct Level {
@@ -197,6 +234,10 @@ pub struct Amg {
     fine: Bsr<f32>,
     levels: Vec<Level>,
     coarse: LdltSolver,
+    /// The coarsest operator in double precision (what `coarse` factorized), for the
+    /// dense inverse on the graphics card.
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+    coarsest: Bsr,
     work: Mutex<Vec<Work>>,
     options: AmgOptions,
     /// Single precision values of all operators and prolongators of the hierarchy, the
@@ -213,11 +254,37 @@ pub struct Amg {
     cg_note: Mutex<Option<String>>,
 }
 
+/// Cycles of the test for slow modes of a fresh hierarchy (see [`Amg::build`]).
+const ADAPTIVE_CYCLES: usize = 30;
+/// A hierarchy whose stationary iteration still reduces the energy of a random error by
+/// less than this factor per cycle after [`ADAPTIVE_CYCLES`] cycles learns the remaining
+/// error as a near-nullspace vector. A solid block of hexahedra contracts by about 0.7
+/// per cycle, one of quadratic tetrahedra by about 0.83.
+const ADAPTIVE_THRESHOLD: f64 = 0.85;
+
 impl Amg {
     /// Builds the hierarchy of the symmetric positive definite `a` (full storage, square
     /// blocks). `unknowns`, when given, has one entry per row of `a` and the unknowns of a
-    /// block belong to one node.
-    pub fn build(a: &Bsr, unknowns: Option<&Unknowns>, options: AmgOptions) -> Result<Amg> {
+    /// block belong to one node. `candidates` are further near-nullspace vectors (length
+    /// of `a`), the slow modes an earlier solve with a hierarchy of `a` found (see
+    /// [`crate::PcgSolver`]).
+    ///
+    /// Adaptive smoothed aggregation (Brezina, Falgout, MacLachlan, Manteuffel,
+    /// McCormick, Ruge, "Adaptive smoothed aggregation (αSA)", SIAM J. Sci. Comput. 25
+    /// (2004)): the rigid body modes are the near-nullspace of a solid, but a thin flange
+    /// or a layer of one element bends with little energy in a pattern the rigid modes of
+    /// an aggregate do not span, and such a hierarchy leaves those modes to the smoother,
+    /// which cannot reduce them (a rope pulley: 84 iterations instead of 40). The fresh
+    /// hierarchy is therefore tried on a random error with the right-hand side zero;
+    /// what [`ADAPTIVE_CYCLES`] cycles leave is the slow mode, and when the energy still
+    /// contracts by less than [`ADAPTIVE_THRESHOLD`] per cycle that vector joins the
+    /// near-nullspace and the hierarchy is built again, up to `options.adaptive` times.
+    pub fn build(
+        a: &Bsr,
+        unknowns: Option<&Unknowns>,
+        candidates: &[Vec<f64>],
+        options: AmgOptions,
+    ) -> Result<Amg> {
         let n = a.rows();
         let mut nullspace = match unknowns {
             Some(u) if u.component.len() == n => rigid_body_modes(u),
@@ -226,9 +293,20 @@ impl Amg {
                 vectors: vec![1.0; n],
             },
         };
-        let mut levels: Vec<Level> = Vec::new();
-        let mut nonzeros = a.nnz();
-        let mut current: Option<Bsr> = None;
+        for candidate in candidates.iter().filter(|c| c.len() == n) {
+            nullspace.push(candidate);
+        }
+        // The body of every block (node) of the level, when the bodies are known: the
+        // aggregates never cross from one body into another.
+        let bodies: Option<Vec<u32>> = unknowns
+            .filter(|u| u.body.len() == n && n > 0)
+            .map(|u| (0..a.brows).map(|b| u.body[b * a.br]).collect());
+        let padding: Vec<bool> = match unknowns {
+            Some(u) if u.component.len() == n => {
+                u.component.iter().map(|&c| c == u8::MAX).collect()
+            }
+            _ => Vec::new(),
+        };
         let trace = std::env::var("PLXS_AMG_TRACE").is_ok();
         let clock = std::time::Instant::now();
         let mut last = 0.0;
@@ -239,6 +317,124 @@ impl Amg {
                 last = now;
             }
         };
+        let mut amg = Self::assemble(a, &nullspace, bodies.clone(), options, trace, &mut lap)?;
+        for round in 0..options.adaptive {
+            let Some((vector, factor)) = amg.slow_mode(a, &padding) else {
+                break;
+            };
+            lap("test for slow modes", n);
+            if trace {
+                eprintln!(
+                    "amg: round {}: the error still contracts by {factor:.3} per cycle, the slow \
+                     mode becomes near-nullspace vector {}",
+                    round + 1,
+                    nullspace.k + 1
+                );
+            }
+            nullspace.push(&vector);
+            amg = Self::assemble(a, &nullspace, bodies.clone(), options, trace, &mut lap)?;
+        }
+        #[cfg(feature = "gpu")]
+        {
+            let views: Vec<crate::gpu::LevelView<'_>> = amg
+                .levels
+                .iter()
+                .map(|level| crate::gpu::LevelView {
+                    a: level.a.as_ref().unwrap_or(&amg.fine),
+                    inv_diag: &level.inv_diag,
+                    lambda_max: level.lambda_max,
+                    p: level.p.as_ref(),
+                    pt: level.pt.as_ref(),
+                })
+                .collect();
+            let placed =
+                crate::gpu::GpuCycle::place(&views, &amg.coarsest, options.degree, options.gpu);
+            lap("upload to the graphics card", n);
+            match placed {
+                crate::gpu::Placement::Gpu(cycle) => amg.gpu = Some(cycle),
+                crate::gpu::Placement::Cpu(reason) => amg.cpu_reason = Mutex::new(reason),
+            }
+        }
+        Ok(amg)
+    }
+
+    /// The slow mode of this hierarchy, when it has one: the error left of a random one
+    /// after [`ADAPTIVE_CYCLES`] cycles on `A x = 0`, scaled to unit entries, with the
+    /// energy contraction of the last cycle; `None` when the hierarchy contracts the
+    /// energy by at least [`ADAPTIVE_THRESHOLD`] per cycle.
+    fn slow_mode(&self, a: &Bsr, padding: &[bool]) -> Option<(Vec<f64>, f64)> {
+        let n = a.rows();
+        if n == 0 || self.levels.len() == 1 {
+            return None;
+        }
+        // A deterministic pseudo-random start, zero on the padding.
+        let mut x: Vec<f64> = (0..n)
+            .map(|i| {
+                let h = (i as u64)
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    .rotate_left(23)
+                    ^ 0xD1B5_4A32_D192_ED03;
+                (h >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+            })
+            .collect();
+        if padding.len() == n {
+            x.iter_mut().zip(padding).for_each(|(x, &p)| {
+                if p {
+                    *x = 0.0
+                }
+            });
+        }
+        let mut ax = vec![0.0; n];
+        let mut z = vec![0.0; n];
+        let mut energy_before = 0.0;
+        let mut factor = 1.0;
+        for cycle in 0..ADAPTIVE_CYCLES {
+            a.multiply(&x, &mut ax);
+            let energy: f64 = x.iter().zip(&ax).map(|(x, y)| x * y).sum();
+            if !energy.is_finite() || energy <= 0.0 {
+                return None;
+            }
+            if cycle > 0 {
+                factor = (energy / energy_before).sqrt();
+                if std::env::var("PLXS_AMG_TRACE").is_ok() {
+                    eprintln!("amg: test cycle {cycle}: energy contraction {factor:.4}");
+                }
+            }
+            energy_before = energy;
+            // x ← x − M⁻¹ A x
+            if self.apply(&ax, &mut z).is_err() {
+                return None;
+            }
+            x.iter_mut().zip(&z).for_each(|(x, z)| *x -= z);
+        }
+        if factor < ADAPTIVE_THRESHOLD {
+            return None;
+        }
+        let scale = x.iter().map(|v| v * v).sum::<f64>().sqrt() / (n as f64).sqrt();
+        if scale == 0.0 || !scale.is_finite() {
+            return None;
+        }
+        x.iter_mut().for_each(|v| *v /= scale);
+        Some((x, factor))
+    }
+
+    /// The hierarchy of `a` on the near-nullspace `nullspace`, on the processor.
+    fn assemble(
+        a: &Bsr,
+        nullspace: &Nullspace,
+        mut bodies: Option<Vec<u32>>,
+        options: AmgOptions,
+        trace: bool,
+        lap: &mut impl FnMut(&str, usize),
+    ) -> Result<Amg> {
+        let n = a.rows();
+        let mut nullspace = Nullspace {
+            k: nullspace.k,
+            vectors: nullspace.vectors.clone(),
+        };
+        let mut levels: Vec<Level> = Vec::new();
+        let mut nonzeros = a.nnz();
+        let mut current: Option<Bsr> = None;
         loop {
             let a_l = current.as_ref().unwrap_or(a);
             let n_l = a_l.rows();
@@ -254,12 +450,22 @@ impl Amg {
             let coarser = if coarsest {
                 None
             } else {
-                let aggregates = aggregate(a_l, options.strength, options.max_aggregate);
+                let aggregates = aggregate(
+                    a_l,
+                    options.strength,
+                    options.max_aggregate,
+                    bodies.as_deref(),
+                );
                 lap("aggregation", n_l);
                 let n_c = aggregates.count * nullspace.k;
                 if n_c * 10 >= n_l * 9 || n_c == 0 {
                     None
                 } else {
+                    let bodies_c = bodies.as_ref().map(|b| {
+                        (0..aggregates.count)
+                            .map(|g| b[aggregates.blocks[aggregates.ptr[g]] as usize])
+                            .collect::<Vec<u32>>()
+                    });
                     let (p_t, ns_c) = tentative(a_l, &aggregates, &nullspace);
                     lap("tentative prolongator", n_l);
                     let p = smooth_prolongator(a_l, &inv_diag, lambda, &p_t);
@@ -277,7 +483,7 @@ impl Amg {
                         );
                     }
                     nonzeros += p.nnz() * 2 + a_c.nnz();
-                    Some((p, pt, a_c, ns_c))
+                    Some((p, pt, a_c, ns_c, bodies_c))
                 }
             };
             match coarser {
@@ -291,7 +497,7 @@ impl Amg {
                     });
                     break;
                 }
-                Some((p, pt, a_c, ns_c)) => {
+                Some((p, pt, a_c, ns_c, bodies_c)) => {
                     levels.push(Level {
                         a: current.as_ref().map(Bsr::converted),
                         inv_diag: inv_diag_32,
@@ -301,6 +507,7 @@ impl Amg {
                     });
                     current = Some(a_c);
                     nullspace = ns_c;
+                    bodies = bodies_c;
                 }
             }
         }
@@ -348,37 +555,18 @@ impl Amg {
             .collect();
         let fine = a.converted();
         lap("single precision copy", n);
-        #[cfg(feature = "gpu")]
-        let (gpu, cpu_reason) = {
-            let views: Vec<crate::gpu::LevelView<'_>> = levels
-                .iter()
-                .map(|level| crate::gpu::LevelView {
-                    a: level.a.as_ref().unwrap_or(&fine),
-                    inv_diag: &level.inv_diag,
-                    lambda_max: level.lambda_max,
-                    p: level.p.as_ref(),
-                    pt: level.pt.as_ref(),
-                })
-                .collect();
-            let placed = crate::gpu::GpuCycle::place(&views, coarsest, options.degree, options.gpu);
-            lap("upload to the graphics card", n);
-            match placed {
-                crate::gpu::Placement::Gpu(cycle) => (Some(cycle), None),
-                crate::gpu::Placement::Cpu(reason) => (None, reason),
-            }
-        };
-        #[cfg(not(feature = "gpu"))]
-        let cpu_reason = None;
+        let coarsest = current.unwrap_or_else(|| a.clone());
         Ok(Amg {
             fine,
             levels,
             coarse,
+            coarsest,
             work: Mutex::new(work),
             options,
             nonzeros,
             #[cfg(feature = "gpu")]
-            gpu,
-            cpu_reason: Mutex::new(cpu_reason),
+            gpu: None,
+            cpu_reason: Mutex::new(None),
             #[cfg(feature = "gpu")]
             cg_note: Mutex::new(None),
         })
@@ -732,8 +920,13 @@ struct Aggregates {
 }
 
 /// Groups the blocks of a level by the three aggregation phases on the graph of strong
-/// connections (Frobenius norms of the coupling blocks).
-fn aggregate(a: &Bsr, strength: f64, max_aggregate: usize) -> Aggregates {
+/// connections (Frobenius norms of the coupling blocks). Blocks of different bodies
+/// (`body`, when given) are never strongly connected: a penalty contact spring between two
+/// bodies is as stiff as the elements, yet it holds only the normal direction, and an
+/// aggregate across it would force the two bodies to slide together on the coarse levels,
+/// although sliding costs no energy. That mode is then left to the smoother, which
+/// cannot reduce it, and the iteration count grows several times over.
+fn aggregate(a: &Bsr, strength: f64, max_aggregate: usize, body: Option<&[u32]>) -> Aggregates {
     let blocks = a.brows;
     let size = a.br * a.bc;
     // Squared norms of the diagonal blocks.
@@ -751,8 +944,11 @@ fn aggregate(a: &Bsr, strength: f64, max_aggregate: usize) -> Aggregates {
         let diag = &diag;
         col.iter().enumerate().filter_map(move |(k, &c)| {
             let c = c as usize;
+            if c == b || body.is_some_and(|body| body[b] != body[c]) {
+                return None;
+            }
             let w: f64 = val[size * k..size * (k + 1)].iter().map(|v| v * v).sum();
-            (c != b && w * w >= theta4 * diag[b] * diag[c]).then_some((c, w))
+            (w * w >= theta4 * diag[b] * diag[c]).then_some((c, w))
         })
     };
     const NONE: u32 = u32::MAX;
@@ -904,28 +1100,97 @@ fn gram_schmidt(q: &mut [f64], m: usize, k: usize, r: &mut [f64]) {
     }
 }
 
-/// `λ_max(D⁻¹ A)` by power iteration, with a margin.
+/// The estimate is scaled by this: an eigenvalue above the smoother's interval is
+/// amplified, and the preconditioner would stop being positive definite (a pulley of
+/// quadratic tetrahedra whose estimate by 12 power iterations was 4 % low: negative
+/// `r·z` in the conjugate gradients, 84 instead of 72 iterations). The Lanczos estimate
+/// is within a fraction of a percent after 30 steps, so a small margin suffices; a larger
+/// one widens the interval and weakens the smoother (1.2: 88 iterations on that pulley).
+const EIGENVALUE_MARGIN: f64 = 1.02;
+
+/// `λ_max(D⁻¹ A)` by Lanczos, with a margin (`PLXS_AMG_MARGIN` for measurements).
 fn largest_eigenvalue(a: &Bsr, inv_diag: &[f64]) -> f64 {
+    let margin: f64 = std::env::var("PLXS_AMG_MARGIN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(EIGENVALUE_MARGIN);
+    largest_eigenvalue_lanczos(a, inv_diag, EIGENVALUE_STEPS) * margin
+}
+
+/// Lanczos steps of the eigenvalue estimate of a level.
+const EIGENVALUE_STEPS: usize = 30;
+/// `λ_max(D⁻¹ A)` as the largest Ritz value of `steps` Lanczos steps on the symmetric
+/// `D^-1/2 A D^-1/2` (same spectrum), no reorthogonalization: the extreme eigenvalue
+/// converges in a few dozen steps where the power iteration needs hundreds.
+fn largest_eigenvalue_lanczos(a: &Bsr, inv_diag: &[f64], steps: usize) -> f64 {
     let n = a.rows();
     if n == 0 {
         return 1.0;
     }
-    let mut x: Vec<f64> = (0..n)
+    let sqrt_inv: Vec<f64> = inv_diag.iter().map(|d| d.sqrt()).collect();
+    let mut v: Vec<f64> = (0..n)
         .map(|i| 1.0 + 0.5 * ((i * 7919 % 1000) as f64 / 1000.0))
         .collect();
-    let mut y = vec![0.0; n];
-    let mut lambda = 1.0;
-    for _ in 0..12 {
-        a.multiply(&x, &mut y);
-        y.iter_mut().zip(inv_diag).for_each(|(y, d)| *y *= d);
-        let norm = y.iter().map(|v| v * v).sum::<f64>().sqrt();
-        if norm == 0.0 || !norm.is_finite() {
+    let norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+    v.iter_mut().for_each(|x| *x /= norm);
+    let mut v_old = vec![0.0; n];
+    let mut w = vec![0.0; n];
+    let mut t = vec![0.0; n];
+    let mut alphas = Vec::new();
+    let mut betas = vec![0.0];
+    let mut beta = 0.0;
+    for _ in 0..steps {
+        // w = D^-1/2 A D^-1/2 v
+        t.iter_mut()
+            .zip(&v)
+            .zip(&sqrt_inv)
+            .for_each(|((t, v), s)| *t = v * s);
+        a.multiply(&t, &mut w);
+        w.iter_mut().zip(&sqrt_inv).for_each(|(w, s)| *w *= s);
+        let alpha: f64 = w.iter().zip(&v).map(|(w, v)| w * v).sum();
+        w.iter_mut()
+            .zip(&v)
+            .zip(&v_old)
+            .for_each(|((w, v), o)| *w -= alpha * v + beta * o);
+        alphas.push(alpha);
+        beta = w.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if beta == 0.0 || !beta.is_finite() {
             break;
         }
-        lambda = norm;
-        x.iter_mut().zip(&y).for_each(|(x, y)| *x = y / norm);
+        betas.push(beta);
+        v_old.copy_from_slice(&v);
+        v.iter_mut().zip(&w).for_each(|(v, w)| *v = w / beta);
     }
-    lambda * 1.1
+    // Largest eigenvalue of the tridiagonal by bisection on the Sturm count.
+    let m = alphas.len();
+    let count_below = |x: f64| {
+        let mut count = 0;
+        let mut q = 1.0;
+        for k in 0..m {
+            let o = if k > 0 { betas[k] * betas[k] } else { 0.0 };
+            q = alphas[k] - x - if q != 0.0 { o / q } else { o / 1e-300 };
+            if q < 0.0 {
+                count += 1;
+            }
+        }
+        count
+    };
+    let radius = (0..m)
+        .map(|k| alphas[k].abs() + betas[k].abs() + betas.get(k + 1).map_or(0.0, |o| o.abs()))
+        .fold(0.0_f64, f64::max);
+    let (mut lo, mut hi) = (-radius, radius);
+    for _ in 0..200 {
+        let mid = 0.5 * (lo + hi);
+        if count_below(mid) >= m {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+        if hi - lo <= 1e-10 * radius {
+            break;
+        }
+    }
+    0.5 * (lo + hi)
 }
 
 /// `P = (I − ω D⁻¹ A) P_t` with `ω = 4 / (3 λ_max)`.
@@ -1073,6 +1338,79 @@ mod tests {
         gram_schmidt(&mut q, m, k, &mut r);
         assert!(q[1] == 0.0 && q[3] == 0.0 && q[5] == 0.0);
         assert_eq!(r[3], 0.0);
+    }
+
+    /// Two chains of nodes with full elastic couplings, joined by one stiff spring that
+    /// holds a single direction (a penalty contact spring).
+    fn two_bodies_in_contact(m: usize) -> (Bsr, Vec<u32>) {
+        let n = 2 * m;
+        let elastic = |k: f64| -> [f64; 9] { [k, 0.1 * k, 0.0, 0.1 * k, k, 0.0, 0.0, 0.0, k] };
+        let mut rows: Vec<Vec<(u32, [f64; 9])>> = vec![Vec::new(); n];
+        let mut couple = |i: usize, j: usize, block: [f64; 9]| {
+            rows[i].push((j as u32, block));
+            rows[j].push((i as u32, block));
+            for d in [i, j] {
+                rows[d].push((d as u32, block));
+            }
+        };
+        for body in 0..2 {
+            for i in body * m..(body + 1) * m - 1 {
+                couple(i, i + 1, elastic(-1.0));
+            }
+        }
+        // The contact spring in the direction x, as stiff as the elements.
+        let mut spring = [0.0; 9];
+        spring[0] = -3.0;
+        couple(m - 1, m, spring);
+        let mut ptr = vec![0usize];
+        let mut col = Vec::new();
+        let mut val = Vec::new();
+        for (i, row) in rows.iter_mut().enumerate() {
+            row.sort_by_key(|(c, _)| *c);
+            let mut merged: Vec<(u32, [f64; 9])> = Vec::new();
+            for &(c, block) in row.iter() {
+                let sign = if c as usize == i { -1.0 } else { 1.0 };
+                match merged.last_mut() {
+                    Some((last, b)) if *last == c => {
+                        b.iter_mut().zip(block).for_each(|(b, v)| *b += sign * v)
+                    }
+                    _ => merged.push((c, block.map(|v| sign * v))),
+                }
+            }
+            for (c, block) in merged {
+                col.push(c);
+                val.extend_from_slice(&block);
+            }
+            ptr.push(col.len());
+        }
+        let a = Bsr {
+            brows: n,
+            bcols: n,
+            br: 3,
+            bc: 3,
+            ptr,
+            col,
+            val,
+        };
+        let body = (0..n as u32).map(|i| i / m as u32).collect();
+        (a, body)
+    }
+
+    #[test]
+    fn aggregates_stay_within_their_bodies() {
+        let (a, body) = two_bodies_in_contact(40);
+        let crossing = |agg: &Aggregates| {
+            (0..agg.count).any(|g| {
+                let members = &agg.blocks[agg.ptr[g]..agg.ptr[g + 1]];
+                members.iter().any(|&b| body[b as usize] == 0)
+                    && members.iter().any(|&b| body[b as usize] == 1)
+            })
+        };
+        assert!(crossing(&aggregate(&a, 0.01, 27, None)));
+        let agg = aggregate(&a, 0.01, 27, Some(&body));
+        assert!(!crossing(&agg));
+        assert_eq!(agg.of_block.len(), 80);
+        assert!(agg.count >= 2);
     }
 
     #[test]

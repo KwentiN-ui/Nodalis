@@ -47,7 +47,7 @@ use plxs_contact::Evaluation;
 use plxs_core::state::{ContactPointState, ContactStatus, IntegrationPointField, NodalField};
 use plxs_core::step::{Procedure as ProcedureKind, Rayleigh};
 use plxs_core::{Convergence, Divergence, Error, Progress, ProgressEvent, Result, Step, Stop};
-use plxs_linalg::{SparseMatrix, Unknowns};
+use plxs_linalg::SparseMatrix;
 use plxs_output::{CvgRow, StaRow};
 
 use crate::dynamic::{
@@ -436,7 +436,7 @@ impl Procedure for NonlinearDynamic {
                 initial_acceleration_matrix(ctx.table, ctx.model, &ctx.pattern, c_m, c_k, true)?;
             let set = constraint_set(ctx, &setup, &motion.u);
             let reduced = set.reduce(&matrix);
-            let coordinates = || Unknowns::from_free(&set.free, 3, &ctx.model.nodes.coordinates);
+            let coordinates = || crate::equations::displacement_unknowns(ctx.model, &set.free);
             equations
                 .prepare(&mut ctx.solver, &reduced, coordinates, true, progress)
                 .map_err(|e| numerical(e, ctx.step_number, 0, &equations))?;
@@ -1752,7 +1752,7 @@ fn attempt(
             let factored = setup.factored.as_ref().expect("just set");
             ctx.profile.add(Phase::Reduction, started);
             let started = std::time::Instant::now();
-            let coordinates = || Unknowns::from_free(&set.free, 3, &ctx.model.nodes.coordinates);
+            let coordinates = || crate::equations::displacement_unknowns(ctx.model, &set.free);
             let mut sink = FirstOrWarnings {
                 inner: &mut *progress,
                 all: increment == 1 && depth == 0 && iteration == 1,
@@ -1811,7 +1811,7 @@ fn attempt(
                 .solve_unsymmetric(
                     &mut ctx.solver,
                     reduced,
-                    || Unknowns::from_free(&set.free, 3, &ctx.model.nodes.coordinates),
+                    || crate::equations::displacement_unknowns(ctx.model, &set.free),
                     &apply,
                     &residual,
                     &mut FirstOrWarnings {

@@ -21,7 +21,6 @@ use plxs_constraints::{ConstraintSet, ReducedPattern};
 use plxs_core::step::{DefaultAmplitude, Incrementation, Procedure as ProcedureKind};
 use plxs_core::{Convergence, Divergence, Error, Progress, ProgressEvent, Result, Step, Stop};
 use plxs_linalg::SparseMatrix;
-use plxs_linalg::Unknowns;
 use plxs_output::{CvgRow, StaRow};
 
 use crate::equations::{Equations, in_increment};
@@ -926,7 +925,7 @@ impl NonlinearStatic {
             let k_reduced = set.reduce_cached(k, reducer);
             ctx.profile.add(Phase::Reduction, started);
             let started = Instant::now();
-            let coordinates = || Unknowns::from_free(&set.free, 3, &ctx.model.nodes.coordinates);
+            let coordinates = || crate::equations::displacement_unknowns(ctx.model, &set.free);
             // The solver's messages would repeat in every iteration: only those of the first
             // system of the step and the warnings (fall-backs of the automatic choice).
             let mut sink = crate::equations::FirstOrWarnings {
