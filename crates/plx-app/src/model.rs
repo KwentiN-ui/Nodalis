@@ -3825,7 +3825,15 @@ S
         assert!(model.results.as_ref().unwrap().plain_nodes.is_empty());
         model.parts[0].visible = false;
         model.update_plain_nodes();
-        assert!(model.results.as_ref().unwrap().plain_nodes.iter().any(|&p| p));
+        assert!(
+            model
+                .results
+                .as_ref()
+                .unwrap()
+                .plain_nodes
+                .iter()
+                .any(|&p| p)
+        );
         model.parts[0].visible = true;
         model.update_plain_nodes();
         assert!(model.results.as_ref().unwrap().plain_nodes.is_empty());
