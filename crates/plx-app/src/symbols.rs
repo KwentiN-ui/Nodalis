@@ -112,6 +112,9 @@ impl Kind {
 pub struct Item {
     pub kind: Kind,
     pub region: Region,
+    /// The coordinate system the components of a force, moment or excitation are given in;
+    /// `None` is the global one.
+    pub system: Option<plx_model::Id>,
     /// Selected in the tree or edited in a dialog: drawn in the highlight colour.
     pub selected: bool,
 }
@@ -160,6 +163,14 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
             (Kind::Load(_), false) => LOAD_COLOR,
             (Kind::Boundary(_), false) => BOUNDARY_COLOR,
             (_, false) => CONSTRAINT_COLOR,
+        };
+        // Components of a force or moment in the load's coordinate system, in global
+        // directions at a point.
+        let system = item.system.and_then(|id| model.fe.coordinate_system(id));
+        let cylindrical =
+            system.is_some_and(|s| s.kind == plx_model::CoordinateSystemKind::Cylindrical);
+        let global = |point: DVec3, local: [f64; 3]| {
+            plx_model::Load::to_global(system, point.into(), local).map_or(DVec3::ZERO, DVec3::from)
         };
         let mut add = |position: DVec3, direction: DVec3, shape: SymbolShape| {
             if let Some(direction) = direction.try_normalize() {
@@ -274,7 +285,8 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
             Kind::Load(LoadKind::Moment(moment)) => {
                 let points = node_points(model, &item.region, &visible);
                 for index in sample(&points, DIVISIONS) {
-                    add(points[index], DVec3::from(moment), SymbolShape::MomentArrow);
+                    let moment = global(points[index], moment);
+                    add(points[index], moment, SymbolShape::MomentArrow);
                 }
             }
             Kind::Load(LoadKind::Pressure(pressure)) => {
@@ -303,15 +315,30 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
             ) => {
                 let points = node_points(model, &item.region, &visible);
                 for index in sample(&points, DIVISIONS) {
-                    add(points[index], DVec3::from(force), SymbolShape::Arrow);
+                    add(
+                        points[index],
+                        global(points[index], force),
+                        SymbolShape::Arrow,
+                    );
                 }
             }
             Kind::Load(
                 LoadKind::Force { value: force, .. }
                 | LoadKind::Excitation(plx_model::Excitation { value: force, .. }),
             ) => {
-                if let Some(center) = region_center(model, &item.region, &visible) {
-                    add(center, DVec3::from(force), SymbolShape::Arrow);
+                // In a cylindrical system the direction changes over the region: arrows
+                // spread over its nodes.
+                if cylindrical {
+                    let points = node_points(model, &item.region, &visible);
+                    for index in sample(&points, DIVISIONS) {
+                        add(
+                            points[index],
+                            global(points[index], force),
+                            SymbolShape::Arrow,
+                        );
+                    }
+                } else if let Some(center) = region_center(model, &item.region, &visible) {
+                    add(center, global(center, force), SymbolShape::Arrow);
                 }
             }
             // A remote force: an arrow for the force and one for the moment at its point,
@@ -981,6 +1008,7 @@ mod tests {
                 reference_point: crate::test_ids::named(reference_point),
             },
             region: Region::Surface("TIP".into()),
+            system: None,
             selected: false,
         };
         let symbols = build(&model, &[item("RP-1")]);
@@ -1008,6 +1036,7 @@ mod tests {
                 to_surface: false,
             },
             region: Region::Nodes(nodes),
+            system: None,
             selected: false,
         };
         // Two directions at each of three nodes, or once at the centre of many nodes.
@@ -1023,6 +1052,7 @@ mod tests {
         let support = |flipped| Item {
             kind: Kind::CompressionOnly { flipped },
             region: Region::Surface("TIP".into()),
+            system: None,
             selected: false,
         };
         let cones = build(&model, &[support(false)]);

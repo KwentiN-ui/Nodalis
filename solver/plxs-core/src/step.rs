@@ -524,6 +524,21 @@ pub struct ConcentratedLoad {
     pub load_case: Option<u8>,
     /// `SECTOR=` of cyclic symmetry models.
     pub sector: Option<u32>,
+    /// `FOLLOWER=` (a plxs extension): under large deformations the load turns with the
+    /// rotation of these nodes; `None` keeps its direction.
+    #[serde(default)]
+    pub follower: Option<Follower>,
+}
+
+/// What a follower load turns with ([`ConcentratedLoad::follower`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Follower {
+    /// `FOLLOWER=`: the rigid rotation that fits the motion of the nodes best (in the least
+    /// squares sense). Nodes on a line give the smallest rotation that turns the line.
+    Nodes(NodeRef),
+    /// `FOLLOWER ROTATION=`: the rotation vector in the translations of this node, the
+    /// rotation node of a rigid body or of a beam or shell node.
+    Rotation(crate::mesh::NodeId),
 }
 
 /// `*DLOAD`: a distributed load on elements or faces.

@@ -164,6 +164,8 @@ struct Setup<'s> {
     /// The reduced pattern of the tangents (one per pattern; not with rigid bodies under
     /// finite rotations, whose constraint set changes every iteration).
     reducer: Option<ReducedPattern>,
+    /// Concentrated loads that turn with the structure (`NLGEOM`).
+    followers: plxs_assembly::FollowerLoads,
 }
 
 /// The tangent the equation solver holds a factorization (or preconditioner) of. It serves
@@ -329,6 +331,11 @@ impl Procedure for NonlinearDynamic {
         let large_rotations = step.nlgeom && ctx.constraints.has_finite_rotations();
         let table: &plxs_assembly::ElementTable = ctx.table;
         let mut setup = Setup {
+            followers: if step.nlgeom {
+                plxs_assembly::FollowerLoads::new(ctx.model, &ctx.table.dofs, step)
+            } else {
+                plxs_assembly::FollowerLoads::default()
+            },
             step,
             scheme,
             rayleigh,
@@ -389,6 +396,11 @@ impl Procedure for NonlinearDynamic {
             None,
         );
         let mut internal = at_start.f_int;
+        // Turned follower loads count against the internal forces, as in the iterations.
+        (setup
+            .followers
+            .at(ctx.model, step, start, start_total + start, period))
+        .add_at(&motion.u, -1.0, &mut internal);
         NonlinearStatic::add_discrete(&setup.discrete, &motion.u, &mut setup.k, &mut internal);
         // The contact forces at the start (a body resting on another).
         let mut contact_states = ctx.state.contact.clone();
@@ -797,6 +809,7 @@ fn input<'a>(step: &Step, u: &'a [f64], dt: f64, time: f64) -> NonlinearInput<'a
         creep_active: false,
         temperature: 0.0,
         follower: &[],
+        turning: None,
     }
 }
 
@@ -1473,6 +1486,11 @@ fn attempt(
                 flux,
             )
         };
+        // Follower loads turned from their reference directions (in `load`).
+        if !setup.followers.is_empty() {
+            (setup.followers.at(ctx.model, step, t1, total, setup.period))
+                .add_at(&u, -1.0, &mut f_int);
+        }
         if !reusable {
             // The gaps count as status too: an iteration that switched one is not the last.
             let gaps = NonlinearStatic::add_discrete(&setup.discrete, &u, &mut setup.k, &mut f_int);

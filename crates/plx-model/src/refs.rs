@@ -215,6 +215,7 @@ impl FeModel {
                 optional(&mut load.amplitude, visit);
                 optional(&mut load.factor_amplitude, visit);
                 optional(&mut load.distribution, visit);
+                optional(&mut load.system, visit);
                 match &mut load.kind {
                     LoadKind::RemoteForce(remote) => optional(&mut remote.system, visit),
                     LoadKind::Moving(moving) => optional(&mut moving.system, visit),

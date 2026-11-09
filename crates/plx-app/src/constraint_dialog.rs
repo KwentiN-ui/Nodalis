@@ -363,6 +363,7 @@ impl ConstraintDraft {
         Some(crate::symbols::Item {
             kind,
             region,
+            system: None,
             selected: true,
         })
     }

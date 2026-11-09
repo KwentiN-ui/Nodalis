@@ -1154,6 +1154,8 @@ mod tests {
             amplitude: None,
             factor_amplitude: None,
             tables: Default::default(),
+            system: None,
+            follower: false,
         });
         // A second step pressing harder, to show the contacts of a step.
         if std::env::var_os("PLX_CONTACT_DEMO_STEPS").is_some() {
@@ -1165,6 +1167,78 @@ mod tests {
         } else {
             model.steps.push(step);
         }
+        let project = single(None, &mesh, &model, None);
+        save_project(std::path::Path::new(&path), &project).unwrap();
+    }
+
+    /// Writes a project of a steel column twisted at its top by a force in a cylindrical
+    /// system that follows the deformation, for the user guide's screenshot of follower
+    /// loads: `PLX_FOLLOWER_DEMO=path cargo test follower_demo -- --ignored`.
+    #[test]
+    #[ignore]
+    fn follower_demo_project() {
+        let Some(path) = std::env::var_os("PLX_FOLLOWER_DEMO") else {
+            return;
+        };
+        let mut mesh = FeMesh::default();
+        let [bottom, top] = add_block(
+            &mut mesh,
+            "Column",
+            1,
+            [0.0, 0.0, 0.0],
+            [0.02, 0.02, 0.1],
+            [4, 4, 20],
+        );
+        let mut model = FeModel::default();
+        model.materials.push(Material {
+            name: "Steel".into(),
+            density: Some(7850.0),
+            elastic: Some(plx_model::Elastic {
+                young: 2.1e11,
+                poisson: 0.3,
+            }),
+            ..Default::default()
+        });
+        model.sections.push(plx_model::Section {
+            name: "Solid_Section-1".into(),
+            material: model.materials.last().map(|m| m.id),
+            region: Region::Parts(vec!["Column".into()]),
+            thickness: 1.0,
+            kind: plx_model::SectionKind::Solid,
+        });
+        let mut axis = plx_model::CoordinateSystem::new("Column_Axis");
+        axis.kind = plx_model::CoordinateSystemKind::Cylindrical;
+        axis.origin = [0.01, 0.01, 0.1];
+        axis.point_x = [0.02, 0.01, 0.1];
+        axis.point_xy = [0.01, 0.02, 0.1];
+        let system = axis.id;
+        model.coordinate_systems.push(axis);
+        let mut step = plx_model::Step::new_static("Step-1");
+        if let plx_model::StepKind::Static(settings) = &mut step.kind {
+            settings.nlgeom = true;
+        }
+        step.boundary_conditions.push(plx_model::BoundaryCondition {
+            id: plx_model::Id::new(),
+            distribution: None,
+            name: "Fixed-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Faces(bottom),
+            kind: plx_model::BoundaryKind::displacement([Some(0.0); 6]),
+            amplitude: None,
+        });
+        let mut load = plx_model::Load::new(
+            "Force-1",
+            Region::Faces(top),
+            plx_model::LoadKind::Force {
+                value: [0.0, 500.0, 0.0],
+                each_node: false,
+            },
+        );
+        load.system = Some(system);
+        load.follower = true;
+        step.loads.push(load);
+        model.steps.push(step);
         let project = single(None, &mesh, &model, None);
         save_project(std::path::Path::new(&path), &project).unwrap();
     }

@@ -1095,6 +1095,8 @@ mod tests {
             amplitude: None,
             factor_amplitude: None,
             tables: Default::default(),
+            system: None,
+            follower: false,
         });
         let mut both = cubes();
         both.fe.steps = vec![frequency.clone(), modal.clone()];

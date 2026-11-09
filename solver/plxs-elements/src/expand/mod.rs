@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use plxs_core::constraints::{Equation, EquationTerm};
 use plxs_core::mesh::{ElementRef, NodeId, NodeRef};
 use plxs_core::section::SectionKind;
-use plxs_core::step::{Boundary, ConcentratedLoad, DistributedLoadKind};
+use plxs_core::step::{Boundary, ConcentratedLoad, DistributedLoadKind, Follower};
 use plxs_core::{Analysis, ElementFamily, ElementType, Error, Model, Result};
 
 pub use beam::section_rule;
@@ -1227,6 +1227,21 @@ impl Expander {
                 }
             }
             step.boundaries = boundaries;
+            // Every node of a follower load names the same nodes: they are mapped once.
+            let mut followers: Vec<(NodeRef, Follower)> = Vec::new();
+            for load in &mut loads {
+                if let Some(Follower::Nodes(nodes)) = &load.follower {
+                    let mapped = match followers.iter().find(|(n, _)| n == nodes) {
+                        Some((_, f)) => f.clone(),
+                        None => {
+                            let f = self.follower(original, nodes);
+                            followers.push((nodes.clone(), f.clone()));
+                            f
+                        }
+                    };
+                    load.follower = Some(mapped);
+                }
+            }
             step.loads.concentrated = loads;
             for load in &mut step.loads.distributed {
                 self.remap_pressure(original, &mut load.region, &mut load.kind)?;
@@ -1289,6 +1304,47 @@ impl Expander {
             return None;
         }
         self.mean_rotation(node, (d - 4) as usize).map(|h| (h, 1))
+    }
+
+    /// What a follower load on nodes of the original model turns with in the expanded one:
+    /// a single node with a knot or with U1 rotations with its rotation node, nodes of
+    /// beams and shells with the nodes they expand to.
+    fn follower(&mut self, original: &Model, nodes: &NodeRef) -> Follower {
+        let ids = original.nodes_of(nodes);
+        if let [single] = ids[..] {
+            if let Some(&helper) = self.u1_rotations.get(&single) {
+                return Follower::Rotation(helper);
+            }
+            if let Some(&(rotation, _)) = self.knots.get(&single) {
+                return Follower::Rotation(rotation);
+            }
+        }
+        if !ids.iter().any(|n| self.groups.contains_key(n)) {
+            return Follower::Nodes(nodes.clone());
+        }
+        let mut expanded = Vec::new();
+        // An expanded node stays in the model without motion of its own (its results come
+        // from the nodes it expands to): only those take part.
+        for id in ids {
+            match self.groups.get(&id) {
+                Some(groups) => {
+                    for group in groups {
+                        let used = group.nodes.iter().zip(&group.used).filter(|(_, u)| **u);
+                        expanded.extend(used.map(|(&n, _)| n));
+                    }
+                }
+                None => expanded.push(id),
+            }
+        }
+        expanded.sort_unstable();
+        expanded.dedup();
+        let sets = &mut self.analysis.model.sets.node_sets;
+        let name = (1..)
+            .map(|k| format!("PLXS-FOLLOWER-{k}"))
+            .find(|name| !sets.contains_key(name))
+            .unwrap_or_default();
+        sets.insert(name.clone(), expanded);
+        Follower::Nodes(NodeRef::Set(name))
     }
 
     fn remap_pressure(

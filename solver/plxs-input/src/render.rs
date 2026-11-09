@@ -23,8 +23,8 @@ use plxs_core::mesh::Surface;
 use plxs_core::section::{BeamProfile, SectionKind, SpringStiffness};
 use plxs_core::step::{
     ContactChange, DefaultAmplitude, DefinedFieldKind, DistributedLoadKind, EquationSolver,
-    FieldOutput, FluxKind, HistoryOutput, Incrementation, Loads, ModalDamping, OutputDimension,
-    Procedure, Totals,
+    FieldOutput, FluxKind, Follower, HistoryOutput, Incrementation, Loads, ModalDamping,
+    OutputDimension, Procedure, Totals,
 };
 use plxs_core::{Analysis, Model, Step};
 
@@ -1188,7 +1188,13 @@ fn loads(out: &mut Out, loads: &Loads, carried: &Loads) {
         &loads.concentrated,
         !carried.concentrated.is_empty(),
         |l| {
-            amplitude_parameter("Amplitude", &l.amplitude) + &case_and_sector(l.load_case, l.sector)
+            amplitude_parameter("Amplitude", &l.amplitude)
+                + &case_and_sector(l.load_case, l.sector)
+                + &match &l.follower {
+                    None => String::new(),
+                    Some(Follower::Nodes(nodes)) => format!(", Follower={nodes}"),
+                    Some(Follower::Rotation(node)) => format!(", Follower rotation={node}"),
+                }
         },
         |l| format!("{}, {}, {}", l.region, l.dof, number(l.value)),
     );

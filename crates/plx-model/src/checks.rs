@@ -4201,6 +4201,8 @@ mod tests {
             amplitude: None,
             factor_amplitude: None,
             tables: Default::default(),
+            system: None,
+            follower: false,
         });
         let steel = steel();
         let steel_id = steel.id;
@@ -4938,6 +4940,8 @@ mod tests {
             amplitude: None,
             factor_amplitude: None,
             tables: Default::default(),
+            system: None,
+            follower: false,
         });
         assert_eq!(
             problems(&check(&model, &mesh)),
@@ -5829,6 +5833,8 @@ mod tests {
             amplitude: None,
             factor_amplitude: None,
             tables: Default::default(),
+            system: None,
+            follower: false,
         });
         model.steps = vec![step];
         // Displacements are free in a heat transfer, and no elasticity is needed.

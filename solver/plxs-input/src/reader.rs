@@ -23,9 +23,10 @@ use plxs_core::step::{
     Boundary, Buckle, ComplexFrequency, ConcentratedFlux, ConcentratedLoad, ContactChange,
     Controls, CyclicModes, DampingRatio, DefaultAmplitude, DefinedField, DefinedFieldKind,
     DesignResponse, DistributedFlux, DistributedLoad, DistributedLoadKind, Dynamic, EquationSolver,
-    ExplicitControls, FieldOutput, Film, Filter, FluxKind, Frequency, HeatTransfer, HistoryOutput,
-    Incrementation, Integration, ModalDamping, ModalDynamics, OutputDimension, Procedure, Radiate,
-    Rayleigh, RestartWrite, Sensitivity, Static, SteadyStateDynamics, Step, Totals, Visco,
+    ExplicitControls, FieldOutput, Film, Filter, FluxKind, Follower, Frequency, HeatTransfer,
+    HistoryOutput, Incrementation, Integration, ModalDamping, ModalDynamics, OutputDimension,
+    Procedure, Radiate, Rayleigh, RestartWrite, Sensitivity, Static, SteadyStateDynamics, Step,
+    Totals, Visco,
 };
 use plxs_core::{Error, normalized_name};
 
@@ -2171,10 +2172,26 @@ impl Reader {
             "TIME DELAY",
             "USER",
             "OMEGA0",
+            "FOLLOWER",
+            "FOLLOWER ROTATION",
         ])?;
         if k.has("USER") || k.has("TIME DELAY") || k.has("OMEGA0") {
             return Err(k.error("USER, TIME DELAY and OMEGA0 are not supported"));
         }
+        let follower = match (k.value("FOLLOWER"), k.value("FOLLOWER ROTATION")) {
+            (Some(_), Some(_)) => {
+                return Err(k.error("FOLLOWER and FOLLOWER ROTATION exclude each other"));
+            }
+            (Some(nodes), None) => Some(Follower::Nodes(node_ref(nodes))),
+            (None, Some(node)) => match node.trim().parse::<NodeId>() {
+                Ok(id) => Some(Follower::Rotation(id)),
+                Err(_) => return Err(k.error("FOLLOWER ROTATION needs a node number")),
+            },
+            (None, None) if k.has("FOLLOWER") || k.has("FOLLOWER ROTATION") => {
+                return Err(k.error("FOLLOWER needs the nodes the load turns with"));
+            }
+            (None, None) => None,
+        };
         let amplitude = k.value("AMPLITUDE").map(normalized_name);
         let load_case = k.integer("LOAD CASE")?.map(|c| c as u8);
         let sector = k.integer("SECTOR")?;
@@ -2195,6 +2212,7 @@ impl Reader {
                 amplitude: amplitude.clone(),
                 load_case,
                 sector,
+                follower: follower.clone(),
             });
         }
         let op_new = k.value("OP") == Some("NEW");

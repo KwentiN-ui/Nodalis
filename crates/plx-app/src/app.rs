@@ -5550,6 +5550,7 @@ impl Workbench {
                 items.push(symbols::Item {
                     kind,
                     region,
+                    system: None,
                     selected: is_selected,
                 });
             }
@@ -5576,6 +5577,7 @@ impl Workbench {
                 items.push(symbols::Item {
                     kind: symbols::Kind::Boundary(bc.kind.clone()),
                     region: bc.region.clone(),
+                    system: None,
                     selected,
                 });
             }
@@ -5586,6 +5588,7 @@ impl Workbench {
                 items.push(symbols::Item {
                     kind: symbols::Kind::Load(load.kind.clone()),
                     region: load.region.clone(),
+                    system: load.system,
                     selected,
                 });
             }

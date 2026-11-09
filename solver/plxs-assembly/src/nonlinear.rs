@@ -28,6 +28,10 @@ pub struct NonlinearInput<'a> {
     /// (membrane index, pressure at the end of the increment). Their nodal forces enter
     /// `f_int` with the opposite sign; their load stiffness is left out of the tangent.
     pub follower: &'a [(u32, f64)],
+    /// Concentrated follower loads (`*CLOAD, FOLLOWER=`): how far they turned from their
+    /// reference directions enters `f_int` with the opposite sign; their load stiffness is
+    /// left out of the tangent.
+    pub turning: Option<&'a crate::Turning<'a>>,
 }
 
 /// What an assembly produced.
@@ -267,6 +271,9 @@ pub fn assemble_nonlinear(
         for (&dof, value) in m.dofs.iter().zip(fe) {
             out.f_int[dof as usize] -= value;
         }
+    }
+    if let Some(turning) = input.turning {
+        turning.add_at(input.u, -1.0, &mut out.f_int);
     }
     out
 }

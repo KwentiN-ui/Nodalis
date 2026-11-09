@@ -12489,6 +12489,8 @@ mod tests {
             amplitude: None,
             factor_amplitude: None,
             tables: Default::default(),
+            system: None,
+            follower: false,
         });
         model.steps.push(step);
         let force = plx_model::ValuePath::new(

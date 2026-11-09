@@ -1995,7 +1995,37 @@ impl Load {
             factor_amplitude: None,
             tables: Default::default(),
             distribution: None,
+            system: None,
+            follower: false,
         }
+    }
+}
+
+impl Load {
+    /// The coordinate system of the components ([`Load::system`]); `None` for the global
+    /// one or for a kind without one.
+    pub fn component_system(&self, fe: &FeModel) -> Result<Option<CoordinateSystem>, String> {
+        match self.system.filter(|_| self.kind.takes_system()) {
+            None => Ok(None),
+            Some(id) => (fe.coordinate_system(id).cloned())
+                .map(Some)
+                .ok_or_else(|| format!("{}: The coordinate system does not exist.", self.name)),
+        }
+    }
+
+    /// Components given in `system` (none: global) at `position` in global directions.
+    pub fn to_global(
+        system: Option<&CoordinateSystem>,
+        position: [f64; 3],
+        local: [f64; 3],
+    ) -> Result<[f64; 3], String> {
+        let Some(system) = system else {
+            return Ok(local);
+        };
+        let axes = system.directions_at(position)?;
+        Ok(std::array::from_fn(|i| {
+            (0..3).map(|k| local[k] * axes[k][i]).sum()
+        }))
     }
 }
 
@@ -2048,6 +2078,17 @@ pub struct Load {
     /// everywhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distribution: Option<Id>,
+    /// Coordinate system the components of a force, moment or excitation are given in;
+    /// `None` is the global one. A cylindrical system turns them with the position of every
+    /// node. See [`LoadKind::takes_system`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<Id>,
+    /// A follower load: under large deformations (`NLGEOM`, explicit dynamics) its
+    /// direction turns with the region, by the rigid rotation that fits the motion of the
+    /// region's nodes best, or with the rotation of a reference point or of a single beam or
+    /// shell node. Only for the kinds of [`LoadKind::takes_system`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub follower: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2122,6 +2163,16 @@ impl LoadKind {
             value,
             each_node: false,
         }
+    }
+
+    /// Whether the components can be given in a coordinate system of their own and the
+    /// load can follow the deformation ([`Load::system`], [`Load::follower`]): forces,
+    /// moments and excitations.
+    pub fn takes_system(&self) -> bool {
+        matches!(
+            self,
+            LoadKind::Force { .. } | LoadKind::Moment(_) | LoadKind::Excitation(_)
+        )
     }
 
     /// How many components of the value can follow a time table of their own: the three
@@ -2556,6 +2607,8 @@ mod tests {
             amplitude: None,
             factor_amplitude: None,
             tables: Default::default(),
+            system: None,
+            follower: false,
         });
         model.steps.push(step);
         model.rename_part("A", "C");

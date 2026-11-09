@@ -3372,6 +3372,8 @@ S
             amplitude: None,
             factor_amplitude: None,
             tables: Default::default(),
+            system: None,
+            follower: false,
         });
         let solid = Section {
             name: "Section-1".into(),

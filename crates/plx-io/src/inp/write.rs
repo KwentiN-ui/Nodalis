@@ -3207,6 +3207,77 @@ fn boundary(
 }
 
 /// A concentrated load on a degree of freedom of `region`.
+/// The components of a force or moment in global directions at `position`, from the
+/// coordinate system of the load.
+fn global_components(
+    model: &FeModel,
+    load: &plx_model::Load,
+    position: [f64; 3],
+    local: [f64; 3],
+) -> Result<[f64; 3], WriteError> {
+    let invalid = |reason: String| WriteError::InvalidLoad {
+        item: load.name.clone(),
+        reason,
+    };
+    let system = load.component_system(model).map_err(invalid)?;
+    plx_model::Load::to_global(system.as_ref(), position, local).map_err(invalid)
+}
+
+/// Where a concentrated force or moment on `target` acts and the position its directions
+/// are taken at: the whole target in a rectangular system (the same directions everywhere),
+/// every node of it at its own position in a cylindrical one.
+fn component_positions(
+    model: &FeModel,
+    sets: &mut Sets,
+    load: &plx_model::Load,
+    target: &NodeRef,
+) -> Result<Vec<(NodeRef, [f64; 3])>, WriteError> {
+    let invalid = |reason: String| WriteError::InvalidLoad {
+        item: load.name.clone(),
+        reason,
+    };
+    let system = load.component_system(model).map_err(invalid)?;
+    if system.is_none_or(|s| s.kind != plx_model::CoordinateSystemKind::Cylindrical) {
+        return Ok(vec![(target.clone(), [0.0; 3])]);
+    }
+    if let Some(point) = load.region.reference_point() {
+        let position = (model.reference_point(point)).map_or([0.0; 3], |p| p.position);
+        return Ok(vec![(target.clone(), position)]);
+    }
+    let nodes = load.region.nodes(sets.mesh);
+    Ok((nodes.into_iter())
+        .filter_map(|n| Some((NodeRef::Node(n), sets.mesh.node(n)?)))
+        .collect())
+}
+
+/// What a follower load turns with: the rotation of its reference point, or the nodes of
+/// its region (a single beam or shell node turns with its rotations in the solver).
+/// `set` is the node set of the region if it was written already.
+fn follower(
+    sets: &mut Sets,
+    load: &plx_model::Load,
+    set: Option<&NodeRef>,
+) -> Result<Option<ir::step::Follower>, WriteError> {
+    if !load.follower || !load.kind.takes_system() {
+        return Ok(None);
+    }
+    Ok(Some(match (load.region.reference_point(), set) {
+        (Some(point), _) => {
+            ir::step::Follower::Rotation(sets.reference_nodes(&load.name, point)?.rotation)
+        }
+        (None, Some(set)) => ir::step::Follower::Nodes(set.clone()),
+        (None, None) => {
+            ir::step::Follower::Nodes(node_set_ref(&sets.node_set(&load.name, &load.region)?))
+        }
+    }))
+}
+
+fn set_follower(items: &mut [ir::step::ConcentratedLoad], follower: Option<ir::step::Follower>) {
+    for item in items {
+        item.follower.clone_from(&follower);
+    }
+}
+
 fn cload(
     region: NodeRef,
     dof: u8,
@@ -3220,6 +3291,7 @@ fn cload(
         amplitude: amplitude.clone(),
         load_case: None,
         sector: None,
+        follower: None,
     }
 }
 
@@ -3673,13 +3745,20 @@ fn step_block<'f>(
                 };
                 let (moment, component_amplitudes) =
                     load_components(step, load, moment, MOMENT_TABLE_LABELS, &amplitude);
+                // In a system of its own, at every node in the directions there.
+                let positions = component_positions(model, sets, load, &target)?;
                 let mut items = Vec::new();
-                for (dof, value) in (0..).zip(moment) {
-                    if value != 0.0 && dof as usize + 4 <= dofs {
-                        let amplitude = &component_amplitudes[dof as usize];
-                        items.push(cload(target.clone(), first_dof + dof, value, amplitude));
+                for (target, position) in positions {
+                    let moment = global_components(model, load, position, moment)?;
+                    for (dof, value) in (0..).zip(moment) {
+                        if value != 0.0 && dof as usize + 4 <= dofs {
+                            let amplitude = &component_amplitudes[dof as usize];
+                            items.push(cload(target.clone(), first_dof + dof, value, amplitude));
+                        }
                     }
                 }
+                let set = load.region.reference_point().is_none().then_some(&target);
+                set_follower(&mut items, follower(sets, load, set)?);
                 vec![Card::Cload {
                     op_new: false,
                     items,
@@ -3816,6 +3895,7 @@ fn step_block<'f>(
                 let (force, component_amplitudes) =
                     load_components(step, load, force, FORCE_TABLE_LABELS, &amplitude);
                 let mut items = Vec::new();
+                let mut region_set = None;
                 // On points the nodes share the force equally, a reference point takes it
                 // whole: the share at every node of their set. With `each_node` every node
                 // of the region takes the whole force.
@@ -3825,12 +3905,16 @@ fn step_block<'f>(
                         Some(_) => 1,
                         None => load.region.nodes(sets.mesh).len(),
                     };
-                    let set = node_set_ref(&sets.node_set(&load.name, &load.region)?);
-                    for (dof, value) in (1..).zip(force).take(dofs) {
-                        if value != 0.0 {
-                            let share = value / count as f64;
-                            let amplitude = &component_amplitudes[dof as usize - 1];
-                            items.push(cload(set.clone(), dof, share, amplitude));
+                    let target = node_set_ref(&sets.node_set(&load.name, &load.region)?);
+                    region_set = Some(target.clone());
+                    for (target, position) in component_positions(model, sets, load, &target)? {
+                        let force = global_components(model, load, position, force)?;
+                        for (dof, value) in (1..).zip(force).take(dofs) {
+                            if value != 0.0 {
+                                let share = value / count as f64;
+                                let amplitude = &component_amplitudes[dof as usize - 1];
+                                items.push(cload(target.clone(), dof, share, amplitude));
+                            }
                         }
                     }
                 } else {
@@ -3844,6 +3928,8 @@ fn step_block<'f>(
                         return Err(empty(&load.name, "element faces or edges"));
                     }
                     for (node, values) in nodal {
+                        let position = sets.mesh.node(node).unwrap_or([0.0; 3]);
+                        let values = global_components(model, load, position, values)?;
                         for (dof, value) in (1..).zip(values).take(dofs) {
                             if value != 0.0 {
                                 let amplitude = &component_amplitudes[dof as usize - 1];
@@ -3852,6 +3938,7 @@ fn step_block<'f>(
                         }
                     }
                 }
+                set_follower(&mut items, follower(sets, load, region_set.as_ref())?);
                 vec![Card::Cload {
                     op_new: false,
                     items,

@@ -102,6 +102,8 @@ fn tip_force() -> Load {
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     }
 }
 
@@ -232,6 +234,8 @@ fn picked_faces_become_one_element_set_per_face_number() {
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (mesh, model) = cantilever(load);
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -258,6 +262,8 @@ fn empty_regions_and_unknown_materials_are_errors() {
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     });
     assert_eq!(
         write_inp(&mesh, &model, ""),
@@ -554,6 +560,8 @@ fn moment(moment: [f64; 3]) -> Load {
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     }
 }
 
@@ -1358,6 +1366,8 @@ fn solver_yields_the_bar_pulled_beyond_its_yield_stress() {
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (mesh, mut model) = cantilever(load);
     s235(&mut model);
@@ -1440,6 +1450,8 @@ fn pre_tension(value: f64, by_displacement: bool) -> (FeMesh, FeModel) {
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     }];
     // Both ends held: the bolt is clamped between them.
     model.steps[0].boundary_conditions.push(BoundaryCondition {
@@ -2009,6 +2021,8 @@ fn solver_pressure_on_a_surface_balances_the_reactions() {
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (mesh, model) = cantilever(load);
     let Some(frd) = run_solver("druck", &write_inp(&mesh, &model, "").unwrap()) else {
@@ -2037,6 +2051,8 @@ fn solver_reads_quadratic_elements_over_two_lines() {
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (mesh, model) = analysis("block_c3d20r.inp", load);
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -2110,6 +2126,8 @@ fn solver_balances_a_surface_traction() {
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (mesh, model) = cantilever(load);
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -2696,6 +2714,8 @@ fn buckle_analysis() -> (FeMesh, FeModel) {
             amplitude: None,
             factor_amplitude: None,
             tables: Default::default(),
+            system: None,
+            follower: false,
         },
     );
     let mut step = Step::new_buckle("Step-1");
@@ -3056,6 +3076,8 @@ fn deactivated_items_are_left_out() {
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     });
     model.steps[0].loads[0].active = false;
     model.steps[0].boundary_conditions[0].active = false;
@@ -3195,6 +3217,8 @@ fn plane_model(
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     });
     FeModel {
         properties: plx_model::ModelProperties {
@@ -3470,6 +3494,8 @@ fn solver_runs_every_plane_element_type() {
                 amplitude: None,
                 factor_amplitude: None,
                 tables: Default::default(),
+                system: None,
+                follower: false,
             });
             assert!(model.set_element_type("PLATE", chosen));
             let written = space.element_type(chosen, shape);
@@ -3629,6 +3655,8 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     });
     model.materials.push(Material {
         id: named("Steel"),
@@ -3700,6 +3728,8 @@ fn solver_preloads_a_bolt_split_into_two_tied_parts() {
             amplitude: None,
             factor_amplitude: None,
             tables: Default::default(),
+            system: None,
+            follower: false,
         }];
         let mut tie = plx_model::Tie::new("Tie-1");
         (tie.master, tie.slave) = if cut_is_master {
@@ -4225,6 +4255,8 @@ fn solver_gives_the_same_contact_in_mm_and_in_m() {
             amplitude: None,
             factor_amplitude: None,
             tables: Default::default(),
+            system: None,
+            follower: false,
         });
         if name == "hard" {
             // Held sideways at its top, the upper block rests on the lower one by contact.
@@ -4479,6 +4511,8 @@ fn blocks_model(
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     });
     FeModel {
         materials: vec![Material {
@@ -4968,6 +5002,8 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     });
     FeModel {
         cross_sections: line_cross_sections(),
@@ -5841,6 +5877,8 @@ fn heat_load(name: &str, region: Region, kind: LoadKind) -> Load {
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     }
 }
 
@@ -6717,6 +6755,8 @@ fn solver_scales_distributed_loads_and_displacements_by_amplitudes() {
         amplitude: Some(named("Rise")),
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (mesh, mut model) = cantilever(pressure);
     let mut gravity = body_load(LoadKind::Gravity([0.0, -9810.0, 0.0]));
@@ -7041,6 +7081,8 @@ fn body_load(kind: LoadKind) -> Load {
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     }
 }
 
@@ -7855,6 +7897,8 @@ fn moving_cantilever() -> (FeMesh, FeModel) {
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (_, mut model) = cantilever(load);
     // Another load stays the same in every position.
@@ -8152,6 +8196,8 @@ fn solver_creeps_the_bar_by_nortons_law() {
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (mesh, mut model) = cantilever(load);
     let creep = plx_model::Creep {
@@ -8549,6 +8595,8 @@ fn block_on_plate(plate_type: &str) -> (FeMesh, FeModel) {
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     });
     let mut model = FeModel::default();
     model.materials.push(Material {
@@ -8637,6 +8685,8 @@ fn solver_bends_a_box_of_a_mesh_block_held_and_loaded_on_its_sides() {
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (_, mut model) = cantilever(load);
     model.sections[0].region = Region::Parts(vec!["BOX".into()]);
@@ -10150,6 +10200,8 @@ fn solver_pressure_follows_its_distribution() {
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (mesh, mut model) = cantilever(load);
     model.properties.units = UnitSystem::MKgSC;
@@ -10602,6 +10654,8 @@ fn uniaxial_bar(hardening: Hardening, stress: f64) -> (FeMesh, FeModel) {
         amplitude: None,
         factor_amplitude: None,
         tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (mesh, mut model) = cantilever(load);
     s235(&mut model);
@@ -11372,5 +11426,69 @@ fn solver_bends_the_beam_by_a_deformable_force_on_a_face_rigid_from_another_step
     assert!(
         (ours - expected).abs() < 1e-6 * expected.abs(),
         "{ours} != {expected}"
+    );
+}
+
+/// A force in a coordinate system of its own is written in global directions: in a
+/// rectangular system once for the set, in a cylindrical one at every node in the radial,
+/// tangential and axial directions there. A follower force names what it turns with.
+#[test]
+fn a_force_in_a_system_of_its_own_is_written_in_global_directions() {
+    let mut system = plx_model::CoordinateSystem::new("Turned");
+    // x along global y, y along global -x.
+    system.point_x = [0.0, 1.0, 0.0];
+    system.point_xy = [-1.0, 0.0, 0.0];
+    let mut load = tip_force();
+    load.region = Region::Nodes(vec![96, 97, 98, 99]);
+    load.kind = LoadKind::force([100.0, 0.0, 0.0]);
+    load.system = Some(system.id);
+    load.follower = true;
+    let (mesh, mut model) = cantilever(load.clone());
+    model.coordinate_systems.push(system.clone());
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Cload, op=New, Follower=INTERNAL_SELECTION-1_FORCE-1\nINTERNAL_SELECTION-1_FORCE-1, 2, 25\n"),
+        "{text}"
+    );
+    // Radial about the beam axis x through the middle of the section.
+    let mut cylinder = plx_model::CoordinateSystem::new("Cylinder");
+    cylinder.kind = plx_model::CoordinateSystemKind::Cylindrical;
+    cylinder.origin = [0.0, 5.0, 5.0];
+    cylinder.point_x = [0.0, 6.0, 5.0];
+    cylinder.point_xy = [0.0, 5.0, 6.0];
+    load.system = Some(cylinder.id);
+    load.follower = false;
+    let (mesh, mut model) = cantilever(load);
+    model.coordinate_systems.push(cylinder);
+    let analysis = lowered(&mesh, &model);
+    let step = &analysis.steps[0];
+    for node in [96, 97, 98, 99] {
+        let x = coordinates(&analysis, node);
+        let radial = [0.0, x[1] - 5.0, x[2] - 5.0];
+        let length = (radial[1] * radial[1] + radial[2] * radial[2]).sqrt();
+        for dof in 1..=3u8 {
+            let value: f64 = (step.loads.concentrated.iter())
+                .filter(|l| l.region == NodeRef::Node(node) && l.dof == dof)
+                .map(|l| l.value)
+                .sum();
+            let expected = 25.0 * radial[dof as usize - 1] / length;
+            assert!(
+                (value - expected).abs() < 1e-9,
+                "node {node}, dof {dof}: {value}"
+            );
+        }
+        assert!(step.loads.concentrated.iter().all(|l| l.follower.is_none()));
+    }
+    // At a reference point the force turns with the rigid body's rotation node.
+    let mut on_point = tip_force();
+    on_point.region = Region::ReferencePoint(named("RP-1"));
+    on_point.follower = true;
+    let (mesh, model) = rigid_tip(Some(on_point), None);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains(
+            "*Cload, op=New, Follower rotation=101\nINTERNAL_SELECTION-1_RP-1, 3, -100\n"
+        ),
+        "{text}"
     );
 }

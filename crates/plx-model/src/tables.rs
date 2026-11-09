@@ -98,6 +98,8 @@ mod tests {
             factor_amplitude: None,
             tables: [table(3.0), table(4.0), None],
             distribution: None,
+            system: None,
+            follower: false,
         };
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(bc.clone());

@@ -362,6 +362,8 @@ impl FeModel {
                     factor_amplitude: None,
                     tables: Default::default(),
                     distribution: None,
+                    system: None,
+                    follower: false,
                 });
                 origin.load_bolts[s].push(b);
             }

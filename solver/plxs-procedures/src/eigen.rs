@@ -72,6 +72,7 @@ pub(crate) fn reference_stiffness(
                 creep_active: false,
                 temperature: 0.0,
                 follower: &[],
+                turning: None,
             };
             plxs_assembly::nonlinear::assemble_nonlinear(
                 ctx.table,

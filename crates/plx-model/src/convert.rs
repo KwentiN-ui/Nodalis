@@ -609,6 +609,8 @@ mod tests {
             amplitude: None,
             factor_amplitude: None,
             tables: Default::default(),
+            system: None,
+            follower: false,
         });
         step.loads.push(Load {
             id: crate::Id::new(),
@@ -621,6 +623,8 @@ mod tests {
             amplitude: None,
             factor_amplitude: None,
             tables: Default::default(),
+            system: None,
+            follower: false,
         });
         model.steps.push(step);
         assert!(model.convert_units(UnitSystem::MTonSC).is_empty());
