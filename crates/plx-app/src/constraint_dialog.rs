@@ -934,8 +934,8 @@ fn rigid_body_point_rows(
     } else {
         hint(
             ui,
-            "The nodes of the region move as one rigid body with the reference point. \
-             Boundary conditions, forces and moments on the point drive the body.",
+            "The region is coupled to the reference point as Behavior says. Boundary \
+             conditions, forces and moments on the point drive the region.",
         );
     }
 }

@@ -39,6 +39,9 @@ nodes of a picked edge, element or surface, for example the centre of a hole.
   changed selection of the point. To track where a face goes independently of node numbers,
   create a point at its #ui("Center of gravity") with #ui("Deformable") coupling and request
   `U` on the point in a history output (@history-outputs).
+
+  #screenshot("reference-point-coupling.png", [Reference point at the centre of an end face,
+    coupled deformably to it])
 / Coordinate System: #ui("Rectangular") or #ui("Cylindrical"), defined by #ui("Origin"),
   #ui("Point on x-axis") and #ui("Point in xy-plane"). For a cylindrical system the z axis is the
   cylinder axis and the directions are r, θ and z.
