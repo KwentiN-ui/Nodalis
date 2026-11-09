@@ -24,7 +24,8 @@ plates (rotations).
     components move the point and so the rigid body.],
   [Temperature], [Prescribed temperature (heat transfer, coupled and uncoupled steps); a
     #ui("Distribution") (@distributions) makes it vary over the region.],
-  [Submodel], [Displacements taken from the global model (static steps of a submodel,
+  [Submodel], [Displacements taken from the global model (static steps; offered only when the model type in the
+    model properties is #ui("Submodel"),
     @submodel). The check boxes select the displacements U1 to U3; the step of the global
     results is the one linked to the #ui("Global results") row. The global results hold no
     rotations.],

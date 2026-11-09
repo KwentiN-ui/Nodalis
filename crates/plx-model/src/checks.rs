@@ -114,6 +114,8 @@ pub enum Problem {
     PartialBeamRotations,
     /// A submodel boundary condition in a model without a global results file.
     NoGlobalResults,
+    /// A submodel boundary condition in a model that is not defined as a submodel.
+    NotASubmodel,
     /// A symmetry boundary condition whose nodes do not fix a plane.
     NoSymmetryPlane,
     /// A symmetry boundary condition whose nodes are not on one plane.
@@ -302,6 +304,7 @@ impl Problem {
             Problem::RotationsIgnored => "Rotations without effect",
             Problem::PartialBeamRotations => "Beam rotations partly held",
             Problem::NoGlobalResults => "No global results",
+            Problem::NotASubmodel => "Not a submodel",
             Problem::NoSymmetryPlane => "No symmetry plane",
             Problem::SymmetryNotPlanar => "Symmetry region not planar",
             Problem::SymmetryOffAxis => "Symmetry plane not perpendicular to the axis",
@@ -566,6 +569,11 @@ impl Problem {
                 "A submodel boundary condition takes its displacements from the results \
                  of a global model (*SUBMODEL). Without the global results file the input \
                  file cannot be written."
+            }
+            Problem::NotASubmodel => {
+                "A submodel boundary condition takes its displacements from the results \
+                 of a global model, which only a model defined as a submodel reads. The \
+                 input file cannot be written."
             }
             Problem::NoSymmetryPlane => {
                 "A symmetry boundary condition holds its nodes in a plane, which it takes \
@@ -1025,6 +1033,10 @@ impl Problem {
                 "Keep other boundary conditions and point loads off the nodes of the \
                  symmetry plane, or align the model so that the plane is a coordinate \
                  plane."
+            }
+            Problem::NotASubmodel => {
+                "Open Model Properties (Material tab of the FE Model ribbon) and set the model type to Submodel, \
+                 or delete the Submodel boundary condition."
             }
             Problem::NoGlobalResults => {
                 "Open Model Properties (Material tab of the FE Model ribbon), set the model type to Submodel and pick the results \
@@ -2726,6 +2738,18 @@ impl FeModel {
                 }
             };
             if let BoundaryKind::Submodel { .. } = bc.kind
+                && self.properties.kind != crate::ModelKind::Submodel
+            {
+                findings.push(Finding::new(
+                    ModelItem::BoundaryCondition(s, i),
+                    Problem::NotASubmodel,
+                    format!(
+                        "{} is a submodel boundary condition, but the model is not defined as a \
+                         submodel: set the model type to Submodel in the model properties",
+                        bc.name
+                    ),
+                ));
+            } else if let BoundaryKind::Submodel { .. } = bc.kind
                 && self.properties.submodel_input().is_none()
             {
                 findings.push(Finding::new(
@@ -4555,9 +4579,13 @@ mod tests {
         });
         assert_eq!(
             problems(&check(&model, &mesh)),
-            [(ModelItem::BoundaryCondition(0, 1), Problem::NoGlobalResults)]
+            [(ModelItem::BoundaryCondition(0, 1), Problem::NotASubmodel)]
         );
         model.properties.kind = crate::ModelKind::Submodel;
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::BoundaryCondition(0, 1), Problem::NoGlobalResults)]
+        );
         model.properties.global_results = Some("global.frd".into());
         assert_eq!(check(&model, &mesh), []);
         assert!(model.uses_global_results());

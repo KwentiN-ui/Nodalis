@@ -1413,6 +1413,13 @@ fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 4] {
     ]
 }
 
+/// Whether the model offers a boundary condition kind for new ones: a submodel boundary
+/// condition only in a model defined as a submodel in its properties.
+fn offers_boundary(fe: &FeModel, kind: &BoundaryKind) -> bool {
+    !matches!(kind, BoundaryKind::Submodel { .. })
+        || fe.properties.kind == plx_model::ModelKind::Submodel
+}
+
 fn boundary_kind_name(kind: &BoundaryKind) -> &'static str {
     match kind {
         BoundaryKind::Displacement(_) => DISPLACEMENT,
@@ -2061,9 +2068,9 @@ impl Editor {
                 let target = fe.steps.get(step)?;
                 let existing = names(&target.boundary_conditions, |b| &b.name);
                 // The first kind the step takes: a heat transfer step only temperatures.
-                let (_, name, kind) = boundary_kinds()
-                    .into_iter()
-                    .find(|(_, _, kind)| target.kind.supports_boundary(kind))?;
+                let (_, name, kind) = boundary_kinds().into_iter().find(|(_, _, kind)| {
+                    target.kind.supports_boundary(kind) && offers_boundary(fe, kind)
+                })?;
                 Draft::BoundaryCondition(
                     step,
                     BoundaryCondition::new(
@@ -2950,6 +2957,11 @@ impl Editor {
                         for (label, name, kind) in boundary_kinds() {
                             // Only the kinds the step takes.
                             if step_kind.is_some_and(|s| !s.supports_boundary(&kind)) {
+                                continue;
+                            }
+                            // Submodel only for a model defined as one; a boundary condition
+                            // that already is one keeps its entry.
+                            if current != name && !offers_boundary(&model.fe, &kind) {
                                 continue;
                             }
                             if ui.selectable_label(current == name, label).clicked()
