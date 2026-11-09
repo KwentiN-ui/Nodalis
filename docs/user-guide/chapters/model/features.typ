@@ -8,7 +8,8 @@ transformations) and are not written to the input file.
 
 The FE Model and the Results workspace share the features of an analysis: both show the same
 list, and a feature created, edited, renamed or deleted in one of them is changed in the other as
-well. A coordinate system defined in the Results, e.g. to look at the stresses of a hub in
+well. In the Results workspace the tiles are on the #ui("Evaluate") tab in the group
+#ui("Features"). A coordinate system defined in the Results, e.g. to look at the stresses of a hub in
 cylindrical coordinates, can then be used for a load or a remote displacement in the FE Model.
 Adding or changing a feature that nothing in the model uses keeps the results up to date; only
 features the model refers to, directly or through another feature, call for a new solution.
