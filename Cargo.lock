@@ -3589,6 +3589,7 @@ dependencies = [
  "plxs-core",
  "plxs-elements",
  "plxs-linalg",
+ "rayon",
 ]
 
 [[package]]

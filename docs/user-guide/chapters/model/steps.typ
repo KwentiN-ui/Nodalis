@@ -53,14 +53,18 @@ solved:
   [Automatic], [(default) The solver chooses. A static or heat transfer step with
     50 000 equations and more whose unknowns are translations (or temperatures) only, i.e.
     a solid model, solves iteratively: the multigrid converges in a few dozen iterations
-    there and beats the factorization by far. Models with rotations (shells, beams), the
+    there and beats the factorization by far. Models with shells, membranes, beams or
+    trusses (the solver expands them into solids, but the multigrid does not fit the bending
+    of such thin elements and hardly converges on them), the
     eigenvalue iteration of frequency and buckle steps and implicit dynamic steps (one
     factorization serves many systems) and smaller models solve directly while the factor
     fits: the solver first estimates its memory, and if that exceeds 60 % of the memory the
     computer has free, the step solves iteratively. If the chosen solver fails, the other
     one takes over once: a factorization that does not fit into the memory continues
-    iteratively, an iteration that does not converge within 2000 iterations continues
-    directly. Leave it here unless you have a reason not to.],
+    iteratively, an iteration that does not converge within 2000 iterations, or that stalls
+    on the way (after 200 iterations, and every 100 after that, the residual has to be at
+    most half of what it was 200 iterations before), continues directly. Leave it here
+    unless you have a reason not to.],
   [Direct], [A sparse direct factorization (LDLᵀ). It solves every system, including
     tangents near buckling and parts held only by contact, but needs memory for the factor,
     which grows quickly with the model: about 2.4 GB for a solid block of 170 000 equations.],
