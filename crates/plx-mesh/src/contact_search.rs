@@ -101,6 +101,12 @@ pub struct SearchParameters {
     /// Young's modulus of each part's material, where known, for choosing the master.
     pub stiffness: Vec<Option<f64>>,
     pub filter: GeometryFilter,
+    /// Of each part, whether its shell faces are the skin of a solid with their normals
+    /// pointing out of it (the display of CAD solids, see [`crate::orient_outward`]): only
+    /// their top side can touch, so that faces of two solids lying side by side in one
+    /// plane, e.g. on a plane of symmetry, do not count as touching. Parts left out are
+    /// two-sided.
+    pub one_sided: Vec<bool>,
 }
 
 /// A master and a slave side of a contact pair found, each a set of surfaces.
@@ -454,6 +460,8 @@ fn contact_surfaces(
     for face in patch_faces(mesh, skins) {
         if !searched.get(face.surface.0).copied().unwrap_or(false)
             || !parameters.filter.takes(face.surface.1)
+            || face.surface.1 == SurfaceKind::ShellBottom
+                && parameters.one_sided.get(face.surface.0) == Some(&true)
         {
             continue;
         }
@@ -1267,6 +1275,7 @@ mod tests {
             group_by,
             stiffness,
             filter: GeometryFilter::default(),
+            one_sided: Vec::new(),
         };
         find_contact_pairs(mesh, &skins, &vec![true; mesh.parts.len()], &parameters)
     }
@@ -1523,6 +1532,7 @@ mod tests {
             group_by: GroupBy::Parts,
             stiffness: Vec::new(),
             filter: only_solids,
+            one_sided: Vec::new(),
         };
         assert!(find_contact_pairs(&mesh, &skins, &[true, true], &parameters).is_empty());
     }

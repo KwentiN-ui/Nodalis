@@ -1045,6 +1045,7 @@ fn contact_edges_found_in_2d_survive_remeshing() {
         group_by: plx_mesh::GroupBy::Parts,
         stiffness: Vec::new(),
         filter: plx_mesh::GeometryFilter::default(),
+        one_sided: Vec::new(),
     };
     let searched = vec![true; coarse.parts.len()];
     let items = plx_mesh::find_contact_pairs(&coarse, &skins, &searched, &parameters);

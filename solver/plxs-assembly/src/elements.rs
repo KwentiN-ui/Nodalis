@@ -146,6 +146,17 @@ impl ElementTable {
     /// Resolves the elements of a model at a uniform reference temperature. Elements the
     /// solver cannot compute yet are an error naming the type.
     pub fn new(model: &Model, temperature: f64) -> Result<Self> {
+        Self::new_after_ties(model, temperature, &[])
+    }
+
+    /// [`Self::new`] on a model whose ties moved slave nodes on to their master surfaces
+    /// (`moved`: each tie's name with the dense indices of the nodes it moved): elements
+    /// turned inside out by the move name the ties in the error.
+    pub fn new_after_ties(
+        model: &Model,
+        temperature: f64,
+        moved: &[(String, Vec<u32>)],
+    ) -> Result<Self> {
         let mut dofs = DofMap::new(model.nodes.len(), 3);
         // Formulations per type and, for plane elements, thickness.
         let mut formulation_index: HashMap<(ElementType, u64), u32> = HashMap::new();
@@ -170,6 +181,16 @@ impl ElementTable {
         let mut entry_of = Vec::with_capacity(model.elements.len());
         let mut discrete = Vec::new();
         let mut inverted: Vec<u32> = Vec::new();
+        // The ties that moved nodes of the elements turned inside out, by their index.
+        let mut moved_by = vec![u32::MAX; model.nodes.len()];
+        for (tie, (_, nodes)) in moved.iter().enumerate() {
+            for &n in nodes {
+                if let Some(slot) = moved_by.get_mut(n as usize) {
+                    *slot = tie as u32;
+                }
+            }
+        }
+        let mut inverting_ties = std::collections::BTreeSet::new();
         for (index, element) in model.elements.iter().enumerate() {
             let family = element.kind.family();
             if matches!(family, ElementFamily::Spring | ElementFamily::Gap) {
@@ -346,6 +367,11 @@ impl ElementTable {
                 .collect();
             if f.inverted(&coords) {
                 inverted.push(element.id);
+                inverting_ties.extend(
+                    (nodes.iter())
+                        .map(|&n| moved_by[n as usize])
+                        .filter(|&t| t != u32::MAX),
+                );
             }
             for &n in &nodes {
                 connected[n as usize] = true;
@@ -377,13 +403,30 @@ impl ElementTable {
             if inverted.len() > SHOWN {
                 list.push_str(&format!(" and {} more", inverted.len() - SHOWN));
             }
+            let hint = if inverting_ties.is_empty() {
+                "for shells and beams this is the solid they are expanded to, check the \
+                 element shape at sharp bends and curved faces against the thickness and the \
+                 offset"
+                    .to_owned()
+            } else {
+                let names: Vec<&str> = (inverting_ties.iter())
+                    .map(|&t| moved[t as usize].0.as_str())
+                    .collect();
+                format!(
+                    "the *TIE {} moved their nodes on to the master surface (ADJUST): the \
+                     slave surface takes in faces that do not lie against the master, e.g. a \
+                     face meeting it at an edge or one on a plane of symmetry, whose nodes \
+                     within the position tolerance are pulled across their elements; leave \
+                     those faces out of the tie or make its position tolerance smaller than \
+                     the elements there",
+                    names.join(", ")
+                )
+            };
             return Err(Error::input(
                 "*ELEMENT",
                 format!(
                     "{} element(s) turned inside out or folded (negative Jacobian at an \
-                     integration point): {list}; for shells and beams this is the solid they \
-                     are expanded to, check the element shape at sharp bends and curved \
-                     faces against the thickness and the offset",
+                     integration point): {list}; {hint}",
                     inverted.len()
                 ),
             ));

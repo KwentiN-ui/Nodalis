@@ -116,7 +116,7 @@ impl Session {
         let mut pending_warnings = constraints.warnings.clone();
         pending_warnings.extend(contact.warnings.iter().cloned());
         let (table, pattern) = pool.install(|| -> Result<_> {
-            let mut table = ElementTable::new(&model, 0.0)?;
+            let mut table = ElementTable::new_after_ties(&model, 0.0, &constraints.moved)?;
             // Nodes outside every element that constraints tie in (rigid body reference
             // and rotation nodes) keep their DOFs; the out-of-plane DOF of plane nodes
             // stays held.
