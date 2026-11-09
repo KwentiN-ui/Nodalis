@@ -454,7 +454,8 @@ impl Writer {
             self.out
                 .compression_only
                 .push(plxs_core::contact::CompressionOnly {
-                    surface,
+                    // The solver model knows its surfaces by their normalized names.
+                    surface: super::ir_name(&surface),
                     clearance: support.clearance,
                     stiffness,
                     flipped: support.flipped,
