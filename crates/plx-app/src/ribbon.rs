@@ -232,7 +232,11 @@ fn groups(
             )
         })
         .collect();
-    let folded = fold_groups(&widths, ui.max_rect().width());
+    // The step and increment tiles are what the results are read by: they fold last.
+    let keep: Vec<bool> = (spans.iter())
+        .map(|&(start, _)| row[start].group == command::STEP_GROUP)
+        .collect();
+    let folded = fold_groups(&widths, &keep, ui.max_rect().width());
     egui::ScrollArea::horizontal()
         .id_salt(("ribbon groups", tab))
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
@@ -258,8 +262,10 @@ fn groups(
 }
 
 /// Which groups fold into a menu so that the row fits `available`: from the right, those
-/// that can. `widths` are the width of each group and, if it can fold, its folded width.
-fn fold_groups(widths: &[(f32, Option<f32>)], available: f32) -> Vec<bool> {
+/// that can, the groups marked in `keep` only when no other is left. A group is shown again
+/// if the room left by the folding holds it. `widths` are the width of each group and, if it
+/// can fold, its folded width.
+fn fold_groups(widths: &[(f32, Option<f32>)], keep: &[bool], available: f32) -> Vec<bool> {
     let mut folded = vec![false; widths.len()];
     let total = |folded: &[bool]| {
         let tiles: f32 = (widths.iter().zip(folded))
@@ -267,11 +273,24 @@ fn fold_groups(widths: &[(f32, Option<f32>)], available: f32) -> Vec<bool> {
             .sum();
         tiles + SEPARATOR * widths.len().saturating_sub(1) as f32
     };
-    for i in (0..widths.len()).rev() {
-        if total(&folded) <= available {
-            break;
+    for pass in [false, true] {
+        for i in (0..widths.len()).rev() {
+            if total(&folded) <= available {
+                break;
+            }
+            if keep[i] == pass {
+                folded[i] = widths[i].1.is_some();
+            }
         }
-        folded[i] = widths[i].1.is_some();
+    }
+    // The room the last group folded freed may hold one that was folded before it.
+    for i in 0..widths.len() {
+        if folded[i] {
+            folded[i] = false;
+            if total(&folded) > available {
+                folded[i] = true;
+            }
+        }
     }
     folded
 }
@@ -1508,11 +1527,50 @@ mod tests {
     fn groups_fold_from_the_right_until_the_row_fits() {
         let widths = [(100.0, Some(40.0)), (100.0, None), (100.0, Some(40.0))];
         let all = 300.0 + 2.0 * SEPARATOR;
-        assert_eq!(fold_groups(&widths, all), [false, false, false]);
-        assert_eq!(fold_groups(&widths, all - 10.0), [false, false, true]);
+        assert_eq!(
+            fold_groups(&widths, &[false; 3], all),
+            [false, false, false]
+        );
+        assert_eq!(
+            fold_groups(&widths, &[false; 3], all - 10.0),
+            [false, false, true]
+        );
         // The middle group cannot fold, so the first one goes next.
-        assert_eq!(fold_groups(&widths, all - 61.0), [true, false, true]);
+        assert_eq!(
+            fold_groups(&widths, &[false; 3], all - 61.0),
+            [true, false, true]
+        );
         // Even with every group folded that can, the row stays as small as it gets.
-        assert_eq!(fold_groups(&widths, 10.0), [true, false, true]);
+        assert_eq!(fold_groups(&widths, &[false; 3], 10.0), [true, false, true]);
+    }
+
+    #[test]
+    fn the_kept_group_folds_after_the_others() {
+        let widths = [
+            (100.0, Some(40.0)),
+            (100.0, Some(40.0)),
+            (100.0, Some(40.0)),
+        ];
+        let keep = [false, false, true];
+        let all = 300.0 + 2.0 * SEPARATOR;
+        // The last group stays open, the ones before it fold.
+        assert_eq!(
+            fold_groups(&widths, &keep, all - 10.0),
+            [false, true, false]
+        );
+        assert_eq!(
+            fold_groups(&widths, &keep, all - 100.0),
+            [true, true, false]
+        );
+        // Nothing else is left to fold: now it goes too.
+        assert_eq!(fold_groups(&widths, &keep, 10.0), [true, true, true]);
+    }
+    #[test]
+    fn a_folded_group_opens_again_when_the_room_is_there() {
+        let widths = [(100.0, Some(40.0)), (30.0, Some(20.0)), (100.0, Some(40.0))];
+        let keep = [false, false, true];
+        // Folding the middle group frees more than the first one needs.
+        let room = 100.0 + 20.0 + 100.0 + 2.0 * SEPARATOR;
+        assert_eq!(fold_groups(&widths, &keep, room), [false, true, false]);
     }
 }

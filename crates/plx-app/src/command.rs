@@ -382,7 +382,8 @@ const GEOMETRY: &[Workspace] = &[Workspace::Geometry];
 const FE_MODEL: &[Workspace] = &[Workspace::FeModel];
 const RESULTS: &[Workspace] = &[Workspace::Results];
 /// The ribbon group of the step, the increment and the animation of the results.
-const STEP_GROUP: &str = "Step and Increment";
+/// The group of the step and increment tiles; the ribbon folds it last.
+pub const STEP_GROUP: &str = "Step and Increment";
 const SOLVING: &[Workspace] = &[Workspace::Geometry, Workspace::FeModel];
 const VIEWING: &[Workspace] = &[Workspace::Geometry, Workspace::FeModel, Workspace::Results];
 const ALL: &[Workspace] = &[
