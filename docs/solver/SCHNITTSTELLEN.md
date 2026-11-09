@@ -1498,8 +1498,10 @@ V-Zyklus, behaltene Hierarchie oft zu lange behalten.
   das lernende Lösen eines Musters auf dem Prozessor, alles Weitere auf der Karte.
   Seilrolle NLGEOM (4 Lösungen): 76 → 49/46/42 Iterationen (Deflation allein 63, sechs
   Kandidaten 38, aber ein 12×12-Zyklus kostet das 1,4-Fache; drei sind netto am
-  schnellsten, −34 % Zeit je Lösen). Lasche/Seilrolle: 1870 → 1485 Iterationen, Lösen
-  124 → 105 s, Lauf 3:39 → 3:16 min (sechs Kandidaten: 1622 Iterationen, 3:53 min).
+  schnellsten, −34 % Zeit je Lösen). Lasche/Seilrolle (gleiche Binary, 0 gegen 3
+  Kandidaten): 1870 → 1485 Iterationen, Lösen 124 → 105 s, Lauf 3:39 → 3:16 min (sechs
+  Kandidaten: 1622 Iterationen, 3:53 min); mit der Kostenregel unten 1348 Iterationen,
+  Lösen 94 s, Lauf 3:11 min (Ausgangsstand 3325 Iterationen).
 - Behalten oder neu bauen: statt der 1,5-fachen Iterationen wiegt `PcgSolver::factorize`
   die Kosten: die Hierarchie bleibt, solange die Mehr-Iterationen des letzten Lösens
   gegenüber dem ersten nach dem Aufbau, über zwei Lösungen (`STALE_HORIZON`) zum
