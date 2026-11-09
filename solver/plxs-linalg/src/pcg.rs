@@ -260,6 +260,31 @@ impl PcgSolver {
                 out.iter_mut().for_each(|v| *v /= norm);
             }
         }
+        // Lanczos without reorthogonalization loses its orthogonality once a Ritz value
+        // converges and then produces copies of it (a buckling matrix near its shift: pairs
+        // of Ritz values 1.5e-5, 1.5e-5), and copies make `E` singular. Orthonormalize
+        // (modified Gram-Schmidt) and drop what is spanned already.
+        let mut basis: Vec<f64> = Vec::with_capacity(d * n);
+        let mut kept = 0;
+        for j in 0..d {
+            let mut col = w[j * n..(j + 1) * n].to_vec();
+            for i in 0..kept {
+                let q = &basis[i * n..(i + 1) * n];
+                let c = dot(q, &col);
+                axpy(-c, q, &mut col);
+            }
+            let remaining = norm(&col);
+            if remaining < DEFLATE_INDEPENDENT {
+                continue;
+            }
+            col.iter_mut().for_each(|v| *v /= remaining);
+            basis.extend_from_slice(&col);
+            kept += 1;
+        }
+        if kept == 0 {
+            return None;
+        }
+        let (d, w) = (kept, basis);
         let mut defl = Deflation {
             d,
             w,
@@ -499,6 +524,8 @@ impl PcgSolver {
         // residuals stay in the complement of `A W` in every iteration, which keeps the
         // rounding out of the deflated space), and the solution of the original system is
         // `x = W E⁻¹ Wᵀ b + Pᵀ x̃` at the end.
+        // The right-hand side, to check a deflated solution against at the end.
+        let b0: Option<Vec<f64>> = deflation.as_ref().map(|_| r.clone());
         let mu_b = deflation.as_ref().map(|defl| {
             let mu = defl.solve_e(&defl.transpose_product(&defl.w, &r));
             defl.add_combination(&defl.aw, &mu, -1.0, &mut r);
@@ -566,7 +593,30 @@ impl PcgSolver {
                     ritz.report();
                 }
                 finish(x);
-                if collect && lanczos.len() >= DEFLATE_FROM_ITERATIONS {
+                if let Some(b0) = b0.as_ref() {
+                    // The projected residual converged; the solution also carries
+                    // `W E⁻¹ Wᵀ b`, which rounding in a badly conditioned `E` can spoil.
+                    self.product(x, &mut q);
+                    let gap: f64 = b0.iter().zip(&q).map(|(b, q)| (b - q) * (b - q)).sum();
+                    let true_residual = gap.sqrt() / b_norm;
+                    if true_residual > DEFLATE_CHECK * tolerance || !true_residual.is_finite() {
+                        if trace {
+                            eprintln!(
+                                "pcg: the deflated solve left a true residual of {true_residual:.2e}, solving again without the deflation"
+                            );
+                        }
+                        *deflation = None;
+                        drop(deflation);
+                        self.unpad(b0, rhs);
+                        return self.iterate(rhs, loose);
+                    }
+                }
+                // Only a solve that kept every Lanczos vector teaches: the Ritz pairs of
+                // a truncated tridiagonal are not eigenpairs (a buckling matrix near its
+                // shift, 348 iterations: the 24 "modes" of its first 96 vectors made the
+                // deflated operator indefinite).
+                if collect && lanczos.len() >= DEFLATE_FROM_ITERATIONS && lanczos.len() == iteration
+                {
                     let learned = self.learn_deflation(&ritz, &lanczos, trace);
                     if let Some(defl) = learned.as_ref() {
                         let mut candidates =
@@ -1275,6 +1325,12 @@ const DEFLATE_FROM_ITERATIONS: usize = 30;
 const DEFLATE_BELOW: f64 = 0.15;
 /// At most this many modes are deflated (two vectors of the system's length each).
 const DEFLATE_MAX: usize = 24;
+/// A Ritz vector whose part outside the span of the ones before it is shorter than this
+/// (of a unit vector) is a copy of them and is dropped.
+const DEFLATE_INDEPENDENT: f64 = 1e-3;
+/// A deflated solve whose true residual exceeds the tolerance by this factor is repeated
+/// without the deflation.
+const DEFLATE_CHECK: f64 = 1e3;
 /// How many of the slowest modes become near-nullspace candidates of the next hierarchy
 /// (`PLXS_AMG_CANDIDATES`).
 fn candidate_count() -> usize {
@@ -1335,7 +1391,9 @@ impl Deflation {
                     sum -= l[i * d + k] * l[j * d + k];
                 }
                 if i == j {
-                    if sum <= 0.0 || !sum.is_finite() {
+                    // A pivot far below the diagonal: two modes nearly the same, `E⁻¹`
+                    // would amplify rounding into the solution.
+                    if sum <= 1e-10 * e[i * d + i] || !sum.is_finite() {
                         return false;
                     }
                     l[i * d + i] = sum.sqrt();
