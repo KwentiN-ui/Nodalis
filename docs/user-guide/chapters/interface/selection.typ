@@ -42,6 +42,8 @@ selects. Drag it by its title bar to another place; it opens there from then on.
   as `1, 5, 10-20` with #ui("Add") and #ui("Remove"); for face and edge regions the numbers are
   element numbers.
 
+
+#screenshot("edge-angle.png", [Edge angle on the rim of a hole selects the CAD edge, shown as "1 edge", not its nodes])
 #screenshot("surface-angle.png", [Surface angle on a shaft selects the three cylindrical faces])
 
 Modes that do not fit the region are disabled, for example #ui("Node") for a pressure load.
