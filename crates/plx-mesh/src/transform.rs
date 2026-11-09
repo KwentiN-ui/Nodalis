@@ -8,7 +8,7 @@ use crate::element::ElementShape;
 use crate::mesh::{Element, ElementId, FeMesh, NodeId, SurfaceDefinition};
 
 /// A rigid or affine map of the node coordinates of a part.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MeshTransform {
     Translate([f64; 3]),
     /// Right-handed rotation by `angle` degrees about the axis through `point`.
@@ -69,6 +69,23 @@ impl MeshTransform {
             Self::Mirror { .. } => true,
             Self::Scale { factors, .. } => factors.iter().filter(|f| **f < 0.0).count() % 2 == 1,
             _ => false,
+        }
+    }
+
+    /// The map that takes every image back to its point, so that a transform can be undone.
+    pub fn inverse(&self) -> Self {
+        match *self {
+            Self::Translate(d) => Self::Translate(d.map(|c| -c)),
+            Self::Rotate { point, axis, angle } => Self::Rotate {
+                point,
+                axis,
+                angle: -angle,
+            },
+            Self::Mirror { .. } => *self,
+            Self::Scale { center, factors } => Self::Scale {
+                center,
+                factors: factors.map(|f| if f == 0.0 { f } else { 1.0 / f }),
+            },
         }
     }
 
