@@ -44,9 +44,11 @@ structure is damped; Nodalis chooses the time step and the integration from that
     (stiffness, unit of a time) directly.],
   [Large deformations], [Off, the motion is linear: displacements and rotations stay
     small. On, every time step iterates on the deformed geometry (see below).],
-  [Starts from], [What the step starts from, for information: rest, the state at the end of
-    the step before it, or an initial velocity (@initial-conditions).],
 )
+
+What the step starts from (the unloaded model, the state at the end of the step before it, an
+initial velocity) is shown in the #ui("Start") section at the top of the dialog
+(@step-handover).
 
 #ui("Advanced settings") are rarely needed:
 
@@ -257,7 +259,7 @@ element.
 Steps of either method can follow each other: a static step settles the model, an explicit
 step computes a short impact, an implicit step follows the slow motion afterwards. Each step
 takes over the displacements, velocities and stresses at the end of the step before it, and
-#ui("Starts from") names the method of that step. The accelerations are not taken over:
+#ui("Starts from") in the #ui("Start") section names the method of that step. The accelerations are not taken over:
 every step computes them again from its own mass, the implicit step from the consistent mass,
 the explicit step from the lumped mass, so the motion continues without a jolt. Velocities
 at the end of an explicit step are those at the end time, not the half step before it.
@@ -330,11 +332,12 @@ followed (the model check warns). A #ui("Damping ratio") applies to every mode d
 ratio α/(2ω) + βω/2. Initial velocities and the state of the step before are taken
 up through the modes.
 
-#ui("Modes about the preloaded state") computes the eigenmodes about the state the previous
-step leaves, with the stiffening by its stresses (`*STEP, PERTURBATION` on the eigenmode
-step): a tensioned string, a bolted joint or a spinning rotor vibrates with the frequencies of
-the loaded structure. Put the preload in a Static step before the Dynamic step. Off (the
-default), the modes are those of the unloaded model. The energies and the velocities, accelerations and reaction forces
+#ui("Base state") in the #ui("Start") section chooses what the eigenmodes are computed about.
+#ui("End of <step>") takes the state the step before leaves, with the stiffening by its
+stresses (`*STEP, PERTURBATION` on the eigenmode step): a tensioned string, a bolted joint or a
+spinning rotor vibrates with the frequencies of the loaded structure. Put the preload in a
+Static step before the Dynamic step. #ui("Unloaded model") (the default) gives the modes of the
+unloaded model. Either way the step itself starts from the state before it. The energies and the velocities, accelerations and reaction forces
 are written as with direct integration. Prescribed displacements must be zero (base
 motion is not supported yet).
 

@@ -41,6 +41,12 @@ pub struct Model {
     /// explicit steps. Set by the expansion, empty otherwise.
     #[serde(default)]
     pub shell_fibres: Vec<Vec<NodeId>>,
+    /// Whether shells, membranes, beams or trusses were expanded into solids: the
+    /// translations of the expanded model carry bending through thin elements, which the
+    /// multigrid of the iterative solver does not fit (the automatic equation solver stays
+    /// direct while the factor fits). Set by the expansion.
+    #[serde(default)]
+    pub expanded_structure: bool,
     #[serde(skip)]
     element_index: HashMap<ElementId, u32>,
 }

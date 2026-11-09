@@ -2953,7 +2953,7 @@ fn lower_step(
     // right before it stores; the solver computes them with the step's supports, preloaded
     // as a perturbation of the previous step's state when asked.
     if let StepKind::Dynamic(settings) = &step.kind
-        && let DynamicMethod::Modal { modes, preloaded } = settings.method
+        && let DynamicMethod::Modal { modes, base } = settings.method
         && let Some(dynamic) = blocks.pop()
     {
         if let Some(problem) = settings.problem() {
@@ -2965,7 +2965,7 @@ fn lower_step(
         let modes = FrequencyStep {
             num_frequencies: modes,
             storage: true,
-            perturbation: preloaded,
+            base,
             solver: settings.solver,
             ..FrequencyStep::default()
         };
@@ -2980,6 +2980,42 @@ fn lower_step(
                 preparation: true,
             },
             dynamic,
+        ]);
+    }
+    // A steady state dynamics step superposes eigenmodes it computes for itself in a
+    // frequency step right before it, unless an Eigenmodes link of another analysis gives
+    // them. Neither changes the state: the pair is an isolated group.
+    if let StepKind::SteadyStateDynamics(settings) = &step.kind
+        && context.model.properties.stored_modes.is_none()
+        && let Some(mut response) = blocks.pop()
+    {
+        let modes = FrequencyStep {
+            num_frequencies: settings.modes,
+            storage: true,
+            base: settings.base,
+            ..FrequencyStep::default()
+        };
+        let mut eigenmodes = frequency_step(&modes, context.cyclic);
+        eigenmodes.name = format!("{} Eigenmodes", response.step.name);
+        eigenmodes.isolation.opens = true;
+        response.step.perturbation = settings.base.is_preloaded();
+        response.step.isolation.closes = true;
+        // The step keeps the supports of its eigenmodes (new ones are refused there), so
+        // the eigenmode step starts them anew.
+        let mut boundaries = vec![Card::Boundary {
+            op_new: true,
+            items: Vec::new(),
+        }];
+        boundaries.extend(response.boundaries.iter().cloned());
+        return Ok(vec![
+            StepBlock {
+                step: eigenmodes,
+                named: response.named,
+                boundaries,
+                cards: Vec::new(),
+                preparation: true,
+            },
+            response,
         ]);
     }
     Ok(blocks)
@@ -3037,7 +3073,24 @@ fn complex_frequency_blocks(
         }
     };
     let mut blocks = Vec::with_capacity(3);
-    let mut first_cards = vec![rotation];
+    let unloaded = !settings.base.is_preloaded();
+    // About the unloaded model the rotation is the only load; otherwise it adds to the
+    // loads the steps before left.
+    let mut first_cards = if unloaded {
+        vec![
+            Card::Cload {
+                op_new: true,
+                items: Vec::new(),
+            },
+            Card::Dload {
+                op_new: true,
+                items: Vec::new(),
+            },
+        ]
+    } else {
+        Vec::new()
+    };
+    first_cards.push(rotation);
     if settings.stiffening {
         // The frequency step after it factorizes the same stiffness anyway, so the
         // automatic choice solves the preload directly as well: the multigrid of the
@@ -3057,10 +3110,15 @@ fn complex_frequency_blocks(
             std::mem::take(&mut first_cards),
         ));
     }
+    let preloaded = settings.stiffening || settings.base.is_preloaded();
     let modes = FrequencyStep {
         num_frequencies: settings.num_modes,
         storage: true,
-        perturbation: settings.stiffening,
+        base: if preloaded {
+            plx_model::Base::PreviousState
+        } else {
+            plx_model::Base::Unloaded
+        },
         solver: settings.solver,
         ..FrequencyStep::default()
     };
@@ -3070,8 +3128,14 @@ fn complex_frequency_blocks(
         first_cards,
     ));
     let mut complex = complex;
-    complex.step.perturbation = settings.stiffening;
+    complex.step.perturbation = preloaded;
+    // The group leaves the state as it found it: the step after it starts from where the
+    // steps before the complex frequency step ended.
+    complex.step.isolation.closes = true;
     blocks.push(complex);
+    let first = &mut blocks[0].step.isolation;
+    first.opens = true;
+    first.unloaded = unloaded;
     Ok(blocks)
 }
 
@@ -4151,6 +4215,23 @@ fn defined_fields(
     if !step.kind.supports_defined_fields() {
         return Ok(cards);
     }
+    // What a step shows is what acts: its own temperatures replace those of the steps
+    // before, and a step that passes its state on without temperatures of its own sets
+    // those a step before was given back to the initial ones (ramped like removed loads).
+    let index = (model.steps.iter().position(|s| std::ptr::eq(s, step)))
+        .or_else(|| model.steps.iter().position(|s| s.name == step.name));
+    if let Some(index) = index
+        && model.temperature_source(index, step).is_some()
+    {
+        cards.push(Card::Temperature {
+            op_new: true,
+            field: ir::step::DefinedField {
+                kind: ir::step::DefinedFieldKind::Temperature(Vec::new()),
+                amplitude: None,
+            },
+        });
+        return Ok(cards);
+    }
     for field in step.defined_fields.iter().filter(|f| f.active) {
         let field = match &field.kind {
             DefinedFieldKind::Temperature(t) => {
@@ -4195,7 +4276,7 @@ fn defined_fields(
             }
         };
         cards.push(Card::Temperature {
-            op_new: false,
+            op_new: cards.is_empty(),
             field,
         });
     }
@@ -4662,7 +4743,7 @@ fn frequency_step(settings: &FrequencyStep, cyclic: bool) -> ir::Step {
             nmax: settings.nodal_diameters.map(|[_, max]| max),
         }),
     }));
-    step.perturbation = settings.perturbation;
+    step.perturbation = settings.base.is_preloaded();
     step
 }
 
@@ -4677,7 +4758,7 @@ fn complex_frequency_step(settings: &ComplexFrequencyStep) -> ir::Step {
             count: settings.num_frequencies,
         },
     ));
-    step.perturbation = settings.stiffening;
+    step.perturbation = settings.stiffening || settings.base.is_preloaded();
     step
 }
 
@@ -4688,7 +4769,7 @@ fn buckle_step(settings: &BuckleStep) -> ir::Step {
         count: settings.num_factors,
         accuracy: Some(settings.accuracy),
     }));
-    step.perturbation = settings.perturbation;
+    step.perturbation = settings.base.is_preloaded();
     step
 }
 

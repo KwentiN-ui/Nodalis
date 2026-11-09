@@ -332,6 +332,7 @@ impl Expander {
         self.remap_steps(&original)?;
         let mut model = std::mem::take(&mut self.analysis.model);
         model.constraints.equations.append(&mut self.equations);
+        model.expanded_structure = !self.structural.is_empty();
         model.shell_fibres = self
             .groups
             .values()

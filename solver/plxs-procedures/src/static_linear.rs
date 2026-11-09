@@ -111,7 +111,7 @@ impl StaticLinear {
             ProcedureKind::Static(p) => p.solver,
             _ => Default::default(),
         };
-        let mut equations = Equations::new(solver_choice);
+        let mut equations = Equations::new(solver_choice).for_model(ctx.model);
         // Gap status the current factorization belongs to (all open before the first).
         let mut factored: Option<Vec<bool>> = None;
         let mut closed: Vec<bool> = gaps

@@ -114,6 +114,8 @@ pub enum Problem {
     PartialBeamRotations,
     /// A submodel boundary condition in a model without a global results file.
     NoGlobalResults,
+    /// A submodel boundary condition in a model that is not defined as a submodel.
+    NotASubmodel,
     /// A symmetry boundary condition whose nodes do not fix a plane.
     NoSymmetryPlane,
     /// A symmetry boundary condition whose nodes are not on one plane.
@@ -133,8 +135,6 @@ pub enum Problem {
     NoPhysicalConstants,
     /// A defined temperature in a step whose materials have no thermal expansion.
     NoExpansion,
-    /// A step that builds on stored eigenmodes (steady state dynamics, complex frequency) without a frequency step before it that stores them.
-    NoStoredModes,
     /// A sensitivity step without the static or frequency step before it whose solution
     /// its design responses need.
     NoSensitivityBase,
@@ -169,7 +169,7 @@ pub enum Problem {
     ExcitationIgnored,
     /// A Coriolis complex frequency step without a centrifugal load before it.
     NoRotation,
-    /// Contact pairs in a frequency step without perturbation: the solver ignores them.
+    /// Contact pairs in a frequency step about the unloaded model: the solver ignores them.
     ContactIgnored,
     /// Contact pairs in a complex frequency step: the Coriolis coupling goes wrong.
     ContactWithCoriolis,
@@ -304,6 +304,7 @@ impl Problem {
             Problem::RotationsIgnored => "Rotations without effect",
             Problem::PartialBeamRotations => "Beam rotations partly held",
             Problem::NoGlobalResults => "No global results",
+            Problem::NotASubmodel => "Not a submodel",
             Problem::NoSymmetryPlane => "No symmetry plane",
             Problem::SymmetryNotPlanar => "Symmetry region not planar",
             Problem::SymmetryOffAxis => "Symmetry plane not perpendicular to the axis",
@@ -326,7 +327,6 @@ impl Problem {
             Problem::HyperelasticLinearized => "Hyperelastic material computed linearly",
             Problem::ExplicitFullIntegration => "Full integration in an explicit step",
             Problem::NoExpansion => "Temperature without thermal expansion",
-            Problem::NoStoredModes => "No stored eigenmodes",
             Problem::NoSensitivityBase => "No step for the sensitivities",
             Problem::DesignRegionIgnored => "Design region ignored",
             Problem::NoCreep => "Visco step without creep",
@@ -570,6 +570,11 @@ impl Problem {
                  of a global model (*SUBMODEL). Without the global results file the input \
                  file cannot be written."
             }
+            Problem::NotASubmodel => {
+                "A submodel boundary condition takes its displacements from the results \
+                 of a global model, which only a model defined as a submodel reads. The \
+                 input file cannot be written."
+            }
             Problem::NoSymmetryPlane => {
                 "A symmetry boundary condition holds its nodes in a plane, which it takes \
                  from the selected faces. A single node, nodes on a line (other than the \
@@ -621,11 +626,6 @@ impl Problem {
                 "A defined temperature (Defined Field) deforms the model only through the \
                  thermal expansion of the materials. Without an expansion coefficient \
                  the analysis runs, but the temperature has no effect."
-            }
-            Problem::NoStoredModes => {
-                "Steady State Dynamics steps work on \
-                 the eigenmodes a previous Frequency step with Storage keeps. Without \
-                 them the run stops."
             }
             Problem::NoSensitivityBase => {
                 "A Sensitivity step differentiates the solution of the step right before it: \
@@ -718,10 +718,11 @@ impl Problem {
                  of the model."
             }
             Problem::ContactIgnored => {
-                "The solver takes contact into account in a Frequency step only as a \
-                 perturbation of the static step before it. Without Perturbation the contact \
-                 pairs, tied ones included, are left out without a message: parts held only \
-                 by them float and give eigenfrequencies near zero or on weak springs."
+                "The solver takes contact into account in a Frequency step only about the \
+                 state a static step before it leaves (Base state: End of ...). About the \
+                 unloaded model the contact pairs, tied ones included, are left out without \
+                 a message: parts held only by them float and give eigenfrequencies near \
+                 zero or on weak springs."
             }
             Problem::ContactFormulationsDiffer => {
                 "The solver takes one formulation (node to surface, surface to surface, mortar \
@@ -1033,6 +1034,10 @@ impl Problem {
                  symmetry plane, or align the model so that the plane is a coordinate \
                  plane."
             }
+            Problem::NotASubmodel => {
+                "Open Model Properties (Material tab of the FE Model ribbon) and set the model type to Submodel, \
+                 or delete the Submodel boundary condition."
+            }
             Problem::NoGlobalResults => {
                 "Open Model Properties (Material tab of the FE Model ribbon), set the model type to Submodel and pick the results \
                  file (.frd) of the global model."
@@ -1058,10 +1063,6 @@ impl Problem {
             Problem::NoExpansion => {
                 "Edit the material and enter a thermal expansion coefficient \
                  (steel: 1.2e-5 1/K)."
-            }
-            Problem::NoStoredModes => {
-                "Add a Frequency step with \"Store eigenmodes (Storage)\" before it, with \
-                 the same supports."
             }
             Problem::NoSensitivityBase => {
                 "Put a Static step (strain energy, mass) or a Frequency step with \"Store \
@@ -1738,16 +1739,6 @@ impl FeModel {
                         },
                         general_beams.join(", ")
                     ),
-                ));
-            }
-            let stored = self.properties.stored_modes.is_some()
-                || (self.steps[..s].iter().filter(|p| p.active))
-                    .any(|p| matches!(&p.kind, StepKind::Frequency(f) if f.storage));
-            if step.kind.uses_stored_modes() && !stored {
-                findings.push(Finding::new(
-                    ModelItem::Step(s),
-                    Problem::NoStoredModes,
-                    format!("{} needs the eigenmodes of a Frequency step", step.name),
                 ));
             }
             let used =
@@ -2747,6 +2738,18 @@ impl FeModel {
                 }
             };
             if let BoundaryKind::Submodel { .. } = bc.kind
+                && self.properties.kind != crate::ModelKind::Submodel
+            {
+                findings.push(Finding::new(
+                    ModelItem::BoundaryCondition(s, i),
+                    Problem::NotASubmodel,
+                    format!(
+                        "{} is a submodel boundary condition, but the model is not defined as a \
+                         submodel: set the model type to Submodel in the model properties",
+                        bc.name
+                    ),
+                ));
+            } else if let BoundaryKind::Submodel { .. } = bc.kind
                 && self.properties.submodel_input().is_none()
             {
                 findings.push(Finding::new(
@@ -2977,14 +2980,14 @@ impl FeModel {
         // Free-free eigenfrequencies are fine; a static or buckle step needs every part held.
         let contact_pairs = (self.contact_pairs.iter()).filter(|c| c.active).count();
         if let StepKind::Frequency(settings) = &step.kind
-            && !settings.perturbation
+            && !settings.base.is_preloaded()
             && contact_pairs > 0
         {
             findings.push(Finding::new(
                 ModelItem::Step(s),
                 Problem::ContactIgnored,
                 format!(
-                    "{}: {contact_pairs} contact pair(s) ignored without Perturbation",
+                    "{}: {contact_pairs} contact pair(s) ignored about the unloaded model",
                     step.name
                 ),
             ));
@@ -4470,7 +4473,7 @@ mod tests {
         model.steps[0].kind = StepKind::Dynamic(crate::DynamicStep {
             method: crate::DynamicMethod::Modal {
                 modes: 10,
-                preloaded: false,
+                base: crate::Base::Unloaded,
             },
             ..crate::DynamicStep::default()
         });
@@ -4576,9 +4579,13 @@ mod tests {
         });
         assert_eq!(
             problems(&check(&model, &mesh)),
-            [(ModelItem::BoundaryCondition(0, 1), Problem::NoGlobalResults)]
+            [(ModelItem::BoundaryCondition(0, 1), Problem::NotASubmodel)]
         );
         model.properties.kind = crate::ModelKind::Submodel;
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::BoundaryCondition(0, 1), Problem::NoGlobalResults)]
+        );
         model.properties.global_results = Some("global.frd".into());
         assert_eq!(check(&model, &mesh), []);
         assert!(model.uses_global_results());
@@ -4811,27 +4818,6 @@ mod tests {
     }
 
     #[test]
-    fn steady_state_dynamics_needs_stored_modes() {
-        let mesh = cubes(2, true);
-        let mut model = model(&mesh);
-        model.steps.push(Step::new_steady_state_dynamics("Step-2"));
-        let stored = |model: &FeModel| {
-            (check(model, &mesh).into_iter())
-                .filter(|f| f.problem == Problem::NoStoredModes)
-                .map(|f| f.item)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(stored(&model), [ModelItem::Step(1)]);
-        let mut frequency = Step::new_frequency("Step-3");
-        let StepKind::Frequency(settings) = &mut frequency.kind else {
-            unreachable!()
-        };
-        settings.storage = true;
-        model.steps.insert(1, frequency);
-        assert_eq!(stored(&model), []);
-    }
-
-    #[test]
     fn contact_pairs_need_perturbation_in_frequency_steps_and_spoil_coriolis() {
         let mesh = cubes(2, true);
         let mut model = model(&mesh);
@@ -4862,7 +4848,7 @@ mod tests {
         let StepKind::Frequency(settings) = &mut model.steps[1].kind else {
             unreachable!()
         };
-        settings.perturbation = true;
+        settings.base = crate::Base::PreviousState;
         assert_eq!(modal(&model), []);
         model.steps.push(Step::new_complex_frequency("Step-3"));
         assert_eq!(
@@ -5557,7 +5543,7 @@ mod tests {
         let mut dynamic = crate::DynamicStep {
             method: crate::DynamicMethod::Modal {
                 modes: 10,
-                preloaded: false,
+                base: crate::Base::Unloaded,
             },
             ..Default::default()
         };

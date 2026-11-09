@@ -191,7 +191,7 @@ impl<'h> HeatRun<'h> {
             tangent: SparseMatrix::zeros(heat.pattern.clone()),
             solver: LdltSolver::new(ctx.threads),
             equations: Equations::new(p.solver),
-            mechanical_equations: Equations::new(p.solver),
+            mechanical_equations: Equations::new(p.solver).for_model(ctx.model),
             coordinates: ctx.model.nodes.coordinates.clone(),
             factorized: None,
             assembled: false,

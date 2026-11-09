@@ -87,6 +87,7 @@ mod solver_check;
 mod solver_profile;
 mod sound;
 mod status;
+mod step_overview;
 mod study;
 mod style;
 mod symbols;

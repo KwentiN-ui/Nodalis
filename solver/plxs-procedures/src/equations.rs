@@ -12,7 +12,10 @@
 //! model, where the multigrid converges in a few dozen iterations and beats the
 //! factorization by far); models with rotations (shells, beams), procedures that solve
 //! many systems with one factorization (the eigenvalue iteration, implicit dynamics) and
-//! small models stay direct while the factor fits into the memory: for a system of at least
+//! small models stay direct while the factor fits into the memory, and so do models of
+//! shells, beams or trusses expanded into solids (translations only, but bending through
+//! elements a fraction of a millimetre thin: the multigrid stalls on them, see
+//! [`Self::for_model`]): for a system of at least
 //! [`AUTOMATIC_FROM`] equations the symbolic analysis tells the size of the factor before
 //! its memory is taken, and beyond [`MEMORY_SHARE`] of the available memory the step solves
 //! iteratively. Each choice falls back to the other once when it fails: a factor that does
@@ -100,6 +103,19 @@ impl Equations {
     /// eigenvalue iteration, implicit dynamics), where the factorization pays off.
     pub fn preferring_direct(mut self) -> Self {
         self.prefer_direct = true;
+        self
+    }
+
+    /// The automatic choice for a model of `model`: a model whose shells, membranes, beams
+    /// or trusses were expanded into solids is solved directly while its factor fits (its
+    /// unknowns are translations only, yet the multigrid built on them does not fit the
+    /// bending of the thin expanded elements and stalls: a corrugated tube of 0.3 mm
+    /// shells, 367k equations, did not get below its initial residual in 2000 iterations,
+    /// 80 s, while the factorization took 4 s).
+    pub fn for_model(mut self, model: &plxs_core::Model) -> Self {
+        if model.expanded_structure {
+            self.prefer_direct = true;
+        }
         self
     }
 
@@ -420,6 +436,9 @@ impl Equations {
         let pcg = self.pcg.get_or_insert_with(PcgSolver::new);
         if self.mode == SolverMode::Automatic {
             pcg.set_max_iterations(AUTOMATIC_MAX_ITERATIONS);
+            // The direct solver stands by (once): an iteration that stalls hands over
+            // early instead of after the whole limit.
+            pcg.set_give_up_on_stall(!self.fell_back);
         }
         pcg.set_unknowns(Some(unknowns.clone()));
         // Skipped for the pattern (and unknowns) analyzed last.
@@ -610,6 +629,28 @@ mod tests {
         // Unless the factor does not fit.
         let mut equations = Equations::new(EquationSolver::Default).preferring_direct();
         equations.set_automatic_limits(10, 100);
+        solve(&mut equations, &k);
+        assert!(equations.is_iterative());
+    }
+
+    #[test]
+    fn automatic_is_direct_for_expanded_shells_while_the_factor_fits() {
+        // Translations only, but of shells expanded into solids: the memory decides.
+        let k = chain(200, 1.0);
+        let mut model = plxs_core::Model::default();
+        model.expanded_structure = true;
+        let mut equations = Equations::new(EquationSolver::Default).for_model(&model);
+        equations.set_automatic_limits(10, 1 << 30);
+        solve(&mut equations, &k);
+        assert!(!equations.is_iterative());
+        let mut equations = Equations::new(EquationSolver::Default).for_model(&model);
+        equations.set_automatic_limits(10, 100);
+        solve(&mut equations, &k);
+        assert!(equations.is_iterative());
+        // A solid model goes iterative.
+        let mut equations =
+            Equations::new(EquationSolver::Default).for_model(&plxs_core::Model::default());
+        equations.set_automatic_limits(10, 1 << 30);
         solve(&mut equations, &k);
         assert!(equations.is_iterative());
     }

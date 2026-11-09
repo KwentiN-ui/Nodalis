@@ -184,6 +184,8 @@ struct Workbench {
     problems_tab_before: bool,
     /// The table of all contact regions is open.
     contact_worksheet: bool,
+    /// The step overview, items against steps, is open.
+    step_overview: bool,
     /// Open mesh tool: transform parts, merge nodes or renumber.
     mesh_tool: Option<MeshToolDialog>,
     /// The Query tool, while its window is open.
@@ -341,6 +343,7 @@ impl AnalysisWindow {
                 analysis_tab_before: false,
                 problems_tab_before: false,
                 contact_worksheet: false,
+                step_overview: false,
                 mesh_tool: None,
                 query: None,
                 material_library: None,
@@ -1586,6 +1589,7 @@ impl AnalysisWindow {
         self.workbench.confirm_remove_results(&ctx);
         self.workbench.toast(&ctx);
         self.workbench.contact_worksheet_window(&ctx);
+        self.workbench.step_overview_window(&ctx);
         self.workbench.mesh_tool_window(&ctx);
         self.workbench.query_window(&ctx);
         self.workbench.section_window(&ctx);
@@ -1689,9 +1693,20 @@ impl Workbench {
             Ok(loaded) => {
                 let LoadedModel {
                     mut model,
-                    render_meshes,
+                    mut render_meshes,
                     geometry_view,
                 } = *loaded;
+                // Solver results know nothing of the mesh the analysis was solved on; the
+                // shells outline as in the FE Model view when the project's mesh tells.
+                let mut cad_adopted = false;
+                if model.results.is_some()
+                    && let Some(project) = &self.model
+                {
+                    cad_adopted = model.adopt_project_surface(&project.mesh);
+                    if cad_adopted {
+                        render_meshes = model.render_meshes();
+                    }
+                }
                 if model.results.is_some()
                     && !is_latest_results(self.results_asked.as_deref(), &path)
                 {
@@ -1720,7 +1735,7 @@ impl Workbench {
                     }
                 }
                 // The scene built on the worker thread is reused unless the settings change it.
-                let mut rebuild = false;
+                let mut rebuild = cad_adopted;
                 // The camera of bound results as saved, replacing the fit to the model.
                 let mut camera = None;
                 // Results opened while another workspace stays shown, e.g. an analysis opened
@@ -2332,11 +2347,18 @@ impl Workbench {
     /// Acts on what the user picked in the tree or in a part's context menu in the 3D view.
     fn tree_response(&mut self, ctx: &egui::Context, view: TreeView, mut response: TreeResponse) {
         self.guard_linked(view, &mut response);
-        for (index, visible) in response.visibility {
-            if let Some(part) = self.shown_mut().and_then(|m| m.parts.get_mut(index)) {
-                part.visible = visible;
+        if !response.visibility.is_empty() {
+            for (index, visible) in response.visibility {
+                if let Some(part) = self.shown_mut().and_then(|m| m.parts.get_mut(index)) {
+                    part.visible = visible;
+                }
+                self.viewport.set_part_visible(index, visible);
             }
-            self.viewport.set_part_visible(index, visible);
+            // Hidden parts leave the legend range.
+            if let Some(model) = self.shown_mut() {
+                model.update_plain_nodes();
+            }
+            self.results_changed = true;
         }
         if !response.contours.is_empty() {
             for (index, contours) in response.contours {
@@ -2396,6 +2418,9 @@ impl Workbench {
         }
         if let Some(kind) = response.create {
             self.create(kind);
+        }
+        if response.step_overview {
+            self.step_overview = true;
         }
         if let Some(item) = response.delete {
             // A part or item among several selected ones deletes them all.
@@ -4229,6 +4254,21 @@ impl Workbench {
     /// Finds what acts on the parts selected in the FE Model tree, once for each selection
     /// and change of the model.
     fn update_acting(&mut self) {
+        // A selected material marks the sections that use it.
+        if let (Some((TreeView::FeModel, TreeItem::Material(i))), Some(model)) =
+            (self.tree.selected.clone(), self.model.as_ref())
+        {
+            let key = (BTreeSet::from([usize::MAX - i]), model.revision);
+            if self.tree.acting_for.as_ref() != Some(&key) {
+                self.tree.acting = crate::setup::sections_using_material(&model.fe, i)
+                    .into_iter()
+                    .map(TreeItem::Section)
+                    .collect();
+                self.tree.acting_for = Some(key);
+                self.tree.reveal_acting = true;
+            }
+            return;
+        }
         let parts = self.tree.selected_parts(TreeView::FeModel);
         let Some(model) = self.model.as_ref().filter(|_| !parts.is_empty()) else {
             self.tree.acting.clear();
@@ -4718,6 +4758,42 @@ impl Workbench {
         let results = self.results.get(self.current_result);
         crate::connections::worksheet(ctx, &mut open, model, results, &mut self.tree);
         self.contact_worksheet = open;
+    }
+
+    /// The step overview: a click opens an item in its step, its menu copies the item to
+    /// the following steps or removes it from them.
+    fn step_overview_window(&mut self, ctx: &egui::Context) {
+        if !self.step_overview {
+            return;
+        }
+        let Some(model) = &mut self.model else {
+            self.step_overview = false;
+            return;
+        };
+        let mut open = true;
+        let action = crate::step_overview::window(ctx, &mut open, &model.fe);
+        self.step_overview = open;
+        match action {
+            Some(crate::step_overview::Action::Open(item)) => {
+                self.tree.selected = Some((TreeView::FeModel, item.clone()));
+                self.tree.reveal = true;
+                self.editor = Editor::edit(&item, &model.fe, &model.mesh);
+            }
+            Some(action) => {
+                let count = match &action {
+                    crate::step_overview::Action::Copy(s, key) => {
+                        model.fe.copy_to_following_steps(*s, key)
+                    }
+                    crate::step_overview::Action::Remove(s, key) => {
+                        model.fe.remove_from_following_steps(*s, key)
+                    }
+                    crate::step_overview::Action::Open(_) => 0,
+                };
+                let text = crate::step_overview::done(&model.fe, &action, count);
+                self.toast = Some(crate::toast::Toast::new(text, count > 0));
+            }
+            None => {}
+        }
     }
 
     /// Deleting, for the context menu and the Delete key alike: in the FE model at once with

@@ -225,8 +225,17 @@ pub fn show(ui: &mut Ui, view: &ResultsView, hide: &mut bool) -> Option<usize> {
             name.push_str(&format!(" (from {source})"));
         }
         let color = if shown { text } else { weak };
-        let galley = fit(ui, &name, font.clone(), color, bar.width());
-        painter.galley(pos2(bar.left() + 2.0, rect.top() + 3.0), galley, color);
+        // A step that leaves the state as it found it branches off the chain: the arrow of
+        // the model tree before its name.
+        let mut name_left = bar.left() + 2.0;
+        if step.base.is_some() {
+            let arrow = Rect::from_min_size(pos2(bar.left(), rect.top() + 2.0), vec2(14.0, 14.0));
+            crate::tree::paint_handover_arrow(&painter, arrow);
+            name_left += 13.0;
+        }
+        let room = bar.right() - name_left + 2.0;
+        let galley = fit(ui, &name, font.clone(), color, room);
+        painter.galley(pos2(name_left, rect.top() + 3.0), galley, color);
         if segment.reached.is_some() {
             let galley = ui.painter().layout_no_wrap(
                 "not converged".into(),
@@ -373,6 +382,9 @@ pub fn tooltip(view: &ResultsView, index: usize) -> String {
     let mut lines = Vec::new();
     if let Some(step) = view.steps.place(index).map(|p| p.step) {
         lines.push(view.step_title(step));
+        if let Some(base) = &view.steps.steps[step].base {
+            lines.push(format!("Base: {base}; leaves the state as it found it"));
+        }
     }
     let count = (view.steps.place(index))
         .and_then(|p| view.entry_count(p.step))
@@ -484,6 +496,7 @@ mod tests {
             time_period: period,
             solver_steps: steps.to_vec(),
             inherited_from: None,
+            base: None,
         }
     }
 
@@ -587,5 +600,25 @@ mod tests {
             "2 Load\nIncrement 1 of 2\nStep time 1.5 s, total time 2.5 s"
         );
         assert_eq!(tooltip(&view, 8), "3 Modes\nMode 3 of 3: 300 Hz");
+    }
+
+    #[test]
+    fn the_tooltip_of_a_probing_step_names_its_base() {
+        let mut view = view();
+        let mut modes = record("Modes", StepCategory::Frequency, None, &[3]);
+        modes.base = Some("End of Load".into());
+        view.set_step_records(
+            &[
+                record("Preload", StepCategory::Static, Some(1.0), &[1]),
+                record("Load", StepCategory::Static, Some(3.0), &[2]),
+                modes,
+            ],
+            &[],
+            None,
+        );
+        assert_eq!(
+            tooltip(&view, 8),
+            "3 Modes\nBase: End of Load; leaves the state as it found it\nMode 3 of 3: 300 Hz"
+        );
     }
 }

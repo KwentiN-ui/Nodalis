@@ -17,6 +17,11 @@
 use std::sync::Arc;
 
 use plxs_linalg::{Pattern, SparseMatrix};
+use rayon::prelude::*;
+
+/// The reduced positions of the products of `Tᵀ K T` that are not simple, by ranges of
+/// columns of `K` (see [`ReducedPattern`]).
+type Landing = Vec<(std::ops::Range<usize>, Vec<u32>)>;
 
 /// The pattern of `Tᵀ K T` for the matrices on one pattern and where every entry of `K`
 /// lands in it (see [`ConstraintSet::reducer`]). It depends on the structure of `T` only,
@@ -33,11 +38,15 @@ pub struct ReducedPattern {
     /// with factor 1 (an entry between unconstrained DOFs, the usual case), else
     /// `u32::MAX` and the entry is in `general`.
     simple: Vec<u32>,
-    /// `(input entry, reduced position, index of tᵢₐ in `T`, index of tⱼᵦ, factor)` of the
-    /// other entries, in the order of the entries. The products are formed and summed in
-    /// the same order as a direct `Tᵀ K T` would, so the reduced matrix is the same to the
-    /// last bit (a mechanism's solution can hang on round-off of this size).
-    general: Vec<(u32, u32, u32, u32, f64)>,
+    /// The other entries, by ranges of columns of the input: the reduced position of each
+    /// product `tᵢₐ K_ij tⱼᵦ`, in the order of the entries and for each entry `a` over row
+    /// `i` of `T`, `b` over row `j` (on a diagonal entry only `a <= b`). The products are
+    /// formed and summed in the same order as a direct `Tᵀ K T` would, so the reduced
+    /// matrix is the same to the last bit (a mechanism's solution can hang on round-off of
+    /// this size). Only the position is kept (4 bytes a product; a model of expanded
+    /// shells has some 300 million of them): the indices into `T` and the factor follow
+    /// from the order.
+    general: Landing,
 }
 
 impl ReducedPattern {
@@ -66,18 +75,35 @@ impl ReducedPattern {
         let mut out = SparseMatrix::zeros(self.pattern.clone());
         let values = k.values();
         let out_values = out.values_mut();
-        let mut general = self.general.iter().peekable();
-        for (entry, (&pos, &v)) in self.simple.iter().zip(values).enumerate() {
-            if pos != u32::MAX {
-                out_values[pos as usize] += v;
-                continue;
-            }
-            while let Some(&&(e, pos, ia, ib, factor)) = general.peek() {
-                if e as usize != entry {
-                    break;
+        let input = &*self.input;
+        let col_ptr = input.col_ptr();
+        let t_range = |row: usize| self.t_ptr[row] as usize..self.t_ptr[row + 1] as usize;
+        for (range, positions) in &self.general {
+            let mut positions = positions.iter();
+            for j in range.clone() {
+                let start = col_ptr[j] as usize;
+                for (offset, &i) in input.column(j).iter().enumerate() {
+                    let entry = start + offset;
+                    let v = values[entry];
+                    let pos = self.simple[entry];
+                    if pos != u32::MAX {
+                        out_values[pos as usize] += v;
+                        continue;
+                    }
+                    let diagonal = i as usize == j;
+                    for ia in t_range(i as usize) {
+                        let a = self.t_col[ia];
+                        for ib in t_range(j) {
+                            let b = self.t_col[ib];
+                            if diagonal && a > b {
+                                continue;
+                            }
+                            let factor = if !diagonal && a == b { 2.0 } else { 1.0 };
+                            let pos = *positions.next().expect("a position for every product");
+                            out_values[pos as usize] += (factor * t_val[ia]) * v * t_val[ib];
+                        }
+                    }
                 }
-                general.next();
-                out_values[pos as usize] += (factor * t_val[ia as usize]) * v * t_val[ib as usize];
             }
         }
         out
@@ -116,6 +142,43 @@ pub enum Added {
 }
 
 const NONE: u32 = u32::MAX;
+
+/// A compressed index structure by rows: the entries of row `r` are
+/// `idx[ptr[r]..ptr[r + 1]]`.
+struct Rows {
+    ptr: Vec<u32>,
+    idx: Vec<u32>,
+}
+
+impl Rows {
+    fn row(&self, r: usize) -> &[u32] {
+        &self.idx[self.ptr[r] as usize..self.ptr[r + 1] as usize]
+    }
+}
+
+/// The transpose of the structure `ptr`/`idx` of `outer` lists over `0..inner`: for every
+/// inner index the outer ones that list it, ascending.
+fn transpose(outer: usize, ptr: &[u32], idx: &[u32], inner: usize) -> Rows {
+    let mut counts = vec![0u32; inner + 1];
+    for &i in idx {
+        counts[i as usize + 1] += 1;
+    }
+    for k in 0..inner {
+        counts[k + 1] += counts[k];
+    }
+    let mut next = counts.clone();
+    let mut out = vec![0u32; idx.len()];
+    for o in 0..outer {
+        for &i in &idx[ptr[o] as usize..ptr[o + 1] as usize] {
+            out[next[i as usize] as usize] = o as u32;
+            next[i as usize] += 1;
+        }
+    }
+    Rows {
+        ptr: counts,
+        idx: out,
+    }
+}
 
 /// A row of `T` (reduced column, coefficient) and of `g` (prescribed value, coefficient).
 type Row = (Vec<(u32, f64)>, Vec<(u32, f64)>);
@@ -397,15 +460,6 @@ impl ConstraintSet {
             .zip(self.t_val[range].iter().copied())
     }
 
-    /// The entries of row `row` of `T` with their indices into the value array.
-    fn t_row_indexed(&self, row: usize) -> impl Iterator<Item = (u32, u32)> + '_ {
-        let range = self.t_ptr[row] as usize..self.t_ptr[row + 1] as usize;
-        self.t_col[range.clone()]
-            .iter()
-            .copied()
-            .zip(range.map(|i| i as u32))
-    }
-
     /// Whether row `row` of `T` is the identity row of a free DOF: a single entry 1 on the
     /// DOF's own reduced unknown. Relinearizing the rows of rigid body members never
     /// touches these rows.
@@ -449,65 +503,17 @@ impl ConstraintSet {
 
     /// The reduced pattern of `Tᵀ K T` for matrices on `pattern`, with where every entry
     /// of `K` lands.
+    ///
+    /// Both passes run in parallel: the pattern column by column of the reduced matrix (a
+    /// symbolic product with a marker per thread, so that no duplicates are collected:
+    /// collecting them per entry of `K` took most of the time and memory of a model with
+    /// many constraints, such as expanded shells), the positions in ranges of columns of
+    /// `K`, concatenated in their order so that [`ReducedPattern::apply`] sums exactly as
+    /// before.
     pub fn reducer(&self, pattern: &Arc<Pattern>) -> ReducedPattern {
         assert_eq!(pattern.dimension(), self.n);
-        let m = self.reduced;
-        // Pass 1: the pattern.
-        let mut rows: Vec<Vec<u32>> = vec![Vec::new(); m];
-        for j in 0..self.n {
-            if self.t_ptr[j] == self.t_ptr[j + 1] {
-                continue;
-            }
-            for &i in pattern.column(j) {
-                for (a, _) in self.t_row(i as usize) {
-                    for (b, _) in self.t_row(j) {
-                        let (r, c) = if a <= b { (a, b) } else { (b, a) };
-                        rows[c as usize].push(r);
-                    }
-                }
-            }
-        }
-        for list in &mut rows {
-            list.sort_unstable();
-            list.dedup();
-        }
-        let reduced_pattern = Arc::new(Pattern::from_columns(m, rows));
-        // Pass 2: where each entry lands.
-        let mut simple = vec![u32::MAX; pattern.nnz()];
-        let mut general = Vec::new();
-        let col_ptr = pattern.col_ptr();
-        for (j, &start) in col_ptr.iter().take(self.n).enumerate() {
-            if self.t_ptr[j] == self.t_ptr[j + 1] {
-                continue;
-            }
-            let start = start as usize;
-            let identity_j = self.is_identity_row(j);
-            for (offset, &i) in pattern.column(j).iter().enumerate() {
-                let entry = start + offset;
-                let diagonal = i as usize == j;
-                if identity_j && self.is_identity_row(i as usize) {
-                    // One target with factor 1, whatever the values of the other rows.
-                    let a = self.t_col[self.t_ptr[i as usize] as usize];
-                    let b = self.t_col[self.t_ptr[j] as usize];
-                    let (r, c) = if a <= b { (a, b) } else { (b, a) };
-                    simple[entry] = reduced_pattern.position(r, c).unwrap() as u32;
-                    continue;
-                }
-                for (a, ia) in self.t_row_indexed(i as usize) {
-                    for (b, ib) in self.t_row_indexed(j) {
-                        if diagonal && a > b {
-                            continue;
-                        }
-                        let (r, c) = if a <= b { (a, b) } else { (b, a) };
-                        // Off-diagonal entries of K stand for K_ij and K_ji: both land on
-                        // the same reduced entry, twice on a reduced diagonal.
-                        let factor = if !diagonal && a == b { 2.0 } else { 1.0 };
-                        let pos = reduced_pattern.position(r, c).unwrap();
-                        general.push((entry as u32, pos as u32, ia, ib, factor));
-                    }
-                }
-            }
-        }
+        let reduced_pattern = Arc::new(self.reduced_pattern(pattern));
+        let (simple, general) = self.landing(pattern, &reduced_pattern);
         ReducedPattern {
             input: pattern.clone(),
             pattern: reduced_pattern,
@@ -516,6 +522,133 @@ impl ConstraintSet {
             simple,
             general,
         }
+    }
+
+    /// The pattern of `Tᵀ K T` (upper triangle, with the diagonal of every reduced
+    /// unknown): entry `(a, c)`, `a <= c`, is there when some entry `K_pq` of the full
+    /// (symmetric) `K` has `T_pa` and `T_qc` in the structure of `T`.
+    fn reduced_pattern(&self, pattern: &Pattern) -> Pattern {
+        let n = self.n;
+        let m = self.reduced;
+        // `K` by rows of its upper triangle (the entries `K_qp`, `p > q`, of column `q`
+        // of the lower triangle), and `T` by columns.
+        let upper_rows = transpose(n, pattern.col_ptr(), pattern.row_idx(), n);
+        let t_cols = transpose(n, &self.t_ptr, &self.t_col, m);
+        let columns: Vec<Vec<u32>> = (0..m)
+            .into_par_iter()
+            .with_min_len(256)
+            .map_init(
+                || vec![u32::MAX; m],
+                |mark, c| {
+                    let mut rows = vec![c as u32];
+                    mark[c] = c as u32;
+                    for &q in t_cols.row(c) {
+                        let q = q as usize;
+                        for &p in pattern.column(q).iter().chain(upper_rows.row(q)) {
+                            for &a in &self.t_col[self.t_ptr[p as usize] as usize
+                                ..self.t_ptr[p as usize + 1] as usize]
+                            {
+                                if a as usize <= c && mark[a as usize] != c as u32 {
+                                    mark[a as usize] = c as u32;
+                                    rows.push(a);
+                                }
+                            }
+                        }
+                    }
+                    rows.sort_unstable();
+                    rows
+                },
+            )
+            .collect();
+        let mut col_ptr = Vec::with_capacity(m + 1);
+        col_ptr.push(0u32);
+        for rows in &columns {
+            col_ptr.push(col_ptr.last().copied().unwrap_or(0) + rows.len() as u32);
+        }
+        let mut row_idx = vec![0u32; col_ptr[m] as usize];
+        let mut rest = row_idx.as_mut_slice();
+        let mut parts = Vec::with_capacity(m);
+        for rows in &columns {
+            let (part, tail) = rest.split_at_mut(rows.len());
+            parts.push(part);
+            rest = tail;
+        }
+        parts
+            .into_par_iter()
+            .zip(columns.par_iter())
+            .for_each(|(part, rows)| part.copy_from_slice(rows));
+        Pattern::from_compressed(m, col_ptr, row_idx)
+    }
+
+    /// Where every entry of `K` on `pattern` lands in `reduced` (see [`ReducedPattern`]),
+    /// in the order of the entries.
+    fn landing(&self, pattern: &Pattern, reduced: &Pattern) -> (Vec<u32>, Landing) {
+        let col_ptr = pattern.col_ptr();
+        let mut simple = vec![u32::MAX; pattern.nnz()];
+        // Ranges of columns of about equal entries, one slice of `simple` each.
+        let chunks = (rayon::current_num_threads() * 8).clamp(1, self.n.max(1));
+        let per_chunk = pattern.nnz().div_ceil(chunks).max(1);
+        let mut ranges = Vec::with_capacity(chunks + 1);
+        let mut first = 0;
+        while first < self.n {
+            let target = col_ptr[first] as usize + per_chunk;
+            let mut last = first + 1;
+            while last < self.n && (col_ptr[last] as usize) < target {
+                last += 1;
+            }
+            ranges.push(first..last);
+            first = last;
+        }
+        let mut rest = simple.as_mut_slice();
+        let mut slices = Vec::with_capacity(ranges.len());
+        for range in &ranges {
+            let len = (col_ptr[range.end] - col_ptr[range.start]) as usize;
+            let (part, tail) = rest.split_at_mut(len);
+            slices.push(part);
+            rest = tail;
+        }
+        let general = ranges
+            .into_par_iter()
+            .zip(slices)
+            .map(|(range, simple)| {
+                let base = col_ptr[range.start] as usize;
+                let mut general = Vec::new();
+                for j in range.clone() {
+                    if self.t_ptr[j] == self.t_ptr[j + 1] {
+                        continue;
+                    }
+                    let start = col_ptr[j] as usize;
+                    let identity_j = self.is_identity_row(j);
+                    for (offset, &i) in pattern.column(j).iter().enumerate() {
+                        let entry = start + offset;
+                        let diagonal = i as usize == j;
+                        if identity_j && self.is_identity_row(i as usize) {
+                            // One target with factor 1, whatever the values of the other
+                            // rows.
+                            let a = self.t_col[self.t_ptr[i as usize] as usize];
+                            let b = self.t_col[self.t_ptr[j] as usize];
+                            let (r, c) = if a <= b { (a, b) } else { (b, a) };
+                            simple[entry - base] = reduced.position(r, c).unwrap() as u32;
+                            continue;
+                        }
+                        // Off-diagonal entries of K stand for K_ij and K_ji: both land on
+                        // the same reduced entry, twice on a reduced diagonal (the factor
+                        // 2 of `apply`).
+                        for (a, _) in self.t_row(i as usize) {
+                            for (b, _) in self.t_row(j) {
+                                if diagonal && a > b {
+                                    continue;
+                                }
+                                let (r, c) = if a <= b { (a, b) } else { (b, a) };
+                                general.push(reduced.position(r, c).unwrap() as u32);
+                            }
+                        }
+                    }
+                }
+                (range, general)
+            })
+            .collect();
+        (simple, general)
     }
 
     /// `Tᵀ f`.

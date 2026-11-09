@@ -83,6 +83,9 @@ pub struct Session {
     options: SessionOptions,
     /// [`restart::model_fingerprint`] of the model as given, before ties moved nodes.
     fingerprint: u64,
+    /// The state before an isolated group of steps ([`plxs_core::step::Isolation`]), which
+    /// returns after its last step.
+    kept: Option<(State, Option<f64>)>,
 }
 
 /// A pool of `threads` threads (0: all cores).
@@ -163,11 +166,54 @@ impl Session {
             threads,
             options,
             fingerprint,
+            kept: None,
         })
     }
 
     /// Computes a step on the current state; events go to `progress`.
     pub fn run_step(&mut self, step: &Step, progress: &mut dyn Progress) -> Result<StepOutcome> {
+        if step.isolation.opens {
+            self.open_group(step.isolation.unloaded);
+        }
+        let outcome = self.run_one_step(step, progress);
+        if step.isolation.closes {
+            self.close_group();
+        }
+        outcome
+    }
+
+    /// Keeps the state for the end of an isolated group; with `unloaded` the group starts
+    /// from the unloaded model, at the time the steps before it reached.
+    fn open_group(&mut self, unloaded: bool) {
+        self.kept = Some((self.state.clone(), self.average_force));
+        if unloaded {
+            self.state = State {
+                steps_done: self.state.steps_done,
+                total_time: self.state.total_time,
+                displacements: plxs_core::state::NodalField::zeros(self.model.nodes.len(), 3),
+                stored_modes: self.state.stored_modes.clone(),
+                ..State::default()
+            };
+            self.average_force = None;
+            self.stiffness = None;
+            self.contact_pattern = None;
+        }
+    }
+
+    /// Returns to the state before the isolated group that ends here; the steps of the
+    /// group still count.
+    fn close_group(&mut self) {
+        if let Some((state, average_force)) = self.kept.take() {
+            let steps_done = self.state.steps_done;
+            self.state = state;
+            self.state.steps_done = steps_done;
+            self.average_force = average_force;
+            self.stiffness = None;
+            self.contact_pattern = None;
+        }
+    }
+
+    fn run_one_step(&mut self, step: &Step, progress: &mut dyn Progress) -> Result<StepOutcome> {
         let step_number = self.state.steps_done + 1;
         progress.event(ProgressEvent::Step { step: step_number });
         for warning in std::mem::take(&mut self.pending_warnings) {

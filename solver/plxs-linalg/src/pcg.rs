@@ -97,6 +97,9 @@ pub struct PcgSolver {
     shift: f64,
     factorized: bool,
     max_iterations: Option<usize>,
+    /// Whether a solve gives up early when the residual stalls ([`Stall`]): when another
+    /// solver stands by.
+    give_up_on_stall: bool,
     /// Iterations of the first solve after the hierarchy was built, and of the last
     /// solve (0: none yet); a factorization keeps the hierarchy while the count stays
     /// reasonable.
@@ -124,6 +127,7 @@ impl Default for PcgSolver {
             shift: 0.0,
             factorized: false,
             max_iterations: None,
+            give_up_on_stall: false,
             iterations_after_build: AtomicUsize::new(0),
             last_iterations: AtomicUsize::new(0),
             reused: false,
@@ -224,6 +228,12 @@ impl PcgSolver {
         self.max_iterations = Some(max);
     }
 
+    /// Gives a solve up as soon as the residual stalls ([`Stall`]) instead of iterating
+    /// up to the limit: for a caller that has another solver to fall back on.
+    pub fn set_give_up_on_stall(&mut self, give_up: bool) {
+        self.give_up_on_stall = give_up;
+    }
+
     /// Entries of the preconditioner, its memory in values.
     pub fn preconditioner_nonzeros(&self) -> Option<usize> {
         match &self.amg {
@@ -310,7 +320,15 @@ impl PcgSolver {
                     .as_ref()
                     .is_some_and(plxs_core::CancelToken::is_cancelled)
             };
-            match gpu.solve(&b, &mut x, TOLERANCE, max_iterations, &cancelled) {
+            let mut stall = Stall::new(self.give_up_on_stall);
+            match gpu.solve(
+                &b,
+                &mut x,
+                TOLERANCE,
+                max_iterations,
+                &cancelled,
+                &mut |i, r| stall.stalls(i, r),
+            ) {
                 Ok(Err(error)) => return Err(error),
                 Ok(Ok(crate::gpu::CgOutcome::Converged {
                     iterations,
@@ -325,8 +343,11 @@ impl PcgSolver {
                     return Ok(self.converged(&x, rhs, iterations, residual));
                 }
                 Ok(Ok(crate::gpu::CgOutcome::Indefinite)) => return Err(indefinite()),
-                Ok(Ok(crate::gpu::CgOutcome::NotConverged { residual })) => {
-                    return Err(not_converged(max_iterations, residual, self.reused));
+                Ok(Ok(crate::gpu::CgOutcome::NotConverged {
+                    residual,
+                    iterations,
+                })) => {
+                    return Err(not_converged(iterations, residual, self.reused));
                 }
                 Err(e) => {
                     // The card failed: the processor solves, from here on.
@@ -345,6 +366,7 @@ impl PcgSolver {
         let mut q = vec![0.0; n];
         let mut rz = dot(&r, &z);
         let mut residual = 1.0;
+        let mut stall = Stall::new(self.give_up_on_stall);
         let (mut t_product, mut t_precondition, mut t_vectors) = (0.0, 0.0, 0.0);
         let clock = std::time::Instant::now();
         let mut last = 0.0;
@@ -389,6 +411,9 @@ impl PcgSolver {
                     return Ok(self.unconverged(x, rhs, iteration, residual));
                 }
                 return Ok(self.converged(x, rhs, iteration, residual));
+            }
+            if stall.stalls(iteration, residual) {
+                return Err(not_converged(iteration, residual, self.reused));
             }
             if trace {
                 lap(&mut t_vectors);
@@ -943,6 +968,48 @@ fn reverse_cuthill_mckee(adjacency: &[Vec<u32>]) -> Vec<u32> {
     new
 }
 
+/// Iterations between the checks of [`Stall`].
+const STALL_CHECK: usize = 100;
+
+/// How far back [`Stall`] compares the residual.
+const STALL_SPAN: usize = 200;
+
+/// The test for an iteration that does not get anywhere: from [`STALL_SPAN`] iterations
+/// on, every [`STALL_CHECK`] iterations, the residual has to be at most half of what it
+/// was [`STALL_SPAN`] iterations before (the start counts as 1). A solve that is to reach
+/// [`TOLERANCE`] within a few thousand iterations is far faster than that; a model the
+/// preconditioner does not fit (thin expanded shells, a badly conditioned mesh) is not,
+/// and stalls for its whole limit otherwise, minutes on a large model, before the direct
+/// solver takes over.
+pub(crate) struct Stall {
+    enabled: bool,
+    /// The residual at every check so far, from iteration 0.
+    marks: Vec<f64>,
+}
+
+impl Stall {
+    pub(crate) fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            marks: vec![1.0],
+        }
+    }
+
+    /// Whether the iteration stalls, given the residual after `iteration` iterations
+    /// (called every iteration, or every few on the graphics card: a check is taken at
+    /// the first call at or after its iteration).
+    pub(crate) fn stalls(&mut self, iteration: usize, residual: f64) -> bool {
+        if !self.enabled || iteration < self.marks.len() * STALL_CHECK {
+            return false;
+        }
+        self.marks.push(residual);
+        let back = STALL_SPAN / STALL_CHECK;
+        let checks = self.marks.len() - 1;
+        // A residual that is not a number stalls too.
+        checks >= back && (residual.is_nan() || residual > 0.5 * self.marks[checks - back])
+    }
+}
+
 fn indefinite() -> Error {
     numerical(
         plxs_core::Failure::NotPositiveDefinite,
@@ -951,11 +1018,11 @@ fn indefinite() -> Error {
     )
 }
 
-fn not_converged(max_iterations: usize, residual: f64, reused: bool) -> Error {
+fn not_converged(iterations: usize, residual: f64, reused: bool) -> Error {
     numerical(
         plxs_core::Failure::IterativeSolver,
         format!(
-            "the iterative solver did not converge in {max_iterations} iterations \
+            "the iterative solver did not converge in {iterations} iterations \
          (relative residual {residual:.3e}){}",
             if reused {
                 " with the kept preconditioner"
@@ -1000,6 +1067,26 @@ fn zip_mut(a: &mut [f64], b: &[f64], f: impl Fn(&mut f64, f64) + Sync + Send) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_stalling_iteration_is_given_up_after_two_hundred_iterations() {
+        // Above the start after 200 iterations (the corrugated tube of expanded shells).
+        let mut stall = super::Stall::new(true);
+        assert!((1..200).all(|i| !stall.stalls(i, 50.0)));
+        assert!(stall.stalls(200, 50.0));
+        // Halving every 200 iterations goes on.
+        let mut stall = super::Stall::new(true);
+        let residual = |i: usize| 0.5f64.powf(i as f64 / 190.0);
+        assert!((1..3000).all(|i| !stall.stalls(i, residual(i))));
+        // Checks taken late (the graphics card reads every few iterations) still count.
+        let mut stall = super::Stall::new(true);
+        assert!(!stall.stalls(104, 0.3));
+        assert!(!stall.stalls(204, 0.4));
+        assert!(stall.stalls(304, 0.2));
+        // Off: never.
+        let mut stall = super::Stall::new(false);
+        assert!((1..3000).all(|i| !stall.stalls(i, 10.0)));
+    }
+
     use super::*;
     use crate::LdltSolver;
     use std::sync::Arc;

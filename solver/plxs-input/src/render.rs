@@ -766,6 +766,18 @@ fn steps(out: &mut Out, analysis: &Analysis) {
             boundaries(out, step, false);
         }
         out.comment(&format!("{} ++++++++++++++++++++", step.name));
+        // CalculiX has no keyword for an isolated group; the input file says what Nodalis
+        // does there.
+        if step.isolation.opens {
+            out.comment(if step.isolation.unloaded {
+                "Nodalis: from the unloaded model, the state before this step returns after the group"
+            } else {
+                "Nodalis: the state before this step returns after the group"
+            });
+        }
+        if step.isolation.closes {
+            out.comment("Nodalis: end of the group, the state before it returns");
+        }
         let mut header = String::from("*Step");
         if step.nlgeom {
             header.push_str(", Nlgeom");
