@@ -47,10 +47,12 @@ pub enum DiscreteKind {
 
 /// Stiffness per area of a `*COMPRESSION ONLY` surface that gives none, in units of
 /// `E / h` (`E` Young's modulus of the elements under the faces, `h` their mean edge
-/// length): practically rigid (a closure of a thousandth of the deformation of an element
-/// layer under the same pressure), yet the integration-point gaps of a quadratic face stay
-/// as smooth as a pressure (tried on a pin-loaded lug, smooth up to 1e4).
-pub const COMPRESSION_ONLY_STIFFNESS: f64 = 1e3;
+/// length): practically rigid (a closure of a tenth of the deformation of an element layer
+/// under the same pressure). Stiffer, the nine gaps of a quadratic face over-constrain it
+/// and the stresses at the surface stripe along the element edges (pin-loaded lug at
+/// `1e3`: corner and midside nodes 3 MPa apart at 12 MPa; at `10` smooth, the peak stress
+/// away from the support within 0.1 %).
+pub const COMPRESSION_ONLY_STIFFNESS: f64 = 10.0;
 
 /// Gap stiffness when `*GAP` gives none: CalculiX' manual leaves the default open; a large
 /// penalty relative to typical steel models (N, mm) is used.

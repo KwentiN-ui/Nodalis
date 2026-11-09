@@ -1565,8 +1565,10 @@ V-Zyklus, behaltene Hierarchie oft zu lange behalten.
   Formfunktionen als Knotengewichten, Normale aus der Referenzgeometrie, Steifigkeit
   `k · J · w`. `DiscreteKind::Gap` trägt dafür `weights` (GAPUNI: `[-1, 1]`); alle
   Prozeduren, die Gaps kennen, nehmen die Flächengaps ohne Änderung mit.
-- `STIFFNESS` ist Steifigkeit pro Fläche; ohne Wert `1e3 · E / h` (`E` der Elemente unter der
-  Fläche, `h` mittlere Kantenlänge). Der Writer rechnet die Gesamtsteifigkeit der
+- `STIFFNESS` ist Steifigkeit pro Fläche; ohne Wert `10 · E / h` (`E` der Elemente unter der
+  Fläche, `h` mittlere Kantenlänge; mit `1e3` überbestimmen die 9 Gaps je quadratischer
+  Fläche sie, die Spannungen an der Bohrung der Lasche streifen dann entlang der
+  Elementkanten, 3 MPa zwischen Eck- und Mittenknoten bei 12 MPa). Der Writer rechnet die Gesamtsteifigkeit der
   Oberfläche (`k / A`) bzw. „Apply to all nodes individually“ (`k · Knoten / A`) um.
   Zugkraft σ∞ und Offset gibt es nur noch bei Schalen, die weiter GAPUNI bekommen.
 - Grund: starre GAPUNI je Knoten auf C3D20-Flächen lassen die Eckknoten ohne Kraft (ihr
