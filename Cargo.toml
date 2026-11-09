@@ -4,7 +4,7 @@ members = ["crates/*", "solver/plxs-*"]
 exclude = ["vendor/egui-snarl"]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/KwentiN-ui/Nodalis"
