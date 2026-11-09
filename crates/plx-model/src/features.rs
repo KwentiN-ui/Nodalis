@@ -445,6 +445,21 @@ impl FeModel {
         self.reference_points.iter().find(|r| r.id == id)
     }
 
+    /// Whether something besides loads and springs binds the degrees of freedom of a
+    /// reference point: a boundary condition on it in an active step, or a joint.
+    pub fn point_bound(&self, id: Id) -> bool {
+        let held = (self.steps.iter().filter(|s| s.active))
+            .flat_map(|s| &s.boundary_conditions)
+            .any(|bc| bc.active && bc.region.reference_point() == Some(id));
+        let joined = self.constraints.iter().any(|c| match c {
+            crate::Constraint::Joint(joint) => (joint.ends.iter())
+                .filter_map(crate::SpringEnd::region)
+                .any(|r| r.reference_point() == Some(id)),
+            _ => false,
+        });
+        held || joined
+    }
+
     pub fn reference_point_named(&self, name: &str) -> Option<&ReferencePoint> {
         self.reference_points.iter().find(|r| r.name == name)
     }

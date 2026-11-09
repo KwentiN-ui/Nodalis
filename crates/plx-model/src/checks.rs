@@ -48,6 +48,9 @@ pub enum Problem {
     /// Nodes in two rigid bodies, of rigid body constraints or displacements on a point:
     /// the solver keeps them in the first and only warns.
     SharedRigidBody,
+    /// A deformable coupling on nodes of a rigid body or rigid point: constraints hold in
+    /// every step, so the selection stays rigid also where only the deformable one acts.
+    DeformableOnRigid,
     /// Nodes of a rigid body constraint that a boundary condition holds directly: CalculiX
     /// refuses them ("dependent side of a MPC and a SPC"), so the input file leaves them
     /// out of the rigid body.
@@ -265,6 +268,7 @@ impl Problem {
             | Problem::ContactOutputIgnored
             | Problem::DesignRegionIgnored
             | Problem::RigidBeamNodes
+            | Problem::DeformableOnRigid
             | Problem::HeldRigidBodyNodes
             | Problem::TieNodesNotTied
             | Problem::LockWithoutPreload
@@ -311,6 +315,7 @@ impl Problem {
             Problem::NoPhysicalConstants => "Physical constants missing",
             Problem::NoRigidBody => "Reference point without rigid body",
             Problem::SharedRigidBody => "Nodes in several rigid bodies or remote points",
+            Problem::DeformableOnRigid => "Deformable coupling on a rigid selection",
             Problem::HeldRigidBodyNodes => "Rigid body on nodes held by a boundary condition",
             Problem::TieNodesNotTied => "Nodes of a bonded contact not tied",
             Problem::RigidBeamNodes => "Beam or shell nodes in a rigid body",
@@ -424,6 +429,12 @@ impl Problem {
                 "A node of a rigid body follows its reference point; a boundary condition on \
                  it binds it a second time, which the solver refuses. Nodalis leaves these nodes out of the rigid body: they keep \
                  their boundary condition, and the rigid body is not held by it."
+            }
+            Problem::DeformableOnRigid => {
+                "Rigid bodies, remote points and their couplings hold in every step of the \
+                 analysis, not only in the step of their load or boundary condition. A \
+                 deformable coupling on nodes of a rigid one therefore averages a selection \
+                 that stays rigid: it acts like the rigid one, also in its own steps."
             }
             Problem::SharedRigidBody => {
                 "A node can follow one rigid body or remote point only. Rigid body constraints \
@@ -922,6 +933,10 @@ impl Problem {
             Problem::HeldRigidBodyNodes => {
                 "To hold the rigid body, put the boundary condition on its reference point, or \
                  leave the nodes of the rigid body out of the boundary condition's selection."
+            }
+            Problem::DeformableOnRigid => {
+                "To compare rigid and deformable behavior, use one analysis for each, or give \
+                 both the same behavior."
             }
             Problem::SharedRigidBody => {
                 "Make the selections of the rigid bodies and displacements on a point separate, \
@@ -1915,9 +1930,17 @@ impl FeModel {
     /// displacements, one per selection as in the input file.
     fn check_shared_rigid_bodies(&self, mesh: &FeMesh, findings: &mut Vec<Finding>) {
         let mut bodies: Vec<(ModelItem, &str, HashSet<NodeId>)> = Vec::new();
+        // Deformable couplings, which average their nodes.
+        let mut averaging: Vec<(ModelItem, &str, HashSet<NodeId>)> = Vec::new();
         let mut held = None;
         for (i, constraint) in self.constraints.iter().enumerate() {
             if let Constraint::RigidBody(body) = constraint
+                && body.active
+                && body.behavior == RemoteBehavior::Deformable
+            {
+                let nodes = body.region.nodes(mesh).into_iter().collect();
+                averaging.push((ModelItem::Constraint(i), &body.name, nodes));
+            } else if let Constraint::RigidBody(body) = constraint
                 && body.active
             {
                 let nodes: HashSet<NodeId> = body.region.nodes(mesh).into_iter().collect();
@@ -1954,7 +1977,15 @@ impl FeModel {
                 let excluded = self.point_excluded_nodes(mesh, &bc.region, remote);
                 if let Ok(point) = remote.resolve(self, mesh, &bc.region, &excluded) {
                     let nodes = point.nodes.into_iter().collect();
-                    bodies.push((ModelItem::BoundaryCondition(s, i), &bc.name, nodes));
+                    let item = (ModelItem::BoundaryCondition(s, i), bc.name.as_str(), nodes);
+                    if matches!(
+                        self.formulation(mesh, s, i),
+                        Some(Formulation::Point(RemoteBehavior::Deformable))
+                    ) {
+                        averaging.push(item);
+                    } else {
+                        bodies.push(item);
+                    }
                 }
             }
         }
@@ -1965,17 +1996,22 @@ impl FeModel {
         let mut regions: Vec<&Region> = points.iter().map(|(r, _)| *r).collect();
         for (s, i, region, remote) in self.remote_forces() {
             let point = remote.point();
-            if remote.behavior != crate::RemoteBehavior::Rigid
-                || (regions.iter().zip(&owned)).any(|(r, p)| *r == region && p.same_point(&point))
-            {
+            if (regions.iter().zip(&owned)).any(|(r, p)| *r == region && p.same_point(&point)) {
                 continue;
             }
             regions.push(region);
             owned.push(point);
             if let Ok((point, _)) = self.remote_force_nodes(mesh, region, remote) {
                 let nodes = point.nodes.into_iter().collect();
-                let name = &self.steps[s].loads[i].name;
-                bodies.push((ModelItem::Load(s, i), name, nodes));
+                let item = (
+                    ModelItem::Load(s, i),
+                    self.steps[s].loads[i].name.as_str(),
+                    nodes,
+                );
+                match remote.behavior {
+                    RemoteBehavior::Rigid => bodies.push(item),
+                    RemoteBehavior::Deformable => averaging.push(item),
+                }
             }
         }
         // A rigid joint couples each selection end to a point of its own.
@@ -2028,6 +2064,20 @@ impl FeModel {
                         format!("{name}: {shared} nodes also in {other}"),
                     ));
                 }
+            }
+        }
+        // Couplings hold in every step: a deformable one on nodes a rigid one keeps in
+        // shape averages a rigid selection, also in the steps of its own.
+        for (item, name, nodes) in &averaging {
+            if let Some((other, shared)) = (bodies.iter())
+                .map(|(_, other, others)| (other, nodes.intersection(others).count()))
+                .find(|(_, shared)| *shared > 0)
+            {
+                findings.push(Finding::new(
+                    *item,
+                    Problem::DeformableOnRigid,
+                    format!("{name}: {shared} nodes kept rigid by {other}"),
+                ));
             }
         }
     }
@@ -5016,6 +5066,35 @@ mod tests {
             "{}",
             finding.detail
         );
+    }
+
+    #[test]
+    fn a_deformable_coupling_on_a_rigid_selection_is_warned_of() {
+        let mesh = cubes(1, false);
+        let mut model = model(&mesh);
+        let bc = &mut model.steps[0].boundary_conditions[0];
+        bc.region = Region::Nodes(vec![1, 4, 5, 8]);
+        bc.kind = BoundaryKind::Displacement(crate::Displacement::rigid([Some(0.0); 6]));
+        model
+            .reference_points
+            .push(ReferencePoint::new("RP-1", [0.0; 3]));
+        let rp = model.reference_points[0].id;
+        let mut body = RigidBody::new("Coupling-1", rp);
+        body.region = Region::Nodes(vec![1, 2]);
+        body.behavior = RemoteBehavior::Deformable;
+        model.constraints.push(Constraint::RigidBody(body));
+        let found = check(&model, &mesh);
+        // Not a second rigid body, but one that stays rigid where the other holds.
+        assert_eq!(
+            problems(&found),
+            [(ModelItem::Constraint(0), Problem::DeformableOnRigid)]
+        );
+        assert!(
+            found[0].detail.ends_with("1 nodes kept rigid by Fixed-1"),
+            "{}",
+            found[0].detail
+        );
+        assert_eq!(found[0].severity(), Severity::Warning);
     }
 
     #[test]

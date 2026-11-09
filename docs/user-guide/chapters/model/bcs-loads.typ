@@ -283,7 +283,11 @@ and the coupling when the input file is written.
 A remote force with the same selection, behavior, coordinate system, location and pinball region
 as another remote force, also of another step, or a displacement on a point shares that point:
 a remote force and a remote displacement on one face act on the same rigid body. Like that of a
-displacement, the coupling belongs to the whole model and stays in steps without the load.
+displacement, the coupling belongs to the whole model and stays in steps without the load. So a
+#ui("Rigid") point keeps its face rigid in every step: a #ui("Deformable") force on the same
+face in another step still loads the face, but as a rigid one, and the model check (@model-check)
+warns "Deformable coupling on a rigid selection". To compare both behaviors, use one analysis for
+each.
 Nodes held directly by a support in a step with the load are left out of the coupling. On the
 reference point of a rigid body the force and moment act on the rigid body itself, without a
 point of their own. The force and moment components have a #ui("P") button for parameter
