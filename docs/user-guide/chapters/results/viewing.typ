@@ -308,6 +308,9 @@ applies to all of them. Results kept with the project (@bind-result) remember wh
 contours off. Nodes that a grey part shares with a part that still has contours keep
 their colour.
 
+A part you hide in the results tree is treated the same way: it no longer counts for the legend
+range or the extremes, and showing it again brings it back.
+
 #screenshot("color-contours-off.png", [The left part without colour contours])
 
 The modes of a buckle step count from 1. In results read from a CalculiX `.frd` file,

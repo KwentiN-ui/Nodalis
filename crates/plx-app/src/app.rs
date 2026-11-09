@@ -2347,11 +2347,18 @@ impl Workbench {
     /// Acts on what the user picked in the tree or in a part's context menu in the 3D view.
     fn tree_response(&mut self, ctx: &egui::Context, view: TreeView, mut response: TreeResponse) {
         self.guard_linked(view, &mut response);
-        for (index, visible) in response.visibility {
-            if let Some(part) = self.shown_mut().and_then(|m| m.parts.get_mut(index)) {
-                part.visible = visible;
+        if !response.visibility.is_empty() {
+            for (index, visible) in response.visibility {
+                if let Some(part) = self.shown_mut().and_then(|m| m.parts.get_mut(index)) {
+                    part.visible = visible;
+                }
+                self.viewport.set_part_visible(index, visible);
             }
-            self.viewport.set_part_visible(index, visible);
+            // Hidden parts leave the legend range.
+            if let Some(model) = self.shown_mut() {
+                model.update_plain_nodes();
+            }
+            self.results_changed = true;
         }
         if !response.contours.is_empty() {
             for (index, contours) in response.contours {

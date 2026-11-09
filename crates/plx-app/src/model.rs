@@ -1350,11 +1350,13 @@ impl Model {
         self.update_plain_nodes();
     }
 
-    fn update_plain_nodes(&mut self) {
+    /// Nodes of hidden parts count like those of parts without contours: they leave the
+    /// legend range and the extremes.
+    pub fn update_plain_nodes(&mut self) {
         let Some(view) = &mut self.results else {
             return;
         };
-        if self.parts.iter().all(|p| p.contours) {
+        if self.parts.iter().all(|p| p.contours && p.visible) {
             view.plain_nodes.clear();
             return;
         }
@@ -1362,7 +1364,7 @@ impl Model {
         let mut plain = vec![false; count];
         let mut coloured = vec![false; count];
         for (index, info) in self.parts.iter().enumerate() {
-            let target = if info.contours {
+            let target = if info.contours && info.visible {
                 &mut coloured
             } else {
                 &mut plain
@@ -3817,5 +3819,23 @@ S
         legacy.mesh = Some(model.mesh.fingerprint());
         model.restore_results_settings(&legacy, Vec::new());
         assert!(!model.parts[0].contours);
+        // Hidden parts leave the legend range like parts without contours.
+        model.parts[0].visible = true;
+        model.set_contours(&[0], true);
+        assert!(model.results.as_ref().unwrap().plain_nodes.is_empty());
+        model.parts[0].visible = false;
+        model.update_plain_nodes();
+        assert!(
+            model
+                .results
+                .as_ref()
+                .unwrap()
+                .plain_nodes
+                .iter()
+                .any(|&p| p)
+        );
+        model.parts[0].visible = true;
+        model.update_plain_nodes();
+        assert!(model.results.as_ref().unwrap().plain_nodes.is_empty());
     }
 }
