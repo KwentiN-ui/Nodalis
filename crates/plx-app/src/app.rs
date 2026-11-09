@@ -3059,7 +3059,11 @@ impl Workbench {
         if let Some(model) = self.results.get(index)
             && let Some(view) = &model.results
         {
-            let dialog = TransformationDialog::new(index, &view.transformations, model);
+            // The results file has no model properties of its own: the model space is the
+            // analysis's.
+            let space = (self.model.as_ref())
+                .map_or(plx_model::ModelSpace::ThreeD, |m| m.fe.properties.space);
+            let dialog = TransformationDialog::new(index, &view.transformations, model, space);
             self.transformation_dialog = Some(dialog);
             self.update_contour();
         }
