@@ -11,7 +11,6 @@ use plxs_core::step::Incrementation;
 use plxs_core::step::Procedure as ProcedureKind;
 use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Step};
 use plxs_linalg::SparseMatrix;
-use plxs_linalg::Unknowns;
 use plxs_output::StaRow;
 use rayon::prelude::*;
 
@@ -231,7 +230,7 @@ impl StaticLinear {
                     let k_red = set.reduce(k_now);
                     ctx.profile.add(Phase::Reduction, started);
                     let coordinates =
-                        || Unknowns::from_free(&set.free, 3, &ctx.model.nodes.coordinates);
+                        || crate::equations::displacement_unknowns(ctx.model, &set.free);
                     let factorization = std::time::Instant::now();
                     equations
                         .prepare(&mut ctx.solver, &k_red, coordinates, true, progress)

@@ -641,7 +641,7 @@ impl<'h> HeatRun<'h> {
             if self.mechanical_spc.as_ref() != Some(&reduction.spc.dofs) {
                 let k_free = k.restrict(&reduction.free);
                 let coordinates =
-                    || Unknowns::from_free(&reduction.free, 3, &model.nodes.coordinates);
+                    || crate::equations::displacement_unknowns(model, &reduction.free);
                 let iterative = self.mechanical_equations.is_iterative();
                 self.mechanical_equations
                     .prepare(&mut ctx.solver, &k_free, coordinates, true, &mut NoProgress)

@@ -365,7 +365,7 @@ impl DynamicProcedure {
                 initial_acceleration_matrix(ctx.table, ctx.model, &ctx.pattern, c_m, c_k, true)?
             };
             let a_red = set.reduce(&a0_matrix);
-            let coordinates = || Unknowns::from_free(&set.free, 3, &ctx.model.nodes.coordinates);
+            let coordinates = || crate::equations::displacement_unknowns(ctx.model, &set.free);
             equations
                 .prepare(&mut ctx.solver, &a_red, coordinates, true, progress)
                 .map_err(|e| numerical(e, ctx.step_number, 0, &equations))?;
@@ -483,8 +483,7 @@ impl DynamicProcedure {
                 let a_red = set.reduce(a);
                 ctx.profile.add(Phase::Reduction, started);
                 let started = std::time::Instant::now();
-                let coordinates =
-                    || Unknowns::from_free(&set.free, 3, &ctx.model.nodes.coordinates);
+                let coordinates = || crate::equations::displacement_unknowns(ctx.model, &set.free);
                 equations
                     .prepare(
                         &mut ctx.solver,

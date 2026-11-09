@@ -493,6 +493,13 @@ fn with_message(error: Error, f: impl FnOnce(&str) -> String) -> Error {
 /// the symbolic analysis on `direct`, which keeps it) with a quarter more for the work
 /// space exceeds [`MEMORY_SHARE`] of the available memory (`available`, else the
 /// platform's). Tells the monitor what it found.
+/// The unknowns of the free displacement DOFs `free` (three per node) of `model`, with the
+/// nodes' positions and bodies, for the solvers (the ordering of the direct one, the
+/// multigrid of the iterative one; see [`plxs_core::Model::node_bodies`]).
+pub fn displacement_unknowns(model: &plxs_core::Model, free: &[u32]) -> Unknowns {
+    Unknowns::from_free(free, 3, &model.nodes.coordinates).with_bodies(&model.node_bodies())
+}
+
 pub fn factor_exceeds_memory(
     direct: &mut LdltSolver,
     k: &SparseMatrix,

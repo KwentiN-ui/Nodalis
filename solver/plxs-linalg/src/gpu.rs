@@ -1430,8 +1430,8 @@ mod tests {
             coarse_size: 300,
             ..AmgOptions::default()
         };
-        let cpu = Amg::build(&a, Some(&unknowns), options(GpuMode::Off)).unwrap();
-        let mut gpu = Amg::build(&a, Some(&unknowns), options(GpuMode::On)).unwrap();
+        let cpu = Amg::build(&a, Some(&unknowns), &[], options(GpuMode::Off)).unwrap();
+        let mut gpu = Amg::build(&a, Some(&unknowns), &[], options(GpuMode::On)).unwrap();
         let placement = gpu.placement().unwrap_or_default();
         if !placement.contains("graphics card") || placement.contains("processor") {
             eprintln!("skipped, no graphics card: {placement}");
@@ -1477,7 +1477,7 @@ mod tests {
             coarse_size: 300,
             ..AmgOptions::default()
         };
-        let mut amg = Amg::build(&a, Some(&unknowns), options).unwrap();
+        let mut amg = Amg::build(&a, Some(&unknowns), &[], options).unwrap();
         amg.attach_operator(&a);
         let Some(gpu) = amg.gpu_cycle() else {
             eprintln!("skipped: {:?}", amg.placement());

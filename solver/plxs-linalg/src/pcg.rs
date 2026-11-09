@@ -105,10 +105,22 @@ pub struct PcgSolver {
     /// reasonable.
     iterations_after_build: AtomicUsize,
     last_iterations: AtomicUsize,
+    /// The seconds the hierarchy took to build and the seconds per iteration of the last
+    /// solve (as bits of an `f64`): what a stale hierarchy costs against a new one.
+    build_seconds: f64,
+    seconds_per_iteration: std::sync::atomic::AtomicU64,
     /// Whether the last factorization kept the hierarchy of the one before.
     reused: bool,
     /// The diagonal of the matrix the hierarchy was built on (padded numbering).
     built_diagonal: Vec<f64>,
+    /// The slow modes of the preconditioned operator learned from the first solve after
+    /// the hierarchy was built, deflated from the solves after it.
+    deflation: std::sync::Mutex<Option<Deflation>>,
+    /// The slowest modes of the first solve with a hierarchy of the rigid body modes
+    /// alone: near-nullspace candidates of every later hierarchy of this pattern. `true`
+    /// while a hierarchy without them is in use and they are to go into the next build.
+    candidates: std::sync::Mutex<Vec<Vec<f64>>>,
+    candidates_pending: std::sync::atomic::AtomicBool,
 }
 
 impl Default for PcgSolver {
@@ -130,8 +142,13 @@ impl Default for PcgSolver {
             give_up_on_stall: false,
             iterations_after_build: AtomicUsize::new(0),
             last_iterations: AtomicUsize::new(0),
+            build_seconds: 0.0,
+            seconds_per_iteration: std::sync::atomic::AtomicU64::new(0),
             reused: false,
             built_diagonal: Vec::new(),
+            deflation: std::sync::Mutex::new(None),
+            candidates: std::sync::Mutex::new(Vec::new()),
+            candidates_pending: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -172,17 +189,97 @@ impl PcgSolver {
     /// The hierarchy of the current values of `full`.
     fn build_multigrid(&mut self) -> Result<()> {
         self.amg = None;
+        *self.deflation.get_mut().unwrap_or_else(|e| e.into_inner()) = None;
         self.reused = false;
         self.iterations_after_build.store(0, Ordering::Relaxed);
         self.built_diagonal = self.full.diagonal();
         let unknowns = self.padded_unknowns();
+        let started = std::time::Instant::now();
+        let candidates =
+            std::mem::take(self.candidates.get_mut().unwrap_or_else(|e| e.into_inner()));
+        self.candidates_pending.store(false, Ordering::Relaxed);
         #[allow(unused_mut)]
-        let mut amg = Amg::build(&self.full, unknowns.as_ref(), AmgOptions::default())?;
+        let mut amg = Amg::build(
+            &self.full,
+            unknowns.as_ref(),
+            &candidates,
+            AmgOptions::default(),
+        );
+        *self.candidates.get_mut().unwrap_or_else(|e| e.into_inner()) = candidates;
+        #[allow(unused_mut)]
+        let mut amg = amg?;
         #[cfg(feature = "gpu")]
         amg.attach_operator(&self.full);
+        self.build_seconds = started.elapsed().as_secs_f64();
         self.amg = Some(amg);
         self.factorized = true;
         Ok(())
+    }
+
+    /// The deflation for the solves to come, from the Lanczos vectors `lanczos` of a
+    /// finished solve and its tridiagonal: the Ritz vectors of the Ritz values below
+    /// [`DEFLATE_BELOW`], at most [`DEFLATE_MAX`] of them; `None` when there are none.
+    fn learn_deflation(
+        &self,
+        ritz: &RitzTrace,
+        lanczos: &[Vec<f32>],
+        trace: bool,
+    ) -> Option<Deflation> {
+        let m = ritz.alphas.len().min(lanczos.len());
+        if m < 2 {
+            return None;
+        }
+        let (diag, off) = ritz.tridiagonal();
+        let (values, vectors) = tridiagonal_eigen(&diag[..m], &off[..m]);
+        let largest = values.iter().copied().fold(0.0_f64, f64::max);
+        let chosen: Vec<usize> = (0..m)
+            .filter(|&j| values[j] > 0.0 && values[j] < DEFLATE_BELOW * largest)
+            .take(DEFLATE_MAX)
+            .collect();
+        if chosen.is_empty() {
+            return None;
+        }
+        let n = self.padded;
+        let d = chosen.len();
+        let mut w = vec![0.0; d * n];
+        for (slot, &j) in chosen.iter().enumerate() {
+            let y = &vectors[j * m..(j + 1) * m];
+            let out = &mut w[slot * n..(slot + 1) * n];
+            for (k, v) in lanczos.iter().take(m).enumerate() {
+                let c = y[k];
+                if c != 0.0 {
+                    out.par_chunks_mut(4096)
+                        .zip(v.par_chunks(4096))
+                        .for_each(|(o, v)| {
+                            o.iter_mut().zip(v).for_each(|(o, &v)| *o += c * v as f64)
+                        });
+                }
+            }
+            let norm = norm(out);
+            if norm > 0.0 {
+                out.iter_mut().for_each(|v| *v /= norm);
+            }
+        }
+        let mut defl = Deflation {
+            d,
+            w,
+            aw: vec![0.0; d * n],
+            chol: Vec::new(),
+        };
+        if !defl.refresh(self) {
+            return None;
+        }
+        if trace {
+            let shown: Vec<String> = chosen
+                .iter()
+                .map(|&j| format!("{:.2e}", values[j]))
+                .collect();
+            eprintln!(
+                "pcg: deflating {d} modes with ritz values {}",
+                shown.join(" ")
+            );
+        }
+        Some(defl)
     }
 
     /// Whether the matrix is stored in `3 × 3` blocks.
@@ -309,9 +406,28 @@ impl PcgSolver {
         }
         let trace = std::env::var("PLXS_PCG_TRACE").is_ok();
         let cancel = plxs_core::CancelToken::current();
+        // The first solve with a fresh hierarchy of a pattern learns the near-nullspace
+        // candidates of the next hierarchy from its Lanczos vectors (see [`Deflation`]),
+        // which only the processor's loop collects.
+        #[cfg(feature = "gpu")]
+        let learning = loose.is_none()
+            && self.amg.is_some()
+            && candidate_count() > 0
+            && !self.candidates_pending.load(Ordering::Relaxed)
+            && self
+                .candidates
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+            && self
+                .deflation
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none();
         #[cfg(feature = "gpu")]
         if let Some(gpu) = self.amg.as_ref().and_then(Amg::gpu_cycle)
             && loose.is_none()
+            && !learning
         {
             let started = std::time::Instant::now();
             let mut x = vec![0.0; n];
@@ -340,7 +456,13 @@ impl PcgSolver {
                             started.elapsed().as_secs_f64()
                         );
                     }
-                    return Ok(self.converged(&x, rhs, iterations, residual));
+                    return Ok(self.converged(
+                        &x,
+                        rhs,
+                        iterations,
+                        residual,
+                        started.elapsed().as_secs_f64(),
+                    ));
                 }
                 Ok(Ok(crate::gpu::CgOutcome::Indefinite)) => return Err(indefinite()),
                 Ok(Ok(crate::gpu::CgOutcome::NotConverged {
@@ -365,9 +487,42 @@ impl PcgSolver {
         let mut p = z.clone();
         let mut q = vec![0.0; n];
         let mut rz = dot(&r, &z);
+        // The Lanczos vectors of the solve (single precision), from which the slowest
+        // modes of the preconditioned operator are taken after it (see [`Deflation`]).
+        let mut deflation = self.deflation.lock().unwrap_or_else(|e| e.into_inner());
+        let collect = deflation.is_none() && loose.is_none() && self.amg.is_some();
+        let mut lanczos: Vec<Vec<f32>> = Vec::new();
+        if collect {
+            lanczos.push(z.iter().map(|v| (v / rz.sqrt()) as f32).collect());
+        }
+        // Deflated: the iteration solves the projected system `P A x̃ = P b` (whose
+        // residuals stay in the complement of `A W` in every iteration, which keeps the
+        // rounding out of the deflated space), and the solution of the original system is
+        // `x = W E⁻¹ Wᵀ b + Pᵀ x̃` at the end.
+        let mu_b = deflation.as_ref().map(|defl| {
+            let mu = defl.solve_e(&defl.transpose_product(&defl.w, &r));
+            defl.add_combination(&defl.aw, &mu, -1.0, &mut r);
+            mu
+        });
+        if deflation.is_some() {
+            self.precondition(&r, &mut z)?;
+            p.copy_from_slice(&z);
+            rz = dot(&r, &z);
+        }
+        let finish = |x: &mut [f64]| {
+            if let (Some(defl), Some(mu_b)) = (deflation.as_ref(), mu_b.as_ref()) {
+                let mu_x = defl.solve_e(&defl.transpose_product(&defl.aw, x));
+                let mu: Vec<f64> = mu_b.iter().zip(&mu_x).map(|(b, x)| b - x).collect();
+                defl.add_combination(&defl.w, &mu, 1.0, x);
+            }
+        };
         let mut residual = 1.0;
         let mut stall = Stall::new(self.give_up_on_stall);
         let (mut t_product, mut t_precondition, mut t_vectors) = (0.0, 0.0, 0.0);
+        // The Lanczos tridiagonal of the preconditioned operator: its eigenvalues (Ritz
+        // values) show what slows the iteration down (trace) and pick the modes to
+        // deflate.
+        let mut ritz = RitzTrace::new(trace);
         let clock = std::time::Instant::now();
         let mut last = 0.0;
         let mut lap = |t: &mut f64| {
@@ -387,6 +542,9 @@ impl PcgSolver {
                 lap(&mut t_vectors);
             }
             self.product(&p, &mut q);
+            if let Some(defl) = deflation.as_ref() {
+                defl.project(&mut q);
+            }
             if trace {
                 lap(&mut t_product);
             }
@@ -395,6 +553,7 @@ impl PcgSolver {
                 return Err(indefinite());
             }
             let alpha = rz / pq;
+            ritz.alpha(alpha);
             axpy(alpha, &p, x);
             axpy(-alpha, &q, &mut r);
             residual = norm(&r) / b_norm;
@@ -404,13 +563,40 @@ impl PcgSolver {
                         "pcg: {iteration} iterations, product {t_product:.2} s, \
                          preconditioner {t_precondition:.2} s, vectors {t_vectors:.2} s"
                     );
+                    ritz.report();
+                }
+                finish(x);
+                if collect && lanczos.len() >= DEFLATE_FROM_ITERATIONS {
+                    let learned = self.learn_deflation(&ritz, &lanczos, trace);
+                    if let Some(defl) = learned.as_ref() {
+                        let mut candidates =
+                            self.candidates.lock().unwrap_or_else(|e| e.into_inner());
+                        if candidates.is_empty() {
+                            // The slowest modes become near-nullspace candidates of the
+                            // next hierarchy of this pattern.
+                            let count = candidate_count().min(defl.d);
+                            for j in (defl.d - count..defl.d).rev() {
+                                candidates.push(defl.w[j * n..(j + 1) * n].to_vec());
+                            }
+                            if count > 0 {
+                                self.candidates_pending.store(true, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    *deflation = learned;
                 }
                 if loose.is_some() {
                     // Not the count of a solve to the tolerance, which the kept hierarchy
                     // is judged by.
                     return Ok(self.unconverged(x, rhs, iteration, residual));
                 }
-                return Ok(self.converged(x, rhs, iteration, residual));
+                return Ok(self.converged(
+                    x,
+                    rhs,
+                    iteration,
+                    residual,
+                    clock.elapsed().as_secs_f64(),
+                ));
             }
             if stall.stalls(iteration, residual) {
                 return Err(not_converged(iteration, residual, self.reused));
@@ -423,17 +609,30 @@ impl PcgSolver {
                 lap(&mut t_precondition);
             }
             let rz_new = dot(&r, &z);
+            if trace && rz_new <= 0.0 {
+                eprintln!(
+                    "pcg: iteration {iteration}: r.z = {rz_new:.3e} <= 0, the preconditioner is not positive definite here"
+                );
+            }
+            if collect && lanczos.len() < DEFLATE_COLLECT_MAX && rz_new > 0.0 {
+                let sign = if lanczos.len() % 2 == 1 { -1.0 } else { 1.0 };
+                let scale = sign / rz_new.sqrt();
+                lanczos.push(z.iter().map(|v| (v * scale) as f32).collect());
+            }
             // Polak-Ribière form of beta (flexible conjugate gradients),
             // `z_new · (r_new - r_old) / (z_old · r_old)` with `r_new - r_old = -alpha q`:
             // one more dot product, and the directions stay conjugate when the
             // preconditioner is not exactly the same operator in every iteration (its
             // single precision rounding). Equal to `rz_new / rz` for a fixed operator.
             let beta = -alpha * dot(&z, &q) / rz;
+            // The Lanczos relation holds for the Fletcher-Reeves form.
+            ritz.beta(rz_new / rz);
             rz = rz_new;
             // p = z + beta p
             zip_mut(&mut p, &z, |p, z| *p = z + beta * *p);
         }
         if loose.is_some() && residual.is_finite() {
+            finish(x);
             return Ok(self.unconverged(x, rhs, max_iterations, residual));
         }
         Err(not_converged(max_iterations, residual, self.reused))
@@ -456,12 +655,23 @@ impl PcgSolver {
     }
 
     /// The solution `x` (padded) into `rhs`, and the bookkeeping of a converged solve.
-    fn converged(&self, x: &[f64], rhs: &mut [f64], iterations: usize, residual: f64) -> PcgStats {
+    fn converged(
+        &self,
+        x: &[f64],
+        rhs: &mut [f64],
+        iterations: usize,
+        residual: f64,
+        seconds: f64,
+    ) -> PcgStats {
         self.unpad(x, rhs);
         self.last_iterations.store(iterations, Ordering::Relaxed);
         if self.iterations_after_build.load(Ordering::Relaxed) == 0 {
             self.iterations_after_build
                 .store(iterations, Ordering::Relaxed);
+        }
+        if iterations > 0 {
+            self.seconds_per_iteration
+                .store((seconds / iterations as f64).to_bits(), Ordering::Relaxed);
         }
         PcgStats {
             iterations,
@@ -507,14 +717,19 @@ impl PcgSolver {
                 renumbered.node[slot] = u.node[i];
                 renumbered.component[slot] = u.component[i];
                 renumbered.coordinates[slot] = u.coordinates[i];
+                if let Some(&body) = u.body.get(i) {
+                    renumbered.body[slot] = body;
+                }
             }
             return Some(renumbered);
         }
         let nodes = self.padded / 3;
+        let bodies_known = u.body.len() == u.node.len();
         let mut padded = Unknowns {
             node: (0..nodes as u32).flat_map(|b| [b, b, b]).collect(),
             component: vec![u8::MAX; self.padded],
             coordinates: vec![[0.0; 3]; self.padded],
+            body: vec![0; if bodies_known { self.padded } else { 0 }],
         };
         for (i, &slot) in self.slot_of.iter().enumerate() {
             let slot = slot as usize;
@@ -522,6 +737,9 @@ impl PcgSolver {
             let node = slot / 3;
             for c in 0..3 {
                 padded.coordinates[3 * node + c] = u.coordinates[i];
+                if bodies_known {
+                    padded.body[3 * node + c] = u.body[i];
+                }
             }
         }
         Some(padded)
@@ -802,6 +1020,12 @@ impl LinearSolver for PcgSolver {
         self.pattern = Some(std::sync::Arc::new(pattern.clone()));
         self.analyzed_unknowns = self.unknowns.clone();
         self.amg = None;
+        *self.deflation.get_mut().unwrap_or_else(|e| e.into_inner()) = None;
+        self.candidates
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.candidates_pending.store(false, Ordering::Relaxed);
         self.reused = false;
         self.iterations_after_build.store(0, Ordering::Relaxed);
         self.factorized = false;
@@ -848,9 +1072,15 @@ impl LinearSolver for PcgSolver {
             // The hierarchy of the previous factorization (same pattern) serves on while
             // the matrix changed little (the diagonal, in the Euclidean norm; a Newton
             // iteration moves it a little, another system of the same procedure a lot)
-            // and the solves with it did not take many more iterations than the first one.
+            // and while its staleness costs less than a new hierarchy: the iterations
+            // the last solve took beyond the first solve after the build (what a new
+            // hierarchy is expected to take), at the last solve's pace, over the next
+            // `STALE_HORIZON` solves, against the time of the build.
             let after_build = self.iterations_after_build.load(Ordering::Relaxed);
             let last = self.last_iterations.load(Ordering::Relaxed);
+            let pace = f64::from_bits(self.seconds_per_iteration.load(Ordering::Relaxed));
+            let stale_cost = STALE_HORIZON * last.saturating_sub(after_build) as f64 * pace;
+            let cheaper_to_keep = stale_cost <= self.build_seconds;
             let similar = || {
                 let now = self.full.diagonal();
                 let (mut change, mut scale) = (0.0, 0.0);
@@ -860,13 +1090,32 @@ impl LinearSolver for PcgSolver {
                 }
                 now.len() == self.built_diagonal.len() && change <= 0.25 * 0.25 * scale
             };
-            let keep = after_build > 0 && last * 2 <= after_build * 3 && !reuse_disabled();
+            let pending = self.candidates_pending.load(Ordering::Relaxed);
+            let keep = after_build > 0 && cheaper_to_keep && !pending && !reuse_disabled();
+            if std::env::var("PLXS_PCG_TRACE").is_ok() && after_build > 0 {
+                eprintln!(
+                    "pcg: hierarchy {}: last solve {last} iterations, first after build {after_build}, {pace:.3} s per iteration, build {:.2} s",
+                    if keep { "kept" } else { "rebuilt" },
+                    self.build_seconds
+                );
+            }
             if let Some(amg) = self.amg.as_mut().filter(|_| keep && similar()) {
                 amg.refresh(&self.full);
                 #[cfg(feature = "gpu")]
                 amg.attach_operator(&self.full);
                 self.reused = true;
                 self.factorized = true;
+                // The deflated modes stay, their products with the new matrix follow it.
+                let mut deflation = std::mem::take(&mut self.deflation);
+                if let Some(defl) = deflation
+                    .get_mut()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_mut()
+                    && !defl.refresh(self)
+                {
+                    *deflation.get_mut().unwrap_or_else(|e| e.into_inner()) = None;
+                }
+                self.deflation = deflation;
                 return Ok(());
             }
             match self.build_multigrid() {
@@ -1010,6 +1259,342 @@ impl Stall {
     }
 }
 
+/// A solve collects at most this many Lanczos vectors (single precision, one per
+/// iteration) for the deflation.
+/// Over how many solves a kept hierarchy is expected to serve on: its extra iterations
+/// over that many solves are weighed against the time of a new build.
+const STALE_HORIZON: f64 = 2.0;
+
+/// How many Lanczos vectors a learning solve keeps (single precision).
+const DEFLATE_COLLECT_MAX: usize = 96;
+/// A solve shorter than this teaches nothing worth deflating.
+const DEFLATE_FROM_ITERATIONS: usize = 30;
+/// Ritz values below this fraction of the largest one are deflated: a hierarchy that fits
+/// its matrix has no eigenvalue of `M⁻¹ A` below about 0.17 (a solid block of quadratic
+/// tetrahedra); the slow modes of a thin flange or a contact interface sit at 0.02 to 0.1.
+const DEFLATE_BELOW: f64 = 0.15;
+/// At most this many modes are deflated (two vectors of the system's length each).
+const DEFLATE_MAX: usize = 24;
+/// How many of the slowest modes become near-nullspace candidates of the next hierarchy
+/// (`PLXS_AMG_CANDIDATES`).
+fn candidate_count() -> usize {
+    std::env::var("PLXS_AMG_CANDIDATES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3)
+}
+
+/// Deflation of the slowest modes of the preconditioned operator (Saad, Yeung, Erhel,
+/// Guyomarc'h, "A deflated version of the conjugate gradient algorithm", SIAM J. Sci.
+/// Comput. 21 (2000)): the Newton iterations of a step solve a sequence of systems with
+/// one multigrid hierarchy, and the first solve shows, in its Lanczos tridiagonal, which
+/// modes the hierarchy reduces slowly (the bending of a thin flange, the modes of a body
+/// held by contact only). Their Ritz vectors `W` are taken out of the solves after it,
+/// in the projected form of Frank and Vuik, "On the construction of deflation-based
+/// preconditioners", SIAM J. Sci. Comput. 23 (2001): the conjugate gradients solve
+/// `P A x̃ = P b` with `P = I − A W E⁻¹ Wᵀ`, `E = Wᵀ A W`, whose operator has the deflated
+/// eigenvalues replaced by zero, and `x = W E⁻¹ Wᵀ b + Pᵀ x̃` solves the original system.
+/// The multigrid stays as it is; `A W` and `E` follow the matrix of every factorization.
+struct Deflation {
+    d: usize,
+    /// `d` vectors of the system's length, one after the other.
+    w: Vec<f64>,
+    /// `A W`, in the same layout.
+    aw: Vec<f64>,
+    /// The Cholesky factor (lower, row major, `d × d`) of `E = Wᵀ A W`.
+    chol: Vec<f64>,
+}
+
+impl Deflation {
+    /// Recomputes `A W` and `E` for the solver's current matrix; `false` when `E` is not
+    /// positive definite (the modes no longer fit).
+    fn refresh(&mut self, solver: &PcgSolver) -> bool {
+        let n = solver.padded;
+        let d = self.d;
+        for j in 0..d {
+            let (w, aw) = (
+                &self.w[j * n..(j + 1) * n],
+                &mut self.aw[j * n..(j + 1) * n],
+            );
+            solver.product(w, aw);
+        }
+        let mut e = vec![0.0; d * d];
+        for i in 0..d {
+            for j in 0..=i {
+                let v = dot(&self.w[i * n..(i + 1) * n], &self.aw[j * n..(j + 1) * n]);
+                e[i * d + j] = v;
+                e[j * d + i] = v;
+            }
+        }
+        // Cholesky, lower.
+        let mut l = vec![0.0; d * d];
+        for i in 0..d {
+            for j in 0..=i {
+                let mut sum = e[i * d + j];
+                for k in 0..j {
+                    sum -= l[i * d + k] * l[j * d + k];
+                }
+                if i == j {
+                    if sum <= 0.0 || !sum.is_finite() {
+                        return false;
+                    }
+                    l[i * d + i] = sum.sqrt();
+                } else {
+                    l[i * d + j] = sum / l[j * d + j];
+                }
+            }
+        }
+        self.chol = l;
+        true
+    }
+
+    /// `E⁻¹ y`.
+    fn solve_e(&self, y: &[f64]) -> Vec<f64> {
+        let d = self.d;
+        let l = &self.chol;
+        let mut x = y.to_vec();
+        for i in 0..d {
+            for k in 0..i {
+                x[i] -= l[i * d + k] * x[k];
+            }
+            x[i] /= l[i * d + i];
+        }
+        for i in (0..d).rev() {
+            for k in i + 1..d {
+                x[i] -= l[k * d + i] * x[k];
+            }
+            x[i] /= l[i * d + i];
+        }
+        x
+    }
+
+    /// `Vᵀ x` for the `d` vectors `V` (`w` or `aw`).
+    fn transpose_product(&self, v: &[f64], x: &[f64]) -> Vec<f64> {
+        let n = x.len();
+        (0..self.d)
+            .into_par_iter()
+            .map(|j| dot(&v[j * n..(j + 1) * n], x))
+            .collect()
+    }
+
+    /// `out += sign · V μ`.
+    fn add_combination(&self, v: &[f64], mu: &[f64], sign: f64, out: &mut [f64]) {
+        let n = out.len();
+        let d = self.d;
+        out.par_chunks_mut(2048).enumerate().for_each(|(c, out)| {
+            let start = c * 2048;
+            for j in 0..d {
+                let coefficient = sign * mu[j];
+                if coefficient == 0.0 {
+                    continue;
+                }
+                let v = &v[j * n + start..j * n + start + out.len()];
+                out.iter_mut()
+                    .zip(v)
+                    .for_each(|(o, v)| *o += coefficient * v);
+            }
+        });
+    }
+
+    /// `q ← P q = q − A W E⁻¹ Wᵀ q`: takes the part of a residual (or of `A p`) in the
+    /// deflated space out.
+    fn project(&self, q: &mut [f64]) {
+        let mu = self.solve_e(&self.transpose_product(&self.w, q));
+        self.add_combination(&self.aw, &mu, -1.0, q);
+    }
+}
+
+/// The eigenvalues and (row major, one per row) eigenvectors of the symmetric tridiagonal
+/// matrix with diagonal `diag` and off-diagonal `off` (`off[k]` couples `k-1` and `k`):
+/// the implicit QL algorithm with Wilkinson shifts.
+fn tridiagonal_eigen(diag: &[f64], off: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let m = diag.len();
+    let mut d = diag.to_vec();
+    // e[k] couples k and k+1.
+    let mut e: Vec<f64> = (0..m)
+        .map(|k| off.get(k + 1).copied().unwrap_or(0.0))
+        .collect();
+    // z holds the eigenvectors as columns: z[i*m + j] is component i of vector j.
+    let mut z = vec![0.0; m * m];
+    for i in 0..m {
+        z[i * m + i] = 1.0;
+    }
+    for l in 0..m {
+        let mut iterations = 0;
+        loop {
+            let mut mm = l;
+            while mm + 1 < m {
+                let dd = d[mm].abs() + d[mm + 1].abs();
+                if e[mm].abs() <= f64::EPSILON * dd {
+                    break;
+                }
+                mm += 1;
+            }
+            if mm == l {
+                break;
+            }
+            iterations += 1;
+            if iterations > 60 {
+                break;
+            }
+            let mut g = (d[l + 1] - d[l]) / (2.0 * e[l]);
+            let mut r = g.hypot(1.0);
+            g = d[mm] - d[l] + e[l] / (g + r.copysign(g));
+            let (mut s, mut c, mut p) = (1.0, 1.0, 0.0);
+            let mut i = mm;
+            let mut underflow = false;
+            while i > l {
+                i -= 1;
+                let f = s * e[i];
+                let b = c * e[i];
+                r = f.hypot(g);
+                e[i + 1] = r;
+                if r == 0.0 {
+                    d[i + 1] -= p;
+                    e[mm] = 0.0;
+                    underflow = true;
+                    break;
+                }
+                s = f / r;
+                c = g / r;
+                g = d[i + 1] - p;
+                r = (d[i] - g) * s + 2.0 * c * b;
+                p = s * r;
+                d[i + 1] = g + p;
+                g = c * r - b;
+                for k in 0..m {
+                    let f = z[k * m + i + 1];
+                    z[k * m + i + 1] = s * z[k * m + i] + c * f;
+                    z[k * m + i] = c * z[k * m + i] - s * f;
+                }
+            }
+            if underflow {
+                continue;
+            }
+            d[l] -= p;
+            e[l] = g;
+            e[mm] = 0.0;
+        }
+    }
+    // Rows: vector j is z[.., j].
+    let vectors: Vec<f64> = (0..m)
+        .flat_map(|j| (0..m).map(move |i| (i, j)))
+        .map(|(i, j)| z[i * m + j])
+        .collect();
+    (d, vectors)
+}
+
+/// The Lanczos tridiagonal `T` built from the conjugate gradient coefficients
+/// (`T_kk = 1/α_k + β_{k-1}/α_{k-1}`, `T_{k,k+1} = √β_k / α_k`), whose eigenvalues
+/// approximate those of the preconditioned operator `M⁻¹ A`; `PLXS_PCG_TRACE` prints the
+/// extreme ones.
+struct RitzTrace {
+    enabled: bool,
+    alphas: Vec<f64>,
+    betas: Vec<f64>,
+}
+
+impl RitzTrace {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            alphas: Vec::new(),
+            betas: Vec::new(),
+        }
+    }
+
+    fn alpha(&mut self, alpha: f64) {
+        self.alphas.push(alpha);
+    }
+
+    fn beta(&mut self, beta: f64) {
+        self.betas.push(beta);
+    }
+
+    /// The diagonal and off-diagonal (`off[k]` couples `k-1` and `k`) of `T`.
+    fn tridiagonal(&self) -> (Vec<f64>, Vec<f64>) {
+        let m = self.alphas.len();
+        let mut diag = vec![0.0; m];
+        let mut off = vec![0.0; m];
+        for k in 0..m {
+            diag[k] = 1.0 / self.alphas[k];
+            if k > 0 {
+                diag[k] += self.betas[k - 1] / self.alphas[k - 1];
+                off[k] = self.betas[k - 1].max(0.0).sqrt() / self.alphas[k - 1];
+            }
+        }
+        (diag, off)
+    }
+
+    fn report(&self) {
+        let m = self.alphas.len();
+        if !self.enabled || m < 2 {
+            return;
+        }
+        let (diag, off) = self.tridiagonal();
+        let values: Vec<f64> = tridiagonal_eigenvalues(&diag, &off)
+            .into_iter()
+            .filter(|v| *v > 0.0)
+            .collect();
+        let m = values.len();
+        if m == 0 {
+            return;
+        }
+        let low: Vec<String> = values.iter().take(8).map(|v| format!("{v:.2e}")).collect();
+        let high: Vec<String> = values
+            .iter()
+            .rev()
+            .take(4)
+            .map(|v| format!("{v:.2e}"))
+            .collect();
+        eprintln!(
+            "pcg: ritz values of M^-1 A: smallest {} ... largest {} (condition {:.1e})",
+            low.join(" "),
+            high.join(" "),
+            values[m - 1] / values[0].max(f64::MIN_POSITIVE)
+        );
+    }
+}
+
+/// The eigenvalues (ascending) of the symmetric tridiagonal matrix with diagonal `diag`
+/// and off-diagonal `off` (`off[k]` couples `k-1` and `k`), by bisection on the Sturm
+/// count.
+fn tridiagonal_eigenvalues(diag: &[f64], off: &[f64]) -> Vec<f64> {
+    let m = diag.len();
+    let count_below = |x: f64| {
+        let mut count = 0;
+        let mut q = 1.0;
+        for k in 0..m {
+            let o = if k > 0 { off[k] * off[k] } else { 0.0 };
+            q = diag[k] - x - if q != 0.0 { o / q } else { o / 1e-300 };
+            if q < 0.0 {
+                count += 1;
+            }
+        }
+        count
+    };
+    let radius = (0..m)
+        .map(|k| diag[k].abs() + off[k].abs() + off.get(k + 1).map_or(0.0, |o| o.abs()))
+        .fold(0.0_f64, f64::max);
+    (0..m)
+        .map(|i| {
+            let (mut lo, mut hi) = (-radius, radius);
+            for _ in 0..200 {
+                let mid = 0.5 * (lo + hi);
+                if count_below(mid) > i {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+                if hi - lo <= 1e-12 * radius {
+                    break;
+                }
+            }
+            0.5 * (lo + hi)
+        })
+        .collect()
+}
+
 fn indefinite() -> Error {
     numerical(
         plxs_core::Failure::NotPositiveDefinite,
@@ -1106,6 +1691,79 @@ mod tests {
         }
         a.add(0, 0, 10.0);
         a
+    }
+
+    #[test]
+    fn tridiagonal_eigen_decomposes_the_matrix() {
+        let diag = [2.0, 3.0, 1.0, 4.0, 2.5];
+        let off = [0.0, 0.5, -0.7, 0.3, 0.9];
+        let (values, vectors) = tridiagonal_eigen(&diag, &off);
+        let m = 5;
+        let mut sorted = values.clone();
+        sorted.sort_by(f64::total_cmp);
+        let sturm = tridiagonal_eigenvalues(&diag, &off);
+        for (a, b) in sorted.iter().zip(&sturm) {
+            assert!((a - b).abs() < 1e-9, "{sorted:?} vs {sturm:?}");
+        }
+        for j in 0..m {
+            let y = &vectors[j * m..(j + 1) * m];
+            for i in 0..m {
+                let mut t = diag[i] * y[i];
+                if i > 0 {
+                    t += off[i] * y[i - 1];
+                }
+                if i + 1 < m {
+                    t += off[i + 1] * y[i + 1];
+                }
+                assert!((t - values[j] * y[i]).abs() < 1e-9, "vector {j}");
+            }
+            let norm: f64 = y.iter().map(|v| v * v).sum();
+            assert!((norm - 1.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn deflated_conjugate_gradients_match_the_direct_solver() {
+        let n = 20_000;
+        let a = chain(n);
+        let b: Vec<f64> = (0..n).map(|i| ((i * 37) % 11) as f64 - 5.0).collect();
+        let mut direct = LdltSolver::new(1);
+        direct.analyze(a.pattern()).unwrap();
+        direct.factorize(&a).unwrap();
+        let mut expected = b.clone();
+        direct.solve(&mut expected).unwrap();
+
+        let mut pcg = PcgSolver::new();
+        pcg.analyze(a.pattern()).unwrap();
+        pcg.factorize(&a).unwrap();
+        let plain = pcg.solve_counted(&mut b.clone()).unwrap();
+        // Any A-independent vectors deflate correctly; smooth ones (the slow modes of a
+        // multigrid are smooth) also save iterations.
+        let d = 3;
+        let w: Vec<f64> = (0..d)
+            .flat_map(|j| {
+                (0..n).map(move |i| ((i as f64) * (j + 1) as f64 * 1e-4).sin() + 0.1 * j as f64)
+            })
+            .collect();
+        let mut defl = Deflation {
+            d,
+            w,
+            aw: vec![0.0; d * n],
+            chol: Vec::new(),
+        };
+        assert!(defl.refresh(&pcg));
+        *pcg.deflation.lock().unwrap() = Some(defl);
+        let mut x = b.clone();
+        let deflated = pcg.solve_counted(&mut x).unwrap();
+        assert!(deflated.relative_residual <= TOLERANCE, "{deflated:?}");
+        let scale = expected.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        for (x, e) in x.iter().zip(&expected) {
+            assert!((x - e).abs() <= 1e-7 * scale, "{x} vs {e}");
+        }
+        assert!(
+            deflated.iterations <= plain.iterations,
+            "{deflated:?} vs {plain:?}"
+        );
     }
 
     #[test]
