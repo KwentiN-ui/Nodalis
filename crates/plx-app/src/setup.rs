@@ -1362,6 +1362,7 @@ const RADIATION: &str = "Radiation";
 const GRAVITY: &str = "Gravity";
 const CENTRIFUGAL: &str = "Centrifugal_Load";
 const MOVING: &str = "Moving_Load";
+const EXCITATION: &str = "Excitation";
 
 /// Whether the boundary condition dialog offers a preview of the motion: a prescribed
 /// displacement that follows an amplitude of the model.
@@ -1740,9 +1741,14 @@ fn nearest_direction(vector: [f64; 3]) -> GravityDirection {
     }
 }
 
-fn load_kinds() -> [(&'static str, &'static str, LoadKind); 13] {
+fn load_kinds() -> [(&'static str, &'static str, LoadKind); 14] {
     [
         ("Force", FORCE, LoadKind::force([0.0; 3])),
+        (
+            "Excitation (impulse, sine, chirp)",
+            EXCITATION,
+            LoadKind::Excitation(plx_model::Excitation::default()),
+        ),
         (
             "Remote Force",
             REMOTE_FORCE,
@@ -1870,6 +1876,7 @@ fn load_kind_name(kind: &LoadKind) -> &'static str {
         LoadKind::Gravity(_) | LoadKind::StandardGravity(_) => GRAVITY,
         LoadKind::Centrifugal { .. } => CENTRIFUGAL,
         LoadKind::Moving(_) => MOVING,
+        LoadKind::Excitation(_) => EXCITATION,
     }
 }
 
@@ -1884,6 +1891,7 @@ enum LoadTarget {
 fn load_target(kind: &LoadKind) -> LoadTarget {
     match kind {
         LoadKind::Force { .. }
+        | LoadKind::Excitation(_)
         | LoadKind::RemoteForce(_)
         | LoadKind::Moment(_)
         | LoadKind::ConcentratedFlux(_) => LoadTarget::Nodes,
@@ -3186,6 +3194,12 @@ impl Editor {
                     LoadKind::RemoteForce(remote) => {
                         remote_force_rows(ui, remote, &region.region(), model, units);
                     }
+                    LoadKind::Excitation(excitation) => {
+                        crate::excitation_rows::excitation_rows(
+                            ui, excitation, period, two_d, units,
+                        );
+                        revolution_hint(ui, axisymmetric);
+                    }
                     LoadKind::PreTension {
                         value,
                         by_displacement,
@@ -3459,7 +3473,12 @@ impl Editor {
                 } else {
                     "Amplitude"
                 };
-                amplitude_row(ui, label, "load amplitude", &mut load.amplitude, &model.fe);
+                // An excitation follows its signal.
+                if matches!(load.kind, LoadKind::Excitation(_)) {
+                    load.amplitude = None;
+                } else {
+                    amplitude_row(ui, label, "load amplitude", &mut load.amplitude, &model.fe);
+                }
                 if (0..3).any(|c| load.table(c).is_some()) {
                     ui.label("");
                     ui.weak("Values with a table (T) follow it instead of the amplitude.");
@@ -6712,7 +6731,7 @@ fn dynamic_form(
     let integration = settings.integration(context.amplitude_interval);
     let reason = match integration.limited_by {
         StepLimit::Frames => "one per frame",
-        StepLimit::Amplitude => "for the amplitudes of the loads",
+        StepLimit::Amplitude => "for the amplitudes and signals of the loads",
         StepLimit::Frequency => "for the frequency limit",
         StepLimit::Fixed => "as set",
     };

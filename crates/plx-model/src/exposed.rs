@@ -504,7 +504,10 @@ fn load_slot(kind: &mut LoadKind, field: Field) -> Option<(Slot<'_>, ValueKind)>
     }
     Some(match (kind, field) {
         (LoadKind::Pressure(p), Field::Value) => real(p, Quantity::Pressure),
-        (LoadKind::Force { value, .. }, field) => real(&mut value[field.axis()?], Quantity::Force),
+        (LoadKind::Force { value, .. }, field)
+        | (LoadKind::Excitation(crate::Excitation { value, .. }), field) => {
+            real(&mut value[field.axis()?], Quantity::Force)
+        }
         (LoadKind::Moment(m), field) => real(&mut m[field.axis()?], Quantity::Moment),
         // The force along X, Y and Z, the moment about RX, RY and RZ.
         (LoadKind::RemoteForce(remote), field) => match field.axis() {

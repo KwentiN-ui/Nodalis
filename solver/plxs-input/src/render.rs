@@ -14,6 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use plxs_core::amplitude::Signal;
 use plxs_core::constraints::{RigidBodyNodes, TransformKind};
 use plxs_core::contact::{Adjust, ContactKind, GapConductance, SurfaceBehavior};
 use plxs_core::element::ElementType;
@@ -672,10 +673,38 @@ fn amplitudes(out: &mut Out, model: &Model) {
         if amplitude.shift_y != 0.0 {
             let _ = write!(header, ", Shifty={}", number(amplitude.shift_y));
         }
+        let values: Vec<f64> = match amplitude.signal {
+            Some(Signal::Pulse { start, width }) => {
+                header.push_str(", Shape=Pulse");
+                vec![start, width]
+            }
+            Some(Signal::Sine {
+                start,
+                end,
+                frequency,
+                phase,
+            }) => {
+                header.push_str(", Shape=Sine");
+                vec![start, end, frequency, phase.to_degrees()]
+            }
+            Some(Signal::Chirp {
+                start,
+                end,
+                from,
+                to,
+                logarithmic,
+            }) => {
+                header.push_str(", Shape=Chirp");
+                if logarithmic {
+                    header.push_str(", Sweep=Log");
+                }
+                vec![start, end, from, to]
+            }
+            None => (amplitude.points.iter())
+                .flat_map(|&(t, v)| [t, v])
+                .collect(),
+        };
         out.keyword(&header);
-        let values: Vec<f64> = (amplitude.points.iter())
-            .flat_map(|&(t, v)| [t, v])
-            .collect();
         out.numbers(&values);
     }
 }

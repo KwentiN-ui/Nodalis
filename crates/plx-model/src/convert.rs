@@ -266,6 +266,37 @@ impl FeModel {
                         c.all(point, Quantity::Length);
                         c.value(speed, Quantity::RotationalSpeed);
                     }
+                    LoadKind::Excitation(excitation) => {
+                        c.all(&mut excitation.value, Quantity::Force);
+                        match &mut excitation.signal {
+                            crate::Signal::Impulse { time, width } => {
+                                c.value(time, Quantity::Time);
+                                c.value(width, Quantity::Time);
+                            }
+                            crate::Signal::Sine {
+                                frequency,
+                                start,
+                                end,
+                                ..
+                            } => {
+                                c.value(frequency, Quantity::Frequency);
+                                c.value(start, Quantity::Time);
+                                c.option(end, Quantity::Time);
+                            }
+                            crate::Signal::Chirp {
+                                from,
+                                to,
+                                start,
+                                end,
+                                ..
+                            } => {
+                                c.value(from, Quantity::Frequency);
+                                c.value(to, Quantity::Frequency);
+                                c.value(start, Quantity::Time);
+                                c.option(end, Quantity::Time);
+                            }
+                        }
+                    }
                     LoadKind::Moving(moving) => {
                         for length in [
                             &mut moving.start,

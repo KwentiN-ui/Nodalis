@@ -186,6 +186,8 @@ step. A frequency step takes no loads.
     to the nodes (`*CLOAD`). With #ui("Apply to all nodes individually") the whole force acts
     at every node of the region instead, as a concentrated force in CalculiX; it is off by
     default.],
+  [Excitation], [A force `F1` to `F3` that follows a signal (impulse, sine, chirp) to shake
+    the structure in a Dynamic step (@excitation).],
   [Remote Force], [Force `F1` to `F3` and moment `M1` to `M3` at a point that the selected
     faces, edges or points follow, rigidly or on average, as Ansys' remote force does
     (@remote-force). The way to put a moment on faces of solids.],

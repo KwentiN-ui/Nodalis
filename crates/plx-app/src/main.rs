@@ -21,6 +21,7 @@ mod cross_section;
 mod dialog;
 mod distribution_dialog;
 mod dock;
+mod excitation_rows;
 mod exploded;
 mod expose;
 mod features;

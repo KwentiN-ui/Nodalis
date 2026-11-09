@@ -21,7 +21,8 @@ pub struct Integration {
 pub enum StepLimit {
     /// The interval between two result frames.
     Frames,
-    /// A tenth of the shortest segment of an amplitude the loads follow.
+    /// A tenth of the shortest segment of an amplitude the loads follow, or of the feature
+    /// of an excitation's signal (an impulse's width, half a period).
     Amplitude,
     /// `1 / (20 f)` of the frequency limit.
     Frequency,
@@ -138,7 +139,9 @@ impl FeModel {
         let bcs = (step.boundary_conditions.iter())
             .filter(|b| b.active && b.kind.takes_amplitude())
             .map(|b| &b.amplitude);
-        let loads = (step.loads.iter().filter(|l| l.active))
+        // An excitation follows its signal, not an amplitude.
+        let loads = (step.loads.iter())
+            .filter(|l| l.active && !matches!(l.kind, crate::LoadKind::Excitation(_)))
             .flat_map(|l| [&l.amplitude, &l.factor_amplitude]);
         let fields = (step.defined_fields.iter().filter(|f| f.active)).map(|f| &f.amplitude);
         let mut used: Vec<&Amplitude> = Vec::new();
@@ -154,7 +157,8 @@ impl FeModel {
 
     /// The shortest segment between two points of the amplitudes a step follows, within
     /// the step: what the time step must resolve so the loads are applied as given.
-    /// Amplitudes in total time count with all their segments. `None` without amplitudes.
+    /// Amplitudes in total time count with all their segments, the signal of an excitation
+    /// with its [`crate::Signal::feature_length`]. `None` without amplitudes.
     pub fn amplitude_interval(&self, step: &Step, duration: f64) -> Option<f64> {
         let mut shortest: Option<f64> = None;
         for amplitude in self.step_amplitudes(step) {
@@ -178,6 +182,14 @@ impl FeModel {
                 let gap = t1 - t0;
                 if gap > 0.0 && t1 > 0.0 && t0 < duration {
                     shortest = Some(shortest.map_or(gap, |s| s.min(gap)));
+                }
+            }
+        }
+        for load in step.loads.iter().filter(|l| l.active) {
+            if let crate::LoadKind::Excitation(excitation) = &load.kind {
+                let length = excitation.signal.feature_length();
+                if length > 0.0 && length.is_finite() && excitation.signal.start() < duration {
+                    shortest = Some(shortest.map_or(length, |s| s.min(length)));
                 }
             }
         }
