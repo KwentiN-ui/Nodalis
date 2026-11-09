@@ -11337,3 +11337,40 @@ fn solver_moves_the_tip_along_tables_and_stops_at_their_points() {
     let (t, u2, u3) = motion[0];
     assert!((t - 2.0).abs() < 1e-9 && (u2 - 4.0).abs() < 1e-6 && (u3 - 0.8).abs() < 1e-6);
 }
+
+/// A rigid remote force in one step and a deformable one on the same face in the next:
+/// the rigid body holds in every step and takes all nodes of the face, so the point of the
+/// deformable force depends on the face instead of the face on it. Its force still bends
+/// the beam, as much as the rigid one would.
+#[test]
+fn solver_bends_the_beam_by_a_deformable_force_on_a_face_rigid_from_another_step() {
+    let force = |behavior| {
+        remote_force(|r| {
+            r.force = [0.0, 0.0, -100.0];
+            r.behavior = behavior;
+        })
+    };
+    let (mesh, mut model) = cantilever(force(RemoteBehavior::Rigid));
+    let mut second = model.steps[0].clone();
+    second.name = "Step-2".into();
+    second.loads[0] = force(RemoteBehavior::Deformable);
+    model.steps.push(second);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert_eq!(text.matches("*Rigid body").count(), 1, "{text}");
+    // The deformable point's equations, each depending on the point.
+    assert_eq!(equations(&mesh, &model), 6, "{text}");
+    let Some(frd) = run_solver("rigid-then-deformable", &text) else {
+        return;
+    };
+    let (_, rigid) = cantilever(force(RemoteBehavior::Rigid));
+    let Some(alone) = run_solver("rigid-alone", &write_inp(&mesh, &rigid, "").unwrap()) else {
+        return;
+    };
+    let expected = node_value(&alone, "DISP", "U3", 99);
+    let ours = node_value(&frd, "DISP", "U3", 99);
+    assert!(expected < -0.1, "{expected}");
+    assert!(
+        (ours - expected).abs() < 1e-6 * expected.abs(),
+        "{ours} != {expected}"
+    );
+}

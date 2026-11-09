@@ -2066,6 +2066,7 @@ fn constraints(
                             spec: &spec,
                             behavior: RemoteBehavior::Deformable,
                             owner: ModelItem::Constraint(index),
+                            free_point: !model.point_bound(body.reference_point),
                         },
                         resolved,
                         held,
@@ -2160,6 +2161,7 @@ fn constraints(
                     spec: remote,
                     behavior,
                     owner: ModelItem::BoundaryCondition(s, i),
+                    free_point: false,
                 },
                 point,
                 held,
@@ -2205,6 +2207,7 @@ fn constraints(
                 spec: &spec,
                 behavior: force.behavior,
                 owner: ModelItem::Load(s, i),
+                free_point: true,
             },
             point,
             held,
@@ -2292,6 +2295,7 @@ fn joint_item(
                 spec: &spec,
                 behavior: joint.behavior,
                 owner: ModelItem::Constraint(index),
+                free_point: false,
             },
             point,
             held,
@@ -2325,6 +2329,10 @@ struct RemoteSource<'r> {
     spec: &'r plx_model::Displacement,
     behavior: RemoteBehavior,
     owner: ModelItem,
+    /// Nothing holds the point or binds its nodes otherwise (a force on it, or a reference
+    /// point without boundary conditions or joints): a deformable point may then depend on
+    /// the region where the region's nodes are taken, e.g. by a rigid body of another step.
+    free_point: bool,
 }
 
 /// Adds the reference and rotation node of a resolved point and couples the nodes of the
@@ -2348,6 +2356,7 @@ fn remote_point(
         spec,
         behavior,
         owner,
+        free_point,
     } = source;
     let (reference, rotation) = (*next_node, *next_node + 1);
     *next_node += 2;
@@ -2390,8 +2399,15 @@ fn remote_point(
             for equation_terms in point.equations(sets.mesh, space) {
                 let mut terms = remote_terms(&equation_terms, point.axes, [reference, rotation]);
                 let mesh = sets.mesh;
+                // The region's nodes depend on the point; a free point depends on the
+                // region where they are all taken. Either way a force on the point reaches
+                // the region.
                 if (sets.dofs).claim_equation(item, &mut terms, |n| {
-                    n != reference && n != rotation && mesh.node(n).is_some()
+                    if n == reference || n == rotation {
+                        free_point
+                    } else {
+                        mesh.node(n).is_some()
+                    }
                 }) {
                     items.push(ConstraintItem::Equation(equation(&terms)));
                 }
