@@ -15,6 +15,7 @@ pub struct Settings {
     pub solver: Solver,
     pub gmsh: Gmsh,
     pub updates: Updates,
+    pub saving: Saving,
     /// Model space and unit system last chosen for a new model, proposed for the next one.
     pub new_model: plx_model::ModelProperties,
     /// Version of the stored settings, for [`Settings::upgrade`]; missing (0) in those of
@@ -44,6 +45,7 @@ impl Default for Settings {
             solver: Solver::default(),
             gmsh: Gmsh::default(),
             updates: Updates::default(),
+            saving: Saving::default(),
             new_model: plx_model::ModelProperties::default(),
             format: FORMAT,
         }
@@ -306,6 +308,32 @@ impl Default for Updates {
     }
 }
 
+/// Saving the project by itself: the "Saving" settings page.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Saving {
+    /// The project saves itself to its file once it has had changes for [`Self::minutes`].
+    pub autosave: bool,
+    /// Minutes autosave waits after the first change that is not saved.
+    pub minutes: u32,
+}
+
+impl Default for Saving {
+    fn default() -> Self {
+        Self {
+            autosave: false,
+            minutes: 5,
+        }
+    }
+}
+
+impl Saving {
+    /// The time autosave waits, at least a minute.
+    pub fn interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(60 * u64::from(self.minutes.max(1)))
+    }
+}
+
 /// A path as typed or pasted: without surrounding spaces and the quotes that Windows'
 /// "Als Pfad kopieren" adds.
 pub fn clean_path(text: &str) -> &str {
@@ -339,6 +367,7 @@ fn is_writable(dir: &std::path::Path) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Graphics,
+    Saving,
     PostProcessing,
     Solver,
     Gmsh,
@@ -346,8 +375,9 @@ pub enum Page {
 }
 
 impl Page {
-    const ALL: [Page; 5] = [
+    const ALL: [Page; 6] = [
         Page::Graphics,
+        Page::Saving,
         Page::PostProcessing,
         Page::Solver,
         Page::Gmsh,
@@ -357,6 +387,7 @@ impl Page {
     fn title(self) -> &'static str {
         match self {
             Page::Graphics => "Graphics",
+            Page::Saving => "Saving",
             Page::PostProcessing => "Post-processing",
             Page::Solver => "Solver",
             Page::Gmsh => "Gmsh",
@@ -582,6 +613,27 @@ impl SettingsWindow {
                     });
                 ui.add_space(8.0);
                 self.solver_check_ui(ui);
+            }
+            Page::Saving => {
+                let saving = &mut self.draft.saving;
+                ui.checkbox(&mut saving.autosave, "Autosave").on_hover_text(
+                    "Saves the project to its file by itself once it has had changes for the \
+                     time below. A new project is saved once you have saved it the first time. \
+                     Saving runs in the background: you can go on working meanwhile.",
+                );
+                ui.add_enabled_ui(saving.autosave, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Save after");
+                        ui.add(
+                            numeric::drag_value(&mut saving.minutes)
+                                .range(1..=240)
+                                .suffix(" min"),
+                        )
+                        .on_hover_text(
+                            "Minutes from the first change that is not saved yet to the autosave.",
+                        );
+                    });
+                });
             }
             Page::Gmsh => self.gmsh_ui(ui),
             Page::Updates => {

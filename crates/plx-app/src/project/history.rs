@@ -102,6 +102,9 @@ pub(super) struct History {
     /// The highest id a block had: ids of deleted blocks are not given again, so that undo
     /// can bring them back.
     pub(super) highest_id: u64,
+    /// Changes made, undone and redone so far, for autosave; another project does not
+    /// start it again.
+    pub(super) edits: u64,
 }
 
 impl History {
@@ -117,11 +120,13 @@ impl History {
     pub(super) fn clear(&mut self) {
         *self = Self {
             highest_id: self.highest_id,
+            edits: self.edits,
             ..Self::default()
         };
     }
 
     fn push(&mut self, change: Change) {
+        self.edits += 1;
         self.undo.push(change);
         self.redo.clear();
         if self.undo.len() > DEPTH {
@@ -264,6 +269,7 @@ impl ProjectApp {
         match self.restore(ctx, change) {
             Ok(change) => {
                 self.history.redo.push(change);
+                self.history.edits += 1;
                 self.output.push("Undone".into());
             }
             Err(change) => self.history.undo.push(change),
@@ -278,6 +284,7 @@ impl ProjectApp {
         match self.restore(ctx, change) {
             Ok(change) => {
                 self.history.undo.push(change);
+                self.history.edits += 1;
                 self.output.push("Redone".into());
             }
             Err(change) => self.history.redo.push(change),

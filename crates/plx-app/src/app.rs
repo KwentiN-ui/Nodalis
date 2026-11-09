@@ -927,6 +927,12 @@ impl AnalysisWindow {
     /// What the program does or shows; returns whether the meshing was cancelled.
     fn status_text(&self, ui: &mut egui::Ui) -> bool {
         let mut cancel = false;
+        // The project being saved, in the background.
+        if let Some(status) = crate::save_status::get(ui.ctx()) {
+            ui.spinner();
+            ui.label(status);
+            ui.separator();
+        }
         ui.horizontal(|ui| match (&self.loading, self.workbench.shown()) {
             (Some(path), _) => {
                 ui.spinner();

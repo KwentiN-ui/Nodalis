@@ -26,8 +26,22 @@ Geometry, FE Model and Results workspaces it has these entries; importing is on 
   [Close Analysis], [Closes the analysis; it stays in the project.],
 )
 
-#note[Nodalis does not ask about unsaved changes. Save regularly. Changes of the model can be
-  undone (@undo).]
+#note[Nodalis does not ask about unsaved changes. Save regularly, or switch on autosave in the
+  settings (@settings-saving). Changes of the model can be undone (@undo).]
+
+=== Saving in the background <save-background>
+
+Saving runs in the background: the windows stay usable while a large project is written, and
+the status bar shows a spinner with the file being saved. Nodalis copies the project when you
+save, which takes a moment only; changes you make while the file is written are not in it and
+are saved the next time. A save asked for while another one runs starts after it. Closing
+Nodalis while it saves waits for the file and then closes; if the file cannot be written,
+Nodalis stays open and says why in the output pane.
+
+#figure(
+  image("../../images/saving-status-bar.png", width: 60%),
+  caption: [The status bar while the project is saved],
+)
 
 === What each file type does
 

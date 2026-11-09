@@ -43,6 +43,7 @@ mod frames;
 mod history;
 mod minimap;
 mod numbers;
+mod saving;
 mod workspace;
 
 /// Storage key of the project file open at exit, reopened at the next start.
@@ -1941,6 +1942,8 @@ pub struct ProjectApp {
     new_analysis: Option<(egui::Pos2, ModelPropertiesDialog)>,
     /// A project file being read on a worker thread, with notes on its conversion.
     opening: Option<(PathBuf, Receiver<Opened>)>,
+    /// The save running on a worker thread, and what autosave needs to know.
+    saver: saving::Saver,
     /// Analyses Update Project still has to solve, in order, and those it solves.
     update_queue: VecDeque<u64>,
     updating: Vec<u64>,
@@ -2062,6 +2065,7 @@ impl ProjectApp {
             dragging: None,
             new_analysis: None,
             opening: None,
+            saver: Default::default(),
             update_queue: VecDeque::new(),
             updating: Vec::new(),
             shown_title: String::new(),
@@ -4434,6 +4438,7 @@ impl ProjectApp {
         self.in_project = true;
         self.active = None;
         self.add_first_analysis();
+        self.forget_edits();
         self.output.push("New project".into());
     }
 
@@ -4523,6 +4528,7 @@ impl ProjectApp {
                 });
                 self.path = Some(path);
                 self.forget_solves();
+                self.forget_edits();
             }
             Err(error) => self.output.push(format!("Not opened: {error}")),
         }
@@ -4555,68 +4561,6 @@ impl ProjectApp {
             frames: self.frames.clone(),
             compact: self.compact.iter().copied().collect(),
             format: plx_model::PROJECT_FORMAT,
-        }
-    }
-
-    /// Saves the project to its file, or to one the user picks for a new project or with
-    /// `save_as`.
-    fn save(&mut self, save_as: bool) {
-        if let Some(name) = self
-            .nodes
-            .iter()
-            .find(|n| n.window().is_some_and(|w| w.model().is_none()))
-        {
-            self.output
-                .push(format!("Not saved: {} is still loading.", name.name));
-            return;
-        }
-        let path = match &self.path {
-            Some(path) if !save_as => path.clone(),
-            _ => {
-                let Some(path) = pick_project_file(self.path.as_deref(), "Save Project", "") else {
-                    return;
-                };
-                path
-            }
-        };
-        let project = self.project(true);
-        match plx_io::project::save_project(&path, &project) {
-            Ok(()) => {
-                let line = timestamped(format!("{} saved", path.display()));
-                self.output.push(line.clone());
-                let folder = crate::analysis::job_name(
-                    &path.file_stem().unwrap_or_default().to_string_lossy(),
-                );
-                for node in &mut self.nodes {
-                    if let Some(window) = node.window_mut() {
-                        window.saved(&path);
-                        window.set_project_folder(folder.clone());
-                        window.message(line.clone());
-                    }
-                }
-                self.path = Some(path);
-            }
-            Err(error) => self.output.push(format!("Not saved: {error}")),
-        }
-    }
-
-    /// Saves a copy of the project without the results of its analyses, for example to send
-    /// it; the open project stays on its own file and keeps its results.
-    fn save_without_results(&mut self) {
-        let Some(path) = pick_project_file(
-            self.path.as_deref(),
-            "Save Project Without Results",
-            "-without-results",
-        ) else {
-            return;
-        };
-        let project = self.project(false);
-        match plx_io::project::save_project(&path, &project) {
-            Ok(()) => self.output.push(timestamped(format!(
-                "{} saved without results",
-                path.display()
-            ))),
-            Err(error) => self.output.push(format!("Not saved: {error}")),
         }
     }
 
@@ -7644,6 +7588,10 @@ impl ProjectApp {
             // What links take from it follows its changes.
             let revision = window.revision();
             if revision != analysis.seen {
+                // A window that is done loading has not changed the analysis.
+                if analysis.seen.is_some() && revision.is_some() {
+                    self.saver.window_edits += 1;
+                }
                 analysis.seen = revision;
                 changed = true;
             }
@@ -7772,6 +7720,7 @@ impl eframe::App for ProjectApp {
         let ctx = ui.ctx().clone();
         crate::style::sync(&ctx);
         self.poll_opening();
+        self.poll_saving(&ctx);
         self.check_active();
         if crate::crash_log::take_device_lost() {
             self.output.push(
@@ -7898,6 +7847,9 @@ impl ProjectApp {
                 if let Some((path, _)) = &self.opening {
                     ui.spinner();
                     ui.label(format!("Opening {} …", path.display()));
+                } else if let Some(status) = crate::save_status::get(&ctx) {
+                    ui.spinner();
+                    ui.label(status);
                 } else {
                     let file = (self.path.as_ref())
                         .map_or_else(|| "not saved yet".into(), |p| p.display().to_string());
