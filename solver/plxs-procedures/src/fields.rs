@@ -166,18 +166,9 @@ pub fn nodal_average_with(
             count[n as usize] += 1;
         }
     }
-    // CalculiX averages over every element it writes to the `.frd`, so two-node springs and
-    // gaps count with zero stress at their nodes (observed with ccx 2.21; `SPRING1`, which
-    // it does not write, does not count).
-    for element in &table.discrete {
-        if model.elements[element.element as usize].kind != plxs_core::ElementType::SPRING1 {
-            let mut nodes: Vec<u32> = element.dofs.iter().map(|d| d / 3).collect();
-            nodes.dedup();
-            for n in nodes {
-                count[n as usize] += 1;
-            }
-        }
-    }
+    // Springs and gaps carry no stress: they do not count at their nodes. (CalculiX counts
+    // the two-node ones it writes to the `.frd` with zero stress, which lowers the stress
+    // wherever a support or contact gap sits, at its peak.)
     for (s, &c) in sum.iter_mut().zip(&count) {
         if c > 0 {
             for v in s.iter_mut() {
