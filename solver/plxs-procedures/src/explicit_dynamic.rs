@@ -472,6 +472,10 @@ fn missing_density(model: &Model, element: u32) -> Error {
     )
 }
 
+/// The most time steps of a chunk on the card while follower loads act: they turn with the
+/// displacements at the start of the chunk.
+const FOLLOWER_CHUNK: usize = 16;
+
 /// How the external loads vary over the step: a sum of reference vectors times their
 /// amplitude (one per amplitude name), which costs a vector sum per time step instead of
 /// an assembly; or assembled in every step where that does not reproduce them.
@@ -501,6 +505,9 @@ struct LoadHistory {
     per_step: bool,
     /// The step times at which an amplitude of the loads has a corner, ascending.
     corners: Vec<f64>,
+    /// Concentrated loads that turn with the structure (`NLGEOM`): [`Self::at`] gives them
+    /// in their reference directions, [`Self::turn`] turns them.
+    followers: plxs_assembly::FollowerLoads,
 }
 
 impl LoadHistory {
@@ -533,10 +540,16 @@ impl LoadHistory {
             let (f, _) = load_at(ctx, &only, 0.0, start_total, period)?;
             groups.push((name, f));
         }
+        let followers = if step.nlgeom {
+            plxs_assembly::FollowerLoads::new(ctx.model, &ctx.table.dofs, step)
+        } else {
+            plxs_assembly::FollowerLoads::default()
+        };
         let mut history = Self {
             groups,
             per_step: false,
             corners,
+            followers,
         };
         // The decomposition must give the loads the assembly gives.
         for fraction in [0.0, 0.37, 1.0] {
@@ -554,6 +567,25 @@ impl LoadHistory {
             }
         }
         Ok(history)
+    }
+
+    /// Turns the follower loads in `f` (from [`Self::at`] at the same time) by the rotations
+    /// at the displacements `u` (by DOF).
+    #[allow(clippy::too_many_arguments)]
+    fn turn(
+        &self,
+        ctx: &ProcedureContext<'_>,
+        step: &Step,
+        time: f64,
+        start_total: f64,
+        period: f64,
+        u: impl Fn(u32) -> f64,
+        f: &mut [f64],
+    ) {
+        if !self.followers.is_empty() {
+            let turning = (self.followers).at(ctx.model, step, time, start_total + time, period);
+            turning.add(u, 1.0, f);
+        }
     }
 
     /// The first corner of an amplitude after `time`.
@@ -2003,6 +2035,15 @@ impl Procedure for ExplicitDynamic {
         }
         ctx.profile.add(Phase::Assembly, started);
         let mut p = loads.at(ctx, step, start, start_total, period)?;
+        loads.turn(
+            ctx,
+            step,
+            start,
+            start_total,
+            period,
+            |d| u[d as usize],
+            &mut p,
+        );
         let mass = &data.mass;
         let damping_force = |v: &[f64], f_int: &[f64], f_int_prev: &[f64], dt: f64| -> Vec<f64> {
             (0..n)
@@ -2271,6 +2312,7 @@ impl Procedure for ExplicitDynamic {
                             material: &material,
                             contact: contact_state.as_ref(),
                         })?;
+                        let follower_dofs = loads.followers.dofs();
                         let mut from = p.clone();
                         let mut g_from = g_cur.clone();
                         let mut done = 0;
@@ -2291,6 +2333,11 @@ impl Procedure for ExplicitDynamic {
                             if let Some(every) = check {
                                 chunk = chunk.min(every - (offset + done) % every);
                             }
+                            // Follower loads turn with the displacements at the start of a
+                            // chunk: short chunks keep them close to the motion.
+                            if !follower_dofs.is_empty() {
+                                chunk = chunk.min(FOLLOWER_CHUNK);
+                            }
                             let steps: Vec<(f64, f64)> = (0..chunk)
                                 .map(|j| {
                                     let c = if done + j == 0 { 0.5 * (h_prev + h) } else { h };
@@ -2298,9 +2345,18 @@ impl Procedure for ExplicitDynamic {
                                 })
                                 .collect();
                             let t_end = time + (done + chunk) as f64 * h;
-                            let to = loads
+                            let follower_u = if follower_dofs.is_empty() {
+                                Vec::new()
+                            } else {
+                                engine.read_values(&follower_dofs)?
+                            };
+                            let at = |d: u32| {
+                                (follower_dofs.binary_search(&d)).map_or(0.0, |k| follower_u[k])
+                            };
+                            let mut to = loads
                                 .at(ctx, step, t_end, start_total, period)
                                 .map_err(|e| e.to_string())?;
+                            loads.turn(ctx, step, t_end, start_total, period, at, &mut to);
                             let g_to = if varying {
                                 g_at(ctx, &set, t_end).map_err(|e| e.to_string())?
                             } else {
@@ -2316,6 +2372,7 @@ impl Procedure for ExplicitDynamic {
                                 from = loads
                                     .at(ctx, step, t_taken, start_total, period)
                                     .map_err(|e| e.to_string())?;
+                                loads.turn(ctx, step, t_taken, start_total, period, at, &mut from);
                                 if varying {
                                     g_from = g_at(ctx, &set, t_taken).map_err(|e| e.to_string())?;
                                 }
@@ -2698,7 +2755,9 @@ impl Procedure for ExplicitDynamic {
                         ctx.profile.add(Phase::Contact, started);
                     }
                     let started = std::time::Instant::now();
-                    let p_next = loads.at(ctx, step, t_next, start_total, period)?;
+                    let mut p_next = loads.at(ctx, step, t_next, start_total, period)?;
+                    let at = |d: u32| u_next[d as usize];
+                    loads.turn(ctx, step, t_next, start_total, period, at, &mut p_next);
                     ctx.profile.add(Phase::Loads, started);
                     let started = std::time::Instant::now();
                     let f_damp_next = if alpha_r != 0.0 || beta_r != 0.0 {

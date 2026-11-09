@@ -292,6 +292,12 @@ impl Procedure for NonlinearStatic {
         // so a motion that changes direction is applied as given; the increment size cut to
         // reach a point is restored afterwards, like that of a frame.
         let breakpoints = step.amplitude_times(ctx.model, start_total, period);
+        // Concentrated loads that turn with the structure, under NLGEOM only.
+        let followers = if step.nlgeom {
+            plxs_assembly::FollowerLoads::new(ctx.model, &ctx.table.dofs, step)
+        } else {
+            plxs_assembly::FollowerLoads::default()
+        };
         while time < period * (1.0 - 1e-12) {
             if ctx.cancel.is_cancelled() {
                 return Ok(StepOutcome::Cancelled);
@@ -378,6 +384,7 @@ impl Procedure for NonlinearStatic {
                 // the increment: their difference is the prescribed motion of the increment.
                 let g_start = prescribed(ctx, time, start_total + time)?;
                 let g_end = prescribed(ctx, step_time, total)?;
+                let turning = followers.at(ctx.model, step, step_time, total, period);
                 let input = NonlinearInput {
                     u: &[],
                     nlgeom: step.nlgeom,
@@ -386,6 +393,7 @@ impl Procedure for NonlinearStatic {
                     creep_active: visco,
                     temperature,
                     follower: &follower,
+                    turning: (!turning.is_empty()).then_some(&turning),
                 };
                 // Contact: candidate master faces from the start of the increment and a
                 // matrix pattern with every spring they allow (the last one while it does,

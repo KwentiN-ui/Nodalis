@@ -1462,6 +1462,44 @@ fn displacement_rows(
     }
 }
 
+/// The coordinate system the components of a force, moment or excitation are given in,
+/// and whether the load follows the deformation.
+fn direction_rows(
+    ui: &mut Ui,
+    system: &mut Option<Id>,
+    follower: &mut bool,
+    fe: &FeModel,
+    nlgeom: bool,
+) {
+    ui.label("Coordinate system");
+    crate::pick_item::system_combo(ui, "load system", system, fe, 200.0);
+    ui.end_row();
+    let cylindrical = (system.and_then(|id| fe.coordinate_system(id)))
+        .is_some_and(|s| s.kind == plx_model::CoordinateSystemKind::Cylindrical);
+    if cylindrical {
+        ui.label("");
+        ui.weak("Components 1, 2, 3 are radial, tangential and axial at every node.");
+        ui.end_row();
+    }
+    ui.label("");
+    ui.checkbox(follower, "Follow the deformation")
+        .on_hover_text(
+            "A follower load: under large deformations its direction turns with the region, \
+         by the rotation that fits the motion of its nodes best (at a reference point with \
+         the rigid body, at a single beam or shell node with its rotation).",
+        );
+    ui.end_row();
+    if *follower {
+        ui.label("");
+        ui.weak(if nlgeom {
+            "The direction turns with the region; the size stays."
+        } else {
+            "Takes effect with large deformations (Nlgeom) only."
+        });
+        ui.end_row();
+    }
+}
+
 /// The coordinate system of a remote displacement or remote force.
 pub(crate) fn system_row(ui: &mut Ui, system: &mut Option<Id>, fe: &FeModel) {
     ui.label("Coordinate system");
@@ -2442,16 +2480,22 @@ impl Editor {
     /// The boundary condition or load being edited as it would be applied: its step, its
     /// index (`None` for a new one) and the symbol item, for the 3D view.
     pub fn step_item(&self) -> Option<(usize, Option<usize>, crate::symbols::Item)> {
-        let (step, kind, region) = match &self.draft {
+        let (step, kind, region, system) = match &self.draft {
             Draft::BoundaryCondition(s, bc, r) => {
-                (*s, crate::symbols::Kind::Boundary(bc.kind.clone()), r)
+                (*s, crate::symbols::Kind::Boundary(bc.kind.clone()), r, None)
             }
-            Draft::Load(s, load, r) => (*s, crate::symbols::Kind::Load(load.kind.clone()), r),
+            Draft::Load(s, load, r) => (
+                *s,
+                crate::symbols::Kind::Load(load.kind.clone()),
+                r,
+                load.system,
+            ),
             _ => return None,
         };
         let item = crate::symbols::Item {
             kind,
             region: region.region(),
+            system,
             selected: true,
         };
         Some((step, self.index, item))
@@ -3130,6 +3174,8 @@ impl Editor {
                              the region that has rotations (beams, shells).",
                         );
                         ui.end_row();
+                        let nlgeom = step_kind.is_some_and(|k| model.fe.step_nlgeom(k));
+                        direction_rows(ui, &mut load.system, &mut load.follower, &model.fe, nlgeom);
                     }
                     LoadKind::Pressure(pressure) => {
                         component_rows(
@@ -3171,6 +3217,8 @@ impl Editor {
                         });
                         ui.end_row();
                         revolution_hint(ui, axisymmetric);
+                        let nlgeom = step_kind.is_some_and(|k| model.fe.step_nlgeom(k));
+                        direction_rows(ui, &mut load.system, &mut load.follower, &model.fe, nlgeom);
                     }
                     LoadKind::RemoteForce(remote) => {
                         remote_force_rows(ui, remote, &region.region(), model, units);
@@ -3180,6 +3228,8 @@ impl Editor {
                             ui, excitation, period, two_d, units,
                         );
                         revolution_hint(ui, axisymmetric);
+                        let nlgeom = step_kind.is_some_and(|k| model.fe.step_nlgeom(k));
+                        direction_rows(ui, &mut load.system, &mut load.follower, &model.fe, nlgeom);
                     }
                     LoadKind::PreTension {
                         value,
@@ -7629,6 +7679,8 @@ mod tests {
             amplitude: None,
             factor_amplitude: None,
             tables: Default::default(),
+            system: None,
+            follower: false,
         });
         let mut editor = Editor::create(NewItem::Step, &fe).unwrap();
         if let Draft::Step(step, _) = &mut editor.draft {
@@ -7712,6 +7764,8 @@ mod tests {
                 amplitude: None,
                 factor_amplitude: None,
                 tables: Default::default(),
+                system: None,
+                follower: false,
             },
             Load {
                 id: crate::test_ids::named("Convective_Film-1"),
@@ -7727,6 +7781,8 @@ mod tests {
                 amplitude: None,
                 factor_amplitude: None,
                 tables: Default::default(),
+                system: None,
+                follower: false,
             },
         ];
         // A heat transfer step after it keeps the temperature and the film only.
@@ -7801,6 +7857,8 @@ mod tests {
             amplitude: None,
             factor_amplitude: None,
             tables: Default::default(),
+            system: None,
+            follower: false,
         });
         assert!(set_visible(&mut fe, &TreeItem::Load(0, 0), false));
         assert!(!fe.steps[0].loads[0].visible);
@@ -7903,6 +7961,8 @@ mod tests {
             amplitude: Some(fe.amplitudes[0].id),
             factor_amplitude: Some(fe.amplitudes[0].id),
             tables: Default::default(),
+            system: None,
+            follower: false,
         };
         fe.steps[0].loads.push(film.clone());
         let mut editor = Editor::edit(&TreeItem::Amplitude(0), &fe, &FeMesh::default()).unwrap();
@@ -7969,6 +8029,8 @@ mod tests {
             amplitude: None,
             factor_amplitude: None,
             tables: Default::default(),
+            system: None,
+            follower: false,
         });
         model.fe.steps.push(step);
         let mut pair = ContactPair::new(

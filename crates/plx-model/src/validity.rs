@@ -368,6 +368,7 @@ impl FeModel {
                             }
                             _ => None,
                         })
+                        .or_else(|| load_system_problem(self, load))
                 };
                 if let Some(reason) = reason {
                     invalid.push(Invalid {
@@ -624,6 +625,22 @@ impl Region {
             }
         }
     }
+}
+
+/// What is wrong with the coordinate system of a force, moment or excitation: it does not
+/// exist or its points do not span it, or components follow time tables of their own
+/// (their amplitudes belong to global directions).
+fn load_system_problem(model: &FeModel, load: &crate::Load) -> Option<String> {
+    let system = match load.component_system(model) {
+        Ok(Some(system)) => system,
+        Ok(None) => return None,
+        Err(_) => return Some("The coordinate system does not exist".into()),
+    };
+    if let Err(reason) = system.axes() {
+        return Some(reason);
+    }
+    (load.tables.iter().any(Option::is_some))
+        .then(|| "Time tables of the components need the global coordinate system".into())
 }
 
 #[cfg(test)]

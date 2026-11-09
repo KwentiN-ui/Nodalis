@@ -1551,6 +1551,8 @@ mod tests {
             amplitude: None,
             factor_amplitude: None,
             tables: Default::default(),
+            system: None,
+            follower: false,
         });
         model.fe.steps.push(step);
         model.fe.contact_detections.push(ContactDetection {
@@ -1707,6 +1709,8 @@ mod tests {
             amplitude: None,
             factor_amplitude: None,
             tables: Default::default(),
+            system: None,
+            follower: false,
         });
         model.fe.steps.push(step);
         model.fe.contact_detections.push(ContactDetection {

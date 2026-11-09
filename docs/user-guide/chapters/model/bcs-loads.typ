@@ -217,7 +217,9 @@ step. A frequency step takes no loads.
 
 Every load can follow an #ui("Amplitude"). Film and radiation have a second amplitude for the film
 coefficient or the emissivity. The components of a force or moment and a pressure can also
-follow a table of their own over the step time (#ui("T") button, @value-tables).
+follow a table of their own over the step time (#ui("T") button, @value-tables). Forces,
+excitations and moments can be given in a coordinate system of their own and follow the
+deformation (@load-directions).
 
 In 2D models face loads act on element edges. In axisymmetric models forces act on the full
 circumference.
@@ -251,6 +253,34 @@ selection of faces and edges carry the force.
 #screenshot("surface-traction-edge.png", [Force of 100 N along the free edge of a shell plate])
 
 #screenshot("force-dialog.png", [Force dialog with the Selection window])
+
+=== Coordinate system and follower loads <load-directions>
+
+A #ui("Force"), an #ui("Excitation") and a #ui("Moment") take their components in a
+#ui("Coordinate system") of the features (@features), like a displacement does; the
+default is the global one. In a rectangular system `F1` to `F3` act along its x, y and z axes;
+in a cylindrical one they are radial, tangential and axial at every node, so a force on a ring of
+faces can push outward all around or twist it. The arrows in the 3D view point the way the
+force acts.
+
+#screenshot("load-follower.png", [Force in a cylindrical system that follows the deformation])
+
+#fields(
+  [Coordinate system], [The directions of the components. The time tables of the components
+    (#ui("T")) need the global system.],
+  [Follow the deformation], [A follower load: under large deformations (#ui("Nlgeom") on the
+    step, also in explicit dynamics) its direction turns with the region. The region turns by the
+    rigid rotation that fits the motion of its nodes best; on the reference point of a rigid
+    body the force turns with the body, at a single node of a beam or shell with its
+    rotation. The size of the load stays. A force normal to a lever arm stays normal to it,
+    and a force along a slender beam stays along it however far the beam turns. Without
+    #ui("Nlgeom") it acts like a fixed load.],
+)
+
+The rotation of a region comes from the motion of all its nodes, so a region that deforms a lot
+in itself, such as a long edge that bends, turns by its mean rotation. Nodes on a straight line
+do not show a turn about that line: the load then turns with the line only. A single node of a
+solid has no rotation, so a follower load there keeps its direction.
 
 === Remote force <remote-force>
 

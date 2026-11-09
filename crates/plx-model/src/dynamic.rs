@@ -276,6 +276,8 @@ mod tests {
             factor_amplitude: None,
             tables: Default::default(),
             distribution: None,
+            system: None,
+            follower: false,
         });
         // The segment at 5 s lies behind the step.
         assert_eq!(model.amplitude_interval(&step, 1.0), Some(0.001));
