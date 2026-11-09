@@ -1186,15 +1186,15 @@ mod tests {
             "Column",
             1,
             [0.0, 0.0, 0.0],
-            [20.0, 20.0, 100.0],
+            [0.02, 0.02, 0.1],
             [4, 4, 20],
         );
         let mut model = FeModel::default();
         model.materials.push(Material {
             name: "Steel".into(),
-            density: Some(7.85e-9),
+            density: Some(7850.0),
             elastic: Some(plx_model::Elastic {
-                young: 210_000.0,
+                young: 2.1e11,
                 poisson: 0.3,
             }),
             ..Default::default()
@@ -1208,9 +1208,9 @@ mod tests {
         });
         let mut axis = plx_model::CoordinateSystem::new("Column_Axis");
         axis.kind = plx_model::CoordinateSystemKind::Cylindrical;
-        axis.origin = [10.0, 10.0, 100.0];
-        axis.point_x = [20.0, 10.0, 100.0];
-        axis.point_xy = [10.0, 20.0, 100.0];
+        axis.origin = [0.01, 0.01, 0.1];
+        axis.point_x = [0.02, 0.01, 0.1];
+        axis.point_xy = [0.01, 0.02, 0.1];
         let system = axis.id;
         model.coordinate_systems.push(axis);
         let mut step = plx_model::Step::new_static("Step-1");
