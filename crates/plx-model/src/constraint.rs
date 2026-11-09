@@ -172,6 +172,12 @@ pub struct Spring {
     pub per_area: bool,
     /// The whole stiffness acts at every node instead of being spread over the nodes.
     pub each_node: bool,
+    /// The springs also resist the motion within each increment of a static step with
+    /// this factor times their stiffness, a force that starts from zero in every increment
+    /// (`*Spring, Stabilize=`): the weak springs of the parts held only by contact
+    /// ([`FeModel::weak_springs`](crate::FeModel::weak_springs)), which are not saved.
+    #[serde(skip)]
+    pub stabilize: f64,
 }
 
 impl Spring {
@@ -188,6 +194,7 @@ impl Spring {
             rotational: [0.0; 3],
             per_area: false,
             each_node: false,
+            stabilize: 0.0,
         }
     }
 

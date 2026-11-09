@@ -1893,6 +1893,7 @@ fn generated_section(section: &constraints::GeneratedSection) -> ir::section::Se
             elset,
             dofs,
             stiffness,
+            stabilize,
         } => ir::section::Section {
             elset: ir_name(elset),
             kind: Kind::Spring(Spring {
@@ -1900,6 +1901,7 @@ fn generated_section(section: &constraints::GeneratedSection) -> ir::section::Se
                 dof2: *dofs.get(1).unwrap_or(&dofs[0]),
                 stiffness: SpringStiffness::Linear(constant(*stiffness)),
                 orientation: None,
+                stabilize: *stabilize,
             }),
         },
         constraints::GeneratedSection::Gap {

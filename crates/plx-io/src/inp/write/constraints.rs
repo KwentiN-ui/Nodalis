@@ -55,6 +55,8 @@ pub(super) enum GeneratedSection {
         elset: String,
         dofs: Vec<u8>,
         stiffness: f64,
+        /// `Stabilize=`, see [`Spring::stabilize`]; zero for none.
+        stabilize: f64,
     },
     /// `*Gap`: clearance, direction, and spring stiffness and tensile force if given.
     Gap {
@@ -92,6 +94,7 @@ pub(super) fn springs(
         ground: Vec::new(),
         dofs: if model.properties.space.is_2d() { 2 } else { 3 },
         space: model.properties.space,
+        stabilize: 0.0,
     };
     let mut nonlinear = false;
     // The lowered model keeps the active regions of no separation only.
@@ -103,7 +106,11 @@ pub(super) fn springs(
     }
     for constraint in model.constraints.iter().filter(|c| c.active()) {
         match constraint {
-            Constraint::Spring(spring) => writer.spring(sets, spring)?,
+            Constraint::Spring(spring) => {
+                writer.stabilize = spring.stabilize;
+                writer.spring(sets, spring)?;
+                writer.stabilize = 0.0;
+            }
             Constraint::CompressionOnly(support) => {
                 writer.compression_only(sets, support)?;
                 nonlinear |= support.nonlinear;
@@ -151,6 +158,8 @@ struct Writer {
     /// Translational degrees of freedom of the model: ccx crashes on more than two in 2D.
     dofs: usize,
     space: ModelSpace,
+    /// `Stabilize=` of the springs written now ([`Spring::stabilize`]).
+    stabilize: f64,
 }
 
 impl Writer {
@@ -207,6 +216,7 @@ impl Writer {
                     elset: set,
                     dofs: if two_nodes { vec![dof, dof] } else { vec![dof] },
                     stiffness: k,
+                    stabilize: self.stabilize,
                 });
             }
         }

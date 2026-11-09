@@ -948,7 +948,7 @@ impl Reader {
     }
 
     fn spring(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
-        k.check_parameters(&["ELSET", "NONLINEAR", "ORIENTATION"])?;
+        k.check_parameters(&["ELSET", "NONLINEAR", "ORIENTATION", "STABILIZE"])?;
         if k.has("ORIENTATION") {
             return Err(k.error("ORIENTATION is not supported"));
         }
@@ -968,6 +968,13 @@ impl Reader {
         }
         let dof1 = dofs[0] as u8;
         let dof2 = dofs.get(1).map(|d| *d as u8).unwrap_or(dof1);
+        let stabilize = match k.value("STABILIZE") {
+            None => 0.0,
+            Some(v) => match v.trim().parse::<f64>() {
+                Ok(f) if f.is_finite() && f >= 0.0 => f,
+                _ => return Err(k.error("STABILIZE needs a factor of zero or more")),
+            },
+        };
         let stiffness = if k.has("NONLINEAR") {
             let mut rows = Vec::new();
             for d in &data[1..] {
@@ -1002,6 +1009,7 @@ impl Reader {
                 dof2,
                 stiffness,
                 orientation: None,
+                stabilize,
             }),
         });
         Ok(())

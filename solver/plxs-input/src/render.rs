@@ -415,11 +415,15 @@ fn sections(out: &mut Out, model: &Model) {
             }
             SectionKind::Spring(spring) => {
                 let nonlinear = matches!(spring.stiffness, SpringStiffness::Nonlinear(_));
-                out.keyword(&if nonlinear {
+                let mut header = if nonlinear {
                     format!("*Spring, Elset={elset}, Nonlinear")
                 } else {
                     format!("*Spring, Elset={elset}")
-                });
+                };
+                if spring.stabilize > 0.0 {
+                    let _ = write!(header, ", Stabilize={}", number(spring.stabilize));
+                }
+                out.keyword(&header);
                 // SPRING2 takes both degrees of freedom, SPRING1 one.
                 let two = spring.dof1 != spring.dof2
                     || (model.sets.element_sets.get(elset)).is_some_and(|ids| {

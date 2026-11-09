@@ -344,6 +344,16 @@ solver therefore stops that first move where the contact carries the load, inste
 the part move far into the other one, and the contact zone grows to its size in a few
 iterations.
 
+In a static step the weak springs also hold the part against its motion within each
+increment, ten times stiffer (10#super[-5] E L in total), with a force that starts from zero
+in every increment and so leaves none behind once the part stops moving. A part whose contacts open again, such as
+a gasket the plate lets go of, lying loose in its groove, then stays where the increment found
+it. On the weak springs alone the small force the tolerance leaves in every increment moved
+it by tenths of a millimetre, against another wall of the groove in every iteration, and the
+step stopped although nothing in the results showed why. In the increment in which the part
+moves it takes ten times the share of the weak springs, e.g. when it closes an initial gap in
+a single increment.
+
 The springs carry about a millionth of the load once the contacts are closed, and the force
 it takes to close an initial gap g, of the order 10#super[-6] E g L. Two things to keep in mind:
 

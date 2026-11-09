@@ -178,6 +178,10 @@ struct Kinematics {
     master_face: u32,
     area: f64,
     cutoff: f64,
+    /// The distance to the master when the normal is the direction to a shared edge or
+    /// corner of the master (see [`Pair::kinematics`]): the normal turns as the point
+    /// moves, which adds `p / distance` across it to the tangent.
+    corner: Option<f64>,
 }
 
 /// A contact spring element: global DOFs, symmetric tangent (row-major) and internal force.
@@ -1390,6 +1394,7 @@ impl Pair {
             master_face,
             area: total,
             cutoff,
+            corner: None,
         };
         self.respond(&kin, previous, predictor, damping, stiffness)
     }
@@ -1442,12 +1447,12 @@ impl Pair {
         } else {
             self.closest(p, current, boxes)
         };
-        let Some((f, _natural, fp, x)) = found else {
+        let Some((f, natural, fp, x)) = found else {
             return Err((x, 0.0));
         };
         let face = &self.master[f as usize];
-        let n = fp.normal;
-        let geometric_gap = dot(sub(x, fp.x), n);
+        let mut n = fp.normal;
+        let mut geometric_gap = dot(sub(x, fp.x), n);
         // A face-to-face point beside the master surface (its foot point clamped to an edge
         // or corner of the closest face, the point itself off to the side) touches nothing:
         // the distance along the normal of the clamped foot point is no overclosure. Without
@@ -1464,6 +1469,35 @@ impl Pair {
             let lateral = geometry::norm(sub(r, scale(n, geometric_gap)));
             if lateral > BESIDE_TOLERANCE * self.typical && !self.inner_edge(p, f, &fp.n) {
                 return Err((x, 0.0));
+            }
+        }
+        // A point whose foot point is clamped to an edge or corner the master faces share
+        // projects into none of them: it lies in the wedge between their normals at a kink
+        // (beneath a concave kink when it is pressed in, outside a convex one when open).
+        // There the closest point of the master is the edge or corner itself, and the
+        // direction to it is the normal: it turns continuously from the normal of one face
+        // to that of the other across the wedge. The normal of whichever face won the tie of
+        // equal distances instead jumped by the kink angle at the wedge's border, and a point
+        // pressed into the kink between a fillet and a straight flank flipped between the
+        // two faces in every Newton iteration (the residual alternated between two values
+        // until the increment was cut back to nothing).
+        let mut corner = None;
+        if !tied && !face.is_interior(natural) {
+            let mut r = sub(x, fp.x);
+            if face.planar.is_some() {
+                r[2] = 0.0;
+            }
+            let distance = geometry::norm(r);
+            let along = dot(r, n);
+            if distance > 1e-9 * self.typical
+                && along != 0.0
+                && geometry::norm(sub(r, scale(n, along))) > 1e-6 * distance
+                && self.inner_edge(p, f, &fp.n)
+            {
+                let sign = along.signum();
+                n = scale(r, sign / distance);
+                geometric_gap = sign * distance;
+                corner = Some(distance);
             }
         }
         let initial_gap = self.initial[p].map_or(0.0, |(_, g)| g);
@@ -1497,6 +1531,7 @@ impl Pair {
             master_face: f,
             area: point.area,
             cutoff: self.cutoff[p],
+            corner,
         })
     }
 
@@ -1739,6 +1774,23 @@ impl Pair {
                     for l in 0..2 {
                         *v += tangent[k][l] * ts[k][i] * ts[l][j];
                     }
+                }
+            }
+        }
+        // The normal towards a shared edge or corner turns with the point: the force
+        // p n = p r / |r| (pressed in) changes across n by p / |r|, as much as the normal
+        // stiffness for a linear relation. Without it Newton's corrections across the normal
+        // overshoot and swing back and forth. Only where it stiffens: a point that is open
+        // but pulled by the relation (exponential, within its reach) would make the tangent
+        // indefinite, which the iterative solver cannot take.
+        if let Some(distance) = kin.corner {
+            let sign = if kin.geometric_gap < 0.0 { 1.0 } else { -1.0 };
+            let a = (sign * pressure / distance).max(0.0);
+            let dims = if planar { 2 } else { 3 };
+            for i in 0..dims {
+                for j in 0..dims {
+                    let identity = if i == j { 1.0 } else { 0.0 };
+                    kernel[i][j] += a * (identity - n[i] * n[j]);
                 }
             }
         }
