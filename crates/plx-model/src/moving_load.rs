@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use plx_mesh::{ElementId, FeMesh, NodeId};
 use serde::{Deserialize, Serialize};
 
-use crate::{CoordinateSystemKind, FeModel, GLOBAL};
+use crate::{CoordinateSystemKind, FeModel};
 
 /// The origin of a path and its unit directions along and across, in global coordinates.
 pub type PathAxes = ([f64; 3], [f64; 3], [f64; 3]);
@@ -21,8 +21,8 @@ pub const AXIS_LABELS: [&str; 3] = ["X", "Y", "Z"];
 /// the part of its force that the covered part of the patch takes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MovingLoad {
-    /// Coordinate system of the path; [`GLOBAL`] for the global one.
-    pub system: String,
+    /// Coordinate system of the path; `None` for the global one.
+    pub system: Option<crate::Id>,
     /// Axis of the system the wheels travel along (0 = x, 1 = y, 2 = z).
     pub travel_axis: usize,
     /// Axis of the system across the path, along which the wheels sit side by side.
@@ -56,7 +56,7 @@ impl Default for MovingLoad {
     /// units like all stored values.
     fn default() -> Self {
         Self {
-            system: GLOBAL.into(),
+            system: None,
             travel_axis: 0,
             lateral_axis: 1,
             start: 0.0,
@@ -142,13 +142,13 @@ impl MovingLoad {
 
     /// Why the load cannot be written, if it cannot.
     pub fn problem(&self, model: &FeModel, two_d: bool) -> Option<String> {
-        let Some(system) = model.coordinate_system_or_global(&self.system) else {
-            return Some(format!("Coordinate System {} does not exist", self.system));
+        let Some(system) = model.coordinate_system_or_global(self.system) else {
+            return Some("The coordinate system does not exist".into());
         };
         if system.kind != CoordinateSystemKind::Rectangular {
             return Some(format!(
                 "Coordinate System {} is not rectangular",
-                self.system
+                system.name
             ));
         }
         if let Err(reason) = system.axes() {
@@ -177,8 +177,8 @@ impl MovingLoad {
 
     /// The origin and the unit directions along and across the path in global coordinates.
     pub fn path_axes(&self, model: &FeModel) -> Result<PathAxes, String> {
-        let system = (model.coordinate_system_or_global(&self.system))
-            .ok_or_else(|| format!("Coordinate System {} does not exist", self.system))?;
+        let system = (model.coordinate_system_or_global(self.system))
+            .ok_or("The coordinate system does not exist")?;
         let axes = system.axes()?;
         let travel = *axes.get(self.travel_axis).ok_or("unknown axis")?;
         let lateral = *axes.get(self.lateral_axis).ok_or("unknown axis")?;

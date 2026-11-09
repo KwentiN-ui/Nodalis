@@ -15,6 +15,8 @@ use crate::{FeModel, Load, LoadKind, ModelItem, Region, Step, Tie};
 /// A bolt cut through its shank: the faces on the two sides of the cut and its preload.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Bolt {
+    /// The internal identity other items refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,
@@ -33,6 +35,7 @@ pub struct Bolt {
 impl Bolt {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
             side_a: Region::Faces(Vec::new()),
@@ -113,7 +116,7 @@ impl From<Preload> for BoltAction {
 /// What a bolt does in one step instead of the automatic action ([`FeModel::bolt_action`]).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BoltChange {
-    pub bolt: String,
+    pub bolt: crate::Id,
     pub action: BoltAction,
 }
 
@@ -172,7 +175,7 @@ impl FeModel {
     pub fn bolt_action(&self, bolt: &Bolt, index: usize) -> Option<BoltAction> {
         let auto = self.auto_bolt_action(bolt, index)?;
         let action = (self.steps[index].bolt_changes.iter())
-            .find(|c| c.bolt == bolt.name)
+            .find(|c| c.bolt == bolt.id)
             .map_or(auto, |c| c.action);
         (action != BoltAction::Open).then_some(action)
     }
@@ -312,8 +315,8 @@ impl FeModel {
         for &r in origin.replaced.keys() {
             let region = &mut lowered.contact_regions[r];
             region.active = false;
-            let name = region.name.clone();
-            lowered.remove_contact_changes(&name);
+            let id = region.id;
+            lowered.remove_contact_changes(id);
         }
         let mut taken: BTreeSet<String> = (self.steps.iter())
             .flat_map(|s| s.loads.iter().map(|l| l.name.clone()))
@@ -332,6 +335,7 @@ impl FeModel {
                 lowered.ties.push(tie);
                 origin.tie_bolts.push(b);
             }
+            let load_id = crate::Id::new();
             for s in 0..self.steps.len() {
                 let Some(action) = self.bolt_action(bolt, s) else {
                     continue;
@@ -343,6 +347,7 @@ impl FeModel {
                     BoltAction::Open => continue,
                 };
                 lowered.steps[s].loads.push(Load {
+                    id: load_id,
                     name: name.clone(),
                     active: true,
                     visible: true,
@@ -365,18 +370,9 @@ impl FeModel {
     }
 
     /// Drops the step changes of a bolt that is deleted.
-    pub fn remove_bolt_changes(&mut self, name: &str) {
+    pub fn remove_bolt_changes(&mut self, bolt: crate::Id) {
         for step in &mut self.steps {
-            step.bolt_changes.retain(|c| c.bolt != name);
-        }
-    }
-
-    /// Follows a renamed bolt: the step changes keep referring to it.
-    pub fn rename_bolt(&mut self, old: &str, new: &str) {
-        for change in self.steps.iter_mut().flat_map(|s| &mut s.bolt_changes) {
-            if change.bolt == old {
-                change.bolt = new.to_string();
-            }
+            step.bolt_changes.retain(|c| c.bolt != bolt);
         }
     }
 }

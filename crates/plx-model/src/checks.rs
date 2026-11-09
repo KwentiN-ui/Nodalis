@@ -13,8 +13,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId};
 
 use crate::{
-    Formulation, GLOBAL, Region, RemoteBehavior, SpringLayout, SymmetryPlane, symmetry_dofs,
-    symmetry_plane,
+    Formulation, Region, RemoteBehavior, SpringLayout, SymmetryPlane, symmetry_dofs, symmetry_plane,
 };
 
 use crate::{
@@ -1687,7 +1686,7 @@ impl FeModel {
         self.check_excitations(&mut findings);
         let used = self.used_distributions();
         for (i, distribution) in self.distributions.iter().enumerate() {
-            if !used.contains(distribution.name.as_str()) {
+            if !used.contains(&distribution.id) {
                 findings.push(Finding::new(
                     ModelItem::Distribution(i),
                     Problem::UnusedDistribution,
@@ -1737,7 +1736,8 @@ impl FeModel {
                     format!("{} needs the eigenmodes of a Frequency step", step.name),
                 ));
             }
-            let used = |m: &&crate::Material| self.sections.iter().any(|s| s.material == m.name);
+            let used =
+                |m: &&crate::Material| self.sections.iter().any(|s| s.material == Some(m.id));
             if matches!(step.kind, StepKind::Visco(_))
                 && !(self.materials.iter().filter(used)).any(|m| m.creep.is_some())
             {
@@ -2151,17 +2151,17 @@ impl FeModel {
     /// Amplitudes that nothing refers to: a forgotten choice in a load or boundary condition
     /// leaves the model without the motion the amplitude was made for.
     fn check_amplitudes(&self, findings: &mut Vec<Finding>) {
-        let used: HashSet<&str> = (self.steps.iter())
+        let used: HashSet<crate::Id> = (self.steps.iter())
             .flat_map(|step| {
                 let bcs = step.boundary_conditions.iter().map(|b| &b.amplitude);
                 let loads = (step.loads.iter()).flat_map(|l| [&l.amplitude, &l.factor_amplitude]);
                 let fields = step.defined_fields.iter().map(|f| &f.amplitude);
                 bcs.chain(loads).chain(fields)
             })
-            .filter_map(|name| name.as_deref())
+            .filter_map(|id| *id)
             .collect();
         for (i, amplitude) in self.amplitudes.iter().enumerate() {
-            if !used.contains(amplitude.name.as_str()) {
+            if !used.contains(&amplitude.id) {
                 findings.push(Finding::new(
                     ModelItem::Amplitude(i),
                     Problem::UnusedAmplitude,
@@ -2244,8 +2244,8 @@ impl FeModel {
 
     fn check_tied_contacts(&self, findings: &mut Vec<Finding>) {
         for (i, pair) in self.contact_pairs.iter().enumerate() {
-            let Some(interaction) = (self.surface_interactions.iter())
-                .find(|s| s.name == pair.interaction)
+            let Some(interaction) = (pair.interaction)
+                .and_then(|i| self.surface_interaction(i))
                 .filter(|_| pair.active)
             else {
                 continue;
@@ -2292,7 +2292,11 @@ impl FeModel {
             s.kind.supports_loads() && (s.loads.iter()).any(|l| l.active && l.kind.is_body_force())
         });
         for (i, material) in self.materials.iter().enumerate() {
-            if !self.sections.iter().any(|s| s.material == material.name) {
+            if !self
+                .sections
+                .iter()
+                .any(|s| s.material == Some(material.id))
+            {
                 continue;
             }
             let item = ModelItem::Material(i);
@@ -2408,11 +2412,12 @@ impl FeModel {
     /// the solver knows only as the user element U1.
     /// Hyperelastic materials where the solver takes the initial linear stiffness.
     fn check_hyperelastic_use(&self, mesh: &FeMesh, findings: &mut Vec<Finding>) {
-        let hyperelastic = |name: &str| {
-            (self.materials.iter()).any(|m| m.name == name && m.hyperelastic.is_some())
-        };
         for (i, section) in self.sections.iter().enumerate() {
-            if !hyperelastic(&section.material) || section.region.elements(mesh).is_empty() {
+            let material = section.material.and_then(|m| self.material(m));
+            let Some(material) = material.filter(|m| m.hyperelastic.is_some()) else {
+                continue;
+            };
+            if section.region.elements(mesh).is_empty() {
                 continue;
             }
             let linear = match &section.kind {
@@ -2429,7 +2434,7 @@ impl FeModel {
                     Problem::HyperelasticLinearized,
                     format!(
                         "{}: {what} of the hyperelastic {}",
-                        section.name, section.material
+                        section.name, material.name
                     ),
                 ));
             }
@@ -2549,7 +2554,7 @@ impl FeModel {
                 findings.push(Finding::new(
                     ModelItem::BoundaryCondition(s, i),
                     Problem::NoRigidBody,
-                    format!("{}: {}", bc.name, bc.region.describe()),
+                    format!("{}: {}", bc.name, bc.region.describe(self)),
                 ));
             }
         }
@@ -2582,7 +2587,7 @@ impl FeModel {
                 findings.push(Finding::new(
                     ModelItem::Load(s, i),
                     Problem::NoRigidBody,
-                    format!("{}: {}", load.name, load.region.describe()),
+                    format!("{}: {}", load.name, load.region.describe(self)),
                 ));
             }
         }
@@ -2594,7 +2599,7 @@ impl FeModel {
                 findings.push(Finding::new(
                     ModelItem::HistoryOutput(s, i),
                     Problem::NoRigidBody,
-                    format!("{}: {}", output.name, region.describe()),
+                    format!("{}: {}", output.name, region.describe(self)),
                 ));
             }
         }
@@ -2625,8 +2630,8 @@ impl FeModel {
                     Vec::new()
                 }
                 // Directions of a coordinate system of its own hold each node along them.
-                BoundaryKind::Displacement(displacement) if displacement.system != GLOBAL => {
-                    if let Some(system) = self.coordinate_system_or_global(&displacement.system) {
+                BoundaryKind::Displacement(displacement) if displacement.system.is_some() => {
+                    if let Some(system) = self.coordinate_system_or_global(displacement.system) {
                         for node in bc.region.nodes(mesh) {
                             let Some(x) = mesh.node(node) else {
                                 continue;
@@ -2852,7 +2857,7 @@ impl FeModel {
                     continue;
                 }
                 temperatures = true;
-                let used = |m: &&Material| self.sections.iter().any(|s| s.material == m.name);
+                let used = |m: &&Material| self.sections.iter().any(|s| s.material == Some(m.id));
                 let expands = (self.materials.iter().filter(used)).any(|m| m.expansion.is_some());
                 if !expands {
                     findings.push(Finding::new(
@@ -2971,7 +2976,7 @@ impl FeModel {
 
     /// Degrees of freedom (0..6) the active boundary conditions of the step prescribe at a
     /// reference point.
-    fn point_dofs(&self, s: usize, point: &str) -> Vec<usize> {
+    fn point_dofs(&self, s: usize, point: crate::Id) -> Vec<usize> {
         let step = &self.steps[s];
         let dofs = if self.properties.space.is_2d() { 2 } else { 6 };
         let mut out = Vec::new();
@@ -3040,7 +3045,7 @@ impl FeModel {
                     _ => None,
                 })
                 .collect(),
-            Region::RemotePoint(name) => (self.remote_point_named(mesh, name))
+            Region::RemotePoint(id) => (self.remote_point_of(mesh, *id))
                 .map(|(region, _)| region.clone())
                 .into_iter()
                 .collect(),
@@ -3203,7 +3208,7 @@ impl FeModel {
                             let axes = (self.joint_frame(mesh, joint).ok())
                                 .map(|(_, axes)| axes)
                                 .or_else(|| {
-                                    (self.coordinate_system_or_global(&joint.system))
+                                    (self.coordinate_system_or_global(joint.system))
                                         .and_then(|system| system.directions_at(centre).ok())
                                 })
                                 .unwrap_or([axis(0), axis(1), axis(2)]);
@@ -3234,16 +3239,16 @@ impl FeModel {
                     // A boundary condition on the reference point holds the body: its
                     // translations like a support at the node nearest the point, its
                     // rotations like those of a beam node.
-                    let Some(point) = self.reference_point(&body.reference_point) else {
+                    let Some(point) = self.reference_point(body.reference_point) else {
                         continue;
                     };
                     let Some(node) = nearest_node(mesh, &body.region, point.position) else {
                         continue;
                     };
-                    let springs = self
-                        .spring_point_dofs(&Region::ReferencePoint(body.reference_point.clone()));
+                    let springs =
+                        self.spring_point_dofs(&Region::ReferencePoint(body.reference_point));
                     for dof in self
-                        .point_dofs(s, &body.reference_point)
+                        .point_dofs(s, body.reference_point)
                         .into_iter()
                         .chain(springs)
                     {
@@ -3286,7 +3291,7 @@ impl FeModel {
                 support(node, axes[dof % 3], dof >= 3);
             }
             // Springs to ground on the point hold it in the global directions.
-            for dof in self.spring_point_dofs(&Region::RemotePoint(bc.name.clone())) {
+            for dof in self.spring_point_dofs(&Region::RemotePoint(bc.id)) {
                 support(node, axis(dof % 3), dof >= 3);
             }
         }
@@ -3302,8 +3307,8 @@ impl FeModel {
                 let tied = pieces(&region);
                 join(&mut ties, &tied, &[]);
                 join(&mut contacts, &tied, &[]);
-                let name = &self.steps[s].loads[i].name;
-                let springs = self.spring_point_dofs(&Region::RemotePoint(name.clone()));
+                let id = self.steps[s].loads[i].id;
+                let springs = self.spring_point_dofs(&Region::RemotePoint(id));
                 if let (false, Some(node)) =
                     (springs.is_empty(), nearest_node(mesh, &region, position))
                 {
@@ -3325,8 +3330,9 @@ impl FeModel {
         }
         for pair in self.contact_pairs.iter().filter(|c| c.active) {
             let (a, b) = (pieces(&pair.master), pieces(&pair.slave));
-            let tied = (self.surface_interactions.iter())
-                .any(|s| s.name == pair.interaction && s.is_tied());
+            let tied = (pair.interaction)
+                .and_then(|i| self.surface_interaction(i))
+                .is_some_and(|s| s.is_tied());
             if tied {
                 join(&mut ties, &a, &b);
             }
@@ -3496,7 +3502,7 @@ impl FeModel {
                     }
                 }
                 Constraint::RigidBody(body) => {
-                    if !self.point_dofs(s, &body.reference_point).is_empty() {
+                    if !self.point_dofs(s, body.reference_point).is_empty() {
                         mark(&body.region, &mut held_otherwise);
                     }
                 }
@@ -4055,11 +4061,12 @@ mod tests {
     /// Makes the first section a beam section of a rectangular cross-section.
     fn beam_section(model: &mut FeModel) {
         model.cross_sections.push(crate::CrossSection {
+            id: crate::Id::new(),
             name: "Rect".into(),
             profile: crate::BeamProfile::ALL[0].clone(),
         });
         model.sections[0].kind = crate::SectionKind::Beam(crate::BeamSection {
-            cross_section: "Rect".into(),
+            cross_section: model.cross_sections.last().map(|c| c.id),
             ..crate::BeamSection::DEFAULT
         });
     }
@@ -4125,6 +4132,7 @@ mod tests {
     fn model(mesh: &FeMesh) -> FeModel {
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::Id::new(),
             distribution: None,
             name: "Fixed-1".into(),
             active: true,
@@ -4134,6 +4142,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(Load {
+            id: crate::Id::new(),
             distribution: None,
             name: "Force-1".into(),
             active: true,
@@ -4144,11 +4153,13 @@ mod tests {
             factor_amplitude: None,
             tables: Default::default(),
         });
+        let steel = steel();
+        let steel_id = steel.id;
         FeModel {
-            materials: vec![steel()],
+            materials: vec![steel],
             sections: vec![Section {
                 name: "Section-1".into(),
-                material: "Steel".into(),
+                material: Some(steel_id),
                 region: Region::Parts(mesh.parts.iter().map(|p| p.name.clone()).collect()),
                 thickness: 1.0,
                 kind: Default::default(),
@@ -4185,7 +4196,7 @@ mod tests {
             "{findings:?}"
         );
         // A missing material is reported once, as a missing reference.
-        model.sections[0].material = "Gone".into();
+        model.sections[0].material = Some(crate::Id::new());
         assert_eq!(
             problems(&check(&model, &mesh)),
             [(ModelItem::Section(0), Problem::MissingReference)]
@@ -4203,6 +4214,7 @@ mod tests {
         model.steps[0]
             .boundary_conditions
             .push(crate::BoundaryCondition {
+                id: crate::Id::new(),
                 name: "Move".into(),
                 active: true,
                 visible: true,
@@ -4238,10 +4250,10 @@ mod tests {
             problems(&check(&model, &mesh)),
             [(ModelItem::Amplitude(0), Problem::UnusedAmplitude)]
         );
-        model.steps[0].loads[0].amplitude = Some("Ramp".into());
+        model.steps[0].loads[0].amplitude = Some(model.amplitudes[0].id);
         assert_eq!(check(&model, &mesh), []);
         model.steps[0].loads[0].amplitude = None;
-        model.steps[0].loads[0].factor_amplitude = Some("Ramp".into());
+        model.steps[0].loads[0].factor_amplitude = Some(model.amplitudes[0].id);
         assert_eq!(check(&model, &mesh), []);
     }
 
@@ -4496,6 +4508,7 @@ mod tests {
         let step = &mut model.steps[0];
         step.loads.clear();
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::Id::new(),
             distribution: None,
             name: "Submodel-1".into(),
             active: true,
@@ -4524,6 +4537,7 @@ mod tests {
         let mesh = cubes(1, false);
         let mut model = model(&mesh);
         let symmetry = |nodes: Vec<NodeId>| BoundaryCondition {
+            id: crate::Id::new(),
             distribution: None,
             name: "Symmetry-1".into(),
             active: true,
@@ -4570,7 +4584,9 @@ mod tests {
         let mesh = cubes(1, false);
         let mut model = model(&mesh);
         let free_z = [Some(0.0), Some(0.0), Some(0.0), Some(0.0), Some(0.0), None];
+        let hinge = crate::Id::new();
         model.steps[0].boundary_conditions[0] = BoundaryCondition {
+            id: hinge,
             distribution: None,
             name: "Hinge".into(),
             active: true,
@@ -4583,7 +4599,7 @@ mod tests {
         assert!(detail.ends_with(": rotation about Z free"), "{detail}");
         let mut spring = crate::Spring::new("Torsion");
         spring.ends = [
-            crate::SpringEnd::Region(Region::RemotePoint("Hinge".into())),
+            crate::SpringEnd::Region(Region::RemotePoint(hinge)),
             crate::SpringEnd::World,
         ];
         spring.rotational = [0.0, 0.0, 100.0];
@@ -4617,6 +4633,7 @@ mod tests {
         );
         // Two corners fixed leave the rotation about the line through them.
         model.steps[0].boundary_conditions.push(BoundaryCondition {
+            id: crate::Id::new(),
             distribution: None,
             name: "Fixed-1".into(),
             active: true,
@@ -4657,11 +4674,13 @@ mod tests {
                 (ModelItem::Part(1), Problem::RigidBodyMotion),
             ]
         );
-        let mut pair = ContactPair::new("Contact_Pair-1", "Surface_Interaction-1");
+        let interaction = crate::Id::new();
+        let mut pair = ContactPair::new("Contact_Pair-1", Some(interaction));
         pair.master = Region::Surface("RIGHT".into());
         pair.slave = Region::Surface("LEFT".into());
         model.contact_pairs.push(pair);
         model.surface_interactions.push(SurfaceInteraction {
+            id: interaction,
             name: "Surface_Interaction-1".into(),
             properties: Vec::new(),
         });
@@ -4705,12 +4724,14 @@ mod tests {
         let mesh = cubes(count, false);
         let mut model = model(&mesh);
         model.surface_interactions.push(SurfaceInteraction {
+            id: crate::Id::new(),
             name: "Tied".into(),
             properties: vec![
                 InteractionProperty::SurfaceBehavior(SurfaceBehavior::Tied { k: 1e7 }),
                 InteractionProperty::Friction(crate::Friction::default()),
             ],
         });
+        let tied = model.surface_interactions[0].id;
         // Only the first cube is fixed; each cube is tied to the next, alternately by a
         // tie and by tied contact.
         for c in 0..count - 1 {
@@ -4721,7 +4742,7 @@ mod tests {
                 (tie.master, tie.slave) = (right, left);
                 model.ties.push(tie);
             } else {
-                let mut pair = ContactPair::new(format!("Contact_Pair-{c}"), "Tied");
+                let mut pair = ContactPair::new(format!("Contact_Pair-{c}"), Some(tied));
                 (pair.master, pair.slave) = (right, left);
                 model.contact_pairs.push(pair);
             }
@@ -4762,7 +4783,7 @@ mod tests {
         let mut model = model(&mesh);
         model
             .contact_pairs
-            .push(ContactPair::new("Contact_Pair-1", "Tied"));
+            .push(ContactPair::new("Contact_Pair-1", None));
         let mut frequency = Step::new_frequency("Step-2");
         let StepKind::Frequency(settings) = &mut frequency.kind else {
             unreachable!()
@@ -4802,10 +4823,12 @@ mod tests {
     fn tied_contact_needs_friction_and_surface_to_surface() {
         let mesh = cubes(2, true);
         let mut model = model(&mesh);
+        let tied = crate::Id::new();
         model
             .contact_pairs
-            .push(ContactPair::new("Contact_Pair-1", "Tied"));
+            .push(ContactPair::new("Contact_Pair-1", Some(tied)));
         model.surface_interactions.push(SurfaceInteraction {
+            id: tied,
             name: "Tied".into(),
             properties: vec![InteractionProperty::SurfaceBehavior(
                 SurfaceBehavior::Tied { k: 1e7 },
@@ -4853,6 +4876,7 @@ mod tests {
         model.materials[0].density = None;
         assert_eq!(check(&model, &mesh), []);
         model.steps[0].loads.push(Load {
+            id: crate::Id::new(),
             distribution: None,
             name: "Gravity-1".into(),
             active: true,
@@ -4921,9 +4945,10 @@ mod tests {
         model
             .reference_points
             .push(ReferencePoint::new("RP-1", [0.0, 0.5, 0.5]));
+        let rp = model.reference_points[0].id;
         // The support moves from the nodes to the reference point: without a rigid body
         // the point has no node, the cube is loose.
-        model.steps[0].boundary_conditions[0].region = Region::ReferencePoint("RP-1".into());
+        model.steps[0].boundary_conditions[0].region = Region::ReferencePoint(rp);
         let found = problems(&check(&model, &mesh));
         assert!(
             found.contains(&(ModelItem::BoundaryCondition(0, 0), Problem::NoRigidBody)),
@@ -4933,7 +4958,7 @@ mod tests {
             found.contains(&(ModelItem::Part(0), Problem::RigidBodyMotion)),
             "{found:?}"
         );
-        let mut body = RigidBody::new("Rigid_Body-1", "RP-1");
+        let mut body = RigidBody::new("Rigid_Body-1", rp);
         body.region = Region::Nodes(vec![1, 4, 5, 8]);
         model.constraints.push(Constraint::RigidBody(body));
         assert_eq!(problems(&check(&model, &mesh)), []);
@@ -4955,7 +4980,7 @@ mod tests {
         );
         // A moment on the point without the body is flagged too.
         model.steps[0].boundary_conditions[0].kind = BoundaryKind::displacement([Some(0.0); 6]);
-        model.steps[0].loads[0].region = Region::ReferencePoint("RP-1".into());
+        model.steps[0].loads[0].region = Region::ReferencePoint(rp);
         model.steps[0].loads[0].kind = LoadKind::Moment([1.0, 0.0, 0.0]);
         assert_eq!(problems(&check(&model, &mesh)), []);
         model.constraints.clear();
@@ -4973,8 +4998,9 @@ mod tests {
         model
             .reference_points
             .push(ReferencePoint::new("RP-1", [0.0; 3]));
+        let rp = model.reference_points[0].id;
         let held = model.steps[0].boundary_conditions[0].region.nodes(&mesh);
-        let mut body = RigidBody::new("Rigid_Body-1", "RP-1");
+        let mut body = RigidBody::new("Rigid_Body-1", rp);
         body.region = Region::Nodes(held[..2].to_vec());
         model.constraints.push(Constraint::RigidBody(body));
         let found = check(&model, &mesh);
@@ -5002,7 +5028,8 @@ mod tests {
         model
             .reference_points
             .push(ReferencePoint::new("RP-1", [0.0; 3]));
-        let mut body = RigidBody::new("Rigid_Body-1", "RP-1");
+        let rp = model.reference_points[0].id;
+        let mut body = RigidBody::new("Rigid_Body-1", rp);
         body.region = Region::Nodes(vec![1, 2]);
         model.constraints.push(Constraint::RigidBody(body));
         let found = check(&model, &mesh);
@@ -5041,6 +5068,7 @@ mod tests {
         // A remote displacement holds no nodes of the mesh itself.
         let mut values = [Some(0.0); 6];
         model.steps[0].boundary_conditions.push(BoundaryCondition {
+            id: crate::Id::new(),
             distribution: None,
             name: "Remote_Displacement-1".into(),
             active: true,
@@ -5058,11 +5086,12 @@ mod tests {
         model
             .reference_points
             .push(ReferencePoint::new("RP-1", [1.0, 0.5, 0.5]));
-        let mut body = RigidBody::new("Rigid_Body-1", "RP-1");
+        let rp = model.reference_points[0].id;
+        let mut body = RigidBody::new("Rigid_Body-1", rp);
         body.region = Region::Nodes(vec![2, 3, 6, 7]);
         model.constraints.push(Constraint::RigidBody(body));
         let bc = &mut model.steps[0].boundary_conditions[1];
-        bc.region = Region::ReferencePoint("RP-1".into());
+        bc.region = Region::ReferencePoint(rp);
         bc.kind = BoundaryKind::displacement([None, None, None, None, None, Some(0.0)]);
         assert!(no_load(&model));
         model.steps[0].boundary_conditions[1].kind =
@@ -5127,6 +5156,7 @@ mod tests {
         let mut model = model(&mesh);
         let step = &mut model.steps[0];
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::Id::new(),
             distribution: None,
             name: "Displacement-1".into(),
             active: true,
@@ -5519,6 +5549,7 @@ mod tests {
         let bcs = &mut model.steps[0].boundary_conditions;
         bcs[0].region = Region::Nodes(vec![1]);
         bcs.push(BoundaryCondition {
+            id: crate::Id::new(),
             distribution: None,
             name: "Pin".into(),
             active: true,
@@ -5541,6 +5572,7 @@ mod tests {
         );
         // The missing rotations given by another boundary condition make a clamp.
         model.steps[0].boundary_conditions.push(BoundaryCondition {
+            id: crate::Id::new(),
             distribution: None,
             name: "Rotations".into(),
             active: true,
@@ -5619,6 +5651,7 @@ mod tests {
         bcs[0].region = Region::Nodes(vec![1]);
         bcs[0].kind = BoundaryKind::displacement([Some(0.0), None, Some(0.0), None, None, None]);
         bcs.push(BoundaryCondition {
+            id: crate::Id::new(),
             distribution: None,
             name: "Roller".into(),
             active: true,
@@ -5628,6 +5661,7 @@ mod tests {
             amplitude: None,
         });
         bcs.push(BoundaryCondition {
+            id: crate::Id::new(),
             distribution: None,
             name: "Plane".into(),
             active: true,
@@ -5681,6 +5715,7 @@ mod tests {
         let mut model = model(&mesh);
         let mut step = Step::new_heat_transfer("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::Id::new(),
             distribution: None,
             name: "Temperature-1".into(),
             active: true,
@@ -5690,6 +5725,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(Load {
+            id: crate::Id::new(),
             distribution: None,
             name: "Flux-1".into(),
             active: true,

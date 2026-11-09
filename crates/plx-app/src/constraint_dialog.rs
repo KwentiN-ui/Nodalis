@@ -80,7 +80,8 @@ impl Type {
                 offset: 0.0,
                 nonlinear: false,
             }),
-            Type::RigidBody => Constraint::RigidBody(RigidBody::new(name, "")),
+            // The dialog chooses the point, see `ConstraintDraft::point_exists`.
+            Type::RigidBody => Constraint::RigidBody(RigidBody::new(name, plx_model::Id::new())),
         }
     }
 
@@ -173,6 +174,8 @@ impl Location {
 /// A reference point the rigid body dialog creates together with the body.
 #[derive(Clone, Debug)]
 pub(crate) struct NewPoint {
+    /// The id the point gets, which the body refers to.
+    id: plx_model::Id,
     name: String,
     location: Location,
     /// Global coordinates in the stored units, for [`Location::Coordinates`].
@@ -185,6 +188,7 @@ pub(crate) struct NewPoint {
 impl NewPoint {
     fn new(fe: &FeModel) -> Self {
         Self {
+            id: plx_model::Id::new(),
             name: next_name("RP", fe.reference_points.iter().map(|p| p.name.as_str())),
             location: Location::Centroid,
             coordinates: [0.0; 3],
@@ -200,6 +204,7 @@ impl NewPoint {
             Location::Coordinates => PointDefinition::Global,
         };
         ReferencePoint {
+            id: self.id,
             name: self.name.trim().to_string(),
             position: self.coordinates,
             definition,
@@ -317,7 +322,8 @@ impl ConstraintDraft {
             && let Some(problem) = point.problem(fe)
         {
             Err(problem)
-        } else if matches!(&self.current(), Constraint::RigidBody(b) if b.reference_point.is_empty())
+        } else if self.creates_point().is_none()
+            && matches!(&self.current(), Constraint::RigidBody(b) if fe.reference_point(b.reference_point).is_none())
         {
             Err("Choose the reference point that drives the rigid body.".into())
         } else {
@@ -402,7 +408,7 @@ impl ConstraintDraft {
                 if let (Constraint::RigidBody(body), Some(point)) =
                     (&mut constraint, self.creates_point())
                 {
-                    body.reference_point = point.name.trim().to_string();
+                    body.reference_point = point.id;
                 }
             }
         }
@@ -667,7 +673,7 @@ fn joint_rows(ui: &mut Ui, model: &Model, joint: &mut Joint, pair: &mut MasterSl
         ui.end_row();
     }
     crate::setup::system_row(ui, &mut joint.system, fe);
-    let system = fe.coordinate_system_or_global(&joint.system);
+    let system = fe.coordinate_system_or_global(joint.system);
     let cylindrical =
         (system.as_ref()).is_some_and(|s| s.kind == plx_model::CoordinateSystemKind::Cylindrical);
     ui.label("Location");
@@ -837,16 +843,16 @@ fn rigid_body_point_rows(
     region: Option<&Region>,
 ) {
     let points = &model.fe.reference_points;
-    if new_point.is_none() && !points.iter().any(|p| p.name == body.reference_point) {
+    if new_point.is_none() && !points.iter().any(|p| p.id == body.reference_point) {
         match points.first() {
-            Some(first) => body.reference_point = first.name.clone(),
+            Some(first) => body.reference_point = first.id,
             None => *new_point = Some(Box::new(NewPoint::new(&model.fe))),
         }
     }
     ui.label("Reference point");
     let selected = match new_point {
         Some(_) => "New point".to_string(),
-        None => body.reference_point.clone(),
+        None => model.fe.name_or_missing(Some(body.reference_point)),
     };
     egui::ComboBox::from_id_salt("rigid body point")
         .selected_text(selected)
@@ -860,10 +866,10 @@ fn rigid_body_point_rows(
                 *new_point = Some(Box::new(NewPoint::new(&model.fe)));
             }
             for point in points {
-                let chosen = new_point.is_none() && body.reference_point == point.name;
+                let chosen = new_point.is_none() && body.reference_point == point.id;
                 if ui.selectable_label(chosen, &point.name).clicked() {
                     *new_point = None;
-                    body.reference_point = point.name.clone();
+                    body.reference_point = point.id;
                 }
             }
         });
@@ -1140,15 +1146,17 @@ mod tests {
         draft.new_point.as_mut().unwrap().name = "rp-1".into();
         assert!(draft.validate(&fe).is_err());
         draft.new_point.as_mut().unwrap().name = "Hub".into();
+        let created = draft.new_point().unwrap();
+        assert_eq!(created.name, "Hub");
         let Constraint::RigidBody(body) = draft.finish() else {
             unreachable!()
         };
-        assert_eq!(body.reference_point, "Hub");
+        assert_eq!(body.reference_point, created.id);
     }
 
     #[test]
     fn an_edited_rigid_body_keeps_its_point() {
-        let mut body = RigidBody::new("Rigid_Body-1", "RP-1");
+        let mut body = RigidBody::new("Rigid_Body-1", crate::test_ids::named("RP-1"));
         body.region = Region::Faces(vec![(1, 2)]);
         let draft = ConstraintDraft::edit(
             &Constraint::RigidBody(body.clone()),
@@ -1207,7 +1215,7 @@ mod tests {
         let torsion = Constraint::Spring(Spring {
             ends: [
                 SpringEnd::World,
-                SpringEnd::Region(Region::RemotePoint("Hinge".into())),
+                SpringEnd::Region(Region::RemotePoint(crate::test_ids::named("Hinge"))),
             ],
             rotational: [0.0, 0.0, 5.0],
             ..Spring::new("Torsion")

@@ -9,7 +9,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId};
 use serde::{Deserialize, Serialize};
 
-use crate::features::GLOBAL;
 use crate::{BoundaryKind, FeModel, ModelSpace, Region};
 
 /// How the selection follows its prescribed displacements, Ansys' "Behavior".
@@ -69,8 +68,8 @@ pub struct Displacement {
     /// `None` leaves one free.
     pub values: [Option<f64>; 6],
     pub behavior: Behavior,
-    /// Coordinate system of the location and of the directions, by name ([`GLOBAL`]).
-    pub system: String,
+    /// Coordinate system of the location and of the directions; `None` is the global one.
+    pub system: Option<crate::Id>,
     /// Coordinates of the point in `system`; `None` is the centre of the selection. Setting
     /// it asks for a point.
     pub location: Option<[f64; 3]>,
@@ -151,16 +150,16 @@ impl FeModel {
         })
     }
 
-    /// The first displacement boundary condition of the name that is written with a point,
+    /// The first displacement boundary condition of the id that is written with a point,
     /// of any step, with the index of its step.
     pub fn remote_displacement(
         &self,
         mesh: &FeMesh,
-        name: &str,
+        id: crate::Id,
     ) -> Option<(usize, &crate::BoundaryCondition, &Displacement)> {
         self.steps.iter().enumerate().find_map(|(s, step)| {
             let (i, bc) =
-                (step.boundary_conditions.iter().enumerate()).find(|(_, bc)| bc.name == name)?;
+                (step.boundary_conditions.iter().enumerate()).find(|(_, bc)| bc.id == id)?;
             let BoundaryKind::Displacement(displacement) = &bc.kind else {
                 return None;
             };
@@ -281,7 +280,7 @@ impl FeModel {
                             continue;
                         }
                         let given = std::array::from_fn(|k| d.values[k].is_some());
-                        if d.system != GLOBAL && given.iter().any(|&g| g) {
+                        if d.system.is_some() && given.iter().any(|&g| g) {
                             [true; 3]
                         } else {
                             given
@@ -312,17 +311,6 @@ impl FeModel {
         }
         held
     }
-
-    /// Follows a renamed displacement: history outputs of its point keep referring to it.
-    pub fn rename_remote_point(&mut self, old: &str, new: &str) {
-        for output in self.steps.iter_mut().flat_map(|s| &mut s.history_outputs) {
-            if let Some(Region::RemotePoint(name)) = output.kind.region_mut()
-                && name == old
-            {
-                *name = new.to_string();
-            }
-        }
-    }
 }
 
 impl Displacement {
@@ -330,7 +318,7 @@ impl Displacement {
         Self {
             values,
             behavior: Behavior::default(),
-            system: GLOBAL.into(),
+            system: None,
             location: None,
             pinball: None,
             tables: Default::default(),
@@ -447,8 +435,8 @@ impl Displacement {
         region: &Region,
         excluded: &BTreeSet<NodeId>,
     ) -> Result<RemotePoint, String> {
-        let system = (model.coordinate_system_or_global(&self.system))
-            .ok_or_else(|| format!("Coordinate System {} does not exist", self.system))?;
+        let system = (model.coordinate_system_or_global(self.system))
+            .ok_or("The coordinate system does not exist")?;
         let position = match self.location {
             Some(local) => system.global(local)?,
             None => (region.centroid(mesh))

@@ -65,7 +65,7 @@ pub enum PlaneDefinition {
     /// A plane of the model's features, shifted along its normal; it follows the feature
     /// when that changes.
     Feature {
-        plane: String,
+        plane: plx_model::Id,
         offset: f64,
         /// A point on the feature's plane and its unit normal, as last resolved; `None` while
         /// the feature is missing or degenerate.
@@ -112,7 +112,7 @@ impl SectionView {
         let PlaneDefinition::Feature { plane, frame, .. } = &mut self.definition else {
             return false;
         };
-        let resolved = (fe.plane(plane))
+        let resolved = (fe.plane(*plane))
             .and_then(|p| p.resolve(fe).ok())
             .map(|(point, normal)| (DVec3::from(point), DVec3::from(normal)));
         let moved = *frame != resolved;
@@ -420,7 +420,7 @@ impl SectionDialog {
                 .on_disabled_hover_text("Create a Plane under Features first.");
             if radio.clicked() && kind != 1 {
                 self.draft.definition = PlaneDefinition::Feature {
-                    plane: fe.planes[0].name.clone(),
+                    plane: fe.planes[0].id,
                     offset: 0.0,
                     frame: None,
                 };
@@ -465,10 +465,10 @@ impl SectionDialog {
                 } => {
                     ui.label("Plane");
                     egui::ComboBox::from_id_salt("section plane")
-                        .selected_text(plane.as_str())
+                        .selected_text(fe.name_or_missing(Some(*plane)))
                         .show_ui(ui, |ui| {
                             for candidate in &fe.planes {
-                                ui.selectable_value(plane, candidate.name.clone(), &candidate.name);
+                                ui.selectable_value(plane, candidate.id, &candidate.name);
                             }
                         });
                     ui.end_row();
@@ -649,22 +649,26 @@ mod tests {
     #[test]
     fn feature_planes_follow_their_feature() {
         let mut fe = FeModel::default();
-        let mut system = plx_model::CoordinateSystem::new("CS");
+        let mut system = plx_model::CoordinateSystem {
+            id: crate::test_ids::named("CS"),
+            ..plx_model::CoordinateSystem::new("CS")
+        };
         system.origin = [0.0, 0.0, 5.0];
         system.point_x = [1.0, 0.0, 5.0];
         system.point_xy = [0.0, 1.0, 5.0];
         fe.coordinate_systems.push(system);
         fe.planes.push(plx_model::Plane {
             source: plx_model::PlaneSource::CoordinateSystem {
-                system: "CS".into(),
+                system: Some(crate::test_ids::named("CS")),
                 plane: plx_model::CoordinatePlane::Xy,
                 offset: 0.0,
             },
+            id: crate::test_ids::named("Plane-1"),
             ..plx_model::Plane::new("Plane-1")
         });
         let mut section = SectionView {
             definition: PlaneDefinition::Feature {
-                plane: "Plane-1".into(),
+                plane: crate::test_ids::named("Plane-1"),
                 offset: 1.0,
                 frame: None,
             },

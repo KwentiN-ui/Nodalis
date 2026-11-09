@@ -5,13 +5,13 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ContactBehavior, ContactRegion, FeModel, Step};
+use crate::{ContactBehavior, ContactRegion, FeModel, Id, Step};
 
 /// A change of a contact region or contact pair from a step on.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContactChange {
-    /// Name of the contact region or contact pair.
-    pub region: String,
+    /// The contact region or contact pair.
+    pub region: crate::Id,
     /// Switched on or off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<bool>,
@@ -57,7 +57,7 @@ impl ContactRegion {
     /// before it.
     pub fn state_in(&self, step: &Step, before: ContactState) -> ContactState {
         (step.contact_changes.iter())
-            .filter(|c| c.region == self.name)
+            .filter(|c| c.region == self.id)
             .fold(before, ContactState::changed)
     }
 
@@ -65,7 +65,7 @@ impl ContactRegion {
     fn changes<'a>(&'a self, steps: &'a [Step]) -> impl Iterator<Item = &'a ContactChange> {
         (steps.iter().filter(|s| s.active))
             .flat_map(|s| &s.contact_changes)
-            .filter(|c| c.region == self.name)
+            .filter(|c| c.region == self.id)
     }
 
     /// Whether a step switches the region off or on.
@@ -80,7 +80,7 @@ impl ContactRegion {
             .flat_map(|s| &s.history_outputs)
             .any(|o| {
                 o.active
-                    && matches!(&o.kind, crate::HistoryKind::Contact { pair } if *pair == self.name)
+                    && matches!(&o.kind, crate::HistoryKind::Contact { pair } if *pair == Some(self.id))
             })
     }
 
@@ -93,13 +93,13 @@ impl ContactRegion {
 impl Step {
     /// Makes the contact region `region` be `wanted` in this step, which follows on a step
     /// where it was `before`: the step keeps only what differs.
-    pub fn set_contact_state(&mut self, region: &str, before: ContactState, wanted: ContactState) {
+    pub fn set_contact_state(&mut self, region: Id, before: ContactState, wanted: ContactState) {
         let active = (wanted.active != before.active).then_some(wanted.active);
         let friction = wanted.friction.filter(|&mu| Some(mu) != before.friction);
         self.contact_changes.retain(|c| c.region != region);
         if active.is_some() || friction.is_some() {
             self.contact_changes.push(ContactChange {
-                region: region.to_owned(),
+                region,
                 active,
                 friction,
             });
@@ -109,9 +109,9 @@ impl Step {
 
 impl FeModel {
     /// Drops the changes of a contact region or pair that is deleted.
-    pub fn remove_contact_changes(&mut self, name: &str) {
+    pub fn remove_contact_changes(&mut self, region: Id) {
         for step in &mut self.steps {
-            step.contact_changes.retain(|c| c.region != name);
+            step.contact_changes.retain(|c| c.region != region);
         }
     }
 }
@@ -136,16 +136,16 @@ mod tests {
             active: false,
             ..before
         };
-        steps[0].set_contact_state("Region-1", before, off);
+        steps[0].set_contact_state(region.id, before, off);
         assert_eq!(steps[0].contact_changes[0].friction, None);
         // Step-2 follows on the change of Step-1.
         assert_eq!(region.state_after(&steps), off);
         assert!(region.switched(&steps) && !region.friction_changed(&steps));
         // Back to what it was: no change left.
-        steps[0].set_contact_state("Region-1", before, before);
+        steps[0].set_contact_state(region.id, before, before);
         assert!(steps[0].contact_changes.is_empty());
         // A deactivated step changes nothing.
-        steps[1].set_contact_state("Region-1", before, off);
+        steps[1].set_contact_state(region.id, before, off);
         steps[1].active = false;
         assert_eq!(region.state_after(&steps), before);
     }

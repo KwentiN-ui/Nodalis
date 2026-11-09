@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 /// beyond the first and last point.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Amplitude {
+    /// The internal identity other items refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     /// Whether the times count from the start of each step or of the analysis.
     pub time_span: AmplitudeTime,
@@ -24,6 +26,7 @@ impl Amplitude {
     /// A new amplitude with the single point at zero.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             time_span: AmplitudeTime::Step,
             shift_time: 0.0,
@@ -109,6 +112,7 @@ impl ValueTable {
     /// factors of a value of 1.
     pub fn as_amplitude(&self, name: impl Into<String>) -> Amplitude {
         Amplitude {
+            id: crate::Id::new(),
             name: name.into(),
             time_span: AmplitudeTime::Step,
             shift_time: 0.0,

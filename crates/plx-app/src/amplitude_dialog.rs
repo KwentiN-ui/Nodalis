@@ -258,7 +258,7 @@ pub fn amplitude_row(
     ui: &mut Ui,
     label: &str,
     id: &str,
-    reference: &mut Option<String>,
+    reference: &mut Option<plx_model::Id>,
     fe: &FeModel,
 ) {
     amplitude_row_with(ui, label, id, reference, fe, |_| {});
@@ -270,12 +270,15 @@ pub fn amplitude_row_with(
     ui: &mut Ui,
     label: &str,
     id: &str,
-    reference: &mut Option<String>,
+    reference: &mut Option<plx_model::Id>,
     fe: &FeModel,
     extra: impl FnOnce(&mut Ui),
 ) {
     ui.label(label);
-    let text = reference.clone().unwrap_or_else(|| DEFAULT.into());
+    let text = match *reference {
+        None => DEFAULT.to_string(),
+        Some(id) => fe.name_or_missing(Some(id)),
+    };
     ui.horizontal(|ui| {
         egui::ComboBox::from_id_salt(id)
             .selected_text(text)
@@ -283,21 +286,17 @@ pub fn amplitude_row_with(
             .show_ui(ui, |ui| {
                 ui.selectable_value(reference, None, DEFAULT);
                 for amplitude in &fe.amplitudes {
-                    let name = Some(amplitude.name.clone());
-                    ui.selectable_value(reference, name, &amplitude.name);
+                    ui.selectable_value(reference, Some(amplitude.id), &amplitude.name);
                 }
             });
         extra(ui);
     });
     ui.end_row();
-    if let Some(name) = reference.as_deref()
-        && fe.amplitude(name).is_none()
+    if let Some(id) = *reference
+        && fe.amplitude(id).is_none()
     {
         ui.label("");
-        ui.colored_label(
-            crate::style::error(),
-            format!("Amplitude {name} does not exist"),
-        );
+        ui.colored_label(crate::style::error(), "The amplitude does not exist");
         ui.end_row();
     }
 }

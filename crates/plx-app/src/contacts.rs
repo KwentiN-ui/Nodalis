@@ -302,15 +302,9 @@ pub fn contact_pair_form(
     regions: &mut MasterSlave,
 ) {
     ui.label("Surface Interaction");
-    egui::ComboBox::from_id_salt("contact interaction")
-        .selected_text(pair.interaction.as_str())
-        .width(crate::dock::fit_width(ui, 200.0))
-        .show_ui(ui, |ui| {
-            for interaction in &model.fe.surface_interactions {
-                let name = interaction.name.clone();
-                ui.selectable_value(&mut pair.interaction, name, &interaction.name);
-            }
-        });
+    let interactions = (model.fe.surface_interactions.iter()).map(|i| (i.id, i.name.as_str()));
+    let salt = "contact interaction";
+    crate::pick_item::item_combo(ui, salt, &mut pair.interaction, interactions, None, 200.0);
     ui.end_row();
     ui.label("Method");
     egui::ComboBox::from_id_salt("contact method")
@@ -361,7 +355,11 @@ pub fn contact_pair_form(
 }
 
 pub fn validate_contact_pair(pair: &ContactPair, fe: &FeModel) -> Result<(), String> {
-    if !(fe.surface_interactions.iter()).any(|s| s.name == pair.interaction) {
+    if pair
+        .interaction
+        .and_then(|i| fe.surface_interaction(i))
+        .is_none()
+    {
         return Err(
             "Please select a Surface Interaction; create one under Surface Interactions first."
                 .into(),

@@ -78,6 +78,7 @@ mod tests {
         // A free degree of freedom ignores its table.
         displacement.tables[1] = table(2.0);
         let bc = BoundaryCondition {
+            id: crate::Id::new(),
             name: "Move".into(),
             active: true,
             visible: true,
@@ -87,6 +88,7 @@ mod tests {
             distribution: None,
         };
         let mut load = Load {
+            id: crate::Id::new(),
             name: "Pressure".into(),
             active: true,
             visible: true,

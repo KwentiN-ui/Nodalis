@@ -1192,7 +1192,9 @@ pub fn worksheet(
                                 if response.double_clicked() {
                                     tree.reveal = true;
                                 }
-                                match &region.detected_by {
+                                let detection =
+                                    (region.detected_by).map(|d| model.fe.name_or_missing(Some(d)));
+                                match &detection {
                                     Some(name) if region.edited => {
                                         ui.label(format!("{name}, changed")).on_hover_text(
                                             "Changed by you: detecting again keeps it.",
@@ -1212,8 +1214,8 @@ pub fn worksheet(
                                     other => other.name().to_owned(),
                                 };
                                 ui.label(behavior);
-                                ui.label(region.side_a.describe());
-                                ui.label(region.side_b.describe());
+                                ui.label(region.side_a.describe(&model.fe));
+                                ui.label(region.side_b.describe(&model.fe));
                                 let master = resolved.items.get(i).map(|r| r.a_is_master);
                                 ui.label(match master {
                                     Some(true) => "A",
@@ -1280,7 +1282,7 @@ pub fn worksheet(
         for i in indices.into_iter().rev() {
             if i < fe.contact_regions.len() {
                 let region = fe.contact_regions.remove(i);
-                fe.remove_contact_changes(&region.name);
+                fe.remove_contact_changes(region.id);
             }
         }
         tree.selected = None;
@@ -1318,18 +1320,7 @@ pub fn worksheet(
                 fe.contact_regions[i].name = plx_model::next_name(&name, others);
             }
         }
-        // History outputs and step changes follow the new names, by way of names no region
-        // has, so that a name passed on from one region to another is not followed twice.
-        let renamed: Vec<(usize, &String)> = (names.iter().enumerate())
-            .filter(|(i, old)| fe.contact_regions[*i].name != **old)
-            .collect();
-        for &(i, old) in &renamed {
-            fe.rename_contact_pair(old, &format!("\u{0}{i}"));
-        }
-        for &(i, _) in &renamed {
-            let new = fe.contact_regions[i].name.clone();
-            fe.rename_contact_pair(&format!("\u{0}{i}"), &new);
-        }
+        // History outputs and step changes refer to the regions by id: they follow.
     }
 }
 
@@ -1409,7 +1400,7 @@ pub fn step_contacts(ui: &mut Ui, fe: &FeModel, step: &mut plx_model::Step, inde
                         }
                     }
                     if wanted != region.state_in(step, before) {
-                        step.set_contact_state(&region.name, before, wanted);
+                        step.set_contact_state(region.id, before, wanted);
                     }
                     if wanted != before {
                         ui.weak("changed here");
@@ -1517,6 +1508,7 @@ mod tests {
         assert_eq!((plate_top.len(), block_bottom.len()), (1, 1));
 
         model.fe.materials.push(Material {
+            id: crate::test_ids::named("Steel"),
             name: "Steel".into(),
             density: None,
             elastic: Some(Elastic {
@@ -1532,13 +1524,14 @@ mod tests {
         });
         model.fe.sections.push(Section {
             name: "Section-1".into(),
-            material: "Steel".into(),
+            material: Some(crate::test_ids::named("Steel")),
             region: Region::Parts(names.clone()),
             thickness: 1.0,
             kind: SectionKind::Solid,
         });
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Fix"),
             distribution: None,
             name: "Fix".into(),
             active: true,
@@ -1548,6 +1541,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(Load {
+            id: crate::test_ids::named("Press"),
             distribution: None,
             name: "Press".into(),
             active: true,
@@ -1559,10 +1553,10 @@ mod tests {
             tables: Default::default(),
         });
         model.fe.steps.push(step);
-        model
-            .fe
-            .contact_detections
-            .push(ContactDetection::new("Detection-1"));
+        model.fe.contact_detections.push(ContactDetection {
+            id: crate::test_ids::named("Detection-1"),
+            ..ContactDetection::new("Detection-1")
+        });
 
         // Nothing is meshed yet: the detection runs on the geometry.
         assert!(detection_display(&model, Some(&view)).is_some());
@@ -1670,6 +1664,7 @@ mod tests {
         assert_eq!((beam_bottom.len(), block_top.len()), (1, 1));
 
         model.fe.materials.push(Material {
+            id: crate::test_ids::named("Steel"),
             name: "Steel".into(),
             density: None,
             elastic: Some(Elastic {
@@ -1685,13 +1680,14 @@ mod tests {
         });
         model.fe.sections.push(Section {
             name: "Section-1".into(),
-            material: "Steel".into(),
+            material: Some(crate::test_ids::named("Steel")),
             region: Region::Parts(names.clone()),
             thickness: 1.0,
             kind: SectionKind::Solid,
         });
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Fix"),
             distribution: None,
             name: "Fix".into(),
             active: true,
@@ -1701,6 +1697,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(Load {
+            id: crate::test_ids::named("Press"),
             distribution: None,
             name: "Press".into(),
             active: true,
@@ -1712,10 +1709,10 @@ mod tests {
             tables: Default::default(),
         });
         model.fe.steps.push(step);
-        model
-            .fe
-            .contact_detections
-            .push(ContactDetection::new("Detection-1"));
+        model.fe.contact_detections.push(ContactDetection {
+            id: crate::test_ids::named("Detection-1"),
+            ..ContactDetection::new("Detection-1")
+        });
 
         let report = detect(&mut model, Some(&view), 0).unwrap();
         assert_eq!(report.added, 1, "{report:?}");

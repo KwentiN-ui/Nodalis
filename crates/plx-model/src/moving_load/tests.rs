@@ -183,10 +183,11 @@ fn the_path_follows_the_coordinate_system() {
     system.origin = [100.0, 0.0, 0.0];
     system.point_x = [100.0, 1.0, 0.0];
     system.point_xy = [100.0, 0.0, 1.0];
+    let runway = system.id;
     model.coordinate_systems.push(system);
     let (mesh, faces) = plate(false);
     let load = MovingLoad {
-        system: "Runway".into(),
+        system: Some(runway),
         travel_axis: 2,
         lateral_axis: 0,
         ..one_wheel(300.0)
@@ -202,9 +203,9 @@ fn problems_are_reported() {
     let model = FeModel::default();
     let mut load = mm_default();
     assert_eq!(load.problem(&model, false), None);
-    load.system = "Missing".into();
+    load.system = Some(crate::Id::new());
     assert!(load.problem(&model, false).is_some());
-    load.system = GLOBAL.into();
+    load.system = None;
     load.lateral_axis = load.travel_axis;
     assert!(load.problem(&model, false).is_some());
     assert_eq!(load.problem(&model, true), None);

@@ -10,12 +10,22 @@ use crate::{CompressionOnly, NodeTie, Region, RigidBody, Spring, SpringEnd};
 /// by contact pairs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SurfaceInteraction {
+    /// The internal identity other items refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     /// The interaction models in the order the user added them; each kind at most once.
     pub properties: Vec<InteractionProperty>,
 }
 
 impl SurfaceInteraction {
+    pub fn new(name: impl Into<String>, properties: Vec<InteractionProperty>) -> Self {
+        Self {
+            id: crate::Id::new(),
+            name: name.into(),
+            properties,
+        }
+    }
+
     /// Whether the surface behavior is tied.
     pub fn is_tied(&self) -> bool {
         (self.properties.iter()).any(|p| {
@@ -237,12 +247,14 @@ impl ContactMethod {
 /// Two surfaces that may touch (`*CONTACT PAIR`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContactPair {
+    /// The internal identity other items refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     /// A deactivated contact pair is written to the input file as a comment only.
     #[serde(default = "crate::active")]
     pub active: bool,
     /// Name of the surface interaction.
-    pub interaction: String,
+    pub interaction: Option<crate::Id>,
     pub method: ContactMethod,
     /// Pairing only at the start of each increment; node to surface contact only.
     pub small_sliding: bool,
@@ -274,11 +286,12 @@ impl ContactPair {
         self.name = swapped_name(&self.name);
     }
 
-    pub fn new(name: impl Into<String>, interaction: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<String>, interaction: Option<crate::Id>) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
-            interaction: interaction.into(),
+            interaction,
             method: ContactMethod::default(),
             small_sliding: false,
             adjust: false,
@@ -634,8 +647,7 @@ impl ContactScale {
     pub fn element_young(model: &crate::FeModel, mesh: &plx_mesh::FeMesh) -> ElementYoung {
         let mut young = ElementYoung::new();
         for section in &model.sections {
-            let Some(e) = (model.materials.iter())
-                .find(|m| m.name == section.material)
+            let Some(e) = (section.material.and_then(|m| model.material(m)))
                 .and_then(|m| m.small_strain_elastic())
                 .map(|elastic| elastic.young)
                 .filter(|&e| e > 0.0)
@@ -797,7 +809,7 @@ mod tests {
             });
             model.sections.push(crate::Section {
                 name: part.into(),
-                material: name.into(),
+                material: model.materials.last().map(|m| m.id),
                 region: Region::Parts(vec![part.into()]),
                 thickness: 1.0,
                 kind: crate::SectionKind::Solid,
@@ -836,6 +848,7 @@ mod tests {
         assert_eq!(default_stick_slope(1e12, true), 1e12);
         assert_eq!(default_stick_slope(1e12, false), 1e10);
         let tied = SurfaceInteraction {
+            id: crate::Id::new(),
             name: "Tied".into(),
             properties: vec![
                 InteractionProperty::SurfaceBehavior(SurfaceBehavior::Tied { k: 5e15 }),
@@ -844,6 +857,7 @@ mod tests {
         };
         assert_eq!(tied.own_normal_stiffness(), Some(5e15));
         let hard = SurfaceInteraction {
+            id: crate::Id::new(),
             name: "Hard".into(),
             properties: vec![InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)],
         };
@@ -852,8 +866,7 @@ mod tests {
 
     #[test]
     fn constraints_saved_before_hiding_are_visible() {
-        let text =
-            r#"RigidBody((name: "Rigid_Body-1", region: Parts([]), reference_point: "RP-1"))"#;
+        let text = r#"RigidBody((name: "Rigid_Body-1", region: Parts([]), reference_point: 7))"#;
         let mut constraint: Constraint = ron::from_str(text).unwrap();
         assert!(constraint.visible());
         *constraint.visible_mut().unwrap() = false;
@@ -863,7 +876,7 @@ mod tests {
 
     #[test]
     fn swapping_turns_regions_and_a_pair_name_around() {
-        let mut pair = ContactPair::new("BEAM_to_DISC", "Steel");
+        let mut pair = ContactPair::new("BEAM_to_DISC", None);
         pair.master = Region::Surface("TOP".into());
         pair.slave = Region::Surface("BOTTOM".into());
         pair.swap_master_slave();

@@ -6101,11 +6101,11 @@ impl Workbench {
         let edited = (self.feature_dialog.as_ref())
             .filter(|d| d.results == Some(self.current_result))
             .and_then(FeatureDialog::result_plane);
-        let name = match edited {
-            Some(name) => name,
-            None => &model.fe.result_planes.get(view.plane_result?)?.plane,
+        let plane = match edited {
+            Some(plane) => plane,
+            None => model.fe.result_planes.get(view.plane_result?)?.plane,
         };
-        let (point, normal) = model.fe.plane(name)?.resolve(&model.fe).ok()?;
+        let (point, normal) = model.fe.plane(plane)?.resolve(&model.fe).ok()?;
         Some((point.into(), normal.into()))
     }
 

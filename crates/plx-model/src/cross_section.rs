@@ -16,6 +16,8 @@ pub const ROUND_POINTS: usize = 24;
 /// A named beam profile.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CrossSection {
+    /// The internal identity other items refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     pub profile: BeamProfile,
 }
@@ -23,6 +25,14 @@ pub struct CrossSection {
 impl CrossSection {
     /// Prefix of new cross-sections' names, like `Cross_Section-1`.
     pub const PREFIX: &'static str = "Cross_Section";
+
+    pub fn new(name: impl Into<String>, profile: BeamProfile) -> Self {
+        Self {
+            id: crate::Id::new(),
+            name: name.into(),
+            profile,
+        }
+    }
 }
 
 /// Cross-section of a beam, with CalculiX's dimensions: the 1-direction is the normal of

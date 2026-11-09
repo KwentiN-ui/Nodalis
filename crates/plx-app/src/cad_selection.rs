@@ -478,6 +478,7 @@ mod tests {
 
         model.fe = FeModel {
             materials: vec![Material {
+                id: crate::test_ids::named("Steel"),
                 name: "Steel".into(),
                 density: None,
                 elastic: Some(Elastic {
@@ -493,7 +494,7 @@ mod tests {
             }],
             sections: vec![Section {
                 name: "Section-1".into(),
-                material: "Steel".into(),
+                material: Some(crate::test_ids::named("Steel")),
                 region: Region::Parts(vec!["SOLID-1".into()]),
                 thickness: 1.0,
                 kind: SectionKind::Solid,
@@ -503,6 +504,7 @@ mod tests {
         };
         let step = &mut model.fe.steps[0];
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Fix"),
             distribution: None,
             name: "Fix".into(),
             active: true,
@@ -512,6 +514,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(Load {
+            id: crate::test_ids::named("Pull"),
             distribution: None,
             name: "Pull".into(),
             active: true,
@@ -644,6 +647,7 @@ mod tests {
 
         model.fe = FeModel {
             materials: vec![Material {
+                id: crate::test_ids::named("Steel"),
                 name: "Steel".into(),
                 density: None,
                 elastic: Some(Elastic {
@@ -659,15 +663,16 @@ mod tests {
             }],
             sections: vec![Section {
                 name: "Section-1".into(),
-                material: "Steel".into(),
+                material: Some(crate::test_ids::named("Steel")),
                 region: line.clone(),
                 thickness: 1.0,
                 kind: SectionKind::Beam(plx_model::BeamSection {
-                    cross_section: "Rect".into(),
+                    cross_section: Some(crate::test_ids::named("Rect")),
                     ..plx_model::BeamSection::DEFAULT
                 }),
             }],
             cross_sections: vec![plx_model::CrossSection {
+                id: crate::test_ids::named("Rect"),
                 name: "Rect".into(),
                 profile: plx_model::BeamProfile::Rect { a: 10.0, b: 10.0 },
             }],
@@ -691,6 +696,7 @@ mod tests {
         model.fe.sections.push(second);
         let step = &mut model.fe.steps[0];
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Fix"),
             distribution: None,
             name: "Fix".into(),
             active: true,
@@ -700,6 +706,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(Load {
+            id: crate::test_ids::named("Pull"),
             distribution: None,
             name: "Pull".into(),
             active: true,
