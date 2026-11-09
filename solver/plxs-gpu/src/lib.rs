@@ -13,13 +13,27 @@
 
 use std::sync::{Arc, Mutex};
 
+mod memory;
+
+use memory::MemoryQuery;
+
 pub use wgpu;
 
-/// Percent of the card's memory budget the solver's buffers may take, so that the user
-/// interface (which draws on the same card with a device of its own) and the desktop keep
-/// theirs: a card with 2 GB filled by a large model made the window's renderer fail and
-/// the desktop stutter.
-pub const MEMORY_SHARE_PERCENT: u8 = 60;
+/// Percent of the card's memory budget the solver's buffers may take, at most. The
+/// budget is what the driver grants this process (the desktop and other programs are
+/// already taken off), and what the window's renderer, which draws on the same card,
+/// already holds counts as used; the rest is headroom for what the window allocates
+/// while the solver runs, for the driver's own needs and for the estimate of the
+/// buffers being rough. On a small card the headroom is at least [`MEMORY_HEADROOM`]:
+/// a card with 2 GB filled by a large model made the window's renderer fail and the
+/// desktop stutter. Checked by [`Gpu::reserve`] against the card's own memory only (see
+/// [`Options::memory_share`]).
+pub const MEMORY_SHARE_PERCENT: u8 = 80;
+
+/// Bytes of the card's budget always left to the window and the driver, whatever the
+/// share says (512 MB): the window's renderer and a results mesh need about as much on
+/// a small card as on a large one.
+pub const MEMORY_HEADROOM: u64 = 512 << 20;
 
 /// Bytes per piece of an upload ([`Gpu::write`]).
 const PIECE: usize = 16 << 20;
@@ -41,15 +55,14 @@ pub fn describe(info: &wgpu::AdapterInfo) -> String {
     format!("{} ({kind})", info.name)
 }
 
-fn instance(memory_share: bool) -> wgpu::Instance {
+/// The instance, without wgpu's own memory budget thresholds: those judge every buffer
+/// against the heap it lands in, also the small one of memory both the card and the
+/// processor reach (256 MB without resizable BAR), which the desktop fills, so that every
+/// upload and read-back failed ("Not enough memory left") while the card's memory was
+/// almost empty. The solver's share of the card is checked by [`Gpu::reserve`] instead.
+fn instance() -> wgpu::Instance {
     let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
     descriptor.backends = wgpu::Backends::PRIMARY;
-    if memory_share {
-        descriptor.memory_budget_thresholds = wgpu::MemoryBudgetThresholds {
-            for_resource_creation: Some(MEMORY_SHARE_PERCENT),
-            for_device_loss: None,
-        };
-    }
     wgpu::Instance::new(descriptor)
 }
 
@@ -71,7 +84,7 @@ pub struct Detection {
 /// Lists the graphics adapters and tells which one the automatic mode takes. Cheap
 /// against opening a device, but still a driver call: run it off the user interface.
 pub fn detect() -> Detection {
-    let instance = instance(false);
+    let instance = instance();
     let adapters = block_on(instance.enumerate_adapters(wgpu::Backends::PRIMARY));
     let mut detection = Detection {
         adapters: adapters.iter().map(|a| describe(&a.get_info())).collect(),
@@ -112,12 +125,36 @@ pub struct Options {
     pub double: Double,
     /// Timestamp queries, when the adapter has them ([`Gpu::timestamps`]).
     pub timestamps: bool,
-    /// Buffers fail beyond [`MEMORY_SHARE_PERCENT`] of a memory heap's budget. The budget
-    /// counts every heap, also the small one of memory both the card and the processor
-    /// reach (256 MB without resizable BAR), which the desktop fills: there every upload
-    /// and read-back buffer fails ("Out of Memory") while the card's own memory is
-    /// almost empty. For solvers whose buffers are small against the card.
+    /// [`Gpu::reserve`] refuses what would take the solver's buffers beyond
+    /// [`MEMORY_SHARE_PERCENT`] of the card's own memory (the budget the driver grants
+    /// this process, so what the window and the desktop hold is already taken off).
+    /// Without it `reserve` accepts everything: for solvers whose buffers are small
+    /// against the card.
     pub memory_share: bool,
+}
+
+/// The card's own memory: the largest heap only the card reaches directly, in bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Memory {
+    /// Its size.
+    pub total: u64,
+    /// What the driver lets this process take of it now (`VK_EXT_memory_budget`; the size
+    /// when the driver does not tell).
+    pub budget: u64,
+    /// What this process holds of it now (0 when the driver does not tell).
+    pub used: u64,
+}
+
+impl Memory {
+    /// The bytes the solver may still take: the budget less the larger of the headroom
+    /// [`MEMORY_SHARE_PERCENT`] leaves and [`MEMORY_HEADROOM`], less what is in use.
+    pub fn free_share(&self) -> u64 {
+        let headroom =
+            (self.budget / 100 * (100 - MEMORY_SHARE_PERCENT) as u64).max(MEMORY_HEADROOM);
+        self.budget
+            .saturating_sub(headroom)
+            .saturating_sub(self.used)
+    }
 }
 
 /// An open device.
@@ -133,6 +170,9 @@ pub struct Gpu {
     pub f64: bool,
     /// Whether timestamp queries are enabled.
     pub timestamps: bool,
+    /// Whether [`Gpu::reserve`] limits the solver to its share of the card.
+    memory_share: bool,
+    memory: Option<MemoryQuery>,
     /// Errors the driver reported outside of error scopes.
     error: Arc<Mutex<Option<String>>>,
 }
@@ -141,7 +181,7 @@ impl Gpu {
     /// Opens the adapter `options` ask for, the discrete one first. `Err` tells why there
     /// is none, for the output.
     pub fn open(options: Options) -> Result<Self, String> {
-        let instance = instance(options.memory_share);
+        let instance = instance();
         let adapters = block_on(instance.enumerate_adapters(wgpu::Backends::PRIMARY));
         let rank = |t: wgpu::DeviceType| match t {
             wgpu::DeviceType::DiscreteGpu => 0,
@@ -201,6 +241,7 @@ impl Gpu {
             let mut slot = sink.lock().unwrap_or_else(|e| e.into_inner());
             slot.get_or_insert_with(|| e.to_string());
         }));
+        let memory = MemoryQuery::new(&adapter, &device);
         Ok(Self {
             device,
             queue,
@@ -208,8 +249,43 @@ impl Gpu {
             limits,
             f64,
             timestamps,
+            memory_share: options.memory_share,
+            memory,
             error,
         })
+    }
+
+    /// The card's own memory as the driver reports it now; `None` when the graphics API
+    /// does not tell.
+    pub fn memory(&self) -> Option<Memory> {
+        self.memory.as_ref().and_then(MemoryQuery::read)
+    }
+
+    /// Whether `bytes` more of storage buffers keep the solver within its share of the
+    /// card ([`Options::memory_share`], [`MEMORY_SHARE_PERCENT`]); `Err` says what is
+    /// missing, for the output. Always `Ok` without the share or when the API does not
+    /// tell the memory: the driver's own "out of memory" then decides.
+    pub fn reserve(&self, bytes: u64) -> Result<(), String> {
+        if !self.memory_share {
+            return Ok(());
+        }
+        let Some(memory) = self.memory() else {
+            return Ok(());
+        };
+        let free = memory.free_share();
+        if bytes <= free {
+            return Ok(());
+        }
+        let mb = |b: u64| b as f64 / 1048576.0;
+        Err(format!(
+            "needs {:.0} MB of the card's memory, {:.0} MB free for the solver \
+             (at most {MEMORY_SHARE_PERCENT} % of the {:.0} MB the driver grants, \
+             {:.0} MB in use)",
+            mb(bytes),
+            mb(free),
+            mb(memory.budget),
+            mb(memory.used)
+        ))
     }
 
     /// The first error the driver reported outside of error scopes since the last call.
@@ -457,4 +533,56 @@ pub enum Use {
     Dynamic,
     Read,
     Write,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open(memory_share: bool) -> Option<Gpu> {
+        match Gpu::open(Options {
+            label: "test",
+            any_adapter: true,
+            double: Double::IfAvailable,
+            timestamps: false,
+            memory_share,
+        }) {
+            Ok(gpu) => Some(gpu),
+            Err(reason) => {
+                eprintln!("skipped, no graphics card: {reason}");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn the_share_of_the_card_is_judged_against_its_own_memory() {
+        let Some(gpu) = open(true) else { return };
+        let Some(memory) = gpu.memory() else {
+            eprintln!("skipped, the API does not tell the memory ({})", gpu.name);
+            return;
+        };
+        assert!(
+            memory.total > 0 && memory.budget <= memory.total,
+            "{memory:?}"
+        );
+        // Small buffers always fit; the solver never takes more than its share.
+        gpu.reserve(16 << 20).unwrap();
+        let refused = gpu.reserve(memory.total).unwrap_err();
+        assert!(refused.contains("free for the solver"), "{refused}");
+        // Uploads and read-backs are not judged against the share: a staging buffer
+        // of the size that failed on a card without resizable BAR is created.
+        let staging = gpu.staging("read-back", 64 << 20);
+        gpu.queue
+            .write_buffer(&gpu.storage("piece", PIECE as u64), 0, &vec![0u8; PIECE]);
+        gpu.wait().unwrap();
+        drop(staging);
+        assert_eq!(gpu.take_error(), None);
+    }
+
+    #[test]
+    fn without_the_share_everything_is_reserved() {
+        let Some(gpu) = open(false) else { return };
+        gpu.reserve(u64::MAX).unwrap();
+    }
 }

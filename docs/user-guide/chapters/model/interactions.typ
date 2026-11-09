@@ -31,7 +31,8 @@ Create them with #ui("Constraint") on the #ui("Connections") tab of the ribbon.
     #ui("Apply to all nodes individually") every node gets the whole value. Without a value
     every gap gets CalculiX's default, practically rigid. With #ui("Nonlinear") the contact
     is solved nonlinearly, otherwise it is linearised in a linear step. Written as `GAPUNI`
-    elements to fixed ground nodes, one per node.],
+    elements to fixed ground nodes, one per node. Springs and gaps carry no stress, so the
+    nodal stresses at a support are the average of the solid elements alone.],
 )
 
 Changing the #ui("Type") while creating a constraint keeps the picks the new type can use. A

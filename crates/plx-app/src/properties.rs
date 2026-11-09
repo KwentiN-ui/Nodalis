@@ -181,6 +181,7 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
         | TreeItem::Plane(_)
         | TreeItem::ResultPlane(_)
         | TreeItem::MeshItem(_)
+        | TreeItem::MeshOperation(_)
         | TreeItem::HistorySet(_)
         | TreeItem::HistoryField(..)
         | TreeItem::HistoryComponent(..) => {}

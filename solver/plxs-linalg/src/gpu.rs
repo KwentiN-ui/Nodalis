@@ -503,6 +503,21 @@ impl GpuCycle {
                 coarsest.rows()
             ));
         }
+        // The solver's share of the card, before anything is uploaded: the sliced storage
+        // pads every slice to its longest row (seldom more than a fifth), the dense
+        // coarsest operator replaces the sparse one, and every level keeps five vectors.
+        let matrix_bytes = |m: &Bsr<f32>| (4 * (m.val.len() + m.col.len())) as u64 * 5 / 4;
+        let mut bytes = 4 * (coarsest.rows() * coarsest.rows()) as u64;
+        for (l, level) in levels.iter().enumerate() {
+            let n = level.inv_diag.len() as u64;
+            if l + 1 != levels.len() {
+                bytes += matrix_bytes(level.a);
+            }
+            bytes += level.p.map(matrix_bytes).unwrap_or(0);
+            bytes += level.pt.map(matrix_bytes).unwrap_or(0);
+            bytes += 4 * n * 6;
+        }
+        ctx.reserve(bytes)?;
         let inverse = dense_inverse(coarsest)?;
         let device = &ctx.device;
         let oom = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
@@ -969,6 +984,8 @@ impl GpuCycle {
                 limit >> 20
             ));
         }
+        // The operator in double precision, six vectors and the read-back of `x`.
+        ctx.reserve(8 * (values.len() + 7 * n) as u64)?;
         let val = buffer("val64", 8 * values.len() as u64);
         write(ctx, &val, bytemuck::cast_slice(values));
         let vector = |label: &str| buffer(label, 8 * n as u64);

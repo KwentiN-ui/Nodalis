@@ -775,6 +775,10 @@ Beobachtete ccx-Konventionen (Orakel, kein Quelltext):
   Linienelement Typ 11 im Netz, `SPRING1` nicht.
 - Die Knotenmittelung von S/E zählt `SPRING2`/`GAPUNI` als Elemente mit Spannung null mit
   (an einem Knoten mit 2 Volumen- und 3 Federelementen ist der Wert 2/5 des Volumenmittels).
+  plxs ahmt das seit 2026-11 nicht mehr nach: Federn und Gaps tragen keine Spannung und
+  zählen nicht. Sonst halbiert eine Compression-Only-Stütze die Spannung genau an ihren
+  Knoten (Druckstütze mit 100 MPa Flächenpressung zeigte S33 = 50 MPa, Lasche mit Bolzen
+  als Gaps ein fleckiges Bild und 24.5 statt 31 MPa).
 - `*GAP`: Feld 5 ist unbenutzt, Feld 6 die Steifigkeit (Default ≈ 1e12), Feld 7 σ∞; der
   Parser las vorher Feld 5 als Steifigkeit (= 0).
 - Rigid Bodies verhalten sich in linearer Statik wie die linearisierte Bedingung (Fixtures

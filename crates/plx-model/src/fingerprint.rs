@@ -55,6 +55,8 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
         mesh_sets,
         element_types,
         exposed: _,
+        // The mesh has them applied.
+        mesh_operations: _,
     } = fe;
     // The global results of a submodel count by their folder and file name, which change
     // with the global results they are; where the work directory is does not count.
