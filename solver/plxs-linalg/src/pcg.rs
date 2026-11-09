@@ -240,6 +240,27 @@ impl PcgSolver {
 
     /// Solves `A x = b` in place and tells how many iterations it took.
     pub fn solve_counted(&self, rhs: &mut [f64]) -> Result<PcgStats> {
+        self.iterate(rhs, None)
+    }
+
+    /// `x ≈ A⁻¹ b` in place, to `|r| <= tolerance |b|` or after `max_iterations`,
+    /// whichever comes first: a preconditioner for an iteration outside (GMRES on the
+    /// unsymmetric tangent of sliding friction), which needs only a few digits. Fails only
+    /// when the matrix turns out indefinite or the iteration produces no finite numbers,
+    /// never for missing the tolerance; the stats tell what it reached.
+    pub fn solve_loosely(
+        &self,
+        rhs: &mut [f64],
+        tolerance: f64,
+        max_iterations: usize,
+    ) -> Result<PcgStats> {
+        self.iterate(rhs, Some((tolerance, max_iterations)))
+    }
+
+    /// The conjugate gradients: to [`TOLERANCE`] within the solver's iteration limit
+    /// (`loose: None`, failing beyond it), or to `loose`'s tolerance and limit, keeping
+    /// the iterate it ends with.
+    fn iterate(&self, rhs: &mut [f64], loose: Option<(f64, usize)>) -> Result<PcgStats> {
         let pattern = (self.pattern.as_ref())
             .filter(|_| self.factorized)
             .ok_or_else(|| numerical(plxs_core::Failure::Internal, "solve before factorize"))?;
@@ -267,7 +288,10 @@ impl PcgSolver {
         let mut max_iterations = self
             .max_iterations
             .unwrap_or_else(|| n.clamp(1000, 100_000));
-        if self.reused {
+        let tolerance = loose.map_or(TOLERANCE, |(tolerance, _)| tolerance);
+        if let Some((_, limit)) = loose {
+            max_iterations = limit.max(1);
+        } else if self.reused {
             // A kept hierarchy that no longer fits its matrix shows soon: give up early,
             // the caller rebuilds it ([`Self::rebuild_preconditioner`]).
             let after_build = self.iterations_after_build.load(Ordering::Relaxed);
@@ -276,7 +300,9 @@ impl PcgSolver {
         let trace = std::env::var("PLXS_PCG_TRACE").is_ok();
         let cancel = plxs_core::CancelToken::current();
         #[cfg(feature = "gpu")]
-        if let Some(gpu) = self.amg.as_ref().and_then(Amg::gpu_cycle) {
+        if let Some(gpu) = self.amg.as_ref().and_then(Amg::gpu_cycle)
+            && loose.is_none()
+        {
             let started = std::time::Instant::now();
             let mut x = vec![0.0; n];
             let cancelled = || {
@@ -350,12 +376,17 @@ impl PcgSolver {
             axpy(alpha, &p, x);
             axpy(-alpha, &q, &mut r);
             residual = norm(&r) / b_norm;
-            if residual <= TOLERANCE {
+            if residual <= tolerance {
                 if trace {
                     eprintln!(
                         "pcg: {iteration} iterations, product {t_product:.2} s, \
                          preconditioner {t_precondition:.2} s, vectors {t_vectors:.2} s"
                     );
+                }
+                if loose.is_some() {
+                    // Not the count of a solve to the tolerance, which the kept hierarchy
+                    // is judged by.
+                    return Ok(self.unconverged(x, rhs, iteration, residual));
                 }
                 return Ok(self.converged(x, rhs, iteration, residual));
             }
@@ -377,7 +408,26 @@ impl PcgSolver {
             // p = z + beta p
             zip_mut(&mut p, &z, |p, z| *p = z + beta * *p);
         }
+        if loose.is_some() && residual.is_finite() {
+            return Ok(self.unconverged(x, rhs, max_iterations, residual));
+        }
         Err(not_converged(max_iterations, residual, self.reused))
+    }
+
+    /// The iterate `x` (padded) of a loose solve into `rhs`, without the bookkeeping of
+    /// [`Self::converged`].
+    fn unconverged(
+        &self,
+        x: &[f64],
+        rhs: &mut [f64],
+        iterations: usize,
+        residual: f64,
+    ) -> PcgStats {
+        self.unpad(x, rhs);
+        PcgStats {
+            iterations,
+            relative_residual: residual,
+        }
     }
 
     /// The solution `x` (padded) into `rhs`, and the bookkeeping of a converged solve.

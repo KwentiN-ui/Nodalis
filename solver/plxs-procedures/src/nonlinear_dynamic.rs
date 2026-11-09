@@ -1796,7 +1796,6 @@ fn attempt(
             // Sliding friction makes the tangent unsymmetric: GMRES on the full tangent,
             // preconditioned by the factorized symmetric part.
             let zero = vec![0.0; n];
-            let solver = &ctx.solver;
             let apply = |v: &[f64], out: &mut [f64]| {
                 reduced.multiply(v, out);
                 let full = set.expand(v, &zero);
@@ -1808,8 +1807,19 @@ fn attempt(
                     *o += (1.0 + alpha) * r;
                 }
             };
-            let precondition = |v: &mut [f64]| equations.apply_inverse(solver, v);
-            plxs_linalg::gmres(&apply, &precondition, &residual, 1e-10, 60, 300)?.0
+            equations
+                .solve_unsymmetric(
+                    &mut ctx.solver,
+                    reduced,
+                    || Unknowns::from_free(&set.free, 3, &ctx.model.nodes.coordinates),
+                    &apply,
+                    &residual,
+                    &mut FirstOrWarnings {
+                        inner: &mut *progress,
+                        all: false,
+                    },
+                )
+                .map_err(|e| in_increment(e, ctx.step_number, increment))?
         };
         ctx.profile.add(Phase::Solve, started);
         let mut du = set.expand(&dv, &vec![0.0; n]);
