@@ -187,7 +187,9 @@ multigrid hierarchy with their sizes, its memory relative to the matrix, the num
 iterations and the remaining relative residual (below 1e-12). The results of both solvers
 agree to that accuracy. In a nonlinear step the hierarchy is kept over the Newton
 iterations while that is cheaper than building it again (the monitor reports the
-rebuilds). Bodies that touch only through contact, such as a pin in a bore, are coarsened
+rebuilds). A node held by a stiff spring in one direction only (a gap or contact spring)
+is scaled by its whole stiffness block, so that its other directions still converge.
+Bodies that touch only through contact, such as a pin in a bore, are coarsened
 one by one, so that each keeps its own rigid body motion on the coarse levels; and the
 first solve with a hierarchy learns the shapes that converge slowest (the bending of thin
 walls, for example) and adds them to the coarse space of the next one, which cuts the

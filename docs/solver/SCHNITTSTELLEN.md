@@ -1515,6 +1515,23 @@ V-Zyklus, behaltene Hierarchie oft zu lange behalten.
   bleibt mit `PLXS_AMG_ADAPTIVE=n` zum Experimentieren, Default 0). Mit Federn 1e4-fach
   steifer 83 Iterationen, erst elastische Bettung (1e8-fach) bringt 25: die Federn sind
   nicht das Problem.
+- Block-Jacobi statt skalarer Diagonale (Nachtrag, Lasche an GAPUNI-Federn): Quentins
+  Lasche (C3D20/C3D15, 87k Gleichungen) hängt nur an 814 Druckfedern (`*GAP`, k = 1e12 N/m,
+  etwa 6000-mal steifer als ein Element) in radialer Richtung. Die skalare Diagonale der
+  Bohrungsknoten ist in allen drei Komponenten riesig, obwohl die Feder nur eine Richtung
+  hält: der Chebyshev-Glätter bewegt die tangentialen Komponenten dieser Knoten praktisch
+  nicht (Eigenwerte von D⁻¹A bei 1e-4), die Stärke-Regel hielt alle ihre Kopplungen für
+  schwach (5 Ebenen, 2,08 × Matrix, Aufbau 8,5 s), und das CG brauchte 280 bis 690
+  Iterationen (Ritz-Werte 4e-4). Mit Federn 1e9 statt 1e12 waren es 46: die Anisotropie
+  war die Ursache. Jetzt skaliert das Multigrid überall mit den inversen Diagonalblöcken
+  (`block_diagonal_inverses`: Cholesky `D_b = L_b L_bᵀ` je Knoten bzw. Aggregat, 3×3 fein,
+  6×6/9×9 grob; nicht positiv definite Blöcke fallen auf die Skalare zurück): Stärke
+  `‖L_b⁻¹ A_bc L_c⁻ᵀ‖_F ≥ θ`, Glätter `D_B⁻¹ r` (`block_apply`, auf der Karte dieselbe
+  Operation in `gpu_vector.wgsl` mit `br` in den Parametern), λ_max per Lanczos auf
+  `L⁻¹ A L⁻ᵀ`, Prolongator `(I − ω D_B⁻¹ A) P_t`. Für skalare Systeme (Wärme) ist alles wie
+  vorher. Lasche: 3 Ebenen (87k > 3,5k > 246), Aufbau 0,9 s, 38 bis 76 Iterationen je
+  Lösen, Gesamtlauf 168 s (master) → 58 s (direkter Solver 46 s). Auch sonst etwas besser:
+  Seilrolle 76 → 60, Hex-Block 25 → 23, Tet10-Block 37 → 33 Iterationen.
 - Offen: Lanczos-Vektoren auch im CG auf der Karte sammeln (Deflation dort), ein
   Kandidatensatz je Körper statt global, und größere Aggregate bei größerem Nahnullraum,
   damit die groben Ebenen nicht wachsen.
