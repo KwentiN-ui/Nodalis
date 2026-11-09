@@ -366,7 +366,10 @@ mod tests {
             thickness: 500.0,
             ..HotSpot::new("t")
         };
-        assert_eq!(hot_spot.in_units(units(&results)).distances(), [200.0, 500.0]);
+        assert_eq!(
+            hot_spot.in_units(units(&results)).distances(),
+            [200.0, 500.0]
+        );
     }
 
     #[test]
