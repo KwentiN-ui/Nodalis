@@ -585,7 +585,7 @@ impl GpuCycle {
         let fine = Sliced::new(levels[0].a);
         let mut buffers = Vec::with_capacity(levels.len());
         for (l, level) in levels.iter().enumerate() {
-            let n = level.inv_diag.len();
+            let n = level.a.rows();
             let a = if l == 0 {
                 matrix(&fine)?
             } else if l == last {
@@ -670,7 +670,9 @@ impl GpuCycle {
                          level: usize,
                          coefficient: Coefficient| {
             let groups = fold(n.div_ceil(VECTOR_GROUP));
-            let header = [n as u32, op, groups.0, 0];
+            // The block size of the inverse diagonal blocks of the level.
+            let br = levels[level].a.br as u32;
+            let header = [n as u32, op, groups.0, br];
             let (c1, c2) = coefficients(&lambdas, degree, level, coefficient);
             let params = uniform(&params_bytes(header, c1, c2));
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {

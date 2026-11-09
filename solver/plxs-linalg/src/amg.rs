@@ -197,6 +197,12 @@ impl Nullspace {
 struct Level {
     /// The operator of this level; `None` on the finest level, whose copy is [`Amg::fine`].
     a: Option<Bsr<f32>>,
+    /// Unknowns of the level.
+    n: usize,
+    /// The inverses of the diagonal blocks (`br × br` each, row-major), the block Jacobi
+    /// scaling of the smoother: a scalar diagonal cannot scale a node whose stiffness is
+    /// large in one direction only (a gap or contact spring to the ground), and the
+    /// smoother then leaves the error in the other directions untouched.
     inv_diag: Vec<f32>,
     /// Largest eigenvalue of `D⁻¹ A` (estimated, with a margin).
     lambda_max: f64,
@@ -438,13 +444,9 @@ impl Amg {
         loop {
             let a_l = current.as_ref().unwrap_or(a);
             let n_l = a_l.rows();
-            let inv_diag: Vec<f64> = a_l
-                .diagonal()
-                .iter()
-                .map(|&d| if d > 0.0 { 1.0 / d } else { 1.0 })
-                .collect();
+            let (inv_diag, inv_chol) = block_diagonal_inverses(a_l);
             let inv_diag_32: Vec<f32> = inv_diag.iter().map(|&d| d as f32).collect();
-            let lambda = largest_eigenvalue(a_l, &inv_diag);
+            let lambda = largest_eigenvalue(a_l, &inv_chol);
             lap("eigenvalue", n_l);
             let coarsest = n_l <= options.coarse_size || levels.len() + 1 >= options.max_levels;
             let coarser = if coarsest {
@@ -452,6 +454,7 @@ impl Amg {
             } else {
                 let aggregates = aggregate(
                     a_l,
+                    &inv_chol,
                     options.strength,
                     options.max_aggregate,
                     bodies.as_deref(),
@@ -490,6 +493,7 @@ impl Amg {
                 None => {
                     levels.push(Level {
                         a: current.as_ref().map(Bsr::converted),
+                        n: n_l,
                         inv_diag: inv_diag_32,
                         lambda_max: lambda,
                         p: None,
@@ -500,6 +504,7 @@ impl Amg {
                 Some((p, pt, a_c, ns_c, bodies_c)) => {
                     levels.push(Level {
                         a: current.as_ref().map(Bsr::converted),
+                        n: n_l,
                         inv_diag: inv_diag_32,
                         lambda_max: lambda,
                         p: Some(p.converted()),
@@ -551,7 +556,7 @@ impl Amg {
         let work = levels
             .iter()
             .enumerate()
-            .map(|(l, level)| Work::new(level.inv_diag.len(), l == last))
+            .map(|(l, level)| Work::new(level.n, l == last))
             .collect();
         let fine = a.converted();
         lap("single precision copy", n);
@@ -584,12 +589,8 @@ impl Amg {
     /// little; the caller watches the iteration counts and rebuilds when they grow.
     pub fn refresh(&mut self, a: &Bsr) {
         let level = &mut self.levels[0];
-        let inv_diag: Vec<f64> = a
-            .diagonal()
-            .iter()
-            .map(|&d| if d > 0.0 { 1.0 / d } else { 1.0 })
-            .collect();
-        level.lambda_max = largest_eigenvalue(a, &inv_diag);
+        let (inv_diag, inv_chol) = block_diagonal_inverses(a);
+        level.lambda_max = largest_eigenvalue(a, &inv_chol);
         level.inv_diag = inv_diag.iter().map(|&d| d as f32).collect();
         convert(&a.val, &mut self.fine.val);
         #[cfg(feature = "gpu")]
@@ -659,7 +660,7 @@ impl Amg {
 
     /// Sizes of the levels, finest first.
     pub fn sizes(&self) -> Vec<usize> {
-        self.levels.iter().map(|l| l.inv_diag.len()).collect()
+        self.levels.iter().map(|l| l.n).collect()
     }
 
     /// `z ≈ A⁻¹ r` by one V-cycle, in single precision: the preconditioner only has to
@@ -729,8 +730,8 @@ impl Amg {
     }
 }
 
-/// Chebyshev smoothing of `A x = b` on the upper part of the spectrum of `D⁻¹ A`,
-/// `degree` products.
+/// Chebyshev smoothing of `A x = b` on the upper part of the spectrum of `D⁻¹ A` (`D` the
+/// block diagonal), `degree` products.
 fn smooth(
     lambda_max: f64,
     degree: usize,
@@ -744,13 +745,14 @@ fn smooth(
     let delta = 0.5 * (lambda_max - lambda_min);
     let sigma = theta / delta;
     let mut rho_old = 1.0 / sigma;
+    let br = a.br;
     if x_is_zero {
         w.r.copy_from_slice(&w.b);
-        scaled(&mut w.d, inv_diag, &w.r, (1.0 / theta) as f32);
+        scaled(&mut w.d, inv_diag, br, &w.r, (1.0 / theta) as f32);
         w.x.copy_from_slice(&w.d);
     } else {
         a.residual(&w.b, &w.x, &mut w.r);
-        scaled(&mut w.d, inv_diag, &w.r, (1.0 / theta) as f32);
+        scaled(&mut w.d, inv_diag, br, &w.r, (1.0 / theta) as f32);
         add(&mut w.x, &w.d);
     }
     for _ in 1..degree {
@@ -759,7 +761,7 @@ fn smooth(
         sub(&mut w.r, &w.t);
         let (c1, c2) = ((rho_new * rho_old) as f32, (2.0 * rho_new / delta) as f32);
         // d = c1 d + c2 D⁻¹ r; x += d
-        update(&mut w.d, &w.r, inv_diag, c1, c2);
+        update(&mut w.d, &w.r, inv_diag, br, c1, c2);
         add(&mut w.x, &w.d);
         rho_old = rho_new;
     }
@@ -804,43 +806,46 @@ fn sub<T: Scalar>(y: &mut [T], x: &[T]) {
     }
 }
 
-/// `d = c · diag ∘ r`.
-fn scaled<T: Scalar>(d: &mut [T], diag: &[T], r: &[T], c: T) {
-    if d.len() < PARALLEL_FROM {
-        d.iter_mut()
-            .zip(diag)
-            .zip(r)
-            .for_each(|((d, di), r)| *d = c * *di * *r);
-    } else {
-        d.par_chunks_mut(4096)
-            .zip(diag.par_chunks(4096))
-            .zip(r.par_chunks(4096))
-            .for_each(|((d, diag), r)| {
-                d.iter_mut()
-                    .zip(diag)
-                    .zip(r)
-                    .for_each(|((d, di), r)| *d = c * *di * *r)
-            });
-    }
+/// `d = c · D⁻¹ r` with the inverse diagonal blocks `inv` (`br × br` each).
+fn scaled<T: Scalar>(d: &mut [T], inv: &[T], br: usize, r: &[T], c: T) {
+    block_apply(d, inv, br, r, |_, s| c * s);
 }
 
-/// `d = c1 d + c2 diag ∘ r`.
-fn update<T: Scalar>(d: &mut [T], r: &[T], diag: &[T], c1: T, c2: T) {
+/// `d = c1 d + c2 D⁻¹ r`.
+fn update<T: Scalar>(d: &mut [T], r: &[T], inv: &[T], br: usize, c1: T, c2: T) {
+    block_apply(d, inv, br, r, |d, s| c1 * d + c2 * s);
+}
+
+/// `d_i = f(d_i, (D⁻¹ r)_i)` block by block, in parallel on large vectors.
+fn block_apply<T: Scalar>(
+    d: &mut [T],
+    inv: &[T],
+    br: usize,
+    r: &[T],
+    f: impl Fn(T, T) -> T + Sync,
+) {
+    let size = br * br;
+    let one = |d: &mut [T], inv: &[T], r: &[T]| {
+        for (b, d) in d.chunks_exact_mut(br).enumerate() {
+            let inv = &inv[b * size..(b + 1) * size];
+            let r = &r[b * br..(b + 1) * br];
+            for (i, d) in d.iter_mut().enumerate() {
+                let mut s = T::default();
+                for (j, &r) in r.iter().enumerate() {
+                    s += inv[i * br + j] * r;
+                }
+                *d = f(*d, s);
+            }
+        }
+    };
+    const CHUNK: usize = 2048;
     if d.len() < PARALLEL_FROM {
-        d.iter_mut()
-            .zip(diag)
-            .zip(r)
-            .for_each(|((d, di), r)| *d = c1 * *d + c2 * *di * *r);
+        one(d, inv, r);
     } else {
-        d.par_chunks_mut(4096)
-            .zip(diag.par_chunks(4096))
-            .zip(r.par_chunks(4096))
-            .for_each(|((d, diag), r)| {
-                d.iter_mut()
-                    .zip(diag)
-                    .zip(r)
-                    .for_each(|((d, di), r)| *d = c1 * *d + c2 * *di * *r)
-            });
+        d.par_chunks_mut(CHUNK * br)
+            .zip(inv.par_chunks(CHUNK * size))
+            .zip(r.par_chunks(CHUNK * br))
+            .for_each(|((d, inv), r)| one(d, inv, r));
     }
 }
 
@@ -926,29 +931,46 @@ struct Aggregates {
 /// aggregate across it would force the two bodies to slide together on the coarse levels,
 /// although sliding costs no energy. That mode is then left to the smoother, which
 /// cannot reduce it, and the iteration count grows several times over.
-fn aggregate(a: &Bsr, strength: f64, max_aggregate: usize, body: Option<&[u32]>) -> Aggregates {
+fn aggregate(
+    a: &Bsr,
+    inv_chol: &[f64],
+    strength: f64,
+    max_aggregate: usize,
+    body: Option<&[u32]>,
+) -> Aggregates {
     let blocks = a.brows;
-    let size = a.br * a.bc;
-    // Squared norms of the diagonal blocks.
-    let diag: Vec<f64> = (0..blocks)
-        .map(|b| {
-            a.diagonal_block(b).map_or(0.0, |k| {
-                a.val[size * k..size * (k + 1)].iter().map(|v| v * v).sum()
-            })
-        })
-        .collect();
-    // Strong: ‖A_bc‖ ≥ θ √(‖A_bb‖ ‖A_cc‖), with the squared norms as weights.
-    let theta4 = strength.powi(4);
+    let br = a.br;
+    let size = br * br;
+    // Strong: ‖L_b⁻¹ A_bc L_c⁻ᵀ‖ ≥ θ (Frobenius; the coupling scaled by the block diagonal,
+    // `D_b = L_b L_bᵀ`), with the squared norms as weights. Scalar diagonals would call
+    // every coupling of a node with a stiff spring to the ground weak, in all directions.
+    let theta2 = strength * strength;
     let strong = |b: usize| {
         let (col, val) = a.block_row(b);
-        let diag = &diag;
+        let lb = &inv_chol[b * size..(b + 1) * size];
         col.iter().enumerate().filter_map(move |(k, &c)| {
             let c = c as usize;
             if c == b || body.is_some_and(|body| body[b] != body[c]) {
                 return None;
             }
-            let w: f64 = val[size * k..size * (k + 1)].iter().map(|v| v * v).sum();
-            (w * w >= theta4 * diag[b] * diag[c]).then_some((c, w))
+            let block = &val[size * k..size * (k + 1)];
+            let lc = &inv_chol[c * size..(c + 1) * size];
+            // M = L_b⁻¹ A_bc L_c⁻ᵀ; L⁻¹ lower.
+            let mut w = 0.0;
+            for i in 0..br {
+                for j in 0..br {
+                    let mut m = 0.0;
+                    for s in 0..=i {
+                        let mut t = 0.0;
+                        for u in j..br {
+                            t += block[s * br + u] * lc[u * br + j];
+                        }
+                        m += lb[i * br + s] * t;
+                    }
+                    w += m * m;
+                }
+            }
+            (w >= theta2).then_some((c, w))
         })
     };
     const NONE: u32 = u32::MAX;
@@ -1108,26 +1130,123 @@ fn gram_schmidt(q: &mut [f64], m: usize, k: usize, r: &mut [f64]) {
 /// one widens the interval and weakens the smoother (1.2: 88 iterations on that pulley).
 const EIGENVALUE_MARGIN: f64 = 1.02;
 
+/// The inverses of the diagonal blocks of `a` (`br × br` each, row-major by block row) and
+/// the inverses `L⁻¹` of their Cholesky factors (`D_b = L_b L_bᵀ`, lower). A block that is
+/// not positive definite (a zero diagonal) gets the inverses of its diagonal entries (1
+/// where that is zero) and their square roots.
+fn block_diagonal_inverses(a: &Bsr) -> (Vec<f64>, Vec<f64>) {
+    let br = a.br;
+    let size = br * br;
+    let mut inv = vec![0.0; a.brows * size];
+    let mut inv_chol = vec![0.0; a.brows * size];
+    let scalar = |block: &[f64], inv: &mut [f64], inv_chol: &mut [f64]| {
+        for i in 0..br {
+            let d = block[i * br + i];
+            let x = if d > 0.0 { 1.0 / d } else { 1.0 };
+            inv[i * br + i] = x;
+            inv_chol[i * br + i] = x.sqrt();
+        }
+    };
+    let zero = vec![0.0; size];
+    for b in 0..a.brows {
+        let block = a
+            .diagonal_block(b)
+            .map_or(&zero[..], |k| &a.val[size * k..size * (k + 1)]);
+        let inv = &mut inv[b * size..(b + 1) * size];
+        let inv_chol = &mut inv_chol[b * size..(b + 1) * size];
+        // Cholesky, lower.
+        let mut l = vec![0.0; size];
+        let mut ok = true;
+        'chol: for i in 0..br {
+            for j in 0..=i {
+                let mut sum = block[i * br + j];
+                for k in 0..j {
+                    sum -= l[i * br + k] * l[j * br + k];
+                }
+                if i == j {
+                    if sum <= 1e-14 * block[i * br + i].abs() || !sum.is_finite() {
+                        ok = false;
+                        break 'chol;
+                    }
+                    l[i * br + i] = sum.sqrt();
+                } else {
+                    l[i * br + j] = sum / l[j * br + j];
+                }
+            }
+        }
+        if !ok {
+            scalar(block, inv, inv_chol);
+            continue;
+        }
+        // L⁻¹ by forward substitution, column by column.
+        for c in 0..br {
+            for i in c..br {
+                let mut sum = if i == c { 1.0 } else { 0.0 };
+                for k in c..i {
+                    sum -= l[i * br + k] * inv_chol[k * br + c];
+                }
+                inv_chol[i * br + c] = sum / l[i * br + i];
+            }
+        }
+        // D⁻¹ = L⁻ᵀ L⁻¹.
+        for i in 0..br {
+            for j in 0..br {
+                let mut sum = 0.0;
+                for k in i.max(j)..br {
+                    sum += inv_chol[k * br + i] * inv_chol[k * br + j];
+                }
+                inv[i * br + j] = sum;
+            }
+        }
+    }
+    (inv, inv_chol)
+}
+
+/// `y = L⁻¹ x` block by block (`inv_chol` the lower blocks `L_b⁻¹`).
+fn block_lower(inv_chol: &[f64], br: usize, x: &[f64], y: &mut [f64]) {
+    let size = br * br;
+    for (b, y) in y.chunks_exact_mut(br).enumerate() {
+        let l = &inv_chol[b * size..(b + 1) * size];
+        let x = &x[b * br..(b + 1) * br];
+        for (i, y) in y.iter_mut().enumerate() {
+            *y = (0..=i).map(|j| l[i * br + j] * x[j]).sum();
+        }
+    }
+}
+
+/// `y = L⁻ᵀ x` block by block.
+fn block_lower_transposed(inv_chol: &[f64], br: usize, x: &[f64], y: &mut [f64]) {
+    let size = br * br;
+    for (b, y) in y.chunks_exact_mut(br).enumerate() {
+        let l = &inv_chol[b * size..(b + 1) * size];
+        let x = &x[b * br..(b + 1) * br];
+        for (i, y) in y.iter_mut().enumerate() {
+            *y = (i..br).map(|j| l[j * br + i] * x[j]).sum();
+        }
+    }
+}
+
 /// `λ_max(D⁻¹ A)` by Lanczos, with a margin (`PLXS_AMG_MARGIN` for measurements).
-fn largest_eigenvalue(a: &Bsr, inv_diag: &[f64]) -> f64 {
+fn largest_eigenvalue(a: &Bsr, inv_chol: &[f64]) -> f64 {
     let margin: f64 = std::env::var("PLXS_AMG_MARGIN")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(EIGENVALUE_MARGIN);
-    largest_eigenvalue_lanczos(a, inv_diag, EIGENVALUE_STEPS) * margin
+    largest_eigenvalue_lanczos(a, inv_chol, EIGENVALUE_STEPS) * margin
 }
 
 /// Lanczos steps of the eigenvalue estimate of a level.
 const EIGENVALUE_STEPS: usize = 30;
 /// `λ_max(D⁻¹ A)` as the largest Ritz value of `steps` Lanczos steps on the symmetric
-/// `D^-1/2 A D^-1/2` (same spectrum), no reorthogonalization: the extreme eigenvalue
-/// converges in a few dozen steps where the power iteration needs hundreds.
-fn largest_eigenvalue_lanczos(a: &Bsr, inv_diag: &[f64], steps: usize) -> f64 {
+/// `L⁻¹ A L⁻ᵀ` (same spectrum; `D = L Lᵀ` the block diagonal), no reorthogonalization: the
+/// extreme eigenvalue converges in a few dozen steps where the power iteration needs
+/// hundreds.
+fn largest_eigenvalue_lanczos(a: &Bsr, inv_chol: &[f64], steps: usize) -> f64 {
     let n = a.rows();
     if n == 0 {
         return 1.0;
     }
-    let sqrt_inv: Vec<f64> = inv_diag.iter().map(|d| d.sqrt()).collect();
+    let br = a.br;
     let mut v: Vec<f64> = (0..n)
         .map(|i| 1.0 + 0.5 * ((i * 7919 % 1000) as f64 / 1000.0))
         .collect();
@@ -1140,13 +1259,12 @@ fn largest_eigenvalue_lanczos(a: &Bsr, inv_diag: &[f64], steps: usize) -> f64 {
     let mut betas = vec![0.0];
     let mut beta = 0.0;
     for _ in 0..steps {
-        // w = D^-1/2 A D^-1/2 v
-        t.iter_mut()
-            .zip(&v)
-            .zip(&sqrt_inv)
-            .for_each(|((t, v), s)| *t = v * s);
+        // w = L⁻¹ A L⁻ᵀ v
+        block_lower_transposed(inv_chol, br, &v, &mut t);
         a.multiply(&t, &mut w);
-        w.iter_mut().zip(&sqrt_inv).for_each(|(w, s)| *w *= s);
+        let mut scaled_w = vec![0.0; n];
+        block_lower(inv_chol, br, &w, &mut scaled_w);
+        w.copy_from_slice(&scaled_w);
         let alpha: f64 = w.iter().zip(&v).map(|(w, v)| w * v).sum();
         w.iter_mut()
             .zip(&v)
@@ -1193,7 +1311,8 @@ fn largest_eigenvalue_lanczos(a: &Bsr, inv_diag: &[f64], steps: usize) -> f64 {
     0.5 * (lo + hi)
 }
 
-/// `P = (I − ω D⁻¹ A) P_t` with `ω = 4 / (3 λ_max)`.
+/// `P = (I − ω D⁻¹ A) P_t` with `ω = 4 / (3 λ_max)` and `D` the block diagonal
+/// (`inv_diag` its inverse blocks).
 fn smooth_prolongator(a: &Bsr, inv_diag: &[f64], lambda_max: f64, p_t: &Bsr) -> Bsr {
     let omega = 4.0 / (3.0 * lambda_max);
     let (br, k) = (a.br, p_t.bc);
@@ -1219,10 +1338,15 @@ fn smooth_prolongator(a: &Bsr, inv_diag: &[f64], lambda_max: f64, p_t: &Bsr) -> 
                     product.iter_mut().for_each(|v| *v = 0.0);
                     gemm_add(a_ij, br, br, p_j, k, product);
                     let out = acc.block(c);
+                    let inv = &inv_diag[i * size..(i + 1) * size];
                     for r in 0..br {
-                        let w = -omega * inv_diag[i * br + r];
-                        for j in 0..k {
-                            out[r * k + j] += w * product[r * k + j];
+                        for s in 0..br {
+                            let w = -omega * inv[r * br + s];
+                            if w != 0.0 {
+                                for j in 0..k {
+                                    out[r * k + j] += w * product[s * k + j];
+                                }
+                            }
                         }
                     }
                 }
@@ -1406,11 +1530,41 @@ mod tests {
                     && members.iter().any(|&b| body[b as usize] == 1)
             })
         };
-        assert!(crossing(&aggregate(&a, 0.01, 27, None)));
-        let agg = aggregate(&a, 0.01, 27, Some(&body));
+        let (_, inv_chol) = block_diagonal_inverses(&a);
+        assert!(crossing(&aggregate(&a, &inv_chol, 0.01, 27, None)));
+        let agg = aggregate(&a, &inv_chol, 0.01, 27, Some(&body[..]));
         assert!(!crossing(&agg));
         assert_eq!(agg.of_block.len(), 80);
         assert!(agg.count >= 2);
+    }
+
+    #[test]
+    fn the_block_diagonal_inverses_invert_the_diagonal_blocks() {
+        let (a, _) = two_bodies_in_contact(10);
+        let (inv, inv_chol) = block_diagonal_inverses(&a);
+        let br = a.br;
+        let size = br * br;
+        for b in 0..a.brows {
+            let k = a.diagonal_block(b).expect("a diagonal block");
+            let d = &a.val[size * k..size * (k + 1)];
+            let (di, li) = (
+                &inv[b * size..(b + 1) * size],
+                &inv_chol[b * size..(b + 1) * size],
+            );
+            for i in 0..br {
+                for j in 0..br {
+                    // D D⁻¹ = I and L⁻ᵀ L⁻¹ = D⁻¹.
+                    let product: f64 = (0..br).map(|s| d[i * br + s] * di[s * br + j]).sum();
+                    let expected = if i == j { 1.0 } else { 0.0 };
+                    assert!(
+                        (product - expected).abs() < 1e-9,
+                        "block {b}: {product} vs {expected}"
+                    );
+                    let ltl: f64 = (0..br).map(|s| li[s * br + i] * li[s * br + j]).sum();
+                    assert!((ltl - di[i * br + j]).abs() <= 1e-9 * di[i * br + i].abs().max(1.0));
+                }
+            }
+        }
     }
 
     #[test]
