@@ -326,6 +326,7 @@ impl ProjectApp {
                 window.message(line.clone());
             }
         }
+        self.remember(&path);
         self.path = Some(path);
         self.saver.saved_edits = edits;
         // Changes made while it was written wait for the next save.

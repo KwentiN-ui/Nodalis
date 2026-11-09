@@ -301,6 +301,7 @@ impl ProjectApp {
         let any = !self.selected.is_empty();
         match cmd {
             Cmd::OpenProject => self.opening.is_none(),
+            Cmd::OpenRecent => true,
             Cmd::OpenBlock | Cmd::Rename => self.selected.len() == 1,
             Cmd::OpenInNewWindow => self.selected_analysis().is_some(),
             Cmd::SolveBlock => self.selected_analysis().is_some() && !self.busy(),
@@ -489,6 +490,14 @@ impl ribbon::Host for ProjectHost<'_> {
             Cmd::Place(block) => self.0.placing == Some(block),
             Cmd::NewAnalysis => self.0.placing == Some(BlockTile::Analysis),
             _ => false,
+        }
+    }
+
+    fn panel(&mut self, ui: &mut egui::Ui, cmd: Cmd) {
+        if cmd == Cmd::OpenRecent
+            && let Some(path) = self.0.recent_panel(ui)
+        {
+            self.0.open(&ui.ctx().clone(), path);
         }
     }
 }
