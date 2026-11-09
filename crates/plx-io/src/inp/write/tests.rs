@@ -4890,6 +4890,8 @@ fn solver_compression_only_support_takes_only_pressure() {
             vec![springs, Constraint::CompressionOnly(gaps)],
             force,
         );
+        // The model the app hands the solver directly checks its surface names.
+        lower(&blocks.mesh, &model, "").unwrap();
         write_inp(&blocks.mesh, &model, "").unwrap()
     };
     let up = [0.0, 0.0, 100.0];
@@ -4897,7 +4899,7 @@ fn solver_compression_only_support_takes_only_pressure() {
     let pulled = support(up, &|_| {});
     // A surface of the solver, no gap elements at the nodes.
     assert!(
-        pulled.contains("*Compression only, Surface=Internal_Selection-1_Compression_Only-1_Surface, Clearance=0\n"),
+        pulled.contains("*Compression only, Surface=INTERNAL_SELECTION-1_COMPRESSION_ONLY-1_SURFACE, Clearance=0\n"),
         "{pulled}"
     );
     assert!(!pulled.contains("GAPUNI"), "{pulled}");
