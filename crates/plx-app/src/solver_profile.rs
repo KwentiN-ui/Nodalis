@@ -166,19 +166,20 @@ pub fn table(ui: &mut egui::Ui, profile: &JobProfile) {
         .striped(true)
         .spacing([10.0, 3.0])
         .show(ui, |ui| {
-            for title in ["Phase", "Time", "Share", "Calls"] {
-                ui.strong(title);
-            }
+            ui.strong("Phase");
+            right_aligned(ui, TIME_WIDTH, egui::RichText::new("Time").strong());
+            ui.strong("Share");
+            right_aligned(ui, CALLS_WIDTH, egui::RichText::new("Calls").strong());
             ui.end_row();
             for row in rows(profile) {
                 ui.label(capitalized(row.name));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(seconds_text(row.seconds));
-                });
+                right_aligned(ui, TIME_WIDTH, seconds_text(row.seconds));
                 share_bar(ui, row.share, bar_color);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(row.count.map_or_else(String::new, thousands_u32));
-                });
+                right_aligned(
+                    ui,
+                    CALLS_WIDTH,
+                    row.count.map_or_else(String::new, thousands_u32),
+                );
                 ui.end_row();
             }
         });
@@ -188,6 +189,24 @@ pub fn table(ui: &mut egui::Ui, profile: &JobProfile) {
             profile.phases.analyses_reused
         ));
     }
+}
+
+/// Widths of the number columns: a right-to-left layout in a grid cell would take all the
+/// width there is and push its number far to the right.
+const TIME_WIDTH: f32 = 72.0;
+const CALLS_WIDTH: f32 = 56.0;
+
+/// `text` right-aligned in a cell `width` wide.
+fn right_aligned(ui: &mut egui::Ui, width: f32, text: impl Into<egui::WidgetText>) {
+    let height = ui.spacing().interact_size.y;
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, height),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            ui.set_min_width(width);
+            ui.label(text);
+        },
+    );
 }
 
 /// A bar as long as the share, with the percentage on it.
