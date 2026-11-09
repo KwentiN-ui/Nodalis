@@ -84,7 +84,7 @@ with the material.
   for them automatically, and the step dialog says so.
 - #ui("Frequency"), #ui("Buckle"), #ui("Complex frequency") and steady-state
   dynamics are small vibrations about a state: without a preload they use the stiffness at
-  small strains; with #ui("Perturbation") after a static step they use the tangent stiffness
+  small strains; with the base state #ui("End of ...") after a static step they use the tangent stiffness
   of the deformed rubber.
 - Coupled temperature-displacement steps, sensitivities and Dynamic steps with modal
   superposition use the stiffness at small strains only. So do trusses, membranes and beams

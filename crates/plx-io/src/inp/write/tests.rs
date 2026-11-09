@@ -2179,7 +2179,7 @@ fn a_frequency_step_is_written() {
     let StepKind::Frequency(settings) = &mut model.steps[1].kind else {
         unreachable!()
     };
-    settings.perturbation = true;
+    settings.base = plx_model::Base::PreviousState;
     settings.storage = true;
     settings.num_frequencies = 4;
     settings.upper_frequency = Some(5000.0);
@@ -2206,7 +2206,7 @@ fn solver_finds_the_bending_frequency_of_the_cantilever() {
     let StepKind::Frequency(settings) = &mut model.steps[1].kind else {
         unreachable!()
     };
-    settings.perturbation = true;
+    settings.base = plx_model::Base::PreviousState;
     let Some(frd) = run_solver("eigenfrequenz", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
@@ -2305,7 +2305,7 @@ fn a_modal_dynamic_step_is_lowered_to_eigenmodes_and_modal_dynamics() {
     };
     settings.method = plx_model::DynamicMethod::Modal {
         modes: 12,
-        preloaded: false,
+        base: plx_model::Base::Unloaded,
     };
     settings.damping = Damping::Ratio {
         zeta: 0.03,
@@ -2339,7 +2339,7 @@ fn a_modal_dynamic_step_is_lowered_to_eigenmodes_and_modal_dynamics() {
     };
     settings.method = plx_model::DynamicMethod::Modal {
         modes: 12,
-        preloaded: true,
+        base: plx_model::Base::PreviousState,
     };
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
@@ -2668,7 +2668,7 @@ fn modal_cantilever(damping: Option<ModalDamping>) -> (FeMesh, FeModel) {
     modal.kind = StepKind::Dynamic(DynamicStep {
         method: plx_model::DynamicMethod::Modal {
             modes: 6,
-            preloaded: false,
+            base: plx_model::Base::Unloaded,
         },
         duration: 1.5e-3,
         frames: 60,
@@ -2692,6 +2692,7 @@ fn modal_cantilever(damping: Option<ModalDamping>) -> (FeMesh, FeModel) {
         data_points: 21,
         bias: 1.0,
         damping,
+        modes: 6,
         ..SteadyStateDynamicsStep::default()
     });
     model.steps = vec![frequency, modal, sweep];
@@ -2802,7 +2803,7 @@ fn a_buckle_step_is_written() {
     let StepKind::Buckle(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
-    settings.perturbation = true;
+    settings.base = plx_model::Base::PreviousState;
     settings.num_factors = 3;
     settings.accuracy = 0.01;
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -2837,7 +2838,7 @@ fn solver_runs_short_modal_steps() {
     settings.frames = 4;
     settings.method = plx_model::DynamicMethod::Modal {
         modes: 4,
-        preloaded: false,
+        base: plx_model::Base::Unloaded,
     };
     model.steps[1].field_outputs = vec![node(&["U", "V"]), element(&["S"])];
     let StepKind::SteadyStateDynamics(settings) = &mut model.steps[2].kind else {
@@ -2845,15 +2846,17 @@ fn solver_runs_short_modal_steps() {
     };
     settings.data_points = 3;
     settings.bias = 2.0;
+    settings.modes = 4;
     model.steps[2].field_outputs = vec![node(&["U", "PU"]), element(&["S", "PHS"])];
     let Some(frd) = run_solver("modal-kurz", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let count = |step: u32| frd.increments.iter().filter(|i| i.step == step).count();
-    // The frequency step, the eigenmodes the Dynamic step computes itself, its frames.
-    assert_eq!((count(1), count(2), count(3)), (4, 4, 4));
+    // The frequency step, the eigenmodes the Dynamic step computes itself, its frames,
+    // the eigenmodes the Steady State Dynamics step computes itself.
+    assert_eq!((count(1), count(2), count(3), count(4)), (4, 4, 4, 4));
     // 700 Hz, the first bending pair, 900 Hz: two intervals of three points.
-    assert_eq!(count(4), 5);
+    assert_eq!(count(5), 5);
 }
 
 /// The modal superposition swings the tip like the direct integration does, damped by the
@@ -2894,8 +2897,9 @@ fn solver_superposes_the_stored_modes_of_the_cantilever() {
             .and_then(|f| f.component("U3"))
             .map_or(0.0, |c| f64::from(c.values[index]))
     };
+    // Step 4 holds the eigenmodes of the Steady State Dynamics step, step 5 its response.
     let sweep: Vec<(f64, f64)> = (frd.increments.iter())
-        .filter(|i| i.step == 4)
+        .filter(|i| i.step == 5)
         .map(|i| (i.value, tip(i).hypot(imaginary(i))))
         .collect();
     assert!(sweep.len() >= 21, "{}", sweep.len());
@@ -3006,7 +3010,7 @@ fn a_preloaded_buckle_step_counts_its_modes_from_one() {
     let StepKind::Buckle(settings) = &mut model.steps[1].kind else {
         unreachable!()
     };
-    settings.perturbation = true;
+    settings.base = plx_model::Base::PreviousState;
     // The side load splits the degenerate pair of bending modes by 2e-4 only; with the
     // default accuracy CalculiX's Lanczos iteration stops 2e-5 away from the buckling
     // factor, too far for the solver fixture made from this test, and the shape of a
@@ -6078,6 +6082,132 @@ fn a_defined_temperature_is_written() {
     ));
 }
 
+/// What a step shows is what acts: its own temperatures replace those of the step before,
+/// and a static step without temperatures sets those of the step before back to the
+/// initial ones; a frequency step keeps the state's.
+#[test]
+fn a_step_takes_only_its_own_defined_temperatures() {
+    let (mesh, mut model) = thermal_bar(
+        StepKind::Static(StaticStep::default()),
+        Vec::new(),
+        Vec::new(),
+    );
+    let all = Region::Parts(vec!["EALL".into()]);
+    model.steps[0].defined_fields = vec![defined_temperature("Hot", all.clone(), 120.0)];
+    let mut warm = model.steps[0].clone();
+    warm.name = "Warm".into();
+    warm.defined_fields = vec![defined_temperature("Warm", all.clone(), 60.0)];
+    let mut cool = model.steps[0].clone();
+    cool.name = "Cool".into();
+    cool.defined_fields.clear();
+    model.steps.push(warm);
+    model.steps.push(cool);
+    let lowered = lower(&mesh, &model, "").unwrap();
+    let fields = |s: usize| lowered.analysis.steps[s].fields.clone();
+    let values = |s: usize| match &fields(s)[..] {
+        [field] => match &field.kind {
+            ir::step::DefinedFieldKind::Temperature(values) => {
+                values.iter().map(|(_, t)| *t).collect::<Vec<_>>()
+            }
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(values(0), [120.0]);
+    // Replaced, not added to.
+    assert_eq!(values(1), [60.0]);
+    // Back to the initial temperatures: a field without values.
+    assert_eq!(values(2), Vec::<f64>::new());
+    assert_eq!(
+        model.step_handover(2).temperatures.as_deref(),
+        Some("Temperatures of Warm go back to the initial ones")
+    );
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert_eq!(text.matches("*Temperature, op=New").count(), 3, "{text}");
+}
+
+/// Supports that let the bar of [`thermal_bar`] expand freely: held at x = 0 in x only,
+/// and against rigid motion at two nodes of that face.
+fn free_expansion_supports(mesh: &FeMesh) -> Vec<BoundaryCondition> {
+    // Held at x = 0 in x only, and against rigid motion at two nodes of that face, so the
+    // bar expands freely: the corner holds y and z, the node along y from it holds z.
+    let fix = nodes_at(mesh, 0, 0.0);
+    let at = |n: NodeId| mesh.node(n).unwrap();
+    let corner = (fix.iter().copied())
+        .min_by(|&a, &b| (at(a)[1] + at(a)[2]).total_cmp(&(at(b)[1] + at(b)[2])))
+        .unwrap();
+    let along_y = (fix.iter().copied())
+        .filter(|&n| (at(n)[2] - at(corner)[2]).abs() < 1e-9 && n != corner)
+        .max_by(|&a, &b| at(a)[1].total_cmp(&at(b)[1]))
+        .unwrap();
+    let hold = |name: &str, nodes: Vec<NodeId>, held: [bool; 3]| BoundaryCondition {
+        id: plx_model::Id::new(),
+        distribution: None,
+        name: name.into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes(nodes),
+        kind: BoundaryKind::displacement([
+            held[0].then_some(0.0),
+            held[1].then_some(0.0),
+            held[2].then_some(0.0),
+            None,
+            None,
+            None,
+        ]),
+        amplitude: None,
+    };
+    vec![
+        hold("Axial", fix.clone(), [true, false, false]),
+        hold("Corner", vec![corner], [false, true, true]),
+        hold("Edge", vec![along_y], [false, false, true]),
+    ]
+}
+
+/// A bar heated by 100 in the first step grows by alpha 100 L; the second step defines no
+/// temperatures and sets them back to the initial ones, so the bar returns to its length.
+#[test]
+fn solver_sets_temperatures_back_in_a_step_without_them() {
+    let (mesh, mut model) = thermal_bar(
+        StepKind::Static(StaticStep::default()),
+        Vec::new(),
+        Vec::new(),
+    );
+    model.initial_conditions.push(plx_model::InitialCondition {
+        distribution: None,
+        name: "Initial_Temperature-1".into(),
+        active: true,
+        region: Region::Parts(vec!["EALL".into()]),
+        kind: plx_model::InitialConditionKind::Temperature(20.0),
+    });
+    model.steps[0].boundary_conditions = free_expansion_supports(&mesh);
+    model.steps[0].defined_fields = vec![defined_temperature(
+        "Hot",
+        Region::Parts(vec!["EALL".into()]),
+        120.0,
+    )];
+    let tip = nodes_at(&mesh, 0, 100.0);
+    let Some(dir) = run_dir("temperatur-zurueck") else {
+        return;
+    };
+    let frd = run_in(&dir, "hot", &write_inp(&mesh, &model, "").unwrap());
+    let growth: Vec<f64> = (tip.iter())
+        .map(|&n| node_value(&frd, "DISP", "U1", n))
+        .collect();
+    assert_all_close(&growth, 1e-5 * 100.0 * 100.0, 5e-3);
+    let mut cool = model.steps[0].clone();
+    cool.name = "Cool".into();
+    cool.defined_fields.clear();
+    model.steps.push(cool);
+    let frd = run_in(&dir, "cool", &write_inp(&mesh, &model, "").unwrap());
+    remove_run_dir(&dir);
+    assert_all_close(&temperatures_at(&mesh, &frd, 100.0), 20.0, 1e-6);
+    let growth: Vec<f64> = (tip.iter())
+        .map(|&n| node_value(&frd, "DISP", "U1", n))
+        .collect();
+    assert_all_close(&growth, 0.0, 1e-6);
+}
+
 /// A heat transfer run gives the bar a gradient from 20 at x = 0 to 120 at the tip; the
 /// static run reads it from the frd file and the bar grows by alpha times the integral of
 /// T - 20 over its length, 1e-5 * 100^2 / 2.
@@ -6108,39 +6238,7 @@ fn solver_strains_the_bar_by_the_temperatures_of_a_result_file() {
         region: Region::Parts(vec!["EALL".into()]),
         kind: plx_model::InitialConditionKind::Temperature(20.0),
     });
-    // Held at x = 0 in x only, and against rigid motion at two nodes of that face, so the
-    // bar expands freely: the corner holds y and z, the node along y from it holds z.
-    let fix = nodes_at(&mesh, 0, 0.0);
-    let at = |n: NodeId| mesh.node(n).unwrap();
-    let corner = (fix.iter().copied())
-        .min_by(|&a, &b| (at(a)[1] + at(a)[2]).total_cmp(&(at(b)[1] + at(b)[2])))
-        .unwrap();
-    let along_y = (fix.iter().copied())
-        .filter(|&n| (at(n)[2] - at(corner)[2]).abs() < 1e-9 && n != corner)
-        .max_by(|&a, &b| at(a)[1].total_cmp(&at(b)[1]))
-        .unwrap();
-    let hold = |name: &str, nodes: Vec<NodeId>, held: [bool; 3]| BoundaryCondition {
-        id: plx_model::Id::new(),
-        distribution: None,
-        name: name.into(),
-        active: true,
-        visible: true,
-        region: Region::Nodes(nodes),
-        kind: BoundaryKind::displacement([
-            held[0].then_some(0.0),
-            held[1].then_some(0.0),
-            held[2].then_some(0.0),
-            None,
-            None,
-            None,
-        ]),
-        amplitude: None,
-    };
-    model.steps[0].boundary_conditions = vec![
-        hold("Axial", fix.clone(), [true, false, false]),
-        hold("Corner", vec![corner], [false, true, true]),
-        hold("Edge", vec![along_y], [false, false, true]),
-    ];
+    model.steps[0].boundary_conditions = free_expansion_supports(&mesh);
     model.steps[0].defined_fields = vec![temperature_from_file(
         "Defined_Temperature-1",
         dir.join("heat.frd").to_str().unwrap(),
@@ -7182,6 +7280,95 @@ fn rotor_analysis(speed: f64) -> (FeMesh, FeModel) {
     });
     step.field_outputs = ccx_eigen_outputs(&step.kind);
     (mesh, model)
+}
+
+/// A complex frequency step between two static steps: the solver gets it as an isolated
+/// group, about the unloaded model (loads of the steps before reset) or about the state
+/// before it, and leaves the state as it found it.
+#[test]
+fn a_complex_frequency_step_leaves_the_state_as_it_found_it() {
+    let (mesh, mut model) = cantilever(tip_force());
+    let load = model.steps[0].clone();
+    let (_, rotor) = rotor_analysis(100.0);
+    let mut spin = rotor.steps[0].clone();
+    spin.boundary_conditions = load.boundary_conditions.clone();
+    let mut again = load.clone();
+    again.name = "Again".into();
+    model.steps = vec![load, spin, again];
+    let lowered = lower(&mesh, &model, "").unwrap();
+    let steps = &lowered.analysis.steps;
+    // Load, the preload, the eigenmodes and the complex modes of Rotor, Again.
+    assert_eq!(steps.len(), 5);
+    let isolation = |s: usize| steps[s].isolation;
+    assert!(isolation(1).opens && isolation(1).unloaded && !isolation(1).closes);
+    assert!(!isolation(2).opens && !isolation(2).closes);
+    assert!(isolation(3).closes);
+    assert_eq!(isolation(4), ir::step::Isolation::default());
+    // About the unloaded model the tip force of Load is not in the preload.
+    assert!(
+        steps[1].loads.concentrated.is_empty(),
+        "{:?}",
+        steps[1].loads
+    );
+    // About the state before it the rotation adds to that force.
+    let StepKind::ComplexFrequency(settings) = &mut model.steps[1].kind else {
+        unreachable!()
+    };
+    settings.base = plx_model::Base::PreviousState;
+    let lowered = lower(&mesh, &model, "").unwrap();
+    let steps = &lowered.analysis.steps;
+    assert!(steps[1].isolation.opens && !steps[1].isolation.unloaded);
+    assert!(!steps[1].loads.concentrated.is_empty());
+    assert!(steps[2].perturbation && steps[3].perturbation);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("** Nodalis: the state before this step returns after the group"));
+    // Again starts at the time Load ended: the preload of the group took no time of it.
+    // (The input file only describes the group in comments; the app solves the analysis.)
+    let Some(dir) = run_dir("rotor-isoliert") else {
+        return;
+    };
+    let options = plxs_session::JobOptions {
+        threads: 1,
+        ..plxs_session::JobOptions::new(&dir, "rotor")
+    };
+    let mut log = Vec::new();
+    let mut progress = |event| log.extend(plxs_session::format_event(&event));
+    let outcome =
+        plxs_session::job::run_analysis(lowered.analysis.clone(), &options, &mut progress);
+    assert_eq!(
+        outcome.ok(),
+        Some(plxs_session::JobOutcome::Finished),
+        "{log:?}"
+    );
+    let frd = read_frd(&dir.join("rotor.frd")).unwrap();
+    remove_run_dir(&dir);
+    let last = frd.increments.last().unwrap();
+    assert_eq!(last.step, 5);
+    assert!((last.value - 2.0).abs() < 1e-9, "{}", last.value);
+}
+
+/// A steady state dynamics step computes its eigenmodes in a step of its own before it,
+/// about the base it is given; the pair leaves the state as it found it.
+#[test]
+fn a_steady_state_dynamics_step_computes_its_own_modes() {
+    let (mesh, mut model) = modal_cantilever(Some(ModalDamping::Constant(0.02)));
+    model.steps.drain(..2);
+    let StepKind::SteadyStateDynamics(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.base = plx_model::Base::PreviousState;
+    let lowered = lower(&mesh, &model, "").unwrap();
+    let steps = &lowered.analysis.steps;
+    assert_eq!(steps.len(), 2);
+    let ir::step::Procedure::Frequency(frequency) = &steps[0].procedure else {
+        panic!("{:?}", steps[0].procedure)
+    };
+    assert_eq!(frequency.count, 6);
+    assert!(frequency.storage && steps[0].perturbation && steps[1].perturbation);
+    assert!(steps[0].isolation.opens && steps[1].isolation.closes);
+    // The supports of the step, given again in the response (accepted, not new).
+    assert!((steps[0].boundaries.iter()).all(|b| steps[1].boundaries.contains(b)));
+    assert_eq!(lowered.preparation_steps, [0]);
 }
 
 /// The half x <= 50 of the cantilever as a submodel: held at x = 0, its cut at x = 50
@@ -11218,7 +11405,7 @@ fn a_hyperelastic_material_is_written_and_switches_nlgeom_on() {
     };
     settings.method = plx_model::DynamicMethod::Modal {
         modes: 5,
-        preloaded: false,
+        base: plx_model::Base::Unloaded,
     };
     assert!(!lowered(&mesh, &model).steps.iter().any(|s| s.nlgeom));
 }

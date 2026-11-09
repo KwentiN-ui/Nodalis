@@ -204,6 +204,7 @@ impl AnalysisWindow {
             | Cmd::Tie
             | Cmd::NodeTie
             | Cmd::ContactWorksheet
+            | Cmd::StepOverview
             | Cmd::ConnectionSettings
             | Cmd::Step
             | Cmd::InitialCondition
@@ -303,6 +304,7 @@ impl AnalysisWindow {
             | Cmd::ModeSound => w.results_command_checked(cmd),
             Cmd::Monitor => w.analysis_tab,
             Cmd::ContactWorksheet => w.contact_worksheet,
+            Cmd::StepOverview => w.step_overview,
             _ => false,
         }
     }
@@ -432,6 +434,7 @@ impl AnalysisWindow {
             Cmd::Tie => w.create(NewItem::Tie),
             Cmd::NodeTie => w.create(NewItem::NodeTie),
             Cmd::ContactWorksheet => w.contact_worksheet = true,
+            Cmd::StepOverview => w.step_overview = true,
             Cmd::ConnectionSettings => {
                 if let Some(model) = w.setup_model() {
                     w.editor = Editor::edit(&TreeItem::Group("Contacts"), &model.fe, &model.mesh);

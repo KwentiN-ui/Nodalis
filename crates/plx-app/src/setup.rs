@@ -5991,7 +5991,6 @@ fn step_form(
     let dynamic = match &step.kind {
         StepKind::Dynamic(settings) => Some(DynamicContext {
             amplitude_interval: fe.amplitude_interval(step, settings.duration),
-            starts_from: dynamic_start(fe, index),
             stable_step: settings
                 .method
                 .uses_explicit()
@@ -6026,6 +6025,7 @@ fn step_form(
         ui.label(step_kind_label(&step.kind));
     }
     ui.end_row();
+    start_section(ui, step, index, fe);
     let units = fe.properties.units;
     match &mut step.kind {
         StepKind::Static(settings) => static_form(ui, settings, units),
@@ -6034,7 +6034,9 @@ fn step_form(
             let context = dynamic.unwrap_or_default();
             dynamic_form(ui, settings, units, &context)
         }
-        StepKind::SteadyStateDynamics(settings) => steady_state_form(ui, settings, units),
+        StepKind::SteadyStateDynamics(settings) => {
+            steady_state_form(ui, settings, units, fe.properties.stored_modes.is_some())
+        }
         StepKind::ComplexFrequency(settings) => complex_frequency_form(ui, settings, fe),
         StepKind::Buckle(settings) => buckle_form(ui, settings),
         StepKind::HeatTransfer(settings) => heat_transfer_form(ui, settings, units, false),
@@ -6053,6 +6055,130 @@ fn step_form(
         ui.weak("Large deformations are on: the model has hyperelastic materials.");
         ui.end_row();
     }
+}
+
+/// The first section of every step dialog: what the step starts from, what it uses of other
+/// steps and what it passes on, with the names of those steps ([`FeModel::handover`]).
+/// Frequency and buckle steps, and the modes of a modal dynamic step, choose their base
+/// state here.
+fn start_section(ui: &mut Ui, step: &mut Step, index: Option<usize>, fe: &FeModel) {
+    let handover = fe.handover(index.unwrap_or(fe.steps.len()), step);
+    ui.strong("Start");
+    ui.separator();
+    ui.end_row();
+    let modal = matches!(&step.kind, StepKind::Dynamic(_));
+    if handover.base.is_some()
+        && let Some(base) = step.kind.base_mut()
+    {
+        ui.label("Base state").on_hover_text(if modal {
+            "What the superposed eigenmodes are computed about: the unloaded model, or the \
+             state the steps before leave with the stiffening by its stresses (a tensioned \
+             string, a spinning rotor). The step itself starts from the state before it \
+             either way."
+        } else {
+            "What the step is computed about: the unloaded model, or the state the steps \
+             before leave, with its deformation, the stiffening by its stresses and its \
+             contact status. The step leaves that state as it found it."
+        });
+        let label = |b: plx_model::Base| match b {
+            plx_model::Base::Unloaded => "Unloaded model".to_owned(),
+            plx_model::Base::PreviousState => (handover.previous_state.clone())
+                .unwrap_or_else(|| "End of the step before (none)".into()),
+        };
+        egui::ComboBox::from_id_salt("step base state")
+            .selected_text(label(*base))
+            .width(200.0)
+            .show_ui(ui, |ui| {
+                for option in plx_model::Base::ALL {
+                    let enabled =
+                        option == plx_model::Base::Unloaded || handover.previous_state.is_some();
+                    ui.add_enabled_ui(enabled, |ui| {
+                        ui.selectable_value(base, option, label(option));
+                    });
+                }
+            });
+        ui.end_row();
+        if base.is_preloaded() && handover.previous_state.is_none() {
+            ui.label("");
+            ui.weak("No step before leaves a state: the base is the unloaded model.");
+            ui.end_row();
+        }
+    }
+    if !(handover.base.is_some() && !step.kind.continues_state()) {
+        ui.label("Starts from");
+        ui.label(wrap_list(&handover.starts_from));
+        ui.end_row();
+    }
+    let shows_state = match handover.base {
+        Some(base) if !step.kind.continues_state() => base.is_preloaded(),
+        _ => true,
+    };
+    if shows_state && !handover.carried.is_empty() {
+        ui.label("");
+        ui.weak(wrap_list(&handover.carried));
+        ui.end_row();
+    }
+    for name in &handover.skipped {
+        ui.label("");
+        ui.weak(format!("{name} is off and left out."));
+        ui.end_row();
+    }
+    for (i, used) in handover.uses.iter().enumerate() {
+        ui.label(if i == 0 { "Uses" } else { "" });
+        ui.label(wrap_list(used));
+        ui.end_row();
+    }
+    if let Some(loads) = &handover.loads {
+        ui.label("Loads");
+        ui.label(wrap_list(loads));
+        ui.end_row();
+        if !handover.removed_loads.is_empty() {
+            ui.label("");
+            ui.weak(wrap_list(&format!(
+                "ramping down to 0: {}",
+                handover.removed_loads.join(", ")
+            )));
+            ui.end_row();
+        }
+    }
+    if let Some(temperatures) = &handover.temperatures {
+        ui.label("Temperatures");
+        ui.label(wrap_list(temperatures));
+        ui.end_row();
+    }
+    if !handover.model_wide.is_empty() {
+        ui.label("Model-wide").on_hover_text(
+            "Hold in every step: constraints, contact, bolts and the couplings of remote \
+             forces, also those of other steps.",
+        );
+        ui.label(wrap_list(&handover.model_wide.join(", ")));
+        ui.end_row();
+    }
+    ui.label("Passes on");
+    ui.label(wrap_list(&handover.passes_on));
+    ui.end_row();
+    ui.label("");
+    ui.separator();
+    ui.end_row();
+}
+
+/// A long line broken between words, so that the dialog keeps its width.
+fn wrap_list(text: &str) -> String {
+    const WIDTH: usize = 34;
+    let mut out = String::new();
+    let mut line = 0;
+    for word in text.split(' ') {
+        if line > 0 && line + 1 + word.len() > WIDTH {
+            out.push('\n');
+            line = 0;
+        } else if line > 0 {
+            out.push(' ');
+            line += 1;
+        }
+        out.push_str(word);
+        line += word.len();
+    }
+    out
 }
 
 /// Settings of a visco step: those of a static step over the creep time and the creep
@@ -6157,8 +6283,6 @@ fn heat_transfer_form(
 struct DynamicContext {
     /// The shortest segment of the amplitudes its loads follow.
     amplitude_interval: Option<f64>,
-    /// "rest", "the state at the end of step Preload", ...
-    starts_from: String,
     /// Explicit integration: the stable time step estimated from the mesh.
     stable_step: Option<plx_model::StableStepEstimate>,
 }
@@ -6188,44 +6312,6 @@ fn stable_step_estimate(
     let estimate = fe.explicit_time_step_estimate(mesh, scaled_shells);
     ctx.data_mut(|d| d.insert_temp::<Cached>(id, (key, estimate.clone())));
     estimate
-}
-
-/// What a Dynamic step at `index` (`None`: a new one at the end) starts from: the state the
-/// active steps before it leave, and the initial velocities until a Dynamic step took them
-/// up.
-fn dynamic_start(fe: &FeModel, index: Option<usize>) -> String {
-    let before = &fe.steps[..index.unwrap_or(fe.steps.len()).min(fe.steps.len())];
-    let previous = before
-        .iter()
-        .rev()
-        .find(|s| s.active && s.kind.is_mechanical());
-    let dynamic_before =
-        (before.iter()).any(|s| s.active && matches!(s.kind, StepKind::Dynamic(_)));
-    let velocities: Vec<&str> = (fe.initial_conditions.iter())
-        .filter(|c| c.active && c.kind.is_velocity())
-        .map(|c| c.name.as_str())
-        .collect();
-    let mut parts = Vec::new();
-    if let Some(previous) = previous {
-        // A Dynamic step before names its integration: the state (displacements,
-        // velocities, stresses, contact) carries over between implicit and explicit
-        // integration, the accelerations are found anew with this step's mass.
-        let method = match &previous.kind {
-            StepKind::Dynamic(d) if d.method.is_explicit() => " (explicit)",
-            StepKind::Dynamic(d) if matches!(d.method, DynamicMethod::Automatic) => " (automatic)",
-            StepKind::Dynamic(d) if matches!(d.method, DynamicMethod::Direct) => " (implicit)",
-            _ => "",
-        };
-        parts.push(format!("the state at the end of {}{method}", previous.name));
-    }
-    if !dynamic_before && !velocities.is_empty() {
-        parts.push(format!("initial velocity {}", velocities.join(", ")));
-    }
-    if parts.is_empty() {
-        "rest".into()
-    } else {
-        parts.join(" with ")
-    }
 }
 
 /// A time or frequency with its unit, to four significant digits.
@@ -6303,7 +6389,7 @@ fn dynamic_form(
                 DynamicMethod::Automatic,
                 DynamicMethod::Modal {
                     modes: 0,
-                    preloaded: false,
+                    base: plx_model::Base::Unloaded,
                 },
             ]
             .iter()
@@ -6321,7 +6407,7 @@ fn dynamic_form(
                         settings.large_deformations = false;
                         DynamicMethod::Modal {
                             modes: DynamicMethod::DEFAULT_MODES,
-                            preloaded: false,
+                            base: plx_model::Base::Unloaded,
                         }
                     }
                 };
@@ -6385,7 +6471,7 @@ fn dynamic_form(
             None => {}
         }
     }
-    if let DynamicMethod::Modal { modes, preloaded } = &mut settings.method {
+    if let DynamicMethod::Modal { modes, .. } = &mut settings.method {
         ui.label("    Modes").on_hover_text(
             "The lowest eigenmodes superposed. The highest of them must lie above the \
              frequencies the loads excite; the solver output names it.",
@@ -6393,14 +6479,6 @@ fn dynamic_form(
         expose::field(ui, Field::Modes, |ui| {
             ui.add(numeric::count(modes).range(1..=10_000))
         });
-        ui.end_row();
-        ui.label("");
-        ui.checkbox(preloaded, "Modes about the preloaded state")
-            .on_hover_text(
-                "The eigenmodes of the state the previous step leaves, with the stiffening \
-                 by its stresses (a tensioned string, a spinning rotor). Off, they are those \
-                 of the unloaded model.",
-            );
         ui.end_row();
         ui.label("");
         ui.weak("Linear only: no contact, no large\ndeformations, no plasticity.");
@@ -6528,10 +6606,6 @@ fn dynamic_form(
         ui.weak("Time steps are split where needed.");
         ui.end_row();
     }
-
-    ui.label("Starts from");
-    ui.label(&context.starts_from);
-    ui.end_row();
 
     // Advanced: open while something in it differs from the defaults.
     let id = ui.id().with("dynamic advanced");
@@ -6694,7 +6768,22 @@ fn dynamic_form(
 }
 
 /// Settings of a steady state dynamics step: the frequency sweep, then the modal damping.
-fn steady_state_form(ui: &mut Ui, settings: &mut SteadyStateDynamicsStep, units: UnitSystem) {
+/// `linked`: the eigenmodes come from another analysis through an Eigenmodes link.
+fn steady_state_form(
+    ui: &mut Ui,
+    settings: &mut SteadyStateDynamicsStep,
+    units: UnitSystem,
+    linked: bool,
+) {
+    if !linked {
+        ui.label("Modes").on_hover_text(
+            "The lowest eigenmodes the response is superposed from, computed by the step \
+             itself about its base state. The highest of them must lie above the upper \
+             frequency.",
+        );
+        ui.add(numeric::count(&mut settings.modes).range(1..=10_000));
+        ui.end_row();
+    }
     ui.label("");
     ui.checkbox(&mut settings.harmonic, "Harmonic excitation");
     ui.end_row();
@@ -6732,9 +6821,6 @@ fn steady_state_form(ui: &mut Ui, settings: &mut SteadyStateDynamicsStep, units:
             ui.end_row();
         }
     }
-    ui.label("");
-    ui.weak("Needs a Frequency step with stored modes before it.");
-    ui.end_row();
     modal_damping_rows(ui, &mut settings.damping, units);
 }
 
@@ -6874,12 +6960,6 @@ fn frequency_form(
     units: UnitSystem,
     cyclic_sectors: Option<u32>,
 ) {
-    ui.label("");
-    ui.checkbox(
-        &mut settings.perturbation,
-        "Perturbation (prestress from previous step)",
-    );
-    ui.end_row();
     ui.label("Number of eigenfrequencies");
     expose::field(ui, Field::Modes, |ui| {
         ui.add(numeric::drag_value(&mut settings.num_frequencies).range(1..=10_000))
@@ -7064,12 +7144,6 @@ fn validate_frequency_step(settings: &FrequencyStep) -> Result<(), String> {
 /// The buckle step view: perturbation, solver, number of buckling factors and
 /// accuracy.
 fn buckle_form(ui: &mut Ui, settings: &mut BuckleStep) {
-    ui.label("");
-    ui.checkbox(
-        &mut settings.perturbation,
-        "Preload from previous step (Perturbation)",
-    );
-    ui.end_row();
     ui.label("Number of buckling factors");
     ui.add(numeric::drag_value(&mut settings.num_factors).range(1..=10_000));
     ui.end_row();

@@ -39,9 +39,90 @@ fields and outputs, and stays selected. #ui("Move Up") is disabled on the first 
 
 #screenshot("step-move-menu.png", [Context menu of a step])
 
-Steps that build on the previous one, such as a step with #ui("Perturbation"), take the state of
-whatever step now precedes them, so check the order after moving. The step numbers of existing
-results refer to the order at the time of the run.
+Steps that build on the previous one, such as a frequency step with the base state
+#ui("End of ..."), take the state of whatever step now precedes them, so check the order after
+moving: the #ui("Start") section of each step names the step it builds on. The step numbers of
+existing results refer to the order at the time of the run.
+
+=== What a step takes from the steps before <step-handover>
+
+The steps of an analysis form a chain. Two kinds of steps make it up:
+
+- Static, visco, dynamic and heat transfer steps *continue* the chain: each starts from the state
+  at the end of the active step before it (displacements, stresses, plastic and creep strains,
+  contact status, velocities, temperatures) and passes its own end state on. The first step
+  starts from the unloaded model with the initial conditions (@initial-conditions).
+- Frequency, buckle, complex frequency, steady state dynamics and sensitivity steps *probe* the
+  model: they are computed about a base state and leave the state as they found it. The step
+  after them starts where the step before them ended.
+
+Every step dialog begins with the section #ui("Start"), which says this for the step with the
+names of the steps involved. The model tree repeats its first line as the first, italic row
+under each step; double-click it to open the step.
+
+#screenshot("step-start.png", [The Start section of a frequency step about the state at the end
+  of the static step before it])
+
+#screenshot("step-start-static.png", [A static step after it continues the static step before the
+  frequency step; the load it no longer has ramps down to zero])
+
+#screenshot("step-start-tree.png", [The first row under each step in the model tree])
+
+The project window shows the same chain as a trace at the left of the step rows of the analysis
+block (@project-window), and the results timeline marks the steps that leave the state as they
+found it (@results-timeline).
+
+#fields(
+  [Base state], [Frequency, buckle, complex frequency and steady state dynamics steps, and the
+    eigenmodes of a Dynamic step with modal superposition: what they are computed about. #ui("Unloaded model") (default) uses the
+    linear stiffness of the model without stresses. #ui("End of <step>") uses the state the
+    named step leaves, with the stiffening by its stresses and its contact status
+    (`*STEP, PERTURBATION`): a tensioned string, a bolted joint or a spinning rotor. Only the
+    last continuing step before can be the base; to build on an earlier one, move the step.],
+  [Starts from], [The state the step starts from: #ui("Unloaded model"), #ui("End of <step>")
+    with the method of a dynamic step, and initial conditions where they act (temperatures in
+    the first step, velocities in the first dynamic step). The line below lists what carries
+    over. A deactivated step in between is named and left out.],
+  [Uses], [What the step reads or computes for itself: the eigenmodes of a complex frequency or
+    steady state dynamics step (or those an Eigenmodes link gives), the solution of the step
+    before a sensitivity step.],
+  [Loads], [In a static or visco step after one: every load moves linearly from its value at
+    the end of that step to the value of this step. A load the step no longer has ramps down to
+    zero; they are listed.],
+  [Temperatures], [Temperatures a step before was given and this one is not go back to the
+    initial temperatures over the step (@defined-fields-steps).],
+  [Model-wide], [What holds in every step: constraints, contact, bolts, and the coupling of a
+    rigid remote force of another step, which keeps its face rigid here too.],
+  [Passes on], [What the next active step gets: the end state, or nothing for a probing step.],
+)
+
+==== Step overview <step-overview>
+
+#menu("Steps", "Step Overview") (also in the context menu of #ui("Steps") in the tree) shows
+every boundary condition, load and defined field, and every model-wide item, against the
+steps. The second row says where each step starts. Each cell compares the item with the step
+the step starts from, for a probing step its base:
+
+#fields(
+  [Created], [The step has the item and the step it starts from does not.],
+  [Same, Changed], [Both have it, with the same or with other values, region or amplitude.],
+  [Off], [The step has the item, deactivated.],
+  [Removed], [The step it starts from has the item and this one does not.],
+  [Ramps to 0], [A load a static or visco step no longer has: it moves down to zero over the
+    step.],
+  [Model-wide], [Constraints, ties, contact and bolts act in every step. A contact switched off
+    from a step on reads #ui("Off from here"), a bolt names its action in the step.],
+)
+
+An empty cell is an item the step does not have and did not have before, or one a step of that
+type cannot take (loads in a frequency step). Click a cell to open the item in that step, or a
+step name to open the step. The context menu of a cell copies the item to all following steps
+that can take it, in place of the one there (#ui("Copy to Following Steps")), or removes it
+from them (#ui("Remove from Following Steps")). Undo takes either back.
+
+#screenshot("step-overview.png", [Step overview: the pressure of Preload ramps down to zero in
+  Unload, the frequency step Modes takes no loads, and the contact region Flange is switched
+  off from Unload on])
 
 === Equation solver <equation-solver>
 
@@ -176,7 +257,8 @@ derives the rest.
 Computes eigenfrequencies and mode shapes (`*FREQUENCY`). A frequency step takes no loads.
 
 #fields(
-  [Perturbation], [Uses the stress state of the previous step (prestress).],
+  [Base state], [#ui("Unloaded model") (default), or the state at the end of the step before
+    with its prestress (@step-handover).],
   [Number of eigenfrequencies], [Default 10.],
   [Lower / Upper frequency bound], [Optional range of frequencies to compute.],
   [Store matrices and eigenmodes], [Writes the `.eig` file (`STORAGE=YES`).],
@@ -194,8 +276,8 @@ Computes buckling factors and buckling modes (`*BUCKLE`). The loads of the step 
 load: the critical load is the buckling factor times these loads.
 
 #fields(
-  [Preload from previous step (Perturbation)], [Takes the state of the previous step as
-    preload.],
+  [Base state], [#ui("Unloaded model") (default), or the state at the end of the step before
+    as a preload that the buckling factor does not scale (@step-handover).],
   [Number of buckling factors], [Default 1.],
   [Accuracy], [Convergence tolerance of the eigenvalue solver (default 1e-4).],
   [Equation solver], [How the reference solution and the systems of the eigenvalue
