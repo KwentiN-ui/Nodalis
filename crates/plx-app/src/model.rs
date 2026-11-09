@@ -1053,6 +1053,84 @@ impl Model {
         }
     }
 
+    /// Makes the skin of results of expanded shells the one of the shells of the mesh the
+    /// analysis was solved on, as the FE Model view shows them. Solver results know nothing
+    /// of that mesh: the expanded solids of neighbouring shells share nodes only where their
+    /// normals agree, so the skin would be one slab per element with walls between them, and
+    /// the outlines of CAD faces would be guessed from the angles between element faces.
+    ///
+    /// Elements of the same id are the same element. The nodes of results that stand for one
+    /// node of the shells (the same side of the thickness) count as one when faces and edges
+    /// are matched, and the CAD faces of the shells lie on the bottom and top face of their
+    /// solids. Returns whether the skins changed.
+    pub fn adopt_project_surface(&mut self, project: &FeMesh) -> bool {
+        use plx_mesh::ElementFamily::{Solid, Surface};
+        let mut weld: Vec<usize> = (0..self.mesh.node_count()).collect();
+        let mut canonical: HashMap<(plx_mesh::NodeId, u8), usize> = HashMap::new();
+        let mut expanded = BTreeSet::new();
+        for solved in self.mesh.elements() {
+            let Some(own) = project.element(solved.id) else {
+                continue;
+            };
+            if own.shape.family() != Surface || solved.shape.family() != Solid {
+                continue;
+            }
+            // Bottom corners, top corners, then for quadratic solids the midside nodes of
+            // the bottom and top and those between them, each as the corners and mids of
+            // the shell.
+            let corners = solved.nodes.len() / if solved.nodes.len() > 8 { 5 } else { 2 };
+            let quadratic = solved.nodes.len() > 8;
+            if own.nodes.len() != if quadratic { 2 * corners } else { corners } {
+                continue;
+            }
+            expanded.insert(solved.id);
+            for (k, &node) in solved.nodes.iter().enumerate() {
+                let (shell_node, slot) = match k / corners {
+                    0 => (own.nodes[k], 0),
+                    1 => (own.nodes[k % corners], 2),
+                    2 => (own.nodes[corners + k % corners], 0),
+                    3 => (own.nodes[corners + k % corners], 2),
+                    _ => (own.nodes[k % corners], 1),
+                };
+                let Some(index) = self.mesh.node_index(node) else {
+                    continue;
+                };
+                weld[index] = *canonical.entry((shell_node, slot)).or_insert(index);
+            }
+        }
+        if expanded.is_empty() {
+            return false;
+        }
+        // The CAD faces of shells lie on the bottom and top face of their solids.
+        if !project.cad.faces.is_empty() && self.mesh.cad.faces.is_empty() {
+            let faces: BTreeMap<i32, Vec<(ElementId, u8)>> = (project.cad.faces.iter())
+                .map(|(&tag, on_face)| {
+                    let kept: Vec<_> = (on_face.iter())
+                        .filter(|(element, _)| expanded.contains(element))
+                        .flat_map(|&(element, _)| [(element, 1), (element, 2)])
+                        .collect();
+                    (tag, kept)
+                })
+                .filter(|(_, kept)| !kept.is_empty())
+                .collect();
+            // Nodes of the results are numbered anew: selections by CAD entity are made in
+            // the FE Model, only the faces outline.
+            self.mesh.cad = plx_mesh::CadMap {
+                faces,
+                ..Default::default()
+            };
+        }
+        self.skins = (self.mesh.parts.iter())
+            .map(|part| {
+                plx_mesh::extract_part_skin_welded(&self.mesh, part, FEATURE_ANGLE_DEG, Some(&weld))
+            })
+            .collect();
+        self.skin_lookup = Default::default();
+        self.part_nodes = Default::default();
+        self.section_cells = Default::default();
+        true
+    }
+
     /// Replaces the mesh, e.g. by a newly generated one; the FE model stays.
     pub fn set_mesh(&mut self, mut mesh: FeMesh) {
         // The user's sets are found on the new mesh by their selections, and its parts get
@@ -3095,6 +3173,99 @@ mod tests {
         let sxx = &stress.component("S11").unwrap().values;
         let max = sxx.iter().copied().fold(f32::MIN, f32::max);
         assert!(max > 300.0 && max < 1500.0, "largest stress {max}");
+    }
+
+    /// Results of expanded shells are skinned like the shells of the mesh the analysis ran on:
+    /// no walls between neighbours, and the CAD faces outlined as in the FE Model view
+    /// although they meet without a crease.
+    #[test]
+    fn results_outline_the_cad_faces_of_the_project_mesh() {
+        let mut project = FeMesh::default();
+        for (id, c) in [
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [20.0, 0.0, 0.0],
+            [20.0, 10.0, 0.0],
+            [10.0, 10.0, 0.0],
+            [0.0, 10.0, 0.0],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            project.set_node(id as u32 + 1, c);
+        }
+        for (id, nodes) in [(1, vec![1, 2, 5, 6]), (2, vec![2, 3, 4, 5])] {
+            project
+                .add_element(plx_mesh::Element {
+                    id,
+                    type_name: "S4".into(),
+                    shape: plx_mesh::ElementShape::Quad4,
+                    nodes,
+                })
+                .unwrap();
+        }
+        project.parts.push(plx_mesh::Part {
+            name: "PLATE".into(),
+            elements: vec![1, 2],
+        });
+        project.cad.faces.insert(1, vec![(1, 1)]);
+        project.cad.faces.insert(2, vec![(2, 1)]);
+        project
+            .cad
+            .nodes
+            .insert(plx_mesh::CadEntity::Face(1), vec![1, 2, 5, 6]);
+        project
+            .cad
+            .nodes
+            .insert(plx_mesh::CadEntity::Face(2), vec![2, 3, 4, 5]);
+
+        // The results show each shell as a solid of its thickness; where their normals
+        // differ they have nodes of their own, here the second element's.
+        let mut solved = FeMesh::default();
+        for (element, ring) in [(1u32, [1u32, 2, 5, 6]), (2, [2, 3, 4, 5])] {
+            let own = |n: u32, side: u32| n + 10 * side + 100 * element;
+            for &n in &ring {
+                let c = project.node(n).unwrap();
+                solved.set_node(own(n, 1), [c[0], c[1], -0.5]);
+                solved.set_node(own(n, 2), [c[0], c[1], 0.5]);
+            }
+            let nodes = (ring.iter().map(|&n| own(n, 1)))
+                .chain(ring.iter().map(|&n| own(n, 2)))
+                .collect();
+            solved
+                .add_element(plx_mesh::Element {
+                    id: element,
+                    type_name: "C3D8".into(),
+                    shape: plx_mesh::ElementShape::Hex8,
+                    nodes,
+                })
+                .unwrap();
+        }
+        solved.parts.push(plx_mesh::Part {
+            name: "PLATE".into(),
+            elements: vec![1, 2],
+        });
+        // Feature edges on the top of the plate where the two CAD faces meet.
+        let features = |model: &Model| -> usize {
+            let coords = model.mesh.coords();
+            (model.skin(0).edges.iter())
+                .filter(|e| {
+                    e.feature
+                        && [e.a, e.b]
+                            .iter()
+                            .all(|&n| coords[n][0] == 10.0 && coords[n][2] == 0.5)
+                })
+                .count()
+        };
+        let mut results = Model::new(Path::new("plate.frd"), solved);
+        assert_eq!(results.skin(0).faces.len(), 12, "a slab per element");
+        assert!(results.adopt_project_surface(&project));
+        assert_eq!(
+            results.skin(0).faces.len(),
+            10,
+            "no walls between the elements"
+        );
+        assert_eq!(features(&results), 1, "the border of the two CAD faces");
     }
 
     /// Shells of a shell section are drawn as the solid of its thickness, placed by its

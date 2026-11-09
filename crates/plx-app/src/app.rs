@@ -1693,9 +1693,20 @@ impl Workbench {
             Ok(loaded) => {
                 let LoadedModel {
                     mut model,
-                    render_meshes,
+                    mut render_meshes,
                     geometry_view,
                 } = *loaded;
+                // Solver results know nothing of the mesh the analysis was solved on; the
+                // shells outline as in the FE Model view when the project's mesh tells.
+                let mut cad_adopted = false;
+                if model.results.is_some()
+                    && let Some(project) = &self.model
+                {
+                    cad_adopted = model.adopt_project_surface(&project.mesh);
+                    if cad_adopted {
+                        render_meshes = model.render_meshes();
+                    }
+                }
                 if model.results.is_some()
                     && !is_latest_results(self.results_asked.as_deref(), &path)
                 {
@@ -1724,7 +1735,7 @@ impl Workbench {
                     }
                 }
                 // The scene built on the worker thread is reused unless the settings change it.
-                let mut rebuild = false;
+                let mut rebuild = cad_adopted;
                 // The camera of bound results as saved, replacing the fit to the model.
                 let mut camera = None;
                 // Results opened while another workspace stays shown, e.g. an analysis opened

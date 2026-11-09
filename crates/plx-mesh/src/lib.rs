@@ -21,5 +21,7 @@ pub use element::{ElementFamily, ElementShape, FaceTopology};
 pub use line_joints::{LineJoint, find_line_joints};
 pub use locate::{PointLocation, SNAP};
 pub use mesh::{Element, ElementId, FeMesh, Fnv, MeshError, NodeId, Part, SurfaceDefinition};
-pub use skin::{PartSkin, SkinEdge, SkinFace, extract_part_skin, face_normal};
+pub use skin::{
+    PartSkin, SkinEdge, SkinFace, extract_part_skin, extract_part_skin_welded, face_normal,
+};
 pub use transform::{FaceRenumbering, MeshTransform};
