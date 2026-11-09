@@ -22,6 +22,8 @@ pub struct CadIndex {
     edge_vertices: BTreeMap<i32, Vec<i32>>,
     /// The CAD edge of each mesh segment along one by its end nodes, the smaller first.
     segment_edge: HashMap<[NodeId; 2], i32>,
+    /// The CAD edges meeting at each CAD vertex.
+    vertex_edges: HashMap<i32, Vec<i32>>,
 }
 
 impl CadIndex {
@@ -71,12 +73,39 @@ impl CadIndex {
                     .map(move |&[a, b]| ([a.min(b), a.max(b)], edge))
             })
             .collect();
+        let mut vertex_edges: HashMap<i32, Vec<i32>> = HashMap::new();
+        for (&edge, vertices) in &edge_vertices {
+            for &vertex in vertices {
+                vertex_edges.entry(vertex).or_default().push(edge);
+            }
+        }
         Self {
             face_of: cad.face_of().into_iter().collect(),
             face_edges,
             edge_vertices,
             segment_edge,
+            vertex_edges,
         }
+    }
+
+    /// The CAD edges reached from `start` across vertices where the edges on both sides bend
+    /// by no more than `angle` radians.
+    fn smooth_edges(&self, mesh: &FeMesh, start: i32, angle: f64) -> BTreeSet<i32> {
+        let mut seen = BTreeSet::from([start]);
+        let mut stack = vec![start];
+        while let Some(edge) = stack.pop() {
+            for &vertex in self.edge_vertices.get(&edge).into_iter().flatten() {
+                for &next in self.vertex_edges.get(&vertex).into_iter().flatten() {
+                    if !seen.contains(&next)
+                        && bend(mesh, vertex, edge, next).is_some_and(|b| b <= angle)
+                    {
+                        seen.insert(next);
+                        stack.push(next);
+                    }
+                }
+            }
+        }
+        seen
     }
 
     /// The vertex at an end of a CAD edge within `precision` of `point`, the nearest if both.
@@ -167,6 +196,65 @@ pub fn pick(model: &Model, hit: &Hit, target: Target, precision: f32) -> Option<
             }
         }
     }
+}
+
+/// How much the path bends from one CAD edge into the next at their common vertex, in
+/// radians: 0 where the second continues the first straight on.
+fn bend(mesh: &FeMesh, vertex: i32, a: i32, b: i32) -> Option<f64> {
+    let node = *mesh.cad.nodes.get(&CadEntity::Vertex(vertex))?.first()?;
+    let origin = glam::DVec3::from(mesh.node(node)?);
+    // The direction leaving the vertex along the edge, by its mesh segment there.
+    let leaving = |edge: i32| -> Option<glam::DVec3> {
+        let segment = mesh
+            .cad
+            .segments
+            .get(&edge)?
+            .iter()
+            .find(|s| s.contains(&node))?;
+        let other = if segment[0] == node {
+            segment[1]
+        } else {
+            segment[0]
+        };
+        (glam::DVec3::from(mesh.node(other)?) - origin).try_normalize()
+    };
+    // Straight on, the directions leaving the vertex are opposite.
+    let between = leaving(a)?.dot(leaving(b)?).clamp(-1.0, 1.0).acos();
+    Some(std::f64::consts::PI - between)
+}
+
+/// What a click selects in the edge angle mode on a mesh generated from CAD geometry: the
+/// CAD edge nearest to the click and the edges that continue it at a bend of no more than
+/// `angle` degrees. For contact surfaces only edges of shells count. `None` where the mesh
+/// has no CAD entities or the click finds no edge.
+pub fn pick_edge_angle(
+    model: &Model,
+    hit: &Hit,
+    target: Target,
+    angle: f64,
+) -> Option<BTreeSet<CadEntity>> {
+    let index = model.cad_index();
+    let start = if hit.line {
+        line_edge(model, hit)?
+    } else {
+        let skin_face = model.skin(hit.part).faces.get(hit.face)?;
+        let element = model.mesh.elements()[skin_face.element].id;
+        let face = index.face(&model.mesh, (element, skin_face.face as u8 + 1))?;
+        (index.face_edges.get(&face)?.iter())
+            .filter_map(|&edge| Some((edge, edge_distance(model, edge, hit.point)?)))
+            .min_by(|a, b| a.1.total_cmp(&b.1))?
+            .0
+    };
+    let edges = index.smooth_edges(&model.mesh, start, angle.to_radians());
+    let entities: BTreeSet<CadEntity> = if target == Target::Surfaces {
+        (edges.into_iter())
+            .map(CadEntity::Edge)
+            .filter(|e| !model.mesh.cad_faces(&[*e]).is_empty())
+            .collect()
+    } else {
+        edges.into_iter().map(CadEntity::Edge).collect()
+    };
+    (!entities.is_empty()).then_some(entities)
 }
 
 /// The CAD face an element face lies on.
@@ -449,6 +537,26 @@ mod tests {
         let items = by_angle.pick(&model, &hit, Target::Nodes, 0.1);
         assert!(
             matches!(&items, crate::selection::Items::Geometry(e) if e.len() == 1 && matches!(e.first(), Some(CadEntity::Face(_)))),
+            "{items:?}"
+        );
+
+        // The edge angle mode picks CAD edges as well: the edges of the end face meet at
+        // right angles, so a small angle gives the one edge and a larger one the loop.
+        let hit = model
+            .pick(model.to_render([-50.0, 5.0, 9.95]), Vec3::X)
+            .unwrap();
+        let mut by_edge_angle = Picker::default();
+        by_edge_angle.select_by = crate::selection::SelectBy::GeometryEdgeAngle;
+        by_edge_angle.angle = 20.0;
+        let items = by_edge_angle.pick(&model, &hit, Target::Nodes, 0.1);
+        assert!(
+            matches!(&items, crate::selection::Items::Geometry(e) if e.len() == 1 && matches!(e.first(), Some(CadEntity::Edge(_)))),
+            "{items:?}"
+        );
+        by_edge_angle.angle = 95.0;
+        let items = by_edge_angle.pick(&model, &hit, Target::Nodes, 0.1);
+        assert!(
+            matches!(&items, crate::selection::Items::Geometry(e) if e.len() >= 4 && e.iter().all(|e| matches!(e, CadEntity::Edge(_)))),
             "{items:?}"
         );
 

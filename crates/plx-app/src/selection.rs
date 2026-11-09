@@ -277,7 +277,7 @@ impl Items {
 pub struct Picker {
     pub select_by: SelectBy,
     /// Angles in degrees for the angle modes, the default 30°.
-    angle: f64,
+    pub(crate) angle: f64,
     ids: String,
     /// Shows the mesh based modes next to the geometry based ones.
     expanded: bool,
@@ -546,6 +546,15 @@ impl Picker {
             && let Some(entity) = crate::cad_selection::pick(model, hit, target, precision)
         {
             return Items::Geometry(BTreeSet::from([entity]));
+        }
+        // Likewise the edge angle mode: the CAD edges along the clicked one.
+        if self.select_by == SelectBy::GeometryEdgeAngle
+            && model.has_cad()
+            && target != Target::Faces
+            && let Some(entities) =
+                crate::cad_selection::pick_edge_angle(model, hit, target, self.angle)
+        {
+            return Items::Geometry(entities);
         }
         if target == Target::Lines {
             return self.pick_edges(model, hit);
