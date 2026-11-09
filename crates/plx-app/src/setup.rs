@@ -4573,6 +4573,17 @@ pub fn swap_master_slave(fe: &mut FeModel, item: &TreeItem) -> bool {
     }
 }
 
+/// The indices of the sections that have the material at `material`.
+pub fn sections_using_material(fe: &FeModel, material: usize) -> Vec<usize> {
+    let Some(id) = fe.materials.get(material).map(|m| m.id) else {
+        return Vec::new();
+    };
+    (fe.sections.iter().enumerate())
+        .filter(|(_, s)| s.material == Some(id))
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// How an item selected in the tree shows in the 3D view: its region, or master and slave.
 pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
     let fe = &model.fe;
@@ -4595,6 +4606,14 @@ pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
     };
     if let Some([master, slave]) = master_slave {
         return contacts::master_slave_highlight(model, master, slave);
+    }
+    if let TreeItem::Material(i) = *item {
+        // Where a material is used: the regions of the sections that have it.
+        let mut highlight = Highlight::default();
+        for section in sections_using_material(fe, i) {
+            highlight.extend(region_highlight(model, &fe.sections[section].region));
+        }
+        return highlight;
     }
     if let (Some(kind), Some(name)) = (crate::tree::set_kind(item), crate::tree::set_name(item)) {
         return region_highlight(model, &kind.reference(name));
@@ -8051,6 +8070,36 @@ mod tests {
             [TreeItem::ContactPair(0), TreeItem::BoundaryCondition(0, 0)].into()
         );
         assert_eq!(acting(&[plate, columns]).len(), 3);
+    }
+
+    #[test]
+    fn sections_using_material_by_id() {
+        let mut fe = FeModel::default();
+        for name in ["Steel", "Alu"] {
+            let mut m = Material {
+                name: name.into(),
+                ..Default::default()
+            };
+            m.id = crate::test_ids::named(name);
+            fe.materials.push(m);
+        }
+        let section = |name: &str, material: Option<plx_model::Id>| Section {
+            name: name.into(),
+            material,
+            region: Region::Parts(vec!["A".into()]),
+            thickness: 1.0,
+            kind: SectionKind::Solid,
+        };
+        let (steel, alu) = (fe.materials[0].id, fe.materials[1].id);
+        fe.sections = vec![
+            section("S1", Some(steel)),
+            section("S2", Some(alu)),
+            section("S3", Some(steel)),
+            section("S4", None),
+        ];
+        assert_eq!(sections_using_material(&fe, 0), vec![0, 2]);
+        assert_eq!(sections_using_material(&fe, 1), vec![1]);
+        assert!(sections_using_material(&fe, 5).is_empty());
     }
 
     #[test]

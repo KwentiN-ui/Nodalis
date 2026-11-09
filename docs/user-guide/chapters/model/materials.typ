@@ -22,6 +22,11 @@ check box. A new material starts with #ui("Elasticity") switched on.
 Values can be typed in any unit of the right kind, for example `210 GPa` or `7.85 g/cm³`
 (@numeric-input).
 
+Selecting a material in the model tree shows where it is used: the sections that have it are
+marked in the tree, and the parts of those sections are highlighted in the 3D view.
+
+#screenshot("material-usage.png", [Selected material with its sections and parts])
+
 === Material library <material-library>
 
 #menu("Material", "Material Library") opens the material library.

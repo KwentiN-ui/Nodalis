@@ -4229,6 +4229,21 @@ impl Workbench {
     /// Finds what acts on the parts selected in the FE Model tree, once for each selection
     /// and change of the model.
     fn update_acting(&mut self) {
+        // A selected material marks the sections that use it.
+        if let (Some((TreeView::FeModel, TreeItem::Material(i))), Some(model)) =
+            (self.tree.selected.clone(), self.model.as_ref())
+        {
+            let key = (BTreeSet::from([usize::MAX - i]), model.revision);
+            if self.tree.acting_for.as_ref() != Some(&key) {
+                self.tree.acting = crate::setup::sections_using_material(&model.fe, i)
+                    .into_iter()
+                    .map(TreeItem::Section)
+                    .collect();
+                self.tree.acting_for = Some(key);
+                self.tree.reveal_acting = true;
+            }
+            return;
+        }
         let parts = self.tree.selected_parts(TreeView::FeModel);
         let Some(model) = self.model.as_ref().filter(|_| !parts.is_empty()) else {
             self.tree.acting.clear();
