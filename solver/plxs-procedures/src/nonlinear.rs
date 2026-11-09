@@ -90,6 +90,21 @@ impl Default for Controls {
     }
 }
 
+/// How many times the iteration limit (I_C) an attempt may iterate while the contact
+/// status still changes and the residual falls.
+const CONTACT_ITERATIONS: u32 = 4;
+
+/// Whether the residual still falls: the smallest of the last four iterations is below
+/// half the smallest of the four before.
+fn contact_settling(residuals: &[f64]) -> bool {
+    let n = residuals.len();
+    if n < 8 {
+        return true;
+    }
+    let least = |r: &[f64]| r.iter().copied().fold(f64::INFINITY, f64::min);
+    least(&residuals[n - 4..]) < 0.5 * least(&residuals[n - 8..n - 4])
+}
+
 impl Controls {
     /// The controls of a step: the defaults, changed by `*CONTROLS, PARAMETERS=TIME
     /// INCREMENTATION` or `FIELD` where the input has them.
@@ -889,13 +904,17 @@ impl NonlinearStatic {
                         }
                     }
                 }
-                if iteration >= controls.max_iterations {
+                // While contact points still open or close and the residual keeps falling,
+                // the iterations go on (up to `CONTACT_ITERATIONS` times the limit): a
+                // smaller increment would open the same points one by one again, e.g. a
+                // flat face that starts exactly touching and lifts off under the load.
+                let settling = changing
+                    && iteration < CONTACT_ITERATIONS * controls.max_iterations
+                    && contact_settling(&residuals);
+                if iteration >= controls.max_iterations && !settling {
                     return Ok(Err(Failure::Diverging(
                         Divergence::IterationLimit,
-                        format!(
-                            "no convergence after {} iterations",
-                            controls.max_iterations
-                        ),
+                        format!("no convergence after {iteration} iterations"),
                         changing,
                     )));
                 }
