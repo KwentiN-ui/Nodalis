@@ -447,6 +447,28 @@ fn can_deactivate(item: &TreeItem) -> bool {
     )
 }
 
+/// The mark of the handover row of a step: an arrow bent into the row, in the orange of the
+/// links that give results to a step.
+fn paint_handover_arrow(painter: &egui::Painter, rect: egui::Rect) {
+    let color = crate::style::adapt(Color32::from_rgb(220, 130, 40));
+    let stroke = egui::Stroke::new(1.6, color);
+    let x0 = rect.left() + rect.width() * 0.3;
+    let y0 = rect.top() + rect.height() * 0.2;
+    let y1 = rect.top() + rect.height() * 0.65;
+    let x1 = rect.right() - rect.width() * 0.15;
+    painter.line_segment([egui::pos2(x0, y0), egui::pos2(x0, y1)], stroke);
+    painter.line_segment([egui::pos2(x0, y1), egui::pos2(x1, y1)], stroke);
+    let head = rect.width() * 0.22;
+    painter.line_segment(
+        [egui::pos2(x1, y1), egui::pos2(x1 - head, y1 - head)],
+        stroke,
+    );
+    painter.line_segment(
+        [egui::pos2(x1, y1), egui::pos2(x1 - head, y1 + head)],
+        stroke,
+    );
+}
+
 /// Warning sign next to an item with findings; a click explains them.
 /// The mark of an item another analysis owns: two chain links.
 fn link_sign(ui: &mut Ui) -> Response {
@@ -1429,6 +1451,49 @@ impl Tree<'_> {
         }
     }
 
+    /// The first row under a step: what it starts from or is computed about
+    /// ([`plx_model::Handover::summary`]), a note rather than an item. A double click opens
+    /// the step, whose dialog shows the whole handover.
+    fn handover_row(&mut self, ui: &mut Ui, step: usize, handover: &plx_model::Handover) {
+        let item = TreeItem::Step(step);
+        if self.hidden(&item) {
+            return;
+        }
+        ui.horizontal(|ui| {
+            let left = ui.cursor().left();
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_space(ui.spacing().indent);
+            let (rect, _) =
+                ui.allocate_exact_size(Vec2::splat(tree_icons::SIZE), egui::Sense::hover());
+            if ui.is_rect_visible(rect) {
+                paint_handover_arrow(ui.painter(), rect);
+            }
+            ui.add_space(3.0);
+            let text = egui::RichText::new(handover.summary()).italics().weak();
+            let response = ui
+                .add(
+                    egui::Label::new(text)
+                        .selectable(false)
+                        .sense(egui::Sense::click()),
+                )
+                .on_hover_text(format!(
+                    "{}\nPasses on: {}\nDouble-click: open the step.",
+                    handover.summary(),
+                    handover.passes_on
+                ));
+            if response.double_clicked() {
+                self.response.open = Some(item);
+            }
+            let row = Row {
+                y: rect.top() + LINE_OFFSET,
+                left,
+            };
+            if let Some(level) = self.levels.last_mut() {
+                level.push(row);
+            }
+        });
+    }
+
     fn leaf(&mut self, ui: &mut Ui, item: TreeItem, text: impl Into<WidgetText>) -> Response {
         let icon = self.icon(&item, false);
         self.row(ui, None, None, icon, item, text).1
@@ -2043,7 +2108,9 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                 } else {
                     step.name.clone()
                 };
+                let handover = fe.step_handover(s);
                 tree.branch(ui, TreeItem::Step(s), &label, true, |tree, ui| {
+                    tree.handover_row(ui, s, &handover);
                     // An eigenvalue step leaves out the field outputs it has (from a
                     // project of an earlier version): the solver keeps its mode shapes.
                     let outputs = (step.field_outputs.iter().enumerate())

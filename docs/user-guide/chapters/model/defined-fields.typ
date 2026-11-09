@@ -31,5 +31,15 @@ A model with a defined field needs an #ui("Initial Condition") of type #ui("Temp
 (@model-check) reports a missing one. The temperatures act through the #ui("Thermal expansion")
 of the materials (@materials) with their reference temperature.
 
+=== Defined fields over several steps <defined-fields-steps>
+
+A step takes only the defined fields listed under it: they replace those of the steps before
+(written with `OP=NEW`). A static, visco or dynamic step without defined fields of its own sets
+the temperatures a step before was given back to the initial temperatures, ramped over the step
+like a removed load; its #ui("Start") section says so (@step-handover). To keep a temperature,
+give it to the step as well (a new step copies the defined fields of the last one). Temperatures
+that a heat transfer step solved for are state and carry on into the steps after it. Frequency
+and buckle steps keep the temperatures of the state they are computed about.
+
 #note[The usual thermo-mechanical workflow: run a heat transfer analysis, then a static analysis
 with a defined field that reads its `.frd` file, in the same model or a copy of it.]

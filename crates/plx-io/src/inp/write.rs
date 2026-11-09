@@ -2953,7 +2953,7 @@ fn lower_step(
     // right before it stores; the solver computes them with the step's supports, preloaded
     // as a perturbation of the previous step's state when asked.
     if let StepKind::Dynamic(settings) = &step.kind
-        && let DynamicMethod::Modal { modes, preloaded } = settings.method
+        && let DynamicMethod::Modal { modes, base } = settings.method
         && let Some(dynamic) = blocks.pop()
     {
         if let Some(problem) = settings.problem() {
@@ -2965,7 +2965,7 @@ fn lower_step(
         let modes = FrequencyStep {
             num_frequencies: modes,
             storage: true,
-            perturbation: preloaded,
+            base,
             solver: settings.solver,
             ..FrequencyStep::default()
         };
@@ -3060,7 +3060,11 @@ fn complex_frequency_blocks(
     let modes = FrequencyStep {
         num_frequencies: settings.num_modes,
         storage: true,
-        perturbation: settings.stiffening,
+        base: if settings.stiffening {
+            plx_model::Base::PreviousState
+        } else {
+            plx_model::Base::Unloaded
+        },
         solver: settings.solver,
         ..FrequencyStep::default()
     };
@@ -4064,6 +4068,23 @@ fn defined_fields(
     if !step.kind.supports_defined_fields() {
         return Ok(cards);
     }
+    // What a step shows is what acts: its own temperatures replace those of the steps
+    // before, and a step that passes its state on without temperatures of its own sets
+    // those a step before was given back to the initial ones (ramped like removed loads).
+    let index = (model.steps.iter().position(|s| std::ptr::eq(s, step)))
+        .or_else(|| model.steps.iter().position(|s| s.name == step.name));
+    if let Some(index) = index
+        && model.temperature_source(index, step).is_some()
+    {
+        cards.push(Card::Temperature {
+            op_new: true,
+            field: ir::step::DefinedField {
+                kind: ir::step::DefinedFieldKind::Temperature(Vec::new()),
+                amplitude: None,
+            },
+        });
+        return Ok(cards);
+    }
     for field in step.defined_fields.iter().filter(|f| f.active) {
         let field = match &field.kind {
             DefinedFieldKind::Temperature(t) => {
@@ -4108,7 +4129,7 @@ fn defined_fields(
             }
         };
         cards.push(Card::Temperature {
-            op_new: false,
+            op_new: cards.is_empty(),
             field,
         });
     }
@@ -4575,7 +4596,7 @@ fn frequency_step(settings: &FrequencyStep, cyclic: bool) -> ir::Step {
             nmax: settings.nodal_diameters.map(|[_, max]| max),
         }),
     }));
-    step.perturbation = settings.perturbation;
+    step.perturbation = settings.base.is_preloaded();
     step
 }
 
@@ -4601,7 +4622,7 @@ fn buckle_step(settings: &BuckleStep) -> ir::Step {
         count: settings.num_factors,
         accuracy: Some(settings.accuracy),
     }));
-    step.perturbation = settings.perturbation;
+    step.perturbation = settings.base.is_preloaded();
     step
 }
 

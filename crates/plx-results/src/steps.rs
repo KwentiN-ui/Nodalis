@@ -151,8 +151,7 @@ impl StepRecord {
             _ => None,
         };
         let perturbation = match kind {
-            K::Frequency(s) => s.perturbation,
-            K::Buckle(s) => s.perturbation,
+            K::Frequency(_) | K::Buckle(_) => kind.base().is_some_and(|b| b.is_preloaded()),
             _ => false,
         };
         Self {

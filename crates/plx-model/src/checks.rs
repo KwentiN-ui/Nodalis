@@ -169,7 +169,7 @@ pub enum Problem {
     ExcitationIgnored,
     /// A Coriolis complex frequency step without a centrifugal load before it.
     NoRotation,
-    /// Contact pairs in a frequency step without perturbation: the solver ignores them.
+    /// Contact pairs in a frequency step about the unloaded model: the solver ignores them.
     ContactIgnored,
     /// Contact pairs in a complex frequency step: the Coriolis coupling goes wrong.
     ContactWithCoriolis,
@@ -718,10 +718,11 @@ impl Problem {
                  of the model."
             }
             Problem::ContactIgnored => {
-                "The solver takes contact into account in a Frequency step only as a \
-                 perturbation of the static step before it. Without Perturbation the contact \
-                 pairs, tied ones included, are left out without a message: parts held only \
-                 by them float and give eigenfrequencies near zero or on weak springs."
+                "The solver takes contact into account in a Frequency step only about the \
+                 state a static step before it leaves (Base state: End of ...). About the \
+                 unloaded model the contact pairs, tied ones included, are left out without \
+                 a message: parts held only by them float and give eigenfrequencies near \
+                 zero or on weak springs."
             }
             Problem::ContactFormulationsDiffer => {
                 "The solver takes one formulation (node to surface, surface to surface, mortar \
@@ -2977,14 +2978,14 @@ impl FeModel {
         // Free-free eigenfrequencies are fine; a static or buckle step needs every part held.
         let contact_pairs = (self.contact_pairs.iter()).filter(|c| c.active).count();
         if let StepKind::Frequency(settings) = &step.kind
-            && !settings.perturbation
+            && !settings.base.is_preloaded()
             && contact_pairs > 0
         {
             findings.push(Finding::new(
                 ModelItem::Step(s),
                 Problem::ContactIgnored,
                 format!(
-                    "{}: {contact_pairs} contact pair(s) ignored without Perturbation",
+                    "{}: {contact_pairs} contact pair(s) ignored about the unloaded model",
                     step.name
                 ),
             ));
@@ -4468,7 +4469,7 @@ mod tests {
         model.steps[0].kind = StepKind::Dynamic(crate::DynamicStep {
             method: crate::DynamicMethod::Modal {
                 modes: 10,
-                preloaded: false,
+                base: crate::Base::Unloaded,
             },
             ..crate::DynamicStep::default()
         });
@@ -4860,7 +4861,7 @@ mod tests {
         let StepKind::Frequency(settings) = &mut model.steps[1].kind else {
             unreachable!()
         };
-        settings.perturbation = true;
+        settings.base = crate::Base::PreviousState;
         assert_eq!(modal(&model), []);
         model.steps.push(Step::new_complex_frequency("Step-3"));
         assert_eq!(
@@ -5553,7 +5554,7 @@ mod tests {
         let mut dynamic = crate::DynamicStep {
             method: crate::DynamicMethod::Modal {
                 modes: 10,
-                preloaded: false,
+                base: crate::Base::Unloaded,
             },
             ..Default::default()
         };

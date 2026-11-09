@@ -29,6 +29,7 @@ mod features;
 mod field;
 pub mod fingerprint;
 mod geometry;
+pub mod handover;
 mod history;
 pub mod hyperelastic;
 pub mod hyperelastic_fit;
@@ -101,6 +102,7 @@ pub use geometry::{
     Algorithm2d, Algorithm3d, ExtrudeLayers, ExtrudeMesh, Geometry, MeshSetupItem, MeshSetupKind,
     MeshingParameters, Recombination,
 };
+pub use handover::Handover;
 pub use history::{HistoryKind, HistoryOutput, Totals};
 pub use hyperelastic::{Hyperelastic, HyperelasticModel, TestMode};
 pub use id::Id;
@@ -154,7 +156,9 @@ use serde::{Deserialize, Serialize};
 /// refused. Format 17 adds the remote force; format 16 reads as it is. Format 18 gives the
 /// items of the model an internal id ([`Id`]) and lets items refer to each other by it in
 /// place of their names, so that renaming keeps the references; older formats are refused.
-pub const PROJECT_FORMAT: u32 = 18;
+/// Format 19 replaces the perturbation switches of the frequency, buckle and modal dynamic
+/// steps by the [`Base`] they are computed about; older formats are refused.
+pub const PROJECT_FORMAT: u32 = 19;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -743,7 +747,7 @@ impl StepKind {
     }
 
     /// Whether the step takes loads. A frequency step has none; preloads
-    /// come from the previous step with [`FrequencyStep::perturbation`].
+    /// come from the steps before with [`FrequencyStep::base`].
     pub fn supports_loads(&self) -> bool {
         !matches!(
             self,
@@ -1092,6 +1096,28 @@ impl Default for HeatTransferStep {
     }
 }
 
+/// What a step that probes the model (eigenmodes, buckling factors) is computed about.
+/// Such a step leaves the state as it found it: the step after it starts from where the
+/// steps before it ended.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Base {
+    /// The unloaded model: its linear stiffness, without stresses or deformation.
+    #[default]
+    Unloaded,
+    /// The state the steps before leave: their deformation, the stiffening by their
+    /// stresses and their contact status.
+    PreviousState,
+}
+
+impl Base {
+    pub const ALL: [Base; 2] = [Base::Unloaded, Base::PreviousState];
+
+    /// Whether the step is computed about a preloaded state (`*STEP, PERTURBATION`).
+    pub fn is_preloaded(self) -> bool {
+        self == Base::PreviousState
+    }
+}
+
 /// Settings of a `*FREQUENCY` step, with the default values.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FrequencyStep {
@@ -1104,9 +1130,9 @@ pub struct FrequencyStep {
     /// Writes eigenvalues, mode shapes and the mass and stiffness matrices to the `.eig`
     /// file (`STORAGE=YES`).
     pub storage: bool,
-    /// Takes the stiffness of the deformed state of the previous step into account, e.g. the
-    /// stiffening by a preload (`*STEP, PERTURBATION`).
-    pub perturbation: bool,
+    /// What the eigenmodes are computed about: the unloaded model, or the state the steps
+    /// before leave with the stiffening by its stresses (`*STEP, PERTURBATION`).
+    pub base: Base,
     /// Lowest and highest nodal diameter of a cyclic symmetric model
     /// (`*SELECT CYCLIC SYMMETRY MODES, NMIN=, NMAX=`); `None` is CalculiX's 0 and the
     /// highest one the sectors allow.
@@ -1284,10 +1310,10 @@ pub enum DynamicMethod {
     /// excite.
     Modal {
         modes: u32,
-        /// The modes about the state the previous step left, with its stress stiffening
-        /// (a perturbation of a preload); otherwise about the unloaded model.
+        /// What the modes are computed about: the unloaded model, or the state the steps
+        /// before leave with its stress stiffening (a perturbation of a preload).
         #[serde(default)]
-        preloaded: bool,
+        base: Base,
     },
     /// Explicit integration (central differences, lumped mass): many small time steps
     /// below the stability limit of the mesh, no equation system. For impacts, crashes and
@@ -1538,7 +1564,7 @@ impl Default for FrequencyStep {
             lower_frequency: None,
             upper_frequency: None,
             storage: false,
-            perturbation: false,
+            base: Base::Unloaded,
             nodal_diameters: None,
             solver: LinearSolverChoice::Automatic,
         }
@@ -1660,9 +1686,10 @@ pub struct BuckleStep {
     pub num_factors: u32,
     /// Accuracy of the eigenvalue solver.
     pub accuracy: f64,
-    /// Adds the stiffness of the deformed state of the previous step, e.g. of a preload that
-    /// is not scaled by the buckling factor (`*STEP, PERTURBATION`).
-    pub perturbation: bool,
+    /// What the buckling loads add to: the unloaded model, or the state the steps before
+    /// leave, e.g. a preload that is not scaled by the buckling factor
+    /// (`*STEP, PERTURBATION`).
+    pub base: Base,
     /// How the reference solution and the systems of the eigenvalue iteration are solved.
     #[serde(default)]
     pub solver: LinearSolverChoice,
@@ -1673,7 +1700,7 @@ impl Default for BuckleStep {
         Self {
             num_factors: 1,
             accuracy: 1e-4,
-            perturbation: false,
+            base: Base::Unloaded,
             solver: LinearSolverChoice::Automatic,
         }
     }
