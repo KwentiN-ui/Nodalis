@@ -226,6 +226,31 @@ impl Equations {
         Ok(())
     }
 
+    /// After the iterative solver failed as the preconditioner of GMRES ([`Self::apply_inverse`]),
+    /// factorizes `k` directly from now on, as [`Self::solve`] falls back. Returns false
+    /// (and does nothing) unless the automatic choice may still fall back.
+    pub fn fall_back_to_direct(
+        &mut self,
+        direct: &mut LdltSolver,
+        k: &SparseMatrix,
+        unknowns: impl FnOnce() -> Unknowns,
+        error: &Error,
+        progress: &mut dyn Progress,
+    ) -> Result<bool> {
+        if !self.is_iterative() || !self.may_fall_back(error) {
+            return Ok(false);
+        }
+        progress.event(ProgressEvent::Warning(format!(
+            "iterative solver: {}; solving directly instead",
+            message(error)
+        )));
+        self.switch(false);
+        direct.set_coordinates(Some(unknowns().coordinates));
+        direct.analyze(k.pattern())?;
+        direct.factorize(k)?;
+        Ok(true)
+    }
+
     /// `v ← K⁻¹ v` with the last prepared matrix, without the fall-back of
     /// [`Self::solve`]: the preconditioner of GMRES (sliding friction).
     pub fn apply_inverse(&self, direct: &LdltSolver, v: &mut [f64]) -> Result<()> {

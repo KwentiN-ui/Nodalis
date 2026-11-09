@@ -969,7 +969,28 @@ impl NonlinearStatic {
                     }
                 };
                 let precondition = |v: &mut [f64]| equations.apply_inverse(solver, v);
-                plxs_linalg::gmres(&apply, &precondition, &residual, 1e-10, 60, 300)?.0
+                let result = plxs_linalg::gmres(&apply, &precondition, &residual, 1e-10, 60, 300);
+                match result {
+                    Ok((dv, _)) => dv,
+                    // The multigrid's own iteration as the preconditioner may miss its
+                    // tolerance; the factorization stands in, as for a symmetric system.
+                    Err(error)
+                        if equations.fall_back_to_direct(
+                            &mut ctx.solver,
+                            &k_reduced,
+                            coordinates,
+                            &error,
+                            &mut *progress,
+                        )? =>
+                    {
+                        let solver = &ctx.solver;
+                        let precondition = |v: &mut [f64]| equations.apply_inverse(solver, v);
+                        plxs_linalg::gmres(&apply, &precondition, &residual, 1e-10, 60, 300)
+                            .map_err(|e| in_increment(e, ctx.step_number, increment))?
+                            .0
+                    }
+                    Err(error) => return Err(in_increment(error, ctx.step_number, increment)),
+                }
             };
             ctx.profile.add(Phase::Solve, started);
             let mut du = set.expand(&dv, &vec![0.0; total_dofs]);
