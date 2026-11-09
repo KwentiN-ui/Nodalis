@@ -13,8 +13,8 @@ use plx_model::{
     AXIS_LABELS, Amplitude, BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition,
     BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, CrossSection,
     CyclicSymmetry, DefinedField, DefinedFieldKind, Displacement, Distribution, DynamicProcedure,
-    DynamicStep, Elastic, FeModel, Field, FieldOutput, Formulation, FrequencyStep, GLOBAL,
-    Hardening, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialCondition,
+    DynamicStep, Elastic, FeModel, Field, FieldOutput, Formulation, FrequencyStep, Hardening,
+    HeatTransferStep, HistoryKind, HistoryOutput, Id, Incrementation, InitialCondition,
     InitialConditionKind, ItemRef, LinearSolverChoice, Load, LoadKind, Material, MeshSet,
     ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad, NodeTie, OutputDimension,
     OutputKind, PlasticPoint, Quantity, Region, RemoteBehavior, RemoteForce, Section, SectionKind,
@@ -144,6 +144,8 @@ pub(crate) struct RegionDraft {
     geometry: History<CadEntity>,
     parts: PartPicks,
     set: String,
+    /// The reference point, or the remote displacement or force whose point the region is.
+    point: Option<Id>,
 }
 
 pub(crate) const NODE_SOURCES: &[Source] = &[Source::Selection, Source::NodeSet, Source::Surface];
@@ -191,6 +193,7 @@ impl RegionDraft {
             geometry: History::default(),
             parts: PartPicks::default(),
             set: String::new(),
+            point: None,
         }
     }
 
@@ -230,19 +233,21 @@ impl RegionDraft {
             Region::Geometry(entities) => {
                 draft.geometry = History::from_items(entities.iter().copied());
             }
-            Region::NodeSet(set)
-            | Region::ElementSet(set)
-            | Region::Surface(set)
-            | Region::ReferencePoint(set)
-            | Region::RemotePoint(set) => {
+            Region::NodeSet(set) | Region::ElementSet(set) | Region::Surface(set) => {
                 draft.source = match region {
                     Region::NodeSet(_) => Source::NodeSet,
                     Region::ElementSet(_) => Source::ElementSet,
-                    Region::ReferencePoint(_) => Source::ReferencePoint,
-                    Region::RemotePoint(_) => Source::RemotePoint,
                     _ => Source::Surface,
                 };
                 draft.set = set.clone();
+            }
+            Region::ReferencePoint(point) => {
+                draft.source = Source::ReferencePoint;
+                draft.point = Some(*point);
+            }
+            Region::RemotePoint(point) => {
+                draft.source = Source::RemotePoint;
+                draft.point = Some(*point);
             }
         }
         draft
@@ -299,8 +304,13 @@ impl RegionDraft {
             Source::NodeSet => Region::NodeSet(self.set.clone()),
             Source::ElementSet => Region::ElementSet(self.set.clone()),
             Source::Surface => Region::Surface(self.set.clone()),
-            Source::ReferencePoint => Region::ReferencePoint(self.set.clone()),
-            Source::RemotePoint => Region::RemotePoint(self.set.clone()),
+            // Without a point chosen the region is empty, see `is_empty`.
+            Source::ReferencePoint => {
+                (self.point).map_or(Region::Nodes(Vec::new()), Region::ReferencePoint)
+            }
+            Source::RemotePoint => {
+                (self.point).map_or(Region::Nodes(Vec::new()), Region::RemotePoint)
+            }
         }
     }
 
@@ -313,6 +323,7 @@ impl RegionDraft {
                 Target::Lines => self.edges.items().is_empty(),
             },
             Source::Parts => self.parts.is_empty(),
+            Source::ReferencePoint | Source::RemotePoint => self.point.is_none(),
             _ => self.set.is_empty(),
         }
     }
@@ -628,13 +639,13 @@ impl RegionDraft {
     }
 
     /// The reference points, and where the region takes them the points of the remote
-    /// displacements, by name.
+    /// displacements and forces, listed by name and kept by id.
     fn point_ui(&mut self, ui: &mut Ui, model: &Model) {
-        let points: Vec<&str> = (model.fe.reference_points.iter())
-            .map(|p| p.name.as_str())
+        let points: Vec<(Id, &str)> = (model.fe.reference_points.iter())
+            .map(|p| (p.id, p.name.as_str()))
             .collect();
         let (remotes, forces) = if self.sources.contains(&Source::RemotePoint) {
-            model.fe.remote_point_names(&model.mesh)
+            model.fe.remote_points(&model.mesh)
         } else {
             Default::default()
         };
@@ -646,15 +657,21 @@ impl RegionDraft {
                 "The model has no reference points (Features)."
             });
         }
-        let (mut source, mut set) = (self.source, self.set.clone());
+        let selected = match (self.source, self.point) {
+            (Source::ReferencePoint, Some(id)) => (model.fe.reference_point(id))
+                .map_or("(missing reference point)".to_string(), |p| p.name.clone()),
+            (Source::RemotePoint, Some(id)) => model.fe.name_or_missing(Some(id)),
+            _ => String::new(),
+        };
+        let (mut source, mut point) = (self.source, self.point);
         egui::ComboBox::from_id_salt("region set")
-            .selected_text(self.set.as_str())
+            .selected_text(selected)
             .width(crate::dock::fit_width(ui, 200.0))
             .show_ui(ui, |ui| {
-                for &name in &points {
-                    let chosen = source == Source::ReferencePoint && set == name;
+                for &(id, name) in &points {
+                    let chosen = source == Source::ReferencePoint && point == Some(id);
                     if ui.selectable_label(chosen, name).clicked() {
-                        (source, set) = (Source::ReferencePoint, name.to_string());
+                        (source, point) = (Source::ReferencePoint, Some(id));
                     }
                 }
                 if !remotes.is_empty() {
@@ -664,10 +681,10 @@ impl RegionDraft {
                     ui.weak("Displacements on a point");
                 }
                 let any_remotes = !remotes.is_empty();
-                for name in remotes {
-                    let chosen = source == Source::RemotePoint && set == name;
+                for (id, name) in remotes {
+                    let chosen = source == Source::RemotePoint && point == Some(id);
                     if ui.selectable_label(chosen, name).clicked() {
-                        (source, set) = (Source::RemotePoint, name.to_string());
+                        (source, point) = (Source::RemotePoint, Some(id));
                     }
                 }
                 if !forces.is_empty() {
@@ -676,14 +693,14 @@ impl RegionDraft {
                     }
                     ui.weak("Remote forces");
                 }
-                for name in forces {
-                    let chosen = source == Source::RemotePoint && set == name;
+                for (id, name) in forces {
+                    let chosen = source == Source::RemotePoint && point == Some(id);
                     if ui.selectable_label(chosen, name).clicked() {
-                        (source, set) = (Source::RemotePoint, name.to_string());
+                        (source, point) = (Source::RemotePoint, Some(id));
                     }
                 }
             });
-        (self.source, self.set) = (source, set);
+        (self.source, self.point) = (source, point);
     }
 
     pub(crate) fn highlight(&self, model: &Model) -> Highlight {
@@ -872,16 +889,7 @@ fn behavior_label(behavior: RemoteBehavior) -> &'static str {
 /// and the wheels relative to the vehicle's reference point.
 fn moving_rows(ui: &mut Ui, moving: &mut MovingLoad, fe: &FeModel, two_d: bool, units: UnitSystem) {
     ui.label("Coordinate system");
-    egui::ComboBox::from_id_salt("moving load system")
-        .selected_text(moving.system.as_str())
-        .width(crate::dock::fit_width(ui, 200.0))
-        .show_ui(ui, |ui| {
-            let names = std::iter::once(GLOBAL)
-                .chain(fe.coordinate_systems.iter().map(|c| c.name.as_str()));
-            for name in names {
-                ui.selectable_value(&mut moving.system, name.to_string(), name);
-            }
-        });
+    crate::pick_item::system_combo(ui, "moving load system", &mut moving.system, fe, 200.0);
     ui.end_row();
     let axes = if two_d { 2 } else { 3 };
     let axis_row = |ui: &mut Ui, label: &str, axis: &mut usize, hover: &str| {
@@ -1138,8 +1146,8 @@ pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
         // The point is drawn as a feature; the body it drives is the constraint's region.
         Region::ReferencePoint(_) => {}
         // The point of a remote displacement exists only in the input file; its region shows.
-        Region::RemotePoint(name) => {
-            if let Some((region, _)) = model.fe.remote_point_named(&model.mesh, name) {
+        Region::RemotePoint(id) => {
+            if let Some((region, _)) = model.fe.remote_point_of(&model.mesh, *id) {
                 return region_highlight(model, region);
             }
         }
@@ -1303,10 +1311,7 @@ const MOVING: &str = "Moving_Load";
 /// displacement that follows an amplitude of the model.
 fn previews_motion(bc: &BoundaryCondition, fe: &FeModel) -> bool {
     matches!(bc.kind, BoundaryKind::Displacement(_))
-        && bc
-            .amplitude
-            .as_deref()
-            .is_some_and(|a| fe.amplitude(a).is_some())
+        && bc.amplitude.is_some_and(|a| fe.amplitude(a).is_some())
 }
 
 /// The boundary condition kinds of the dialog: label, default name and the kind.
@@ -1385,18 +1390,9 @@ fn displacement_rows(
 }
 
 /// The coordinate system of a remote displacement or remote force.
-fn system_row(ui: &mut Ui, system: &mut String, fe: &FeModel) {
+fn system_row(ui: &mut Ui, system: &mut Option<Id>, fe: &FeModel) {
     ui.label("Coordinate system");
-    egui::ComboBox::from_id_salt("remote system")
-        .selected_text(system.as_str())
-        .width(crate::dock::fit_width(ui, 200.0))
-        .show_ui(ui, |ui| {
-            let names = std::iter::once(GLOBAL)
-                .chain(fe.coordinate_systems.iter().map(|c| c.name.as_str()));
-            for name in names {
-                ui.selectable_value(system, name.to_string(), name);
-            }
-        });
+    crate::pick_item::system_combo(ui, "remote system", system, fe, 200.0);
     ui.end_row();
 }
 
@@ -1410,7 +1406,7 @@ fn point_rows(
     units: UnitSystem,
 ) {
     let fe = &model.fe;
-    let system = fe.coordinate_system_or_global(&remote.system);
+    let system = fe.coordinate_system_or_global(remote.system);
     let cylindrical = system
         .as_ref()
         .is_some_and(|s| s.kind == plx_model::CoordinateSystemKind::Cylindrical);
@@ -1869,19 +1865,15 @@ impl Editor {
                 }),
                 ..Material::default()
             }),
-            NewItem::CrossSection => Draft::CrossSection(CrossSection {
-                name: next_name(CrossSection::PREFIX, names(&fe.cross_sections, |c| &c.name)),
+            NewItem::CrossSection => Draft::CrossSection(CrossSection::new(
+                next_name(CrossSection::PREFIX, names(&fe.cross_sections, |c| &c.name)),
                 // Ten by ten millimetres, in SI units.
-                profile: BeamProfile::Rect { a: 0.01, b: 0.01 },
-            }),
+                BeamProfile::Rect { a: 0.01, b: 0.01 },
+            )),
             NewItem::Section => Draft::Section(
                 Section {
                     name: next_name("Solid_Section", names(&fe.sections, |s| &s.name)),
-                    material: fe
-                        .materials
-                        .first()
-                        .map(|m| m.name.clone())
-                        .unwrap_or_default(),
+                    material: fe.materials.first().map(|m| m.id),
                     region: Region::Parts(Vec::new()),
                     thickness: plx_model::unit_thickness(),
                     kind: SectionKind::Solid,
@@ -1932,15 +1924,11 @@ impl Editor {
                     .find(|(_, _, kind)| target.kind.supports_boundary(kind))?;
                 Draft::BoundaryCondition(
                     step,
-                    BoundaryCondition {
-                        distribution: None,
-                        name: next_name(name, existing),
-                        active: true,
-                        visible: true,
-                        region: Region::Nodes(Vec::new()),
+                    BoundaryCondition::new(
+                        next_name(name, existing),
+                        Region::Nodes(Vec::new()),
                         kind,
-                        amplitude: None,
-                    },
+                    ),
                     RegionDraft::new(SUPPORT_SOURCES, Target::Nodes),
                 )
             }
@@ -1953,16 +1941,11 @@ impl Editor {
                     .find(|(_, _, kind)| target.kind.supports_load(kind))?;
                 Draft::Load(
                     step,
-                    Load {
-                        distribution: None,
-                        name: next_name(name, existing),
-                        active: true,
-                        visible: true,
-                        region: Region::Nodes(Vec::new()),
-                        kind: kind.clone(),
-                        amplitude: None,
-                        factor_amplitude: None,
-                    },
+                    Load::new(
+                        next_name(name, existing),
+                        Region::Nodes(Vec::new()),
+                        kind.clone(),
+                    ),
                     load_region(&kind, None, fe, &FeMesh::default()),
                 )
             }
@@ -1979,12 +1962,12 @@ impl Editor {
             NewItem::ContactHistoryOutput(step, contact) => {
                 let target = fe.steps.get(step)?;
                 let pair = match contact {
-                    ContactItem::Region(i) => &fe.contact_regions.get(i)?.name,
-                    ContactItem::Pair(i) => &fe.contact_pairs.get(i)?.name,
+                    ContactItem::Region(i) => fe.contact_regions.get(i)?.id,
+                    ContactItem::Pair(i) => fe.contact_pairs.get(i)?.id,
                 };
                 let mut output = HistoryOutput::contact(
                     next_name("CH_Output", names(&target.history_outputs, |h| &h.name)),
-                    pair.clone(),
+                    Some(pair),
                 );
                 // The contact forces too, summed over the slave side.
                 output.variables.push("CF".into());
@@ -2014,10 +1997,8 @@ impl Editor {
             NewItem::Constraint => Draft::Constraint(ConstraintDraft::new(fe)),
             NewItem::SurfaceInteraction => {
                 let existing = names(&fe.surface_interactions, |s| &s.name);
-                let interaction = SurfaceInteraction {
-                    name: next_name("Surface_Interaction", existing),
-                    properties: Vec::new(),
-                };
+                let interaction =
+                    SurfaceInteraction::new(next_name("Surface_Interaction", existing), Vec::new());
                 let view = contacts::InteractionView::new(&interaction);
                 Draft::SurfaceInteraction(interaction, view)
             }
@@ -2049,9 +2030,7 @@ impl Editor {
             }
             NewItem::ContactPair => {
                 let existing = names(&fe.contact_pairs, |c| &c.name);
-                let interaction = (fe.surface_interactions.first())
-                    .map(|s| s.name.clone())
-                    .unwrap_or_default();
+                let interaction = fe.surface_interactions.first().map(|s| s.id);
                 Draft::ContactPair(
                     ContactPair::new(next_name("Contact_Pair", existing), interaction),
                     MasterSlave::new(contact_target(fe)),
@@ -2263,7 +2242,7 @@ impl Editor {
                 let bolt = fe.bolts.get(i)?.clone();
                 let sides =
                     MasterSlave::from_regions(&bolt.side_a, &bolt.side_b, contact_target(fe), mesh);
-                let actions = crate::bolts::step_actions(fe, &bolt.name);
+                let actions = crate::bolts::step_actions(fe, bolt.id);
                 (Draft::Bolt(bolt, sides, actions, Default::default()), i)
             }
             TreeItem::Group("Contacts") => (Draft::Connections(fe.contact_defaults.clone()), 0),
@@ -2400,7 +2379,7 @@ impl Editor {
         let BoundaryKind::Displacement(Displacement { values, .. }) = bc.kind else {
             return None;
         };
-        let amplitude = model.fe.amplitude(bc.amplitude.as_deref()?)?;
+        let amplitude = model.fe.amplitude(bc.amplitude?)?;
         let values = [values[0], values[1], values[2]];
         Some(preview.frame(now, model, region.region(), values, amplitude))
     }
@@ -2702,15 +2681,16 @@ impl Editor {
                     section.name = next_name(section.kind.prefix(), taken.iter().copied());
                 }
                 ui.label("Material");
-                egui::ComboBox::from_id_salt("section material")
-                    .selected_text(section.material.as_str())
-                    .width(crate::dock::fit_width(ui, 200.0))
-                    .show_ui(ui, |ui| {
-                        for material in &model.fe.materials {
-                            let name = material.name.clone();
-                            ui.selectable_value(&mut section.material, name, &material.name);
-                        }
-                    });
+                let materials = (model.fe.materials.iter()).map(|m| (m.id, m.name.as_str()));
+                let chosen = &mut section.material;
+                crate::pick_item::item_combo(
+                    ui,
+                    "section material",
+                    chosen,
+                    materials,
+                    None,
+                    200.0,
+                );
                 ui.end_row();
                 let membrane = matches!(section.kind, SectionKind::Membrane { .. });
                 match &mut section.kind {
@@ -3582,7 +3562,7 @@ impl Editor {
             return Err(problem);
         }
         if let Draft::Section(section, _) = &self.draft {
-            if !fe.materials.iter().any(|m| m.name == section.material) {
+            if section.material.and_then(|m| fe.material(m)).is_none() {
                 return Err("Please select a material; create one under Materials first.".into());
             }
             match &section.kind {
@@ -3601,7 +3581,11 @@ impl Editor {
                 }
                 SectionKind::Shell { .. } | SectionKind::Membrane { .. } => {}
                 SectionKind::Beam(beam) => {
-                    if fe.cross_section(&beam.cross_section).is_none() {
+                    if beam
+                        .cross_section
+                        .and_then(|c| fe.cross_section(c))
+                        .is_none()
+                    {
                         return Err("Please select a cross-section; create one under \
                                     Sections > Cross-Sections first."
                             .into());
@@ -3850,34 +3834,13 @@ impl Editor {
         let index = self.index;
         let from_step = self.from_step;
         match self.draft {
-            Draft::Material(material) => {
-                // Sections follow a renamed material.
-                if let Some(old) = index.and_then(|i| fe.materials.get(i)) {
-                    let old = old.name.clone();
-                    for section in fe.sections.iter_mut().filter(|s| s.material == old) {
-                        section.material = material.name.clone();
-                    }
-                }
-                put(&mut fe.materials, index, material);
-            }
+            // Items refer to the others by id: they follow a renamed one.
+            Draft::Material(material) => put(&mut fe.materials, index, material),
             Draft::Section(mut section, region) => {
                 section.region = region.region();
                 put(&mut fe.sections, index, section);
             }
-            Draft::CrossSection(cross_section) => {
-                // Beam sections follow a renamed cross-section.
-                if let Some(old) = index.and_then(|i| fe.cross_sections.get(i)) {
-                    let old = old.name.clone();
-                    for section in &mut fe.sections {
-                        if let SectionKind::Beam(beam) = &mut section.kind
-                            && beam.cross_section == old
-                        {
-                            beam.cross_section = cross_section.name.clone();
-                        }
-                    }
-                }
-                put(&mut fe.cross_sections, index, cross_section);
-            }
+            Draft::CrossSection(cross_section) => put(&mut fe.cross_sections, index, cross_section),
             Draft::Step(mut step, region) => {
                 if let Some(design) = step.kind.design_region_mut() {
                     *design = region.region();
@@ -3908,18 +3871,11 @@ impl Editor {
                     bc.active = moved.active;
                 }
                 let list = &mut fe.steps[s].boundary_conditions;
-                let mut renamed = None;
                 if let Some(existing) = index.and_then(|i| list.get(i)) {
                     bc.active = existing.active;
-                    renamed = Some(existing.name.clone()).filter(|old| *old != bc.name);
                 }
-                let remote = matches!(bc.kind, BoundaryKind::Displacement(_));
-                let new = bc.name.clone();
+                // History outputs of a remote displacement's point refer to it by id.
                 put(list, index, bc);
-                // History outputs of a remote displacement's point follow a renamed one.
-                if let Some(old) = renamed.filter(|_| remote) {
-                    fe.rename_remote_point(&old, &new);
-                }
             }
             Draft::Load(s, mut load, region) => {
                 load.region = region.region();
@@ -3931,18 +3887,11 @@ impl Editor {
                     load.active = moved.active;
                 }
                 let list = &mut fe.steps[s].loads;
-                let mut renamed = None;
                 if let Some(existing) = index.and_then(|i| list.get(i)) {
                     load.active = existing.active;
-                    renamed = Some(existing.name.clone()).filter(|old| *old != load.name);
                 }
-                let remote = matches!(load.kind, LoadKind::RemoteForce(_));
-                let new = load.name.clone();
+                // History outputs of a remote force's point refer to it by id.
                 put(list, index, load);
-                // History outputs of a remote force's point follow a renamed one.
-                if let Some(old) = renamed.filter(|_| remote) {
-                    fe.rename_remote_point(&old, &new);
-                }
             }
             Draft::InitialCondition(mut condition, region) => {
                 condition.region = region.region();
@@ -3980,35 +3929,18 @@ impl Editor {
                     region.active = existing.active;
                     // A detected region the user changed is kept when detecting again.
                     region.edited |= region.detected_by.is_some() && region != *existing;
-                    let old = existing.name.clone();
-                    fe.rename_contact_pair(&old, &region.name);
                 }
                 put(&mut fe.contact_regions, index, region);
             }
-            Draft::ContactDetection(detection) => {
-                if let Some(existing) = index.and_then(|i| fe.contact_detections.get(i)) {
-                    let old = existing.name.clone();
-                    for region in &mut fe.contact_regions {
-                        if region.detected_by.as_deref() == Some(old.as_str()) {
-                            region.detected_by = Some(detection.name.clone());
-                        }
-                    }
-                    for tie in &mut fe.node_ties {
-                        if tie.detected_by.as_deref() == Some(old.as_str()) {
-                            tie.detected_by = Some(detection.name.clone());
-                        }
-                    }
-                }
-                put(&mut fe.contact_detections, index, detection);
-            }
+            Draft::ContactDetection(detection) => put(&mut fe.contact_detections, index, detection),
             Draft::Bolt(mut bolt, sides, actions, _) => {
                 (bolt.side_a, bolt.side_b) = sides.regions();
                 if let Some(existing) = index.and_then(|i| fe.bolts.get(i)) {
                     bolt.active = existing.active;
-                    let old = existing.name.clone();
-                    fe.remove_bolt_changes(&old);
+                    let old = existing.id;
+                    fe.remove_bolt_changes(old);
                 }
-                crate::bolts::set_step_actions(fe, &bolt.name, &actions);
+                crate::bolts::set_step_actions(fe, bolt.id, &actions);
                 put(&mut fe.bolts, index, bolt);
             }
             Draft::Connections(defaults) => fe.contact_defaults = defaults,
@@ -4047,41 +3979,17 @@ impl Editor {
                 put(&mut fe.constraints, index, constraint);
             }
             Draft::SurfaceInteraction(interaction, _) => {
-                // Contact pairs follow a renamed interaction.
-                if let Some(old) = index.and_then(|i| fe.surface_interactions.get(i)) {
-                    let old = old.name.clone();
-                    for pair in fe.contact_pairs.iter_mut().filter(|c| c.interaction == old) {
-                        pair.interaction = interaction.name.clone();
-                    }
-                }
-                put(&mut fe.surface_interactions, index, interaction);
+                put(&mut fe.surface_interactions, index, interaction)
             }
             Draft::ContactPair(mut pair, regions) => {
                 (pair.master, pair.slave) = regions.regions();
                 if let Some(existing) = index.and_then(|i| fe.contact_pairs.get(i)) {
                     pair.active = existing.active;
-                    // Contact history outputs follow a renamed pair.
-                    let old = existing.name.clone();
-                    fe.rename_contact_pair(&old, &pair.name);
                 }
                 put(&mut fe.contact_pairs, index, pair);
             }
-            Draft::Amplitude(amplitude, _) => {
-                // Boundary conditions and loads follow a renamed amplitude.
-                if let Some(old) = index.and_then(|i| fe.amplitudes.get(i)) {
-                    let old = old.name.clone();
-                    fe.rename_amplitude(&old, &amplitude.name);
-                }
-                put(&mut fe.amplitudes, index, amplitude);
-            }
-            Draft::Distribution(distribution, _) => {
-                // Pressures and temperatures follow a renamed distribution.
-                if let Some(old) = index.and_then(|i| fe.distributions.get(i)) {
-                    let old = old.name.clone();
-                    fe.rename_distribution(&old, &distribution.name);
-                }
-                put(&mut fe.distributions, index, distribution);
-            }
+            Draft::Amplitude(amplitude, _) => put(&mut fe.amplitudes, index, amplitude),
+            Draft::Distribution(distribution, _) => put(&mut fe.distributions, index, distribution),
             Draft::MeshSet(mut set, region, replaces) => {
                 set.region = region.region();
                 // Items on the set follow a new name.
@@ -4158,42 +4066,42 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
         TreeItem::Constraint(i) => remove(&mut fe.constraints, i),
         TreeItem::SurfaceInteraction(i) => remove(&mut fe.surface_interactions, i),
         TreeItem::ContactPair(i) | TreeItem::ContactRegion(i) => {
-            let name = match item {
-                TreeItem::ContactPair(_) => fe.contact_pairs.get(i).map(|p| p.name.clone()),
-                _ => fe.contact_regions.get(i).map(|r| r.name.clone()),
+            let id = match item {
+                TreeItem::ContactPair(_) => fe.contact_pairs.get(i).map(|p| p.id),
+                _ => fe.contact_regions.get(i).map(|r| r.id),
             };
-            let Some(name) = name else {
+            let Some(id) = id else {
                 return false;
             };
-            fe.remove_contact_changes(&name);
+            fe.remove_contact_changes(id);
             match item {
                 TreeItem::ContactPair(_) => remove(&mut fe.contact_pairs, i),
                 _ => remove(&mut fe.contact_regions, i),
             }
         }
         TreeItem::Bolt(i) => {
-            let Some(name) = fe.bolts.get(i).map(|b| b.name.clone()) else {
+            let Some(id) = fe.bolts.get(i).map(|b| b.id) else {
                 return false;
             };
-            fe.remove_bolt_changes(&name);
+            fe.remove_bolt_changes(id);
             remove(&mut fe.bolts, i)
         }
         TreeItem::ContactDetection(i) => {
-            let Some(name) = fe.contact_detections.get(i).map(|d| d.name.clone()) else {
+            let Some(id) = fe.contact_detections.get(i).map(|d| d.id) else {
                 return false;
             };
             fe.contact_detections.remove(i);
             // Its regions go with it, except those the user changed, which stay as regions
             // of their own.
             fe.contact_regions.retain_mut(|r| {
-                if r.detected_by.as_deref() != Some(name.as_str()) {
+                if r.detected_by != Some(id) {
                     return true;
                 }
                 r.detected_by = None;
                 std::mem::take(&mut r.edited)
             });
             fe.node_ties.retain_mut(|t| {
-                if t.detected_by.as_deref() != Some(name.as_str()) {
+                if t.detected_by != Some(id) {
                     return true;
                 }
                 t.detected_by = None;
@@ -4318,8 +4226,6 @@ pub fn swap_master_slave(fe: &mut FeModel, item: &TreeItem) -> bool {
                 let free = next_name(&name, others);
                 fe.contact_pairs[i].name = free;
             }
-            let new = fe.contact_pairs[i].name.clone();
-            fe.rename_contact_pair(&old, &new);
             true
         }
         TreeItem::ContactRegion(i) => fe.contact_regions.get_mut(i).map(|r| r.flip()).is_some(),
@@ -4355,14 +4261,9 @@ pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
         TreeItem::HistoryOutput(s, i) => {
             let output = fe.steps.get(s).and_then(|st| st.history_outputs.get(i));
             match output.map(|h| &h.kind) {
-                Some(HistoryKind::Contact { pair }) => (fe.contact_pairs.iter())
-                    .find(|c| c.name == *pair)
+                Some(HistoryKind::Contact { pair: Some(pair) }) => (fe.contact_pair(*pair))
                     .map(|c| [&c.master, &c.slave])
-                    .or_else(|| {
-                        (fe.contact_regions.iter())
-                            .find(|r| r.name == *pair)
-                            .map(|r| [&r.side_a, &r.side_b])
-                    }),
+                    .or_else(|| fe.contact_region(*pair).map(|r| [&r.side_a, &r.side_b])),
                 _ => None,
             }
         }
@@ -4514,7 +4415,7 @@ fn history_output_form(
     ui.label("Type");
     ui.horizontal(|ui| {
         let current = output.kind.prefix();
-        let pair = (model.fe.contact_pairs.first()).map_or(String::new(), |c| c.name.clone());
+        let pair = model.fe.contact_pairs.first().map(|c| c.id);
         let kinds = [
             HistoryKind::Node {
                 region: Region::Nodes(Vec::new()),
@@ -4534,7 +4435,7 @@ fn history_output_form(
                 let defaults = match &kind {
                     HistoryKind::Node { region } => HistoryOutput::node("", region.clone()),
                     HistoryKind::Element { region } => HistoryOutput::element("", region.clone()),
-                    HistoryKind::Contact { pair } => HistoryOutput::contact("", pair.clone()),
+                    HistoryKind::Contact { pair } => HistoryOutput::contact("", *pair),
                 };
                 output.variables = defaults.variables;
                 rename_default(&mut output.name, current, kind.prefix(), taken);
@@ -4586,14 +4487,8 @@ fn history_output_form(
     match &mut output.kind {
         HistoryKind::Contact { pair } => {
             ui.label("Contact Pair");
-            egui::ComboBox::from_id_salt("history contact pair")
-                .selected_text(pair.as_str())
-                .width(crate::dock::fit_width(ui, 200.0))
-                .show_ui(ui, |ui| {
-                    for name in model.fe.contact_pair_names() {
-                        ui.selectable_value(pair, name.to_owned(), name);
-                    }
-                });
+            let choices = model.fe.contact_pair_choices();
+            crate::pick_item::item_combo(ui, "history contact pair", pair, choices, None, 200.0);
             ui.end_row();
             ui.label("");
             ui.weak(
@@ -4617,7 +4512,7 @@ fn history_output_form(
 fn point_hint(region: &Region, fe: &FeModel, mesh: &FeMesh) -> Option<&'static str> {
     let behavior = match region {
         Region::ReferencePoint(_) => RemoteBehavior::Rigid,
-        Region::RemotePoint(name) => fe.remote_point_named(mesh, name)?.1,
+        Region::RemotePoint(id) => fe.remote_point_of(mesh, *id)?.1,
         _ => return None,
     };
     Some(match behavior {
@@ -4744,7 +4639,7 @@ fn validate_history_output(
     }
     match &output.kind {
         HistoryKind::Contact { pair } => {
-            if !fe.contact_pair_names().contains(&pair.as_str()) {
+            if !(fe.contact_pair_choices().iter()).any(|(id, _)| Some(*id) == *pair) {
                 return Err(
                     "Please select a contact pair; create one under Contact Pairs first.".into(),
                 );
@@ -4796,16 +4691,15 @@ pub(crate) fn name_row(ui: &mut Ui, name: &mut String) {
 /// Profile, normal and offsets of a beam section, with CalculiX's directions: the
 /// 1-direction is the normal, the 2-direction the beam axis crossed with it.
 fn beam_form(ui: &mut Ui, beam: &mut BeamSection, fe: &FeModel, units: UnitSystem) {
-    if fe.cross_section(&beam.cross_section).is_none()
-        && let Some(first) = fe.cross_sections.first()
-        && beam.cross_section.is_empty()
+    if let Some(first) = fe.cross_sections.first()
+        && beam.cross_section.is_none()
     {
-        beam.cross_section = first.name.clone();
+        beam.cross_section = Some(first.id);
     }
     ui.label("Cross-section");
-    let text = match beam.cross_section.as_str() {
-        "" => "Select …",
-        name => name,
+    let text = match beam.cross_section {
+        None => "Select …".to_string(),
+        Some(id) => fe.name_or_missing(Some(id)),
     };
     egui::ComboBox::from_id_salt("beam cross-section")
         .selected_text(text)
@@ -4813,12 +4707,11 @@ fn beam_form(ui: &mut Ui, beam: &mut BeamSection, fe: &FeModel, units: UnitSyste
         .show_ui(ui, |ui| {
             for cross_section in &fe.cross_sections {
                 let label = format!("{} ({})", cross_section.name, cross_section.profile.label());
-                let name = cross_section.name.clone();
-                ui.selectable_value(&mut beam.cross_section, name, label);
+                ui.selectable_value(&mut beam.cross_section, Some(cross_section.id), label);
             }
         });
     ui.end_row();
-    match fe.cross_section(&beam.cross_section) {
+    match beam.cross_section.and_then(|c| fe.cross_section(c)) {
         Some(cross_section) => {
             ui.label("");
             crate::cross_section::preview(ui, &cross_section.profile, units);
@@ -5947,10 +5840,11 @@ mod tests {
         assert_eq!(editor.title(), "Create Contact Detection: Contacts");
         assert_eq!(editor.detection(&fe), Some(0));
         editor.apply(&mut fe);
+        let detection = fe.contact_detections[0].id;
         let found = |name: &str, edited| plx_model::ContactRegion {
             side_a: Region::Faces(vec![(1, 2)]),
             side_b: Region::Faces(vec![(2, 1)]),
-            detected_by: Some("Contacts".into()),
+            detected_by: Some(detection),
             edited,
             ..plx_model::ContactRegion::new(name, plx_model::ContactBehavior::Bonded)
         };
@@ -5966,14 +5860,15 @@ mod tests {
         }
         editor.apply(&mut fe);
         assert!(fe.contact_regions[1].edited);
-        // Renaming the detection renames it in its regions.
+        // A renamed detection is still the one of its regions.
         let mut editor = Editor::edit(&TreeItem::ContactDetection(0), &fe, &mesh).unwrap();
         if let Draft::ContactDetection(detection) = &mut editor.draft {
             detection.name = "Bolts".into();
         }
         assert_eq!(editor.detection(&fe), Some(0));
         editor.apply(&mut fe);
-        assert_eq!(fe.contact_regions[0].detected_by.as_deref(), Some("Bolts"));
+        assert_eq!(fe.contact_regions[0].detected_by, Some(detection));
+        assert_eq!(fe.contact_detections[0].name, "Bolts");
         // Deleting it deletes what it found; a region the user changed stays, as one of
         // their own.
         assert!(delete(&mut fe, &TreeItem::ContactDetection(0)));
@@ -6068,7 +5963,12 @@ mod tests {
             unreachable!()
         };
         assert!(region.sources.contains(&Source::RemotePoint));
-        let point = Region::RemotePoint("Remote_Displacement-1".into());
+        let mut remote = BoundaryCondition::new(
+            "Remote_Displacement-1",
+            Region::Nodes(vec![1]),
+            BoundaryKind::Displacement(plx_model::Displacement::rigid([Some(0.0); 6])),
+        );
+        let point = Region::RemotePoint(remote.id);
         let draft = RegionDraft::from_region(
             &point,
             HISTORY_NODE_SOURCES,
@@ -6080,11 +5980,14 @@ mod tests {
         let mut output = HistoryOutput::node("NH_Output-1", point);
         output.normalize_variables();
         fe.steps[0].history_outputs.push(output);
-        fe.rename_remote_point("Remote_Displacement-1", "Shaft");
+        remote.name = "Shaft".into();
+        let id = remote.id;
+        fe.steps[0].boundary_conditions.push(remote);
         assert_eq!(
             fe.steps[0].history_outputs[0].kind.region(),
-            Some(&Region::RemotePoint("Shaft".into()))
+            Some(&Region::RemotePoint(id))
         );
+        assert_eq!(fe.name_of(id), Some("Shaft"));
     }
 
     #[test]
@@ -6140,6 +6043,7 @@ mod tests {
         let mut fe = FeModel::default();
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Displacement_Rotation-1"),
             distribution: None,
             name: "Displacement_Rotation-1".into(),
             active: true,
@@ -6243,11 +6147,11 @@ mod tests {
         assert_eq!(fe.cross_sections[0].name, "Cross_Section-1");
         fe.sections.push(Section {
             name: "Beam_Section-1".into(),
-            material: String::new(),
+            material: None,
             region: Region::Parts(Vec::new()),
             thickness: 1.0,
             kind: SectionKind::Beam(BeamSection {
-                cross_section: "Cross_Section-1".into(),
+                cross_section: Some(fe.cross_sections[0].id),
                 ..BeamSection::DEFAULT
             }),
         });
@@ -6273,7 +6177,8 @@ mod tests {
         let SectionKind::Beam(beam) = &fe.sections[0].kind else {
             panic!("not a beam");
         };
-        assert_eq!(beam.cross_section, "Tube");
+        assert_eq!(beam.cross_section, Some(fe.cross_sections[0].id));
+        assert_eq!(fe.cross_sections[0].name, "Tube");
         assert!(delete(&mut fe, &TreeItem::CrossSection(0)));
         assert!(fe.cross_sections.is_empty());
     }
@@ -6314,6 +6219,7 @@ mod tests {
         let mut fe = FeModel::default();
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
         fe.steps[0].boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Fixed-1"),
             distribution: None,
             name: "Fixed-1".into(),
             active: true,
@@ -6323,6 +6229,7 @@ mod tests {
             amplitude: None,
         });
         fe.steps[0].loads.push(Load {
+            id: crate::test_ids::named("Pressure-1"),
             distribution: None,
             name: "Pressure-1".into(),
             active: true,
@@ -6382,6 +6289,7 @@ mod tests {
         let step = &mut fe.steps[1];
         step.boundary_conditions = vec![
             BoundaryCondition {
+                id: crate::test_ids::named("Fixed-1"),
                 distribution: None,
                 name: "Fixed-1".into(),
                 active: true,
@@ -6391,6 +6299,7 @@ mod tests {
                 amplitude: None,
             },
             BoundaryCondition {
+                id: crate::test_ids::named("Temperature-1"),
                 distribution: None,
                 name: "Temperature-1".into(),
                 active: true,
@@ -6402,6 +6311,7 @@ mod tests {
         ];
         step.loads = vec![
             Load {
+                id: crate::test_ids::named("Pressure-1"),
                 distribution: None,
                 name: "Pressure-1".into(),
                 active: true,
@@ -6412,6 +6322,7 @@ mod tests {
                 factor_amplitude: None,
             },
             Load {
+                id: crate::test_ids::named("Convective_Film-1"),
                 distribution: None,
                 name: "Convective_Film-1".into(),
                 active: true,
@@ -6487,6 +6398,7 @@ mod tests {
         let mut fe = FeModel::default();
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
         fe.steps[0].loads.push(Load {
+            id: crate::test_ids::named("Force-1"),
             distribution: None,
             name: "Force-1".into(),
             active: true,
@@ -6511,6 +6423,7 @@ mod tests {
         let mut fe = FeModel::default();
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
         fe.steps[0].boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Fixed-1"),
             distribution: None,
             name: "Fixed-1".into(),
             active: true,
@@ -6561,8 +6474,10 @@ mod tests {
     #[test]
     fn a_swapped_name_that_is_taken_gets_a_number() {
         let mut fe = FeModel::default();
-        fe.contact_pairs.push(ContactPair::new("A_to_B", ""));
-        fe.contact_pairs.push(ContactPair::new("B_to_A", ""));
+        fe.contact_pairs
+            .push(ContactPair::new("A_to_B", Some(crate::test_ids::named(""))));
+        fe.contact_pairs
+            .push(ContactPair::new("B_to_A", Some(crate::test_ids::named(""))));
         fe.contact_pairs[0].master = Region::Surface("A".into());
         assert!(swap_master_slave(&mut fe, &TreeItem::ContactPair(0)));
         assert_eq!(fe.contact_pairs[0].name, "B_to_A-1");
@@ -6581,6 +6496,7 @@ mod tests {
         }
         assert_eq!(fe.amplitudes[0].name, "Amplitude-1");
         let mut film = Load {
+            id: crate::test_ids::named("Film-1"),
             distribution: None,
             name: "Film-1".into(),
             active: true,
@@ -6590,8 +6506,8 @@ mod tests {
                 sink: 20.0,
                 coefficient: 1.0,
             },
-            amplitude: Some("Amplitude-1".into()),
-            factor_amplitude: Some("Amplitude-1".into()),
+            amplitude: Some(fe.amplitudes[0].id),
+            factor_amplitude: Some(fe.amplitudes[0].id),
         };
         fe.steps[0].loads.push(film.clone());
         let mut editor = Editor::edit(&TreeItem::Amplitude(0), &fe, &FeMesh::default()).unwrap();
@@ -6600,11 +6516,12 @@ mod tests {
         }
         editor.apply(&mut fe);
         let load = &fe.steps[0].loads[0];
-        assert_eq!(load.amplitude.as_deref(), Some("Ramp"));
-        assert_eq!(load.factor_amplitude.as_deref(), Some("Ramp"));
+        assert_eq!(load.amplitude, Some(fe.amplitudes[0].id));
+        assert_eq!(load.factor_amplitude, Some(fe.amplitudes[0].id));
+        assert_eq!(fe.amplitudes[0].name, "Ramp");
         // A pressure has no film coefficient to scale.
         film.kind = LoadKind::Pressure(1.0);
-        film.factor_amplitude = Some("Ramp".into());
+        film.factor_amplitude = Some(fe.amplitudes[0].id);
         Editor {
             draft: Draft::Load(0, film, RegionDraft::new(FACE_SOURCES, Target::Faces)),
             index: Some(0),
@@ -6637,6 +6554,7 @@ mod tests {
         let (plate, columns) = (part("PLATTE"), part("STUETZEN"));
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Feet"),
             distribution: None,
             name: "Feet".into(),
             active: true,
@@ -6646,6 +6564,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(Load {
+            id: crate::test_ids::named("Pressure"),
             distribution: None,
             name: "Pressure".into(),
             active: true,
@@ -6656,7 +6575,10 @@ mod tests {
             factor_amplitude: None,
         });
         model.fe.steps.push(step);
-        let mut pair = ContactPair::new("Contact_Pair-1", "Interaction-1");
+        let mut pair = ContactPair::new(
+            "Contact_Pair-1",
+            Some(crate::test_ids::named("Interaction-1")),
+        );
         pair.master = Region::Parts(vec!["PLATTE".into()]);
         pair.slave = Region::Parts(vec!["STUETZEN".into()]);
         model.fe.contact_pairs.push(pair);
@@ -6708,7 +6630,7 @@ mod tests {
         // A section on the set follows its new name.
         model.fe.sections.push(Section {
             name: "Section-1".into(),
-            material: "Steel".into(),
+            material: Some(crate::test_ids::named("Steel")),
             region: Region::ElementSet("Beam".into()),
             thickness: 1.0,
             kind: SectionKind::Solid,

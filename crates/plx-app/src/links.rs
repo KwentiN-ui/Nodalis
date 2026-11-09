@@ -897,6 +897,9 @@ fn copy_category(target: &mut FeModel, source: &FeModel, category: &str, name: M
     // The global steps of the target's submodel boundary conditions stay as a results link
     // set them.
     let global_steps = submodel_steps(target);
+    // Items refer to each other by id: an item copied over the target's own of the same
+    // name takes over the references to it.
+    let before = target.item_ids();
     match category {
         "Features" => {
             copy(
@@ -975,6 +978,7 @@ fn copy_category(target: &mut FeModel, source: &FeModel, category: &str, name: M
         }
         _ => {}
     }
+    target.follow_replaced(&before);
 }
 
 /// The global step each step's submodel boundary conditions read, by step name.
@@ -1653,6 +1657,7 @@ mod tests {
     fn steps_keep_the_global_step_a_results_link_set() {
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: "Submodel-1".into(),
             active: true,
@@ -1867,6 +1872,7 @@ mod tests {
             path(&["Setup", "Steps", "Load", "Global results"])
         );
         target.steps[1].boundary_conditions.push(BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: "Cut".into(),
             active: true,

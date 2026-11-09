@@ -1,6 +1,18 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod amplitude_dialog;
+#[cfg(test)]
+mod test_ids {
+    /// The id of the test items called `name`, the same for all of them: a test refers to
+    /// an item by its name, also before the item is made.
+    pub fn named(name: &str) -> plx_model::Id {
+        use std::collections::HashMap;
+        use std::sync::{LazyLock, Mutex};
+        static IDS: LazyLock<Mutex<HashMap<String, plx_model::Id>>> =
+            LazyLock::new(Default::default);
+        *(IDS.lock().unwrap().entry(name.into())).or_default()
+    }
+}
 mod analysis;
 mod animation;
 mod animation_export;
@@ -54,6 +66,7 @@ mod output_news;
 mod overlay;
 mod parameter_set;
 mod path_plot;
+mod pick_item;
 mod portable;
 mod project;
 mod properties;

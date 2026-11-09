@@ -6039,11 +6039,11 @@ impl Workbench {
         let edited = (self.feature_dialog.as_ref())
             .filter(|d| d.results == Some(self.current_result))
             .and_then(FeatureDialog::result_plane);
-        let name = match edited {
-            Some(name) => name,
-            None => &model.fe.result_planes.get(view.plane_result?)?.plane,
+        let plane = match edited {
+            Some(plane) => plane,
+            None => model.fe.result_planes.get(view.plane_result?)?.plane,
         };
-        let (point, normal) = model.fe.plane(name)?.resolve(&model.fe).ok()?;
+        let (point, normal) = model.fe.plane(plane)?.resolve(&model.fe).ok()?;
         Some((point.into(), normal.into()))
     }
 
@@ -7133,12 +7133,11 @@ mod tests {
 
     #[test]
     fn carried_settings_lose_reference_points_deleted_from_the_fe_model() {
+        let inherited = plx_model::ReferencePoint::new("RP-1", [0.0; 3]);
+        let key = format!("RP:{}", inherited.id.raw());
         let mut settings = plx_results::ResultsSettings {
-            reference_points: vec![
-                plx_model::ReferencePoint::new("RP-1", [0.0; 3]),
-                plx_model::ReferencePoint::new("Mine", [1.0; 3]),
-            ],
-            inherited_features: vec!["RP:RP-1".into()],
+            reference_points: vec![inherited, plx_model::ReferencePoint::new("Mine", [1.0; 3])],
+            inherited_features: vec![key],
             ..Default::default()
         };
         drop_removed_features(&mut settings, &plx_model::FeModel::default());

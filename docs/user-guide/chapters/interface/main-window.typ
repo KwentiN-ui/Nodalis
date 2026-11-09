@@ -111,9 +111,11 @@ model but are written to the input file only as a comment, so CalculiX ignores t
 
 Tree items are renamed in the #ui("Name") field of their dialog. Mesh parts are renamed in their
 #ui("Properties") dialog. Names are converted to upper case and may contain letters (no umlauts),
-digits, `_` and `-`, up to 80 characters. Items that refer to a renamed part, material or
-amplitude follow the new name. Geometry parts cannot be renamed, because the mesh setup refers to
-them by name.
+digits, `_` and `-`, up to 80 characters. Renaming never breaks a reference: items refer to each
+other by an internal identity that the name does not change. A history output stays on its
+reference point, a load keeps its amplitude, a section its material, a contact pair its
+interaction, whatever they are renamed to. Items that refer to a renamed mesh part or set follow
+the new name. Geometry parts cannot be renamed, because the mesh setup refers to them by name.
 
 === What acts on a part <acting>
 

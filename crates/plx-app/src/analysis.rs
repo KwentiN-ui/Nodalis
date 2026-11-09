@@ -700,6 +700,7 @@ mod tests {
             elements: vec![1, 2, 3],
         });
         let bc = |name: &str, nodes: Vec<u32>, kind| BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: name.into(),
             active: true,
@@ -730,6 +731,7 @@ mod tests {
         let mut model = Model::new(std::path::Path::new("cubes.ndl"), mesh);
         model.fe = plx_model::FeModel {
             materials: vec![Material {
+                id: crate::test_ids::named("S235"),
                 name: "S235".into(),
                 elastic: Some(Elastic {
                     young: 210000.0,
@@ -739,7 +741,7 @@ mod tests {
             }],
             sections: vec![Section {
                 name: "Section-1".into(),
-                material: "S235".into(),
+                material: Some(crate::test_ids::named("S235")),
                 region: Region::Parts(vec!["Solid-1".into()]),
                 thickness: 1.0,
                 kind: plx_model::SectionKind::Solid,
@@ -1009,6 +1011,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nodalis-linked-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let bc = |name: &str, nodes: Vec<u32>, kind| BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: name.into(),
             active: true,
@@ -1038,6 +1041,7 @@ mod tests {
         let mut modal = Step::new_modal_dynamics("Shake");
         modal.boundary_conditions = frequency.boundary_conditions.clone();
         modal.loads.push(Load {
+            id: crate::test_ids::named("Push"),
             distribution: None,
             name: "Push".into(),
             active: true,

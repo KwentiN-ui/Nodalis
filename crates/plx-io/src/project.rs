@@ -719,7 +719,7 @@ pub fn save_project(path: &Path, project: &Project) -> Result<(), ProjectError> 
 
 /// The oldest format that can still be opened. While Nodalis is being designed, a new
 /// format is not converted: older projects are refused.
-pub const FIRST_PROJECT_FORMAT: u32 = 16;
+pub const FIRST_PROJECT_FORMAT: u32 = 18;
 
 /// The format of a project file, read before the rest, which depends on it.
 #[derive(Deserialize)]
@@ -1078,7 +1078,9 @@ mod tests {
         };
         let base_top: Vec<_> = base_top.into_iter().filter(|f| inside(&mesh, f)).collect();
         let mut model = FeModel::default();
+        let steel = plx_model::Id::new();
         model.materials.push(Material {
+            id: steel,
             name: "Steel".into(),
             density: Some(7850.0),
             elastic: Some(plx_model::Elastic {
@@ -1089,7 +1091,7 @@ mod tests {
         });
         model.sections.push(plx_model::Section {
             name: "Solid_Section-1".into(),
-            material: "Steel".into(),
+            material: Some(steel),
             region: Region::Parts(vec!["Base".into(), "Block".into(), "Cap".into()]),
             thickness: 1.0,
             kind: plx_model::SectionKind::Solid,
@@ -1113,6 +1115,7 @@ mod tests {
         }
         let mut step = plx_model::Step::new_static("Step-1");
         step.boundary_conditions.push(plx_model::BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: "Fixed-1".into(),
             active: true,
@@ -1124,6 +1127,7 @@ mod tests {
         // The cap held sideways at its top, pressed down.
         let cap_nodes = Region::Faces(cap_top.clone()).nodes(&mesh);
         step.boundary_conditions.push(plx_model::BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: "Guide-1".into(),
             active: true,
@@ -1140,6 +1144,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(plx_model::Load {
+            id: plx_model::Id::new(),
             distribution: None,
             name: "Pressure-1".into(),
             active: true,
@@ -1183,6 +1188,7 @@ mod tests {
         let mesh = read_inp(&root.join("testdata/block_c3d20r.inp"))
             .unwrap()
             .mesh;
+        let [rp, plane, interaction, region, detection] = [(); 5].map(|_| plx_model::Id::new());
         let model = FeModel {
             bolts: Vec::new(),
             cross_sections: Vec::new(),
@@ -1199,14 +1205,17 @@ mod tests {
                 Step::new_static("Step-1"),
                 Step {
                     contact_changes: vec![plx_model::ContactChange {
-                        region: "Region-1".into(),
+                        region,
                         active: Some(false),
                         friction: Some(0.3),
                     }],
                     ..Step::new_coupled("Step-2")
                 },
             ],
-            reference_points: vec![plx_model::ReferencePoint::new("RP-1", [1.0, 2.0, 3.0])],
+            reference_points: vec![plx_model::ReferencePoint {
+                id: rp,
+                ..plx_model::ReferencePoint::new("RP-1", [1.0, 2.0, 3.0])
+            }],
             coordinate_systems: vec![plx_model::CoordinateSystem {
                 kind: plx_model::CoordinateSystemKind::Cylindrical,
                 ..plx_model::CoordinateSystem::new("Coordinate_System-1")
@@ -1214,19 +1223,20 @@ mod tests {
             planes: vec![plx_model::Plane {
                 source: plx_model::PlaneSource::ThreePoints {
                     points: [
-                        plx_model::PointRef::ReferencePoint("RP-1".into()),
+                        plx_model::PointRef::ReferencePoint(rp),
                         plx_model::PointRef::Coordinates([1.0, 0.0, 0.0]),
                         plx_model::PointRef::Coordinates([0.0, 1.0, 0.0]),
                     ],
                 },
+                id: plane,
                 ..plx_model::Plane::new("Plane-1")
             }],
             result_planes: vec![plx_model::ResultPlane {
                 name: "Plane_Result-1".into(),
-                plane: "Plane-1".into(),
+                plane,
             }],
             result_paths: vec![plx_model::ResultPath {
-                start: plx_model::PointRef::ReferencePoint("RP-1".into()),
+                start: plx_model::PointRef::ReferencePoint(rp),
                 ..plx_model::ResultPath::new("Path-1")
             }],
             mesh_sets: vec![plx_model::MeshSet::new(
@@ -1258,6 +1268,7 @@ mod tests {
                 ..plx_model::NodeTie::new("Node_Tie-1")
             }],
             surface_interactions: vec![SurfaceInteraction {
+                id: interaction,
                 name: "Surface_Interaction-1".into(),
                 properties: vec![
                     InteractionProperty::SurfaceBehavior(SurfaceBehavior::Tabular(vec![
@@ -1271,7 +1282,7 @@ mod tests {
                 adjustment_size: Some(0.01),
                 clearance: None,
                 master_color: [255, 0, 0],
-                ..ContactPair::new("Contact_Pair-1", "Surface_Interaction-1")
+                ..ContactPair::new("Contact_Pair-1", Some(interaction))
             }],
             contact_regions: vec![plx_model::ContactRegion {
                 side_a: Region::Parts(vec!["A".into()]),
@@ -1282,8 +1293,9 @@ mod tests {
                     tolerance: Some(1e-4),
                     ..Default::default()
                 },
-                detected_by: Some("Contacts".into()),
+                detected_by: Some(detection),
                 edited: true,
+                id: region,
                 ..plx_model::ContactRegion::new(
                     "Frictional - A to B",
                     plx_model::ContactBehavior::Frictional { mu: 0.2 },
@@ -1294,6 +1306,7 @@ mod tests {
                 tolerance: Some(2e-4),
                 grouping: plx_model::DetectionGrouping::Graph,
                 behavior: plx_model::ContactBehavior::Rough,
+                id: detection,
                 ..plx_model::ContactDetection::new("Contacts")
             }],
             contact_defaults: plx_model::ContactDefaults {
@@ -1446,6 +1459,7 @@ mod tests {
             position: [10.0, 200.0],
             units: plx_model::UnitSystem::MmTonSC,
             cross_sections: vec![plx_model::CrossSection {
+                id: plx_model::Id::new(),
                 name: "Tube".into(),
                 profile: plx_model::BeamProfile::Pipe {
                     radius: 0.02,

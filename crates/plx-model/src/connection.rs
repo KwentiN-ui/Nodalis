@@ -14,14 +14,16 @@ use plx_mesh::{ElementId, FeMesh, NodeId};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ContactMethod, ContactPair, FeModel, Friction, InteractionProperty, Region, STICK_SLOPE_RATIO,
-    StepKind, SurfaceBehavior, SurfaceInteraction, Tie,
+    ContactMethod, ContactPair, FeModel, Friction, Id, InteractionProperty, Region,
+    STICK_SLOPE_RATIO, StepKind, SurfaceBehavior, SurfaceInteraction, Tie,
 };
 
 /// Two surfaces of the model and how they behave towards each other. Which side becomes the
 /// master is derived, see [`ContactSettings::sides`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContactRegion {
+    /// The internal identity other items refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,
@@ -34,7 +36,7 @@ pub struct ContactRegion {
     pub color_b: [u8; 3],
     /// The contact detection that found the region; `None` for a region made by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detected_by: Option<String>,
+    pub detected_by: Option<crate::Id>,
     /// Changed by the user after its detection: detecting again keeps it as it is.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub edited: bool,
@@ -43,6 +45,7 @@ pub struct ContactRegion {
 impl ContactRegion {
     pub fn new(name: impl Into<String>, behavior: ContactBehavior) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
             side_a: Region::Faces(Vec::new()),
@@ -489,8 +492,8 @@ struct Properties {
     young: HashMap<ElementId, f64>,
     conductivity: HashMap<ElementId, f64>,
     /// The distance each detection that found regions with an automatic tolerance searched
-    /// within, by its name.
-    detections: HashMap<String, f64>,
+    /// within, by its id.
+    detections: HashMap<Id, f64>,
 }
 
 /// What the derivation needs to know about the model.
@@ -615,7 +618,15 @@ impl FeModel {
     /// The names contact history outputs can refer to: of the contact pairs and of the
     /// contact regions written as contact pairs.
     pub fn contact_pair_names(&self) -> Vec<&str> {
-        let pairs = self.contact_pairs.iter().map(|p| p.name.as_str());
+        (self.contact_pair_choices().into_iter())
+            .map(|(_, name)| name)
+            .collect()
+    }
+
+    /// The contact pairs and the contact regions written as contact pairs, which contact
+    /// history outputs can print, by id and name.
+    pub fn contact_pair_choices(&self) -> Vec<(Id, &str)> {
+        let pairs = self.contact_pairs.iter().map(|p| (p.id, p.name.as_str()));
         let regions = (self.contact_regions.iter())
             .filter(|r| match r.behavior {
                 // A bonded region left to Auto becomes a tied contact when its contact values
@@ -625,7 +636,7 @@ impl FeModel {
                 }
                 behavior => behavior.separates(),
             })
-            .map(|r| r.name.as_str());
+            .map(|r| (r.id, r.name.as_str()));
         pairs.chain(regions).collect()
     }
 
@@ -642,9 +653,7 @@ impl FeModel {
     ) -> HashMap<ElementId, f64> {
         let mut values = HashMap::new();
         for section in &self.sections {
-            let Some(value) = (self.materials.iter())
-                .find(|m| m.name == section.material)
-                .and_then(&property)
+            let Some(value) = (section.material.and_then(|m| self.material(m))).and_then(&property)
             else {
                 continue;
             };
@@ -658,15 +667,14 @@ impl FeModel {
     fn properties_of_elements(&self, mesh: &FeMesh) -> Properties {
         let detections = (self.contact_detections.iter())
             .filter(|d| {
-                (self.contact_regions.iter()).any(|r| {
-                    r.settings.tolerance.is_none() && r.detected_by.as_ref() == Some(&d.name)
-                })
+                (self.contact_regions.iter())
+                    .any(|r| r.settings.tolerance.is_none() && r.detected_by == Some(d.id))
             })
             .map(|d| {
                 let distance = d
                     .tolerance
                     .unwrap_or_else(|| d.searched_diagonal(mesh) * 0.005);
-                (d.name.clone(), distance)
+                (d.id, distance)
             })
             .collect();
         Properties {
@@ -731,7 +739,7 @@ impl FeModel {
         let a = Side::new(&region.side_a, mesh, properties);
         let b = Side::new(&region.side_b, mesh, properties);
         let detected_within = (region.detected_by.as_ref())
-            .and_then(|name| properties.detections.get(name))
+            .and_then(|id| properties.detections.get(id))
             .copied();
         let model = Derivation {
             formulation,
@@ -848,23 +856,25 @@ impl FeModel {
                         .skip(self.surface_interactions.len())
                         .find(|i| i.properties == properties && !own && !private.contains(&i.name))
                     {
-                        Some(found) => found.name.clone(),
+                        Some(found) => found.id,
                         None => {
                             let taken: Vec<String> = (lowered.surface_interactions.iter())
                                 .map(|i| i.name.clone())
                                 .collect();
                             let name = unique_name(&interaction_name(region.behavior), &taken);
-                            lowered.surface_interactions.push(SurfaceInteraction {
-                                name: name.clone(),
-                                properties,
-                            });
+                            let interaction = SurfaceInteraction::new(name.clone(), properties);
+                            let id = interaction.id;
+                            lowered.surface_interactions.push(interaction);
                             if own {
-                                private.push(name.clone());
+                                private.push(name);
                             }
-                            name
+                            id
                         }
                     };
-                    let mut pair = ContactPair::new(region.name.clone(), interaction);
+                    // The pair keeps the region's id: history outputs and changes of the
+                    // steps on the region go to it.
+                    let mut pair = ContactPair::new(region.name.clone(), Some(interaction));
+                    pair.id = region.id;
                     pair.active = region.active;
                     pair.method = resolved.formulation;
                     pair.small_sliding = *small_sliding;
@@ -885,21 +895,15 @@ impl FeModel {
             origin.tie_regions.push(regions);
         }
         // Changes in the steps are kept for the contact pairs; ties and equations stay.
-        let pairs: BTreeSet<String> = (lowered.contact_pairs.iter())
-            .map(|p| p.name.clone())
-            .collect();
+        let pairs: BTreeSet<Id> = lowered.contact_pairs.iter().map(|p| p.id).collect();
         // Contact values are printed for contact pairs only; of a region written as a tie
         // or as equations there are none (see the model check).
-        let regions: BTreeSet<&str> = self
-            .contact_regions
-            .iter()
-            .map(|r| r.name.as_str())
-            .collect();
+        let regions: BTreeSet<Id> = self.contact_regions.iter().map(|r| r.id).collect();
         for step in &mut lowered.steps {
             step.contact_changes.retain(|c| pairs.contains(&c.region));
             step.history_outputs.retain(|o| match &o.kind {
-                crate::HistoryKind::Contact { pair } => {
-                    pairs.contains(pair) || !regions.contains(pair.as_str())
+                crate::HistoryKind::Contact { pair: Some(pair) } => {
+                    pairs.contains(pair) || !regions.contains(pair)
                 }
                 _ => true,
             });

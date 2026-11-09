@@ -73,7 +73,8 @@ impl Type {
                 offset: 0.0,
                 nonlinear: false,
             }),
-            Type::RigidBody => Constraint::RigidBody(RigidBody::new(name, "")),
+            // The dialog chooses the point, see `ConstraintDraft::point_exists`.
+            Type::RigidBody => Constraint::RigidBody(RigidBody::new(name, plx_model::Id::new())),
         }
     }
 }
@@ -112,6 +113,8 @@ pub(crate) struct ConstraintDraft {
     region: RegionDraft,
     /// The region (slave) and target surface (master) of a spring.
     pair: MasterSlave,
+    /// Whether the model has the reference point of a rigid body, as last shown.
+    point_exists: bool,
 }
 
 impl ConstraintDraft {
@@ -122,6 +125,7 @@ impl ConstraintDraft {
             constraint: kind.create(next_name(kind.prefix(), names(fe))),
             region: RegionDraft::new(FACE_SOURCES, faces),
             pair: spring_regions(faces, &FeMesh::default(), None),
+            point_exists: false,
         }
     }
 
@@ -141,6 +145,7 @@ impl ConstraintDraft {
             constraint: constraint.clone(),
             region,
             pair,
+            point_exists: true,
         }
     }
 
@@ -193,8 +198,7 @@ impl ConstraintDraft {
             Err("The region is empty.".into())
         } else if self.to_surface() && self.pair.master.is_empty() {
             Err("The target surface is empty.".into())
-        } else if matches!(&self.constraint, Constraint::RigidBody(b) if b.reference_point.is_empty())
-        {
+        } else if matches!(&self.constraint, Constraint::RigidBody(_)) && !self.point_exists {
             Err("Choose the reference point that drives the rigid body.".into())
         } else {
             Ok(())
@@ -293,26 +297,28 @@ impl ConstraintDraft {
                 self.region.ui(ui, model);
                 ui.label("Reference point");
                 let points = &model.fe.reference_points;
-                if body.reference_point.is_empty()
+                if model.fe.reference_point(body.reference_point).is_none()
                     && let Some(first) = points.first()
                 {
-                    body.reference_point = first.name.clone();
+                    body.reference_point = first.id;
                 }
+                self.point_exists = model.fe.reference_point(body.reference_point).is_some();
                 if points.is_empty() {
                     ui.weak("The model has no reference points (Features).");
                 } else {
-                    egui::ComboBox::from_id_salt("rigid body point")
-                        .selected_text(body.reference_point.as_str())
-                        .width(crate::dock::fit_width(ui, 200.0))
-                        .show_ui(ui, |ui| {
-                            for point in points {
-                                ui.selectable_value(
-                                    &mut body.reference_point,
-                                    point.name.clone(),
-                                    &point.name,
-                                );
-                            }
-                        });
+                    let mut chosen = Some(body.reference_point);
+                    let items = points.iter().map(|p| (p.id, p.name.as_str()));
+                    crate::pick_item::item_combo(
+                        ui,
+                        "rigid body point",
+                        &mut chosen,
+                        items,
+                        None,
+                        200.0,
+                    );
+                    if let Some(chosen) = chosen {
+                        body.reference_point = chosen;
+                    }
                 }
                 ui.end_row();
                 hint(

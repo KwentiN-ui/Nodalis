@@ -11916,6 +11916,7 @@ mod tests {
             position: [1.0, 2.0],
             units: plx_model::UnitSystem::MmTonSC,
             cross_sections: vec![CrossSection {
+                id: plx_model::Id::new(),
                 name: "Girder".into(),
                 profile: BeamProfile::Rect { a: 0.02, b: 0.04 },
             }],
@@ -12280,6 +12281,7 @@ mod tests {
         let mut fe = plx_model::FeModel::default();
         let mut step = plx_model::Step::new_static("Step-1");
         step.boundary_conditions.push(plx_model::BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: "Fixed".into(),
             active: true,
@@ -12449,6 +12451,7 @@ mod tests {
         let mut model = plx_model::FeModel::default();
         let mut step = plx_model::Step::new_static("Step-1");
         step.loads.push(plx_model::Load {
+            id: plx_model::Id::new(),
             distribution: None,
             name: "Force-1".into(),
             active: true,

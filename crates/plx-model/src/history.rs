@@ -27,7 +27,7 @@ pub enum HistoryKind {
     Element { region: Region },
     /// Values of all contact elements (`*CONTACT PRINT`); the contact pair gives master and
     /// slave of the contact forces `CF`.
-    Contact { pair: String },
+    Contact { pair: Option<crate::Id> },
 }
 
 /// Whether sums over the region are printed, CalculiX's `TOTALS` parameter.
@@ -123,11 +123,11 @@ impl HistoryOutput {
     }
 
     /// The default contact history output: contact displacements and stresses.
-    pub fn contact(name: impl Into<String>, pair: impl Into<String>) -> Self {
+    pub fn contact(name: impl Into<String>, pair: Option<crate::Id>) -> Self {
         Self {
             name: name.into(),
             active: true,
-            kind: HistoryKind::Contact { pair: pair.into() },
+            kind: HistoryKind::Contact { pair },
             variables: vec!["CDIS".into(), "CSTR".into()],
             totals: Totals::No,
         }

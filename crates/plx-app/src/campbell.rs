@@ -2035,6 +2035,7 @@ mod tests {
         let mesh = plx_io::inp::read_inp(&testdata).unwrap().mesh;
         let mut fe = FeModel {
             materials: vec![plx_model::Material {
+                id: crate::test_ids::named("Steel"),
                 name: "Steel".into(),
                 density: Some(7.85e-9),
                 elastic: Some(plx_model::Elastic {
@@ -2045,7 +2046,7 @@ mod tests {
             }],
             sections: vec![plx_model::Section {
                 name: "Section-1".into(),
-                material: "Steel".into(),
+                material: Some(crate::test_ids::named("Steel")),
                 region: plx_model::Region::Parts(vec!["EALL".into()]),
                 thickness: 1.0,
                 kind: plx_model::SectionKind::Solid,
@@ -2053,6 +2054,7 @@ mod tests {
             ..FeModel::default()
         };
         let fixed = plx_model::BoundaryCondition {
+            id: crate::test_ids::named("Fixed-1"),
             distribution: None,
             name: "Fixed-1".into(),
             active: true,

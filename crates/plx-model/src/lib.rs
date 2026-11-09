@@ -28,6 +28,7 @@ mod field;
 pub mod fingerprint;
 mod geometry;
 mod history;
+mod id;
 pub mod library;
 mod measure;
 mod mesh_set;
@@ -36,6 +37,7 @@ mod number;
 mod parameter;
 mod primitive;
 mod properties;
+mod refs;
 mod region;
 mod remote;
 mod remote_force;
@@ -90,6 +92,7 @@ pub use geometry::{
     MeshingParameters, Recombination,
 };
 pub use history::{HistoryKind, HistoryOutput, Totals};
+pub use id::Id;
 pub use library::MaterialLibrary;
 pub use measure::{Extreme, MeasureKind, MeasureRegion, POINT_AXES};
 pub use mesh_set::{MeshSet, SetKind};
@@ -137,8 +140,10 @@ use serde::{Deserialize, Serialize};
 /// without them. Format 15 merges the remote displacement into the displacement, which
 /// chooses how it is written from its selection; older formats are refused. Format 16 gives
 /// the equation solver of a step only the choice Direct or Iterative; older formats are
-/// refused. Format 17 adds the remote force; format 16 reads as it is.
-pub const PROJECT_FORMAT: u32 = 17;
+/// refused. Format 17 adds the remote force; format 16 reads as it is. Format 18 gives the
+/// items of the model an internal id ([`Id`]) and lets items refer to each other by it in
+/// place of their names, so that renaming keeps the references; older formats are refused.
+pub const PROJECT_FORMAT: u32 = 18;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -384,40 +389,6 @@ impl FeModel {
         self.constraints = constraints;
     }
 
-    /// Follows a renamed amplitude: boundary conditions and loads keep referring to it.
-    pub fn rename_amplitude(&mut self, old: &str, new: &str) {
-        for step in &mut self.steps {
-            let references = (step.boundary_conditions.iter_mut())
-                .map(|b| &mut b.amplitude)
-                .chain(
-                    (step.loads.iter_mut())
-                        .flat_map(|l| [&mut l.amplitude, &mut l.factor_amplitude]),
-                )
-                .chain(step.defined_fields.iter_mut().map(|f| &mut f.amplitude));
-            for reference in references {
-                if reference.as_deref() == Some(old) {
-                    *reference = Some(new.to_string());
-                }
-            }
-        }
-    }
-
-    /// Follows a renamed contact pair: contact history outputs keep referring to it.
-    pub fn rename_contact_pair(&mut self, old: &str, new: &str) {
-        for output in self.steps.iter_mut().flat_map(|s| &mut s.history_outputs) {
-            if let HistoryKind::Contact { pair } = &mut output.kind
-                && pair == old
-            {
-                *pair = new.to_string();
-            }
-        }
-        for change in self.steps.iter_mut().flat_map(|s| &mut s.contact_changes) {
-            if change.region == old {
-                change.region = new.to_string();
-            }
-        }
-    }
-
     /// Whether an active step that takes it has an active submodel boundary condition, so
     /// that the input file reads the results of the global model.
     pub fn uses_global_results(&self) -> bool {
@@ -430,64 +401,24 @@ impl FeModel {
         })
     }
 
-    /// The amplitude of the name, if the model has it.
-    pub fn amplitude(&self, name: &str) -> Option<&Amplitude> {
-        self.amplitudes.iter().find(|a| a.name == name)
-    }
-
-    pub fn cross_section(&self, name: &str) -> Option<&CrossSection> {
-        self.cross_sections.iter().find(|c| c.name == name)
-    }
-
     /// The profile of a beam section's cross-section; `None` for other sections or a
     /// cross-section the model lacks.
     pub fn section_profile(&self, kind: &SectionKind) -> Option<&BeamProfile> {
         match kind {
-            SectionKind::Beam(beam) => Some(&self.cross_section(&beam.cross_section)?.profile),
+            SectionKind::Beam(beam) => Some(&self.cross_section(beam.cross_section?)?.profile),
             _ => None,
         }
     }
 
-    pub fn distribution(&self, name: &str) -> Option<&Distribution> {
-        self.distributions.iter().find(|d| d.name == name)
-    }
-
-    /// Every reference to a distribution: of boundary conditions, loads, initial conditions
-    /// and defined fields.
-    fn distribution_references(&mut self) -> impl Iterator<Item = &mut Option<String>> {
-        let initial = self
-            .initial_conditions
-            .iter_mut()
-            .map(|c| &mut c.distribution);
-        let steps = self.steps.iter_mut().flat_map(|step| {
-            (step
-                .boundary_conditions
-                .iter_mut()
-                .map(|b| &mut b.distribution))
-            .chain(step.loads.iter_mut().map(|l| &mut l.distribution))
-            .chain(step.defined_fields.iter_mut().map(|f| &mut f.distribution))
-        });
-        initial.chain(steps)
-    }
-
-    /// Follows a renamed distribution: the items that use it keep using it.
-    pub fn rename_distribution(&mut self, old: &str, new: &str) {
-        for reference in self.distribution_references() {
-            if reference.as_deref() == Some(old) {
-                *reference = Some(new.to_string());
-            }
-        }
-    }
-
-    /// The names of the distributions some item uses.
-    pub fn used_distributions(&self) -> std::collections::BTreeSet<&str> {
+    /// The distributions some item uses.
+    pub fn used_distributions(&self) -> std::collections::BTreeSet<Id> {
         let initial = self.initial_conditions.iter().map(|c| &c.distribution);
         let steps = self.steps.iter().flat_map(|step| {
             (step.boundary_conditions.iter().map(|b| &b.distribution))
                 .chain(step.loads.iter().map(|l| &l.distribution))
                 .chain(step.defined_fields.iter().map(|f| &f.distribution))
         });
-        initial.chain(steps).filter_map(|d| d.as_deref()).collect()
+        initial.chain(steps).filter_map(|d| *d).collect()
     }
 
     /// Follows a renamed part: regions on the part, or on the element set an input file
@@ -531,6 +462,11 @@ impl FeModel {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Material {
+    /// The internal identity other items refer to; the user sees only the name. The user's
+    /// material library, whose materials nothing refers to, may hold materials without one:
+    /// they get a new one when read, and one copied into a model a new one again.
+    #[serde(default)]
+    pub id: crate::Id,
     pub name: String,
     pub density: Option<f64>,
     pub elastic: Option<Elastic>,
@@ -1619,6 +1555,8 @@ impl Step {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BoundaryCondition {
+    /// The internal identity other items refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     /// A deactivated boundary condition is left out of the input file and the 3D view.
     #[serde(default = "active")]
@@ -1630,11 +1568,11 @@ pub struct BoundaryCondition {
     pub kind: BoundaryKind,
     /// Amplitude the values follow over time; `None` is CalculiX's default ramp or step.
     #[serde(default)]
-    pub amplitude: Option<String>,
+    pub amplitude: Option<Id>,
     /// Distribution the value is scaled by over the region; `None` is the same value
     /// everywhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub distribution: Option<String>,
+    pub distribution: Option<Id>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1664,6 +1602,40 @@ pub enum BoundaryKind {
     },
 }
 
+impl BoundaryCondition {
+    /// An active, visible boundary condition without amplitude or distribution, with an
+    /// id of its own.
+    pub fn new(name: impl Into<String>, region: Region, kind: BoundaryKind) -> Self {
+        Self {
+            id: Id::new(),
+            name: name.into(),
+            active: true,
+            visible: true,
+            region,
+            kind,
+            amplitude: None,
+            distribution: None,
+        }
+    }
+}
+
+impl Load {
+    /// An active, visible load without amplitudes or distribution, with an id of its own.
+    pub fn new(name: impl Into<String>, region: Region, kind: LoadKind) -> Self {
+        Self {
+            id: Id::new(),
+            name: name.into(),
+            active: true,
+            visible: true,
+            region,
+            kind,
+            amplitude: None,
+            factor_amplitude: None,
+            distribution: None,
+        }
+    }
+}
+
 impl BoundaryKind {
     /// Whether an amplitude can scale the boundary condition; symmetry supports stay zero.
     pub fn takes_amplitude(&self) -> bool {
@@ -1685,6 +1657,8 @@ impl BoundaryKind {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Load {
+    /// The internal identity other items refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     /// A deactivated load is left out of the input file and the 3D view.
     #[serde(default = "active")]
@@ -1697,15 +1671,15 @@ pub struct Load {
     /// Amplitude the value follows over time, of a film or radiation its sink temperature;
     /// `None` is CalculiX's default ramp or step.
     #[serde(default)]
-    pub amplitude: Option<String>,
+    pub amplitude: Option<Id>,
     /// Amplitude of the film coefficient or the emissivity (`FILM AMPLITUDE`,
     /// `RADIATION AMPLITUDE`); other loads have none.
     #[serde(default)]
-    pub factor_amplitude: Option<String>,
+    pub factor_amplitude: Option<Id>,
     /// Distribution the value is scaled by over the region; `None` is the same value
     /// everywhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub distribution: Option<String>,
+    pub distribution: Option<Id>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1817,7 +1791,7 @@ pub struct InitialCondition {
     /// Distribution the value is scaled by over the region; `None` is the same value
     /// everywhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub distribution: Option<String>,
+    pub distribution: Option<Id>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -1889,11 +1863,11 @@ pub struct DefinedField {
     /// Amplitude a value follows over time; `None` is CalculiX's default ramp. A field
     /// read from a file has none.
     #[serde(default)]
-    pub amplitude: Option<String>,
+    pub amplitude: Option<Id>,
     /// Distribution the value is scaled by over the region; `None` is the same value
     /// everywhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub distribution: Option<String>,
+    pub distribution: Option<Id>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2002,13 +1976,14 @@ mod tests {
         let mut model = FeModel::default();
         model.sections.push(Section {
             name: "Section-1".into(),
-            material: "Steel".into(),
+            material: None,
             region: Region::Parts(vec!["A".into(), "B".into()]),
             thickness: 1.0,
             kind: SectionKind::Solid,
         });
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::Id::new(),
             distribution: None,
             name: "Fixed-1".into(),
             active: true,
@@ -2018,6 +1993,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(Load {
+            id: crate::Id::new(),
             distribution: None,
             name: "Pressure-1".into(),
             active: true,

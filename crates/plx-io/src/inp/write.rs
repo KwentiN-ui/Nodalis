@@ -14,7 +14,7 @@ use plx_model::{
     Amplitude, AmplitudeTime, BeamProfile, BeamSection, BoundaryKind, BuckleStep,
     ComplexFrequencyStep, Constraint, ContactMethod, ContactPair, ContactScale, DefinedFieldKind,
     DynamicStep, FeModel, FieldOutput, Formulation, FrequencyStep, GapConductance,
-    HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialConditionKind,
+    HeatTransferStep, HistoryKind, HistoryOutput, Id, Incrementation, InitialConditionKind,
     InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep, ModelItem, ModelSpace,
     MovingFrame, NodeTie, Origins, OutputDimension, OutputKind, Quantity, Region, RemoteBehavior,
     RemoteDof, Sampler, Section, SectionKind, SectorDisplay, SensitivityStep, StaticStep,
@@ -116,6 +116,39 @@ impl WriteError {
     }
 }
 
+impl WriteError {
+    /// The item another refers to, by its id as the lowering found it.
+    fn reference_mut(&mut self) -> Option<&mut String> {
+        use WriteError as E;
+        match self {
+            E::UnknownMaterial { material: r, .. }
+            | E::UnknownInteraction { interaction: r, .. }
+            | E::UnknownAmplitude { amplitude: r, .. }
+            | E::UnknownDistribution {
+                distribution: r, ..
+            }
+            | E::UnknownContactPair { pair: r, .. }
+            | E::UnknownReferencePoint { point: r, .. }
+            | E::UnknownRemotePoint { point: r, .. } => Some(r),
+            _ => None,
+        }
+    }
+
+    /// Names the item the error refers to by its name in `model` instead of its id, which
+    /// the user never sees; one that is not there is named as missing.
+    fn name_reference(&mut self, model: &FeModel) {
+        let Some(reference) = self.reference_mut() else {
+            return;
+        };
+        if !reference.starts_with('#') {
+            return;
+        }
+        let items = model.item_ids();
+        let item = items.iter().find(|(_, _, id)| id.to_string() == *reference);
+        *reference = item.map_or_else(|| "(missing)".to_string(), |(_, name, _)| name.clone());
+    }
+}
+
 /// An error of the model with the item of the tree it is about, so that the GUI can point
 /// at it. `item` is `None` when the error is about something the lowering derived (a tie of
 /// a contact region's detection) that has no item of its own.
@@ -129,7 +162,8 @@ pub struct ModelError {
 impl ModelError {
     /// The error with the item it names, looked up in `model` (in the step that was being
     /// lowered first).
-    fn new(model: &FeModel, error: WriteError, step: Option<usize>) -> Self {
+    fn new(model: &FeModel, mut error: WriteError, step: Option<usize>) -> Self {
+        error.name_reference(model);
         Self {
             item: model.item_named(error.item_name(), step),
             error,
@@ -1004,14 +1038,14 @@ struct Sets<'a> {
     submodel_sets: Vec<(String, String)>,
     /// Reference and rotation node of each reference point an active rigid body is driven
     /// by, and the node set holding the reference node once something refers to it.
-    reference_nodes: BTreeMap<String, ReferenceNodes>,
+    reference_nodes: BTreeMap<Id, ReferenceNodes>,
     /// Reference and rotation node of the point of each displacement written with a point,
     /// with its region; boundary conditions with the same region and point share it.
     remote_points: Vec<(Region, plx_model::Displacement, [NodeId; 2])>,
     /// Reference and rotation node of the point of each displacement written with a point by
-    /// the boundary condition's name, and of each remote force by the load's name, with its
+    /// the boundary condition's id, and of each remote force by the load's id, with its
     /// behavior.
-    remote_names: BTreeMap<String, ([NodeId; 2], RemoteBehavior)>,
+    remote_names: BTreeMap<Id, ([NodeId; 2], RemoteBehavior)>,
     /// Local coordinate systems (`*Transform`) of node sets whose symmetry plane is no
     /// coordinate plane or whose displacement is in a system of its own: the set with the
     /// local x and y axes (type R), or with two points on the axis (type C).
@@ -1026,6 +1060,8 @@ struct Sets<'a> {
 /// the translations, the rotation node the rotations as its displacements.
 #[derive(Clone, Debug)]
 struct ReferenceNodes {
+    /// The name of the reference point, for the name of its set.
+    name: String,
     reference: NodeId,
     rotation: NodeId,
     set: Option<String>,
@@ -1166,19 +1202,19 @@ impl<'a> Sets<'a> {
     }
 
     /// The nodes of the rigid body a reference point drives.
-    fn reference_nodes(&mut self, item: &str, point: &str) -> Result<ReferenceNodes, WriteError> {
-        let Some(nodes) = self.reference_nodes.get(point).cloned() else {
+    fn reference_nodes(&mut self, item: &str, point: Id) -> Result<ReferenceNodes, WriteError> {
+        let Some(nodes) = self.reference_nodes.get(&point).cloned() else {
             return Err(WriteError::UnknownReferencePoint {
                 item: item.to_string(),
                 point: point.to_string(),
             });
         };
         if nodes.set.is_none() {
-            let set = self.free_name("Internal_Selection", &name(point));
+            let set = self.free_name("Internal_Selection", &name(&nodes.name));
             self.node_sets.push((set.clone(), vec![nodes.reference]));
-            self.reference_nodes.get_mut(point).unwrap().set = Some(set);
+            self.reference_nodes.get_mut(&point).unwrap().set = Some(set);
         }
-        Ok(self.reference_nodes[point].clone())
+        Ok(self.reference_nodes[&point].clone())
     }
 
     /// Node set holding the nodes of a region.
@@ -1186,7 +1222,7 @@ impl<'a> Sets<'a> {
         match region {
             Region::NodeSet(set) => return Ok(set.clone()),
             Region::ReferencePoint(point) => {
-                return Ok(self.reference_nodes(item, point)?.set.unwrap());
+                return Ok(self.reference_nodes(item, *point)?.set.unwrap());
             }
             Region::Surface(surface) => {
                 if let Some((_, nodes)) = self.surface_sets.get(surface) {
@@ -1423,40 +1459,40 @@ fn amplitudes(model: &FeModel) -> Result<Vec<ir::amplitude::Amplitude>, WriteErr
 fn amplitude_parameter(
     amplitudes: &[Amplitude],
     item: &str,
-    reference: &Option<String>,
+    reference: &Option<Id>,
 ) -> Result<Option<String>, WriteError> {
     let Some(reference) = reference else {
         return Ok(None);
     };
-    if !amplitudes.iter().any(|a| &a.name == reference) {
+    let Some(amplitude) = amplitudes.iter().find(|a| a.id == *reference) else {
         return Err(WriteError::UnknownAmplitude {
             item: item.to_owned(),
-            amplitude: reference.clone(),
+            amplitude: reference.to_string(),
         });
-    }
-    Ok(Some(ir_name(&name(reference))))
+    };
+    Ok(Some(ir_name(&name(&amplitude.name))))
 }
 
 /// The distribution an item scales its value by, ready to sample; `None` without one.
 fn distribution(
     model: &FeModel,
     item: &str,
-    reference: &Option<String>,
+    reference: &Option<Id>,
 ) -> Result<Option<Sampler>, WriteError> {
-    let Some(name) = reference else {
+    let Some(id) = *reference else {
         return Ok(None);
     };
-    let Some(distribution) = model.distribution(name) else {
+    let Some(distribution) = model.distribution(id) else {
         return Err(WriteError::UnknownDistribution {
             item: item.to_owned(),
-            distribution: name.clone(),
+            distribution: id.to_string(),
         });
     };
     (distribution.sampler(model.properties.units))
         .map(Some)
         .map_err(|reason| WriteError::InvalidDistribution {
             item: item.to_owned(),
-            distribution: name.clone(),
+            distribution: distribution.name.clone(),
             reason,
         })
 }
@@ -1554,13 +1590,13 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<SectionsAndProfiles, Wri
     let mut comments = Vec::new();
     let mut owners = Vec::new();
     for (index, section) in model.sections.iter().enumerate() {
-        if !model.materials.iter().any(|m| m.name == section.material) {
+        let Some(material) = section.material.and_then(|m| model.material(m)) else {
             return Err(WriteError::UnknownMaterial {
                 item: section.name.clone(),
-                material: section.material.clone(),
+                material: model.name_or_missing(section.material),
             });
-        }
-        let material = ir_name(&name(&section.material));
+        };
+        let material = ir_name(&name(&material.name));
         match &section.kind {
             SectionKind::Solid => {
                 let set = sets.element_set(&section.name, &section.region)?;
@@ -1721,10 +1757,13 @@ fn profile_of(
     section: &str,
     beam: &BeamSection,
 ) -> Result<BeamProfile, WriteError> {
-    let cross_section = model.cross_section(&beam.cross_section);
+    let cross_section = beam.cross_section.and_then(|c| model.cross_section(c));
     (cross_section.map(|c| c.profile.clone())).ok_or_else(|| WriteError::InvalidSection {
         item: section.to_owned(),
-        reason: format!("Cross-Section {} does not exist", beam.cross_section),
+        reason: match beam.cross_section {
+            None => "The beam section has no cross-section".into(),
+            Some(_) => "The cross-section does not exist".into(),
+        },
     })
 }
 
@@ -1827,10 +1866,10 @@ fn constraints(
             // Moved to the model's node ties when the project was read.
             Constraint::NodeTie(_) => {}
             Constraint::RigidBody(body) => {
-                let Some(point) = model.reference_point(&body.reference_point) else {
+                let Some(point) = model.reference_point(body.reference_point) else {
                     return Err(WriteError::UnknownReferencePoint {
                         item: body.name.clone(),
-                        point: body.reference_point.clone(),
+                        point: body.reference_point.to_string(),
                     });
                 };
                 // Both nodes sit on the reference point.
@@ -1839,8 +1878,9 @@ fn constraints(
                 generated.nodes.push((reference, point.position));
                 generated.nodes.push((rotation, point.position));
                 sets.reference_nodes.insert(
-                    body.reference_point.clone(),
+                    body.reference_point,
                     ReferenceNodes {
+                        name: point.name.clone(),
                         reference,
                         rotation,
                         set: None,
@@ -1881,7 +1921,7 @@ fn constraints(
             if let Some(&(_, _, nodes)) = (sets.remote_points.iter())
                 .find(|(r, p, _)| *r == bc.region && p.same_point(remote))
             {
-                (sets.remote_names.entry(bc.name.clone())).or_insert((nodes, behavior));
+                (sets.remote_names.entry(bc.id)).or_insert((nodes, behavior));
                 continue;
             }
             // An error is about the boundary condition of this step, whatever the others of
@@ -1913,7 +1953,7 @@ fn constraints(
                 model,
                 generated,
             )?;
-            (sets.remote_names.entry(bc.name.clone())).or_insert((nodes, behavior));
+            (sets.remote_names.entry(bc.id)).or_insert((nodes, behavior));
         }
     }
     // A remote force drives its region from a point of its own the same way, or from the
@@ -1925,11 +1965,11 @@ fn constraints(
         }
         let spec = force.point();
         let load = &model.steps[s].loads[i];
-        // Node history outputs find the point by the load's name.
+        // Node history outputs find the point by the load's id.
         if let Some(&(_, _, nodes)) =
             (sets.remote_points.iter()).find(|(r, p, _)| r == region && p.same_point(&spec))
         {
-            (sets.remote_names.entry(load.name.clone())).or_insert((nodes, force.behavior));
+            (sets.remote_names.entry(load.id)).or_insert((nodes, force.behavior));
             continue;
         }
         *lowering = Some(s);
@@ -1958,7 +1998,7 @@ fn constraints(
             model,
             generated,
         )?;
-        (sets.remote_names.entry(load.name.clone())).or_insert((nodes, force.behavior));
+        (sets.remote_names.entry(load.id)).or_insert((nodes, force.behavior));
     }
     *lowering = None;
     for t in model.ties.iter().filter(|t| t.active) {
@@ -2306,7 +2346,7 @@ impl InteractionDefaults {
         young: &plx_model::ElementYoung,
     ) -> Self {
         let pairs: Vec<&ContactPair> = (model.contact_pairs.iter())
-            .filter(|p| p.active && p.interaction == interaction.name)
+            .filter(|p| p.active && p.interaction == Some(interaction.id))
             .collect();
         let softest = |penalty_only: bool| {
             (pairs.iter())
@@ -2431,7 +2471,7 @@ fn interaction(
 }
 
 /// Master and slave surface of each active contact pair, by the pair's name.
-type PairSurfaces = BTreeMap<String, (String, String)>;
+type PairSurfaces = BTreeMap<Id, (String, String)>;
 
 /// Contact pairs: slave surface first; with
 /// their clearances.
@@ -2450,12 +2490,12 @@ fn contact_pairs(
     let (mut pairs, mut clearances) = (Vec::new(), Vec::new());
     let mut surfaces = PairSurfaces::new();
     for pair in model.contact_pairs.iter().filter(|p| p.active) {
-        if !(model.surface_interactions.iter()).any(|s| s.name == pair.interaction) {
+        let Some(interaction) = pair.interaction.and_then(|i| model.surface_interaction(i)) else {
             return Err(WriteError::UnknownInteraction {
                 item: pair.name.clone(),
-                interaction: pair.interaction.clone(),
+                interaction: model.name_or_missing(pair.interaction),
             });
-        }
+        };
         let master = sets.surface(&pair.name, "Master", &pair.master)?;
         let slave = sets.surface(&pair.name, "Slave", &pair.slave)?;
         let kind = match pair.method {
@@ -2470,7 +2510,7 @@ fn contact_pairs(
             }
         };
         pairs.push(c::ContactPair {
-            interaction: ir_name(&name(&pair.interaction)),
+            interaction: ir_name(&name(&interaction.name)),
             kind,
             small_sliding: pair.method == ContactMethod::NodeToSurface && pair.small_sliding,
             adjust: (pair.adjust).then(|| c::Adjust::Distance(pair.adjustment_size.unwrap_or(0.0))),
@@ -2484,7 +2524,7 @@ fn contact_pairs(
                 value,
             });
         }
-        surfaces.insert(pair.name.clone(), (master, slave));
+        surfaces.insert(pair.id, (master, slave));
     }
     Ok((pairs, clearances, surfaces))
 }
@@ -2965,7 +3005,7 @@ fn step_block<'f>(
         if !bc.active || !step.kind.supports_boundary(&bc.kind) {
             continue;
         }
-        let on_point = sets.remote_names.contains_key(&bc.name)
+        let on_point = sets.remote_names.contains_key(&bc.id)
             && matches!(
                 formulation(model, sets.mesh, &step.name, &bc.name),
                 Some(Formulation::Point(_))
@@ -3038,21 +3078,18 @@ fn step_block<'f>(
             None => None,
         };
         // Symmetry supports stay zero; an amplitude would not change them.
-        let reference = bc.amplitude.as_ref().filter(|_| bc.kind.takes_amplitude());
-        let amplitude = amplitude_parameter(amplitudes, &bc.name, &reference.cloned())?;
+        let reference = bc.amplitude.filter(|_| bc.kind.takes_amplitude());
+        let amplitude = amplitude_parameter(amplitudes, &bc.name, &reference)?;
         let mut items = Vec::new();
         match bc.kind {
             BoundaryKind::Displacement(ref displacement) => {
                 let values = displacement.values;
                 // A coordinate system of its own turns the directions of the nodes.
-                if displacement.system != plx_model::GLOBAL && rotation_node.is_none() {
-                    let system = (model.coordinate_system_or_global(&displacement.system))
+                if displacement.system.is_some() && rotation_node.is_none() {
+                    let system = (model.coordinate_system_or_global(displacement.system))
                         .ok_or_else(|| WriteError::InvalidBoundary {
                             item: bc.name.clone(),
-                            reason: format!(
-                                "Coordinate System {} does not exist",
-                                displacement.system
-                            ),
+                            reason: "The coordinate system does not exist".into(),
                         })?;
                     let invalid = |reason: String| WriteError::InvalidBoundary {
                         item: bc.name.clone(),
@@ -3556,9 +3593,9 @@ fn contact_changes(
                 master: ir_name(master),
             });
         }
-        let pair = (model.contact_pairs.iter()).find(|p| p.name == change.region);
+        let pair = model.contact_pair(change.region);
         let friction = pair
-            .and_then(|p| (model.surface_interactions.iter()).find(|i| i.name == p.interaction))
+            .and_then(|p| model.surface_interaction(p.interaction?))
             .and_then(|i| {
                 i.properties.iter().find_map(|p| match p {
                     InteractionProperty::Friction(f) => Some((i, f)),
@@ -4179,12 +4216,12 @@ fn history_output(
             request.set = None;
             if output.variables.iter().any(|v| v == "CF") {
                 let (master, slave) =
-                    pair_surfaces
-                        .get(pair)
-                        .ok_or_else(|| WriteError::UnknownContactPair {
+                    (pair.and_then(|p| pair_surfaces.get(&p))).ok_or_else(|| {
+                        WriteError::UnknownContactPair {
                             item: output.name.clone(),
-                            pair: pair.clone(),
-                        })?;
+                            pair: pair.map_or_else(|| "(none)".into(), |p| p.to_string()),
+                        }
+                    })?;
                 request.surfaces = Some((ir_name(slave), ir_name(master)));
             }
             Card::ContactPrint(request)
@@ -4205,14 +4242,14 @@ fn point_nodes(
             Some(nodes) => Ok(([nodes.reference, nodes.rotation], RemoteBehavior::Rigid)),
             None => Err(WriteError::UnknownReferencePoint {
                 item: item.to_string(),
-                point: point.clone(),
+                point: point.to_string(),
             }),
         },
         Region::RemotePoint(point) => match sets.remote_names.get(point) {
             Some(&nodes) => Ok(nodes),
             None => Err(WriteError::UnknownRemotePoint {
                 item: item.to_string(),
-                point: point.clone(),
+                point: point.to_string(),
             }),
         },
         _ => unreachable!("not a point"),

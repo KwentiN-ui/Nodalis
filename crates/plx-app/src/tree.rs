@@ -1831,8 +1831,8 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
         // Before the contacts, whose menus create outputs in the steps.
         tree.step_names = fe.steps.iter().map(|s| s.name.clone()).collect();
         for (r, region) in fe.contact_regions.iter().enumerate() {
-            let detection = (region.detected_by.as_deref())
-                .and_then(|name| fe.contact_detections.iter().position(|d| d.name == name));
+            let detection = (region.detected_by)
+                .and_then(|id| fe.contact_detections.iter().position(|d| d.id == id));
             if let Some(d) = detection {
                 tree.detected.insert(r, d);
             }

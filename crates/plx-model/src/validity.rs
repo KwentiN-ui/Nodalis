@@ -4,7 +4,7 @@
 
 use plx_mesh::FeMesh;
 
-use crate::{Constraint, FeModel, LoadKind, Region, Section, SectionKind, line_tangent};
+use crate::{Constraint, FeModel, Id, LoadKind, Region, Section, SectionKind, line_tangent};
 
 /// An item of the model that can refer to something else.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -158,15 +158,20 @@ impl FeModel {
     pub fn invalid_items(&self, mesh: &FeMesh) -> Vec<Invalid> {
         let mut invalid = Vec::new();
         for (i, section) in self.sections.iter().enumerate() {
-            let reason = if !self.materials.iter().any(|m| m.name == section.material) {
-                Some(format!("Material {} does not exist", section.material))
+            let reason = if section.material.and_then(|m| self.material(m)).is_none() {
+                Some(match section.material {
+                    None => "The section has no material".into(),
+                    Some(_) => "The material of the section does not exist".into(),
+                })
             } else if let SectionKind::Beam(beam) = &section.kind
-                && self.cross_section(&beam.cross_section).is_none()
+                && beam
+                    .cross_section
+                    .and_then(|c| self.cross_section(c))
+                    .is_none()
             {
-                Some(if beam.cross_section.is_empty() {
-                    "The beam section has no cross-section".into()
-                } else {
-                    format!("Cross-Section {} does not exist", beam.cross_section)
+                Some(match beam.cross_section {
+                    None => "The beam section has no cross-section".into(),
+                    Some(_) => "The cross-section of the beam section does not exist".into(),
                 })
             } else {
                 section.region.missing_reference(mesh)
@@ -193,7 +198,7 @@ impl FeModel {
                     .find_map(|region| region.missing_reference(mesh))
                     .or_else(|| match constraint {
                         Constraint::RigidBody(body) => {
-                            self.missing_reference_point(&body.reference_point)
+                            self.missing_reference_point(body.reference_point)
                         }
                         _ => None,
                     }),
@@ -206,12 +211,11 @@ impl FeModel {
             }
         }
         for (i, pair) in self.contact_pairs.iter().enumerate() {
-            let reason = if !(self.surface_interactions.iter()).any(|s| s.name == pair.interaction)
+            let reason = if (pair.interaction)
+                .and_then(|i| self.surface_interaction(i))
+                .is_none()
             {
-                Some(format!(
-                    "Surface Interaction {} does not exist",
-                    pair.interaction
-                ))
+                Some("The surface interaction of the contact pair does not exist".into())
             } else {
                 master_slave_reference(&pair.master, &pair.slave, mesh)
             };
@@ -279,14 +283,9 @@ impl FeModel {
                                     &Default::default(),
                                 ))
                                 .err(),
-                                _ => (self.coordinate_system_or_global(&displacement.system))
+                                _ => (self.coordinate_system_or_global(displacement.system))
                                     .is_none()
-                                    .then(|| {
-                                        format!(
-                                            "Coordinate System {} does not exist",
-                                            displacement.system
-                                        )
-                                    }),
+                                    .then(|| "The coordinate system does not exist".into()),
                             }
                         }
                         _ => None,
@@ -343,10 +342,10 @@ impl FeModel {
         for (s, step) in self.steps.iter().enumerate() {
             for (i, output) in step.history_outputs.iter().enumerate() {
                 let reason = match &output.kind {
-                    crate::HistoryKind::Contact { pair } => {
-                        (!self.contact_pair_names().contains(&pair.as_str()))
-                            .then(|| format!("Contact Pair {pair} does not exist"))
-                    }
+                    crate::HistoryKind::Contact { pair } => (pair)
+                        .and_then(|p| self.contact_name(p))
+                        .is_none()
+                        .then(|| "The contact pair does not exist".into()),
                     kind => kind.region().and_then(|r| {
                         r.missing_reference(mesh)
                             .or_else(|| self.missing_region_point(r))
@@ -408,42 +407,43 @@ impl FeModel {
         invalid
     }
 
-    /// The reference point, if the model has none of that name.
-    fn missing_reference_point(&self, name: &str) -> Option<String> {
-        (self.reference_point(name).is_none())
-            .then(|| format!("Reference Point {name} does not exist"))
+    /// The reference point, if the model does not have it.
+    fn missing_reference_point(&self, id: Id) -> Option<String> {
+        (self.reference_point(id).is_none()).then(|| "The reference point does not exist".into())
     }
 
-    /// The reference point of a region on one, if the model has none of that name.
+    /// The reference point of a region on one, if the model does not have it.
     fn missing_region_point(&self, region: &Region) -> Option<String> {
         region
             .reference_point()
-            .and_then(|name| self.missing_reference_point(name))
+            .and_then(|id| self.missing_reference_point(id))
     }
 
-    /// The displacement of a region on its point, if the model has none of that name written
+    /// The displacement of a region on its point, if the model does not have it written
     /// with a point.
     fn missing_remote_point(&self, mesh: &FeMesh, region: &Region) -> Option<String> {
-        let name = region.remote_point()?;
-        (self.remote_point_named(mesh, name).is_none())
-            .then(|| format!("Displacement or Remote Force {name} does not exist or has no point"))
+        let id = region.remote_point()?;
+        (self.remote_point_of(mesh, id).is_none()).then(|| match self.remote_item_name(id) {
+            Some(name) => format!("Displacement or Remote Force {name} has no point"),
+            None => "The displacement or remote force does not exist".into(),
+        })
     }
 
-    /// The distribution reference, if it names no distribution of the model.
-    fn missing_distribution(&self, reference: &Option<String>) -> Option<String> {
-        (reference.as_deref())
-            .filter(|name| self.distribution(name).is_none())
-            .map(|name| format!("Distribution {name} does not exist"))
+    /// The distribution reference, if the model does not have it.
+    fn missing_distribution(&self, reference: &Option<Id>) -> Option<String> {
+        (*reference)
+            .filter(|&id| self.distribution(id).is_none())
+            .map(|_| "The distribution does not exist".into())
     }
 
-    /// The first of the amplitude references that names no amplitude of the model.
+    /// The first of the amplitude references the model does not have.
     fn missing_amplitude<'a>(
         &self,
-        references: impl IntoIterator<Item = &'a Option<String>>,
+        references: impl IntoIterator<Item = &'a Option<Id>>,
     ) -> Option<String> {
         (references.into_iter().flatten())
-            .find(|name| self.amplitude(name).is_none())
-            .map(|name| format!("Amplitude {name} does not exist"))
+            .find(|&&id| self.amplitude(id).is_none())
+            .map(|_| "The amplitude does not exist".into())
     }
 }
 
@@ -462,15 +462,12 @@ impl Section {
             }
             SectionKind::Beam(beam) => match profile {
                 None => {
-                    return Some(format!(
-                        "Cross-Section {} does not exist",
-                        beam.cross_section
-                    ));
+                    return Some("The cross-section does not exist".into());
                 }
                 Some(profile) if !profile.is_valid() => {
+                    let name = fe.name_or_missing(beam.cross_section);
                     return Some(format!(
-                        "The profile dimensions of Cross-Section {} are invalid",
-                        beam.cross_section
+                        "The profile dimensions of Cross-Section {name} are invalid"
                     ));
                 }
                 // The axis of CalculiX's general beam runs through the centroid.
@@ -624,6 +621,7 @@ mod tests {
     fn model() -> FeModel {
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::Id::new(),
             distribution: None,
             name: "Fixed-1".into(),
             active: true,
@@ -632,9 +630,11 @@ mod tests {
             kind: BoundaryKind::displacement([Some(0.0); 6]),
             amplitude: None,
         });
+        let steel = crate::Id::new();
         FeModel {
             properties: Default::default(),
             materials: vec![Material {
+                id: steel,
                 name: "Steel".into(),
                 density: None,
                 elastic: None,
@@ -642,7 +642,7 @@ mod tests {
             }],
             sections: vec![Section {
                 name: "Section-1".into(),
-                material: "Steel".into(),
+                material: Some(steel),
                 region: Region::Parts(vec!["PART-1".into()]),
                 thickness: 1.0,
                 kind: SectionKind::Solid,
@@ -660,15 +660,17 @@ mod tests {
     #[test]
     fn beam_section_without_its_cross_section_is_invalid() {
         let mut model = model();
+        let tube = crate::Id::new();
         model.sections[0].kind = SectionKind::Beam(crate::BeamSection {
-            cross_section: "Tube".into(),
+            cross_section: Some(tube),
             ..crate::BeamSection::DEFAULT
         });
         let invalid = model.invalid_items(&mesh());
         assert_eq!(invalid.len(), 1);
         assert_eq!(invalid[0].item, ModelItem::Section(0));
-        assert!(invalid[0].reason.contains("Cross-Section Tube"));
+        assert!(invalid[0].reason.contains("does not exist"));
         model.cross_sections.push(crate::CrossSection {
+            id: tube,
             name: "Tube".into(),
             profile: crate::BeamProfile::Pipe {
                 radius: 1.0,
@@ -688,7 +690,7 @@ mod tests {
         let invalid = model.invalid_items(&mesh());
         assert_eq!(invalid.len(), 1);
         assert_eq!(invalid[0].item, ModelItem::Section(0));
-        assert!(invalid[0].reason.contains("Steel"));
+        assert!(invalid[0].reason.contains("material"));
         model.materials.push(steel);
         assert_eq!(model.invalid_items(&mesh()), []);
     }
@@ -697,13 +699,14 @@ mod tests {
     fn references_follow_amplitudes() {
         let mesh = mesh();
         let mut model = model();
-        model.steps[0].boundary_conditions[0].amplitude = Some("Ramp".into());
+        let ramp = crate::Amplitude::new("Ramp");
+        model.steps[0].boundary_conditions[0].amplitude = Some(ramp.id);
         let invalid = model.invalid_items(&mesh);
         assert_eq!(invalid[0].item, ModelItem::BoundaryCondition(0, 0));
-        assert!(invalid[0].reason.contains("Ramp"));
-        model.amplitudes.push(crate::Amplitude::new("Ramp"));
+        assert!(invalid[0].reason.contains("amplitude"));
+        model.amplitudes.push(ramp);
         assert_eq!(model.invalid_items(&mesh), []);
-        model.rename_amplitude("Ramp", "Ramp-2");
+        // A renamed amplitude is still the one of the boundary condition.
         model.amplitudes[0].name = "Ramp-2".into();
         assert_eq!(model.invalid_items(&mesh), []);
         model.amplitudes[0].points.clear();
@@ -750,14 +753,16 @@ mod tests {
     fn contact_pair_needs_its_interaction_and_surfaces() {
         let mesh = mesh();
         let mut model = model();
-        let mut pair = ContactPair::new("Contact_Pair-1", "Surface_Interaction-1");
+        let interaction = crate::Id::new();
+        let mut pair = ContactPair::new("Contact_Pair-1", Some(interaction));
         pair.master = Region::Faces(vec![(1, 1)]);
         pair.slave = Region::Faces(vec![(1, 2)]);
         model.contact_pairs.push(pair);
         let invalid = model.invalid_items(&mesh);
         assert_eq!(invalid[0].item, ModelItem::ContactPair(0));
-        assert!(invalid[0].reason.contains("Surface_Interaction-1"));
+        assert!(invalid[0].reason.contains("surface interaction"));
         model.surface_interactions.push(SurfaceInteraction {
+            id: interaction,
             name: "Surface_Interaction-1".into(),
             properties: Vec::new(),
         });

@@ -210,24 +210,24 @@ fn exported_as(model: &Model, bolt: &Bolt) -> String {
     text
 }
 
-/// The step actions of the bolt named `name`, one per step, for the dialog.
-pub fn step_actions(fe: &FeModel, name: &str) -> Vec<Option<BoltAction>> {
+/// The step actions of the bolt, one per step, for the dialog.
+pub fn step_actions(fe: &FeModel, bolt: plx_model::Id) -> Vec<Option<BoltAction>> {
     (fe.steps.iter())
         .map(|step| {
             (step.bolt_changes.iter())
-                .find(|c| c.bolt == name)
+                .find(|c| c.bolt == bolt)
                 .map(|c| c.action)
         })
         .collect()
 }
 
-/// Stores the step actions of the dialog with the bolt named `name`.
-pub fn set_step_actions(fe: &mut FeModel, name: &str, actions: &[Option<BoltAction>]) {
+/// Stores the step actions of the dialog with the bolt.
+pub fn set_step_actions(fe: &mut FeModel, bolt: plx_model::Id, actions: &[Option<BoltAction>]) {
     for (step, action) in fe.steps.iter_mut().zip(actions) {
-        step.bolt_changes.retain(|c| c.bolt != name);
+        step.bolt_changes.retain(|c| c.bolt != bolt);
         if let Some(action) = action {
             step.bolt_changes.push(plx_model::BoltChange {
-                bolt: name.to_owned(),
+                bolt,
                 action: *action,
             });
         }

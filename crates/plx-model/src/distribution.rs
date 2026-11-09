@@ -11,6 +11,8 @@ use crate::units::{Quantity, UnitSystem};
 /// A factor over the model, given by an equation or by points with a value each.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Distribution {
+    /// The internal identity other items refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     pub kind: DistributionKind,
 }
@@ -61,6 +63,7 @@ impl Distribution {
     /// A distribution with the factor 1 everywhere.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             kind: DistributionKind::Equation("=1".into()),
         }
@@ -287,6 +290,7 @@ mod tests {
 
     fn points(points: Vec<[f64; 4]>, interpolation: Interpolation) -> Distribution {
         Distribution {
+            id: crate::Id::new(),
             name: "D".into(),
             kind: DistributionKind::Points {
                 source: "points.txt".into(),

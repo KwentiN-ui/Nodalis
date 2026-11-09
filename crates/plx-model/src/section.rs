@@ -17,7 +17,8 @@ use crate::{BeamProfile, Region};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Section {
     pub name: String,
-    pub material: String,
+    /// The material of the section; `None` until one is chosen.
+    pub material: Option<crate::Id>,
     pub region: Region,
     /// Thickness of plane stress and plane strain elements; other models ignore it.
     #[serde(default = "unit_thickness")]
@@ -227,9 +228,9 @@ pub fn membrane_type(shell_type: &str) -> Option<&'static str> {
 /// axis.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BeamSection {
-    /// Name of the [`crate::CrossSection`] of the model the beam has.
+    /// The [`crate::CrossSection`] of the model the beam has; `None` until one is chosen.
     #[serde(default)]
-    pub cross_section: String,
+    pub cross_section: Option<crate::Id>,
     #[serde(default)]
     pub orientation: BeamOrientation,
     /// Offset of the beam axis from the nodes in the 1- and 2-direction, in multiples of
@@ -240,7 +241,7 @@ pub struct BeamSection {
 
 impl BeamSection {
     pub const DEFAULT: BeamSection = BeamSection {
-        cross_section: String::new(),
+        cross_section: None,
         orientation: BeamOrientation::Automatic,
         offset: [0.0, 0.0],
     };
@@ -430,19 +431,19 @@ mod tests {
 
     #[test]
     fn beam_sections_name_their_cross_section() {
-        let text = r#"(cross_section: "Tube", orientation: Automatic, offset: (0.0, 0.5))"#;
+        let text = r#"(cross_section: Some(5), orientation: Automatic, offset: (0.0, 0.5))"#;
         let beam: BeamSection = ron::from_str(text).unwrap();
-        assert_eq!(beam.cross_section, "Tube");
+        assert_eq!(beam.cross_section.map(|id| id.raw()), Some(5));
         // A beam section saved with its own profile reads without a cross-section, which
         // the model checks then ask for.
         let text = r#"(profile: Rect(a: 1.0, b: 2.0), orientation: Automatic)"#;
         let beam: BeamSection = ron::from_str(text).unwrap();
-        assert_eq!(beam.cross_section, "");
+        assert_eq!(beam.cross_section, None);
     }
 
     #[test]
     fn sections_of_old_projects_are_solid() {
-        let text = r#"(name: "S", material: "M", region: Parts(["P"]))"#;
+        let text = r#"(name: "S", material: Some(3), region: Parts(["P"]))"#;
         let section: Section = ron::from_str(text).unwrap();
         assert_eq!(section.kind, SectionKind::Solid);
         // One millimetre, in SI units.

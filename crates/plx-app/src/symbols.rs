@@ -50,9 +50,9 @@ const CIRCLE_SEGMENTS: usize = 16;
 pub enum Kind {
     Load(LoadKind),
     Boundary(BoundaryKind),
-    /// A rigid body driven by the named reference point.
+    /// A rigid body driven by the reference point.
     RigidBody {
-        reference_point: String,
+        reference_point: plx_model::Id,
     },
     /// Springs with their stiffness K1..K3, to ground or to a surface.
     Spring {
@@ -71,7 +71,7 @@ impl Kind {
         Some(match constraint {
             Constraint::RigidBody(body) => (
                 Kind::RigidBody {
-                    reference_point: body.reference_point.clone(),
+                    reference_point: body.reference_point,
                 },
                 body.region.clone(),
             ),
@@ -160,9 +160,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
         match item.kind {
             // Lines from nodes spread over the region to the reference point, half as dense
             // as the arrows of loads.
-            Kind::RigidBody {
-                ref reference_point,
-            } => {
+            Kind::RigidBody { reference_point } => {
                 let Some(point) = model.fe.reference_point(reference_point) else {
                     continue;
                 };
@@ -500,8 +498,8 @@ impl Visible {
 
 fn node_points(model: &Model, region: &Region, visible: &Visible) -> Vec<DVec3> {
     // A reference point has no node; its symbols sit on the point itself.
-    if let Region::ReferencePoint(name) = region {
-        return (model.fe.reference_point(name).into_iter())
+    if let Region::ReferencePoint(id) = region {
+        return (model.fe.reference_point(*id).into_iter())
             .map(|point| DVec3::from(point.position))
             .collect();
     }
@@ -900,13 +898,14 @@ mod tests {
         let mesh = plx_io::inp::read_inp(&path).unwrap().mesh;
         let mut model = Model::new(&path, mesh);
         model.fe.reference_points.push(plx_model::ReferencePoint {
+            id: crate::test_ids::named("RP-1"),
             name: "RP-1".into(),
             position: [130.0, 5.0, 5.0],
             definition: Default::default(),
         });
         let item = |reference_point: &str| Item {
             kind: Kind::RigidBody {
-                reference_point: reference_point.into(),
+                reference_point: crate::test_ids::named(reference_point),
             },
             region: Region::Surface("TIP".into()),
             selected: false,

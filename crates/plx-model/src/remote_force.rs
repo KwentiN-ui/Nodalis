@@ -9,8 +9,10 @@ use std::collections::BTreeSet;
 use plx_mesh::{FeMesh, NodeId};
 use serde::{Deserialize, Serialize};
 
-use crate::features::GLOBAL;
-use crate::{Behavior, Displacement, FeModel, LoadKind, ModelSpace, Region, RemoteBehavior};
+use crate::{Behavior, Displacement, FeModel, Id, LoadKind, ModelSpace, Region, RemoteBehavior};
+
+/// An item by its id, with its name to show.
+pub type NamedId<'a> = (Id, &'a str);
 
 /// Force and moment at a point the selection of the load follows.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -21,8 +23,8 @@ pub struct RemoteForce {
     pub moment: [f64; 3],
     /// How the selection follows the point.
     pub behavior: RemoteBehavior,
-    /// Coordinate system of the location and of the directions, by name ([`GLOBAL`]).
-    pub system: String,
+    /// Coordinate system of the location and of the directions; `None` is the global one.
+    pub system: Option<crate::Id>,
     /// Coordinates of the point in `system`; `None` is the centre of the selection.
     pub location: Option<[f64; 3]>,
     /// Only the nodes within this distance of the point take part, Ansys' pinball region.
@@ -35,7 +37,7 @@ impl Default for RemoteForce {
             force: [0.0; 3],
             moment: [0.0; 3],
             behavior: RemoteBehavior::Rigid,
-            system: GLOBAL.into(),
+            system: None,
             location: None,
             pinball: None,
         }
@@ -52,7 +54,7 @@ impl RemoteForce {
                 RemoteBehavior::Rigid => Behavior::Rigid,
                 RemoteBehavior::Deformable => Behavior::Deformable,
             },
-            system: self.system.clone(),
+            system: self.system,
             location: self.location,
             pinball: self.pinball,
         }
@@ -60,7 +62,7 @@ impl RemoteForce {
 
     /// Takes the location, pinball region and coordinate system of `point` back.
     pub fn set_point(&mut self, point: &Displacement) {
-        self.system = point.system.clone();
+        self.system = point.system;
         self.location = point.location;
         self.pinball = point.pinball;
     }
@@ -73,8 +75,8 @@ impl RemoteForce {
         model: &FeModel,
         position: [f64; 3],
     ) -> Result<([f64; 3], [f64; 3]), String> {
-        let system = (model.coordinate_system_or_global(&self.system))
-            .ok_or_else(|| format!("Coordinate System {} does not exist", self.system))?;
+        let system = (model.coordinate_system_or_global(self.system))
+            .ok_or("The coordinate system does not exist")?;
         let axes = system.directions_at(position)?;
         // The global component k is sum_j axes[j][k] times the local component j.
         let rotate = |local: [f64; 3]| -> [f64; 3] {
@@ -141,30 +143,26 @@ impl FeModel {
 }
 
 impl FeModel {
-    /// The point a node history output on `Region::RemotePoint(name)` prints: that of the
-    /// displacement of the name written with a point, else that of the first remote force of
-    /// the name that has a point of its own (not on a reference point). Its region and how
+    /// The point a node history output on `Region::RemotePoint(id)` prints: that of the
+    /// displacement of the id written with a point, else that of the first remote force of
+    /// the id that has a point of its own (not on a reference point). Its region and how
     /// the region follows it.
-    pub fn remote_point_named(
-        &self,
-        mesh: &FeMesh,
-        name: &str,
-    ) -> Option<(&Region, RemoteBehavior)> {
-        if let Some((s, bc, _)) = self.remote_displacement(mesh, name) {
+    pub fn remote_point_of(&self, mesh: &FeMesh, id: Id) -> Option<(&Region, RemoteBehavior)> {
+        if let Some((s, bc, _)) = self.remote_displacement(mesh, id) {
             let i = (self.steps[s].boundary_conditions.iter()).position(|b| std::ptr::eq(b, bc))?;
             if let Some(crate::Formulation::Point(behavior)) = self.formulation(mesh, s, i) {
                 return Some((&bc.region, behavior));
             }
         }
-        self.remote_force_named(name)
+        self.remote_force_of(id)
             .map(|(region, remote)| (region, remote.behavior))
     }
 
-    /// The first remote force of the name, of any step, that has a point of its own.
-    pub fn remote_force_named(&self, name: &str) -> Option<(&Region, &RemoteForce)> {
+    /// The first remote force of the id, of any step, that has a point of its own.
+    pub fn remote_force_of(&self, id: Id) -> Option<(&Region, &RemoteForce)> {
         (self.steps.iter().flat_map(|step| &step.loads)).find_map(|load| match &load.kind {
             LoadKind::RemoteForce(remote)
-                if load.name == name && load.region.reference_point().is_none() =>
+                if load.id == id && load.region.reference_point().is_none() =>
             {
                 Some((&load.region, remote))
             }
@@ -172,29 +170,29 @@ impl FeModel {
         })
     }
 
-    /// The names of the remote displacements and remote forces with a point, which node
-    /// history outputs can print, each once: displacements first.
-    pub fn remote_point_names(&self, mesh: &FeMesh) -> (Vec<&str>, Vec<&str>) {
-        let mut displacements: Vec<&str> = Vec::new();
+    /// The remote displacements and remote forces with a point, which node history outputs
+    /// can print, each once with its name: displacements first.
+    pub fn remote_points(&self, mesh: &FeMesh) -> (Vec<NamedId<'_>>, Vec<NamedId<'_>>) {
+        let mut displacements: Vec<NamedId> = Vec::new();
         for (s, step) in self.steps.iter().enumerate() {
             for (i, bc) in step.boundary_conditions.iter().enumerate() {
                 if matches!(
                     self.formulation(mesh, s, i),
                     Some(crate::Formulation::Point(_))
-                ) && !displacements.contains(&bc.name.as_str())
+                ) && !displacements.iter().any(|(id, _)| *id == bc.id)
                 {
-                    displacements.push(&bc.name);
+                    displacements.push((bc.id, &bc.name));
                 }
             }
         }
-        let mut forces: Vec<&str> = Vec::new();
+        let mut forces: Vec<(Id, &str)> = Vec::new();
         for load in self.steps.iter().flat_map(|step| &step.loads) {
             if matches!(load.kind, LoadKind::RemoteForce(_))
                 && load.region.reference_point().is_none()
-                && !displacements.contains(&load.name.as_str())
-                && !forces.contains(&load.name.as_str())
+                && !displacements.iter().any(|(id, _)| *id == load.id)
+                && !forces.iter().any(|(id, _)| *id == load.id)
             {
-                forces.push(&load.name);
+                forces.push((load.id, &load.name));
             }
         }
         (displacements, forces)
@@ -227,6 +225,7 @@ mod tests {
         );
         // A system turned 90 degrees about z: local x is global y.
         model.coordinate_systems.push(CoordinateSystem {
+            id: crate::Id::new(),
             name: "Turned".into(),
             kind: CoordinateSystemKind::Rectangular,
             origin: [0.0; 3],
@@ -234,14 +233,14 @@ mod tests {
             point_xy: [-1.0, 0.0, 0.0],
         });
         let turned = RemoteForce {
-            system: "Turned".into(),
+            system: model.coordinate_systems.last().map(|c| c.id),
             ..remote
         };
         let (force, moment) = turned.global(&model, [0.0; 3]).unwrap();
         assert!((force[1] - 10.0).abs() < 1e-9 && force[0].abs() < 1e-9);
         assert!((moment[0] + 5.0).abs() < 1e-9 && moment[1].abs() < 1e-9);
         let missing = RemoteForce {
-            system: "Missing".into(),
+            system: Some(crate::Id::new()),
             ..Default::default()
         };
         assert!(missing.global(&model, [0.0; 3]).is_err());

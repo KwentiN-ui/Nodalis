@@ -76,7 +76,23 @@ mod tests {
     fn libraries_read_back_what_was_saved() {
         let dir = std::env::temp_dir().join(format!("plx-library-{}", std::process::id()));
         let path = dir.join("sub").join("materials.ron");
-        assert_eq!(read_library(&path).unwrap(), MaterialLibrary::default());
+        // Without a file the defaults, whose materials get new ids each time.
+        let without_ids = |library: MaterialLibrary| {
+            let text = format!("{library:?}");
+            (text.split("id: Id(").enumerate())
+                .map(|(i, part)| {
+                    if i == 0 {
+                        part
+                    } else {
+                        part.split_once("), ").unwrap().1
+                    }
+                })
+                .collect::<String>()
+        };
+        assert_eq!(
+            without_ids(read_library(&path).unwrap()),
+            without_ids(MaterialLibrary::default())
+        );
 
         let mut library = MaterialLibrary::default();
         let category = library.add_category(&[]).unwrap();

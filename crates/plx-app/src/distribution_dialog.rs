@@ -176,28 +176,32 @@ pub fn validate(distribution: &Distribution) -> Result<(), String> {
 
 /// The distribution choice of a pressure or temperature: "Uniform" or one of the model's
 /// distributions.
-pub fn distribution_row(ui: &mut Ui, id: &str, reference: &mut Option<String>, fe: &FeModel) {
+pub fn distribution_row(
+    ui: &mut Ui,
+    id: &str,
+    reference: &mut Option<plx_model::Id>,
+    fe: &FeModel,
+) {
     ui.label("Distribution");
-    let text = reference.clone().unwrap_or_else(|| UNIFORM.into());
+    let text = match *reference {
+        None => UNIFORM.to_string(),
+        Some(id) => fe.name_or_missing(Some(id)),
+    };
     egui::ComboBox::from_id_salt(id)
         .selected_text(text)
         .width(crate::dock::fit_width(ui, 200.0))
         .show_ui(ui, |ui| {
             ui.selectable_value(reference, None, UNIFORM);
             for distribution in &fe.distributions {
-                let name = Some(distribution.name.clone());
-                ui.selectable_value(reference, name, &distribution.name);
+                ui.selectable_value(reference, Some(distribution.id), &distribution.name);
             }
         });
     ui.end_row();
-    if let Some(name) = reference.as_deref()
-        && fe.distribution(name).is_none()
+    if let Some(id) = *reference
+        && fe.distribution(id).is_none()
     {
         ui.label("");
-        ui.colored_label(
-            crate::style::error(),
-            format!("Distribution {name} does not exist"),
-        );
+        ui.colored_label(crate::style::error(), "The distribution does not exist");
         ui.end_row();
     }
 }

@@ -24,7 +24,7 @@ pub struct NodeTie {
     pub rotations: bool,
     /// The contact detection that found the tie at line ends; `None` for one made by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detected_by: Option<String>,
+    pub detected_by: Option<crate::Id>,
     /// Changed by the user after its detection: detecting again keeps it as it is.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub edited: bool,
@@ -55,18 +55,18 @@ pub struct RigidBody {
     #[serde(default = "crate::active")]
     pub visible: bool,
     pub region: Region,
-    /// Name of the reference point ([`crate::ReferencePoint`]) the body is driven by.
-    pub reference_point: String,
+    /// The reference point ([`crate::ReferencePoint`]) the body is driven by.
+    pub reference_point: crate::Id,
 }
 
 impl RigidBody {
-    pub fn new(name: impl Into<String>, reference_point: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<String>, reference_point: crate::Id) -> Self {
         Self {
             name: name.into(),
             active: true,
             visible: true,
             region: Region::Faces(Vec::new()),
-            reference_point: reference_point.into(),
+            reference_point,
         }
     }
 }
