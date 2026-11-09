@@ -338,6 +338,8 @@ pub struct TreeResponse {
     pub delete: Option<TreeItem>,
     /// Activate a deactivated step, boundary condition or load, or deactivate an active one.
     pub toggle_active: Option<TreeItem>,
+    /// Open the step overview, items against steps.
+    pub step_overview: bool,
     /// Move a step one place up (`true`) or down in the list of steps.
     pub move_step: Option<(usize, bool)>,
     /// Swap master and slave of a tie, spring connection or contact pair.
@@ -1215,6 +1217,18 @@ impl Tree<'_> {
                     }
                     if ui.button("Collapse All").clicked() {
                         self.state.expand = Some((self.view, item.clone(), false));
+                    }
+                    if item == TreeItem::Group("Steps")
+                        && self.view == TreeView::FeModel
+                        && ui
+                            .button("Step Overview")
+                            .on_hover_text(
+                                "What every step has: boundary conditions, loads, defined \
+                                 fields and model-wide items against the steps.",
+                            )
+                            .clicked()
+                    {
+                        self.response.step_overview = true;
                     }
                 }
                 if editable {

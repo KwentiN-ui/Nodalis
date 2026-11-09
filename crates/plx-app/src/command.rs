@@ -177,6 +177,7 @@ pub enum Cmd {
     NodeTie,
     ContactWorksheet,
     ConnectionSettings,
+    StepOverview,
     Step,
     BoundaryCondition,
     Load,
@@ -1445,6 +1446,17 @@ fn build() -> Vec<Command> {
         Tree(TreeIcon::HistoryOutput),
         "",
         "Values printed for a region in the last step.",
+    ));
+    add(command(
+        C::StepOverview,
+        "Step\nOverview",
+        f,
+        t,
+        "Review",
+        Shape(Glyph::Worksheet),
+        "",
+        "What every step has: boundary conditions, loads, defined fields and model-wide \
+         items against the steps.",
     ));
 
     // Results workspace: File holds what reads and writes results.

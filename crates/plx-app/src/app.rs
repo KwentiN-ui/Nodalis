@@ -184,6 +184,8 @@ struct Workbench {
     problems_tab_before: bool,
     /// The table of all contact regions is open.
     contact_worksheet: bool,
+    /// The step overview, items against steps, is open.
+    step_overview: bool,
     /// Open mesh tool: transform parts, merge nodes or renumber.
     mesh_tool: Option<MeshToolDialog>,
     /// The Query tool, while its window is open.
@@ -341,6 +343,7 @@ impl AnalysisWindow {
                 analysis_tab_before: false,
                 problems_tab_before: false,
                 contact_worksheet: false,
+                step_overview: false,
                 mesh_tool: None,
                 query: None,
                 material_library: None,
@@ -1586,6 +1589,7 @@ impl AnalysisWindow {
         self.workbench.confirm_remove_results(&ctx);
         self.workbench.toast(&ctx);
         self.workbench.contact_worksheet_window(&ctx);
+        self.workbench.step_overview_window(&ctx);
         self.workbench.mesh_tool_window(&ctx);
         self.workbench.query_window(&ctx);
         self.workbench.section_window(&ctx);
@@ -2396,6 +2400,9 @@ impl Workbench {
         }
         if let Some(kind) = response.create {
             self.create(kind);
+        }
+        if response.step_overview {
+            self.step_overview = true;
         }
         if let Some(item) = response.delete {
             // A part or item among several selected ones deletes them all.
@@ -4718,6 +4725,42 @@ impl Workbench {
         let results = self.results.get(self.current_result);
         crate::connections::worksheet(ctx, &mut open, model, results, &mut self.tree);
         self.contact_worksheet = open;
+    }
+
+    /// The step overview: a click opens an item in its step, its menu copies the item to
+    /// the following steps or removes it from them.
+    fn step_overview_window(&mut self, ctx: &egui::Context) {
+        if !self.step_overview {
+            return;
+        }
+        let Some(model) = &mut self.model else {
+            self.step_overview = false;
+            return;
+        };
+        let mut open = true;
+        let action = crate::step_overview::window(ctx, &mut open, &model.fe);
+        self.step_overview = open;
+        match action {
+            Some(crate::step_overview::Action::Open(item)) => {
+                self.tree.selected = Some((TreeView::FeModel, item.clone()));
+                self.tree.reveal = true;
+                self.editor = Editor::edit(&item, &model.fe, &model.mesh);
+            }
+            Some(action) => {
+                let count = match &action {
+                    crate::step_overview::Action::Copy(s, key) => {
+                        model.fe.copy_to_following_steps(*s, key)
+                    }
+                    crate::step_overview::Action::Remove(s, key) => {
+                        model.fe.remove_from_following_steps(*s, key)
+                    }
+                    crate::step_overview::Action::Open(_) => 0,
+                };
+                let text = crate::step_overview::done(&model.fe, &action, count);
+                self.toast = Some(crate::toast::Toast::new(text, count > 0));
+            }
+            None => {}
+        }
     }
 
     /// Deleting, for the context menu and the Delete key alike: in the FE model at once with

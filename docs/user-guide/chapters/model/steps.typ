@@ -92,6 +92,34 @@ under each step; double-click it to open the step.
   [Passes on], [What the next active step gets: the end state, or nothing for a probing step.],
 )
 
+==== Step overview <step-overview>
+
+#menu("Steps", "Step Overview") (also in the context menu of #ui("Steps") in the tree) shows
+every boundary condition, load and defined field, and every model-wide item, against the
+steps. The second row says where each step starts. Each cell compares the item with the step
+the step starts from, for a probing step its base:
+
+#fields(
+  [Created], [The step has the item and the step it starts from does not.],
+  [Same, Changed], [Both have it, with the same or with other values, region or amplitude.],
+  [Off], [The step has the item, deactivated.],
+  [Removed], [The step it starts from has the item and this one does not.],
+  [Ramps to 0], [A load a static or visco step no longer has: it moves down to zero over the
+    step.],
+  [Model-wide], [Constraints, ties, contact and bolts act in every step. A contact switched off
+    from a step on reads #ui("Off from here"), a bolt names its action in the step.],
+)
+
+An empty cell is an item the step does not have and did not have before, or one a step of that
+type cannot take (loads in a frequency step). Click a cell to open the item in that step, or a
+step name to open the step. The context menu of a cell copies the item to all following steps
+that can take it, in place of the one there (#ui("Copy to Following Steps")), or removes it
+from them (#ui("Remove from Following Steps")). Undo takes either back.
+
+#screenshot("step-overview.png", [Step overview: the pressure of Preload ramps down to zero in
+  Unload, the frequency step Modes takes no loads, and the contact region Flange is switched
+  off from Unload on])
+
 === Equation solver <equation-solver>
 
 Static, visco, dynamic, heat transfer, frequency and buckle steps have an
