@@ -58,9 +58,6 @@ pub struct ResultsSettings {
     /// [`plx_mesh::FeMesh::fingerprint`] of the results' mesh, to tell whether what refers
     /// to its nodes and elements still fits results of another run.
     pub mesh: Option<u64>,
-    /// Keys of the features taken over from the FE model, see
-    /// [`plx_model::FeModel::add_missing_features`]; the others were made on the results.
-    pub inherited_features: Vec<String>,
 }
 
 impl ResultsSettings {
