@@ -19,12 +19,15 @@ use memory::MemoryQuery;
 
 pub use wgpu;
 
-/// Percent of the card's memory budget the solver's buffers may take, so that the user
-/// interface (which draws on the same card with a device of its own) and the desktop keep
-/// theirs: a card with 2 GB filled by a large model made the window's renderer fail and
-/// the desktop stutter. Checked by [`Gpu::reserve`] against the card's own memory only
-/// (see [`Options::memory_share`]).
-pub const MEMORY_SHARE_PERCENT: u8 = 60;
+/// Percent of the card's memory budget the solver's buffers may take. The budget is what
+/// the driver grants this process (the desktop and other programs are already taken
+/// off), and what the window's renderer, which draws on the same card, already holds
+/// counts as used; the rest is headroom for what the window allocates while the solver
+/// runs, for the driver's own needs and for the estimate of the buffers being rough. A
+/// card with 2 GB filled by a large model made the window's renderer fail and the
+/// desktop stutter. Checked by [`Gpu::reserve`] against the card's own memory only (see
+/// [`Options::memory_share`]).
+pub const MEMORY_SHARE_PERCENT: u8 = 80;
 
 /// Bytes per piece of an upload ([`Gpu::write`]).
 const PIECE: usize = 16 << 20;
