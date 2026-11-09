@@ -219,13 +219,6 @@ impl FieldOutput {
         outputs
     }
 
-    /// Field outputs added to a new modal dynamics step: velocities too.
-    pub fn modal_dynamics_defaults() -> Vec<Self> {
-        let mut outputs = Self::dynamic_defaults();
-        outputs[0].variables = ["RF", "U", "V"].map(String::from).to_vec();
-        outputs
-    }
-
     /// Field outputs of a new sensitivity step: the sensitivities only, as the step
     /// computes no displacements or stresses of its own.
     pub fn sensitivity_defaults() -> Vec<Self> {

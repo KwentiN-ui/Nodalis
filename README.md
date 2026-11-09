@@ -43,7 +43,7 @@ the program: no external solver to install, and results go straight into the pos
 - Unit systems with unit-aware input and model check.
 
 **Analysis**
-- Static, frequency, buckling, dynamic, modal dynamics, steady-state dynamics, heat transfer and
+- Static, frequency, buckling, dynamic (implicit, explicit, modal superposition), steady-state dynamics, heat transfer and
   coupled temperature-displacement steps, complex frequency with Campbell diagram.
 - Built-in solver with direct and iterative equation solvers and live progress; results stay in
   the program.

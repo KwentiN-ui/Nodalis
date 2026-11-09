@@ -13,9 +13,9 @@ fehlgeschlagenen Lauf aus der Ausgabe von CalculiX erkennt. Nachgestellt mit Cal
 | Elemente ohne Section | `no material was assigned to element N` | Abbruch | Elemente je Part gegen Sections |
 | Element in mehreren Sections (gleiches Part o. ä.) | keine Prüfung durch ccx, zwei Section-Definitionen je Element | Fehler im Check | Elemente je Section, die schon eine frühere Section belegt |
 | Material ohne Elastizität | `no elastic constants were assigned` | Abbruch | Materialien, die eine Section nutzt |
-| Frequency, Dynamic, Modal Dynamics oder Steady State Dynamics Step ohne Dichte | `no density was assigned` | Abbruch | wie oben |
-| Modal Dynamics oder Steady State Dynamics ohne vorherigen Frequency Step mit Storage=Yes | `*MODAL DYNAMIC`/`*STEADY STATE DYNAMICS`: `no eigenvalue file` bzw. Lesen von `.eig` schlägt fehl | Abbruch | Fehler: Modal-Steps brauchen einen aktiven Frequency Step mit gespeicherten Eigenformen davor |
-| `*Boundary, op=New` in einem Modal Dynamics Step | `in a modal dynamic step new SPCs are not allowed` | Abbruch | Writer lässt das Zurücksetzen der Lagerung in Modal-Steps weg (gleiche Lager erneut angeben ist erlaubt) |
+| Frequency, Dynamic oder Steady State Dynamics Step ohne Dichte | `no density was assigned` | Abbruch | wie oben |
+| Steady State Dynamics ohne vorherigen Frequency Step mit Storage=Yes | `*MODAL DYNAMIC`/`*STEADY STATE DYNAMICS`: `no eigenvalue file` bzw. Lesen von `.eig` schlägt fehl | Abbruch | Fehler: Modal-Steps brauchen einen aktiven Frequency Step mit gespeicherten Eigenformen davor |
+| `*Boundary, op=New` in einem Modal-Step (Dynamic mit Modal superposition, Steady State Dynamics) | `in a modal dynamic step new SPCs are not allowed` | Abbruch | Writer lässt das Zurücksetzen der Lagerung in Modal-Steps weg (gleiche Lager erneut angeben ist erlaubt) |
 | Wärmeübertragung ohne Wärmeleitfähigkeit | nur `WARNING ... no conductivity constants`, dann Absturz beim Lösen | Abbruch | Materialien in thermischen Steps |
 | Instationäre Wärmeübertragung ohne Dichte, spezifische Wärme oder Anfangstemperatur | `no density was assigned`, `no specific heat was assigned`, `please define initial conditions for the temperature` | Abbruch | Materialien und Initial Conditions |
 | Querkontraktionszahl >= 0,5 | `Poisson coefficient should be less than 0.5` | Abbruch beim Einlesen | E > 0, -1 < nu < 0,5 |

@@ -82,7 +82,7 @@ with the material.
 - #ui("Static"), #ui("Visco") and #ui("Dynamic") steps (direct integration, also with contact)
   compute hyperelastic materials with large deformations: Nonlinear geometry is switched on
   for them automatically, and the step dialog says so.
-- #ui("Frequency"), #ui("Buckle"), #ui("Complex frequency"), modal dynamics and steady-state
+- #ui("Frequency"), #ui("Buckle"), #ui("Complex frequency") and steady-state
   dynamics are small vibrations about a state: without a preload they use the stiffness at
   small strains; with #ui("Perturbation") after a static step they use the tangent stiffness
   of the deformed rubber.

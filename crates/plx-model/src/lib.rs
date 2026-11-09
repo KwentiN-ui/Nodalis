@@ -767,8 +767,6 @@ pub enum StepKind {
     Dynamic(DynamicStep),
     /// Creep over time of materials with a creep law (`*VISCO`), otherwise a static step.
     Visco(ViscoStep),
-    /// Response over time as a superposition of the stored eigenmodes (`*MODAL DYNAMICS`).
-    ModalDynamics(ModalDynamicsStep),
     /// Harmonic response over a frequency range from the stored eigenmodes
     /// (`*STEADY STATE DYNAMICS`).
     SteadyStateDynamics(SteadyStateDynamicsStep),
@@ -779,7 +777,7 @@ pub enum StepKind {
 
 impl StepKind {
     /// How long the step lasts in step time: the time period of static, heat transfer,
-    /// visco and modal dynamics steps, the duration of a dynamic one; 1 for the others.
+    /// visco steps, the duration of a dynamic one; 1 for the others.
     pub fn period(&self) -> f64 {
         match self {
             StepKind::Static(settings) => settings.period(),
@@ -788,7 +786,6 @@ impl StepKind {
             | StepKind::UncoupledTempDisp(settings) => settings.increments.period(),
             StepKind::Visco(settings) => settings.increments.period(),
             StepKind::Dynamic(settings) => settings.duration,
-            StepKind::ModalDynamics(settings) => settings.time_period,
             _ => 1.0,
         }
     }
@@ -806,10 +803,7 @@ impl StepKind {
 
     /// Whether the step superposes the eigenmodes a previous frequency step stored.
     pub fn uses_stored_modes(&self) -> bool {
-        matches!(
-            self,
-            StepKind::ModalDynamics(_) | StepKind::SteadyStateDynamics(_)
-        )
+        matches!(self, StepKind::SteadyStateDynamics(_))
     }
 
     /// Whether the step takes loads. A frequency step has none; preloads
@@ -1302,7 +1296,7 @@ impl DynamicStep {
         {
             return Some("The frequency limit must be greater than 0.".into());
         }
-        if let DynamicMethod::Modal { modes } = self.method {
+        if let DynamicMethod::Modal { modes, .. } = self.method {
             if modes == 0 {
                 return Some("Modal superposition needs at least one mode.".into());
             }
@@ -1352,7 +1346,13 @@ pub enum DynamicMethod {
     /// linear models (no contact, no large deformations) come cheap. The response is
     /// exact in the modes it has; the modes must reach above the frequencies the loads
     /// excite.
-    Modal { modes: u32 },
+    Modal {
+        modes: u32,
+        /// The modes about the state the previous step left, with its stress stiffening
+        /// (a perturbation of a preload); otherwise about the unloaded model.
+        #[serde(default)]
+        preloaded: bool,
+    },
     /// Explicit integration (central differences, lumped mass): many small time steps
     /// below the stability limit of the mesh, no equation system. For impacts, crashes and
     /// drop tests with buckling and plasticity.
@@ -1482,61 +1482,6 @@ impl NumericalDamping {
     }
 }
 
-/// Settings of a `*MODAL DYNAMICS` step, with the default values: the response over time
-/// as a superposition of the eigenmodes a previous frequency step stored.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ModalDynamicsStep {
-    /// Fixed time increment of the response.
-    pub increment: f64,
-    pub time_period: f64,
-    /// Maximum number of increments (`INC`); the writer raises it to fit the time period.
-    pub max_increments: u32,
-    /// Steady state (`STEADY STATE`): integrated until the response repeats within the
-    /// relative error, instead of over the time period.
-    pub steady_state: bool,
-    pub relative_error: f64,
-    pub damping: Option<ModalDamping>,
-}
-
-impl Default for ModalDynamicsStep {
-    fn default() -> Self {
-        Self {
-            increment: 0.1,
-            time_period: 1.0,
-            max_increments: 100,
-            steady_state: false,
-            relative_error: 0.01,
-            damping: None,
-        }
-    }
-}
-
-impl ModalDynamicsStep {
-    /// What is wrong with the settings, if anything.
-    pub fn problem(&self) -> Option<String> {
-        if self.increment <= 0.0 {
-            return Some("The time increment must be greater than 0.".into());
-        }
-        if !self.steady_state && self.time_period <= 0.0 {
-            return Some("The time period must be greater than 0.".into());
-        }
-        if self.steady_state && !(0.0..=1.0).contains(&self.relative_error) {
-            return Some("The relative error must lie between 0 and 1.".into());
-        }
-        self.damping.as_ref().and_then(ModalDamping::problem)
-    }
-
-    /// The `INC` of the step: the limit, or the number of increments the time period
-    /// takes when that is more.
-    pub fn increments(&self) -> u32 {
-        if self.steady_state || self.increment <= 0.0 {
-            return self.max_increments;
-        }
-        let needed = (self.time_period / self.increment).ceil() as u32 + 1;
-        self.max_increments.max(needed)
-    }
-}
-
 /// Settings of a `*STEADY STATE DYNAMICS` step, with the default values: the harmonic
 /// response over a frequency range from the stored eigenmodes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1593,7 +1538,7 @@ impl SteadyStateDynamicsStep {
     }
 }
 
-/// Damping of the modes of a modal dynamics or steady state dynamics step
+/// Damping of the modes of a steady state dynamics step
 /// (`*MODAL DAMPING`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ModalDamping {
@@ -2001,16 +1946,6 @@ impl Step {
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),
             bolt_changes: Vec::new(),
-        }
-    }
-
-    /// A modal dynamics step with the default field outputs.
-    pub fn new_modal_dynamics(name: impl Into<String>) -> Self {
-        Self {
-            kind: StepKind::ModalDynamics(ModalDynamicsStep::default()),
-            field_outputs: FieldOutput::modal_dynamics_defaults(),
-            history_outputs: Vec::new(),
-            ..Self::new_dynamic(name)
         }
     }
 
@@ -2595,7 +2530,6 @@ mod tests {
             (StepKind::Frequency(FrequencyStep::default()), true),
             (StepKind::Dynamic(DynamicStep::default()), true),
             (StepKind::Buckle(BuckleStep::default()), true),
-            (StepKind::ModalDynamics(ModalDynamicsStep::default()), false),
             (
                 StepKind::SteadyStateDynamics(SteadyStateDynamicsStep::default()),
                 false,

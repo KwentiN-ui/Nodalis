@@ -413,7 +413,7 @@ pub enum ResultsUse {
     /// The temperatures as a defined field of a step:
     /// `["Setup", "Steps", step, "Temperatures"]`.
     Temperature,
-    /// The eigenmodes of a frequency step, for modal dynamics and steady state dynamics:
+    /// The eigenmodes of a frequency step, for steady state dynamics:
     /// `["Setup", "Steps", step, "Eigenmodes"]`.
     Modes,
     /// The temperatures the model starts at: `["Setup", "Initial Conditions", "Temperature"]`.
@@ -1809,7 +1809,7 @@ mod tests {
         let heat = Step::new_heat_transfer("Heat");
         let mut target = FeModel::default();
         target.steps.push(Step::new_static("Load"));
-        target.steps.push(Step::new_modal_dynamics("Shake"));
+        target.steps.push(Step::new_steady_state_dynamics("Shake"));
         let slot = |parts: &[&str]| results_slot(&heat, &target, &path(parts));
         // Dropped on a step, they go to the input of it that fits.
         assert_eq!(

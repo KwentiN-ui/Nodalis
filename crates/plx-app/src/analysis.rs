@@ -1069,7 +1069,7 @@ mod tests {
             material.specific_heat = Some(4.6e8);
             model
         };
-        // Eigenmodes of one analysis, the response over time from them in another one.
+        // Eigenmodes of one analysis, the harmonic response from them in another one.
         let mut frequency = Step::new_frequency("Modes");
         if let plx_model::StepKind::Frequency(f) = &mut frequency.kind {
             f.storage = true;
@@ -1079,7 +1079,7 @@ mod tests {
             vec![1, 2, 3, 4],
             BoundaryKind::displacement([Some(0.0); 6]),
         )];
-        let mut modal = Step::new_modal_dynamics("Shake");
+        let mut modal = Step::new_steady_state_dynamics("Shake");
         modal.boundary_conditions = frequency.boundary_conditions.clone();
         modal.loads.push(Load {
             distribution: None,

@@ -23,7 +23,7 @@ Every step shows a pictogram of its type in front of its name, so that you can t
 apart whatever you named them. Hover over the pictogram or the name to read the type.
 
 #screenshot("step-types.png", [Static, frequency, complex frequency, buckle, heat transfer,
-  coupled, dynamic, modal dynamics, steady state dynamics and sensitivity steps])
+  coupled, dynamic, modal superposition, steady state dynamics and sensitivity steps])
 
 #screenshot("step-type-tooltip.png", [Tooltip of a step])
 
@@ -87,8 +87,8 @@ frequency step needs no #ui("Lower frequency") bound for it; with one it solves 
 Without a factorization there is no Sturm sequence check that no eigenvalue was missed;
 instead the iteration restarts with a fresh start vector until no new eigenvalue turns up
 among the wanted ones, which also finds the second copies of double eigenvalues (symmetric
-parts). Complex frequency, modal dynamics and steady state dynamics steps work on the modes of
-a frequency step, so the choice there applies to them as well; sensitivity steps always solve
+parts). Complex frequency and steady state dynamics steps and Dynamic steps by modal
+superposition work on the modes of a frequency step, so the choice there applies to them as well; sensitivity steps always solve
 directly and do not offer it. The monitor reports
 the automatic choice, e.g. "automatic equation solver: 173394 equations of translations
 only; solving iteratively" or, with the estimated memory, "the factor of 173394 equations

@@ -164,11 +164,6 @@ impl FeModel {
                         }
                     }
                 }
-                StepKind::ModalDynamics(m) => {
-                    c.value(&mut m.increment, Quantity::Time);
-                    c.value(&mut m.time_period, Quantity::Time);
-                    convert_modal_damping(&mut m.damping, &c);
-                }
                 StepKind::SteadyStateDynamics(s) => {
                     c.value(&mut s.lower_frequency, Quantity::Frequency);
                     c.value(&mut s.upper_frequency, Quantity::Frequency);

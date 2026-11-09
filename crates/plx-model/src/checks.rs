@@ -75,7 +75,7 @@ pub enum Problem {
     UnstableHyperelastic,
     /// A hyperelastic material where the solver takes its initial linear stiffness:
     /// trusses, membranes and general beams, and steps without large deformations
-    /// (coupled temperature-displacement, modal dynamics, sensitivity).
+    /// (coupled temperature-displacement, modal superposition, sensitivity).
     HyperelasticLinearized,
     /// An explicit Dynamic step on elements with full integration that have a reduced
     /// variant (C3D8, C3D20, S4, S8, CPS4, ...): reduced integration is several times
@@ -131,8 +131,7 @@ pub enum Problem {
     NoPhysicalConstants,
     /// A defined temperature in a step whose materials have no thermal expansion.
     NoExpansion,
-    /// A step that builds on stored eigenmodes (modal dynamics, steady state dynamics,
-    /// complex frequency) without a frequency step before it that stores them.
+    /// A step that builds on stored eigenmodes (steady state dynamics, complex frequency) without a frequency step before it that stores them.
     NoStoredModes,
     /// A sensitivity step without the static or frequency step before it whose solution
     /// its design responses need.
@@ -614,7 +613,7 @@ impl Problem {
                  the analysis runs, but the temperature has no effect."
             }
             Problem::NoStoredModes => {
-                "Modal Dynamics and Steady State Dynamics steps work on \
+                "Steady State Dynamics steps work on \
                  the eigenmodes a previous Frequency step with Storage keeps. Without \
                  them the run stops."
             }
@@ -637,8 +636,8 @@ impl Problem {
                 "I, T, channel, angle and general profiles are not native beam sections: \
                  they are written as general sections of the user element U1, a \
                  linear beam. It computes Static steps without large deformations (Nlgeom), \
-                 Frequency steps and the modal and steady state \
-                 dynamics built on them; other steps stop the run with an error."
+                 Frequency steps, Dynamic steps by modal superposition and Steady \
+                 State Dynamics steps; other steps stop the run with an error."
             }
             Problem::InvalidCyclicSymmetry => {
                 "A cyclic symmetry tie models a whole part by one sector of a 3D mesh. The \
@@ -1704,13 +1703,13 @@ impl FeModel {
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
             self.check_step(s, mesh, mesh_check, &trusses, &mut findings);
             let general_fits = !self.step_nlgeom(&step.kind)
-                && matches!(
-                    step.kind,
+                && match &step.kind {
                     StepKind::Static(_)
-                        | StepKind::Frequency(_)
-                        | StepKind::ModalDynamics(_)
-                        | StepKind::SteadyStateDynamics(_)
-                );
+                    | StepKind::Frequency(_)
+                    | StepKind::SteadyStateDynamics(_) => true,
+                    StepKind::Dynamic(d) => matches!(d.method, crate::DynamicMethod::Modal { .. }),
+                    _ => false,
+                };
             if !general_beams.is_empty() && !general_fits {
                 findings.push(Finding::new(
                     ModelItem::Step(s),
@@ -4405,7 +4404,10 @@ mod tests {
         let mesh = cubes(2, true);
         let mut model = model(&mesh);
         model.steps[0].kind = StepKind::Dynamic(crate::DynamicStep {
-            method: crate::DynamicMethod::Modal { modes: 10 },
+            method: crate::DynamicMethod::Modal {
+                modes: 10,
+                preloaded: false,
+            },
             ..crate::DynamicStep::default()
         });
         assert_eq!(check(&model, &mesh), []);
@@ -4736,10 +4738,10 @@ mod tests {
     }
 
     #[test]
-    fn modal_dynamics_needs_stored_modes_but_no_load_amplitude() {
+    fn steady_state_dynamics_needs_stored_modes() {
         let mesh = cubes(2, true);
         let mut model = model(&mesh);
-        model.steps.push(Step::new_modal_dynamics("Step-2"));
+        model.steps.push(Step::new_steady_state_dynamics("Step-2"));
         let stored = |model: &FeModel| {
             (check(model, &mesh).into_iter())
                 .filter(|f| f.problem == Problem::NoStoredModes)
@@ -5438,6 +5440,19 @@ mod tests {
         assert_eq!(refused(&model).len(), 1);
         model.steps[0].kind = StepKind::Frequency(Default::default());
         assert!(refused(&model).is_empty());
+        // Modal superposition is linear too, direct integration is not.
+        let mut dynamic = crate::DynamicStep {
+            method: crate::DynamicMethod::Modal {
+                modes: 10,
+                preloaded: false,
+            },
+            ..Default::default()
+        };
+        model.steps[0].kind = StepKind::Dynamic(dynamic.clone());
+        assert!(refused(&model).is_empty());
+        dynamic.method = crate::DynamicMethod::Direct;
+        model.steps[0].kind = StepKind::Dynamic(dynamic);
+        assert_eq!(refused(&model).len(), 1);
         // Native profiles are CalculiX's own beams, which take every step.
         model.cross_sections[0].profile = crate::BeamProfile::ALL[0].clone();
         model.steps[0].kind = StepKind::Buckle(Default::default());

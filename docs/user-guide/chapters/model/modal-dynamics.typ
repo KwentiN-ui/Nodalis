@@ -1,33 +1,16 @@
 #import "../../template.typ": *
 
-== Modal Dynamics and Steady State Dynamics steps <modal-dynamics>
+== Steady State Dynamics step <modal-dynamics>
 
-Both steps superpose the eigenmodes of the structure instead of integrating the full model:
-#ui("Modal Dynamics (from stored modes)") computes the response over time (`*MODAL DYNAMIC`),
-#ui("Steady State Dynamics (frequency response)") the amplitude at every frequency of a
-harmonic excitation (`*STEADY STATE DYNAMICS`). Both need a #ui("Frequency") step with
-#ui("Store matrices and eigenmodes") before them, with the same boundary conditions; the model
-check (@model-check) reports a missing one as "No stored eigenmodes". Create the steps with
+#ui("Steady State Dynamics (frequency response)") superposes the eigenmodes of the structure
+instead of integrating the full model and computes the amplitude at every frequency of a
+harmonic excitation (`*STEADY STATE DYNAMICS`). It needs a #ui("Frequency") step with
+#ui("Store matrices and eigenmodes") before it, with the same boundary conditions; the model
+check (@model-check) reports a missing one as "No stored eigenmodes". Create the step with
 #menu("Steps", "Step").
 
-#screenshot("modal-dynamics-step.png", [Modal Dynamics step with a constant damping ratio])
-
-=== Modal Dynamics
-
-#fields(
-  [Steady state (until the response repeats)], [Integrates until the response repeats itself
-    within #ui("Relative error") (`STEADY STATE`), instead of over the time period.],
-  [Time increment], [Fixed increment of the response (default 0.1).],
-  [Time period], [Length of the step (default 1).],
-  [Max. increments], [Largest number of increments (default 100). Nodalis raises it so that the
-    time period fits.],
-)
-
-A load of a modal dynamics step without an #ui("Amplitude") (@amplitudes) acts at once and stays
-constant; give it an amplitude for a load that changes over time. Only loads and the boundary conditions of the frequency step act;
-CalculiX cannot change supports in a modal step.
-
-=== Steady State Dynamics
+The response over time from the eigenmodes is a #ui("Dynamic") step with the method
+#ui("Modal superposition") (@dynamic-modal), which computes its eigenmodes itself.
 
 #screenshot("steady-state-step.png", [Steady State Dynamics step])
 
@@ -46,7 +29,7 @@ and imaginary part (`DISPI`); the magnitude of a node is the length of both toge
 
 === Modal damping
 
-Both steps have a #ui("Modal damping") setting, written as `*MODAL DAMPING`:
+The step has a #ui("Modal damping") setting, written as `*MODAL DAMPING`:
 
 #fields(
   [Off], [No damping.],
@@ -56,5 +39,5 @@ Both steps have a #ui("Modal damping") setting, written as `*MODAL DAMPING`:
     the lowest to the highest mode number). #ui("Add range") adds a row, #ui("x") removes
     one.],
   [Rayleigh], [Damping from the mass and stiffness matrices with #ui("Alpha (mass)") and
-    #ui("Beta (stiffness)"), as for a dynamic step (@dynamic-step).],
+    #ui("Beta (stiffness)"), as for a Dynamic step (@dynamic-step).],
 )
