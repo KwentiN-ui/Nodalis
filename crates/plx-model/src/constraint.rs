@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::Region;
+use crate::{Region, RemoteBehavior};
 
 /// Nodes tied to each other, nodalis's node tie: the ends of beams or trusses meeting at a
 /// point, which have nodes of their own since parts share no nodes. Every node of the region
@@ -43,9 +43,11 @@ impl NodeTie {
     }
 }
 
-/// Nodes that move as one rigid body with a reference point (`*RIGID BODY`).
-/// Boundary conditions and loads on the reference point drive the body:
-/// its translations and rotations, forces and moments.
+/// Nodes coupled to a reference point. Rigid, they move as one rigid body with the point
+/// (`*RIGID BODY`); deformable, the point follows their weighted mean motion (Nastran's
+/// RBE3, written as equations) and the selection keeps its own stiffness, which suits a
+/// point that only tracks where a face goes. Boundary conditions and loads on the
+/// reference point drive the selection: its translations and rotations, forces and moments.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RigidBody {
     pub name: String,
@@ -57,6 +59,9 @@ pub struct RigidBody {
     pub region: Region,
     /// Name of the reference point ([`crate::ReferencePoint`]) the body is driven by.
     pub reference_point: String,
+    /// Whether the selection keeps its shape or the point follows its mean motion.
+    #[serde(default)]
+    pub behavior: RemoteBehavior,
 }
 
 impl RigidBody {
@@ -67,6 +72,7 @@ impl RigidBody {
             visible: true,
             region: Region::Faces(Vec::new()),
             reference_point: reference_point.into(),
+            behavior: RemoteBehavior::Rigid,
         }
     }
 }

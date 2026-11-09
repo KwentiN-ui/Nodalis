@@ -1054,6 +1054,8 @@ struct ReferenceNodes {
     reference: NodeId,
     rotation: NodeId,
     set: Option<String>,
+    /// How the selection follows the point.
+    behavior: RemoteBehavior,
 }
 
 impl<'a> Sets<'a> {
@@ -1969,6 +1971,52 @@ fn constraints(
                         point: body.reference_point.clone(),
                     });
                 };
+                if body.behavior == RemoteBehavior::Deformable {
+                    // The point follows the mean motion of the selection, as the point of a
+                    // deformable remote displacement does.
+                    let spec = plx_model::Displacement {
+                        values: [None; 6],
+                        behavior: plx_model::Behavior::Deformable,
+                        system: plx_model::GLOBAL.to_string(),
+                        location: Some(point.position),
+                        pinball: None,
+                        tables: Default::default(),
+                    };
+                    let invalid = |reason: String| WriteError::InvalidConstraint {
+                        item: body.name.clone(),
+                        reason,
+                    };
+                    let excluded = model.directly_held_nodes_in(sets.mesh, |_| true);
+                    let held = model.held_translations(sets.mesh);
+                    let resolved = (spec.resolve(model, sets.mesh, &body.region, &excluded))
+                        .map_err(invalid)?;
+                    let [reference, rotation] = remote_point(
+                        RemoteSource {
+                            item: &body.name,
+                            region: &body.region,
+                            spec: &spec,
+                            behavior: RemoteBehavior::Deformable,
+                            owner: ModelItem::Constraint(index),
+                        },
+                        resolved,
+                        held,
+                        &mut next_node,
+                        (&mut items, &mut owners),
+                        sets,
+                        model,
+                        generated,
+                    )?;
+                    sets.reference_nodes.insert(
+                        body.reference_point.clone(),
+                        ReferenceNodes {
+                            reference,
+                            rotation,
+                            set: None,
+                            behavior: RemoteBehavior::Deformable,
+                        },
+                    );
+                    continue;
+                }
                 // Both nodes sit on the reference point.
                 let (reference, rotation) = (next_node, next_node + 1);
                 next_node += 2;
@@ -1980,6 +2028,7 @@ fn constraints(
                         reference,
                         rotation,
                         set: None,
+                        behavior: RemoteBehavior::Rigid,
                     },
                 );
                 owners.resize(items.len(), None);
@@ -4613,7 +4662,7 @@ fn history_output(
 }
 
 /// Reference and rotation node of a reference point or the point of a remote displacement,
-/// and how the region follows the point: a reference point drives a rigid body.
+/// and how the region follows the point.
 fn point_nodes(
     sets: &Sets,
     item: &str,
@@ -4621,7 +4670,7 @@ fn point_nodes(
 ) -> Result<([NodeId; 2], RemoteBehavior), WriteError> {
     match region {
         Region::ReferencePoint(point) => match sets.reference_nodes.get(point) {
-            Some(nodes) => Ok(([nodes.reference, nodes.rotation], RemoteBehavior::Rigid)),
+            Some(nodes) => Ok(([nodes.reference, nodes.rotation], nodes.behavior)),
             None => Err(WriteError::UnknownReferencePoint {
                 item: item.to_string(),
                 point: point.clone(),

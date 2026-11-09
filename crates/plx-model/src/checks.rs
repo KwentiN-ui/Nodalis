@@ -13,7 +13,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId};
 
 use crate::{
-    Formulation, GLOBAL, Region, SpringLayout, SymmetryPlane, symmetry_dofs, symmetry_plane,
+    Formulation, GLOBAL, Region, RemoteBehavior, SpringLayout, SymmetryPlane, symmetry_dofs,
+    symmetry_plane,
 };
 
 use crate::{
@@ -3167,9 +3168,13 @@ impl FeModel {
                     }
                 }
                 Constraint::RigidBody(body) => {
-                    let tied = pieces(&body.region);
-                    join(&mut ties, &tied, &[]);
-                    join(&mut contacts, &tied, &[]);
+                    // A deformable coupling only averages its selection: it joins nothing
+                    // by itself, but a boundary condition on its point holds it all the same.
+                    if body.behavior == RemoteBehavior::Rigid {
+                        let tied = pieces(&body.region);
+                        join(&mut ties, &tied, &[]);
+                        join(&mut contacts, &tied, &[]);
+                    }
                     // A boundary condition on the reference point holds the body: its
                     // translations like a support at the node nearest the point, its
                     // rotations like those of a beam node.

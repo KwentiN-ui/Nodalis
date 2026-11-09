@@ -769,6 +769,108 @@ fn solver_turns_a_deformable_remote_point_with_the_mean_of_its_face() {
     assert!((turned - angle).abs() < 1e-6 * angle, "{turned} != {angle}");
 }
 
+/// The cantilever with its tip force and reference point RP-1 at the centre of the tip
+/// face, the face coupled to it as `behavior` says.
+fn coupled_tip(behavior: RemoteBehavior) -> (FeMesh, FeModel) {
+    let (mesh, mut model) = rigid_tip(Some(tip_force()), None);
+    let Constraint::RigidBody(body) = &mut model.constraints[0] else {
+        unreachable!()
+    };
+    body.behavior = behavior;
+    (mesh, model)
+}
+
+#[test]
+fn a_deformable_coupling_of_a_reference_point_is_written_as_equations() {
+    let (mesh, mut model) = coupled_tip(RemoteBehavior::Deformable);
+    model.steps[0]
+        .history_outputs
+        .push(plx_model::HistoryOutput::node(
+            "Tip-1",
+            Region::ReferencePoint("RP-1".into()),
+        ));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("*Rigid body"), "{text}");
+    // Three translations and three rotations follow the face.
+    assert_eq!(equations(&mesh, &model), 6, "{text}");
+    let analysis = lowered(&mesh, &model);
+    let ids = &analysis.model.nodes.ids;
+    assert_eq!(ids[ids.len() - 2..], [100, 101]);
+    assert_eq!(coordinates(&analysis, 100), [100.0, 5.0, 5.0]);
+    // The point of equations has no reaction force to print.
+    assert!(text.contains("*Node print"), "{text}");
+    assert!(!text.contains(", RF"), "{text}");
+}
+
+/// A deformable coupling tracks the tip face without stiffening it: the beam bends as
+/// without the point, and the point moves with the mean of the face. A rigid one stiffens
+/// the face.
+#[test]
+fn solver_moves_a_deformably_coupled_point_with_the_mean_of_its_face() {
+    let (mesh, plain) = cantilever(tip_force());
+    let Some(free) = run_solver("coupling-none", &write_inp(&mesh, &plain, "").unwrap()) else {
+        return;
+    };
+    let (_, mut model) = coupled_tip(RemoteBehavior::Deformable);
+    let mut output = plx_model::HistoryOutput::node("Tip", Region::ReferencePoint("RP-1".into()));
+    output.variables = vec!["U".into()];
+    model.steps[0].history_outputs.push(output);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let name = "coupling-deformable";
+    dump_fixture(name, &text);
+    let Some(dir) = run_dir(name) else {
+        return;
+    };
+    let frd = run_in(&dir, name, &text);
+    let dat = std::fs::read_to_string(dir.join(format!("{name}.dat"))).unwrap();
+    remove_run_dir(&dir);
+    let expected = node_value(&free, "DISP", "U3", 99);
+    let ours = node_value(&frd, "DISP", "U3", 99);
+    assert!(
+        (ours - expected).abs() < 1e-9 * expected.abs(),
+        "{ours} != {expected}"
+    );
+    // The point follows the weighted mean of the face, as its equations say.
+    let spec = Displacement {
+        behavior: Behavior::Deformable,
+        location: Some([100.0, 5.0, 5.0]),
+        ..Displacement::new([None; 6])
+    };
+    let point = spec
+        .resolve(
+            &model,
+            &mesh,
+            &Region::Surface("TIP".into()),
+            &Default::default(),
+        )
+        .unwrap();
+    let total: f64 = point.weights.iter().sum();
+    let mean: f64 = (point.nodes.iter().zip(&point.weights))
+        .map(|(&n, w)| w * node_value(&frd, "DISP", "U3", n))
+        .sum::<f64>()
+        / total;
+    // The history output prints the displacements of the point's reference node.
+    let block = &dat[dat.find("displacements").expect(&dat)..];
+    let line = (block.lines())
+        .find(|l| l.split_whitespace().next() == Some("100"))
+        .expect(&dat);
+    let at_point: f64 = line.split_whitespace().nth(3).unwrap().parse().unwrap();
+    assert!(
+        // The .dat file prints seven digits.
+        (at_point - mean).abs() < 1e-6 * mean.abs(),
+        "{at_point} != {mean}"
+    );
+    let (_, rigid) = coupled_tip(RemoteBehavior::Rigid);
+    let Some(stiff) = run_solver("coupling-rigid", &write_inp(&mesh, &rigid, "").unwrap()) else {
+        return;
+    };
+    let stiffened = node_value(&stiff, "DISP", "U3", 99);
+    assert!(
+        stiffened.abs() < (1.0 - 1e-3) * expected.abs(),
+        "{stiffened} vs {expected}"
+    );
+}
+
 /// A solid beam on two end faces held in their translations with free rotations is simply
 /// supported: the faces turn about their centres. Held at each node, the same supports clamp
 /// the ends nearly.
