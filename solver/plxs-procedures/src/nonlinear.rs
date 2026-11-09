@@ -177,7 +177,7 @@ impl Procedure for NonlinearStatic {
         }
         let step = &step;
         let controls = Controls::of_step(step);
-        let mut equations = Equations::new(solver);
+        let mut equations = Equations::new(solver).for_model(ctx.model);
 
         let period = increments.period();
         if period <= 0.0 {

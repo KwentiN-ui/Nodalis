@@ -74,6 +74,23 @@ impl Pattern {
         }
     }
 
+    /// A pattern from its compressed columns: `col_ptr` (`n + 1` offsets) and per column
+    /// the row indices in `row_idx`, ascending, within the upper triangle and with the
+    /// diagonal.
+    pub fn from_compressed(n: usize, col_ptr: Vec<u32>, row_idx: Vec<u32>) -> Pattern {
+        assert_eq!(col_ptr.len(), n + 1);
+        assert_eq!(col_ptr[n] as usize, row_idx.len());
+        debug_assert!((0..n).all(|c| {
+            let rows = &row_idx[col_ptr[c] as usize..col_ptr[c + 1] as usize];
+            rows.windows(2).all(|w| w[0] < w[1]) && rows.last() == Some(&(c as u32))
+        }));
+        Pattern {
+            n,
+            col_ptr,
+            row_idx,
+        }
+    }
+
     pub fn dimension(&self) -> usize {
         self.n
     }

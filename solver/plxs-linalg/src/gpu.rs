@@ -870,6 +870,7 @@ impl GpuCycle {
 }
 
 /// How the conjugate gradients on the card ended.
+#[derive(Debug)]
 pub(crate) enum CgOutcome {
     Converged {
         iterations: usize,
@@ -879,6 +880,8 @@ pub(crate) enum CgOutcome {
     Indefinite,
     NotConverged {
         residual: f64,
+        /// The iterations done: the limit, or fewer when `stalls` gave up.
+        iterations: usize,
     },
 }
 
@@ -1151,6 +1154,7 @@ impl GpuCycle {
         tolerance: f64,
         max_iterations: usize,
         cancelled: &dyn Fn() -> bool,
+        stalls: &mut dyn FnMut(usize, f64) -> bool,
     ) -> Result<std::result::Result<CgOutcome, plxs_core::Error>, String> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let Some(cg) = self
@@ -1161,7 +1165,7 @@ impl GpuCycle {
             return Err("the conjugate gradients are not on the card".to_owned());
         };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.iterate(cg, b, x, tolerance, max_iterations, cancelled)
+            self.iterate(cg, b, x, tolerance, max_iterations, cancelled, stalls)
         }))
         .unwrap_or_else(|_| Err("the conjugate gradients panicked".to_owned()));
         if result.is_err() {
@@ -1218,6 +1222,7 @@ impl GpuCycle {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn iterate(
         &self,
         cg: &Cg,
@@ -1226,6 +1231,7 @@ impl GpuCycle {
         tolerance: f64,
         max_iterations: usize,
         cancelled: &dyn Fn() -> bool,
+        stalls: &mut dyn FnMut(usize, f64) -> bool,
     ) -> Result<std::result::Result<CgOutcome, plxs_core::Error>, String> {
         let queue = &self.ctx.queue;
         queue.write_buffer(&cg.b, 0, bytemuck::cast_slice(b));
@@ -1241,6 +1247,13 @@ impl GpuCycle {
         );
         let mut state = [0.0f64; SCALARS];
         self.read(&cg.scalars_staging, &mut state)?;
+        let relative = |state: &[f64; SCALARS]| {
+            if state[3] > 0.0 {
+                (state[4] / state[3]).sqrt()
+            } else {
+                0.0
+            }
+        };
         while state[5] == 0.0 {
             if cancelled() {
                 return Ok(Err(plxs_core::Error::Cancelled));
@@ -1251,12 +1264,14 @@ impl GpuCycle {
                 Some((&cg.scalars, &cg.scalars_staging, bytes)),
             );
             self.read(&cg.scalars_staging, &mut state)?;
+            if state[5] == 0.0 && stalls(state[6] as usize, relative(&state)) {
+                return Ok(Ok(CgOutcome::NotConverged {
+                    residual: relative(&state),
+                    iterations: state[6] as usize,
+                }));
+            }
         }
-        let residual = if state[3] > 0.0 {
-            (state[4] / state[3]).sqrt()
-        } else {
-            0.0
-        };
+        let residual = relative(&state);
         let outcome = match state[5] as u32 {
             1 => {
                 let n = 8 * self.n as u64;
@@ -1273,7 +1288,10 @@ impl GpuCycle {
                 }
             }
             2 => CgOutcome::Indefinite,
-            _ => CgOutcome::NotConverged { residual },
+            _ => CgOutcome::NotConverged {
+                residual,
+                iterations: state[6] as usize,
+            },
         };
         Ok(Ok(outcome))
     }
@@ -1469,7 +1487,7 @@ mod tests {
         let b: Vec<f64> = (0..n).map(|i| ((i * 37) % 23) as f64 - 11.0).collect();
         let mut x = vec![0.0; n];
         let outcome = gpu
-            .solve(&b, &mut x, 1e-12, 1000, &|| false)
+            .solve(&b, &mut x, 1e-12, 1000, &|| false, &mut |_, _| false)
             .unwrap()
             .unwrap();
         let CgOutcome::Converged {
@@ -1494,12 +1512,27 @@ mod tests {
         amg.attach_operator(&a2);
         let gpu = amg.gpu_cycle().expect("still on the card");
         let mut y = vec![0.0; n];
-        gpu.solve(&b, &mut y, 1e-12, 1000, &|| false)
+        gpu.solve(&b, &mut y, 1e-12, 1000, &|| false, &mut |_, _| false)
             .unwrap()
             .unwrap();
         for (x, y) in x.iter().zip(&y) {
             assert!((x - 2.0 * y).abs() <= 1e-9 * x.abs().max(1.0), "{x} vs {y}");
         }
+        // A caller that gives up (a stalling iteration): the card stops at the first
+        // check that says so, with the iterations done.
+        let mut asked = Vec::new();
+        let outcome = gpu
+            .solve(&b, &mut y, 1e-12, 1000, &|| false, &mut |i, r| {
+                asked.push((i, r));
+                i >= 2
+            })
+            .unwrap()
+            .unwrap();
+        let CgOutcome::NotConverged { iterations, .. } = outcome else {
+            panic!("did not stop: {outcome:?}");
+        };
+        assert_eq!(iterations, asked.last().unwrap().0);
+        assert!(asked.iter().all(|&(_, r)| r.is_finite() && r > 0.0));
     }
 
     #[test]
