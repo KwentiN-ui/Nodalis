@@ -116,6 +116,21 @@ impl Handover {
         }
     }
 
+    /// For a step that leaves the state as it found it, the state it is computed about:
+    /// "End of Preload" or "Unloaded model". `None` for a step that passes its state on,
+    /// and for one without a base (sensitivity, linked eigenmodes).
+    pub fn base_state(&self) -> Option<String> {
+        if self.continues() {
+            return None;
+        }
+        match self.base? {
+            Base::PreviousState => {
+                Some((self.previous_state.clone()).unwrap_or_else(|| "Unloaded model".into()))
+            }
+            Base::Unloaded => Some("Unloaded model".into()),
+        }
+    }
+
     fn continues(&self) -> bool {
         self.passes_on.starts_with("Its end state")
     }
@@ -415,10 +430,13 @@ mod tests {
         assert_eq!(handover.base, Some(Base::PreviousState));
         assert_eq!(handover.previous_state.as_deref(), Some("End of Preload"));
         assert_eq!(handover.summary(), "Base: End of Preload");
+        assert_eq!(handover.base_state().as_deref(), Some("End of Preload"));
         assert_eq!(
             handover.passes_on,
             "Nothing: Unload starts from the end of Preload"
         );
+        // A continuing step has no base state.
+        assert_eq!(fe.step_handover(0).base_state(), None);
     }
 
     #[test]

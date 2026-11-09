@@ -138,6 +138,13 @@ results with a single increment have none.
 #screenshot("results-timeline.png", [The timeline of three static steps and a frequency step
   with the frequency of each mode])
 
+An orange arrow before the name of a step marks a step that leaves the state as it found it
+(@step-handover). Its tooltip names the state it was computed about, and so does the information
+block in the 3D view: #ui("Step 2 of 4: Modes (Frequency, about the end of Preload)").
+
+#screenshot("timeline-base.png", [The frequency step Modes is computed about the end of
+  Preload, Free about the unloaded model; Unload continues Preload])
+
 In a Dynamic step with #ui("Automatic (implicit/explicit)") (@dynamic-automatic) the parts the
 solver integrated explicitly are orange, labelled #ui("explicit") where they are wide enough;
 the rest of the step was integrated implicitly. Hovering over an increment of an explicit part

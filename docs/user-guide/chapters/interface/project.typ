@@ -98,6 +98,17 @@ the submodel #ui("Local") was solved from #ui("Step-1"): only #ui("Global") is o
 #screenshot("mesh-block-out-of-date.png", [After #ui("nx") of the box changed from 10 to 20, the
 mesh, solution and results of the analysis that takes the box's mesh are out of date])
 
+A green trace at the left of the rows of the steps, under #ui("Setup") > #ui("Steps") and under
+#ui("Results"), shows how the state flows through them (@step-handover). A filled dot is a step
+that passes its end state on; the line joins it to the next one. A ring is a step that leaves the
+state as it found it: a frequency, buckle, complex frequency or steady state dynamics step. When
+it is computed about the end of the step before, a short branch joins it to the line; computed
+about the unloaded model, it stands apart. The tooltip of each step row says where the step starts
+and what it passes on.
+
+#screenshot("chain-trace.png", [The trace of the steps: Modes branches off after Preload, Unload
+  continues Preload, Free is computed about the unloaded model])
+
 The pins on both sides of a row take and give links. Blue wires are references (geometry, mesh,
 setup items: the target has the same as the source), orange wires carry results into the inputs
 of steps and green wires carry the state after a step (@links). A round pin on the left takes

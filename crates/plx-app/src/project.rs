@@ -5535,6 +5535,10 @@ impl ProjectApp {
                 let continues = (self.links.iter())
                     .find(|l| l.target == n.id && links::is_state(l))
                     .map(|l| self.name_of(l.source));
+                let chain = match (n.kind(), fe) {
+                    (Kind::Analysis, Some(fe)) => chain_marks(fe, &rows),
+                    _ => HashMap::new(),
+                };
                 BlockView {
                     id: n.id,
                     name: n.name.clone(),
@@ -5569,6 +5573,7 @@ impl ProjectApp {
                     compact: self.compact.contains(&n.id),
                     number: n.as_number().map(|(b, switch)| (b.clone(), switch)),
                     framed: frames::frame_of(&self.frames, n.id).is_some(),
+                    chain,
                 }
             })
             .collect();
@@ -8085,6 +8090,127 @@ struct BlockView {
     framed: bool,
     /// A Math or Switch block, and whether it is a switch.
     number: Option<(NumberBlock, bool)>,
+    /// The mark of the step chain at the rows of steps, by row path.
+    chain: HashMap<Vec<String>, ChainMark>,
+}
+
+/// Where a row of a step lies on the chain of steps, for the trace at the left of the rows
+/// of an analysis block: a solid line where the state flows, a dot at a step that passes its
+/// state on, a side branch to a ring at a step that only reads it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct ChainMark {
+    /// An active step that passes its state on.
+    continues: bool,
+    /// An active step that leaves the state as it found it.
+    probing: bool,
+    /// The probing step is computed about the state the steps before leave.
+    branch: bool,
+    /// An active step that passes its state on lies above and below the row.
+    above: bool,
+    below: bool,
+}
+
+/// The chain marks of the rows of steps of an analysis: under Setup > Steps (and the inputs
+/// below an open step) and under Results, each list on its own.
+fn chain_marks(fe: &plx_model::FeModel, rows: &[Row]) -> HashMap<Vec<String>, ChainMark> {
+    let mut marks = HashMap::new();
+    let continuing = |s: usize| fe.steps[s].active && fe.steps[s].kind.continues_state();
+    for results in [false, true] {
+        let listed: Vec<(&Vec<String>, usize)> = (rows.iter())
+            .filter_map(|row| {
+                let name = match row.path.as_slice() {
+                    [setup, steps, name] if !results && setup == links::SETUP => {
+                        (steps == links::STEPS).then_some(name)?
+                    }
+                    [group, name] if results && group == links::RESULTS => name,
+                    _ => return None,
+                };
+                let index = fe.steps.iter().position(|s| &s.name == name)?;
+                Some((&row.path, index))
+            })
+            .collect();
+        for (k, &(path, s)) in listed.iter().enumerate() {
+            let step = &fe.steps[s];
+            let probing = step.active && !step.kind.continues_state();
+            let branch = probing
+                && (fe.step_handover(s).base_state()).is_some_and(|base| base != "Unloaded model");
+            marks.insert(
+                path.clone(),
+                ChainMark {
+                    continues: continuing(s),
+                    probing,
+                    branch,
+                    above: listed[..k].iter().any(|&(_, p)| continuing(p)),
+                    below: listed[k + 1..].iter().any(|&(_, p)| continuing(p)),
+                },
+            );
+        }
+    }
+    // The inputs below an open step: the line passes them on to the next step.
+    for row in rows.iter().filter(|r| r.path.len() == 4) {
+        if let Some(mark) = marks.get(&row.path[..3]).copied() {
+            let through = mark.below;
+            marks.insert(
+                row.path.clone(),
+                ChainMark {
+                    above: through,
+                    below: through,
+                    ..ChainMark::default()
+                },
+            );
+        }
+    }
+    marks
+}
+
+/// Where the step `name` starts and what it passes on, for the tooltips of its rows.
+fn chain_tip(fe: Option<&plx_model::FeModel>, name: &str) -> String {
+    let Some(fe) = fe else {
+        return String::new();
+    };
+    let Some(index) = fe.steps.iter().position(|s| s.name == name) else {
+        return String::new();
+    };
+    let handover = fe.step_handover(index);
+    format!(
+        "\n{}. Passes on: {}.",
+        handover.summary(),
+        handover.passes_on
+    )
+}
+
+/// Paints the chain trace of a row of a step in `rect`; `gap` is the space between rows,
+/// which the lines bridge.
+fn paint_chain(painter: &egui::Painter, rect: egui::Rect, depth: usize, mark: ChainMark, gap: f32) {
+    let color = crate::style::adapt(egui::Color32::from_rgb(40, 150, 60));
+    let stroke = egui::Stroke::new(2.0, color);
+    let x = rect.left() + 2.0 + 14.0 * depth as f32 - 10.0;
+    let middle = rect.center().y;
+    let top = rect.top() - gap * 0.5 - 0.5;
+    let bottom = rect.bottom() + gap * 0.5 + 0.5;
+    if mark.continues {
+        if mark.above {
+            painter.line_segment([egui::pos2(x, top), egui::pos2(x, middle)], stroke);
+        }
+        if mark.below {
+            painter.line_segment([egui::pos2(x, middle), egui::pos2(x, bottom)], stroke);
+        }
+        painter.circle_filled(egui::pos2(x, middle), 3.5, color);
+        return;
+    }
+    if mark.above && mark.below {
+        painter.line_segment([egui::pos2(x, top), egui::pos2(x, bottom)], stroke);
+    } else if mark.above && mark.branch {
+        painter.line_segment([egui::pos2(x, top), egui::pos2(x, middle)], stroke);
+    }
+    if mark.probing {
+        let ring = egui::pos2(x + 6.5, middle);
+        if mark.branch && mark.above {
+            let thin = egui::Stroke::new(1.5, color);
+            painter.line_segment([egui::pos2(x, middle), ring - egui::vec2(3.0, 0.0)], thin);
+        }
+        painter.circle_stroke(ring, 2.7, egui::Stroke::new(1.5, color));
+    }
 }
 
 /// An exposed parameter as its row shows it: its value and kind, `None` when its field is
@@ -8355,7 +8481,8 @@ fn block_rows(
                         format!(
                             "{name}: drag to another analysis to link its definition. Open \
                              it for its inputs, or drop the results of a step of another \
-                             analysis here: they go to the input that fits."
+                             analysis here: they go to the input that fits.{}",
+                            chain_tip(fe, &name)
                         )
                     } else {
                         format!("{name}: drag to another analysis to link it")
@@ -8466,8 +8593,9 @@ fn block_rows(
                 "Results of {}, what it produces: drag them to an input of a step under \
                  Setup > Steps of another analysis (its Temperatures, Eigenmodes or Global \
                  results), to the State row of another analysis, which continues from them, \
-                 or to empty space to continue in a new analysis",
-                step.name
+                 or to empty space to continue in a new analysis.{}",
+                step.name,
+                chain_tip(fe, &step.name)
             )
         } else {
             format!("{} is deactivated and has no results", step.name)
@@ -10745,6 +10873,11 @@ impl SnarlViewer<u64> for Viewer {
         if response.hovered() {
             painter.rect_filled(rect, 2.0, crate::style::hover_fill());
         }
+        if let Some(&mark) = self.block(id).and_then(|b| b.chain.get(&row.path)) {
+            // Results rows of steps sit one level up from those under Setup > Steps.
+            let depth = if row.path.len() == 2 { 1 } else { 2 };
+            paint_chain(painter, rect, depth, mark, ui.spacing().item_spacing.y);
+        }
         let mut x = rect.left() + 2.0 + 14.0 * row.depth as f32;
         let middle = rect.center().y;
         let mut toggled = false;
@@ -13015,6 +13148,53 @@ mod tests {
         assert_eq!(row.text, "Global results of Global");
         assert_eq!(row.linked_from.as_deref(), Some("Global"));
         assert!(row.state.is_none());
+    }
+
+    #[test]
+    fn the_rows_of_steps_trace_the_chain() {
+        let mut model = plx_model::FeModel::default();
+        model.steps.push(plx_model::Step::new_static("Preload"));
+        let mut modes = plx_model::Step::new_frequency("Modes");
+        if let plx_model::StepKind::Frequency(settings) = &mut modes.kind {
+            settings.base = plx_model::Base::PreviousState;
+        }
+        model.steps.push(modes);
+        model.steps.push(plx_model::Step::new_static("Unload"));
+        model.steps.push(plx_model::Step::new_frequency("Free"));
+        let data = ProjectAnalysis {
+            model: model.clone(),
+            ..Default::default()
+        };
+        let node = Node::analysis(1, "Beam".into(), data);
+        let status = node.status().unwrap();
+        let open = [
+            vec!["Setup".to_owned()],
+            vec!["Setup".into(), "Steps".into()],
+        ];
+        let rows = block_rows(status, Some(&model), &open.into(), &[], &[], None);
+        let marks = chain_marks(&model, &rows);
+        for group in [vec!["Setup", "Steps"], vec!["Results"]] {
+            let mark = |step: &str| {
+                let mut path: Vec<String> = group.iter().map(|p| p.to_string()).collect();
+                path.push(step.to_owned());
+                marks[&path]
+            };
+            // The state flows from Preload past Modes to Unload.
+            let preload = mark("Preload");
+            assert!(preload.continues && !preload.above && preload.below);
+            let modes = mark("Modes");
+            assert!(modes.probing && modes.branch && modes.above && modes.below);
+            let unload = mark("Unload");
+            assert!(unload.continues && unload.above && !unload.below);
+            // A frequency step about the unloaded model stands apart.
+            let free = mark("Free");
+            assert!(free.probing && !free.branch && !free.below);
+        }
+        // The tooltip of a step row says where it starts.
+        let row = (rows.iter())
+            .find(|r| r.path == ["Results", "Modes"])
+            .unwrap();
+        assert!(row.tip.contains("Base: End of Preload"), "{}", row.tip);
     }
 
     #[test]

@@ -313,6 +313,8 @@ pub fn step_records(
                 record.inherited_from = (inherited.iter())
                     .find(|(name, _)| *name == step.name)
                     .map(|(_, source)| source.clone());
+                // A probing step names the state it was computed about.
+                record.base = fe.step_handover(model).base_state();
                 records.push((model, record));
             }
         }

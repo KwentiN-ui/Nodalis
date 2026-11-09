@@ -68,6 +68,10 @@ under each step; double-click it to open the step.
 
 #screenshot("step-start-tree.png", [The first row under each step in the model tree])
 
+The project window shows the same chain as a trace at the left of the step rows of the analysis
+block (@project-window), and the results timeline marks the steps that leave the state as they
+found it (@results-timeline).
+
 #fields(
   [Base state], [Frequency, buckle, complex frequency and steady state dynamics steps, and the
     eigenmodes of a Dynamic step with modal superposition: what they are computed about. #ui("Unloaded model") (default) uses the

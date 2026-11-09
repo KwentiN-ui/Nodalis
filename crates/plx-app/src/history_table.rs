@@ -1011,6 +1011,7 @@ mod tests {
             time_period: Some(if name == "Preload" { 1.0 } else { 2.0 }),
             solver_steps: steps.to_vec(),
             inherited_from: None,
+            base: None,
         };
         let steps = ResultSteps::new(
             &increments,

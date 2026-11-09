@@ -451,7 +451,7 @@ fn can_deactivate(item: &TreeItem) -> bool {
 
 /// The mark of the handover row of a step: an arrow bent into the row, in the orange of the
 /// links that give results to a step.
-fn paint_handover_arrow(painter: &egui::Painter, rect: egui::Rect) {
+pub fn paint_handover_arrow(painter: &egui::Painter, rect: egui::Rect) {
     let color = crate::style::adapt(Color32::from_rgb(220, 130, 40));
     let stroke = egui::Stroke::new(1.6, color);
     let x0 = rect.left() + rect.width() * 0.3;

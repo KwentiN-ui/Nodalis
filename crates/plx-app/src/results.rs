@@ -1923,6 +1923,7 @@ mod tests {
             time_period: None,
             solver_steps: vec![step],
             inherited_from: None,
+            base: None,
         };
         let mut view = ResultsView::new(
             vec![
@@ -2007,6 +2008,7 @@ mod tests {
             time_period: None,
             solver_steps: steps.to_vec(),
             inherited_from: None,
+            base: None,
         };
         view.set_step_records(
             &[
@@ -2277,6 +2279,7 @@ mod tests {
             time_period: None,
             solver_steps: steps.to_vec(),
             inherited_from: None,
+            base: None,
         };
         view.set_step_records(
             &[

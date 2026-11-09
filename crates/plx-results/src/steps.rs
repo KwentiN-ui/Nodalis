@@ -135,6 +135,9 @@ pub struct StepRecord {
     pub solver_steps: Vec<u32>,
     /// The analysis the step was taken over from, for an analysis that continues another.
     pub inherited_from: Option<String>,
+    /// For a step that leaves the state as it found it: the state it was computed about,
+    /// "End of Preload" or "Unloaded model".
+    pub base: Option<String>,
 }
 
 impl StepRecord {
@@ -162,6 +165,7 @@ impl StepRecord {
             time_period: time_period.filter(|t| t.is_finite() && *t > 0.0),
             solver_steps,
             inherited_from: None,
+            base: None,
         }
     }
 }
@@ -192,6 +196,8 @@ pub struct ResultStep {
     pub perturbation: bool,
     pub time_period: Option<f64>,
     pub inherited_from: Option<String>,
+    /// The state a probing step was computed about, see [`StepRecord::base`].
+    pub base: Option<String>,
     pub solver_steps: Vec<u32>,
     /// Indices into the increments of the results, in order.
     pub increments: Vec<usize>,
@@ -230,14 +236,17 @@ impl ResultStep {
         }
     }
 
-    /// The kind with its options, e.g. "Static, NLGEOM" or "Frequency, perturbation".
+    /// The kind with its options, e.g. "Static, NLGEOM" or "Frequency, about the end of
+    /// Preload".
     pub fn description(&self) -> String {
         let mut text = self.category.label().to_owned();
         if self.nlgeom {
             text.push_str(", NLGEOM");
         }
-        if self.perturbation {
-            text.push_str(", perturbation");
+        match &self.base {
+            Some(base) => text.push_str(&format!(", about the {}", lower_first(base))),
+            None if self.perturbation => text.push_str(", perturbation"),
+            None => {}
         }
         if self.has_positions() {
             text.push_str(&format!(
@@ -323,6 +332,7 @@ impl ResultSteps {
                         perturbation: r.perturbation,
                         time_period: r.time_period,
                         inherited_from: r.inherited_from.clone(),
+                        base: r.base.clone(),
                         solver_steps: r.solver_steps.clone(),
                         increments: Vec::new(),
                         start_time: 0.0,
@@ -341,6 +351,7 @@ impl ResultSteps {
                         perturbation: false,
                         time_period: None,
                         inherited_from: None,
+                        base: None,
                         solver_steps: vec![*n],
                         increments: Vec::new(),
                         start_time: 0.0,
@@ -484,6 +495,15 @@ fn before(value: f64, start: f64) -> bool {
     value < start - 1e-9 * start.abs().max(1.0)
 }
 
+/// `text` with a lower-case first letter: "End of Preload" in a sentence.
+fn lower_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,6 +533,7 @@ mod tests {
             time_period: period,
             solver_steps: steps.to_vec(),
             inherited_from: None,
+            base: None,
         }
     }
 
@@ -656,7 +677,14 @@ mod tests {
         let mut modes = record("Modes", StepCategory::Frequency, None, &[2]);
         modes.perturbation = true;
         let increments = [inc(2, 1, AnalysisKind::Frequency, 10.0)];
-        let steps = ResultSteps::new(&increments, &[modes], &[], None);
+        let steps = ResultSteps::new(&increments, &[modes.clone()], &[], None);
         assert_eq!(steps.steps[0].description(), "Frequency, perturbation");
+        // The record names its base.
+        modes.base = Some("End of Preload".into());
+        let steps = ResultSteps::new(&increments, &[modes], &[], None);
+        assert_eq!(
+            steps.steps[0].description(),
+            "Frequency, about the end of Preload"
+        );
     }
 }
