@@ -353,6 +353,23 @@ mod tests {
     }
 
     #[test]
+    fn thickness_is_in_the_units_of_the_results() {
+        // Results of a millimetre model: t = 500 mm gives read-out points at 200 and 500
+        // (mesh units), not at 0.2 and 0.5 as if t were taken as SI metres. The dialog's
+        // thickness field must therefore convert from the results' units, not from SI.
+        let results = load(&testdata("kragbalken_c3d20r.frd"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
+        assert_eq!(units(&results), UnitSystem::MmTonSC);
+        assert_eq!(results.stored_units(), units(&results));
+        let hot_spot = HotSpot {
+            thickness: 500.0,
+            ..HotSpot::new("t")
+        };
+        assert_eq!(hot_spot.in_units(units(&results)).distances(), [200.0, 500.0]);
+    }
+
+    #[test]
     fn plot_shows_the_edge_node_with_the_highest_stress() {
         // The cantilever of the test above: an edge across the top at x = 40 to 60 picks the
         // node nearest to the support, x = 40, where the bending stress is highest.

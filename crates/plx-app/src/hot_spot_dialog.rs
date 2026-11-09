@@ -407,7 +407,10 @@ fn form(
     ui.label("Plate thickness t");
     ui.add_enabled(
         hot_spot.extrapolation.uses_thickness(),
-        numeric::quantity(&mut hot_spot.thickness, units, Quantity::Length)
+        // A hot spot works on the results, which are stored in the units they show; the
+        // thickness is in those units, not in SI like the values of an FE model.
+        numeric::converted(&mut hot_spot.thickness, units, units, Quantity::Length)
+            .suffix(length_suffix(units))
             .range(0.0..=f64::MAX)
             .speed(0.1),
     );
@@ -455,6 +458,16 @@ fn form(
         ui.weak("Away from the weld toe; rotated into the plate surface across the weld.");
     });
     ui.end_row();
+}
+
+/// The unit after a length, empty without one.
+fn length_suffix(units: plx_model::UnitSystem) -> String {
+    let unit = units.unit(Quantity::Length);
+    if unit.is_empty() {
+        String::new()
+    } else {
+        format!(" {unit}")
+    }
 }
 
 fn validate(hot_spot: &HotSpot) -> Result<(), String> {
