@@ -135,6 +135,8 @@ impl MaterialLibraryEditor {
             return;
         };
         let mut material = material.clone();
+        // A material of its own, also when the same one is copied again.
+        material.id = plx_model::Id::new();
         material.convert_units(&Conversion::new(self.library.units, plx_model::STORED));
         material.name = name_for_model(
             &material.name,

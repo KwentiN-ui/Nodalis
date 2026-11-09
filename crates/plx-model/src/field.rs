@@ -267,9 +267,7 @@ mod tests {
             crate::HistoryKind::Element {
                 region: crate::Region::Nodes(Vec::new()),
             },
-            crate::HistoryKind::Contact {
-                pair: String::new(),
-            },
+            crate::HistoryKind::Contact { pair: None },
         ];
         let field = OutputKind::ALL.iter().flat_map(|k| k.choices());
         for variable in field.chain(history.iter().flat_map(|k| k.choices())) {

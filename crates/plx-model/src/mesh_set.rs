@@ -205,7 +205,7 @@ mod tests {
         let before = fe.mesh_sets.clone();
         fe.sections.push(crate::Section {
             name: "Section-1".into(),
-            material: "Steel".into(),
+            material: None,
             region: Region::ElementSet("All".into()),
             thickness: 1.0,
             kind: crate::SectionKind::Solid,

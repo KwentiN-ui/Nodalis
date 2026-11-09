@@ -542,7 +542,8 @@ fn add_default(category: &mut Category, material: &Material, old: &Material) {
         let unchanged = category
             .items
             .iter_mut()
-            .find(|n| matches!(n, LibraryNode::Material(m) if m == old));
+            // The same material by its values: ids are made anew with each library.
+            .find(|n| matches!(n, LibraryNode::Material(m) if Material { id: old.id, ..m.clone() } == *old));
         if let Some(node) = unchanged {
             *node = LibraryNode::Material(material.clone());
             return;

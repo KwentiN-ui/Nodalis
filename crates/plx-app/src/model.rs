@@ -1623,7 +1623,7 @@ impl Model {
             .map(move |s| {
                 let profile = match &s.kind {
                     plx_model::SectionKind::Beam(beam) => (cross_sections.iter())
-                        .find(|c| c.name == beam.cross_section)
+                        .find(|c| Some(c.id) == beam.cross_section)
                         .map(|c| &c.profile),
                     _ => None,
                 };
@@ -2520,7 +2520,7 @@ mod tests {
         let (first, second) = (model.parts[0].name.clone(), model.parts[1].name.clone());
         model.fe.sections.push(plx_model::Section {
             name: "Section-1".into(),
-            material: "Steel".into(),
+            material: Some(crate::test_ids::named("Steel")),
             region: plx_model::Region::Parts(vec![first.clone()]),
             thickness: 1.0,
             kind: SectionKind::Solid,
@@ -3041,6 +3041,7 @@ mod tests {
         let (fixed, pulled) = (nodes_at(0.0), nodes_at(100.0));
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Fix"),
             distribution: None,
             name: "Fix".into(),
             active: true,
@@ -3050,6 +3051,7 @@ mod tests {
             amplitude: None,
         });
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Pull"),
             distribution: None,
             name: "Pull".into(),
             active: true,
@@ -3061,6 +3063,7 @@ mod tests {
         model.fe = FeModel {
             properties: Default::default(),
             materials: vec![Material {
+                id: crate::test_ids::named("Steel"),
                 name: "Steel".into(),
                 density: None,
                 elastic: Some(Elastic {
@@ -3071,7 +3074,7 @@ mod tests {
             }],
             sections: vec![Section {
                 name: "Section-1".into(),
-                material: "Steel".into(),
+                material: Some(crate::test_ids::named("Steel")),
                 region: Region::Parts(vec!["SOLID-1".into()]),
                 thickness: 1.0,
                 kind: SectionKind::Solid,
@@ -3124,7 +3127,7 @@ mod tests {
         let mut model = Model::new(Path::new("plate.inp"), mesh);
         model.fe.sections.push(plx_model::Section {
             name: "Shell_Section-1".into(),
-            material: "Steel".into(),
+            material: Some(crate::test_ids::named("Steel")),
             region: plx_model::Region::Parts(vec!["Plate".into()]),
             thickness: 1.0,
             kind: SectionKind::Shell {
@@ -3171,11 +3174,11 @@ mod tests {
         let mut model = Model::new(Path::new("beam.inp"), mesh);
         model.fe.sections.push(plx_model::Section {
             name: "Beam_Section-1".into(),
-            material: "Steel".into(),
+            material: Some(crate::test_ids::named("Steel")),
             region: plx_model::Region::Parts(vec!["Beam".into()]),
             thickness: 1.0,
             kind: SectionKind::Beam(plx_model::BeamSection {
-                cross_section: "Rect".into(),
+                cross_section: Some(crate::test_ids::named("Rect")),
                 orientation: BeamOrientation::Direction([0.0, 1.0, 0.0]),
                 offset: [0.0; 2],
             }),
@@ -3186,6 +3189,7 @@ mod tests {
         };
         assert_eq!(extent(&model), Vec3::new(10.0, 0.0, 0.0));
         model.fe.cross_sections.push(plx_model::CrossSection {
+            id: crate::test_ids::named("Rect"),
             name: "Rect".into(),
             profile: plx_model::BeamProfile::Rect { a: 4.0, b: 2.0 },
         });
@@ -3348,6 +3352,7 @@ S
         let part = model.mesh.parts[0].name.clone();
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Clamped"),
             distribution: None,
             name: "Clamped".into(),
             active: true,
@@ -3357,6 +3362,7 @@ S
             amplitude: None,
         });
         step.loads.push(Load {
+            id: crate::test_ids::named("Weight"),
             distribution: None,
             name: "Weight".into(),
             active: true,
@@ -3369,13 +3375,14 @@ S
         });
         let solid = Section {
             name: "Section-1".into(),
-            material: "Steel".into(),
+            material: Some(crate::test_ids::named("Steel")),
             region: Region::Parts(vec![part]),
             thickness: 1.0,
             kind: SectionKind::Solid,
         };
         model.fe = FeModel {
             materials: vec![Material {
+                id: crate::test_ids::named("Steel"),
                 name: "Steel".into(),
                 density: Some(density),
                 elastic: Some(Elastic { young, poisson }),
@@ -3460,6 +3467,7 @@ S
             ),
         ] {
             step.boundary_conditions.push(BoundaryCondition {
+                id: plx_model::Id::new(),
                 distribution: None,
                 name: name.into(),
                 active: true,
@@ -3471,6 +3479,7 @@ S
         }
         let fe = FeModel {
             materials: vec![Material {
+                id: crate::test_ids::named("S235"),
                 name: "S235".into(),
                 elastic: Some(Elastic {
                     young: 210000.0,
@@ -3480,7 +3489,7 @@ S
             }],
             sections: vec![Section {
                 name: "Section-1".into(),
-                material: "S235".into(),
+                material: Some(crate::test_ids::named("S235")),
                 region: Region::Parts(names.map(String::from).to_vec()),
                 thickness: 1.0,
                 kind: SectionKind::Solid,
@@ -3560,7 +3569,10 @@ S
                 plx_results::transformation::SymmetryPlane::X,
             )],
             hot_spots: vec![plx_results::hot_spot::HotSpot::new("Hot_Spot-1")],
-            reference_points: vec![plx_model::ReferencePoint::new("RP-1", [1.0, 2.0, 3.0])],
+            reference_points: vec![plx_model::ReferencePoint {
+                id: crate::test_ids::named("RP-1"),
+                ..plx_model::ReferencePoint::new("RP-1", [1.0, 2.0, 3.0])
+            }],
             result_paths: vec![plx_model::ResultPath::new("Path-1")],
             plain_part_names: vec![model.parts[0].name.clone()],
             mesh: Some(model.mesh.fingerprint()),

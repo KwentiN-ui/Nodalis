@@ -128,9 +128,8 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
     hash.finish()
 }
 
-/// The features `text`, the rest of the model written out, names, and those these features
-/// refer to in turn. A name is found as a quoted string anywhere, so a feature is rather
-/// counted once too often than missed.
+/// The features `text`, the rest of the model written out, refers to by their ids, and
+/// those these features refer to in turn.
 fn used_features<'a>(
     text: &str,
     points: &'a [crate::ReferencePoint],
@@ -141,7 +140,7 @@ fn used_features<'a>(
     Vec<&'a crate::CoordinateSystem>,
     Vec<&'a crate::Plane>,
 ) {
-    let named = |text: &str, name: &str| text.contains(&format!("{name:?}"));
+    let named = |text: &str, id: &crate::Id| text.contains(&format!("{id:?}"));
     let mut used = [
         vec![false; points.len()],
         vec![false; systems.len()],
@@ -153,17 +152,14 @@ fn used_features<'a>(
         let names = [
             points
                 .iter()
-                .map(|p| (&p.name, format!("{p:?}")))
+                .map(|p| (&p.id, format!("{p:?}")))
                 .collect::<Vec<_>>(),
-            systems
-                .iter()
-                .map(|c| (&c.name, format!("{c:?}")))
-                .collect(),
-            planes.iter().map(|p| (&p.name, format!("{p:?}"))).collect(),
+            systems.iter().map(|c| (&c.id, format!("{c:?}"))).collect(),
+            planes.iter().map(|p| (&p.id, format!("{p:?}"))).collect(),
         ];
         for (kind, items) in names.iter().enumerate() {
-            for (i, (name, written)) in items.iter().enumerate() {
-                if !used[kind][i] && named(&text, name) {
+            for (i, (id, written)) in items.iter().enumerate() {
+                if !used[kind][i] && named(&text, id) {
                     used[kind][i] = true;
                     found.push_str(written);
                 }
@@ -259,7 +255,7 @@ mod tests {
         let crate::StepKind::ComplexFrequency(complex) = &mut fe.steps[0].kind else {
             unreachable!()
         };
-        complex.system = Some("Hub".into());
+        complex.system = Some(fe.coordinate_systems[0].id);
         let used = solve_input(&mesh, &fe);
         assert_ne!(used, before);
         fe.coordinate_systems[0].origin = [0.0, 0.0, 1.0];
@@ -268,18 +264,18 @@ mod tests {
 
     #[test]
     fn features_count_through_those_that_refer_to_them() {
-        let mut point = crate::ReferencePoint::new("RP-1", [0.0; 3]);
-        point.definition = crate::PointDefinition::Local {
-            system: "Hub".into(),
-            coordinates: [1.0, 0.0, 0.0],
-        };
         let systems = [
             crate::CoordinateSystem::new("Hub"),
             crate::CoordinateSystem::new("Other"),
         ];
+        let mut point = crate::ReferencePoint::new("RP-1", [0.0; 3]);
+        point.definition = crate::PointDefinition::Local {
+            system: Some(systems[0].id),
+            coordinates: [1.0, 0.0, 0.0],
+        };
+        let text = format!("{:?}", crate::Region::ReferencePoint(point.id));
         let points = [point];
-        let (points, systems, planes) =
-            used_features("Region::ReferencePoint(\"RP-1\")", &points, &systems, &[]);
+        let (points, systems, planes) = used_features(&text, &points, &systems, &[]);
         assert_eq!(points.len(), 1);
         let names: Vec<_> = systems.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["Hub"]);

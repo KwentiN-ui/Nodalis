@@ -322,9 +322,9 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
         }
         ItemRef::BoundaryCondition { step, name } => {
             // The angle of a location in a cylindrical system is in degrees, no quantity.
-            let cylindrical: Vec<String> = (fe.coordinate_systems.iter())
+            let cylindrical: Vec<Option<crate::Id>> = (fe.coordinate_systems.iter())
                 .filter(|c| c.kind == crate::CoordinateSystemKind::Cylindrical)
-                .map(|c| c.name.clone())
+                .map(|c| Some(c.id))
                 .collect();
             let bc =
                 (step_named(fe, step)?.boundary_conditions.iter_mut()).find(|b| &b.name == name)?;
@@ -576,9 +576,9 @@ impl FeModel {
             ItemRef::Section(name) => fe
                 .sections
                 .push(self.sections.iter().find(|s| &s.name == name)?.clone()),
-            ItemRef::CrossSection(name) => {
-                fe.cross_sections.push(self.cross_section(name)?.clone())
-            }
+            ItemRef::CrossSection(name) => fe
+                .cross_sections
+                .push(self.cross_section_named(name)?.clone()),
             ItemRef::InitialCondition(name) => fe.initial_conditions.push(
                 (self.initial_conditions.iter())
                     .find(|c| &c.name == name)?
@@ -681,6 +681,7 @@ mod tests {
     fn model() -> FeModel {
         let mut step = Step::new_static("Step-1");
         step.loads.push(Load {
+            id: crate::Id::new(),
             distribution: None,
             name: "Force-1".into(),
             active: true,
@@ -776,6 +777,7 @@ mod tests {
         fe.steps[0]
             .boundary_conditions
             .push(crate::BoundaryCondition {
+                id: crate::Id::new(),
                 distribution: None,
                 name: "Remote-1".into(),
                 active: true,

@@ -53,9 +53,9 @@ impl FeModel {
         if !c.from.has_units() || !c.to.has_units() {
             return notes;
         }
-        let cylindrical: Vec<String> = (self.coordinate_systems.iter())
+        let cylindrical: Vec<Option<crate::Id>> = (self.coordinate_systems.iter())
             .filter(|s| s.kind == crate::CoordinateSystemKind::Cylindrical)
-            .map(|s| s.name.clone())
+            .map(|s| Some(s.id))
             .collect();
         for material in &mut self.materials {
             material.convert_units(&c);
@@ -340,9 +340,9 @@ impl FeModel {
     /// and result paths, and the axis of cyclic symmetry.
     pub fn convert_features(&mut self, c: &Conversion) {
         let length = |p: &mut [f64; 3]| c.all(p, Quantity::Length);
-        let cylindrical: Vec<String> = (self.coordinate_systems.iter())
+        let cylindrical: Vec<Option<crate::Id>> = (self.coordinate_systems.iter())
             .filter(|s| s.kind == crate::CoordinateSystemKind::Cylindrical)
-            .map(|s| s.name.clone())
+            .map(|s| Some(s.id))
             .collect();
         for point in &mut self.reference_points {
             length(&mut point.position);
@@ -592,13 +592,14 @@ mod tests {
         });
         model.sections.push(Section {
             name: "Section-1".into(),
-            material: "Steel".into(),
+            material: model.materials.last().map(|m| m.id),
             region: Region::Parts(Vec::new()),
             thickness: 5.0,
             kind: SectionKind::Solid,
         });
         let mut step = Step::new_static("Step-1");
         step.loads.push(Load {
+            id: crate::Id::new(),
             distribution: None,
             name: "Pressure-1".into(),
             active: true,
@@ -610,6 +611,7 @@ mod tests {
             tables: Default::default(),
         });
         step.loads.push(Load {
+            id: crate::Id::new(),
             distribution: None,
             name: "Force-1".into(),
             active: true,

@@ -235,44 +235,31 @@ pub(crate) fn solve_beam_built_in(dir: &Path) -> std::path::PathBuf {
 
 pub(crate) fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeModel {
     let mut step = Step::new_static("Step-1");
-    step.boundary_conditions.push(BoundaryCondition {
-        distribution: None,
-        name: "Fixed-1".into(),
-        active: true,
-        visible: true,
-        region: Region::Nodes(nodes_where(mesh, |p| p[0] == 0.0)),
-        kind: BoundaryKind::displacement([Some(0.0); 6]),
-        amplitude: None,
-    });
-    step.loads.push(Load {
-        distribution: None,
-        name: "Load-1".into(),
-        active: true,
-        visible: true,
-        region,
-        kind: load,
-        amplitude: None,
-        factor_amplitude: None,
-        tables: Default::default(),
-    });
+    step.boundary_conditions.push(BoundaryCondition::new(
+        "Fixed-1",
+        Region::Nodes(nodes_where(mesh, |p| p[0] == 0.0)),
+        BoundaryKind::displacement([Some(0.0); 6]),
+    ));
+    step.loads.push(Load::new("Load-1", region, load));
+    let material = Material {
+        name: "Steel".into(),
+        density: None,
+        elastic: Some(Elastic {
+            young: YOUNG,
+            poisson: POISSON,
+        }),
+        ..Default::default()
+    };
     FeModel {
         properties: Default::default(),
-        materials: vec![Material {
-            name: "Steel".into(),
-            density: None,
-            elastic: Some(Elastic {
-                young: YOUNG,
-                poisson: POISSON,
-            }),
-            ..Default::default()
-        }],
         sections: vec![Section {
             name: "Section-1".into(),
-            material: "Steel".into(),
+            material: Some(material.id),
             region: Region::Parts(vec!["BEAM".into()]),
             thickness: 1.0,
             kind: SectionKind::Solid,
         }],
+        materials: vec![material],
         steps: vec![step],
         ..FeModel::default()
     }

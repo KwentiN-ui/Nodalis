@@ -24,7 +24,7 @@ pub struct NodeTie {
     pub rotations: bool,
     /// The contact detection that found the tie at line ends; `None` for one made by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detected_by: Option<String>,
+    pub detected_by: Option<crate::Id>,
     /// Changed by the user after its detection: detecting again keeps it as it is.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub edited: bool,
@@ -57,21 +57,21 @@ pub struct RigidBody {
     #[serde(default = "crate::active")]
     pub visible: bool,
     pub region: Region,
-    /// Name of the reference point ([`crate::ReferencePoint`]) the body is driven by.
-    pub reference_point: String,
+    /// The reference point ([`crate::ReferencePoint`]) the body is driven by.
+    pub reference_point: crate::Id,
     /// Whether the selection keeps its shape or the point follows its mean motion.
     #[serde(default)]
     pub behavior: RemoteBehavior,
 }
 
 impl RigidBody {
-    pub fn new(name: impl Into<String>, reference_point: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<String>, reference_point: crate::Id) -> Self {
         Self {
             name: name.into(),
             active: true,
             visible: true,
             region: Region::Faces(Vec::new()),
-            reference_point: reference_point.into(),
+            reference_point,
             behavior: RemoteBehavior::Rigid,
         }
     }
@@ -395,8 +395,10 @@ pub struct Joint {
     pub free: [bool; 6],
     /// How a selection end follows its point.
     pub behavior: crate::RemoteBehavior,
-    /// Coordinate system of the location and the joint directions, by name.
-    pub system: String,
+    /// Coordinate system of the location and the joint directions; `None` is the global
+    /// one.
+    #[serde(default)]
+    pub system: Option<crate::Id>,
     /// Coordinates of the joint in `system`; `None` is the centre of the first end (of the
     /// second with ground as the first).
     pub location: Option<[f64; 3]>,
@@ -418,7 +420,7 @@ impl Joint {
             kind: JointKind::Revolute,
             free: [false; 6],
             behavior: crate::RemoteBehavior::Rigid,
-            system: crate::features::GLOBAL.to_string(),
+            system: None,
             location: None,
             axis: JointAxis::FaceNormal,
         }
@@ -450,14 +452,14 @@ impl crate::FeModel {
     /// Displacement/Rotation condition or remote force.
     pub fn point_position(&self, mesh: &plx_mesh::FeMesh, point: &Region) -> Option<[f64; 3]> {
         match point {
-            Region::ReferencePoint(name) => self.reference_point(name).map(|p| p.position),
-            Region::RemotePoint(name) => {
-                if let Some((_, bc, remote)) = self.remote_displacement(mesh, name) {
+            Region::ReferencePoint(id) => self.reference_point(*id).map(|p| p.position),
+            Region::RemotePoint(id) => {
+                if let Some((_, bc, remote)) = self.remote_displacement(mesh, *id) {
                     let excluded = self.point_excluded_nodes(mesh, &bc.region, remote);
                     return (remote.resolve(self, mesh, &bc.region, &excluded).ok())
                         .map(|p| p.position);
                 }
-                let (region, force) = self.remote_force_named(name)?;
+                let (region, force) = self.remote_force_of(*id)?;
                 (self.remote_force_nodes(mesh, region, force).ok()).map(|(p, _)| p.position)
             }
             _ => None,
@@ -467,15 +469,15 @@ impl crate::FeModel {
     /// Where a joint is, globally: its location, or the centre of its first end (of the
     /// second with ground as the first).
     pub fn joint_origin(&self, mesh: &plx_mesh::FeMesh, joint: &Joint) -> Result<[f64; 3], String> {
-        let system = (self.coordinate_system_or_global(&joint.system))
-            .ok_or_else(|| format!("Coordinate System {} does not exist", joint.system))?;
+        let system = (self.coordinate_system_or_global(joint.system))
+            .ok_or("The coordinate system does not exist")?;
         if let Some(local) = joint.location {
             return system.global(local);
         }
         let end = joint.locating_end().ok_or("Both ends are World")?;
         if is_point(end) {
             self.point_position(mesh, end)
-                .ok_or_else(|| format!("{} has no position", end.describe()))
+                .ok_or_else(|| format!("{} has no position", end.describe(self)))
         } else {
             end.centroid(mesh)
                 .ok_or_else(|| "The selection contains no nodes.".to_string())
@@ -490,8 +492,8 @@ impl crate::FeModel {
         joint: &Joint,
     ) -> Result<([f64; 3], [[f64; 3]; 3]), String> {
         let origin = self.joint_origin(mesh, joint)?;
-        let system = (self.coordinate_system_or_global(&joint.system))
-            .ok_or_else(|| format!("Coordinate System {} does not exist", joint.system))?;
+        let system = (self.coordinate_system_or_global(joint.system))
+            .ok_or("The coordinate system does not exist")?;
         let directions = system.directions_at(origin)?;
         if self.properties.space.is_2d() {
             return Ok((origin, directions));

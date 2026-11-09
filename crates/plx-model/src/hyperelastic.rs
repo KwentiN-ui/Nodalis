@@ -452,7 +452,7 @@ impl crate::FeModel {
     /// Whether a section of the model has a hyperelastic material.
     pub fn has_hyperelastic(&self) -> bool {
         (self.sections.iter()).any(|s| {
-            (self.materials.iter()).any(|m| m.name == s.material && m.hyperelastic.is_some())
+            (s.material.and_then(|m| self.material(m))).is_some_and(|m| m.hyperelastic.is_some())
         })
     }
 

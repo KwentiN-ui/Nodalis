@@ -28,6 +28,8 @@ type PartPair = (BTreeSet<usize>, BTreeSet<usize>);
 /// A search for contact regions and the parameters it runs with.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContactDetection {
+    /// The internal identity other items refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     /// Names of the parts searched; empty searches all visible parts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -72,6 +74,7 @@ impl ContactDetection {
 
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             parts: Vec::new(),
             tolerance: None,
@@ -377,8 +380,14 @@ impl FeModel {
             tolerance,
             ..DetectionReport::default()
         };
-        let ours = |r: &ContactRegion| r.detected_by.as_deref() == Some(detection.name.as_str());
+        let ours = |r: &ContactRegion| r.detected_by == Some(detection.id);
         let before = self.contact_regions.len();
+        // A region found again keeps the id of the one it replaces, so that what refers to
+        // it (a contact history output, a contact change of a step) stays on it.
+        let replaced: Vec<(String, crate::Id)> = (self.contact_regions.iter())
+            .filter(|r| ours(r) && !r.edited)
+            .map(|r| (r.name.clone(), r.id))
+            .collect();
         self.contact_regions.retain(|r| !ours(r) || r.edited);
         report.replaced = before - self.contact_regions.len();
         // The parts each kept region connects, to recognise it among the regions found.
@@ -410,7 +419,7 @@ impl FeModel {
                 Some(_) => detection.tolerance,
                 None => Some(tolerance),
             };
-            found.detected_by = Some(detection.name.clone());
+            found.detected_by = Some(detection.id);
             let name = found.name_from_definition(mesh);
             let taken = self.contact_pair_names();
             found.name = if taken.iter().any(|t| t.eq_ignore_ascii_case(&name)) {
@@ -418,6 +427,9 @@ impl FeModel {
             } else {
                 name
             };
+            if let Some((_, id)) = replaced.iter().find(|(n, _)| *n == found.name) {
+                found.id = *id;
+            }
             self.contact_regions.push(found);
             report.added += 1;
         }
@@ -450,7 +462,7 @@ impl FeModel {
         let Some(detection) = self.contact_detections.get(index).cloned() else {
             return;
         };
-        let ours = |t: &NodeTie| t.detected_by.as_deref() == Some(detection.name.as_str());
+        let ours = |t: &NodeTie| t.detected_by == Some(detection.id);
         self.node_ties.retain(|t| !ours(t) || t.edited);
         if !detection.filter.line_end {
             return;
@@ -477,7 +489,7 @@ impl FeModel {
             };
             self.node_ties.push(NodeTie {
                 region: joint_region(mesh, &joint),
-                detected_by: Some(detection.name.clone()),
+                detected_by: Some(detection.id),
                 ..NodeTie::new(name)
             });
             report.node_ties += 1;

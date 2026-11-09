@@ -145,9 +145,9 @@ impl FeModel {
             .flat_map(|l| [&l.amplitude, &l.factor_amplitude]);
         let fields = (step.defined_fields.iter().filter(|f| f.active)).map(|f| &f.amplitude);
         let mut used: Vec<&Amplitude> = Vec::new();
-        for name in bcs.chain(loads).chain(fields).flatten() {
-            if let Some(amplitude) = self.amplitudes.iter().find(|a| &a.name == name)
-                && !used.iter().any(|a| a.name == amplitude.name)
+        for id in bcs.chain(loads).chain(fields).flatten() {
+            if let Some(amplitude) = self.amplitude(*id)
+                && !used.iter().any(|a| a.id == amplitude.id)
             {
                 used.push(amplitude);
             }
@@ -266,12 +266,13 @@ mod tests {
         let mut step = Step::new_dynamic("Dyn");
         assert_eq!(model.amplitude_interval(&step, 1.0), None);
         step.loads.push(crate::Load {
+            id: crate::Id::new(),
             name: "F".into(),
             active: true,
             visible: true,
             region: crate::Region::Nodes(Vec::new()),
             kind: crate::LoadKind::Pressure(1.0),
-            amplitude: Some("Pulse".into()),
+            amplitude: Some(model.amplitudes[0].id),
             factor_amplitude: None,
             tables: Default::default(),
             distribution: None,
@@ -309,7 +310,7 @@ impl FeModel {
         use plx_mesh::ElementShape;
         let mut best: Option<StableStepEstimate> = None;
         for section in &self.sections {
-            let Some(material) = self.materials.iter().find(|m| m.name == section.material) else {
+            let Some(material) = section.material.and_then(|m| self.material(m)) else {
                 continue;
             };
             let (Some(rho), Some(elastic)) = (material.density, material.elastic.as_ref()) else {

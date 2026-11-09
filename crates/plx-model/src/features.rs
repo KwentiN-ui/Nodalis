@@ -1,5 +1,5 @@
 //! The features: reference points and coordinate systems, and planes. They describe
-//! places and directions in the model that other items refer to by name, e.g. a plane spanned
+//! places and directions in the model that other items refer to by their [`Id`], e.g. a plane spanned
 //! by two axes of a coordinate system, results on that plane, or a result path between two
 //! reference points.
 //!
@@ -10,10 +10,11 @@
 use plx_mesh::FeMesh;
 use serde::{Deserialize, Serialize};
 
-use crate::{FeModel, Region, UnitSystem};
+use crate::{FeModel, Id, Region, UnitSystem};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReferencePoint {
+    pub id: Id,
     pub name: String,
     /// Position in global coordinates: as entered, or computed from the definition and kept
     /// up to date by [`FeModel::update_reference_points`].
@@ -31,7 +32,7 @@ pub enum PointDefinition {
     /// Coordinates in a coordinate system of the features: x, y, z, or for a cylindrical
     /// one r, θ in degrees, z.
     Local {
-        system: String,
+        system: Option<Id>,
         coordinates: [f64; 3],
     },
     /// The area-weighted centre of selected faces (of edges in 2D models), e.g. the centre
@@ -55,6 +56,7 @@ impl PointDefinition {
 impl ReferencePoint {
     pub fn new(name: impl Into<String>, position: [f64; 3]) -> Self {
         Self {
+            id: Id::new(),
             name: name.into(),
             position,
             definition: PointDefinition::Global,
@@ -75,9 +77,9 @@ impl ReferencePoint {
                 system,
                 coordinates,
             } => {
-                let system = model
-                    .coordinate_system_or_global(system)
-                    .ok_or_else(|| format!("Coordinate System {system} does not exist"))?;
+                let system = model.coordinate_system_or_global(*system).ok_or_else(|| {
+                    format!("{}: The coordinate system does not exist.", self.name)
+                })?;
                 system.global(*coordinates)
             }
             PointDefinition::CenterOfGravity(region) => {
@@ -158,6 +160,7 @@ impl CoordinateSystemKind {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CoordinateSystem {
+    pub id: Id,
     pub name: String,
     pub kind: CoordinateSystemKind,
     pub origin: [f64; 3],
@@ -200,6 +203,7 @@ impl CoordinateSystem {
     /// The default: the global system.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            id: Id::new(),
             name: name.into(),
             kind: CoordinateSystemKind::Rectangular,
             origin: [0.0; 3],
@@ -285,21 +289,21 @@ impl CoordinateSystem {
     }
 }
 
-/// A point given by coordinates or by a reference point's name.
+/// A point given by coordinates or by a reference point.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PointRef {
     Coordinates([f64; 3]),
-    ReferencePoint(String),
+    ReferencePoint(Id),
 }
 
 impl PointRef {
     pub fn resolve(&self, model: &FeModel) -> Result<[f64; 3], String> {
         match self {
             PointRef::Coordinates(p) => Ok(*p),
-            PointRef::ReferencePoint(name) => model
-                .reference_point(name)
+            PointRef::ReferencePoint(id) => model
+                .reference_point(*id)
                 .map(|r| r.position)
-                .ok_or_else(|| format!("Reference Point {name} does not exist")),
+                .ok_or_else(|| "The reference point does not exist.".to_string()),
         }
     }
 }
@@ -311,22 +315,24 @@ pub enum PlaneSource {
     PointNormal { point: PointRef, normal: [f64; 3] },
     /// Through three points; the normal follows the right-hand rule.
     ThreePoints { points: [PointRef; 3] },
-    /// A plane of a coordinate system, or of the global one ([`GLOBAL`]), shifted along its
+    /// A plane of a coordinate system, or of the global one (`None`), shifted along its
     /// normal.
     CoordinateSystem {
-        system: String,
+        system: Option<Id>,
         plane: CoordinatePlane,
         offset: f64,
     },
 }
 
-/// Name of the global coordinate system, which planes refer to without it being a feature.
+/// Name of the global coordinate system, which items refer to as `None` without it being a
+/// feature.
 pub const GLOBAL: &str = "Global";
 
 /// A plane of the model, e.g. for results on a cut through it. Nothing of it goes into the
 /// input file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Plane {
+    pub id: Id,
     pub name: String,
     pub source: PlaneSource,
 }
@@ -335,9 +341,10 @@ impl Plane {
     /// The global XY plane.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            id: Id::new(),
             name: name.into(),
             source: PlaneSource::CoordinateSystem {
-                system: GLOBAL.into(),
+                system: None,
                 plane: CoordinatePlane::Xy,
                 offset: 0.0,
             },
@@ -372,19 +379,11 @@ impl Plane {
                 plane,
                 offset,
             } => {
-                let system = model
-                    .coordinate_system_or_global(system)
-                    .ok_or_else(|| format!("Coordinate System {system} does not exist"))?;
+                let system = model.coordinate_system_or_global(*system).ok_or_else(|| {
+                    format!("{}: The coordinate system does not exist.", self.name)
+                })?;
                 system.plane(*plane, *offset)
             }
-        }
-    }
-
-    fn point_refs_mut(&mut self) -> Vec<&mut PointRef> {
-        match &mut self.source {
-            PlaneSource::PointNormal { point, .. } => vec![point],
-            PlaneSource::ThreePoints { points } => points.iter_mut().collect(),
-            PlaneSource::CoordinateSystem { .. } => Vec::new(),
         }
     }
 }
@@ -394,8 +393,8 @@ impl Plane {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResultPlane {
     pub name: String,
-    /// Name of the plane feature.
-    pub plane: String,
+    /// The plane feature.
+    pub plane: Id,
 }
 
 /// A straight path through the model on which results are read, e.g. across a wall: values
@@ -442,23 +441,52 @@ impl ResultPath {
 }
 
 impl FeModel {
-    pub fn reference_point(&self, name: &str) -> Option<&ReferencePoint> {
+    pub fn reference_point(&self, id: Id) -> Option<&ReferencePoint> {
+        self.reference_points.iter().find(|r| r.id == id)
+    }
+
+    pub fn reference_point_named(&self, name: &str) -> Option<&ReferencePoint> {
         self.reference_points.iter().find(|r| r.name == name)
     }
 
-    pub fn coordinate_system(&self, name: &str) -> Option<&CoordinateSystem> {
+    pub fn coordinate_system(&self, id: Id) -> Option<&CoordinateSystem> {
+        self.coordinate_systems.iter().find(|c| c.id == id)
+    }
+
+    pub fn coordinate_system_named(&self, name: &str) -> Option<&CoordinateSystem> {
         self.coordinate_systems.iter().find(|c| c.name == name)
     }
 
-    /// A coordinate system of the features, or the global one by its name [`GLOBAL`].
-    pub fn coordinate_system_or_global(&self, name: &str) -> Option<CoordinateSystem> {
-        match self.coordinate_system(name) {
-            Some(system) => Some(system.clone()),
-            None => (name == GLOBAL).then(|| CoordinateSystem::new(GLOBAL)),
+    /// A coordinate system of the features, or the global one for `None`.
+    pub fn coordinate_system_or_global(&self, system: Option<Id>) -> Option<CoordinateSystem> {
+        match system {
+            Some(id) => self.coordinate_system(id).cloned(),
+            None => Some(CoordinateSystem::new(GLOBAL)),
         }
     }
 
-    pub fn plane(&self, name: &str) -> Option<&Plane> {
+    /// The name of a coordinate system for the GUI and messages: [`GLOBAL`] for `None`.
+    pub fn system_name(&self, system: Option<Id>) -> String {
+        match system {
+            None => GLOBAL.to_string(),
+            Some(id) => self.coordinate_system(id).map_or_else(
+                || "(missing coordinate system)".to_string(),
+                |c| c.name.clone(),
+            ),
+        }
+    }
+
+    /// The coordinate system of a name for items read from an input file or typed in:
+    /// `None` for [`GLOBAL`] and for a name the features lack.
+    pub fn system_by_name(&self, name: &str) -> Option<Id> {
+        self.coordinate_system_named(name).map(|c| c.id)
+    }
+
+    pub fn plane(&self, id: Id) -> Option<&Plane> {
+        self.planes.iter().find(|p| p.id == id)
+    }
+
+    pub fn plane_named(&self, name: &str) -> Option<&Plane> {
         self.planes.iter().find(|p| p.name == name)
     }
 
@@ -491,79 +519,26 @@ impl FeModel {
     /// Takes over an edit of the shared features made on results: `before` and `after` are
     /// the features of the results before and after the edit, in `units`, this the FE model
     /// in [`crate::STORED`] units. Items the edit did not change keep their values here, so
-    /// that converting them back and forth never rounds them; a renamed item takes the
-    /// references to it along.
+    /// that converting them back and forth never rounds them; a renamed item keeps the
+    /// references to it, which go by its id.
     pub fn take_feature_edit(&mut self, before: &FeModel, after: &FeModel, units: UnitSystem) {
-        fn renamed<T>(
-            before: &[T],
-            after: &[T],
-            name: impl Fn(&T) -> &String,
-        ) -> Option<(String, String)> {
-            if before.len() != after.len() {
-                return None;
-            }
-            let (old, new) = (before.iter().zip(after))
-                .find(|(b, a)| name(b) != name(a) && !before.iter().any(|o| name(o) == name(a)))?;
-            Some((name(old).clone(), name(new).clone()))
-        }
         fn merge<T: Clone + PartialEq>(
             own: &[T],
             before: &[T],
             after: &[T],
             converted: &[T],
-            name: impl Fn(&T) -> &String,
+            id: impl Fn(&T) -> Id,
         ) -> Vec<T> {
             (after.iter().zip(converted))
                 .map(|(item, converted)| {
                     let kept = before
                         .contains(item)
-                        .then(|| own.iter().find(|o| name(o) == name(item)));
+                        .then(|| own.iter().find(|o| id(o) == id(item)));
                     kept.flatten().unwrap_or(converted).clone()
                 })
                 .collect()
         }
-        let mut before = before.shared_features();
-        fn point(r: &crate::ReferencePoint) -> &String {
-            &r.name
-        }
-        fn system(c: &CoordinateSystem) -> &String {
-            &c.name
-        }
-        fn plane(p: &Plane) -> &String {
-            &p.name
-        }
-        if let Some((old, new)) = renamed(&before.reference_points, &after.reference_points, point)
-        {
-            self.rename_reference_point(&old, &new);
-            before.rename_reference_point(&old, &new);
-            before
-                .reference_points
-                .iter_mut()
-                .filter(|r| r.name == old)
-                .for_each(|r| r.name = new.clone());
-        }
-        if let Some((old, new)) = renamed(
-            &before.coordinate_systems,
-            &after.coordinate_systems,
-            system,
-        ) {
-            self.rename_coordinate_system(&old, &new);
-            before.rename_coordinate_system(&old, &new);
-            before
-                .coordinate_systems
-                .iter_mut()
-                .filter(|c| c.name == old)
-                .for_each(|c| c.name = new.clone());
-        }
-        if let Some((old, new)) = renamed(&before.planes, &after.planes, plane) {
-            self.rename_plane(&old, &new);
-            before.rename_plane(&old, &new);
-            before
-                .planes
-                .iter_mut()
-                .filter(|p| p.name == old)
-                .for_each(|p| p.name = new.clone());
-        }
+        let before = before.shared_features();
         let mut converted = after.shared_features();
         converted.convert_features(&crate::convert::Conversion::new(units, crate::STORED));
         self.reference_points = merge(
@@ -571,21 +546,21 @@ impl FeModel {
             &before.reference_points,
             &after.reference_points,
             &converted.reference_points,
-            point,
+            |r| r.id,
         );
         self.coordinate_systems = merge(
             &self.coordinate_systems,
             &before.coordinate_systems,
             &after.coordinate_systems,
             &converted.coordinate_systems,
-            system,
+            |c| c.id,
         );
         self.planes = merge(
             &self.planes,
             &before.planes,
             &after.planes,
             &converted.planes,
-            plane,
+            |p| p.id,
         );
     }
 
@@ -603,94 +578,6 @@ impl FeModel {
             }
         }
         errors
-    }
-
-    /// Points referring to a renamed reference point follow it, as do rigid bodies and the
-    /// boundary conditions and loads on it.
-    pub fn rename_reference_point(&mut self, old: &str, new: &str) {
-        for constraint in &mut self.constraints {
-            if let crate::Constraint::RigidBody(body) = constraint
-                && body.reference_point == old
-            {
-                body.reference_point = new.to_string();
-            }
-        }
-        // The ends of springs on the point.
-        let constraints = self.constraints.iter_mut().flat_map(|c| c.regions_mut());
-        for region in constraints {
-            if matches!(region, crate::Region::ReferencePoint(n) if n == old) {
-                *region = crate::Region::ReferencePoint(new.to_string());
-            }
-        }
-        for step in &mut self.steps {
-            let regions = (step.boundary_conditions.iter_mut().map(|bc| &mut bc.region))
-                .chain(step.loads.iter_mut().map(|load| &mut load.region));
-            for region in regions {
-                if matches!(region, crate::Region::ReferencePoint(n) if n == old) {
-                    *region = crate::Region::ReferencePoint(new.to_string());
-                }
-            }
-        }
-        let paths = (self.result_paths.iter_mut()).flat_map(|p| [&mut p.start, &mut p.end]);
-        let planes = self.planes.iter_mut().flat_map(Plane::point_refs_mut);
-        for point in paths.chain(planes) {
-            if matches!(point, PointRef::ReferencePoint(n) if n == old) {
-                *point = PointRef::ReferencePoint(new.to_string());
-            }
-        }
-    }
-
-    /// Reference points, planes, loads, displacements and complex frequency steps of a
-    /// renamed coordinate system follow it.
-    pub fn rename_coordinate_system(&mut self, old: &str, new: &str) {
-        for point in &mut self.reference_points {
-            if let PointDefinition::Local { system, .. } = &mut point.definition
-                && system == old
-            {
-                *system = new.to_string();
-            }
-        }
-        for plane in &mut self.planes {
-            if let PlaneSource::CoordinateSystem { system, .. } = &mut plane.source
-                && system == old
-            {
-                *system = new.to_string();
-            }
-        }
-        for load in self.steps.iter_mut().flat_map(|s| &mut s.loads) {
-            if let crate::LoadKind::Moving(moving) = &mut load.kind
-                && moving.system == old
-            {
-                moving.system = new.to_string();
-            }
-        }
-        for bc in self
-            .steps
-            .iter_mut()
-            .flat_map(|s| &mut s.boundary_conditions)
-        {
-            if let crate::BoundaryKind::Displacement(remote) = &mut bc.kind
-                && remote.system == old
-            {
-                remote.system = new.to_string();
-            }
-        }
-        for step in &mut self.steps {
-            if let crate::StepKind::ComplexFrequency(complex) = &mut step.kind
-                && complex.system.as_deref() == Some(old)
-            {
-                complex.system = Some(new.to_string());
-            }
-        }
-    }
-
-    /// Results on a renamed plane follow it.
-    pub fn rename_plane(&mut self, old: &str, new: &str) {
-        for result in &mut self.result_planes {
-            if result.plane == old {
-                result.plane = new.to_string();
-            }
-        }
     }
 }
 
@@ -781,19 +668,24 @@ mod tests {
         model
             .reference_points
             .push(ReferencePoint::new("RP-1", [0.0, 0.0, 4.0]));
+        let rp = model.reference_points[0].id;
         let mut path = ResultPath::new("Path-1");
-        path.start = PointRef::ReferencePoint("RP-1".into());
+        path.start = PointRef::ReferencePoint(rp);
         path.end = PointRef::Coordinates([0.0, 0.0, 0.0]);
         path.points = 5;
         let samples = path.samples(&model).unwrap();
         assert_eq!(samples.len(), 5);
         assert_eq!(samples[1], (1.0, [0.0, 0.0, 3.0]));
         model.result_paths.push(path);
-        model.rename_reference_point("RP-1", "Top");
+        // A renamed point is still the start of the path.
+        model.reference_points[0].name = "Top".into();
+        assert_eq!(model.result_paths[0].start, PointRef::ReferencePoint(rp));
         assert_eq!(
-            model.result_paths[0].start,
-            PointRef::ReferencePoint("Top".into())
+            model.result_paths[0].samples(&model).unwrap()[1].1,
+            [0.0, 0.0, 3.0]
         );
+        // A removed one is not.
+        model.reference_points.clear();
         assert!(model.result_paths[0].samples(&model).is_err());
     }
 
@@ -805,10 +697,11 @@ mod tests {
         let mut hub = CoordinateSystem::new("Hub");
         hub.origin = [0.1, 0.0, 0.0];
         hub.point_x = [0.3, 0.0, 0.0];
+        let hub_id = hub.id;
         fe.coordinate_systems.push(hub);
         let mut step = crate::Step::new_static("Rotor");
         step.kind = crate::StepKind::ComplexFrequency(crate::ComplexFrequencyStep {
-            system: Some("Hub".into()),
+            system: Some(hub_id),
             ..Default::default()
         });
         fe.steps.push(step);
@@ -827,7 +720,7 @@ mod tests {
         // The unchanged one keeps its values exactly.
         assert_eq!(fe.coordinate_systems[0], kept);
         assert!(close(fe.coordinate_systems[1].origin, [0.005, 0.0, 0.0]));
-        // A rename on the results takes the step along.
+        // A rename on the results keeps the step on the system.
         let before = results.clone();
         results.coordinate_systems[0].name = "Shaft".into();
         fe.take_feature_edit(&before, &results, UnitSystem::MmTonSC);
@@ -835,7 +728,7 @@ mod tests {
         let crate::StepKind::ComplexFrequency(complex) = &fe.steps[0].kind else {
             unreachable!()
         };
-        assert_eq!(complex.system.as_deref(), Some("Shaft"));
+        assert_eq!(complex.system, Some(hub_id));
         // And a deletion goes as well.
         let before = results.clone();
         results.coordinate_systems.remove(1);
@@ -854,20 +747,22 @@ mod tests {
         model
             .reference_points
             .push(ReferencePoint::new("RP-1", [0.0; 3]));
+        let rp = model.reference_points[0].id;
         let mut spring = crate::Spring::new("Spring-1");
         spring.ends = [
-            crate::SpringEnd::Region(crate::Region::ReferencePoint("RP-1".into())),
+            crate::SpringEnd::Region(crate::Region::ReferencePoint(rp)),
             crate::SpringEnd::World,
         ];
         model.constraints.push(crate::Constraint::Spring(spring));
-        model.rename_reference_point("RP-1", "Hub");
+        model.reference_points[0].name = "Hub".into();
         let crate::Constraint::Spring(spring) = &model.constraints[0] else {
             unreachable!()
         };
         assert_eq!(
             spring.ends[0],
-            crate::SpringEnd::Region(crate::Region::ReferencePoint("Hub".into()))
+            crate::SpringEnd::Region(crate::Region::ReferencePoint(rp))
         );
+        assert_eq!(model.name_of(rp), Some("Hub"));
     }
 
     #[test]
@@ -876,12 +771,13 @@ mod tests {
         model
             .reference_points
             .push(ReferencePoint::new("RP-1", [0.0, 0.0, 2.0]));
+        let rp = model.reference_points[0].id;
         let mut plane = Plane::new("Plane-1");
         let (point, normal) = plane.resolve(&model).unwrap();
         assert!(close(point, [0.0; 3]) && close(normal, [0.0, 0.0, 1.0]));
         plane.source = PlaneSource::ThreePoints {
             points: [
-                PointRef::ReferencePoint("RP-1".into()),
+                PointRef::ReferencePoint(rp),
                 PointRef::Coordinates([1.0, 0.0, 2.0]),
                 PointRef::Coordinates([0.0, 0.0, 3.0]),
             ],
@@ -898,9 +794,10 @@ mod tests {
         cs.origin = [0.0, 0.0, 5.0];
         cs.point_x = [0.0, 1.0, 5.0];
         cs.point_xy = [-1.0, 0.0, 5.0];
+        let system = cs.id;
         model.coordinate_systems.push(cs);
         plane.source = PlaneSource::CoordinateSystem {
-            system: "CS".into(),
+            system: Some(system),
             plane: CoordinatePlane::Yz,
             offset: 2.0,
         };
@@ -909,12 +806,12 @@ mod tests {
         model.planes.push(plane);
         model.result_planes.push(ResultPlane {
             name: "Plane_Result-1".into(),
-            plane: "Plane-1".into(),
+            plane: model.planes[0].id,
         });
         // So does the rotation axis of a complex frequency step: the z axis through the origin.
         let mut step = crate::Step::new_static("Rotor");
         step.kind = crate::StepKind::ComplexFrequency(crate::ComplexFrequencyStep {
-            system: Some("CS".into()),
+            system: Some(system),
             ..Default::default()
         });
         model.steps.push(step);
@@ -925,21 +822,21 @@ mod tests {
         let (point, axis) = complex(&model).axis_in(&model).unwrap();
         assert!(close(point, [0.0, 0.0, 5.0]) && close(axis, [0.0, 0.0, 1.0]));
         model.coordinate_systems[0].name = "Turned".into();
-        model.rename_coordinate_system("CS", "Turned");
-        model.rename_plane("Plane-1", "Cut");
+        model.planes[0].name = "Cut".into();
         assert!(model.planes[0].resolve(&model).is_ok());
-        assert_eq!(complex(&model).system.as_deref(), Some("Turned"));
+        assert_eq!(complex(&model).system, Some(system));
         assert!(complex(&model).axis_in(&model).is_ok());
         let mut missing = complex(&model);
-        missing.system = Some("Gone".into());
-        assert!(missing.axis_in(&model).unwrap_err().contains("Gone"));
-        assert_eq!(model.result_planes[0].plane, "Cut");
+        missing.system = Some(Id::new());
+        assert!(missing.axis_in(&model).is_err());
+        assert_eq!(model.result_planes[0].plane, model.planes[0].id);
     }
 
     #[test]
     fn degenerate_planes_are_reported() {
         let model = FeModel::default();
         let plane = Plane {
+            id: crate::Id::new(),
             name: "P".into(),
             source: PlaneSource::ThreePoints {
                 points: [
@@ -951,9 +848,10 @@ mod tests {
         };
         assert!(plane.resolve(&model).is_err());
         let missing = Plane {
+            id: crate::Id::new(),
             name: "P".into(),
             source: PlaneSource::CoordinateSystem {
-                system: "CS".into(),
+                system: Some(crate::Id::new()),
                 plane: CoordinatePlane::Xy,
                 offset: 0.0,
             },
