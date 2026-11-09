@@ -48,6 +48,8 @@ pub enum TreeIcon {
     Warning,
     Geometry,
     MeshSetup,
+    /// A mesh operation such as a transform: a part moved along an arrow.
+    MeshOperation,
     HotSpot,
     Plane,
     Path,
@@ -100,6 +102,7 @@ fn pixmap(icon: TreeIcon) -> &'static Pixmap {
         TreeIcon::Warning => &WARNING,
         TreeIcon::Geometry => &GEOMETRY,
         TreeIcon::MeshSetup => &MESH_SETUP,
+        TreeIcon::MeshOperation => &MESH_OPERATION,
         TreeIcon::Plane => &PLANE,
         TreeIcon::Path => &PATH,
         TreeIcon::PlaneResult => &PLANE_RESULT,
@@ -1539,6 +1542,33 @@ const GEOMETRY: Pixmap = Pixmap {
 };
 
 /// Mesh_refinement.ico
+const MESH_OPERATION: Pixmap = Pixmap {
+    colors: &[
+        [80, 80, 80, 255],
+        [170, 170, 170, 255],
+        [220, 40, 40, 255],
+        [150, 150, 150, 255],
+    ],
+    rows: [
+        "DDDDDD..........",
+        "D....D..........",
+        "D....D..........",
+        "D....D..........",
+        "D....DC.........",
+        "DDDDDD.C.C......",
+        "........CC......",
+        ".......CCC......",
+        "................",
+        ".........AAAAAAA",
+        ".........ABBABBA",
+        ".........ABBABBA",
+        ".........AAAAAAA",
+        ".........ABBABBA",
+        ".........ABBABBA",
+        ".........AAAAAAA",
+    ],
+};
+
 const MESH_SETUP: Pixmap = Pixmap {
     colors: &[
         [255, 0, 0, 94],
@@ -1737,6 +1767,7 @@ mod tests {
             TreeIcon::Warning,
             TreeIcon::Geometry,
             TreeIcon::MeshSetup,
+            TreeIcon::MeshOperation,
             TreeIcon::HotSpot,
             TreeIcon::Plane,
             TreeIcon::Path,

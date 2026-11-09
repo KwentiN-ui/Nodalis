@@ -310,6 +310,7 @@ impl ModelMut<'_> {
             mesh_inputs,
             mesh_sets,
             element_types,
+            mesh_operations,
         } = copy;
         if let Some(tags) = links::geometry_tags(self.geometry.as_ref(), geometry.as_ref()) {
             links::follow_geometry(self.fe, None, &tags);
@@ -319,6 +320,7 @@ impl ModelMut<'_> {
         *self.mesh_inputs = mesh_inputs;
         self.fe.mesh_sets = mesh_sets;
         self.fe.element_types = element_types;
+        self.fe.mesh_operations = mesh_operations;
     }
 }
 

@@ -76,6 +76,9 @@ impl FeModel {
             cross_section.profile.convert_units(&c);
         }
         self.convert_features(&c);
+        for operation in &mut self.mesh_operations {
+            operation.convert_units(&c);
+        }
         for constraint in &mut self.constraints {
             constraint.convert_units(&c);
             if let Constraint::Joint(joint) = constraint

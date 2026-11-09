@@ -36,6 +36,7 @@ pub mod hyperelastic_fit;
 mod id;
 pub mod library;
 mod measure;
+mod mesh_operation;
 mod mesh_set;
 mod moving_load;
 mod number;
@@ -109,6 +110,7 @@ pub use hyperelastic::{Hyperelastic, HyperelasticModel, TestMode};
 pub use id::Id;
 pub use library::MaterialLibrary;
 pub use measure::{Extreme, MeasureKind, MeasureRegion, POINT_AXES};
+pub use mesh_operation::{MeshOperation, MeshOperationKind};
 pub use mesh_set::{MeshSet, SetKind};
 pub use moving_load::{AXIS_LABELS, LoadStations, MovingFrame, MovingLoad, Wheel, load_stations};
 pub use number::{MathOp, switch};
@@ -230,6 +232,10 @@ pub struct FeModel {
     /// Element types the user chose for parts instead of those the mesh came with.
     #[serde(default)]
     pub element_types: Vec<PartElementType>,
+    /// Changes of the mesh parts applied after meshing, such as transforms, in order; the
+    /// mesh has them applied.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mesh_operations: Vec<MeshOperation>,
     /// Fields exposed as parameters, which value links of the project schematic set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exposed: Vec<Exposed>,
@@ -442,6 +448,7 @@ impl FeModel {
     /// defines for it, keep pointing at it.
     pub fn rename_part(&mut self, old: &str, new: &str) {
         self.rename_element_types(old, new);
+        self.rename_mesh_operation_parts(old, new);
         let regions = (self.sections.iter_mut().map(|s| &mut s.region))
             .chain(
                 self.constraints

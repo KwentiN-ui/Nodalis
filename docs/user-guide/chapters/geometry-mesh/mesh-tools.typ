@@ -3,17 +3,23 @@
 == Mesh tools <mesh-tools>
 
 The mesh tools change an existing mesh without meshing again: they move or mirror parts, join
-parts, merge nodes that lie on top of each other and renumber the mesh. They work on the
+parts, merge nodes that lie on top of each other and renumber the mesh. Transforms stay in the
+model as mesh operations and come back when the parts are meshed again; the other tools change
+the mesh once. They work on the
 FE Model workspace, on meshed geometry as well as on imported meshes.
 
 === Transform parts
 
 #ui("Transform ...") in the context menu of one or more parts under #ui("Mesh") moves their
-nodes.
+nodes. A transform is a mesh operation: it is kept in the tree under
+#ui("Mesh") > #ui("Mesh Operations") as part of how the mesh is made, so that meshing the parts
+again does not lose it.
 
 #screenshot("transform-mesh.png", [Transform mesh parts])
 
 #fields(
+  [Name], [Name of the mesh operation, #ui("Transform-1") and so on.],
+  [Parts], [The mesh parts it moves; the parts selected in the tree are checked.],
   [Kind], [#ui("Translate") by #ui("dX"), #ui("dY"), #ui("dZ"); #ui("Rotate") by #ui("Angle")
     (in degrees) about an axis through the point #ui("X"), #ui("Y"), #ui("Z") with the
     direction #ui("Axis"); #ui("Mirror") at the plane through the point with the #ui("Normal");
@@ -21,9 +27,28 @@ nodes.
 )
 
 Mirrored elements are turned inside out again, so they stay valid; the surfaces, sets and
-regions of the model follow the elements. Only the mesh moves: meshing the geometry again
-restores its position. In 2D models the rotation axis is the z axis and the transformations have
-two components.
+regions of the model follow the elements. In 2D models the rotation axis is the z axis and the
+transformations have two components.
+
+=== Mesh operations
+
+#ui("Mesh Operations") under #ui("Mesh") lists the transforms in the order they are applied.
+Selecting one highlights its parts.
+
+#screenshot("mesh-operations.png", [A transform under Mesh Operations])
+
+- *Meshing again:* when a part is meshed anew from the geometry, every mesh operation that
+  names it is applied to the new mesh, in the order of the list. The output pane names the
+  operations that were applied.
+- *Edit:* a double-click or #ui("Edit ...") opens the transform again. On #ui("OK") Nodalis
+  undoes it and the operations after it on the mesh there is, and applies them again with the
+  new values; the parts are not meshed again.
+- *Delete:* #ui("Delete") in the context menu, or #key("Del"), undoes the transform on the mesh
+  and removes it; #menu("Edit", "Undo") brings it back.
+
+A mesh operation names its parts; a part renamed under #ui("Mesh") stays in it. An analysis that
+takes its mesh from another one by a link takes its mesh operations too; change them in the
+analysis the mesh comes from.
 
 === Merge parts
 

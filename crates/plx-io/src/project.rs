@@ -1427,6 +1427,15 @@ mod tests {
                 part: "EALL".into(),
                 type_name: "C3D20".into(),
             }],
+            mesh_operations: vec![plx_model::MeshOperation {
+                name: "Transform-1".into(),
+                parts: vec!["EALL".into()],
+                kind: plx_model::MeshOperationKind::Transform(plx_mesh::MeshTransform::Rotate {
+                    point: [1.0, 2.0, 3.0],
+                    axis: [0.0, 0.0, 1.0],
+                    angle: 30.0,
+                }),
+            }],
             exposed: vec![plx_model::Exposed {
                 key: 1,
                 name: "Steel density".into(),

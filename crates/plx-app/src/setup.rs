@@ -4599,6 +4599,12 @@ pub fn sections_using_material(fe: &FeModel, material: usize) -> Vec<usize> {
 /// How an item selected in the tree shows in the 3D view: its region, or master and slave.
 pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
     let fe = &model.fe;
+    // A mesh operation shows the parts it changes.
+    if let TreeItem::MeshOperation(i) = *item {
+        return (fe.mesh_operations.get(i))
+            .map(|o| Highlight::parts(o.part_indices(&model.mesh)))
+            .unwrap_or_default();
+    }
     let master_slave = match *item {
         TreeItem::Constraint(i) => fe.constraints.get(i).and_then(Constraint::master_slave),
         TreeItem::ContactPair(i) => fe.contact_pairs.get(i).map(|c| [&c.master, &c.slave]),

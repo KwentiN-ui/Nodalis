@@ -31,6 +31,8 @@ pub enum TreeItem {
     Part(usize),
     /// An item of the geometry's mesh setup.
     MeshItem(usize),
+    /// A mesh operation of the FE model, such as a transform, under Mesh > Mesh Operations.
+    MeshOperation(usize),
     NodeSet(String),
     ElementSet(String),
     Surface(String),
@@ -85,6 +87,9 @@ pub enum TreeItem {
     /// A hot spot definition of the current results, by index.
     HotSpot(usize),
 }
+
+/// The category of the mesh operations under Mesh.
+pub const MESH_OPERATIONS: &str = "Mesh Operations";
 
 /// The group of the exposed parameters in the FE Model tree.
 pub const EXPOSED: &str = "Exposed Parameters";
@@ -697,6 +702,7 @@ fn deletable(view: TreeView, item: &TreeItem) -> bool {
                 | TreeItem::HotSpot(_)
                 | TreeItem::MeshItem(_)
         )
+        || (view == TreeView::FeModel && matches!(item, TreeItem::MeshOperation(_)))
         || (view == TreeView::FeModel && set_kind(item).is_some())
 }
 
@@ -772,7 +778,9 @@ fn contains(branch: &TreeItem, item: &TreeItem) -> bool {
     use TreeItem::*;
     match branch {
         Model => !matches!(item, Model),
-        Mesh | Group("Parts") => matches!(item, Part(_)),
+        Mesh => matches!(item, Part(_) | MeshOperation(_) | Group(MESH_OPERATIONS)),
+        Group("Parts") => matches!(item, Part(_)),
+        Group(MESH_OPERATIONS) => matches!(item, MeshOperation(_)),
         Group("Constraints") => matches!(item, Constraint(_)),
         Group("Sections") => matches!(item, Section(_) | CrossSection(_) | Group(CROSS_SECTIONS)),
         Group(CROSS_SECTIONS) => matches!(item, CrossSection(_)),
@@ -1171,7 +1179,8 @@ impl Tree<'_> {
                     | TreeItem::HistorySet(_)
                     | TreeItem::HotSpot(_)
                     | TreeItem::MeshItem(_)
-            );
+            )
+            || (self.view == TreeView::FeModel && matches!(item, TreeItem::MeshOperation(_)));
         // The menu of one of several selected items acts on all of them.
         let several = self.is_selected(&item) && self.state.selected_items(self.view).len() > 1;
         if creates.is_some() || editable {
@@ -1334,6 +1343,7 @@ impl Tree<'_> {
             TreeItem::Group("Parts") if self.view == TreeView::Geometry => TreeIcon::Geometry,
             TreeItem::Group("Parts") => TreeIcon::Part,
             TreeItem::Group("Mesh Setup") => TreeIcon::MeshSetup,
+            TreeItem::Group(MESH_OPERATIONS) => TreeIcon::MeshOperation,
             TreeItem::Group("Node Sets") => TreeIcon::NodeSet,
             TreeItem::Group("Element Sets") => TreeIcon::ElementSet,
             TreeItem::Group("Surfaces") => TreeIcon::Surface,
@@ -1654,6 +1664,14 @@ impl Tree<'_> {
         };
         self.branch(ui, TreeItem::Mesh, "Mesh", true, |tree, ui| {
             tree.parts(ui, model);
+            // What is done to the parts after meshing, in order; the Results tree shows the
+            // mesh as it is.
+            if tree.view == TreeView::FeModel {
+                let operations = (model.fe.mesh_operations.iter().enumerate())
+                    .map(|(i, o)| (TreeItem::MeshOperation(i), o.name.as_str()))
+                    .collect();
+                tree.container(ui, MESH_OPERATIONS, operations);
+            }
             let mesh = &model.mesh;
             // The user's sets are listed even when their selection finds nothing on the mesh.
             let names = |kind: SetKind| -> Vec<String> {

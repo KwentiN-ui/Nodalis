@@ -89,6 +89,8 @@ pub struct MeshCopy {
     pub mesh_inputs: BTreeMap<String, u64>,
     pub mesh_sets: Vec<plx_model::MeshSet>,
     pub element_types: Vec<plx_model::PartElementType>,
+    /// The operations the mesh has applied, so that the copy meshes alike.
+    pub mesh_operations: Vec<plx_model::MeshOperation>,
 }
 
 impl MeshCopy {
@@ -99,6 +101,7 @@ impl MeshCopy {
             mesh_inputs: data.mesh_inputs.clone(),
             mesh_sets: data.fe.mesh_sets.clone(),
             element_types: data.fe.element_types.clone(),
+            mesh_operations: data.fe.mesh_operations.clone(),
         }
     }
 }
@@ -752,6 +755,7 @@ pub fn fingerprint(data: Data, path: &[String]) -> u64 {
             hash.add_debug(data.mesh_inputs);
             hash.add_debug(&data.fe.mesh_sets);
             hash.add_debug(&data.fe.element_types);
+            hash.add_debug(&data.fe.mesh_operations);
         }
         [cell, rest @ ..] if cell == SETUP => setup_fingerprint(&mut hash, data.fe, rest),
         _ => {}
@@ -1343,7 +1347,7 @@ pub fn path_of(fe: &FeModel, item: &TreeItem) -> Option<Vec<String>> {
         | TreeItem::NodeSet(_)
         | TreeItem::ElementSet(_)
         | TreeItem::Surface(_) => Some(vec![MESH.to_owned()]),
-        TreeItem::MeshItem(_) => Some(vec![MESH.to_owned()]),
+        TreeItem::MeshItem(_) | TreeItem::MeshOperation(_) => Some(vec![MESH.to_owned()]),
         TreeItem::Material(i) => entry("Materials", &fe.materials.get(*i)?.name),
         TreeItem::CrossSection(i) => entry(CROSS_SECTIONS, &fe.cross_sections.get(*i)?.name),
         TreeItem::Section(i) => entry("Sections", &fe.sections.get(*i)?.name),

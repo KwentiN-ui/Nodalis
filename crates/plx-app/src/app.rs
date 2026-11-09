@@ -527,6 +527,7 @@ impl AnalysisWindow {
             mesh_inputs,
             mesh_sets,
             element_types,
+            mesh_operations,
         } = mesh;
         let Some(model) = &mut self.workbench.model else {
             return;
@@ -538,6 +539,7 @@ impl AnalysisWindow {
         }
         model.fe.mesh_sets = mesh_sets;
         model.fe.element_types = element_types;
+        model.fe.mesh_operations = mesh_operations;
         model.set_mesh(mesh);
         model.mesh_inputs = mesh_inputs;
         self.take_geometry(geometry, false);
@@ -1166,6 +1168,9 @@ pub(crate) fn merge_part_meshes(
         space
             .prepare_generated_mesh(&mut part.mesh)
             .map_err(|error| format!("Meshing failed: {error}"))?;
+        // The mesh operations are part of making the mesh: a part meshed anew gets them
+        // again rather than losing them.
+        model.fe.apply_mesh_operations(&mut part.mesh);
         // What each part is meshed from, to tell when its mesh is out of date.
         for p in &part.mesh.parts {
             let input = plx_model::fingerprint::mesh_input(geometry, space, &p.name);
@@ -1198,6 +1203,13 @@ pub(crate) fn merge_part_meshes(
         mesh = plx_mesher::merge_part(&mesh, part.mesh);
     }
     model.set_mesh(mesh);
+    let applied: Vec<&str> = (model.fe.mesh_operations.iter())
+        .filter(|o| !o.part_indices(&model.mesh).is_empty())
+        .map(|o| o.name.as_str())
+        .collect();
+    if !applied.is_empty() {
+        output.push(format!("Mesh operations applied: {}", applied.join(", ")));
+    }
     let lost = lost_selections(&model.fe, &model.mesh);
     if had_mesh && lost > 0 {
         output.push(format!(
@@ -2210,6 +2222,10 @@ impl Workbench {
                 TreeView::FeModel if path[0] == crate::links::MESH => {
                     let mut items = vec![TreeItem::Mesh, TreeItem::Group("Parts")];
                     items.extend((0..model.parts.len()).map(TreeItem::Part));
+                    // The mesh operations come with the mesh they were applied to.
+                    items.push(TreeItem::Group(tree::MESH_OPERATIONS));
+                    let operations = model.fe.mesh_operations.len();
+                    items.extend((0..operations).map(TreeItem::MeshOperation));
                     items
                 }
                 TreeView::FeModel => crate::links::tree_items(&model.fe, path),
@@ -2400,6 +2416,10 @@ impl Workbench {
             }
         } else if let (Some(TreeItem::Model), TreeView::FeModel) = (&response.open, view) {
             self.edit_model_properties();
+        } else if let (Some(TreeItem::MeshOperation(index)), TreeView::FeModel) =
+            (&response.open, view)
+        {
+            self.open_mesh_tool(MeshTool::Operation(*index));
         } else if let Some(TreeItem::MeshItem(index)) = response.open {
             self.mesh_item_editor = self.model.as_ref().and_then(|m| {
                 MeshItemEditor::edit(m.geometry.as_ref()?, index, m.fe.properties.units)
@@ -4879,6 +4899,9 @@ impl Workbench {
     /// The name of an item of the FE model, as its dialog shows it.
     fn item_name(&self, item: &TreeItem) -> Option<String> {
         let model = self.model.as_ref()?;
+        if let TreeItem::MeshOperation(index) = item {
+            return (model.fe.mesh_operations.get(*index)).map(|o| o.name.clone());
+        }
         let editor = Editor::edit(item, &model.fe, &model.mesh)?;
         Some(editor.name())
     }
@@ -4924,6 +4947,8 @@ impl Workbench {
             self.delete_history_output(set);
         } else if let TreeItem::HotSpot(index) = item {
             self.delete_hot_spot(index);
+        } else if let TreeItem::MeshOperation(index) = item {
+            self.delete_mesh_operation(index);
         } else if let TreeItem::MeshItem(index) = item {
             if let Some(geometry) = self.model.as_mut().and_then(|m| m.geometry.as_mut())
                 && index < geometry.mesh_items.len()
@@ -5214,6 +5239,27 @@ impl Workbench {
         model.set_mesh(mesh);
         self.output.push(deleted_message(&names));
         self.after_parts_changed();
+    }
+
+    /// Deleting a mesh operation: it is undone on the mesh, and the parts are no longer
+    /// changed by it when they are meshed again.
+    fn delete_mesh_operation(&mut self, index: usize) {
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+        let Some(name) = (model.fe.mesh_operations.get(index)).map(|o| o.name.clone()) else {
+            return;
+        };
+        let mut operations = model.fe.mesh_operations.clone();
+        operations.remove(index);
+        model.edit_mesh(|mesh, fe| fe.set_mesh_operations(mesh, operations));
+        self.tree.selected = None;
+        self.mesh_tool = None;
+        self.highlighted = None;
+        self.symbols_shown = None;
+        self.results_changed = true;
+        self.output
+            .push(format!("{name} deleted and undone on the mesh"));
     }
 
     /// Merging mesh parts: the selected parts become one, named after the
