@@ -4895,7 +4895,12 @@ fn solver_compression_only_support_takes_only_pressure() {
     let up = [0.0, 0.0, 100.0];
     let down = [0.0, 0.0, -100.0];
     let pulled = support(up, &|_| {});
-    assert!(pulled.contains("*Element, Type=GAPUNI\n"));
+    // A surface of the solver, no gap elements at the nodes.
+    assert!(
+        pulled.contains("*Compression only, Surface=Internal_Selection-1_Compression_Only-1_Surface, Clearance=0\n"),
+        "{pulled}"
+    );
+    assert!(!pulled.contains("GAPUNI"), "{pulled}");
     assert!(pulled.contains("*Plastic, Hardening=Isotropic\n"));
     let Some(frd) = run_solver("druck-nur-zug", &pulled) else {
         return;
@@ -4918,24 +4923,25 @@ fn solver_compression_only_support_takes_only_pressure() {
     let sink = mean_top(&blocks, &frd, "U3");
     assert!((sink + 0.1).abs() < 0.002, "{sink}");
 
-    // A stiffness given is that of the whole face, spread over its nodes: 1000 of the gaps
-    // and 1000 of the springs.
+    // A stiffness given is that of the whole face, spread over it as a stiffness per area:
+    // 1000 of the support and 1000 of the springs.
     let soft = |c: &mut CompressionOnly| c.spring_stiffness = Some(1000.0);
     let text = support(down, &soft);
     let frd = run_solver("druck-nur-verteilt", &text).unwrap();
     let sink = mean_top(&blocks, &frd, "U3");
     assert!((sink + 0.05).abs() < 0.001, "{sink}");
-    // Applied to the 9 nodes individually, each gap has the whole stiffness. The gaps of
-    // the flat face then share one section, as CalculiX makes a material of each.
+    // Applied to the 9 nodes individually, each node stands for the whole stiffness: 9000
+    // over the face.
     let each = |c: &mut CompressionOnly| {
         c.spring_stiffness = Some(1000.0);
         c.each_node = true;
     };
     let text = support(down, &each);
-    assert_eq!(text.matches(", , 1000\n").count(), 1, "{text}");
-    assert_eq!(text.matches("*Gap, Elset=").count(), 1, "{text}");
-    let gaps = text.split("*Element, Type=GAPUNI\n").nth(1).unwrap();
-    assert_eq!(gaps.lines().take_while(|l| !l.starts_with('*')).count(), 9);
+    let area = 1.0;
+    assert!(
+        text.contains(&format!(", Stiffness={}", super::number(9000.0 / area))),
+        "{text}"
+    );
     let frd = run_solver("druck-nur-einzeln", &text).unwrap();
     let sink = mean_top(&blocks, &frd, "U3");
     assert!((sink + 0.01).abs() < 0.001, "{sink}");

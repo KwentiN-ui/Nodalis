@@ -1555,3 +1555,23 @@ V-Zyklus, behaltene Hierarchie oft zu lange behalten.
 - Nodalis (`plx-solve`) lässt in Eigenwertschritten alle Feldausgaben weg, auch die aus dem
   Schritt davor übernommenen (`keep_modes_as_shapes`). `plx-results::from_solver` zeigt jede
   Mode als Inkrement mit dem Feld `MODE` (komplex zusätzlich `PMODE`, Betrag und Phase).
+
+## Compression Only als Flächenstütze (2026-11-09, Thread "Fix compression-only spring lug results")
+
+- Neues plxs-Keyword `*COMPRESSION ONLY, SURFACE=<Elementfläche>[, CLEARANCE=d][, STIFFNESS=k][, FLIP]`
+  (kein ccx-Keyword). `plxs_core::contact::CompressionOnly`; die Assembly
+  (`plxs_assembly::discrete::surface_gaps`) macht daraus je Gauß-Punkt jeder Fläche ein Gap
+  (3×3 auf quadratischen Vierecken, 2/3 Punkte auf Kanten von 2D-Elementen) mit den
+  Formfunktionen als Knotengewichten, Normale aus der Referenzgeometrie, Steifigkeit
+  `k · J · w`. `DiscreteKind::Gap` trägt dafür `weights` (GAPUNI: `[-1, 1]`); alle
+  Prozeduren, die Gaps kennen, nehmen die Flächengaps ohne Änderung mit.
+- `STIFFNESS` ist Steifigkeit pro Fläche; ohne Wert `1e3 · E / h` (`E` der Elemente unter der
+  Fläche, `h` mittlere Kantenlänge). Der Writer rechnet die Gesamtsteifigkeit der
+  Oberfläche (`k / A`) bzw. „Apply to all nodes individually“ (`k · Knoten / A`) um.
+  Zugkraft σ∞ und Offset gibt es nur noch bei Schalen, die weiter GAPUNI bekommen.
+- Grund: starre GAPUNI je Knoten auf C3D20-Flächen lassen die Eckknoten ohne Kraft (ihr
+  konsistenter Anteil eines Drucks ist negativ), das gab ein Schachbrett in den Spannungen.
+  FEAnalyst-Lasche (C3D20, Bohrung r 12, 3000 N): GAPUNI fleckig, Ecken 0 N; Flächenstütze
+  glatt, SXX_max 31.7 MPa (fester Bolzen mit Face-to-Face-Kontakt 32.05 MPa, 2D-Netz 31.9).
+  Nebenbei besser konditioniert: automatischer (iterativer) Löser 142 statt ~360
+  PCG-Iterationen pro Lösung, 64 s statt 168 s (Cloud, 4 Threads).

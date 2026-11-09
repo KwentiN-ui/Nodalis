@@ -652,6 +652,20 @@ fn contact(out: &mut Out, model: &Model) {
             number(clearance.value)
         ));
     }
+    for support in &contact.compression_only {
+        let mut header = format!(
+            "*Compression only, Surface={}, Clearance={}",
+            support.surface,
+            number(support.clearance)
+        );
+        if let Some(stiffness) = support.stiffness {
+            let _ = write!(header, ", Stiffness={}", number(stiffness));
+        }
+        if support.flipped {
+            header.push_str(", Flip");
+        }
+        out.keyword(&header);
+    }
 }
 
 fn friction_line(out: &mut Out, friction: &plxs_core::contact::Friction) {

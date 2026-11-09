@@ -26,13 +26,15 @@ Create them with #ui("Constraint") on the #ui("Connections") tab of the ribbon.
   [Compression Only], [A support that only takes pressure, like a part resting on a rigid floor.
     By default it pushes onto the surface from outside; #ui("Flip") under #ui("Direction")
     makes it push the surface outward from inside the material. #ui("Clearance") is the
-    initial gap. #ui("Spring stiffness") and #ui("Tensile force") are optional and belong to
-    the whole surface, spread over its nodes by area; with
-    #ui("Apply to all nodes individually") every node gets the whole value. Without a value
-    every gap gets CalculiX's default, practically rigid. With #ui("Nonlinear") the contact
-    is solved nonlinearly, otherwise it is linearised in a linear step. Written as `GAPUNI`
-    elements to fixed ground nodes, one per node. Springs and gaps carry no stress, so the
-    nodal stresses at a support are the average of the solid elements alone.],
+    initial gap. #ui("Spring stiffness") is optional and belongs to the whole surface, spread
+    over it by area; with #ui("Apply to all nodes individually") every node stands for the
+    whole value. Without a value the support is practically rigid (a thousand times the
+    stiffness of the element layer under it). On solids and 2D models the support acts at the
+    integration points of the faces, like a pressure spread over them, so that the contact
+    pressure and the stresses under it stay smooth on quadratic elements too. On shells it is
+    written as `GAPUNI` elements to fixed ground nodes, one per node; only there do
+    #ui("Tensile force") and #ui("Offset") matter. With #ui("Nonlinear") the contact is solved
+    nonlinearly, otherwise it is linearised in a linear step.],
 )
 
 Changing the #ui("Type") while creating a constraint keeps the picks the new type can use. A

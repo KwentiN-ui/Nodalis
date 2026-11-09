@@ -309,6 +309,15 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
             }
         }
     }
+    for support in &model.contact.compression_only {
+        if !model.sets.surfaces.contains_key(&support.surface) {
+            errors.push(Error::undefined(
+                "*COMPRESSION ONLY",
+                "surface",
+                &support.surface,
+            ));
+        }
+    }
 
     // Initial conditions and design variables.
     for (region, _) in &model.initial.temperatures {

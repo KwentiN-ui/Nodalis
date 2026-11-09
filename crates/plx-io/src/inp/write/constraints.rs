@@ -1,6 +1,9 @@
 //! Constraints written as CalculiX elements, the way the `CalculixFileWriter` splits
 //! them: springs to ground become `SPRING1` elements with one `*Spring` section per node
-//! and direction, compression only supports become `GAPUNI` elements to fixed ground nodes.
+//! and direction. Compression only supports on faces of solids or 2D elements become a
+//! `*Compression only` surface of the solver (gaps at the integration points of the faces:
+//! `GAPUNI` elements at the nodes leave the corners of quadratic faces without load and the
+//! stresses checkered); those on shells become `GAPUNI` elements to fixed ground nodes.
 //! Springs to a surface become `SPRING2` elements from each node of
 //! the region to a new node that `*Equation`s tie to the closest point of the master
 //! surface. Contact regions of no separation become one `*Equation` per slave node that
@@ -33,6 +36,8 @@ pub(super) struct Generated {
     /// The dummy plastic material that makes the solver solve gaps nonlinearly, by
     /// its name.
     pub material: Option<String>,
+    /// `*Compression only` supports on element surfaces.
+    pub compression_only: Vec<plxs_core::contact::CompressionOnly>,
 }
 
 /// An `*Element` block of generated elements.
@@ -433,6 +438,28 @@ impl Writer {
         let (weights, area) = node_areas(mesh, &faces, false, true);
         if weights.is_empty() {
             return Err(empty(&support.name, "element faces"));
+        }
+        let on_shells = (faces.iter()).any(|(e, _)| mesh.element(*e).is_none_or(|e| e.is_shell()));
+        if !on_shells {
+            // The stiffness of the whole surface, or of every node, as a stiffness per area;
+            // the tensile force of CalculiX's gaps has no counterpart.
+            let stiffness = support.spring_stiffness.map(|k| {
+                if support.each_node {
+                    k * weights.len() as f64 / area
+                } else {
+                    k / area
+                }
+            });
+            let surface = sets.surface(&support.name, "Surface", &support.region)?;
+            self.out
+                .compression_only
+                .push(plxs_core::contact::CompressionOnly {
+                    surface,
+                    clearance: support.clearance,
+                    stiffness,
+                    flipped: support.flipped,
+                });
+            return Ok(());
         }
         // Normal of each node: the mean of the outward normals of its faces.
         let mut normals: BTreeMap<NodeId, [f64; 3]> = BTreeMap::new();
