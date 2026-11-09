@@ -38,7 +38,7 @@ fn main() {
     match gpu.memory() {
         Some(memory) => println!(
             "memory: {:.0} MB total, {:.0} MB granted to this process, {:.0} MB in use, \
-             {:.0} MB free for the solver ({MEMORY_SHARE_PERCENT} %)",
+             {:.0} MB free for the solver (at most {MEMORY_SHARE_PERCENT} %)",
             mb(memory.total),
             mb(memory.budget),
             mb(memory.used),

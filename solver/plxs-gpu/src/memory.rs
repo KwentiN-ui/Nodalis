@@ -1,4 +1,5 @@
-//! The card's own memory as the graphics API reports it, read through wgpu-hal. The
+//! The card's own memory as the graphics API reports it (Vulkan: memory heaps and
+//! `VK_EXT_memory_budget`; DirectX 12: `QueryVideoMemoryInfo`), read through wgpu-hal. The
 //! only place of this crate that steps outside of wgpu: the handles come from wgpu's
 //! live instance and device and are only read, never freed or written.
 #![allow(unsafe_code)]
@@ -14,6 +15,9 @@ pub(crate) enum MemoryQuery {
         /// `VK_EXT_memory_budget` is enabled and the instance speaks Vulkan 1.1.
         budget: bool,
     },
+    /// DirectX 12: the adapter is asked at every read.
+    #[cfg(windows)]
+    Dx12 { adapter: wgpu::Adapter },
 }
 
 // The Vulkan handles are plain pointers and dispatch tables; the instance outlives the
@@ -22,7 +26,16 @@ unsafe impl Send for MemoryQuery {}
 unsafe impl Sync for MemoryQuery {}
 
 impl MemoryQuery {
-    pub(crate) fn new(device: &wgpu::Device) -> Option<Self> {
+    pub(crate) fn new(adapter: &wgpu::Adapter, device: &wgpu::Device) -> Option<Self> {
+        #[cfg(windows)]
+        // SAFETY: only the presence of the DirectX adapter is checked here.
+        if unsafe { adapter.as_hal::<wgpu::hal::api::Dx12>() }.is_some() {
+            return Some(Self::Dx12 {
+                adapter: adapter.clone(),
+            });
+        }
+        #[cfg(not(windows))]
+        let _ = adapter;
         // SAFETY: the guard is only read while it lives, and the handles it hands out are
         // owned by the instance wgpu keeps alive as long as the device.
         let hal = unsafe { device.as_hal::<wgpu::hal::api::Vulkan>() }?;
@@ -77,6 +90,25 @@ impl MemoryQuery {
                     total: heap.size,
                     budget: budget_bytes.min(heap.size),
                     used,
+                })
+            }
+            #[cfg(windows)]
+            Self::Dx12 { adapter } => {
+                // SAFETY: the guard lives for this read only; the adapter is wgpu's.
+                let hal = unsafe { adapter.as_hal::<wgpu::hal::api::Dx12>() }?;
+                let adapter = hal.raw_adapter();
+                // The local segment group (the card's own memory) is the zero value of
+                // `DXGI_MEMORY_SEGMENT_GROUP`, which spares a dependency on `windows`.
+                let info = adapter.query_video_memory_info(Default::default()).ok()?;
+                // SAFETY: a plain query on a live adapter.
+                let total = unsafe { adapter.GetDesc1() }
+                    .map(|desc| desc.DedicatedVideoMemory as u64)
+                    .unwrap_or(info.Budget);
+                let total = total.max(info.Budget);
+                Some(Memory {
+                    total,
+                    budget: info.Budget.min(total),
+                    used: info.CurrentUsage,
                 })
             }
         }

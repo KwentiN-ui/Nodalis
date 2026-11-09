@@ -19,15 +19,21 @@ use memory::MemoryQuery;
 
 pub use wgpu;
 
-/// Percent of the card's memory budget the solver's buffers may take. The budget is what
-/// the driver grants this process (the desktop and other programs are already taken
-/// off), and what the window's renderer, which draws on the same card, already holds
-/// counts as used; the rest is headroom for what the window allocates while the solver
-/// runs, for the driver's own needs and for the estimate of the buffers being rough. A
-/// card with 2 GB filled by a large model made the window's renderer fail and the
+/// Percent of the card's memory budget the solver's buffers may take, at most. The
+/// budget is what the driver grants this process (the desktop and other programs are
+/// already taken off), and what the window's renderer, which draws on the same card,
+/// already holds counts as used; the rest is headroom for what the window allocates
+/// while the solver runs, for the driver's own needs and for the estimate of the
+/// buffers being rough. On a small card the headroom is at least [`MEMORY_HEADROOM`]:
+/// a card with 2 GB filled by a large model made the window's renderer fail and the
 /// desktop stutter. Checked by [`Gpu::reserve`] against the card's own memory only (see
 /// [`Options::memory_share`]).
 pub const MEMORY_SHARE_PERCENT: u8 = 80;
+
+/// Bytes of the card's budget always left to the window and the driver, whatever the
+/// share says (512 MB): the window's renderer and a results mesh need about as much on
+/// a small card as on a large one.
+pub const MEMORY_HEADROOM: u64 = 512 << 20;
 
 /// Bytes per piece of an upload ([`Gpu::write`]).
 const PIECE: usize = 16 << 20;
@@ -140,9 +146,14 @@ pub struct Memory {
 }
 
 impl Memory {
-    /// The bytes the solver may still take under [`MEMORY_SHARE_PERCENT`].
+    /// The bytes the solver may still take: the budget less the larger of the headroom
+    /// [`MEMORY_SHARE_PERCENT`] leaves and [`MEMORY_HEADROOM`], less what is in use.
     pub fn free_share(&self) -> u64 {
-        (self.budget / 100 * MEMORY_SHARE_PERCENT as u64).saturating_sub(self.used)
+        let headroom =
+            (self.budget / 100 * (100 - MEMORY_SHARE_PERCENT) as u64).max(MEMORY_HEADROOM);
+        self.budget
+            .saturating_sub(headroom)
+            .saturating_sub(self.used)
     }
 }
 
@@ -230,7 +241,7 @@ impl Gpu {
             let mut slot = sink.lock().unwrap_or_else(|e| e.into_inner());
             slot.get_or_insert_with(|| e.to_string());
         }));
-        let memory = MemoryQuery::new(&device);
+        let memory = MemoryQuery::new(&adapter, &device);
         Ok(Self {
             device,
             queue,
@@ -268,7 +279,8 @@ impl Gpu {
         let mb = |b: u64| b as f64 / 1048576.0;
         Err(format!(
             "needs {:.0} MB of the card's memory, {:.0} MB free for the solver \
-             ({MEMORY_SHARE_PERCENT} % of the {:.0} MB the driver grants, {:.0} MB in use)",
+             (at most {MEMORY_SHARE_PERCENT} % of the {:.0} MB the driver grants, \
+             {:.0} MB in use)",
             mb(bytes),
             mb(free),
             mb(memory.budget),
