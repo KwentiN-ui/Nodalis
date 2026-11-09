@@ -161,6 +161,11 @@ pub enum Problem {
     /// A time table of a boundary condition or load with points after the end of its step:
     /// the rest of the table is not applied.
     TableBeyondStep,
+    /// An excitation whose signal the solver cannot evaluate: no width, no frequency, an
+    /// end before the start, a start after the step.
+    InvalidSignal,
+    /// An excitation in a step other than a Dynamic step, which does not follow time.
+    ExcitationIgnored,
     /// A Coriolis complex frequency step without a centrifugal load before it.
     NoRotation,
     /// Contact pairs in a frequency step without perturbation: the solver ignores them.
@@ -247,6 +252,7 @@ impl Problem {
             | Problem::ModalStepNonlinear
             | Problem::AmplitudeOutsideStep
             | Problem::TableBeyondStep
+            | Problem::ExcitationIgnored
             | Problem::NoLoad
             | Problem::UnusedAmplitude
             | Problem::UnusedDistribution
@@ -333,6 +339,8 @@ impl Problem {
             Problem::ModalStepNonlinear => "Modal superposition is linear",
             Problem::AmplitudeOutsideStep => "Amplitude starts after the step",
             Problem::TableBeyondStep => "Table goes beyond the step",
+            Problem::InvalidSignal => "Invalid excitation signal",
+            Problem::ExcitationIgnored => "Excitation outside a Dynamic step",
             Problem::NoRotation => "No rotation",
             Problem::ContactIgnored => "Contact ignored",
             Problem::ContactWithCoriolis => "Contact with Coriolis",
@@ -687,6 +695,13 @@ impl Problem {
             Problem::TableBeyondStep => {
                 "The table of a value has points after the end of the step: the step stops \
                  at its duration, so the value never reaches them."
+            }
+            Problem::InvalidSignal => {
+                "The solver cannot evaluate the signal of the excitation as it is set."
+            }
+            Problem::ExcitationIgnored => {
+                "An excitation follows its signal over time, which only a Dynamic step \
+                 integrates. The step leaves it out."
             }
             Problem::NoRotation => {
                 "The Coriolis forces of a Complex Frequency step come from its rotational \
@@ -1072,6 +1087,13 @@ impl Problem {
             Problem::TableBeyondStep => {
                 "Set the duration of the step to the last time of the table, or shorten \
                  the table."
+            }
+            Problem::InvalidSignal => {
+                "Open the excitation and correct its signal: positive width and frequencies, \
+                 an end after the start, a start inside the step."
+            }
+            Problem::ExcitationIgnored => {
+                "Move the excitation into a Dynamic step, or use a Force with an amplitude."
             }
             Problem::InvalidBolt => {
                 "Pick the two faces of the cut on the geometry, or element faces of solid \
@@ -1662,6 +1684,7 @@ impl FeModel {
         self.check_tied_contacts(&mut findings);
         self.check_amplitudes(&mut findings);
         self.check_tables(&mut findings);
+        self.check_excitations(&mut findings);
         let used = self.used_distributions();
         for (i, distribution) in self.distributions.iter().enumerate() {
             if !used.contains(distribution.name.as_str()) {
@@ -2147,6 +2170,35 @@ impl FeModel {
                         amplitude.name
                     ),
                 ));
+            }
+        }
+    }
+
+    /// Excitations outside Dynamic steps and signals the solver would reject.
+    fn check_excitations(&self, findings: &mut Vec<Finding>) {
+        for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
+            for (i, load) in step.loads.iter().enumerate() {
+                let LoadKind::Excitation(excitation) = &load.kind else {
+                    continue;
+                };
+                if !load.active {
+                    continue;
+                }
+                let StepKind::Dynamic(dynamic) = &step.kind else {
+                    findings.push(Finding::new(
+                        ModelItem::Load(s, i),
+                        Problem::ExcitationIgnored,
+                        format!("{}: {} is not a Dynamic step", load.name, step.name),
+                    ));
+                    continue;
+                };
+                if let Some(reason) = excitation.signal.problem(dynamic.duration) {
+                    findings.push(Finding::new(
+                        ModelItem::Load(s, i),
+                        Problem::InvalidSignal,
+                        format!("{}: {reason}", load.name),
+                    ));
+                }
             }
         }
     }
@@ -2766,7 +2818,10 @@ impl FeModel {
                     load.active
                         && matches!(
                             load.kind,
-                            LoadKind::Force { .. } | LoadKind::Moment(_) | LoadKind::RemoteForce(_)
+                            LoadKind::Force { .. }
+                                | LoadKind::Moment(_)
+                                | LoadKind::RemoteForce(_)
+                                | LoadKind::Excitation(_)
                         )
                         && load.region.nodes(mesh).iter().any(|n| nodes.contains(n))
                 });
@@ -2819,7 +2874,8 @@ impl FeModel {
                 }
                 loaded = true;
                 let directions: Vec<usize> = match load.kind {
-                    LoadKind::Force { value: f, .. } => {
+                    LoadKind::Force { value: f, .. }
+                    | LoadKind::Excitation(crate::Excitation { value: f, .. }) => {
                         (0..3).filter(|&d| f[d] != 0.0 && d < dofs).collect()
                     }
                     LoadKind::Moment(m) => (0..3)

@@ -1456,6 +1456,7 @@ fn amplitudes(model: &FeModel) -> Result<Vec<ir::amplitude::Amplitude>, WriteErr
             shift_x: amplitude.shift_time,
             shift_y: amplitude.shift_amplitude,
             points: amplitude.points.iter().map(|&[t, a]| (t, a)).collect(),
+            signal: None,
         });
     }
     // Each time table of a component is an amplitude of its own, in step time, that a value
@@ -1479,6 +1480,31 @@ fn amplitudes(model: &FeModel) -> Result<Vec<ir::amplitude::Amplitude>, WriteErr
                 shift_x: 0.0,
                 shift_y: 0.0,
                 points: table.table.points.iter().map(|&[t, v]| (t, v)).collect(),
+                signal: None,
+            });
+        }
+        // The signal of each excitation is an amplitude of its own, in step time, that the
+        // solver evaluates at every time step.
+        let StepKind::Dynamic(dynamic) = &step.kind else {
+            continue;
+        };
+        for load in step.loads.iter().filter(|l| l.active) {
+            let LoadKind::Excitation(excitation) = &load.kind else {
+                continue;
+            };
+            if let Some(reason) = excitation.signal.problem(dynamic.duration) {
+                return Err(WriteError::InvalidAmplitude {
+                    item: load.name.clone(),
+                    reason,
+                });
+            }
+            amplitudes.push(ir::amplitude::Amplitude {
+                name: signal_amplitude(&step.name, &load.name),
+                total_time: false,
+                shift_x: 0.0,
+                shift_y: 0.0,
+                points: Vec::new(),
+                signal: Some(excitation.signal.to_ir(dynamic.duration)),
             });
         }
     }
@@ -1514,6 +1540,11 @@ fn table_owner<'a>(step: &'a Step, table: &plx_model::StepTable) -> (&'a str, &'
 /// as the solver compares it.
 fn table_amplitude(step: &str, item: &str, label: &str) -> String {
     ir_name(&name(&format!("Table~{step}~{item}~{label}")))
+}
+
+/// The name of the amplitude of the signal of excitation `item` in a step.
+fn signal_amplitude(step: &str, item: &str) -> String {
+    ir_name(&name(&format!("Signal~{step}~{item}")))
 }
 
 /// The values a displacement holds and the amplitude each follows: a degree of freedom with
@@ -3559,7 +3590,11 @@ fn step_block<'f>(
         if !load.active || !kind.supports_load(&load.kind) {
             continue;
         }
-        let amplitude = amplitude_parameter(amplitudes, &load.name, &load.amplitude)?;
+        // An excitation follows its signal instead of an amplitude.
+        let amplitude = match load.kind {
+            LoadKind::Excitation(_) => Some(signal_amplitude(&step.name, &load.name)),
+            _ => amplitude_parameter(amplitudes, &load.name, &load.amplitude)?,
+        };
         // The second amplitude of a film scales its coefficient, of radiation the emissivity.
         let factor_amplitude = match load.kind {
             LoadKind::Film { .. } | LoadKind::Radiation { .. } => {
@@ -3712,10 +3747,16 @@ fn step_block<'f>(
                     }]
                 }
             }
+            // An excitation is a force times its signal.
             LoadKind::Force {
                 value: force,
                 each_node,
-            } => {
+            }
+            | LoadKind::Excitation(plx_model::Excitation {
+                value: force,
+                each_node,
+                ..
+            }) => {
                 let faces = load.region.faces(sets.mesh);
                 let edges = load.region.edges(sets.mesh);
                 let axisymmetric = space == ModelSpace::Axisymmetric;

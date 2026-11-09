@@ -487,7 +487,7 @@ fn amplitude_corners<'n>(
         .filter_map(|name| ctx.model.amplitude(name))
         .flat_map(|a| {
             let offset = a.shift_x - if a.total_time { start_total } else { 0.0 };
-            a.points.iter().map(move |&(t, _)| t + offset)
+            a.corner_times().into_iter().map(move |t| t + offset)
         })
         .filter(|&t| t > 0.0 && t < period)
         .collect();

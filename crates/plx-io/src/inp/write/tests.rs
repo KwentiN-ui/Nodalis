@@ -2456,6 +2456,122 @@ fn solver_runs_short_dynamic_steps() {
     );
 }
 
+/// The cantilever of [`dynamic_cantilever`] with its tip force turned into an excitation.
+fn excited_cantilever(duration: f64, frames: u32, signal: plx_model::Signal) -> (FeMesh, FeModel) {
+    let (mesh, mut model) = dynamic_cantilever(duration, duration / frames as f64, None);
+    model.steps[0].loads[0].kind = LoadKind::Excitation(plx_model::Excitation {
+        value: [0.0, 0.0, -100.0],
+        each_node: false,
+        signal,
+    });
+    model.steps[0].loads[0].name = "Excitation-1".into();
+    (mesh, model)
+}
+
+/// An excitation is the force of its region times a signal amplitude that the solver
+/// evaluates itself; an open end runs to the end of the step, and the automatic time step
+/// resolves the signal.
+#[test]
+fn an_excitation_writes_its_force_and_signal() {
+    let sine = plx_model::Signal::Sine {
+        frequency: 1000.0,
+        phase: 90.0,
+        start: 0.0,
+        end: None,
+    };
+    let (mesh, model) = excited_cantilever(0.01, 10, sine);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Amplitude, Name=SIGNAL_STEP-1_EXCITATION-1, Shape=Sine\n0, 0.01, 1000, 90\n",
+        "*Cload, op=New, Amplitude=SIGNAL_STEP-1_EXCITATION-1\nINTERNAL_SELECTION-1_EXCITATION-1, 3, -100\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in\n{text}");
+    }
+    // 20 time steps per period of 1 kHz: 50 us.
+    let analysis = lowered(&mesh, &model);
+    let ir::step::Procedure::Dynamic(dynamic) = &analysis.steps[0].procedure else {
+        panic!("{:?}", analysis.steps[0].procedure)
+    };
+    assert!(
+        (dynamic.increments.initial.unwrap() - 5e-5).abs() < 1e-12,
+        "{dynamic:?}"
+    );
+    let amplitude = analysis
+        .model
+        .amplitude("SIGNAL_STEP-1_EXCITATION-1")
+        .unwrap();
+    assert!((amplitude.value(0.0) - 1.0).abs() < 1e-12);
+
+    let chirp = plx_model::Signal::Chirp {
+        from: 10.0,
+        to: 500.0,
+        sweep: plx_model::Sweep::Logarithmic,
+        start: 0.001,
+        end: Some(0.009),
+    };
+    let (mesh, model) = excited_cantilever(0.01, 10, chirp);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("Shape=Chirp, Sweep=Log\n0.001, 0.009, 10, 500\n"),
+        "{text}"
+    );
+    // Outside a dynamic step the excitation is left out.
+    let (mesh, mut model) = excited_cantilever(0.01, 10, plx_model::Signal::default());
+    model.steps[0].kind = StepKind::Static(StaticStep::default());
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("Shape="), "{text}");
+}
+
+/// A short impulse sets the cantilever (first bending mode 810 Hz) swinging freely: its
+/// impulse I = 2 F w / pi gives the tip a swing of I / (m w1), the static deflection under F
+/// times w1 I / F. A slow sine of 50 Hz bends it nearly statically: the peak at a quarter
+/// period is the static deflection times 1 / (1 - (50/810)^2), plus the free swing the
+/// start sets off.
+#[test]
+fn solver_follows_impulse_and_sine_excitations() {
+    let (mesh, reference) = analysis("kragbalken_c3d20r.inp", tip_force());
+    let Some(frd) = run_solver(
+        "anregung_statisch",
+        &write_inp(&mesh, &reference, "").unwrap(),
+    ) else {
+        return;
+    };
+    let static_u3 = node_value(&frd, "DISP", "U3", 99);
+    let width = 5e-5;
+    let impulse = plx_model::Signal::Impulse { time: 0.0, width };
+    let (mesh, model) = excited_cantilever(2.5e-3, 100, impulse);
+    let frd = run_solver("anregung_impuls", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let history = tip_history(&frd);
+    let swing = (history.iter()).fold(0.0_f64, |m, h| m.max(h.1.abs()));
+    let omega = 2.0 * std::f64::consts::PI * 810.0;
+    let expected = static_u3.abs() * omega * 2.0 * width / std::f64::consts::PI;
+    assert!(
+        (swing / expected - 1.0).abs() < 0.2,
+        "swing {swing}, expected {expected}"
+    );
+    // The force is gone after the impulse: the tip swings about zero.
+    let late_min = (history.iter().skip(50)).fold(0.0_f64, |m, h| m.min(h.1));
+    let late_max = (history.iter().skip(50)).fold(0.0_f64, |m, h| m.max(h.1));
+    assert!(
+        late_min < -0.5 * expected && late_max > 0.5 * expected,
+        "{history:?}"
+    );
+
+    let sine = plx_model::Signal::Sine {
+        frequency: 50.0,
+        phase: 0.0,
+        start: 0.0,
+        end: None,
+    };
+    let (mesh, model) = excited_cantilever(5e-3, 20, sine);
+    let frd = run_solver("anregung_sinus", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let history = tip_history(&frd);
+    let (time, peak) = *history.last().unwrap();
+    assert!((time - 5e-3).abs() < 1e-9, "{history:?}");
+    let ratio = peak / static_u3 * (1.0 - (50.0_f64 / 810.0).powi(2));
+    assert!((ratio - 1.0).abs() < 0.1, "peak {ratio} x static");
+}
+
 /// The cantilever with a frequency step that stores its modes, a modal dynamics step with
 /// the tip force applied at once, and a steady state sweep of the tip force around the
 /// first bending mode; both modal steps damped as given.

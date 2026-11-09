@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use plxs_core::amplitude::Amplitude;
+use plxs_core::amplitude::{Amplitude, Signal};
 use plxs_core::constraints::{
     CyclicSymmetryModel, Equation, EquationTerm, Joint, RigidBody, RigidBodyNodes, Submodel, Tie,
     Transform, TransformKind,
@@ -1468,7 +1468,7 @@ impl Reader {
     // ----- Amplitudes, initial conditions, constants ------------------------------------
 
     fn amplitude(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
-        k.check_parameters(&["NAME", "TIME", "SHIFTX", "SHIFTY", "USER"])?;
+        k.check_parameters(&["NAME", "TIME", "SHIFTX", "SHIFTY", "USER", "SHAPE", "SWEEP"])?;
         let Some(name) = k.value("NAME").map(normalized_name) else {
             return Err(k.error("no NAME given"));
         };
@@ -1479,16 +1479,28 @@ impl Reader {
         for d in data {
             values.extend(numbers(k, d)?);
         }
-        if values.len() % 2 != 0 {
-            return Err(k.error("time and value come in pairs"));
+        let signal = match k.value("SHAPE") {
+            None | Some("TABLE") => None,
+            Some(shape) => Some(signal(k, shape, &values)?),
+        };
+        if signal.is_none() && k.has("SWEEP") {
+            return Err(k.error("SWEEP needs SHAPE=CHIRP"));
         }
-        let points: Vec<(f64, f64)> = values.chunks(2).map(|p| (p[0], p[1])).collect();
+        let points: Vec<(f64, f64)> = if signal.is_some() {
+            Vec::new()
+        } else {
+            if values.len() % 2 != 0 {
+                return Err(k.error("time and value come in pairs"));
+            }
+            values.chunks(2).map(|p| (p[0], p[1])).collect()
+        };
         self.model().amplitudes.push(Amplitude {
             name,
             total_time: k.value("TIME") == Some("TOTALTIME"),
             shift_x: k.number("SHIFTX")?.unwrap_or(0.0),
             shift_y: k.number("SHIFTY")?.unwrap_or(0.0),
             points,
+            signal,
         });
         Ok(())
     }
@@ -2612,6 +2624,67 @@ fn parse_id(k: &Keyword, d: &Data<'_>, text: &str) -> Result<u32, Error> {
     text.trim()
         .parse::<u32>()
         .map_err(|_| data_error(k, d, format!("{text} is not a node or element number")))
+}
+
+/// The signal of an `*AMPLITUDE, SHAPE=...`: its numbers on the data lines are
+/// `start, width` of a pulse, `start, end, frequency, phase` of a sine (phase in degrees) and
+/// `start, end, start frequency, end frequency` of a chirp.
+fn signal(k: &Keyword, shape: &str, values: &[f64]) -> Result<Signal, Error> {
+    let take = |n: usize, what: &str| -> Result<&[f64], Error> {
+        if values.len() != n {
+            return Err(k.error(format!("SHAPE={shape} needs {what} on its data line")));
+        }
+        Ok(values)
+    };
+    let signal = match shape {
+        "PULSE" => {
+            let v = take(2, "start and width")?;
+            if v[1] <= 0.0 {
+                return Err(k.error("the width of a pulse must be positive"));
+            }
+            Signal::Pulse {
+                start: v[0],
+                width: v[1],
+            }
+        }
+        "SINE" => {
+            let v = take(4, "start, end, frequency and phase")?;
+            Signal::Sine {
+                start: v[0],
+                end: v[1],
+                frequency: v[2],
+                phase: v[3].to_radians(),
+            }
+        }
+        "CHIRP" => {
+            let v = take(4, "start, end, start frequency and end frequency")?;
+            let logarithmic = match k.value("SWEEP") {
+                None | Some("LINEAR") => false,
+                Some("LOG" | "LOGARITHMIC") => true,
+                Some(other) => return Err(k.error(format!("unknown SWEEP={other}"))),
+            };
+            if logarithmic && (v[2] <= 0.0 || v[3] <= 0.0) {
+                return Err(k.error("a logarithmic sweep needs positive frequencies"));
+            }
+            Signal::Chirp {
+                start: v[0],
+                end: v[1],
+                from: v[2],
+                to: v[3],
+                logarithmic,
+            }
+        }
+        other => return Err(k.error(format!("unknown SHAPE={other}"))),
+    };
+    if let Signal::Sine { frequency, .. } = signal
+        && frequency <= 0.0
+    {
+        return Err(k.error("the frequency must be positive"));
+    }
+    if signal.end().is_nan() || signal.end() <= signal.start() {
+        return Err(k.error("the signal must end after it starts"));
+    }
+    Ok(signal)
 }
 
 fn numbers(k: &Keyword, d: &Data<'_>) -> Result<Vec<f64>, Error> {

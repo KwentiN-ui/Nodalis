@@ -67,7 +67,8 @@ structure is damped; Nodalis chooses the time step and the integration from that
 
 Loads act at once from the start of the step. Give a load an #ui("Amplitude")
 (@amplitudes) for a ramp, a pulse or a vibration; the automatic time step follows its
-points. Materials need a density. Contact regions and contact pairs (@contacts) act in a
+points. To shake the structure with an impulse, a sine or a frequency sweep, use an
+#ui("Excitation") (@excitation). Materials need a density. Contact regions and contact pairs (@contacts) act in a
 dynamic step too, see below.
 
 The model check warns when the frequency limit is higher than the frames can show

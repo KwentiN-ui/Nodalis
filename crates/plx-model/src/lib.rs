@@ -23,6 +23,7 @@ mod distribution;
 mod dynamic;
 mod element_type;
 pub mod equation;
+mod excitation;
 mod exposed;
 mod features;
 mod field;
@@ -87,6 +88,7 @@ pub use detection::{
 pub use distribution::{Distribution, DistributionKind, Interpolation, Sampler, parse_points};
 pub use dynamic::{Integration, RayleighFit, StableStepEstimate, StepLimit};
 pub use element_type::{PartElementType, element_type_options};
+pub use excitation::{Excitation, Signal, SignalKind, Sweep};
 pub use exposed::{Exposed, Field, ItemRef, ValuePath};
 pub use features::{
     CoordinatePlane, CoordinateSystem, CoordinateSystemKind, GLOBAL, Plane, PlaneSource,
@@ -916,6 +918,10 @@ impl StepKind {
         // Each position of a moving load is a static step of its own.
         if matches!(kind, LoadKind::Moving(_)) {
             return matches!(self, StepKind::Static(_));
+        }
+        // An excitation shakes the structure over time, which only a dynamic step follows.
+        if matches!(kind, LoadKind::Excitation(_)) {
+            return matches!(self, StepKind::Dynamic(_));
         }
         self.supports_loads()
             && if kind.is_thermal() {
@@ -2194,6 +2200,9 @@ pub enum LoadKind {
     /// Wheel loads that travel over a surface region, one static step per position; see
     /// [`MovingLoad`].
     Moving(MovingLoad),
+    /// A force that follows a signal (an impulse, a sine, a frequency sweep) to excite the
+    /// structure in a dynamic step; see [`Excitation`].
+    Excitation(Excitation),
 }
 
 impl LoadKind {
@@ -2247,6 +2256,7 @@ impl LoadKind {
                 | LoadKind::StandardGravity(_)
                 | LoadKind::Centrifugal { .. }
                 | LoadKind::Moving(_)
+                | LoadKind::Excitation(_)
         )
     }
 

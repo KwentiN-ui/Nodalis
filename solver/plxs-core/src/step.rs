@@ -95,7 +95,7 @@ impl Step {
             } else {
                 0.0
             };
-            for &(t, _) in &amplitude.points {
+            for t in amplitude.corner_times() {
                 let time = t + amplitude.shift_x - offset;
                 if time > period * 1e-9 && time < period * (1.0 - 1e-9) {
                     times.push(time);
@@ -735,6 +735,7 @@ mod amplitude_time_tests {
             shift_x: 0.0,
             shift_y: 0.0,
             points,
+            signal: None,
         };
         model.amplitudes = vec![
             table(

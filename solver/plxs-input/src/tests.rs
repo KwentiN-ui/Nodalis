@@ -611,3 +611,53 @@ fn hyperelastic_models_are_read_and_rendered_back() {
     );
     assert!(read(&temperatures).is_err());
 }
+
+/// Signal amplitudes read with their parameters, render back the same and reject what the
+/// solver cannot evaluate.
+#[test]
+fn signal_amplitudes_read_and_render_back() {
+    use plxs_core::amplitude::Signal;
+    let step = "*Amplitude, Name=Kick, Shape=Pulse\n0.1, 0.002\n\
+*Amplitude, Name=Shake, Shape=Sine\n0, 1, 50, 90\n\
+*Amplitude, Name=Sweep, Shape=Chirp, Sweep=Log\n0.2, 0.8, 10, 1000\n\
+*Step\n*Dynamic, Direct\n0.001, 1\n*Boundary\nFIX, 1, 3, 0\n*Cload\n5, 3, -1, , SWEEP\n*End step\n";
+    let analysis = read(&cube(step)).unwrap();
+    let signal = |name: &str| analysis.model.amplitude(name).unwrap().signal.clone();
+    assert_eq!(
+        signal("KICK"),
+        Some(Signal::Pulse {
+            start: 0.1,
+            width: 0.002
+        })
+    );
+    let Some(Signal::Sine { phase, .. }) = signal("SHAKE") else {
+        panic!("{:?}", signal("SHAKE"))
+    };
+    assert!((phase - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+    assert!((analysis.model.amplitude("SHAKE").unwrap().value(0.0) - 1.0).abs() < 1e-12);
+    assert!(matches!(
+        signal("SWEEP"),
+        Some(Signal::Chirp {
+            logarithmic: true,
+            ..
+        })
+    ));
+    let again = read(&super::render(&analysis)).unwrap();
+    for name in ["KICK", "SHAKE", "SWEEP"] {
+        let a = signal(name).unwrap();
+        let b = again.model.amplitude(name).unwrap().signal.clone().unwrap();
+        for t in [0.0, 0.1, 0.101, 0.3, 0.55, 0.9] {
+            assert!((a.value(t) - b.value(t)).abs() < 1e-9, "{name} at {t}");
+        }
+    }
+    for wrong in [
+        "*Amplitude, Name=A, Shape=Pulse\n0.1, 0\n",
+        "*Amplitude, Name=A, Shape=Sine\n0, 1, 50\n",
+        "*Amplitude, Name=A, Shape=Chirp, Sweep=Log\n0, 1, 0, 100\n",
+        "*Amplitude, Name=A, Shape=Sine\n1, 0.5, 50, 0\n",
+        "*Amplitude, Name=A, Shape=Square\n0, 1\n",
+        "*Amplitude, Name=A, Sweep=Log\n0, 0, 1, 1\n",
+    ] {
+        assert!(read(&cube(wrong)).is_err(), "{wrong}");
+    }
+}
