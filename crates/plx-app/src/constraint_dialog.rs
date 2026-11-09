@@ -459,6 +459,7 @@ impl ConstraintDraft {
                 self.region.ui(ui, model);
                 let region = (!self.region.is_empty()).then(|| self.region.region());
                 rigid_body_point_rows(ui, model, body, &mut self.new_point, region.as_ref());
+                coupling_behavior_row(ui, &mut body.behavior);
             }
             Constraint::Tie(_) => unreachable!("ties are not constraints"),
             Constraint::NodeTie(_) => unreachable!("node ties are not constraints"),
@@ -811,6 +812,21 @@ fn rotational_rows(ui: &mut Ui, rotational: &mut [f64; 3], units: UnitSystem, ax
     }
 }
 
+/// How the selection of a rigid body follows its reference point.
+pub(crate) fn coupling_behavior_row(ui: &mut Ui, behavior: &mut RemoteBehavior) {
+    ui.label("Behavior");
+    ui.horizontal(|ui| {
+        ui.radio_value(behavior, RemoteBehavior::Rigid, "Rigid")
+            .on_hover_text("The selection keeps its shape and moves with the point.");
+        ui.radio_value(behavior, RemoteBehavior::Deformable, "Deformable")
+            .on_hover_text(
+                "The point follows the mean motion of the selection, which keeps its own \
+                 stiffness. Suits a point that tracks where a face goes.",
+            );
+    });
+    ui.end_row();
+}
+
 /// The reference point that drives a rigid body: an existing one, or a new one created with
 /// the body at the centroid of its region, the centre of its bounding box or coordinates.
 fn rigid_body_point_rows(
@@ -918,8 +934,8 @@ fn rigid_body_point_rows(
     } else {
         hint(
             ui,
-            "The nodes of the region move as one rigid body with the reference point. \
-             Boundary conditions, forces and moments on the point drive the body.",
+            "The region is coupled to the reference point as Behavior says. Boundary \
+             conditions, forces and moments on the point drive the region.",
         );
     }
 }

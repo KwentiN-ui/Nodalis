@@ -46,8 +46,9 @@ impl Behavior {
 }
 
 /// How the selection follows a point.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RemoteBehavior {
+    #[default]
     Rigid,
     Deformable,
 }

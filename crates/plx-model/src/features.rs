@@ -41,6 +41,17 @@ pub enum PointDefinition {
     BoundingBoxCenter(Region),
 }
 
+impl PointDefinition {
+    /// The selection of a point at the centre of faces.
+    pub fn region(&self) -> Option<&Region> {
+        match self {
+            PointDefinition::CenterOfGravity(region)
+            | PointDefinition::BoundingBoxCenter(region) => Some(region),
+            PointDefinition::Global | PointDefinition::Local { .. } => None,
+        }
+    }
+}
+
 impl ReferencePoint {
     pub fn new(name: impl Into<String>, position: [f64; 3]) -> Self {
         Self {

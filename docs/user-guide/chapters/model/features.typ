@@ -31,6 +31,17 @@ nodes of a picked edge, element or surface, for example the centre of a hole.
   - #ui("Bounding box center"): the centre of the box around the selected faces.
   A point at the centre of a selection moves with the mesh: after remeshing, a selection of
   geometry faces gives the new centre. #ui("Global position") shows where the point lies.
+  #ui("Couple faces") adds a #ui("Rigid Body") constraint (@rigid-body) on the same faces with
+  the point, so that loads, supports and history outputs on the point act on them:
+  #ui("Deformable") (the default for a new point) lets the point follow the mean motion of the
+  faces without stiffening them, #ui("Rigid") makes the faces keep their shape, #ui("None")
+  adds no constraint, or removes the one the point already drives. The constraint follows a
+  changed selection of the point. To track where a face goes independently of node numbers,
+  create a point at its #ui("Center of gravity") with #ui("Deformable") coupling and request
+  `U` on the point in a history output (@history-outputs).
+
+  #screenshot("reference-point-coupling.png", [Reference point at the centre of an end face,
+    coupled deformably to it])
 / Coordinate System: #ui("Rectangular") or #ui("Cylindrical"), defined by #ui("Origin"),
   #ui("Point on x-axis") and #ui("Point in xy-plane"). For a cylindrical system the z axis is the
   cylinder axis and the directions are r, θ and z.
