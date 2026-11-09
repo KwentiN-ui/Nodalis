@@ -335,7 +335,6 @@ pub fn step_line(step: &plx_model::Step) -> String {
         K::UncoupledTempDisp(_) => "uncoupled temperature-displacement".into(),
         K::Dynamic(settings) => format!("dynamic, {}", settings.method.label()),
         K::Visco(_) => "visco".into(),
-        K::ModalDynamics(_) => "modal dynamics".into(),
         K::SteadyStateDynamics(_) => "steady state dynamics".into(),
         K::Sensitivity(_) => "sensitivity".into(),
     };

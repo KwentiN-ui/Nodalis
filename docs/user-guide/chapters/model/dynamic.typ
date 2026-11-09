@@ -314,7 +314,7 @@ time steps. A time step costs a few microseconds instead of the solution of the 
 equation system, so long durations, fine time steps and large linear models come cheap,
 and the memory stays that of the frames.
 
-#screenshot("dynamic-modal.png", [Dynamic step with modal superposition])
+#screenshot("dynamic-modal.png", [Dynamic step with modal superposition about the preloaded state])
 
 The response is exact in the modes it has and misses what lies above them. Choose the
 number of modes so that the highest one lies well above the frequencies the loads excite
@@ -328,7 +328,13 @@ The method is linear: contact, #ui("Large deformations") and plasticity are not
 followed (the model check warns). A #ui("Damping ratio") applies to every mode directly
 (no Rayleigh fit, no frequency range); #ui("Rayleigh coefficients") give each mode the
 ratio α/(2ω) + βω/2. Initial velocities and the state of the step before are taken
-up through the modes. The energies and the velocities, accelerations and reaction forces
+up through the modes.
+
+#ui("Modes about the preloaded state") computes the eigenmodes about the state the previous
+step leaves, with the stiffening by its stresses (`*STEP, PERTURBATION` on the eigenmode
+step): a tensioned string, a bolted joint or a spinning rotor vibrates with the frequencies of
+the loaded structure. Put the preload in a Static step before the Dynamic step. Off (the
+default), the modes are those of the unloaded model. The energies and the velocities, accelerations and reaction forces
 are written as with direct integration. Prescribed displacements must be zero (base
 motion is not supported yet).
 

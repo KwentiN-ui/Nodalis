@@ -21,7 +21,6 @@ pub enum StepCategory {
     CoupledTempDisp,
     UncoupledTempDisp,
     Dynamic,
-    ModalDynamics,
     SteadyStateDynamics,
     Frequency,
     ComplexFrequency,
@@ -58,7 +57,6 @@ impl StepCategory {
             K::UncoupledTempDisp(_) => Self::UncoupledTempDisp,
             K::Dynamic(_) => Self::Dynamic,
             K::Visco(_) => Self::Visco,
-            K::ModalDynamics(_) => Self::ModalDynamics,
             K::SteadyStateDynamics(_) => Self::SteadyStateDynamics,
             K::Sensitivity(_) => Self::Sensitivity,
         }
@@ -85,7 +83,6 @@ impl StepCategory {
             Self::CoupledTempDisp => "Coupled temperature-displacement",
             Self::UncoupledTempDisp => "Uncoupled temperature-displacement",
             Self::Dynamic => "Dynamic",
-            Self::ModalDynamics => "Modal dynamics",
             Self::SteadyStateDynamics => "Steady state dynamics",
             Self::Frequency => "Frequency",
             Self::ComplexFrequency => "Complex frequency",
@@ -98,7 +95,7 @@ impl StepCategory {
     pub fn family(self) -> StepFamily {
         match self {
             Self::Static | Self::Visco => StepFamily::Mechanical,
-            Self::Dynamic | Self::ModalDynamics | Self::SteadyStateDynamics => StepFamily::Dynamic,
+            Self::Dynamic | Self::SteadyStateDynamics => StepFamily::Dynamic,
             Self::HeatTransfer | Self::CoupledTempDisp | Self::UncoupledTempDisp => {
                 StepFamily::Thermal
             }
@@ -117,7 +114,6 @@ impl StepCategory {
                 | Self::CoupledTempDisp
                 | Self::UncoupledTempDisp
                 | Self::Dynamic
-                | Self::ModalDynamics
                 | Self::Unknown
         )
     }
@@ -152,7 +148,6 @@ impl StepRecord {
             }
             K::Dynamic(s) => Some(s.duration),
             K::Visco(s) => Some(s.increments.duration),
-            K::ModalDynamics(s) => Some(s.time_period),
             _ => None,
         };
         let perturbation = match kind {

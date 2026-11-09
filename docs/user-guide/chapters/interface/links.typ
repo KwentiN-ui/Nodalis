@@ -162,9 +162,9 @@ its inputs are listed below it, each with an orange pin:
   [a heat transfer, coupled or uncoupled temperature-displacement step],
   [the temperatures of that step: a defined field named #ui("Linked Temperatures")
     (`*TEMPERATURE, FILE=..., BSTEP=n`), see @defined-fields],
-  [#ui("Eigenmodes") (modal dynamics and steady state dynamics steps)],
+  [#ui("Eigenmodes") (steady state dynamics steps)],
   [a frequency step with #ui("Storage") on],
-  [the eigenmodes these steps work on: the `.eig` file of the other run (@modal-dynamics)],
+  [the eigenmodes the step works on: the `.eig` file of the other run (@modal-dynamics)],
   [#ui("Global results") (every step, and a row of the block of a submodel)],
   [any step of the global model],
   [the displacements on the cut boundary of a submodel (@submodel)],
@@ -210,8 +210,8 @@ before it left. A *state link* lets an analysis take that state from a step of a
 and continue with steps of its own, as if they stood behind that step in one input file. Where
 Ansys Workbench links a static analysis to a pre-stressed modal analysis, Nodalis links any
 step to any following steps: a load history that branches after a pre-load into several load
-cases, a frequency step after a static step, or a modal dynamics step after the frequency step
-of another analysis.
+cases, a frequency step after a static step, or a steady state dynamics step after the frequency
+step of another analysis.
 
 Drop the results of a step on the #ui("State") row at the top of another block. The target then
 *continues* the source:

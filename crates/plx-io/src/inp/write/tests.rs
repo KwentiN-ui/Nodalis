@@ -5,9 +5,9 @@ use plx_mesh::CadEntity;
 use plx_model::{
     BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition, CrossSection, Damping,
     DampingRange, DefinedField, DefinedFieldKind, Displacement, DynamicStep, Elastic, Hardening,
-    LinearSolverChoice, Load, Material, ModalDamping, ModalDynamicsStep, NodeTie, NumericalDamping,
-    Plastic, PlasticPoint, ReferencePoint, RemoteBehavior, RigidBody, Section, SectionKind,
-    StaticStep, SteadyStateDynamicsStep, UnitSystem,
+    LinearSolverChoice, Load, Material, ModalDamping, NodeTie, NumericalDamping, Plastic,
+    PlasticPoint, ReferencePoint, RemoteBehavior, RigidBody, Section, SectionKind, StaticStep,
+    SteadyStateDynamicsStep, UnitSystem,
 };
 
 use super::*;
@@ -2285,7 +2285,10 @@ fn a_modal_dynamic_step_is_lowered_to_eigenmodes_and_modal_dynamics() {
     let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
-    settings.method = plx_model::DynamicMethod::Modal { modes: 12 };
+    settings.method = plx_model::DynamicMethod::Modal {
+        modes: 12,
+        preloaded: false,
+    };
     settings.damping = Damping::Ratio {
         zeta: 0.03,
         range: DampingRange::Automatic,
@@ -2311,6 +2314,22 @@ fn a_modal_dynamic_step_is_lowered_to_eigenmodes_and_modal_dynamics() {
     }
     // The supports hold in both steps.
     assert_eq!(text.matches("\n*Boundary").count(), 2, "{text}");
+    assert!(!text.contains("Perturbation"), "{text}");
+    // Preloaded, the eigenmodes are a perturbation of the state before the step.
+    let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.method = plx_model::DynamicMethod::Modal {
+        modes: 12,
+        preloaded: true,
+    };
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains(
+            "*Step, Perturbation, Inc=100, Amplitude=Ramp\n*Frequency, Storage=Yes\n12\n"
+        ),
+        "{text}"
+    );
     // Large deformations do not go with the superposition.
     let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
         unreachable!()
@@ -2604,9 +2623,10 @@ fn solver_follows_impulse_and_sine_excitations() {
     assert!((ratio - 1.0).abs() < 0.1, "peak {ratio} x static");
 }
 
-/// The cantilever with a frequency step that stores its modes, a modal dynamics step with
-/// the tip force applied at once, and a steady state sweep of the tip force around the
-/// first bending mode; both modal steps damped as given.
+/// The cantilever with a frequency step that stores its modes, a Dynamic step by modal
+/// superposition of as many modes with the tip force applied at once, and a steady state
+/// sweep of the tip force around the first bending mode; both modal steps damped as given
+/// (a constant ratio or Rayleigh).
 fn modal_cantilever(damping: Option<ModalDamping>) -> (FeMesh, FeModel) {
     let (mesh, mut model) = analysis("kragbalken_c3d20r.inp", tip_force());
     model
@@ -2623,14 +2643,27 @@ fn modal_cantilever(damping: Option<ModalDamping>) -> (FeMesh, FeModel) {
     };
     settings.storage = true;
     settings.num_frequencies = 6;
-    let mut modal = Step::new_modal_dynamics("Step-2");
+    let mut modal = Step::new_dynamic("Step-2");
+    modal.history_outputs.clear();
     modal.boundary_conditions = supports.clone();
     modal.loads = vec![force];
-    modal.kind = StepKind::ModalDynamics(ModalDynamicsStep {
-        increment: 2.5e-5,
-        time_period: 1.5e-3,
-        damping: damping.clone(),
-        ..ModalDynamicsStep::default()
+    modal.kind = StepKind::Dynamic(DynamicStep {
+        method: plx_model::DynamicMethod::Modal {
+            modes: 6,
+            preloaded: false,
+        },
+        duration: 1.5e-3,
+        frames: 60,
+        damping: match &damping {
+            None => Damping::None,
+            Some(ModalDamping::Constant(zeta)) => Damping::Ratio {
+                zeta: *zeta,
+                range: DampingRange::Automatic,
+            },
+            Some(ModalDamping::Rayleigh(r)) => Damping::Rayleigh(*r),
+            Some(ModalDamping::Direct(_)) => unreachable!(),
+        },
+        ..DynamicStep::default()
     });
     let mut sweep = Step::new_steady_state_dynamics("Step-3");
     sweep.boundary_conditions = supports;
@@ -2679,19 +2712,19 @@ fn modal_steps_are_written() {
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
         "*Frequency, Storage=Yes\n6\n",
-        "*Step, Inc=100, Amplitude=Step\n*Modal dynamics\n0.000025, 0.0015\n\
+        "*Step, Inc=61, Amplitude=Step\n*Modal dynamics\n0.000025, 0.0015\n\
          *Modal damping\n1, 1000000, 0.02\n",
         "*Cload, op=New, Amplitude=STEPPED\n",
         "*Steady state dynamics\n700, 900, 21, 1\n*Modal damping\n1, 1000000, 0.02\n",
-        "*Node file\nRF, U, V\n",
     ] {
         assert!(text.contains(line), "missing {line:?} in\n{text}");
     }
-    let StepKind::ModalDynamics(settings) = &mut model.steps[1].kind else {
+    let StepKind::SteadyStateDynamics(settings) = &mut model.steps[2].kind else {
         unreachable!()
     };
-    settings.time_period = 0.01;
-    settings.steady_state = true;
+    settings.harmonic = false;
+    settings.fourier_terms = 5;
+    settings.time_upper = 0.002;
     settings.damping = Some(ModalDamping::Direct(vec![
         plx_model::ModeDamping {
             lowest: 1,
@@ -2704,40 +2737,34 @@ fn modal_steps_are_written() {
             ratio: 0.1,
         },
     ]));
-    let StepKind::SteadyStateDynamics(settings) = &mut model.steps[2].kind else {
-        unreachable!()
-    };
-    settings.harmonic = false;
-    settings.fourier_terms = 5;
-    settings.time_upper = 0.002;
-    settings.damping = Some(ModalDamping::Rayleigh(plx_model::RayleighDamping {
-        alpha: 10.0,
-        beta: 4e-5,
-    }));
-    let text = write_inp(&mesh, &model, "").unwrap();
-    for line in [
-        "*Step, Inc=100, Amplitude=Step\n*Modal dynamics, Steady state\n0.000025, 0.01\n\
-         *Modal damping\n1, 2, 0.05\n3, 6, 0.1\n",
-        "*Steady state dynamics, Harmonic=No\n700, 900, 21, 1, 5\n\
-         *Modal damping, Rayleigh\n, , 10, 0.00004\n",
-    ] {
-        assert!(text.contains(line), "missing {line:?} in\n{text}");
-    }
-    // The increment count grows with the time period.
-    let StepKind::ModalDynamics(settings) = &mut model.steps[1].kind else {
-        unreachable!()
-    };
-    settings.steady_state = false;
-    settings.time_period = 0.01;
-    assert_eq!(settings.increments(), 401);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Step, Inc=401, Amplitude=Step\n*Modal dynamics"),
+        text.contains(
+            "*Steady state dynamics, Harmonic=No\n700, 900, 21, 1, 5\n\
+             *Modal damping\n1, 2, 0.05\n3, 6, 0.1\n"
+        ),
+        "{text}"
+    );
+    settings_rayleigh(&mut model);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Modal damping, Rayleigh\n, , 10, 0.00004\n"),
         "{text}"
     );
     model.steps[1].active = false;
     model.steps[2].active = false;
     assert_eq!(lowered(&mesh, &model).steps.len(), 1);
+}
+
+/// Rayleigh damping on the sweep of [`modal_cantilever`].
+fn settings_rayleigh(model: &mut FeModel) {
+    let StepKind::SteadyStateDynamics(settings) = &mut model.steps[2].kind else {
+        unreachable!()
+    };
+    settings.damping = Some(ModalDamping::Rayleigh(plx_model::RayleighDamping {
+        alpha: 10.0,
+        beta: 4e-5,
+    }));
 }
 
 #[test]
@@ -2783,10 +2810,15 @@ fn solver_runs_short_modal_steps() {
     };
     settings.num_frequencies = 4;
     model.steps[0].field_outputs = vec![node(&["U"])];
-    let StepKind::ModalDynamics(settings) = &mut model.steps[1].kind else {
+    let StepKind::Dynamic(settings) = &mut model.steps[1].kind else {
         unreachable!()
     };
-    settings.time_period = 1e-4;
+    settings.duration = 1e-4;
+    settings.frames = 4;
+    settings.method = plx_model::DynamicMethod::Modal {
+        modes: 4,
+        preloaded: false,
+    };
     model.steps[1].field_outputs = vec![node(&["U", "V"]), element(&["S"])];
     let StepKind::SteadyStateDynamics(settings) = &mut model.steps[2].kind else {
         unreachable!()
@@ -2798,9 +2830,10 @@ fn solver_runs_short_modal_steps() {
         return;
     };
     let count = |step: u32| frd.increments.iter().filter(|i| i.step == step).count();
-    assert_eq!((count(1), count(2)), (4, 4));
+    // The frequency step, the eigenmodes the Dynamic step computes itself, its frames.
+    assert_eq!((count(1), count(2), count(3)), (4, 4, 4));
     // 700 Hz, the first bending pair, 900 Hz: two intervals of three points.
-    assert_eq!(count(3), 5);
+    assert_eq!(count(4), 5);
 }
 
 /// The modal superposition swings the tip like the direct integration does, damped by the
@@ -2821,13 +2854,14 @@ fn solver_superposes_the_stored_modes_of_the_cantilever() {
         f64::from(i.field("DISP").unwrap().component("U3").unwrap().values[index])
     };
     let modes: Vec<f64> = (frd.increments.iter())
-        .filter(|i| i.kind == plx_results::AnalysisKind::Frequency)
+        .filter(|i| i.step == 1 && i.kind == plx_results::AnalysisKind::Frequency)
         .map(|i| i.value)
         .collect();
     assert_eq!(modes.len(), 6, "{modes:?}");
     assert!((780.0..835.0).contains(&modes[0]), "{modes:?}");
+    // Step 2 holds the eigenmodes of the Dynamic step, step 3 its frames.
     let history: Vec<f64> = (frd.increments.iter())
-        .filter(|i| i.step == 2)
+        .filter(|i| i.step == 3)
         .map(tip)
         .collect();
     assert_eq!(history.len(), 60, "{history:?}");
@@ -2841,7 +2875,7 @@ fn solver_superposes_the_stored_modes_of_the_cantilever() {
             .map_or(0.0, |c| f64::from(c.values[index]))
     };
     let sweep: Vec<(f64, f64)> = (frd.increments.iter())
-        .filter(|i| i.step == 3)
+        .filter(|i| i.step == 4)
         .map(|i| (i.value, tip(i).hypot(imaginary(i))))
         .collect();
     assert!(sweep.len() >= 21, "{}", sweep.len());
@@ -11128,7 +11162,10 @@ fn a_hyperelastic_material_is_written_and_switches_nlgeom_on() {
     let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
-    settings.method = plx_model::DynamicMethod::Modal { modes: 5 };
+    settings.method = plx_model::DynamicMethod::Modal {
+        modes: 5,
+        preloaded: false,
+    };
     assert!(!lowered(&mesh, &model).steps.iter().any(|s| s.nlgeom));
 }
 

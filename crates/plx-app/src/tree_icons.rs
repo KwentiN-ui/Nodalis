@@ -163,6 +163,7 @@ pub enum StepGlyph {
     ExplicitDynamic,
     /// A Dynamic step that switches between implicit and explicit integration.
     AutomaticDynamic,
+    /// A Dynamic step by modal superposition.
     ModalDynamics,
     SteadyStateDynamics,
     Sensitivity,
@@ -183,7 +184,7 @@ impl StepGlyph {
             StepGlyph::Dynamic => "Dynamic",
             StepGlyph::ExplicitDynamic => "Dynamic (explicit)",
             StepGlyph::AutomaticDynamic => "Dynamic (automatic)",
-            StepGlyph::ModalDynamics => "Modal Dynamics",
+            StepGlyph::ModalDynamics => "Dynamic (modal superposition)",
             StepGlyph::SteadyStateDynamics => "Steady State Dynamics",
             StepGlyph::Sensitivity => "Sensitivity",
             StepGlyph::Visco => "Visco",
@@ -207,7 +208,6 @@ impl From<&StepKind> for StepGlyph {
                 plx_model::DynamicMethod::Automatic => StepGlyph::AutomaticDynamic,
                 plx_model::DynamicMethod::Modal { .. } => StepGlyph::ModalDynamics,
             },
-            StepKind::ModalDynamics(_) => StepGlyph::ModalDynamics,
             StepKind::SteadyStateDynamics(_) => StepGlyph::SteadyStateDynamics,
             StepKind::Sensitivity(_) => StepGlyph::Sensitivity,
             StepKind::Visco(_) => StepGlyph::Visco,

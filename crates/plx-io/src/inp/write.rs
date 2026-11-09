@@ -15,12 +15,11 @@ use plx_model::{
     ComplexFrequencyStep, Constraint, ContactMethod, ContactPair, ContactScale, Damping,
     DefinedFieldKind, DynamicMethod, DynamicStep, FeModel, FieldOutput, Formulation, FrequencyStep,
     GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, Id, IncrementPlan,
-    InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep,
-    ModelItem, ModelSpace, MovingFrame, NodeTie, Origins, OutputDimension, OutputKind, Quantity,
-    RayleighFit, Region, RemoteBehavior, RemoteDof, Sampler, Section, SectionKind, SectorDisplay,
-    SensitivityStep, StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior,
-    SurfaceInteraction, TableOwner, Tie, Totals, UnitSystem, ViscoStep, line_tangent,
-    symmetry_dofs, symmetry_plane,
+    InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModelItem, ModelSpace,
+    MovingFrame, NodeTie, Origins, OutputDimension, OutputKind, Quantity, RayleighFit, Region,
+    RemoteBehavior, RemoteDof, Sampler, Section, SectionKind, SectorDisplay, SensitivityStep,
+    StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction,
+    TableOwner, Tie, Totals, UnitSystem, ViscoStep, line_tangent, symmetry_dofs, symmetry_plane,
 };
 use plxs_core as ir;
 use plxs_core::mesh::{ElementRef, NodeRef};
@@ -2935,9 +2934,10 @@ fn lower_step(
         return complex_frequency_blocks(sets, step, settings, context, complex);
     }
     // A Dynamic step by modal superposition superposes the eigenmodes a frequency step
-    // right before it stores; the solver computes them with the step's supports.
+    // right before it stores; the solver computes them with the step's supports, preloaded
+    // as a perturbation of the previous step's state when asked.
     if let StepKind::Dynamic(settings) = &step.kind
-        && let DynamicMethod::Modal { modes } = settings.method
+        && let DynamicMethod::Modal { modes, preloaded } = settings.method
         && let Some(dynamic) = blocks.pop()
     {
         if let Some(problem) = settings.problem() {
@@ -2949,7 +2949,7 @@ fn lower_step(
         let modes = FrequencyStep {
             num_frequencies: modes,
             storage: true,
-            perturbation: false,
+            perturbation: preloaded,
             solver: settings.solver,
             ..FrequencyStep::default()
         };
@@ -3346,7 +3346,6 @@ fn step_block<'f>(
             ir_step
         }
         StepKind::Visco(settings) => visco_step(settings, nlgeom),
-        StepKind::ModalDynamics(settings) => modal_dynamics_step(settings),
         StepKind::SteadyStateDynamics(settings) => steady_state_dynamics_step(settings),
         StepKind::Sensitivity(settings) => sensitivity_step(sets, &step.name, settings)?,
     };
@@ -4474,28 +4473,6 @@ fn dynamic_step(settings: &DynamicStep, model: &FeModel, step: &Step) -> (ir::St
     ir_step.default_amplitude = ir::step::DefaultAmplitude::Step;
     ir_step.nlgeom = settings.large_deformations;
     (ir_step, integration.per_frame)
-}
-
-/// A modal dynamics step, with the modal
-/// damping. Its loads act at once, as in CalculiX.
-fn modal_dynamics_step(settings: &ModalDynamicsStep) -> ir::Step {
-    let period = if settings.steady_state {
-        settings.relative_error
-    } else {
-        settings.time_period
-    };
-    let mut step = new_step(ir::step::Procedure::ModalDynamics(
-        ir::step::ModalDynamics {
-            solver: ir::step::EquationSolver::Default,
-            steady_state: settings.steady_state,
-            increment: settings.increment,
-            period,
-            damping: modal_damping(settings.damping.as_ref()),
-        },
-    ));
-    step.max_increments = settings.increments();
-    step.default_amplitude = ir::step::DefaultAmplitude::Step;
-    step
 }
 
 /// A steady state dynamics step.

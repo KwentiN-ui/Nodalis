@@ -17,12 +17,11 @@ use plx_model::{
     FrequencyStep, GravityDirection, Hardening, HeatTransferStep, HistoryKind, HistoryOutput,
     Hyperelastic, HyperelasticModel, Id, IncrementControl, IncrementSize, InitialCondition,
     InitialConditionKind, ItemRef, LinearSolverChoice, Load, LoadKind, Material, MeshSet,
-    ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad, NodeTie,
-    NumericalDamping, OutputDimension, OutputKind, PlasticPoint, Quantity, RayleighDamping, Region,
-    RemoteBehavior, RemoteForce, STANDARD_GRAVITY, Section, SectionKind, SensitivityStep, SetKind,
-    StaticStep, SteadyStateDynamicsStep, Step, StepKind, StepLimit, SurfaceInteraction,
-    SymmetryError, TestMode, Tie, TimeStep, UnitSystem, ViscoStep, Wheel, next_name,
-    symmetry_plane,
+    ModalDamping, ModeDamping, ModelSpace, MovingLoad, NodeTie, NumericalDamping, OutputDimension,
+    OutputKind, PlasticPoint, Quantity, RayleighDamping, Region, RemoteBehavior, RemoteForce,
+    STANDARD_GRAVITY, Section, SectionKind, SensitivityStep, SetKind, StaticStep,
+    SteadyStateDynamicsStep, Step, StepKind, StepLimit, SurfaceInteraction, SymmetryError,
+    TestMode, Tie, TimeStep, UnitSystem, ViscoStep, Wheel, next_name, symmetry_plane,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row, amplitude_row_with};
@@ -3948,11 +3947,6 @@ impl Editor {
                         return Err(problem);
                     }
                 }
-                StepKind::ModalDynamics(settings) => {
-                    if let Some(problem) = settings.problem() {
-                        return Err(problem);
-                    }
-                }
                 StepKind::SteadyStateDynamics(settings) => {
                     if let Some(problem) = settings.problem() {
                         return Err(problem);
@@ -5840,7 +5834,7 @@ fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
 
 /// The step kinds of the dialog: label, the kind with its settings and its default field
 /// outputs (none for eigenvalue steps, which keep their mode shapes), in order.
-fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 12] {
+fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 11] {
     let heat = HeatTransferStep::default();
     [
         (
@@ -5857,11 +5851,6 @@ fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 12] 
             DYNAMIC_LABEL,
             StepKind::Dynamic(DynamicStep::default()),
             FieldOutput::dynamic_defaults(),
-        ),
-        (
-            MODAL_DYNAMICS_LABEL,
-            StepKind::ModalDynamics(ModalDynamicsStep::default()),
-            FieldOutput::modal_dynamics_defaults(),
         ),
         (
             STEADY_STATE_LABEL,
@@ -5912,7 +5901,6 @@ const HEAT_TRANSFER_LABEL: &str = "Heat Transfer";
 const COUPLED_LABEL: &str = "Coupled Temperature-Displacement";
 const UNCOUPLED_LABEL: &str = "Uncoupled Temperature-Displacement";
 const DYNAMIC_LABEL: &str = "Dynamic (time integration)";
-const MODAL_DYNAMICS_LABEL: &str = "Modal Dynamics (from stored modes)";
 const STEADY_STATE_LABEL: &str = "Steady State Dynamics (frequency response)";
 const COMPLEX_FREQUENCY_LABEL: &str = "Complex Frequency (rotating, Coriolis)";
 const BUCKLE_LABEL: &str = "Buckle";
@@ -5924,7 +5912,6 @@ fn step_kind_label(kind: &StepKind) -> &'static str {
         StepKind::Static(_) => STATIC_LABEL,
         StepKind::Frequency(_) => FREQUENCY_LABEL,
         StepKind::Dynamic(_) => DYNAMIC_LABEL,
-        StepKind::ModalDynamics(_) => MODAL_DYNAMICS_LABEL,
         StepKind::SteadyStateDynamics(_) => STEADY_STATE_LABEL,
         StepKind::ComplexFrequency(_) => COMPLEX_FREQUENCY_LABEL,
         StepKind::Buckle(_) => BUCKLE_LABEL,
@@ -5997,7 +5984,6 @@ fn step_form(
             let context = dynamic.unwrap_or_default();
             dynamic_form(ui, settings, units, &context)
         }
-        StepKind::ModalDynamics(settings) => modal_dynamics_form(ui, settings, units),
         StepKind::SteadyStateDynamics(settings) => steady_state_form(ui, settings, units),
         StepKind::ComplexFrequency(settings) => complex_frequency_form(ui, settings, fe),
         StepKind::Buckle(settings) => buckle_form(ui, settings),
@@ -6265,7 +6251,10 @@ fn dynamic_form(
                 DynamicMethod::Direct,
                 DynamicMethod::Explicit,
                 DynamicMethod::Automatic,
-                DynamicMethod::Modal { modes: 0 },
+                DynamicMethod::Modal {
+                    modes: 0,
+                    preloaded: false,
+                },
             ]
             .iter()
             .enumerate()
@@ -6282,6 +6271,7 @@ fn dynamic_form(
                         settings.large_deformations = false;
                         DynamicMethod::Modal {
                             modes: DynamicMethod::DEFAULT_MODES,
+                            preloaded: false,
                         }
                     }
                 };
@@ -6345,7 +6335,7 @@ fn dynamic_form(
             None => {}
         }
     }
-    if let DynamicMethod::Modal { modes } = &mut settings.method {
+    if let DynamicMethod::Modal { modes, preloaded } = &mut settings.method {
         ui.label("    Modes").on_hover_text(
             "The lowest eigenmodes superposed. The highest of them must lie above the \
              frequencies the loads excite; the solver output names it.",
@@ -6353,6 +6343,14 @@ fn dynamic_form(
         expose::field(ui, Field::Modes, |ui| {
             ui.add(numeric::count(modes).range(1..=10_000))
         });
+        ui.end_row();
+        ui.label("");
+        ui.checkbox(preloaded, "Modes about the preloaded state")
+            .on_hover_text(
+                "The eigenmodes of the state the previous step leaves, with the stiffening \
+                 by its stresses (a tensioned string, a spinning rotor). Off, they are those \
+                 of the unloaded model.",
+            );
         ui.end_row();
         ui.label("");
         ui.weak("Linear only: no contact, no large\ndeformations, no plasticity.");
@@ -6643,51 +6641,6 @@ fn dynamic_form(
          Materials need a density.",
     );
     ui.end_row();
-}
-
-/// Settings of a modal dynamics step: the time increments, then the modal damping.
-fn modal_dynamics_form(ui: &mut Ui, settings: &mut ModalDynamicsStep, units: UnitSystem) {
-    ui.label("");
-    ui.checkbox(
-        &mut settings.steady_state,
-        "Steady state (until the response repeats)",
-    );
-    ui.end_row();
-    ui.label("Time increment");
-    ui.add(numeric::physical(
-        &mut settings.increment,
-        units,
-        Quantity::Time,
-    ));
-    ui.end_row();
-    if settings.steady_state {
-        ui.label("Relative error");
-        ui.add(
-            numeric::drag_value(&mut settings.relative_error)
-                .range(0.0..=1.0)
-                .speed(0.001)
-                .max_decimals(6),
-        );
-        ui.end_row();
-    } else {
-        ui.label("Time period");
-        ui.add(numeric::physical(
-            &mut settings.time_period,
-            units,
-            Quantity::Time,
-        ));
-        ui.end_row();
-    }
-    ui.label("Max. increments");
-    ui.add(numeric::drag_value(&mut settings.max_increments).range(1..=1_000_000));
-    ui.end_row();
-    ui.label("");
-    ui.weak(
-        "Needs a Frequency step with stored modes before it. Loads without an amplitude \
-         act at once and stay constant.",
-    );
-    ui.end_row();
-    modal_damping_rows(ui, &mut settings.damping, units);
 }
 
 /// Settings of a steady state dynamics step: the frequency sweep, then the modal damping.

@@ -422,7 +422,7 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                 StepKind::Dynamic(d) => {
                     if matches!(field, Field::Modes) {
                         return match &mut d.method {
-                            crate::DynamicMethod::Modal { modes } => {
+                            crate::DynamicMethod::Modal { modes, .. } => {
                                 Some((Slot::Count(modes), ValueKind::Count))
                             }
                             crate::DynamicMethod::Direct
