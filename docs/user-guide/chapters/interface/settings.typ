@@ -29,6 +29,26 @@ tab, see @shell-section, @beam-profiles and @links. Those toggles are stored wit
 
 #screenshot("dark-theme.png", [The dark theme with the results of a cantilever])
 
+=== Saving <settings-saving>
+
+#figure(
+  image("../../images/settings-saving.png", width: 55%),
+  caption: [The saving page of the settings: autosave one minute after a change],
+)
+
+#fields(
+  [Autosave], [Saves the project to its file by itself once it has had changes for the time
+    below (default off). A new project is saved automatically once you have saved it the first
+    time, as it has no file before. The output pane notes each autosave with
+    #ui("saved (autosave)"); a failed autosave shows a message and is tried again after the
+    same time.],
+  [Save after], [Minutes from the first change that is not saved to the autosave (1 to 240,
+    default 5). Changes made during that time are saved together.],
+)
+
+Autosave writes the open project's own file, the same as #key("Ctrl+S"), in the background
+(@files).
+
 === Post-processing
 
 #screenshot("settings-post-processing.png", [The post-processing page of the settings])
