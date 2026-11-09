@@ -16,6 +16,8 @@ const ACCENT: Color32 = Color32::from_rgb(70, 140, 215);
 pub enum Icon {
     New,
     Open,
+    /// The open folder with a small clock: the projects opened last.
+    OpenRecent,
     /// Import of geometry: an arrow pointing into a sheet.
     Import,
     Save,
@@ -353,7 +355,7 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
                 ACCENT,
             );
         }
-        Icon::Open => {
+        Icon::Open | Icon::OpenRecent => {
             let back = Color32::from_rgb(230, 170, 40);
             let front = Color32::from_rgb(255, 206, 84);
             polygon(
@@ -375,6 +377,12 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
                 front,
                 Color32::from_rgb(170, 120, 20),
             );
+            if icon == Icon::OpenRecent {
+                let centre = p(11.5, 11.0);
+                shapes.push(Shape::circle_filled(centre, 4.6, Color32::WHITE));
+                shapes.push(Shape::circle_stroke(centre, 4.6, Stroke::new(1.2, ACCENT)));
+                line(shapes, &[p(11.5, 8.2), centre, p(13.4, 12.0)], 1.2, OUTLINE);
+            }
         }
         Icon::Save => {
             let blue = Color32::from_rgb(60, 110, 180);

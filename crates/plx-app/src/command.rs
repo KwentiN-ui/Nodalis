@@ -106,6 +106,7 @@ pub enum Cmd {
     // Project workspace.
     NewProject,
     OpenProject,
+    OpenRecent,
     SaveProject,
     SaveProjectAs,
     SaveWithoutResults,
@@ -507,6 +508,19 @@ fn build() -> Vec<Command> {
         Tool(Icon::Open),
         "Ctrl+O",
         "Opens a project file.",
+    ));
+    add(tile(
+        command(
+            C::OpenRecent,
+            "Open\nRecent",
+            p,
+            t,
+            "File",
+            Tool(Icon::OpenRecent),
+            "",
+            "Opens one of the projects opened last that still exist.",
+        ),
+        Tile::Panel,
     ));
     add(command(
         C::SaveProject,

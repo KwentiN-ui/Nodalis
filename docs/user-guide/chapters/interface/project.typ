@@ -234,6 +234,7 @@ placed and worked on with the ribbon (@ribbon) and the keys above.
   [File > New Project], [Closes the project and starts a new one with #ui("Analysis-1").],
   [File > Open ... (#key("Ctrl+O"))], [Opens a project. Its analyses open when you
     double-click them.],
+  [File > Open Recent], [Lists the projects opened or saved last that still exist.],
   [File > Save (#key("Ctrl+S"))], [Saves the project with all analyses, also those whose
     windows are open (@files).],
   [File > Save As ... (#key("Ctrl+Shift+S"))], [Saves the project under a new name.],

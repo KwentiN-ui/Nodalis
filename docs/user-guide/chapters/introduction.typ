@@ -104,7 +104,7 @@ Nothing else happens: ignore it if you do not want to update. A click on the sym
   its size and checksum and starts it. Windows asks for administrator rights, Nodalis closes,
   the installer only shows its progress and then starts Nodalis again; the shortcuts and the
   `.ndl` association stay as you installed them. Save your project before: the project that was
-  open is reopened when it was saved as a `.ndl` file.
+  open is listed under #ui("Open Recent") when it was saved as a `.ndl` file.
 - #ui("Download ZIP") (portable version only, @portable) downloads the new portable ZIP file in
   the web browser. Unpack it yourself and copy the `Settings` folder over.
 - #ui("Open Release Page") opens the release on GitHub. A Nodalis built from source offers only
@@ -154,8 +154,8 @@ nodalis bracket.ndl bracket.frd
 ```
 
 Several CAD files given together are combined into one geometry. Without command line arguments,
-Nodalis reopens the project that was open when it was last closed, provided it was saved as a
-`.ndl` file and still exists.
+Nodalis starts with a new, empty project. The projects you used last are under
+#ui("Open Recent") on the File tab of the Project workspace.
 
 == This guide offline <offline-guide>
 

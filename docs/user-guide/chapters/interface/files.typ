@@ -76,5 +76,14 @@ CAD files dropped together are combined into one geometry.
 
 On the command line, `nodalis project.ndl` opens the project. Other files, for example
 `nodalis plate.step`, start a new project with one analysis named after the first file, into
-which the files are imported. Without files, Nodalis reopens the last saved project that was
-open at exit.
+which the files are imported. Without files, Nodalis starts with a new, empty project; the
+projects used last are under #ui("Open Recent") (@recent).
+
+==== Open Recent <recent>
+
+#ui("Open Recent") next to #ui("Open") on the File tab of the Project workspace (and
+#ui("File > Open Recent") in the menu) lists the project files you opened or saved last, the
+latest first, up to ten. Click one to open it. Files that no longer exist are left out of the
+list, so a moved or deleted project does not show up.
+
+#screenshot("open-recent.png", [Open Recent lists the projects used last that still exist])

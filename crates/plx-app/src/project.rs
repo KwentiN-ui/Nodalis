@@ -47,7 +47,9 @@ mod saving;
 mod workspace;
 
 /// Storage key of the project file open at exit, reopened at the next start.
-const LAST_PROJECT_KEY: &str = "last_project";
+const RECENT_KEY: &str = "recent_projects";
+/// How many projects Open Recent lists.
+const RECENT_MAX: usize = 10;
 
 /// What a block of the schematic is, without its data: for menus, texts and decisions that
 /// only depend on the kind.
@@ -1952,6 +1954,8 @@ pub struct ProjectApp {
     new_analysis: Option<(egui::Pos2, ModelPropertiesDialog)>,
     /// A project file being read on a worker thread, with notes on its conversion.
     opening: Option<(PathBuf, Receiver<Opened>)>,
+    /// The project files opened or saved last, the latest first; see Open Recent.
+    recent: Vec<PathBuf>,
     /// The save running on a worker thread, and what autosave needs to know.
     saver: saving::Saver,
     /// Analyses Update Project still has to solve, in order, and those it solves.
@@ -2075,6 +2079,7 @@ impl ProjectApp {
             dragging: None,
             new_analysis: None,
             opening: None,
+            recent: cc.storage.map(stored_recent).unwrap_or_default(),
             saver: Default::default(),
             update_queue: VecDeque::new(),
             updating: Vec::new(),
@@ -2117,10 +2122,8 @@ impl ProjectApp {
             let id = app.add_analysis(&name, egui::pos2(40.0, 40.0), properties);
             app.startup_import = files;
             app.open_window(&cc.egui_ctx, id, None);
-        } else if let Some(path) = cc.storage.and_then(stored_last_project) {
-            // Without files on the command line, the project open at the last exit opens.
-            app.open(&cc.egui_ctx, path);
         } else {
+            // The last project is not loaded again: Open Recent lists it.
             app.add_first_analysis();
         }
         Ok(app)
@@ -4474,6 +4477,31 @@ impl ProjectApp {
         }
     }
 
+    /// Puts `path` first in the list of Open Recent.
+    fn remember(&mut self, path: &Path) {
+        self.recent = with_recent(&self.recent, path);
+    }
+
+    /// The panel of Open Recent: the recent projects that still exist, the latest first.
+    /// Returns the one picked.
+    fn recent_panel(&mut self, ui: &mut egui::Ui) -> Option<PathBuf> {
+        self.recent.retain(|path| path.is_file());
+        if self.recent.is_empty() {
+            ui.weak("No recent projects");
+            return None;
+        }
+        let mut picked = None;
+        for path in &self.recent {
+            let name = (path.file_name()).map_or_else(String::new, |n| n.to_string_lossy().into());
+            let open = ui.add_enabled(self.opening.is_none(), egui::Button::new(name));
+            if open.on_hover_text(path.display().to_string()).clicked() {
+                picked = Some(path.clone());
+                ui.close();
+            }
+        }
+        picked
+    }
+
     /// Reads the project file on a worker thread; it replaces the open project once read.
     fn open(&mut self, ctx: &egui::Context, path: PathBuf) {
         if self.opening.is_some() {
@@ -4536,6 +4564,7 @@ impl ProjectApp {
                         path.display()
                     )
                 });
+                self.remember(&path);
                 self.path = Some(path);
                 self.forget_solves();
                 self.forget_edits();
@@ -5326,6 +5355,17 @@ impl ProjectApp {
                 let open = egui::Button::new("Open …").shortcut_text("Ctrl+O");
                 if ui.add_enabled(self.opening.is_none(), open).clicked() {
                     self.open_dialog(ui.ctx());
+                }
+                let tip = "Opens one of the projects opened last that still exist";
+                let mut picked = None;
+                ui.add_enabled_ui(self.opening.is_none(), |ui| {
+                    ui.menu_button("Open Recent", |ui| picked = self.recent_panel(ui))
+                        .response
+                        .on_hover_text(tip);
+                });
+                if let Some(path) = picked {
+                    self.open(ui.ctx(), path);
+                    ui.close();
                 }
                 let save = egui::Button::new("Save").shortcut_text("Ctrl+S");
                 if ui.add(save).clicked() {
@@ -7734,8 +7774,7 @@ fn analysis_viewport(id: u64) -> egui::ViewportId {
 impl eframe::App for ProjectApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, settings::STORAGE_KEY, &self.settings);
-        let last = self.path.clone().filter(|p| p.is_file());
-        eframe::set_value(storage, LAST_PROJECT_KEY, &last);
+        eframe::set_value(storage, RECENT_KEY, &self.recent);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -11702,12 +11741,21 @@ struct MonitorRow {
     active: bool,
 }
 
-/// The project file stored at the last exit, if it still exists. It is stored as an
-/// `Option`, so it has to be read back as one.
-fn stored_last_project(storage: &dyn eframe::Storage) -> Option<PathBuf> {
-    eframe::get_value::<Option<PathBuf>>(storage, LAST_PROJECT_KEY)
-        .flatten()
-        .filter(|path| path.is_file())
+/// The recent project files stored at the last exit that still exist.
+fn stored_recent(storage: &dyn eframe::Storage) -> Vec<PathBuf> {
+    let mut recent = eframe::get_value::<Vec<PathBuf>>(storage, RECENT_KEY).unwrap_or_default();
+    recent.retain(|path| path.is_file());
+    recent.truncate(RECENT_MAX);
+    recent
+}
+
+/// `recent` with `path` first, once, and at most [`RECENT_MAX`] entries.
+fn with_recent(recent: &[PathBuf], path: &Path) -> Vec<PathBuf> {
+    let same = |other: &Path| other == path;
+    let mut list = vec![path.to_path_buf()];
+    list.extend(recent.iter().filter(|p| !same(p)).cloned());
+    list.truncate(RECENT_MAX);
+    list
 }
 
 /// Asks for a project file to save to, proposing the open one's name with `suffix`.
@@ -13195,16 +13243,26 @@ mod tests {
     }
 
     #[test]
-    fn the_project_stored_at_exit_is_read_back() {
-        let path = std::env::temp_dir().join("nodalis_test_last_project.ndl");
-        std::fs::write(&path, "").unwrap();
+    fn recent_projects_keep_their_order_and_only_existing_files() {
+        let dir = std::env::temp_dir();
+        let (a, b) = (
+            dir.join("nodalis_test_recent_a.ndl"),
+            dir.join("nodalis_test_recent_b.ndl"),
+        );
+        std::fs::write(&a, "").unwrap();
+        std::fs::write(&b, "").unwrap();
+        let gone = dir.join("nodalis_test_recent_gone.ndl");
+        let list = with_recent(&with_recent(&[], &a), &b);
+        assert_eq!(list, [b.clone(), a.clone()]);
+        // Opening one again moves it to the front and does not list it twice.
+        assert_eq!(with_recent(&list, &a), [a.clone(), b.clone()]);
+        let many: Vec<PathBuf> = (0..20).map(|i| dir.join(format!("r{i}.ndl"))).collect();
+        assert_eq!(with_recent(&many, &a).len(), RECENT_MAX);
         let mut storage = MemoryStorage::default();
-        eframe::set_value(&mut storage, LAST_PROJECT_KEY, &Some(path.clone()));
-        assert_eq!(stored_last_project(&storage), Some(path.clone()));
-        std::fs::remove_file(&path).unwrap();
-        assert_eq!(stored_last_project(&storage), None);
-        eframe::set_value(&mut storage, LAST_PROJECT_KEY, &None::<PathBuf>);
-        assert_eq!(stored_last_project(&storage), None);
-        assert_eq!(stored_last_project(&MemoryStorage::default()), None);
+        eframe::set_value(&mut storage, RECENT_KEY, &vec![gone, a.clone(), b.clone()]);
+        assert_eq!(stored_recent(&storage), [a.clone(), b.clone()]);
+        assert!(stored_recent(&MemoryStorage::default()).is_empty());
+        std::fs::remove_file(&a).unwrap();
+        std::fs::remove_file(&b).unwrap();
     }
 }
