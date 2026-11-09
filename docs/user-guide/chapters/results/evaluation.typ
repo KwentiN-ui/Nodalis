@@ -23,6 +23,13 @@ Move a type from #ui("Available") to #ui("Active") and set its properties:
 / Circular pattern: copies the model #ui("Number of items") times by #ui("Angle") about the axis
   through two points.
 
+In a 2D model the window offers only what stays in the model plane: symmetries about the X and Y
+axis (not Z), patterns with X and Y coordinates, and a circular pattern about the Z axis through
+one #ui("Center Point"). A 2D axisymmetric model keeps the circular pattern about its y axis, which
+revolves the section into a 3D body.
+
+#screenshot("transformation-2d.png", [Transformations of a 2D model: no Z axis])
+
 Several transformations are applied one after the other. Vector and tensor results are mirrored
 or rotated with the copies, and legend and labels include them. #ui("Apply") shows the
 transformations, #ui("Close") applies them and closes the window, and #ui("Off") shows the
