@@ -9473,12 +9473,14 @@ fn a_detection_finds_the_touching_blocks_and_keeps_regions_the_user_changed() {
     assert_eq!(region.side_a.faces(&mesh).len(), 4);
     assert_eq!(region.side_b.faces(&mesh).len(), 4);
     assert_eq!(region.settings.tolerance, Some(auto));
-    // Detecting again replaces what it found.
+    // Detecting again replaces what it found, keeping its id for what refers to it.
+    let id = model.contact_regions[0].id;
     let report = model
         .detect_contacts(0, &mesh, &skins, &[true, true])
         .unwrap();
     assert_eq!((report.added, report.replaced), (1, 1));
     assert_eq!(model.contact_regions.len(), 1);
+    assert_eq!(model.contact_regions[0].id, id);
     // A region changed by the user stays, and nothing is added for its parts.
     model.contact_regions[0].behavior = plx_model::ContactBehavior::Frictionless;
     model.contact_regions[0].edited = true;

@@ -382,6 +382,12 @@ impl FeModel {
         };
         let ours = |r: &ContactRegion| r.detected_by == Some(detection.id);
         let before = self.contact_regions.len();
+        // A region found again keeps the id of the one it replaces, so that what refers to
+        // it (a contact history output, a contact change of a step) stays on it.
+        let replaced: Vec<(String, crate::Id)> = (self.contact_regions.iter())
+            .filter(|r| ours(r) && !r.edited)
+            .map(|r| (r.name.clone(), r.id))
+            .collect();
         self.contact_regions.retain(|r| !ours(r) || r.edited);
         report.replaced = before - self.contact_regions.len();
         // The parts each kept region connects, to recognise it among the regions found.
@@ -421,6 +427,9 @@ impl FeModel {
             } else {
                 name
             };
+            if let Some((_, id)) = replaced.iter().find(|(n, _)| *n == found.name) {
+                found.id = *id;
+            }
             self.contact_regions.push(found);
             report.added += 1;
         }
