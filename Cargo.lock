@@ -3560,6 +3560,7 @@ name = "plxs-assembly"
 version = "0.3.1"
 dependencies = [
  "plxs-constraints",
+ "plxs-contact",
  "plxs-core",
  "plxs-elements",
  "plxs-linalg",

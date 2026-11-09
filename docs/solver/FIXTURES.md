@@ -245,12 +245,12 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `modal/rotor-perturbation-true` | A | M3 | plxs 0.2.0 | C3D8, \*STATIC, \*FREQUENCY, \*COMPLEX FREQUENCY |
 | `modal/rotor` | A | M3 | plxs 0.2.0 | C3D8, \*STATIC, \*FREQUENCY, \*COMPLEX FREQUENCY |
 | `nonlinear/amplitude_force` | B | M2 | plxs 0.2.0 | C3D8, \*AMPLITUDE, \*STATIC, NLGEOM |
-| `nonlinear/druck-nur-druck` | B | M2 | plxs 0.2.0 | C3D8, SPRING1, GAPUNI, \*PLASTIC, \*SPRING, \*GAP, \*STATIC |
-| `nonlinear/druck-nur-einzeln` | B | M2 | plxs 0.2.0 | C3D8, SPRING1, GAPUNI, \*PLASTIC, \*SPRING, \*GAP, \*STATIC |
-| `nonlinear/druck-nur-umgedreht-druck` | B | M2 | plxs 0.2.0 | C3D8, SPRING1, GAPUNI, \*PLASTIC, \*SPRING, \*GAP, \*STATIC |
-| `nonlinear/druck-nur-umgedreht-zug` | B | M2 | plxs 0.2.0 | C3D8, SPRING1, GAPUNI, \*PLASTIC, \*SPRING, \*GAP, \*STATIC |
-| `nonlinear/druck-nur-verteilt` | B | M2 | plxs 0.2.0 | C3D8, SPRING1, GAPUNI, \*PLASTIC, \*SPRING, \*GAP, \*STATIC |
-| `nonlinear/druck-nur-zug` | B | M2 | plxs 0.2.0 | C3D8, SPRING1, GAPUNI, \*PLASTIC, \*SPRING, \*GAP, \*STATIC |
+| `nonlinear/druck-nur-druck` | B | M2 | plxs 0.3.1 | C3D8, SPRING1, \*PLASTIC, \*SPRING, \*COMPRESSION ONLY, \*STATIC |
+| `nonlinear/druck-nur-einzeln` | B | M2 | plxs 0.3.1 | C3D8, SPRING1, \*PLASTIC, \*SPRING, \*COMPRESSION ONLY, \*STATIC |
+| `nonlinear/druck-nur-umgedreht-druck` | B | M2 | plxs 0.3.1 | C3D8, SPRING1, \*PLASTIC, \*SPRING, \*COMPRESSION ONLY, \*STATIC |
+| `nonlinear/druck-nur-umgedreht-zug` | B | M2 | plxs 0.3.1 | C3D8, SPRING1, \*PLASTIC, \*SPRING, \*COMPRESSION ONLY, \*STATIC |
+| `nonlinear/druck-nur-verteilt` | B | M2 | plxs 0.3.1 | C3D8, SPRING1, \*PLASTIC, \*SPRING, \*COMPRESSION ONLY, \*STATIC |
+| `nonlinear/druck-nur-zug` | B | M2 | plxs 0.3.1 | C3D8, SPRING1, \*PLASTIC, \*SPRING, \*COMPRESSION ONLY, \*STATIC |
 | `nonlinear/gap_stuetzen` | B | M2 | plxs 0.2.0 | C3D8, GAPUNI, \*GAP, \*STATIC, NLGEOM |
 | `nonlinear/kriechen` | B | M2 | plxs 0.2.0 | C3D8, \*CREEP, \*STATIC, \*VISCO |
 | `nonlinear/membran-vorgespannt` | B | M2 | plxs 0.2.0 | M3D4, \*MEMBRANE SECTION, \*STATIC, NLGEOM |

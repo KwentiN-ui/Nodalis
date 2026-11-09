@@ -762,6 +762,7 @@ fn lower_model_named(
         interactions,
         pairs: contact_pairs,
         clearances,
+        compression_only: std::mem::take(&mut generated.compression_only),
     };
     ir_model.constraints.equations.extend(node_tie_equations);
     ir_model.amplitudes = amplitudes;

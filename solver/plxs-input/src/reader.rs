@@ -272,6 +272,7 @@ impl Reader {
             "*GAPCONDUCTANCE" => self.gap_conductance(k, data)?,
             "*CONTACTPAIR" => self.contact_pair(k, data)?,
             "*CLEARANCE" => self.clearance(k)?,
+            "*COMPRESSIONONLY" => self.compression_only(k)?,
             "*AMPLITUDE" => self.amplitude(k, data)?,
             "*INITIALCONDITIONS" => self.initial_conditions(k, data)?,
             "*PHYSICALCONSTANTS" => self.physical_constants(k)?,
@@ -1448,6 +1449,29 @@ impl Reader {
             slave: normalized_name(f[0]),
             master: normalized_name(f[1]),
         });
+        Ok(())
+    }
+
+    /// `*COMPRESSION ONLY, SURFACE=name[, CLEARANCE=d][, STIFFNESS=k][, FLIP]` (plxs only):
+    /// see [`plxs_core::contact::CompressionOnly`].
+    fn compression_only(&mut self, k: &Keyword) -> Result<(), Error> {
+        k.check_parameters(&["SURFACE", "CLEARANCE", "STIFFNESS", "FLIP"])?;
+        let Some(surface) = k.value("SURFACE").map(normalized_name) else {
+            return Err(k.error("SURFACE is needed"));
+        };
+        let stiffness = k.number("STIFFNESS")?;
+        if stiffness.is_some_and(|s| s <= 0.0 || s.is_nan()) {
+            return Err(k.error("STIFFNESS must be positive"));
+        }
+        self.model()
+            .contact
+            .compression_only
+            .push(plxs_core::contact::CompressionOnly {
+                surface,
+                clearance: k.number("CLEARANCE")?.unwrap_or(0.0),
+                stiffness,
+                flipped: k.has("FLIP"),
+            });
         Ok(())
     }
 

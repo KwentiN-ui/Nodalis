@@ -453,6 +453,14 @@ impl ElementTable {
                 }
             }
         }
+        for support in &model.contact.compression_only {
+            for gap in crate::discrete::surface_gaps(model, support)? {
+                for &d in &gap.dofs {
+                    connected[(d / 3) as usize] = true;
+                }
+                discrete.push(gap);
+            }
+        }
         // DOFs no element works on are held at zero: nodes outside every element, and the
         // out-of-plane DOF of nodes that only plane or axisymmetric elements use.
         for n in 0..model.nodes.len() {

@@ -7,6 +7,9 @@ pub struct Contact {
     pub interactions: Vec<SurfaceInteraction>,
     pub pairs: Vec<ContactPair>,
     pub clearances: Vec<Clearance>,
+    /// `*COMPRESSION ONLY`: surfaces held against fixed ground in compression only.
+    #[serde(default)]
+    pub compression_only: Vec<CompressionOnly>,
 }
 
 /// `*SURFACE INTERACTION` with its `*SURFACE BEHAVIOR`, `*FRICTION` and `*GAP CONDUCTANCE`.
@@ -91,4 +94,23 @@ pub struct Clearance {
     pub master: String,
     pub slave: String,
     pub value: f64,
+}
+
+/// `*COMPRESSION ONLY, SURFACE=`: a support that pushes on an element surface and never pulls,
+/// like a part resting on a rigid floor. Unlike `GAPUNI` elements at the nodes it acts at
+/// the integration points of the faces, so that the pressure is spread over the faces as a
+/// pressure load is: rigid nodal gaps on quadratic faces leave the corner nodes without
+/// load (their consistent share of a pressure is negative) and the stresses checkered.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CompressionOnly {
+    /// Upper case name of the element surface.
+    pub surface: String,
+    /// Distance the surface can move towards the ground before the support takes load.
+    pub clearance: f64,
+    /// Stiffness per area (pressure per closure); `None`: practically rigid, see the
+    /// assembly.
+    pub stiffness: Option<f64>,
+    /// The ground lies inside the material and pushes the surface outward (`FLIP`),
+    /// instead of lying outside and pushing onto it.
+    pub flipped: bool,
 }
