@@ -4,17 +4,25 @@
 
 #ui("Steady State Dynamics (frequency response)") superposes the eigenmodes of the structure
 instead of integrating the full model and computes the amplitude at every frequency of a
-harmonic excitation (`*STEADY STATE DYNAMICS`). It needs a #ui("Frequency") step with
-#ui("Store matrices and eigenmodes") before it, with the same boundary conditions; the model
-check (@model-check) reports a missing one as "No stored eigenmodes". Create the step with
-#menu("Steps", "Step").
+harmonic excitation (`*STEADY STATE DYNAMICS`). The step computes the eigenmodes itself, with
+its own boundary conditions, in a frequency step the solver runs right before it; only the
+response is kept. #ui("Base state") in its #ui("Start") section (@step-handover) chooses
+whether the modes are those of the unloaded model or of the state the step before leaves
+(a preloaded structure). The step leaves the state as it found it. An #ui("Eigenmodes") link
+from a frequency step of another analysis gives it those modes instead (@results-links).
+Create the step with #menu("Steps", "Step").
 
 The response over time from the eigenmodes is a #ui("Dynamic") step with the method
 #ui("Modal superposition") (@dynamic-modal), which computes its eigenmodes itself.
 
 #screenshot("steady-state-step.png", [Steady State Dynamics step])
 
+#screenshot("ssd-start.png", [Start section of a Steady State Dynamics step on the preloaded state: the step computes its own eigenmodes and passes nothing on])
+
 #fields(
+  [Modes], [The number of eigenmodes the response is superposed from (default 20). The highest
+    of them should lie well above the upper frequency. Not shown when an Eigenmodes link gives
+    the modes.],
   [Harmonic excitation], [The loads vary as sine waves with the frequency swept over the range
     (default on). Switched off, the loads are periodic between #ui("Period start") and
     #ui("Period end") and expanded into #ui("Fourier terms") (`HARMONIC=NO`).],

@@ -34,6 +34,27 @@ pub struct Step {
     pub restart_write: Option<RestartWrite>,
     /// `*CONTROLS`, not written by Nodalis; `None` means CalculiX's defaults.
     pub controls: Option<Controls>,
+    /// Whether the step belongs to a group of steps that leaves the state as it found it
+    /// (Nodalis only, no CalculiX keyword).
+    #[serde(default)]
+    pub isolation: Isolation,
+}
+
+/// A group of consecutive steps that probes the model and leaves the state as it found
+/// it, such as the preload, eigenmodes and complex modes of Nodalis' complex frequency
+/// step: the first step opens the group, the session keeps the state before it, and after
+/// the step that closes the group the state returns to the kept one. The step after the
+/// group starts where the steps before the group ended. Steps outside a group have both
+/// flags off.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Isolation {
+    /// The first step of the group.
+    pub opens: bool,
+    /// The last step of the group (also the first in a group of one).
+    pub closes: bool,
+    /// With `opens`: the group starts from the unloaded model instead of the state before
+    /// it.
+    pub unloaded: bool,
 }
 
 impl Step {
@@ -52,6 +73,7 @@ impl Step {
             outputs: Outputs::default(),
             restart_write: None,
             controls: None,
+            isolation: Isolation::default(),
         }
     }
 }

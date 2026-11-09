@@ -36,6 +36,8 @@ impl StepKind {
         match self {
             StepKind::Frequency(settings) => Some(settings.base),
             StepKind::Buckle(settings) => Some(settings.base),
+            StepKind::ComplexFrequency(settings) => Some(settings.base),
+            StepKind::SteadyStateDynamics(settings) => Some(settings.base),
             StepKind::Dynamic(settings) => match settings.method {
                 DynamicMethod::Modal { base, .. } => Some(base),
                 _ => None,
@@ -48,6 +50,8 @@ impl StepKind {
         match self {
             StepKind::Frequency(settings) => Some(&mut settings.base),
             StepKind::Buckle(settings) => Some(&mut settings.base),
+            StepKind::ComplexFrequency(settings) => Some(&mut settings.base),
+            StepKind::SteadyStateDynamics(settings) => Some(&mut settings.base),
             StepKind::Dynamic(settings) => match &mut settings.method {
                 DynamicMethod::Modal { base, .. } => Some(base),
                 _ => None,
@@ -56,16 +60,10 @@ impl StepKind {
         }
     }
 
-    /// Whether the step leaves eigenmodes behind that a later steady state dynamics step
-    /// superposes: a frequency step that stores them, and the eigenmodes a modal dynamic or
-    /// complex frequency step computes for itself.
+    /// Whether the step leaves eigenmodes behind that a later sensitivity step reads: a
+    /// frequency step that stores them.
     pub fn stores_modes(&self) -> bool {
-        match self {
-            StepKind::Frequency(settings) => settings.storage,
-            StepKind::ComplexFrequency(_) => true,
-            StepKind::Dynamic(settings) => matches!(settings.method, DynamicMethod::Modal { .. }),
-            _ => false,
-        }
+        matches!(self, StepKind::Frequency(settings) if settings.storage)
     }
 }
 
@@ -173,7 +171,10 @@ impl FeModel {
             .map(|c| c.name.as_str())
             .collect();
         let probing = !kind.continues_state();
-        let base = kind.base();
+        // Eigenmodes linked from another analysis were computed there, about its state.
+        let linked_modes = matches!(kind, StepKind::SteadyStateDynamics(_))
+            && self.properties.stored_modes.is_some();
+        let base = kind.base().filter(|_| !linked_modes);
         let starts_unloaded = previous.is_none() || (probing && base == Some(Base::Unloaded));
         let mut starts_from = if starts_unloaded {
             "Unloaded model".to_owned()
@@ -248,23 +249,25 @@ impl FeModel {
 
         let mut uses = Vec::new();
         match kind {
-            StepKind::SteadyStateDynamics(_) => {
-                match (0..index)
-                    .rev()
-                    .find(|&s| before[s].active && before[s].kind.stores_modes())
-                {
-                    Some(s) => uses.push(format!("Eigenmodes of {}", before[s].name)),
-                    None => uses.push("Eigenmodes of a Frequency step before it (none)".into()),
-                }
+            StepKind::SteadyStateDynamics(settings) => {
+                uses.push(match &self.properties.stored_modes {
+                    Some(file) => format!("Eigenmodes linked from {}", file.display()),
+                    None => format!("Its own {} eigenmodes", settings.modes),
+                });
             }
             StepKind::Sensitivity(_) => match (0..index).rev().find(|&s| before[s].active) {
                 Some(s) => uses.push(format!("Solution of {}", before[s].name)),
                 None => uses.push("Solution of the step before it (none)".into()),
             },
-            StepKind::ComplexFrequency(settings) if settings.stiffening => {
-                // The preload by the rotation is a static step of its own after the steps
-                // before; the eigenmodes are about it.
-                uses.push("Its own preload by the rotation".into());
+            StepKind::ComplexFrequency(settings) => {
+                uses.push(if settings.stiffening {
+                    format!(
+                        "Its own {} eigenmodes, preloaded by the rotation",
+                        settings.num_modes
+                    )
+                } else {
+                    format!("Its own {} eigenmodes", settings.num_modes)
+                });
             }
             _ => {}
         }
@@ -297,30 +300,6 @@ impl FeModel {
         }
 
         let next = (after.iter()).find(|s| s.active).map(|s| s.name.as_str());
-        // The preload of a complex frequency step is a static step of its own, whose state
-        // the steps after it start from.
-        if let StepKind::ComplexFrequency(settings) = kind
-            && settings.stiffening
-        {
-            let passes_on = match next {
-                Some(next) => format!("Its state preloaded by the rotation to {next}"),
-                None => "Its state preloaded by the rotation (no step follows)".into(),
-            };
-            return Handover {
-                previous,
-                starts_from,
-                carried,
-                skipped,
-                base,
-                previous_state: previous_name,
-                uses,
-                loads,
-                removed_loads,
-                temperatures,
-                model_wide,
-                passes_on,
-            };
-        }
         let passes_on = match (kind.continues_state(), next) {
             (true, Some(next)) => format!("Its end state to {next}"),
             (true, None) => "Its end state (no step follows)".into(),
@@ -464,6 +443,31 @@ mod tests {
         );
         assert_eq!(handover.removed_loads, ["Pressure"]);
         assert_eq!(handover.passes_on, "Its end state (no step follows)");
+    }
+
+    #[test]
+    fn complex_frequency_and_steady_state_steps_compute_their_own_modes() {
+        let mut fe = chain();
+        fe.steps[1].kind = StepKind::ComplexFrequency(crate::ComplexFrequencyStep::default());
+        let handover = fe.step_handover(1);
+        assert_eq!(handover.summary(), "Base: Unloaded model");
+        assert_eq!(
+            handover.uses,
+            ["Its own 20 eigenmodes, preloaded by the rotation"]
+        );
+        assert_eq!(
+            handover.passes_on,
+            "Nothing: Unload starts from the end of Preload"
+        );
+        fe.steps[1].kind = StepKind::SteadyStateDynamics(crate::SteadyStateDynamicsStep::default());
+        let handover = fe.step_handover(1);
+        assert_eq!(handover.uses, ["Its own 20 eigenmodes"]);
+        assert_eq!(handover.base, Some(Base::Unloaded));
+        // Eigenmodes of another analysis: no base of its own.
+        fe.properties.stored_modes = Some("modes.eig".into());
+        let handover = fe.step_handover(1);
+        assert_eq!(handover.uses, ["Eigenmodes linked from modes.eig"]);
+        assert_eq!(handover.base, None);
     }
 
     #[test]

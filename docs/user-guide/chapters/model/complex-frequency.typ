@@ -40,9 +40,12 @@ holds the rotation, and no static or frequency step has to come before it.
 The rotating parts need a density. The solver computes
 the step in up to three steps of its own: with stress stiffening a static preload by the
 centrifugal forces, then the eigenmodes (with stress stiffening as a perturbation of the
-preload), then the complex modes. Only the complex modes are kept as results. The step starts
-from the state of the step before it: a bolt preload of an earlier Static step stays in place
-and stiffens the rotor as well. Loads of the step itself have no effect; the boundary
+preload), then the complex modes. Only the complex modes are kept as results. #ui("Base state")
+in the #ui("Start") section (@step-handover) chooses what the rotation acts on:
+#ui("Unloaded model") (default) loads the model by the rotation only; #ui("End of <step>")
+adds the rotation to the state that step leaves, so a bolt preload of an earlier Static step
+stays in place and stiffens the rotor as well. Either way the step leaves the state as it
+found it: the step after it starts where the step before it ended. Loads of the step itself have no effect; the boundary
 conditions hold in all three solver steps.
 
 === A rotor on a standing structure

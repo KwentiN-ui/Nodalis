@@ -1083,6 +1083,10 @@ mod tests {
             BoundaryKind::displacement([Some(0.0); 6]),
         )];
         let mut modal = Step::new_steady_state_dynamics("Shake");
+        // Alone it computes as many modes as the frequency step of the other analysis.
+        if let plx_model::StepKind::SteadyStateDynamics(settings) = &mut modal.kind {
+            settings.modes = 10;
+        }
         modal.boundary_conditions = frequency.boundary_conditions.clone();
         modal.loads.push(Load {
             id: crate::test_ids::named("Push"),
@@ -1105,9 +1109,6 @@ mod tests {
         let mut target = cubes();
         target.fe.steps = vec![modal];
         target.fe.properties.stored_modes = Some(dir.join("Modes/Modes.eig"));
-        assert!(
-            !(target.findings().iter()).any(|f| f.problem == plx_model::Problem::NoStoredModes)
-        );
         solve_as(&target, &dir.join("Shake"), "Shake", &Default::default());
         let alone = results(&dir.join("Shake/Shake.ndlr"));
         let joint = results(&dir.join("Both/Both.ndlr"));

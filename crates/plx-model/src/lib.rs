@@ -690,7 +690,7 @@ pub enum StepKind {
     /// Eigenfrequencies and mode shapes (`*FREQUENCY`).
     Frequency(FrequencyStep),
     /// Complex eigenfrequencies of a rotating structure with Coriolis forces
-    /// (`*COMPLEX FREQUENCY`), from the eigenmodes a frequency step stored before.
+    /// (`*COMPLEX FREQUENCY`), from eigenmodes it computes for itself.
     ComplexFrequency(ComplexFrequencyStep),
     /// Buckling factors and buckling modes (`*BUCKLE`).
     Buckle(BuckleStep),
@@ -707,7 +707,7 @@ pub enum StepKind {
     Dynamic(DynamicStep),
     /// Creep over time of materials with a creep law (`*VISCO`), otherwise a static step.
     Visco(ViscoStep),
-    /// Harmonic response over a frequency range from the stored eigenmodes
+    /// Harmonic response over a frequency range from eigenmodes it computes for itself
     /// (`*STEADY STATE DYNAMICS`).
     SteadyStateDynamics(SteadyStateDynamicsStep),
     /// How strongly mass, stiffness or an eigenfrequency react to moving the surface nodes
@@ -741,7 +741,8 @@ impl StepKind {
         }
     }
 
-    /// Whether the step superposes the eigenmodes a previous frequency step stored.
+    /// Whether the step superposes eigenmodes kept before it (by its own eigenmode step or
+    /// an Eigenmodes link): it keeps their supports.
     pub fn uses_stored_modes(&self) -> bool {
         matches!(self, StepKind::SteadyStateDynamics(_))
     }
@@ -1445,7 +1446,9 @@ impl NumericalDamping {
 }
 
 /// Settings of a `*STEADY STATE DYNAMICS` step, with the default values: the harmonic
-/// response over a frequency range from the stored eigenmodes.
+/// response over a frequency range, superposed from eigenmodes the step computes for itself
+/// (an eigenmode step before it in the solver's input, about its [`Base`]), or from those an
+/// Eigenmodes link of another analysis gives it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SteadyStateDynamicsStep {
     /// Harmonic excitation; otherwise the loads are periodic over the time range and
@@ -1463,6 +1466,16 @@ pub struct SteadyStateDynamicsStep {
     pub time_lower: f64,
     pub time_upper: f64,
     pub damping: Option<ModalDamping>,
+    /// Number of eigenmodes the response is superposed from.
+    #[serde(default = "default_modes")]
+    pub modes: u32,
+    /// What the eigenmodes are computed about.
+    #[serde(default)]
+    pub base: Base,
+}
+
+fn default_modes() -> u32 {
+    SteadyStateDynamicsStep::DEFAULT_MODES
 }
 
 impl Default for SteadyStateDynamicsStep {
@@ -1477,13 +1490,21 @@ impl Default for SteadyStateDynamicsStep {
             time_lower: 0.0,
             time_upper: 1.0,
             damping: None,
+            modes: Self::DEFAULT_MODES,
+            base: Base::Unloaded,
         }
     }
 }
 
 impl SteadyStateDynamicsStep {
+    /// The number of modes a new step superposes.
+    pub const DEFAULT_MODES: u32 = 20;
+
     /// What is wrong with the settings, if anything.
     pub fn problem(&self) -> Option<String> {
+        if self.modes == 0 {
+            return Some("At least one eigenmode is needed.".into());
+        }
         if self.lower_frequency < 0.0 || self.upper_frequency <= self.lower_frequency {
             return Some("The upper frequency must be greater than the lower one.".into());
         }
@@ -1604,6 +1625,11 @@ pub struct ComplexFrequencyStep {
     /// those of the structure preloaded by the rotation. Off, they are those at standstill
     /// (as some other programs compute them).
     pub stiffening: bool,
+    /// What the step is computed about: the unloaded model with only its rotation, or the
+    /// state the steps before leave with the rotation added (a bolt preload stiffening the
+    /// rotor as well).
+    #[serde(default)]
+    pub base: Base,
     /// Number of eigenmodes the complex modes are combined from; at least
     /// [`ComplexFrequencyStep::num_frequencies`].
     pub num_modes: u32,
@@ -1621,6 +1647,7 @@ impl Default for ComplexFrequencyStep {
             system: None,
             region: whole_model(),
             stiffening: true,
+            base: Base::Unloaded,
             num_modes: 20,
             solver: LinearSolverChoice::Automatic,
         }

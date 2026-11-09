@@ -5984,7 +5984,9 @@ fn step_form(
             let context = dynamic.unwrap_or_default();
             dynamic_form(ui, settings, units, &context)
         }
-        StepKind::SteadyStateDynamics(settings) => steady_state_form(ui, settings, units),
+        StepKind::SteadyStateDynamics(settings) => {
+            steady_state_form(ui, settings, units, fe.properties.stored_modes.is_some())
+        }
         StepKind::ComplexFrequency(settings) => complex_frequency_form(ui, settings, fe),
         StepKind::Buckle(settings) => buckle_form(ui, settings),
         StepKind::HeatTransfer(settings) => heat_transfer_form(ui, settings, units, false),
@@ -6015,7 +6017,9 @@ fn start_section(ui: &mut Ui, step: &mut Step, index: Option<usize>, fe: &FeMode
     ui.separator();
     ui.end_row();
     let modal = matches!(&step.kind, StepKind::Dynamic(_));
-    if let Some(base) = step.kind.base_mut() {
+    if handover.base.is_some()
+        && let Some(base) = step.kind.base_mut()
+    {
         ui.label("Base state").on_hover_text(if modal {
             "What the superposed eigenmodes are computed about: the unloaded model, or the \
              state the steps before leave with the stiffening by its stresses (a tensioned \
@@ -6714,7 +6718,22 @@ fn dynamic_form(
 }
 
 /// Settings of a steady state dynamics step: the frequency sweep, then the modal damping.
-fn steady_state_form(ui: &mut Ui, settings: &mut SteadyStateDynamicsStep, units: UnitSystem) {
+/// `linked`: the eigenmodes come from another analysis through an Eigenmodes link.
+fn steady_state_form(
+    ui: &mut Ui,
+    settings: &mut SteadyStateDynamicsStep,
+    units: UnitSystem,
+    linked: bool,
+) {
+    if !linked {
+        ui.label("Modes").on_hover_text(
+            "The lowest eigenmodes the response is superposed from, computed by the step \
+             itself about its base state. The highest of them must lie above the upper \
+             frequency.",
+        );
+        ui.add(numeric::count(&mut settings.modes).range(1..=10_000));
+        ui.end_row();
+    }
     ui.label("");
     ui.checkbox(&mut settings.harmonic, "Harmonic excitation");
     ui.end_row();
@@ -6752,9 +6771,6 @@ fn steady_state_form(ui: &mut Ui, settings: &mut SteadyStateDynamicsStep, units:
             ui.end_row();
         }
     }
-    ui.label("");
-    ui.weak("Needs a Frequency step with stored modes before it.");
-    ui.end_row();
     modal_damping_rows(ui, &mut settings.damping, units);
 }
 

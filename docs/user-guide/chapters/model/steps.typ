@@ -69,8 +69,8 @@ under each step; double-click it to open the step.
 #screenshot("step-start-tree.png", [The first row under each step in the model tree])
 
 #fields(
-  [Base state], [Frequency and buckle steps, and the eigenmodes of a Dynamic step with modal
-    superposition: what they are computed about. #ui("Unloaded model") (default) uses the
+  [Base state], [Frequency, buckle, complex frequency and steady state dynamics steps, and the
+    eigenmodes of a Dynamic step with modal superposition: what they are computed about. #ui("Unloaded model") (default) uses the
     linear stiffness of the model without stresses. #ui("End of <step>") uses the state the
     named step leaves, with the stiffening by its stresses and its contact status
     (`*STEP, PERTURBATION`): a tensioned string, a bolted joint or a spinning rotor. Only the
@@ -79,8 +79,9 @@ under each step; double-click it to open the step.
     with the method of a dynamic step, and initial conditions where they act (temperatures in
     the first step, velocities in the first dynamic step). The line below lists what carries
     over. A deactivated step in between is named and left out.],
-  [Uses], [What the step reads that other steps produced: the eigenmodes of the frequency step
-    before a steady state dynamics step, the solution of the step before a sensitivity step.],
+  [Uses], [What the step reads or computes for itself: the eigenmodes of a complex frequency or
+    steady state dynamics step (or those an Eigenmodes link gives), the solution of the step
+    before a sensitivity step.],
   [Loads], [In a static or visco step after one: every load moves linearly from its value at
     the end of that step to the value of this step. A load the step no longer has ramps down to
     zero; they are listed.],

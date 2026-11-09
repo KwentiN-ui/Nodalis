@@ -2674,6 +2674,7 @@ fn modal_cantilever(damping: Option<ModalDamping>) -> (FeMesh, FeModel) {
         data_points: 21,
         bias: 1.0,
         damping,
+        modes: 6,
         ..SteadyStateDynamicsStep::default()
     });
     model.steps = vec![frequency, modal, sweep];
@@ -2825,15 +2826,17 @@ fn solver_runs_short_modal_steps() {
     };
     settings.data_points = 3;
     settings.bias = 2.0;
+    settings.modes = 4;
     model.steps[2].field_outputs = vec![node(&["U", "PU"]), element(&["S", "PHS"])];
     let Some(frd) = run_solver("modal-kurz", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let count = |step: u32| frd.increments.iter().filter(|i| i.step == step).count();
-    // The frequency step, the eigenmodes the Dynamic step computes itself, its frames.
-    assert_eq!((count(1), count(2), count(3)), (4, 4, 4));
+    // The frequency step, the eigenmodes the Dynamic step computes itself, its frames,
+    // the eigenmodes the Steady State Dynamics step computes itself.
+    assert_eq!((count(1), count(2), count(3), count(4)), (4, 4, 4, 4));
     // 700 Hz, the first bending pair, 900 Hz: two intervals of three points.
-    assert_eq!(count(4), 5);
+    assert_eq!(count(5), 5);
 }
 
 /// The modal superposition swings the tip like the direct integration does, damped by the
@@ -2874,8 +2877,9 @@ fn solver_superposes_the_stored_modes_of_the_cantilever() {
             .and_then(|f| f.component("U3"))
             .map_or(0.0, |c| f64::from(c.values[index]))
     };
+    // Step 4 holds the eigenmodes of the Steady State Dynamics step, step 5 its response.
     let sweep: Vec<(f64, f64)> = (frd.increments.iter())
-        .filter(|i| i.step == 4)
+        .filter(|i| i.step == 5)
         .map(|i| (i.value, tip(i).hypot(imaginary(i))))
         .collect();
     assert!(sweep.len() >= 21, "{}", sweep.len());
@@ -7234,6 +7238,95 @@ fn rotor_analysis(speed: f64) -> (FeMesh, FeModel) {
     });
     step.field_outputs = ccx_eigen_outputs(&step.kind);
     (mesh, model)
+}
+
+/// A complex frequency step between two static steps: the solver gets it as an isolated
+/// group, about the unloaded model (loads of the steps before reset) or about the state
+/// before it, and leaves the state as it found it.
+#[test]
+fn a_complex_frequency_step_leaves_the_state_as_it_found_it() {
+    let (mesh, mut model) = cantilever(tip_force());
+    let load = model.steps[0].clone();
+    let (_, rotor) = rotor_analysis(100.0);
+    let mut spin = rotor.steps[0].clone();
+    spin.boundary_conditions = load.boundary_conditions.clone();
+    let mut again = load.clone();
+    again.name = "Again".into();
+    model.steps = vec![load, spin, again];
+    let lowered = lower(&mesh, &model, "").unwrap();
+    let steps = &lowered.analysis.steps;
+    // Load, the preload, the eigenmodes and the complex modes of Rotor, Again.
+    assert_eq!(steps.len(), 5);
+    let isolation = |s: usize| steps[s].isolation;
+    assert!(isolation(1).opens && isolation(1).unloaded && !isolation(1).closes);
+    assert!(!isolation(2).opens && !isolation(2).closes);
+    assert!(isolation(3).closes);
+    assert_eq!(isolation(4), ir::step::Isolation::default());
+    // About the unloaded model the tip force of Load is not in the preload.
+    assert!(
+        steps[1].loads.concentrated.is_empty(),
+        "{:?}",
+        steps[1].loads
+    );
+    // About the state before it the rotation adds to that force.
+    let StepKind::ComplexFrequency(settings) = &mut model.steps[1].kind else {
+        unreachable!()
+    };
+    settings.base = plx_model::Base::PreviousState;
+    let lowered = lower(&mesh, &model, "").unwrap();
+    let steps = &lowered.analysis.steps;
+    assert!(steps[1].isolation.opens && !steps[1].isolation.unloaded);
+    assert!(!steps[1].loads.concentrated.is_empty());
+    assert!(steps[2].perturbation && steps[3].perturbation);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("** Nodalis: the state before this step returns after the group"));
+    // Again starts at the time Load ended: the preload of the group took no time of it.
+    // (The input file only describes the group in comments; the app solves the analysis.)
+    let Some(dir) = run_dir("rotor-isoliert") else {
+        return;
+    };
+    let options = plxs_session::JobOptions {
+        threads: 1,
+        ..plxs_session::JobOptions::new(&dir, "rotor")
+    };
+    let mut log = Vec::new();
+    let mut progress = |event| log.extend(plxs_session::format_event(&event));
+    let outcome =
+        plxs_session::job::run_analysis(lowered.analysis.clone(), &options, &mut progress);
+    assert_eq!(
+        outcome.ok(),
+        Some(plxs_session::JobOutcome::Finished),
+        "{log:?}"
+    );
+    let frd = read_frd(&dir.join("rotor.frd")).unwrap();
+    remove_run_dir(&dir);
+    let last = frd.increments.last().unwrap();
+    assert_eq!(last.step, 5);
+    assert!((last.value - 2.0).abs() < 1e-9, "{}", last.value);
+}
+
+/// A steady state dynamics step computes its eigenmodes in a step of its own before it,
+/// about the base it is given; the pair leaves the state as it found it.
+#[test]
+fn a_steady_state_dynamics_step_computes_its_own_modes() {
+    let (mesh, mut model) = modal_cantilever(Some(ModalDamping::Constant(0.02)));
+    model.steps.drain(..2);
+    let StepKind::SteadyStateDynamics(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.base = plx_model::Base::PreviousState;
+    let lowered = lower(&mesh, &model, "").unwrap();
+    let steps = &lowered.analysis.steps;
+    assert_eq!(steps.len(), 2);
+    let ir::step::Procedure::Frequency(frequency) = &steps[0].procedure else {
+        panic!("{:?}", steps[0].procedure)
+    };
+    assert_eq!(frequency.count, 6);
+    assert!(frequency.storage && steps[0].perturbation && steps[1].perturbation);
+    assert!(steps[0].isolation.opens && steps[1].isolation.closes);
+    // The supports of the step, given again in the response (accepted, not new).
+    assert!((steps[0].boundaries.iter()).all(|b| steps[1].boundaries.contains(b)));
+    assert_eq!(lowered.preparation_steps, [0]);
 }
 
 /// The half x <= 50 of the cantilever as a submodel: held at x = 0, its cut at x = 50

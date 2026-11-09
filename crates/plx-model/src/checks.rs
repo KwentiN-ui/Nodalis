@@ -133,8 +133,6 @@ pub enum Problem {
     NoPhysicalConstants,
     /// A defined temperature in a step whose materials have no thermal expansion.
     NoExpansion,
-    /// A step that builds on stored eigenmodes (steady state dynamics, complex frequency) without a frequency step before it that stores them.
-    NoStoredModes,
     /// A sensitivity step without the static or frequency step before it whose solution
     /// its design responses need.
     NoSensitivityBase,
@@ -326,7 +324,6 @@ impl Problem {
             Problem::HyperelasticLinearized => "Hyperelastic material computed linearly",
             Problem::ExplicitFullIntegration => "Full integration in an explicit step",
             Problem::NoExpansion => "Temperature without thermal expansion",
-            Problem::NoStoredModes => "No stored eigenmodes",
             Problem::NoSensitivityBase => "No step for the sensitivities",
             Problem::DesignRegionIgnored => "Design region ignored",
             Problem::NoCreep => "Visco step without creep",
@@ -621,11 +618,6 @@ impl Problem {
                 "A defined temperature (Defined Field) deforms the model only through the \
                  thermal expansion of the materials. Without an expansion coefficient \
                  the analysis runs, but the temperature has no effect."
-            }
-            Problem::NoStoredModes => {
-                "Steady State Dynamics steps work on \
-                 the eigenmodes a previous Frequency step with Storage keeps. Without \
-                 them the run stops."
             }
             Problem::NoSensitivityBase => {
                 "A Sensitivity step differentiates the solution of the step right before it: \
@@ -1059,10 +1051,6 @@ impl Problem {
             Problem::NoExpansion => {
                 "Edit the material and enter a thermal expansion coefficient \
                  (steel: 1.2e-5 1/K)."
-            }
-            Problem::NoStoredModes => {
-                "Add a Frequency step with \"Store eigenmodes (Storage)\" before it, with \
-                 the same supports."
             }
             Problem::NoSensitivityBase => {
                 "Put a Static step (strain energy, mass) or a Frequency step with \"Store \
@@ -1739,16 +1727,6 @@ impl FeModel {
                         },
                         general_beams.join(", ")
                     ),
-                ));
-            }
-            let stored = self.properties.stored_modes.is_some()
-                || (self.steps[..s].iter().filter(|p| p.active))
-                    .any(|p| matches!(&p.kind, StepKind::Frequency(f) if f.storage));
-            if step.kind.uses_stored_modes() && !stored {
-                findings.push(Finding::new(
-                    ModelItem::Step(s),
-                    Problem::NoStoredModes,
-                    format!("{} needs the eigenmodes of a Frequency step", step.name),
                 ));
             }
             let used =
@@ -4807,27 +4785,6 @@ mod tests {
             problems(&check(&model, &mesh))
                 .contains(&(ModelItem::Part(5), Problem::RigidBodyMotion))
         );
-    }
-
-    #[test]
-    fn steady_state_dynamics_needs_stored_modes() {
-        let mesh = cubes(2, true);
-        let mut model = model(&mesh);
-        model.steps.push(Step::new_steady_state_dynamics("Step-2"));
-        let stored = |model: &FeModel| {
-            (check(model, &mesh).into_iter())
-                .filter(|f| f.problem == Problem::NoStoredModes)
-                .map(|f| f.item)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(stored(&model), [ModelItem::Step(1)]);
-        let mut frequency = Step::new_frequency("Step-3");
-        let StepKind::Frequency(settings) = &mut frequency.kind else {
-            unreachable!()
-        };
-        settings.storage = true;
-        model.steps.insert(1, frequency);
-        assert_eq!(stored(&model), []);
     }
 
     #[test]
