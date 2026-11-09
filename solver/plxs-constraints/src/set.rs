@@ -38,6 +38,9 @@ pub struct ModelConstraints {
     pub cyclic_real: Vec<LinearConstraint>,
     /// Slave nodes (dense indices) of each tie that are too far from its master surface.
     pub untied: Vec<(String, Vec<u32>)>,
+    /// Slave nodes (dense indices) each tie with `ADJUST` moved on to its master surface,
+    /// by more than rounding.
+    pub moved: Vec<(String, Vec<u32>)>,
     /// The rows of the rigid bodies in `constraints`, for large rotations (see
     /// [`ModelConstraints::at_rotations`]).
     pub rigid: Vec<RigidRow>,
@@ -91,11 +94,20 @@ impl ModelConstraints {
                 mc.untied.push((t.name.clone(), missed.clone()));
             }
             if t.adjust {
+                let mut moved = Vec::new();
                 for c in &couplings {
                     if c.distance > 0.0 {
-                        model.nodes.coordinates[c.slave as usize] = c.point;
+                        let x = &mut model.nodes.coordinates[c.slave as usize];
+                        let size = x.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+                        if c.distance > 1e-9 * size {
+                            moved.push(c.slave);
+                        }
+                        *x = c.point;
                         mc.adjusted += 1;
                     }
+                }
+                if !moved.is_empty() {
+                    mc.moved.push((t.name.clone(), moved));
                 }
             }
             let origin = mc.label(format!("*TIE {}", t.name));

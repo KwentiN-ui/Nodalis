@@ -261,6 +261,16 @@ pub struct DetectionGeometry<'a> {
     pub part_dimensions: &'a [u8],
 }
 
+/// What a detection on the display of CAD geometry knows of its parts.
+#[derive(Clone, Copy)]
+struct Display<'a> {
+    /// Of each part, the dimension of its CAD shape.
+    part_dimensions: &'a [u8],
+    /// Of each part, whether its faces were turned outwards, see
+    /// [`plx_mesh::SearchParameters::one_sided`].
+    one_sided: &'a [bool],
+}
+
 impl FeModel {
     /// Runs the detection `index`: finds the touching surfaces of the parts it searches
     /// (`visible` says which parts are shown, for a detection of all parts) and replaces its
@@ -287,8 +297,35 @@ impl FeModel {
     ) -> Option<DetectionReport> {
         let mut mesh = geometry.mesh.clone();
         mesh.cad = display_cad_map(&mesh, geometry.entities, geometry.face_edges);
-        let skins = geometry.skins;
-        self.detect(index, &mesh, skins, visible, Some(geometry.part_dimensions))
+        // The display does not tell which side of the faces of a solid is outside: turned
+        // outwards, only that side touches. Else two faces of neighbouring solids in one
+        // plane, e.g. on a plane of symmetry, would touch each other's back.
+        let one_sided: Vec<bool> = (0..mesh.parts.len())
+            .map(|part| {
+                geometry.part_dimensions.get(part) == Some(&3)
+                    && plx_mesh::orient_outward(&mut mesh, part)
+            })
+            .collect();
+        let skins: Vec<PartSkin> = if one_sided.contains(&true) {
+            (mesh.parts.iter())
+                .zip(geometry.skins)
+                .zip(&one_sided)
+                .map(|((part, skin), &turned)| {
+                    if turned {
+                        plx_mesh::extract_part_skin(&mesh, part, 180.0)
+                    } else {
+                        skin.clone()
+                    }
+                })
+                .collect()
+        } else {
+            geometry.skins.to_vec()
+        };
+        let display = Display {
+            part_dimensions: geometry.part_dimensions,
+            one_sided: &one_sided,
+        };
+        self.detect(index, &mesh, &skins, visible, Some(display))
     }
 
     /// The detection on a mesh, or on a display of CAD geometry with the dimensions of its
@@ -299,7 +336,7 @@ impl FeModel {
         mesh: &FeMesh,
         skins: &[PartSkin],
         visible: &[bool],
-        display: Option<&[u8]>,
+        display: Option<Display>,
     ) -> Option<DetectionReport> {
         let detection = self.contact_detections.get(index)?.clone();
         let searched = searched_parts(&detection, mesh, visible);
@@ -343,9 +380,10 @@ impl FeModel {
             },
             stiffness,
             filter,
+            one_sided: display.map_or(Vec::new(), |d| d.one_sided.to_vec()),
         };
         let mut items = find_contact_pairs(mesh, skins, &searched, &parameters);
-        if let Some(dimensions) = display {
+        if let Some(dimensions) = display.map(|d| d.part_dimensions) {
             // Of solids only their faces count, which the filter asks for as solid faces;
             // the borders of their faces are no edges of shells.
             let wanted = |id: &SurfaceId| match (dimensions.get(id.0), id.1) {

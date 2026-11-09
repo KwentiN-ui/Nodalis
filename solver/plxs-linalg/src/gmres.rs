@@ -1,5 +1,7 @@
-//! Restarted GMRES with right preconditioning (Saad, "Iterative Methods for Sparse Linear
-//! Systems", 2nd ed., algorithm 9.5), used where a mostly symmetric system has a small
+//! Restarted flexible GMRES with right preconditioning (Saad, "Iterative Methods for Sparse
+//! Linear Systems", 2nd ed., algorithm 9.6: the preconditioned directions are kept, so the
+//! preconditioner may change from one application to the next, as an inner iteration
+//! stopped at a loose tolerance does), used where a mostly symmetric system has a small
 //! unsymmetric part: the factorized symmetric part is the preconditioner, so the iteration
 //! only has to resolve the low-rank remainder (sliding friction of contact). No CalculiX
 //! code was consulted.
@@ -27,17 +29,29 @@ pub fn gmres(
     }
     let mut work = vec![0.0; n];
     let mut used = 0;
+    let mut previous = f64::INFINITY;
+    // The iterate the current cycle started from, with its relative residual `previous`.
+    let mut before = x.clone();
     loop {
         apply(&x, &mut work);
         let r: Vec<f64> = b.iter().zip(&work).map(|(b, a)| b - a).collect();
         let beta = norm(&r);
         let relative = beta / b_norm;
-        if relative <= tolerance || used >= max_iterations {
+        // A cycle that did not halve the true residual has reached what the rounding of
+        // the operator allows (its estimate went below the tolerance, the true residual
+        // did not follow): more cycles only cost.
+        if relative > previous {
+            return Ok((before, previous));
+        }
+        if relative <= tolerance || used >= max_iterations || relative > 0.5 * previous {
             return Ok((x, relative));
         }
+        previous = relative;
+        before.clone_from(&x);
         let m = restart.min(max_iterations - used).max(1);
         let mut v: Vec<Vec<f64>> = Vec::with_capacity(m + 1);
         v.push(r.iter().map(|r| r / beta).collect());
+        let mut zs: Vec<Vec<f64>> = Vec::with_capacity(m);
         let mut h = vec![vec![0.0; m]; m + 1];
         let (mut cs, mut sn) = (vec![0.0; m], vec![0.0; m]);
         let mut g = vec![0.0; m + 1];
@@ -48,6 +62,7 @@ pub fn gmres(
             precondition(&mut z)?;
             let mut w = vec![0.0; n];
             apply(&z, &mut w);
+            zs.push(z);
             used += 1;
             for (i, vi) in v.iter().enumerate() {
                 let hij = dot(&w, vi);
@@ -79,7 +94,7 @@ pub fn gmres(
             }
             v.push(w.iter().map(|w| w / hn).collect());
         }
-        // Back substitution H y = g, then x += M⁻¹ V y.
+        // Back substitution H y = g, then x += Z y (Z: the preconditioned directions).
         let mut y = vec![0.0; k];
         for i in (0..k).rev() {
             let mut s = g[i];
@@ -89,12 +104,11 @@ pub fn gmres(
             y[i] = s / h[i][i];
         }
         let mut update = vec![0.0; n];
-        for (yi, vi) in y.iter().zip(&v) {
-            for (u, v) in update.iter_mut().zip(vi) {
-                *u += yi * v;
+        for (yi, zi) in y.iter().zip(&zs) {
+            for (u, z) in update.iter_mut().zip(zi) {
+                *u += yi * z;
             }
         }
-        precondition(&mut update)?;
         for (x, u) in x.iter_mut().zip(&update) {
             *x += u;
         }

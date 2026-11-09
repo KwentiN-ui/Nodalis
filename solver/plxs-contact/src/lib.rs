@@ -29,7 +29,7 @@ pub mod law;
 pub mod output;
 
 use rayon::prelude::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use plxs_core::contact::{Adjust, ContactKind};
 use plxs_core::state::{ContactPointState, ContactStatus};
@@ -99,6 +99,9 @@ pub struct Pair {
     pub compression_only: bool,
     /// Candidate master faces per point, from the last [`ContactModel::prepare`].
     candidates: Vec<Vec<u32>>,
+    /// The corner nodes on the boundary of the master surface (on an edge of only one
+    /// master face), see [`Pair::inner_edge`].
+    master_boundary: HashSet<u32>,
 }
 
 /// The first impact of a slave point on a master face within an increment
@@ -466,7 +469,9 @@ impl ContactModel {
                 typical,
                 compression_only: false,
                 candidates: Vec::new(),
+                master_boundary: HashSet::new(),
             };
+            prepared.master_boundary = boundary_corners(&prepared.master);
 
             if mortar && !prepared.law.is_tied() {
                 let mut by_node: std::collections::BTreeMap<u32, Vec<(u32, f64)>> =
@@ -1507,6 +1512,14 @@ impl Pair {
             .filter(|(_, v)| v.abs() > 1e-9)
             .map(|(&node, _)| node)
             .collect();
+        // A corner shared by the faces around it is no inner corner where it lies on the
+        // boundary of the master surface: a point far beyond the end of a bore projects on
+        // to one of its corners, and the corner's neighbours along the end share it too.
+        if let [corner] = edge[..]
+            && self.master_boundary.contains(&corner)
+        {
+            return false;
+        }
         !edge.is_empty()
             && self.candidates.get(p).is_some_and(|candidates| {
                 candidates.iter().any(|&g| {
@@ -1856,4 +1869,29 @@ fn node_energy(law: &Law, d: f64) -> f64 {
         sum += factor * law.node_pressure(h * i as f64).0;
     }
     sum * h / 3.0
+}
+
+/// The corner nodes on the boundary of a surface of faces: the corners of the edges that
+/// only one face has (for edges of plane elements, their ends that only one edge has).
+fn boundary_corners(faces: &[ContactFace]) -> HashSet<u32> {
+    let mut edges: HashMap<[u32; 2], u32> = HashMap::new();
+    let mut ends: HashMap<u32, u32> = HashMap::new();
+    for face in faces {
+        let corners = &face.nodes[..face.corners.min(face.nodes.len())];
+        if corners.len() == 2 {
+            for &n in corners {
+                *ends.entry(n).or_default() += 1;
+            }
+            continue;
+        }
+        for k in 0..corners.len() {
+            let (a, b) = (corners[k], corners[(k + 1) % corners.len()]);
+            *edges.entry([a.min(b), a.max(b)]).or_default() += 1;
+        }
+    }
+    (edges.into_iter())
+        .filter(|&(_, count)| count == 1)
+        .flat_map(|(edge, _)| edge)
+        .chain(ends.into_iter().filter(|&(_, c)| c == 1).map(|(n, _)| n))
+        .collect()
 }

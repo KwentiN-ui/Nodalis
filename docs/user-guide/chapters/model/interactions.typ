@@ -300,6 +300,14 @@ the triangles that show the faces say nothing about the mesh to come. The region
 catches every node of faces the detection found touching, also across a small gap. A model with parts that do not come from the
 geometry, such as an imported mesh, is searched on its mesh as before.
 
+Of a solid only the outside of its faces touches: faces of two parts that lie side by side in
+one plane, such as the faces of a pin and of the plate around it on a plane of symmetry, are
+no contact, even where the triangles showing them overlap. In a bonded region such faces would
+do harm: the tie moves the slave nodes within its tolerance onto the master side and pulls
+those of a neighbouring face across their elements. If that happens anyway, e.g. with faces
+added by hand, the solver stops with elements turned inside out and names the tie; take the
+faces out of the region or make its tolerance smaller.
+
 #screenshot("contact-detection-geometry-region.png", [The region found before meshing, shown
   on the mesh: the whole top face of the plate (side A) against the bottom of the block])
 
