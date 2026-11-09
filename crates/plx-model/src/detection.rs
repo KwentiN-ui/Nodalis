@@ -381,6 +381,11 @@ impl FeModel {
             stiffness,
             filter,
             one_sided: display.map_or(Vec::new(), |d| d.one_sided.to_vec()),
+            // The triangles of a solid's faces end at the borders of its CAD faces, which are
+            // no edges of shells; searched as edges they would join faces that do not touch.
+            solid_skins: display.map_or(Vec::new(), |d| {
+                (d.part_dimensions.iter()).map(|&d| d == 3).collect()
+            }),
         };
         let mut items = find_contact_pairs(mesh, skins, &searched, &parameters);
         if let Some(dimensions) = display.map(|d| d.part_dimensions) {

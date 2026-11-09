@@ -296,6 +296,7 @@ mod tests {
                     shell_edge: false,
                 },
                 one_sided,
+                solid_skins: Vec::new(),
             };
             find_contact_pairs(mesh, &skins, &[true, true], &parameters)
         };

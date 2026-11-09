@@ -1046,6 +1046,7 @@ fn contact_edges_found_in_2d_survive_remeshing() {
         stiffness: Vec::new(),
         filter: plx_mesh::GeometryFilter::default(),
         one_sided: Vec::new(),
+        solid_skins: Vec::new(),
     };
     let searched = vec![true; coarse.parts.len()];
     let items = plx_mesh::find_contact_pairs(&coarse, &skins, &searched, &parameters);
@@ -1080,6 +1081,88 @@ fn contact_edges_found_in_2d_survive_remeshing() {
             faces.len() > coarse_count,
             "{} <= {coarse_count}",
             faces.len()
+        );
+    }
+}
+
+/// Four blocks meeting at one edge, like the slices of a lug cut along two planes: each
+/// block touches two neighbours with one face each, and its two faces at the junction lie in
+/// one plane with faces of the blocks beside them. The detection on the geometry finds four
+/// regions of one face a side; the borders of the faces, where the triangles of the display
+/// end, once joined the faces beside them into the regions and the regions into one, whose
+/// ties then pulled nodes across the junction.
+#[test]
+fn detection_on_geometry_keeps_to_the_faces_that_touch() {
+    if !gmsh_available() {
+        return;
+    }
+    let file = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        for origin in [[0.0, 0.0], [0.0, 20.0], [30.0, 0.0], [30.0, 20.0]] {
+            gmsh.add_box([origin[0], origin[1], 0.0], [30.0, 20.0, 10.0])?;
+        }
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    let geometry = Geometry {
+        source: "bloecke.brep".into(),
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        meshing: MeshingParameters::for_diagonal(60.0),
+        mesh_items: Vec::new(),
+        part_names: Vec::new(),
+        refinement: 1.0,
+        signatures: Vec::new(),
+    };
+    let display = tessellate(&geometry).unwrap();
+    let skins: Vec<_> = (display.mesh.parts.iter())
+        .map(|part| {
+            let mut skin = plx_mesh::extract_part_skin(&display.mesh, part, 180.0);
+            for face in &mut skin.faces {
+                let id = display.mesh.elements()[face.element].id;
+                if let Some(CadEntity::Face(tag)) = display.entity(id) {
+                    face.region = tag as usize;
+                }
+            }
+            skin
+        })
+        .collect();
+    let mut model = plx_model::FeModel::default();
+    model
+        .contact_detections
+        .push(plx_model::ContactDetection::new("Contacts"));
+    let geometry = plx_model::DetectionGeometry {
+        mesh: &display.mesh,
+        skins: &skins,
+        entities: &display.entities,
+        face_edges: &display.topology.face_edges,
+        part_dimensions: &display.part_dimensions,
+    };
+    let visible = vec![true; display.mesh.parts.len()];
+    let report = model
+        .detect_contacts_on_geometry(0, &geometry, &visible)
+        .unwrap();
+    assert_eq!(report.added, 4, "{:#?}", model.contact_regions);
+    // Each side is the one face of its block at the plane between the two blocks.
+    let mut mesh = display.mesh.clone();
+    mesh.cad = plx_mesh::display_cad_map(&mesh, &display.entities, &display.topology.face_edges);
+    let plane_of = |region: &plx_model::Region| {
+        let plx_model::Region::Geometry(entities) = region else {
+            panic!("{region:?}");
+        };
+        assert_eq!(entities.len(), 1, "{entities:?}");
+        let nodes = mesh.cad_nodes(entities);
+        let points: Vec<[f64; 3]> = nodes.iter().map(|&n| mesh.node(n).unwrap()).collect();
+        let flat = |k: usize| points.iter().all(|p| (p[k] - points[0][k]).abs() < 1e-6);
+        (flat(0), flat(1), points[0])
+    };
+    for region in &model.contact_regions {
+        let (a, b) = (plane_of(&region.side_a), plane_of(&region.side_b));
+        assert_eq!((a.0, a.1), (b.0, b.1), "{}", region.name);
+        let k = if a.0 { 0 } else { 1 };
+        assert!(
+            a.0 != a.1 && (a.2[k] - b.2[k]).abs() < 1e-6,
+            "{}",
+            region.name
         );
     }
 }
