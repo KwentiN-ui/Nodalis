@@ -52,6 +52,20 @@ pub struct PartSkin {
 ///
 /// Elements that reference undefined nodes are skipped.
 pub fn extract_part_skin(mesh: &FeMesh, part: &Part, feature_angle_deg: f64) -> PartSkin {
+    extract_part_skin_welded(mesh, part, feature_angle_deg, None)
+}
+
+/// [`extract_part_skin`] for a mesh whose elements do not share all the nodes they share in
+/// the model they stand for, e.g. shells expanded into solids by the solver: `weld` gives the
+/// node every node (by index) counts as when faces and edges are matched, so that elements
+/// meeting in the model are connected, and the walls between them are no part of the skin.
+pub fn extract_part_skin_welded(
+    mesh: &FeMesh,
+    part: &Part,
+    feature_angle_deg: f64,
+    weld: Option<&[usize]>,
+) -> PartSkin {
+    let welded = |node: usize| weld.map_or(node, |w| w[node]);
     let mut skin = PartSkin::default();
     // Faces of solid elements by sorted corner nodes: the first element and face seen, and
     // whether a second element shares the face. Only unshared faces are built afterwards.
@@ -87,7 +101,7 @@ pub fn extract_part_skin(mesh: &FeMesh, part: &Part, feature_angle_deg: f64) -> 
             // quad still matches the neighbour's triangle. Faces collapsed to a line are skipped.
             let mut key = [usize::MAX; 4];
             for (k, &corner) in topology.corners.iter().enumerate() {
-                key[k] = nodes[corner];
+                key[k] = welded(nodes[corner]);
             }
             key.sort_unstable();
             let mut distinct = 0;
@@ -120,7 +134,13 @@ pub fn extract_part_skin(mesh: &FeMesh, part: &Part, feature_angle_deg: f64) -> 
             .push(skin_face(element_index, face_index, element.shape, &nodes));
     }
     let tags = cad_faces(mesh, &skin.faces);
-    skin.edges = collect_edges(mesh.coords(), &mut skin.faces, &tags, feature_angle_deg);
+    skin.edges = collect_edges(
+        mesh.coords(),
+        &mut skin.faces,
+        &tags,
+        feature_angle_deg,
+        &welded,
+    );
     skin
 }
 
@@ -202,6 +222,7 @@ fn collect_edges(
     faces: &mut [SkinFace],
     tags: &[Option<i32>],
     feature_angle_deg: f64,
+    welded: &dyn Fn(usize) -> usize,
 ) -> Vec<SkinEdge> {
     let cos_limit = feature_angle_deg.to_radians().cos();
     let normals: Vec<[f64; 3]> = faces
@@ -215,7 +236,8 @@ fn collect_edges(
         let n = face.corners.len();
         for i in 0..n {
             let (a, b) = (face.corners[i], face.corners[(i + 1) % n]);
-            let key = (a.min(b), a.max(b));
+            let (wa, wb) = (welded(a), welded(b));
+            let key = (wa.min(wb), wa.max(wb));
             edges
                 .entry(key)
                 .or_insert_with(|| {
