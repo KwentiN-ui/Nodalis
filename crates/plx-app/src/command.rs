@@ -347,6 +347,9 @@ impl Command {
     pub fn tab_in(&self, workspace: Workspace) -> &'static str {
         if self.tab == "View" && workspace == Workspace::Results {
             "Display"
+        } else if self.tab == "Features" && workspace == Workspace::Results {
+            // Features are shared with the FE model; in the Results they help evaluating.
+            "Evaluate"
         } else {
             self.tab
         }
@@ -381,8 +384,11 @@ const PROJECT: &[Workspace] = &[Workspace::Project];
 const GEOMETRY: &[Workspace] = &[Workspace::Geometry];
 const FE_MODEL: &[Workspace] = &[Workspace::FeModel];
 const RESULTS: &[Workspace] = &[Workspace::Results];
+/// Reference points, coordinate systems and planes: the FE model and its results share them.
+const FEATURES: &[Workspace] = &[Workspace::FeModel, Workspace::Results];
 /// The ribbon group of the step, the increment and the animation of the results.
-const STEP_GROUP: &str = "Step and Increment";
+/// The group of the step and increment tiles; the ribbon folds it last.
+pub const STEP_GROUP: &str = "Step and Increment";
 const SOLVING: &[Workspace] = &[Workspace::Geometry, Workspace::FeModel];
 const VIEWING: &[Workspace] = &[Workspace::Geometry, Workspace::FeModel, Workspace::Results];
 const ALL: &[Workspace] = &[
@@ -1194,7 +1200,7 @@ fn build() -> Vec<Command> {
     add(command(
         C::ReferencePoint,
         "Reference\nPoint",
-        f,
+        FEATURES,
         t,
         "Features",
         Tree(TreeIcon::ReferencePoint),
@@ -1204,7 +1210,7 @@ fn build() -> Vec<Command> {
     add(command(
         C::CoordinateSystem,
         "Coordinate\nSystem",
-        f,
+        FEATURES,
         t,
         "Features",
         Tree(TreeIcon::CoordinateSystem),
@@ -1214,7 +1220,7 @@ fn build() -> Vec<Command> {
     add(command(
         C::Plane,
         "Plane",
-        f,
+        FEATURES,
         t,
         "Features",
         Tree(TreeIcon::Plane),

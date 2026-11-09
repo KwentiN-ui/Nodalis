@@ -29,6 +29,26 @@ tab, see @shell-section, @beam-profiles and @links. Those toggles are stored wit
 
 #screenshot("dark-theme.png", [The dark theme with the results of a cantilever])
 
+=== Saving <settings-saving>
+
+#figure(
+  image("../../images/settings-saving.png", width: 55%),
+  caption: [The saving page of the settings: autosave one minute after a change],
+)
+
+#fields(
+  [Autosave], [Saves the project to its file by itself once it has had changes for the time
+    below (default off). A new project is saved automatically once you have saved it the first
+    time, as it has no file before. The output pane notes each autosave with
+    #ui("saved (autosave)"); a failed autosave shows a message and is tried again after the
+    same time.],
+  [Save after], [Minutes from the first change that is not saved to the autosave (1 to 240,
+    default 5). Changes made during that time are saved together.],
+)
+
+Autosave writes the open project's own file, the same as #key("Ctrl+S"), in the background
+(@files).
+
 === Post-processing
 
 #screenshot("settings-post-processing.png", [The post-processing page of the settings])
@@ -64,9 +84,10 @@ killed. A step it cannot compute yet is reported when the analysis runs (@model-
   [Parallel analyses], [How many independent analyses #ui("Update Project") solves at the same
     time (default 2, @update-project). It limits the memory they need together; the threads
     are shared as described above.],
-  [Graphics card], [#ui("Use for the iterative solver") (default on) lets the iterative
+  [Graphics card], [#ui("Use for the solver") (default on) lets the iterative
     equation solver run on a discrete graphics card for models of 100 000 equations and more
-    (@equation-solver). Below it the card the solver found is shown with its graphics interface,
+    (@equation-solver), and the time steps of explicit Dynamic steps from 30 000 DOFs, or
+    from 2 000 elements under large deformations or with contact (@dynamic-gpu). Below it the card the solver found is shown with its graphics interface,
     and whether the conjugate gradients run on it too (cards with double precision) or only
     the multigrid cycle. Without a discrete card, or switched off, the solver runs on the
     processor. Switch it off when the card is weak or its memory is needed elsewhere; the

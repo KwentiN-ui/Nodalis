@@ -14,10 +14,9 @@ results, without editing input files by hand.
 Nodalis comes with its own solver, written in Rust from scratch, that computes the analyses inside
 the program: no external solver to install, and results go straight into the post-processing.
 
-![Nodalis showing the von Mises stress of a cantilever beam with holes](docs/images/readme-hero.png)
+![Nodalis: 2D dynamic NLGEOM simulation of a double pendulum hitting a plate, coloured by von Mises stress](docs/images/readme-hero.gif)
 
-> Nodalis is a hobby project under active development. There is no release yet, so for now
-> build it with cargo (see below). Expect rough edges and please report what you find in the
+> Nodalis is a hobby project under active development. Expect rough edges and please report what you find in the
 > [issue tracker](https://github.com/KwentiN-ui/Nodalis/issues).
 
 ## Features

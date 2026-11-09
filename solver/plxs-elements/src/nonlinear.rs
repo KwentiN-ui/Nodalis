@@ -12,6 +12,7 @@
 //! condensed linear stiffness exactly and keeps the enhanced kinematics for nonlinear
 //! materials and large displacements. No CalculiX code was consulted.
 
+use crate::plane::Expansion;
 use crate::solid::{Formulation, SolidElement};
 
 /// What a material law needs at an integration point.
@@ -61,85 +62,288 @@ impl PointKinematics {
     }
 }
 
+#[inline(always)]
+fn dot6(a: &[f64; 6], b: &[f64; 6]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+/// The cofactor matrix `det(m) m⁻ᵀ`.
+fn cofactors(m: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    std::array::from_fn(|i| {
+        std::array::from_fn(|j| {
+            let (i1, i2) = ((i + 1) % 3, (i + 2) % 3);
+            let (j1, j2) = ((j + 1) % 3, (j + 2) % 3);
+            m[i1][j1] * m[i2][j2] - m[i1][j2] * m[i2][j1]
+        })
+    })
+}
+
 fn det3(a: &[[f64; 3]; 3]) -> f64 {
     a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1])
         - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
         + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0])
 }
 
-/// The displacement-gradient operator at one point: `l[(k * 3 + c) * ndof + col]`.
-struct Gradient {
+/// The integration points of an element as [`SolidElement::nodal_gradients`] gives them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NodalGradients {
+    /// Per point: the weight times the Jacobian determinant (the volume the point stands
+    /// for), and the Cartesian derivatives of the shape functions per node.
+    pub points: Vec<(f64, Vec<[f64; 3]>)>,
+    /// For C3D8R: `ε` of its hourglass stiffness `ε Σ_α γ_α γ_αᵀ ⊗ I`, whose vectors
+    /// `γ_α = h_α − (h_α · z) ∂N/∂z` take the base vectors `h_α` of
+    /// `SolidElement::HOURGLASS_BASE`, the nodal `z` coordinates and the (only) point's
+    /// derivatives.
+    pub hourglass: Option<f64>,
+}
+
+/// The integration points of any solid element as general displacement-gradient
+/// operators ([`SolidElement::dense_operators`]), for the graphics card.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DenseOperators {
+    /// Per point: the volume it stands for (with the expansion's scale) and the operator
+    /// `L` (`H_kc = Σ_j L[(3k + c) · ndof + j] u_j`).
+    pub points: Vec<(f64, Vec<f64>)>,
+    /// A constant stiffness to add (row-major `ndof × ndof`): the condensed hourglass
+    /// control of an expanded reduced-integration element.
+    pub matrix: Option<Vec<f64>>,
+}
+
+/// The displacement-gradient operators of the integration points, in one buffer:
+/// `l[(ip * 9 + k * 3 + c) * ndof + col]`.
+struct Gradients {
     l: Vec<f64>,
-    weight: f64,
+    weights: Vec<f64>,
+    ndof: usize,
+}
+
+impl Gradients {
+    fn new(points: usize, ndof: usize) -> Self {
+        Self {
+            l: vec![0.0; points * 9 * ndof],
+            weights: vec![0.0; points],
+            ndof,
+        }
+    }
+
+    /// The weights and operators of the points.
+    fn points(&self) -> impl Iterator<Item = (f64, &[f64])> {
+        self.weights
+            .iter()
+            .copied()
+            .zip(self.l.chunks_exact(9 * self.ndof))
+    }
+
+    /// The nine rows of the operator at point `ip`.
+    fn point_mut(&mut self, ip: usize) -> &mut [f64] {
+        let size = 9 * self.ndof;
+        &mut self.l[ip * size..(ip + 1) * size]
+    }
+}
+
+/// The DOFs the operators act on, which the tangent's products are restricted to: other DOFs
+/// (the out-of-plane DOF of plane and axisymmetric elements) have zero rows and columns.
+/// `of[k]`: those the rows `L_(k,c)` of direction `k` act on, which the initial-stress
+/// stiffness of that direction couples (a third of the DOFs of a solid). Taken from the
+/// structure of the operators, so a superset of their nonzero columns.
+struct Columns {
+    all: Vec<usize>,
+    of: [Vec<usize>; 3],
+}
+
+impl SolidElement {
+    fn columns(&self, condense: Option<&Expansion>) -> Columns {
+        // C3D8I folds the modes into every column of `L`.
+        let mixed = self.formulation == Formulation::Incompatible;
+        let mut of: [Vec<usize>; 3] = Default::default();
+        let all: Vec<usize> = match condense {
+            None => {
+                let ndof = self.dof_count_3d();
+                for (k, columns) in of.iter_mut().enumerate() {
+                    *columns = if mixed {
+                        (0..ndof).collect()
+                    } else {
+                        (k..ndof).step_by(3).collect()
+                    };
+                }
+                (0..ndof).collect()
+            }
+            Some(x) => {
+                let mut all = Vec::new();
+                for (i, m) in x.dof_map().iter().enumerate() {
+                    if let Some((d, _)) = *m {
+                        all.push(d);
+                        of[i % 3].push(d);
+                    }
+                }
+                for list in of.iter_mut().chain([&mut all]) {
+                    list.sort_unstable();
+                    list.dedup();
+                }
+                if mixed {
+                    of = std::array::from_fn(|_| all.clone());
+                }
+                all
+            }
+        };
+        Columns { all, of }
+    }
 }
 
 impl SolidElement {
     /// The gradient operators of all integration points (one for the uniform-strain
     /// element) and, for C3D8R, the hourglass stiffness to add.
+    ///
+    /// With `condense` (the expansion of a 2D element, `coords` those of its 3D element)
+    /// the operators act on the 2D DOFs (`L T`); the hourglass stiffness stays on the 3D
+    /// DOFs.
     fn gradients(
         &self,
         coords: &[[f64; 3]],
         d_elastic: &[[f64; 6]; 6],
-    ) -> (Vec<Gradient>, Option<Vec<f64>>) {
-        let ndof = self.dof_count_3d();
-        let nodal = |dndx: &[[f64; 3]], weight: f64| -> Gradient {
-            let mut l = vec![0.0; 9 * ndof];
-            for (a, g) in dndx.iter().enumerate() {
-                for k in 0..3 {
-                    for c in 0..3 {
-                        l[(k * 3 + c) * ndof + 3 * a + k] = g[c];
+        condense: Option<&Expansion>,
+    ) -> (Gradients, Option<Vec<f64>>) {
+        let ndof = condense.map_or(self.dof_count_3d(), |x| 3 * x.nodes);
+        let nodal = |dndx: &[[f64; 3]], l: &mut [f64]| match condense {
+            None => {
+                for (a, g) in dndx.iter().enumerate() {
+                    for k in 0..3 {
+                        for c in 0..3 {
+                            l[(k * 3 + c) * ndof + 3 * a + k] = g[c];
+                        }
                     }
                 }
             }
-            Gradient { l, weight }
+            Some(x) => {
+                let map = x.dof_map();
+                for (a, g) in dndx.iter().enumerate() {
+                    for k in 0..3 {
+                        let Some((d, factor)) = map[3 * a + k] else {
+                            continue;
+                        };
+                        for c in 0..3 {
+                            l[(k * 3 + c) * ndof + d] += factor * g[c];
+                        }
+                    }
+                }
+            }
         };
         match self.formulation {
-            Formulation::Standard => (
-                self.rule
-                    .points
-                    .iter()
-                    .zip(&self.rule.weights)
-                    .map(|(&p, &w)| {
-                        let point = self.point(p, coords);
-                        nodal(&point.dndx, point.det * w)
-                    })
-                    .collect(),
-                None,
-            ),
+            Formulation::Standard => {
+                let mut gradients = Gradients::new(self.rule.weights.len(), ndof);
+                for (ip, &w) in self.rule.weights.iter().enumerate() {
+                    let (det, dndx) = self.rule_point(ip, coords);
+                    nodal(&dndx, gradients.point_mut(ip));
+                    gradients.weights[ip] = det * w;
+                }
+                (gradients, None)
+            }
             Formulation::Reduced => {
                 let (volume, mean) = self.mean_gradients(coords);
-                let mut hourglass = vec![0.0; ndof * ndof];
+                // On the 3D DOFs, which the caller condenses.
+                let n3 = self.dof_count_3d();
+                let mut hourglass = vec![0.0; n3 * n3];
                 self.hourglass_stiffness(coords, d_elastic, &mean, volume, &mut hourglass);
-                (vec![nodal(&mean, volume)], Some(hourglass))
+                let mut gradients = Gradients::new(1, ndof);
+                nodal(&mean, gradients.point_mut(0));
+                gradients.weights[0] = volume;
+                (gradients, Some(hourglass))
             }
             Formulation::Incompatible => {
                 let (x, inv0) = self.incompatible_coupling(coords, d_elastic);
-                let gradients = self
-                    .rule
-                    .points
-                    .iter()
-                    .zip(&self.rule.weights)
-                    .map(|(&p, &w)| {
-                        let point = self.point(p, coords);
-                        let mut g = nodal(&point.dndx, point.det * w);
-                        let modes = Self::mode_gradients(p, &inv0);
-                        // L_eff[(k,c)][j] = L[(k,c)][j] − Σ_m dM_m/dx_c X[3m+k][j].
-                        for (m, dm) in modes.iter().enumerate() {
-                            for k in 0..3 {
-                                let row = &x[(3 * m + k) * ndof..(3 * m + k + 1) * ndof];
-                                for (c, dmc) in dm.iter().enumerate() {
-                                    let l = &mut g.l[(k * 3 + c) * ndof..(k * 3 + c + 1) * ndof];
-                                    for (lj, xj) in l.iter_mut().zip(row) {
-                                        *lj -= dmc * xj;
-                                    }
+                let mut gradients = Gradients::new(self.rule.weights.len(), ndof);
+                for (ip, (&p, &w)) in self.rule.points.iter().zip(&self.rule.weights).enumerate() {
+                    let point = self.point(p, coords);
+                    gradients.weights[ip] = point.det * w;
+                    let g = gradients.point_mut(ip);
+                    nodal(&point.dndx, g);
+                    let modes = Self::mode_gradients(p, &inv0);
+                    // L_eff[(k,c)][j] = L[(k,c)][j] − Σ_m dM_m/dx_c X[3m+k][j].
+                    for (m, dm) in modes.iter().enumerate() {
+                        for k in 0..3 {
+                            let row = &x[(3 * m + k) * ndof..(3 * m + k + 1) * ndof];
+                            for (c, dmc) in dm.iter().enumerate() {
+                                let l = &mut g[(k * 3 + c) * ndof..(k * 3 + c + 1) * ndof];
+                                for (lj, xj) in l.iter_mut().zip(row) {
+                                    *lj -= dmc * xj;
                                 }
                             }
                         }
-                        g
-                    })
-                    .collect();
+                    }
+                }
                 (gradients, None)
             }
+        }
+    }
+
+    /// Whether the displacement gradient is `Σ_a u_a ⊗ ∇N_a` at every point: not for the
+    /// incompatible-mode element and the expanded plane elements.
+    pub fn has_nodal_gradients(&self) -> bool {
+        self.expansion().is_none() && self.formulation != Formulation::Incompatible
+    }
+
+    /// The integration points of an element whose displacement gradient is
+    /// `Σ_a u_a ⊗ ∇N_a` at every point, as the graphics card takes them: `None` for the
+    /// incompatible-mode element and for expanded plane elements, whose operators are not of
+    /// that form.
+    pub fn nodal_gradients(
+        &self,
+        coords: &[[f64; 3]],
+        d_elastic: &[[f64; 6]; 6],
+    ) -> Option<NodalGradients> {
+        if !self.has_nodal_gradients() {
+            return None;
+        }
+        match self.formulation {
+            Formulation::Standard => Some(NodalGradients {
+                points: (0..self.rule.len())
+                    .map(|ip| {
+                        let (det, dndx) = self.rule_point(ip, coords);
+                        (det * self.rule.weights[ip], dndx)
+                    })
+                    .collect(),
+                hourglass: None,
+            }),
+            Formulation::Reduced => {
+                let (volume, mean) = self.mean_gradients(coords);
+                let epsilon = self.hourglass_coefficient(d_elastic, &mean, volume);
+                Some(NodalGradients {
+                    points: vec![(volume, mean)],
+                    hourglass: Some(epsilon),
+                })
+            }
+            Formulation::Incompatible => None,
+        }
+    }
+
+    /// The integration points as general operators on the element's DOFs (three per node
+    /// of the element, for plane and axisymmetric elements those of the 2D nodes), the
+    /// forces being `Σ_points w Lᵀ P` plus the constant matrix times the displacements, as
+    /// [`SolidElement::nonlinear`] computes them.
+    pub fn dense_operators(
+        &self,
+        coords: &[[f64; 3]],
+        d_elastic: &[[f64; 6]; 6],
+    ) -> DenseOperators {
+        let Some(x) = self.expansion() else {
+            let (gradients, hourglass) = self.gradients(coords, d_elastic, None);
+            return DenseOperators {
+                points: gradients.points().map(|(w, l)| (w, l.to_vec())).collect(),
+                matrix: hourglass,
+            };
+        };
+        let (gradients, hourglass) = self.gradients(&x.coordinates(coords), d_elastic, Some(x));
+        let n2 = self.dof_count();
+        DenseOperators {
+            points: gradients
+                .points()
+                .map(|(w, l)| (x.scale * w, l.to_vec()))
+                .collect(),
+            matrix: hourglass.map(|hg| {
+                let mut out = vec![0.0; n2 * n2];
+                x.condense_matrix(&hg, &mut out);
+                out
+            }),
         }
     }
 
@@ -150,8 +354,10 @@ impl SolidElement {
     /// keeps whatever state it updates there. `d_elastic` serves the hourglass control and
     /// the incompatible modes.
     ///
-    /// Plane and axisymmetric elements compute their expanded 3D element and condense its
-    /// forces and tangent on the 2D DOFs, as the linear stiffness does.
+    /// Plane and axisymmetric elements integrate their expanded 3D element on the 2D DOFs
+    /// directly: the gradient operators of the integration points are condensed (`L T` for
+    /// the expansion `u₃ = T u₂`), which gives `Tᵀ f₃` and `Tᵀ K₃ T` at a fraction of the
+    /// cost of the 3D element matrix.
     #[allow(clippy::too_many_arguments)]
     pub fn nonlinear<M>(
         &self,
@@ -165,60 +371,96 @@ impl SolidElement {
     ) where
         M: FnMut(usize, &PointKinematics) -> ([f64; 6], [[f64; 6]; 6]),
     {
-        let Some(x) = self.expansion() else {
-            self.nonlinear_3d(coords, u, nlgeom, d_elastic, material, fe, ke);
-            return;
-        };
-        let mut f3 = vec![0.0; self.dof_count_3d()];
-        let mut k3 = Vec::new();
-        let want_k = ke.is_some();
-        self.nonlinear_3d(
-            &x.coordinates(coords),
-            &x.expand(u),
-            nlgeom,
-            d_elastic,
-            material,
-            &mut f3,
-            want_k.then_some(&mut k3),
-        );
-        x.condense_vector(&f3, fe);
-        if let Some(ke) = ke {
-            let n = self.dof_count();
-            ke.clear();
-            ke.resize(n * n, 0.0);
-            x.condense_matrix(&k3, ke);
-        }
+        self.nonlinear_with_volume(coords, u, nlgeom, d_elastic, material, fe, ke, None);
     }
 
+    /// [`SolidElement::nonlinear`], and with `current` the current volume and its
+    /// gradient `∂V/∂u = Σ_points w cof(F) : L` (`J F⁻ᵀ ∇N` integrated, for an element of
+    /// nodal gradients), added to it: the volumetric rate of the formulation itself, which
+    /// the bulk viscosity of the explicit steps takes for the elements whose operators are
+    /// not nodal gradients.
     #[allow(clippy::too_many_arguments)]
-    fn nonlinear_3d<M>(
+    pub fn nonlinear_with_volume<M>(
         &self,
         coords: &[[f64; 3]],
         u: &[f64],
         nlgeom: bool,
         d_elastic: &[[f64; 6]; 6],
-        mut material: M,
+        material: M,
         fe: &mut [f64],
-        mut ke: Option<&mut Vec<f64>>,
+        ke: Option<&mut Vec<f64>>,
+        current: Option<&mut (f64, Vec<f64>)>,
     ) where
         M: FnMut(usize, &PointKinematics) -> ([f64; 6], [[f64; 6]; 6]),
     {
-        let ndof = self.dof_count_3d();
+        let Some(x) = self.expansion() else {
+            let (gradients, hourglass) = self.gradients(coords, d_elastic, None);
+            let hourglass = hourglass.as_deref();
+            let columns = self.columns(None);
+            self.integrate(
+                &gradients, &columns, hourglass, 1.0, u, nlgeom, material, fe, ke, current,
+            );
+            return;
+        };
+        let (gradients, hourglass) = self.gradients(&x.coordinates(coords), d_elastic, Some(x));
+        let n2 = self.dof_count();
+        let hourglass = hourglass.map(|hg| {
+            let mut out = vec![0.0; n2 * n2];
+            x.condense_matrix(&hg, &mut out);
+            // The condensation scaled it already.
+            out.iter_mut().for_each(|v| *v /= x.scale);
+            out
+        });
+        let hourglass = hourglass.as_deref();
+        let columns = self.columns(Some(x));
+        self.integrate(
+            &gradients, &columns, hourglass, x.scale, u, nlgeom, material, fe, ke, current,
+        );
+    }
+
+    /// Integrates the forces and the tangent over the points `gradients` (operators of
+    /// `ndof` columns) for the displacements `u` of those `ndof` DOFs, every contribution
+    /// scaled by `scale`; `hourglass` is a constant stiffness to add. The tangent's products
+    /// run over `columns` only.
+    #[allow(clippy::too_many_arguments)]
+    fn integrate<M>(
+        &self,
+        gradients: &Gradients,
+        columns: &Columns,
+        hourglass: Option<&[f64]>,
+        scale: f64,
+        u: &[f64],
+        nlgeom: bool,
+        mut material: M,
+        fe: &mut [f64],
+        mut ke: Option<&mut Vec<f64>>,
+        mut current: Option<&mut (f64, Vec<f64>)>,
+    ) where
+        M: FnMut(usize, &PointKinematics) -> ([f64; 6], [[f64; 6]; 6]),
+    {
+        let ndof = gradients.ndof;
+        debug_assert_eq!(u.len(), ndof);
+        debug_assert_eq!(fe.len(), ndof);
         if let Some(ke) = ke.as_deref_mut() {
             ke.clear();
             ke.resize(ndof * ndof, 0.0);
         }
-        let (gradients, hourglass) = self.gradients(coords, d_elastic);
-        let mut b = vec![0.0; 6 * ndof];
-        let mut db = vec![0.0; 6 * ndof];
-        for (ip, gradient) in gradients.iter().enumerate() {
-            let l = &gradient.l;
+        // Column-major operators: `bt[col]` holds the six strain rows of one DOF, so the
+        // products below are dot products of short fixed-size arrays.
+        let mut bt = vec![[0.0; 6]; ndof];
+        let mut dbt = vec![[0.0; 6]; ndof];
+        let mut g = vec![[0.0; 3]; ndof];
+        let active = &columns.all;
+        const IJ: [(usize, usize); 6] = [(0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (2, 0)];
+        let points = gradients.l.chunks_exact(9 * ndof).zip(&gradients.weights);
+        for (ip, (operator, &weight)) in points.enumerate() {
+            // The nine rows `L_(k,c)` of the operator.
+            let lrow = |k: usize, c: usize| &operator[(k * 3 + c) * ndof..(k * 3 + c + 1) * ndof];
             // H = L u, F = I + H.
             let mut h = [[0.0; 3]; 3];
-            for k in 0..3 {
-                for c in 0..3 {
-                    let row = &l[(k * 3 + c) * ndof..(k * 3 + c + 1) * ndof];
-                    h[k][c] = row.iter().zip(u).map(|(a, b)| a * b).sum();
+            for (k, hk) in h.iter_mut().enumerate() {
+                for (c, hkc) in hk.iter_mut().enumerate() {
+                    *hkc = lrow(k, c).iter().zip(u).map(|(a, b)| a * b).sum();
                 }
             }
             let mut f = [[0.0; 3]; 3];
@@ -227,7 +469,6 @@ impl SolidElement {
                     f[i][j] = if i == j { 1.0 } else { 0.0 } + if nlgeom { h[i][j] } else { 0.0 };
                 }
             }
-            const IJ: [(usize, usize); 6] = [(0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (2, 0)];
             let mut strain = [0.0; 6];
             for (r, &(i, j)) in IJ.iter().enumerate() {
                 let mut e = h[i][j] + h[j][i];
@@ -237,19 +478,17 @@ impl SolidElement {
                 strain[r] = if i == j { 0.5 * e } else { e };
             }
             // B_L = ∂E/∂u: normal rows Σ_k F_ki L_(k,i), shear rows Σ_k (F_ki L_(k,j) + F_kj L_(k,i)).
-            for (r, &(i, j)) in IJ.iter().enumerate() {
-                let out = &mut b[r * ndof..(r + 1) * ndof];
-                out.iter_mut().for_each(|v| *v = 0.0);
-                for k in 0..3 {
-                    let li = &l[(k * 3 + i) * ndof..(k * 3 + i + 1) * ndof];
-                    let lj = &l[(k * 3 + j) * ndof..(k * 3 + j + 1) * ndof];
+            bt.iter_mut().for_each(|col| *col = [0.0; 6]);
+            for (k, fk) in f.iter().enumerate() {
+                for (r, &(i, j)) in IJ.iter().enumerate() {
+                    let (li, lj) = (lrow(k, i), lrow(k, j));
                     if i == j {
-                        for (o, a) in out.iter_mut().zip(li) {
-                            *o += f[k][i] * a;
+                        for (col, a) in bt.iter_mut().zip(li) {
+                            col[r] += fk[i] * a;
                         }
                     } else {
-                        for ((o, a), c) in out.iter_mut().zip(lj).zip(li) {
-                            *o += f[k][i] * a + f[k][j] * c;
+                        for ((col, a), c) in bt.iter_mut().zip(lj).zip(li) {
+                            col[r] += fk[i] * a + fk[j] * c;
                         }
                     }
                 }
@@ -257,54 +496,74 @@ impl SolidElement {
             let kinematics = PointKinematics {
                 deformation_gradient: f,
                 strain,
-                weight: gradient.weight,
+                weight,
             };
             let (s, d) = material(ip, &kinematics);
-            let w = gradient.weight;
-            for (c, o) in fe.iter_mut().enumerate() {
-                *o += w * (0..6).map(|r| b[r * ndof + c] * s[r]).sum::<f64>();
+            let w = scale * weight;
+            if let Some((volume, dv)) = current.as_deref_mut() {
+                // J F⁻ᵀ is the cofactor matrix of F (of the full H, also for a
+                // geometrically linear step).
+                let fc: [[f64; 3]; 3] = std::array::from_fn(|i| {
+                    std::array::from_fn(|j| if i == j { 1.0 } else { 0.0 } + h[i][j])
+                });
+                let cof = cofactors(&fc);
+                *volume += w * (0..3).map(|c| fc[0][c] * cof[0][c]).sum::<f64>();
+                dv.resize(ndof, 0.0);
+                for (k, row) in cof.iter().enumerate() {
+                    for (c, value) in row.iter().enumerate() {
+                        let factor = w * value;
+                        for (o, l) in dv.iter_mut().zip(lrow(k, c)) {
+                            *o += factor * l;
+                        }
+                    }
+                }
+            }
+            for (o, col) in fe.iter_mut().zip(&bt) {
+                *o += w * dot6(col, &s);
             }
             let Some(ke) = ke.as_deref_mut() else {
                 continue;
             };
-            // Material stiffness Bᵀ D B.
-            for r in 0..6 {
-                for c in 0..ndof {
-                    db[r * ndof + c] = (0..6).map(|q| d[r][q] * b[q * ndof + c]).sum();
+            // Material stiffness Bᵀ D B (upper triangle).
+            for &c in active {
+                for (r, drow) in d.iter().enumerate() {
+                    dbt[c][r] = dot6(drow, &bt[c]);
                 }
             }
-            for a in 0..ndof {
-                for c in a..ndof {
-                    let v: f64 = (0..6).map(|r| b[r * ndof + a] * db[r * ndof + c]).sum();
-                    ke[a * ndof + c] += w * v;
+            for (i, &a) in active.iter().enumerate() {
+                let ba = &bt[a];
+                let row = &mut ke[a * ndof..(a + 1) * ndof];
+                for &c in &active[i..] {
+                    row[c] += w * dot6(ba, &dbt[c]);
                 }
             }
             if nlgeom {
                 // Initial-stress stiffness Lᵀ (S ⊗ I) L: for every direction k,
                 // Σ_{c,c'} L_(k,c)ᵀ S_cc' L_(k,c').
-                let sm = [[s[0], s[3], s[5]], [s[3], s[1], s[4]], [s[5], s[4], s[2]]];
-                let mut g = vec![0.0; 3 * ndof];
+                // (`S` is symmetric: its columns are its rows.)
                 for k in 0..3 {
-                    for c in 0..3 {
-                        let row = &mut g[c * ndof..(c + 1) * ndof];
-                        row.iter_mut().for_each(|v| *v = 0.0);
-                        for cp in 0..3 {
-                            let lk = &l[(k * 3 + cp) * ndof..(k * 3 + cp + 1) * ndof];
-                            for (o, a) in row.iter_mut().zip(lk) {
-                                *o += sm[c][cp] * a;
+                    g.iter_mut().for_each(|col| *col = [0.0; 3]);
+                    for (cp, s_cp) in [[s[0], s[3], s[5]], [s[3], s[1], s[4]], [s[5], s[4], s[2]]]
+                        .iter()
+                        .enumerate()
+                    {
+                        for (gc, a) in g.iter_mut().zip(lrow(k, cp)) {
+                            for (gcc, scc) in gc.iter_mut().zip(s_cp) {
+                                *gcc += scc * a;
                             }
                         }
                     }
-                    for c in 0..3 {
-                        let lk = &l[(k * 3 + c) * ndof..(k * 3 + c + 1) * ndof];
-                        let gc = &g[c * ndof..(c + 1) * ndof];
-                        for a in 0..ndof {
-                            if lk[a] == 0.0 {
-                                continue;
-                            }
-                            for cc in a..ndof {
-                                ke[a * ndof + cc] += w * lk[a] * gc[cc];
-                            }
+                    let (l0, l1, l2) = (lrow(k, 0), lrow(k, 1), lrow(k, 2));
+                    let columns = &columns.of[k];
+                    for (i, &a) in columns.iter().enumerate() {
+                        let la = [l0[a], l1[a], l2[a]];
+                        if la == [0.0; 3] {
+                            continue;
+                        }
+                        let row = &mut ke[a * ndof..(a + 1) * ndof];
+                        for &cc in &columns[i..] {
+                            let gc = &g[cc];
+                            row[cc] += w * (la[0] * gc[0] + la[1] * gc[1] + la[2] * gc[2]);
                         }
                     }
                 }
@@ -320,11 +579,11 @@ impl SolidElement {
         if let Some(hg) = hourglass {
             for a in 0..ndof {
                 let row = &hg[a * ndof..(a + 1) * ndof];
-                fe[a] += row.iter().zip(u).map(|(k, u)| k * u).sum::<f64>();
+                fe[a] += scale * row.iter().zip(u).map(|(k, u)| k * u).sum::<f64>();
             }
             if let Some(ke) = ke {
-                for (k, h) in ke.iter_mut().zip(&hg) {
-                    *k += h;
+                for (k, h) in ke.iter_mut().zip(hg) {
+                    *k += scale * h;
                 }
             }
         }
@@ -420,6 +679,220 @@ mod tests {
         }
     }
 
+    /// The dense operators reproduce `nonlinear` (forces of a Saint Venant-Kirchhoff
+    /// material under NLGEOM), and the current volume of the reference configuration is the
+    /// one of `volume_mean_gradients`, for 3D, incompatible-mode and expanded 2D elements.
+    #[test]
+    fn dense_operators_give_the_forces_and_the_volume() {
+        let d = isotropic(210_000.0, 0.3);
+        let mut elements: Vec<(SolidElement, Vec<[f64; 3]>)> = [
+            ElementType::C3D8,
+            ElementType::C3D8R,
+            ElementType::C3D8I,
+            ElementType::C3D20R,
+            ElementType::C3D10,
+        ]
+        .into_iter()
+        .map(distorted)
+        .collect();
+        for kind in [
+            ElementType::CPE4,
+            ElementType::CPS4R,
+            ElementType::CAX4,
+            ElementType::CAX8R,
+            ElementType::CPE6,
+        ] {
+            let e = crate::plane::plane(kind, Some(0.3)).unwrap();
+            let corners: &[[f64; 2]] = if kind == ElementType::CPE6 {
+                &[[1.0, 0.0], [2.0, 0.1], [1.4, 1.1]]
+            } else {
+                &[[1.0, 0.0], [2.0, 0.1], [2.2, 1.0], [0.9, 1.2]]
+            };
+            let n = corners.len();
+            // Corners, then the mid-side nodes (slightly off the middle).
+            let coords: Vec<[f64; 3]> = (0..kind.node_count())
+                .map(|i| {
+                    if i < n {
+                        [corners[i][0], corners[i][1], 0.0]
+                    } else {
+                        let (a, b) = (corners[i - n], corners[(i - n + 1) % n]);
+                        [0.5 * (a[0] + b[0]) + 0.02, 0.5 * (a[1] + b[1]) - 0.01, 0.0]
+                    }
+                })
+                .collect();
+            elements.push((e, coords));
+        }
+        for (e, coords) in elements {
+            let ndof = e.dof_count();
+            let kind = e.kind;
+            let operators = e.dense_operators(&coords, &d);
+            let mut u = displacements(ndof, 1e-2);
+            if e.expansion().is_some() {
+                // In-plane motion only.
+                for (i, v) in u.iter_mut().enumerate() {
+                    if i % 3 == 2 {
+                        *v = 0.0;
+                    }
+                }
+            }
+            let mut expected = vec![0.0; ndof];
+            let mut current = (0.0, Vec::new());
+            e.nonlinear_with_volume(
+                &coords,
+                &u,
+                true,
+                &d,
+                linear(&d),
+                &mut expected,
+                None,
+                Some(&mut current),
+            );
+            let mut f = vec![0.0; ndof];
+            let mut volume = 0.0;
+            for (w, l) in &operators.points {
+                let mut h = [[0.0; 3]; 3];
+                for (k, hk) in h.iter_mut().enumerate() {
+                    for (c, hkc) in hk.iter_mut().enumerate() {
+                        *hkc = (0..ndof).map(|j| l[(3 * k + c) * ndof + j] * u[j]).sum();
+                    }
+                }
+                let hh = |i: usize, j: usize| (0..3).map(|k| h[k][i] * h[k][j]).sum::<f64>();
+                let strain = [
+                    h[0][0] + 0.5 * hh(0, 0),
+                    h[1][1] + 0.5 * hh(1, 1),
+                    h[2][2] + 0.5 * hh(2, 2),
+                    h[0][1] + h[1][0] + hh(0, 1),
+                    h[1][2] + h[2][1] + hh(1, 2),
+                    h[2][0] + h[0][2] + hh(2, 0),
+                ];
+                let s: Vec<f64> = (0..6).map(|r| dot6(&d[r], &strain)).collect();
+                let sm = [[s[0], s[3], s[5]], [s[3], s[1], s[4]], [s[5], s[4], s[2]]];
+                // P = F S.
+                for k in 0..3 {
+                    for c in 0..3 {
+                        let p: f64 = (0..3)
+                            .map(|m| (if k == m { 1.0 } else { 0.0 } + h[k][m]) * sm[m][c])
+                            .sum();
+                        for j in 0..ndof {
+                            f[j] += w * p * l[(3 * k + c) * ndof + j];
+                        }
+                    }
+                }
+                volume += w;
+            }
+            if let Some(m) = &operators.matrix {
+                for a in 0..ndof {
+                    f[a] += (0..ndof).map(|j| m[a * ndof + j] * u[j]).sum::<f64>();
+                }
+            }
+            let scale = expected.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            for (a, b) in expected.iter().zip(&f) {
+                assert!((a - b).abs() < 1e-10 * scale, "{kind}: {a} vs {b}");
+            }
+            // The reference configuration.
+            let (v0, g0) = e.volume_mean_gradients(&coords);
+            assert!((volume - v0).abs() < 1e-10 * v0, "{kind}: {volume} vs {v0}");
+            let mut reference = (0.0, Vec::new());
+            e.nonlinear_with_volume(
+                &coords,
+                &vec![0.0; ndof],
+                true,
+                &d,
+                linear(&d),
+                &mut vec![0.0; ndof],
+                None,
+                Some(&mut reference),
+            );
+            assert!((reference.0 - v0).abs() < 1e-10 * v0, "{kind}");
+            // The incompatible modes add their own (small) volume change in a distorted
+            // element.
+            let tolerance = if kind == ElementType::C3D8I {
+                1e-2
+            } else {
+                1e-9
+            };
+            let gscale = g0.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            for (a, b) in reference.1.iter().zip(&g0) {
+                assert!(
+                    (a - v0 * b).abs() < tolerance * v0 * gscale,
+                    "{kind}: {a} vs {}",
+                    v0 * b
+                );
+            }
+            assert!(current.0 > 0.0);
+        }
+    }
+
+    #[test]
+    fn nodal_gradients_give_the_stiffness_times_the_displacements() {
+        let d = isotropic(210_000.0, 0.3);
+        for kind in [
+            ElementType::C3D8,
+            ElementType::C3D8R,
+            ElementType::C3D20R,
+            ElementType::C3D4,
+            ElementType::C3D10,
+            ElementType::C3D15,
+        ] {
+            let (e, coords) = distorted(kind);
+            let ndof = e.dof_count();
+            let mut k = Vec::new();
+            e.stiffness(&coords, &d, &mut k);
+            let u = displacements(ndof, 1e-3);
+            let gradients = e.nodal_gradients(&coords, &d).unwrap();
+            let mut f = vec![0.0; ndof];
+            for (w, g) in &gradients.points {
+                let mut h = [[0.0; 3]; 3];
+                for (a, ga) in g.iter().enumerate() {
+                    for (k, hk) in h.iter_mut().enumerate() {
+                        for (c, hkc) in hk.iter_mut().enumerate() {
+                            *hkc += u[3 * a + k] * ga[c];
+                        }
+                    }
+                }
+                let strain = [
+                    h[0][0],
+                    h[1][1],
+                    h[2][2],
+                    h[0][1] + h[1][0],
+                    h[1][2] + h[2][1],
+                    h[2][0] + h[0][2],
+                ];
+                let s: Vec<f64> = (0..6).map(|r| dot6(&d[r], &strain)).collect();
+                let sm = [[s[0], s[3], s[5]], [s[3], s[1], s[4]], [s[5], s[4], s[2]]];
+                for (a, ga) in g.iter().enumerate() {
+                    for k in 0..3 {
+                        f[3 * a + k] += w * (0..3).map(|c| sm[k][c] * ga[c]).sum::<f64>();
+                    }
+                }
+            }
+            if let Some(epsilon) = gradients.hourglass {
+                let g = &gradients.points[0].1;
+                for h in &SolidElement::HOURGLASS_BASE {
+                    let hz: f64 = (0..8).map(|a| h[a] * coords[a][2]).sum();
+                    let gamma: Vec<f64> = (0..8).map(|a| h[a] - hz * g[a][2]).collect();
+                    for k in 0..3 {
+                        let q: f64 = (0..8).map(|a| gamma[a] * u[3 * a + k]).sum();
+                        for a in 0..8 {
+                            f[3 * a + k] += epsilon * gamma[a] * q;
+                        }
+                    }
+                }
+            }
+            let scale = f.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            for a in 0..ndof {
+                let ku: f64 = (0..ndof).map(|c| k[a * ndof + c] * u[c]).sum();
+                assert!(
+                    (ku - f[a]).abs() < 1e-10 * scale,
+                    "{kind}: {ku} vs {}",
+                    f[a]
+                );
+            }
+        }
+        let (e, coords) = distorted(ElementType::C3D8I);
+        assert!(e.nodal_gradients(&coords, &d).is_none());
+    }
+
     #[test]
     fn the_tangent_is_the_derivative_of_the_internal_force_under_nlgeom() {
         let d = isotropic(1000.0, 0.3);
@@ -437,6 +910,62 @@ mod tests {
             e.nonlinear(&coords, &u, true, &d, linear(&d), &mut fe, Some(&mut ke));
             let h = 1e-6;
             let scale = ke.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            for j in 0..ndof {
+                let mut up = u.clone();
+                up[j] += h;
+                let mut um = u.clone();
+                um[j] -= h;
+                let mut fp = vec![0.0; ndof];
+                let mut fm = vec![0.0; ndof];
+                e.nonlinear(&coords, &up, true, &d, linear(&d), &mut fp, None);
+                e.nonlinear(&coords, &um, true, &d, linear(&d), &mut fm, None);
+                for i in 0..ndof {
+                    let fd = (fp[i] - fm[i]) / (2.0 * h);
+                    assert!(
+                        (fd - ke[i * ndof + j]).abs() < 1e-6 * scale,
+                        "{kind}: K[{i}][{j}] = {} but finite difference {fd}",
+                        ke[i * ndof + j]
+                    );
+                }
+            }
+        }
+    }
+
+    /// Nodes of a distorted 2D quadrilateral (4 or 8 nodes) away from the axis.
+    fn distorted_quad(nodes: usize) -> Vec<[f64; 3]> {
+        let corners = [[1.0, 0.0], [2.1, 0.1], [2.0, 1.2], [0.9, 1.0]];
+        let mut coords: Vec<[f64; 3]> = corners.iter().map(|c| [c[0], c[1], 0.0]).collect();
+        if nodes == 8 {
+            for a in 0..4 {
+                let (p, q) = (corners[a], corners[(a + 1) % 4]);
+                coords.push([0.5 * (p[0] + q[0]) + 0.03, 0.5 * (p[1] + q[1]) - 0.02, 0.0]);
+            }
+        }
+        coords
+    }
+
+    #[test]
+    fn the_tangent_of_plane_and_axisymmetric_elements_is_the_derivative_of_their_force() {
+        // The tangent skips the DOFs the expanded element does not move (the out-of-plane
+        // DOF); the finite differences cover all of them.
+        let d = isotropic(1000.0, 0.3);
+        for kind in [
+            ElementType::CAX8,
+            ElementType::CAX4,
+            ElementType::CAX4R,
+            ElementType::CPE8R,
+            ElementType::CPE4,
+        ] {
+            let e = crate::plane::plane(kind, None).unwrap();
+            let coords = distorted_quad(e.node_count());
+            let ndof = e.dof_count();
+            let u = displacements(ndof, 0.1);
+            let mut fe = vec![0.0; ndof];
+            let mut ke = Vec::new();
+            e.nonlinear(&coords, &u, true, &d, linear(&d), &mut fe, Some(&mut ke));
+            let h = 1e-6;
+            let scale = ke.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            assert!(scale > 0.0);
             for j in 0..ndof {
                 let mut up = u.clone();
                 up[j] += h;

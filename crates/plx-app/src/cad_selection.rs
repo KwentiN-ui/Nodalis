@@ -490,6 +490,7 @@ mod tests {
                 expansion: None,
                 plastic: None,
                 creep: None,
+                hyperelastic: None,
             }],
             sections: vec![Section {
                 name: "Section-1".into(),
@@ -522,6 +523,7 @@ mod tests {
             kind: LoadKind::Pressure(-100.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
 
         let check = |model: &Model| {
@@ -657,6 +659,7 @@ mod tests {
                 expansion: None,
                 plastic: None,
                 creep: None,
+                hyperelastic: None,
             }],
             sections: vec![Section {
                 name: "Section-1".into(),
@@ -715,6 +718,7 @@ mod tests {
             },
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
 
         let check = |model: &Model| {

@@ -22,7 +22,7 @@
 use plxs_core::material::{Hardening, Material};
 use plxs_core::{Error, Result};
 
-use crate::{LinearElastic, MaterialInput, MaterialLaw, MaterialOutput};
+use crate::{KernelLaw, LinearElastic, MaterialInput, MaterialLaw, MaterialOutput};
 
 /// State variables per integration point.
 pub const STATE_SIZE: usize = 14;
@@ -335,6 +335,25 @@ impl MaterialLaw for J2Plastic {
 
     fn elastic_matrix(&self) -> [[f64; 6]; 6] {
         self.elastic.matrix()
+    }
+
+    fn kernel_law(&self) -> Option<KernelLaw> {
+        if self.creep.is_some() {
+            return None;
+        }
+        let Some(isotropic) = &self.isotropic else {
+            return Some(KernelLaw::Elastic);
+        };
+        Some(KernelLaw::J2 {
+            shear: self.elastic.shear_modulus(),
+            bulk: self.elastic.bulk_modulus(),
+            isotropic: isotropic.points.clone(),
+            kinematic: self
+                .kinematic
+                .as_ref()
+                .map_or_else(Vec::new, |c| c.points.clone()),
+            finite: false,
+        })
     }
 
     fn stress(&self, input: &MaterialInput, state: &mut [f64]) -> MaterialOutput {

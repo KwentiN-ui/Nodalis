@@ -78,6 +78,17 @@ impl FeModel {
         self.convert_features(&c);
         for constraint in &mut self.constraints {
             constraint.convert_units(&c);
+            if let Constraint::Joint(joint) = constraint
+                && let Some(location) = &mut joint.location
+            {
+                // The angle of cylindrical coordinates stays.
+                if cylindrical.contains(&joint.system) {
+                    c.value(&mut location[0], Quantity::Length);
+                    c.value(&mut location[2], Quantity::Length);
+                } else {
+                    c.all(location, Quantity::Length);
+                }
+            }
         }
         for interaction in &mut self.surface_interactions {
             for property in &mut interaction.properties {
@@ -134,10 +145,23 @@ impl FeModel {
                 }
                 StepKind::Visco(v) => v.increments.convert_units(&c),
                 StepKind::Dynamic(d) => {
-                    d.increments.convert_units(&c);
-                    if let Some(damping) = &mut d.damping {
-                        c.value(&mut damping.alpha, Quantity::Frequency);
-                        c.value(&mut damping.beta, Quantity::Time);
+                    c.value(&mut d.duration, Quantity::Time);
+                    if let crate::TimeStep::Fixed(dt) = &mut d.time_step {
+                        c.value(dt, Quantity::Time);
+                    }
+                    c.option(&mut d.frequency_limit, Quantity::Frequency);
+                    match &mut d.damping {
+                        crate::Damping::None => {}
+                        crate::Damping::Ratio { range, .. } => {
+                            if let crate::DampingRange::Between(f1, f2) = range {
+                                c.value(f1, Quantity::Frequency);
+                                c.value(f2, Quantity::Frequency);
+                            }
+                        }
+                        crate::Damping::Rayleigh(damping) => {
+                            c.value(&mut damping.alpha, Quantity::Frequency);
+                            c.value(&mut damping.beta, Quantity::Time);
+                        }
                     }
                 }
                 StepKind::ModalDynamics(m) => {
@@ -170,6 +194,14 @@ impl FeModel {
                     BoundaryKind::Submodel { .. } | BoundaryKind::Symmetry { .. } => {}
                     BoundaryKind::Displacement(remote) => {
                         convert_displacements(&mut remote.values, &c);
+                        for (i, table) in remote.tables.iter_mut().enumerate() {
+                            let quantity = if i < 3 {
+                                Quantity::Length
+                            } else {
+                                Quantity::Angle
+                            };
+                            convert_table(table, quantity, &c);
+                        }
                         c.option(&mut remote.pinball, Quantity::Length);
                         if let Some(location) = &mut remote.location {
                             // The angle of cylindrical coordinates stays.
@@ -185,6 +217,11 @@ impl FeModel {
                 }
             }
             for load in &mut step.loads {
+                if let Some(quantity) = load.kind.table_quantity() {
+                    for table in &mut load.tables {
+                        convert_table(table, quantity, &c);
+                    }
+                }
                 match &mut load.kind {
                     LoadKind::Moment(moment) => c.all(moment, Quantity::Moment),
                     LoadKind::PreTension {
@@ -223,9 +260,42 @@ impl FeModel {
                     }
                     LoadKind::Radiation { sink, .. } => c.value(sink, Quantity::Temperature),
                     LoadKind::Gravity(acceleration) => c.all(acceleration, Quantity::Acceleration),
+                    // Standard gravity has no unit of its own.
+                    LoadKind::StandardGravity(_) => {}
                     LoadKind::Centrifugal { point, speed, .. } => {
                         c.all(point, Quantity::Length);
                         c.value(speed, Quantity::RotationalSpeed);
+                    }
+                    LoadKind::Excitation(excitation) => {
+                        c.all(&mut excitation.value, Quantity::Force);
+                        match &mut excitation.signal {
+                            crate::Signal::Impulse { time, width } => {
+                                c.value(time, Quantity::Time);
+                                c.value(width, Quantity::Time);
+                            }
+                            crate::Signal::Sine {
+                                frequency,
+                                start,
+                                end,
+                                ..
+                            } => {
+                                c.value(frequency, Quantity::Frequency);
+                                c.value(start, Quantity::Time);
+                                c.option(end, Quantity::Time);
+                            }
+                            crate::Signal::Chirp {
+                                from,
+                                to,
+                                start,
+                                end,
+                                ..
+                            } => {
+                                c.value(from, Quantity::Frequency);
+                                c.value(to, Quantity::Frequency);
+                                c.value(start, Quantity::Time);
+                                c.option(end, Quantity::Time);
+                            }
+                        }
                     }
                     LoadKind::Moving(moving) => {
                         for length in [
@@ -328,13 +398,17 @@ impl FeModel {
 
 impl StaticStep {
     fn convert_units(&mut self, c: &Conversion) {
+        c.value(&mut self.duration, Quantity::Time);
+        let control = &mut self.control;
+        if let crate::IncrementSize::Fixed(dt) = &mut control.size {
+            c.value(dt, Quantity::Time);
+        }
         for time in [
-            &mut self.initial_increment,
-            &mut self.time_period,
-            &mut self.min_increment,
-            &mut self.max_increment,
+            &mut control.initial,
+            &mut control.minimum,
+            &mut control.maximum,
         ] {
-            c.value(time, Quantity::Time);
+            c.option(time, Quantity::Time);
         }
     }
 }
@@ -344,6 +418,17 @@ impl Material {
         c.option(&mut self.density, Quantity::Density);
         if let Some(elastic) = &mut self.elastic {
             c.value(&mut elastic.young, Quantity::Pressure);
+        }
+        if let Some(hyper) = &mut self.hyperelastic {
+            let kinds = hyper.model.parameters();
+            for (value, parameter) in hyper.constants.iter_mut().zip(kinds) {
+                if parameter.kind == crate::hyperelastic::ParameterKind::Stress {
+                    c.value(value, Quantity::Pressure);
+                }
+            }
+            for point in hyper.test_data.iter_mut() {
+                c.value(&mut point.stress, Quantity::Pressure);
+            }
         }
         c.option(&mut self.conductivity, Quantity::ThermalConductivity);
         c.option(&mut self.specific_heat, Quantity::SpecificHeat);
@@ -379,7 +464,9 @@ impl Constraint {
         match self {
             Constraint::Spring(s) => {
                 let quantity = stiffness(s.is_per_area());
-                c.all(&mut s.stiffness, quantity)
+                c.all(&mut s.stiffness, quantity);
+                // Moment per radian.
+                c.all(&mut s.rotational, Quantity::Moment)
             }
             Constraint::CompressionOnly(s) => {
                 c.value(&mut s.clearance, Quantity::Length);
@@ -388,7 +475,7 @@ impl Constraint {
                 c.option(&mut s.tensile_force, Quantity::Force);
             }
             Constraint::Tie(t) => c.option(&mut t.position_tolerance, Quantity::Length),
-            Constraint::NodeTie(_) | Constraint::RigidBody(_) => {}
+            Constraint::NodeTie(_) | Constraint::RigidBody(_) | Constraint::Joint(_) => {}
         }
     }
 }
@@ -465,6 +552,14 @@ fn convert_modal_damping(damping: &mut Option<crate::ModalDamping>, c: &Conversi
     }
 }
 
+/// The times and values of a time table.
+fn convert_table(table: &mut Option<crate::ValueTable>, quantity: Quantity, c: &Conversion) {
+    for point in table.iter_mut().flat_map(|t| t.points.iter_mut()) {
+        c.value(&mut point[0], Quantity::Time);
+        c.value(&mut point[1], quantity);
+    }
+}
+
 /// Displacements (lengths) and rotations (angles) of a boundary condition.
 fn convert_displacements(values: &mut [Option<f64>; 6], c: &Conversion) {
     for (i, value) in values.iter_mut().enumerate() {
@@ -518,6 +613,7 @@ mod tests {
             kind: LoadKind::Pressure(2.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         step.loads.push(Load {
             id: crate::Id::new(),
@@ -529,6 +625,7 @@ mod tests {
             kind: LoadKind::force([1000.0, 0.0, 0.0]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         model.steps.push(step);
         assert!(model.convert_units(UnitSystem::MTonSC).is_empty());

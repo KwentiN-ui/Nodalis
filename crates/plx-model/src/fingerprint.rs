@@ -109,12 +109,82 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
         }
     }
     hash.add_debug(&steps);
-    hash.add_debug(reference_points);
-    hash.add_debug(coordinate_systems);
-    hash.add_debug(planes);
     hash.add_debug(mesh_sets);
     hash.add_debug(element_types);
+    // Features only count when the model uses them: one made on the results, e.g. a
+    // coordinate system to look at stresses in, leaves the results up to date.
+    let used = used_features(
+        &format!(
+            "{properties:?}{materials:?}{sections:?}{cross_sections:?}{constraints:?}\
+             {surface_interactions:?}{contact_pairs:?}{ties:?}{node_ties:?}{contact_regions:?}{contact_defaults:?}\
+             {bolts:?}{amplitudes:?}{distributions:?}{initial_conditions:?}{steps:?}\
+             {mesh_sets:?}{element_types:?}"
+        ),
+        reference_points,
+        coordinate_systems,
+        planes,
+    );
+    hash.add_debug(&used);
     hash.finish()
+}
+
+/// The features `text`, the rest of the model written out, refers to by their ids, and
+/// those these features refer to in turn.
+fn used_features<'a>(
+    text: &str,
+    points: &'a [crate::ReferencePoint],
+    systems: &'a [crate::CoordinateSystem],
+    planes: &'a [crate::Plane],
+) -> (
+    Vec<&'a crate::ReferencePoint>,
+    Vec<&'a crate::CoordinateSystem>,
+    Vec<&'a crate::Plane>,
+) {
+    let named = |text: &str, id: &crate::Id| text.contains(&format!("{id:?}"));
+    let mut used = [
+        vec![false; points.len()],
+        vec![false; systems.len()],
+        vec![false; planes.len()],
+    ];
+    let mut text = text.to_string();
+    loop {
+        let mut found = String::new();
+        let names = [
+            points
+                .iter()
+                .map(|p| (&p.id, format!("{p:?}")))
+                .collect::<Vec<_>>(),
+            systems.iter().map(|c| (&c.id, format!("{c:?}"))).collect(),
+            planes.iter().map(|p| (&p.id, format!("{p:?}"))).collect(),
+        ];
+        for (kind, items) in names.iter().enumerate() {
+            for (i, (id, written)) in items.iter().enumerate() {
+                if !used[kind][i] && named(&text, id) {
+                    used[kind][i] = true;
+                    found.push_str(written);
+                }
+            }
+        }
+        if found.is_empty() {
+            break;
+        }
+        text = found;
+    }
+    let pick = |flags: &[bool], i: usize| flags[i];
+    (
+        (points.iter().enumerate())
+            .filter(|(i, _)| pick(&used[0], *i))
+            .map(|(_, p)| p)
+            .collect(),
+        (systems.iter().enumerate())
+            .filter(|(i, _)| pick(&used[1], *i))
+            .map(|(_, c)| c)
+            .collect(),
+        (planes.iter().enumerate())
+            .filter(|(i, _)| pick(&used[2], *i))
+            .map(|(_, p)| p)
+            .collect(),
+    )
 }
 
 /// The inputs of the mesh of one part of the geometry: the shapes, the model space and the
@@ -167,6 +237,49 @@ mod tests {
         assert_eq!(solve_input(&mesh, &fe), before);
         fe.steps.push(Step::new_static("Step-1"));
         assert_ne!(solve_input(&mesh, &fe), before);
+    }
+
+    #[test]
+    fn only_features_the_model_uses_count() {
+        let mesh = FeMesh::default();
+        let mut fe = FeModel::default();
+        fe.steps.push(Step::new_complex_frequency("Rotor"));
+        let before = solve_input(&mesh, &fe);
+        // A coordinate system made on the results to look at stresses in.
+        fe.coordinate_systems
+            .push(crate::CoordinateSystem::new("Hub"));
+        fe.reference_points
+            .push(crate::ReferencePoint::new("RP-1", [1.0; 3]));
+        assert_eq!(solve_input(&mesh, &fe), before);
+        // The step turns about it: now it counts, and so do its changes.
+        let crate::StepKind::ComplexFrequency(complex) = &mut fe.steps[0].kind else {
+            unreachable!()
+        };
+        complex.system = Some(fe.coordinate_systems[0].id);
+        let used = solve_input(&mesh, &fe);
+        assert_ne!(used, before);
+        fe.coordinate_systems[0].origin = [0.0, 0.0, 1.0];
+        assert_ne!(solve_input(&mesh, &fe), used);
+    }
+
+    #[test]
+    fn features_count_through_those_that_refer_to_them() {
+        let systems = [
+            crate::CoordinateSystem::new("Hub"),
+            crate::CoordinateSystem::new("Other"),
+        ];
+        let mut point = crate::ReferencePoint::new("RP-1", [0.0; 3]);
+        point.definition = crate::PointDefinition::Local {
+            system: Some(systems[0].id),
+            coordinates: [1.0, 0.0, 0.0],
+        };
+        let text = format!("{:?}", crate::Region::ReferencePoint(point.id));
+        let points = [point];
+        let (points, systems, planes) = used_features(&text, &points, &systems, &[]);
+        assert_eq!(points.len(), 1);
+        let names: Vec<_> = systems.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["Hub"]);
+        assert!(planes.is_empty());
     }
 
     #[test]

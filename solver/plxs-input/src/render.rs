@@ -14,6 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use plxs_core::amplitude::Signal;
 use plxs_core::constraints::{RigidBodyNodes, TransformKind};
 use plxs_core::contact::{Adjust, ContactKind, GapConductance, SurfaceBehavior};
 use plxs_core::element::ElementType;
@@ -117,6 +118,19 @@ impl Out {
 
 /// A number that reads back as the same `f64`: the shortest form that does, plain when that
 /// is short, else with an exponent.
+/// `MASS SCALING=`, `TIME STEP=` and `SHELL INERTIA=` of an explicit or automatic `*DYNAMIC`.
+fn explicit_controls(header: &mut String, controls: &plxs_core::step::ExplicitControls) {
+    if let Some(target) = controls.mass_scaling {
+        let _ = write!(header, ", Mass scaling={}", number(target));
+    }
+    if let Some(dt) = controls.time_step {
+        let _ = write!(header, ", Time step={}", number(dt));
+    }
+    if controls.full_shell_inertia {
+        header.push_str(", Shell inertia=Full");
+    }
+}
+
 pub(crate) fn number(value: f64) -> String {
     if value.is_nan() {
         return String::new();
@@ -251,6 +265,22 @@ fn materials(out: &mut Out, model: &Model) {
             for row in &elastic.rows {
                 out.numbers(&[row.young, row.poisson, row.temperature]);
             }
+        }
+        if let Some(hyper) = &material.hyperelastic {
+            use plxs_core::material::HyperelasticModel as H;
+            let model = match hyper.model {
+                H::NeoHooke => "Neo Hooke".to_string(),
+                H::MooneyRivlin => "Mooney-Rivlin".to_string(),
+                H::Polynomial(n) => format!("Polynomial, N={n}"),
+                H::ReducedPolynomial(n) => format!("Reduced polynomial, N={n}"),
+                H::Yeoh => "Yeoh".to_string(),
+                H::Ogden(n) => format!("Ogden, N={n}"),
+                H::ArrudaBoyce => "Arruda-Boyce".to_string(),
+            };
+            out.keyword(&format!("*Hyperelastic, {model}"));
+            let mut values = hyper.constants.clone();
+            values.push(0.0);
+            out.numbers(&values);
         }
         if let Some(plastic) = &material.plastic {
             let hardening = match plastic.hardening {
@@ -466,6 +496,25 @@ fn constraints(out: &mut Out, model: &Model) {
             body.reference_node, body.rotation_node
         ));
     }
+    for joint in &constraints.joints {
+        out.keyword(&format!("*Joint, Name={}", joint.name));
+        let [first, second] = joint.ends.map(|end| end.unwrap_or([0, 0]));
+        out.line(&format!(
+            "{}, {}, {}, {}",
+            first[0], first[1], second[0], second[1]
+        ));
+        let [x, y, _] = joint.axes;
+        let o = joint.origin;
+        let frame: Vec<String> = [o, x, y].iter().flatten().map(|&v| number(v)).collect();
+        out.line(&frame.join(", "));
+        let held: Vec<String> = (1..=6)
+            .filter(|&d| joint.fixed[d - 1])
+            .map(|d| d.to_string())
+            .collect();
+        if !held.is_empty() {
+            out.line(&held.join(", "));
+        }
+    }
     if !constraints.equations.is_empty() {
         out.keyword("*Equation");
         for equation in &constraints.equations {
@@ -624,10 +673,38 @@ fn amplitudes(out: &mut Out, model: &Model) {
         if amplitude.shift_y != 0.0 {
             let _ = write!(header, ", Shifty={}", number(amplitude.shift_y));
         }
+        let values: Vec<f64> = match amplitude.signal {
+            Some(Signal::Pulse { start, width }) => {
+                header.push_str(", Shape=Pulse");
+                vec![start, width]
+            }
+            Some(Signal::Sine {
+                start,
+                end,
+                frequency,
+                phase,
+            }) => {
+                header.push_str(", Shape=Sine");
+                vec![start, end, frequency, phase.to_degrees()]
+            }
+            Some(Signal::Chirp {
+                start,
+                end,
+                from,
+                to,
+                logarithmic,
+            }) => {
+                header.push_str(", Shape=Chirp");
+                if logarithmic {
+                    header.push_str(", Sweep=Log");
+                }
+                vec![start, end, from, to]
+            }
+            None => (amplitude.points.iter())
+                .flat_map(|&(t, v)| [t, v])
+                .collect(),
+        };
         out.keyword(&header);
-        let values: Vec<f64> = (amplitude.points.iter())
-            .flat_map(|&(t, v)| [t, v])
-            .collect();
         out.numbers(&values);
     }
 }
@@ -748,6 +825,13 @@ fn solver_parameter(header: &mut String, solver: EquationSolver) {
     let _ = write!(header, ", Solver={name}");
 }
 
+/// `FRAMES=` (Nodalis): result frames evenly spaced over the step.
+fn frames_parameter(header: &mut String, increments: &Incrementation) {
+    if let Some(frames) = increments.frames {
+        let _ = write!(header, ", Frames={frames}");
+    }
+}
+
 /// The incrementation line: initial, period, minimum, maximum, missing ones empty.
 fn increments_line(out: &mut Out, increments: &Incrementation) {
     let values = [
@@ -803,6 +887,7 @@ fn procedure(out: &mut Out, procedure: &Procedure) {
             if settings.increments.direct {
                 header.push_str(", Direct");
             }
+            frames_parameter(&mut header, &settings.increments);
             if settings.time_reset {
                 header.push_str(", Time reset");
             }
@@ -818,6 +903,7 @@ fn procedure(out: &mut Out, procedure: &Procedure) {
             if settings.increments.direct {
                 header.push_str(", Direct");
             }
+            frames_parameter(&mut header, &settings.increments);
             out.keyword(&header);
             increments_line(out, &settings.increments);
         }
@@ -888,6 +974,7 @@ fn procedure(out: &mut Out, procedure: &Procedure) {
             if let Some(count) = settings.frequency_count {
                 let _ = write!(header, ", Frequency={count}");
             }
+            frames_parameter(&mut header, &settings.increments);
             out.keyword(&header);
             increments_line(out, &settings.increments);
         }
@@ -897,11 +984,26 @@ fn procedure(out: &mut Out, procedure: &Procedure) {
             if let Some(alpha) = settings.alpha {
                 let _ = write!(header, ", Alpha={}", number(alpha));
             }
-            if settings.explicit {
-                header.push_str(", Explicit");
+            match settings.integration {
+                plxs_core::step::Integration::Implicit => {}
+                plxs_core::step::Integration::Explicit(c) => {
+                    header.push_str(", Integration=Explicit");
+                    explicit_controls(&mut header, &c);
+                }
+                plxs_core::step::Integration::Automatic {
+                    explicit,
+                    switch_factor,
+                } => {
+                    header.push_str(", Integration=Automatic");
+                    explicit_controls(&mut header, &explicit);
+                    let _ = write!(header, ", Switch={}", number(switch_factor));
+                }
             }
             if settings.increments.direct {
                 header.push_str(", Direct");
+            }
+            if settings.event_frames {
+                header.push_str(", Events");
             }
             out.keyword(&header);
             increments_line(out, &settings.increments);
@@ -911,6 +1013,14 @@ fn procedure(out: &mut Out, procedure: &Procedure) {
                     number(rayleigh.alpha),
                     number(rayleigh.beta)
                 ));
+            }
+            if let Some(damping) = &settings.damping_ratio {
+                let mut line = format!("*Damping, Ratio={}", number(damping.ratio));
+                if let Some(lower) = damping.lower {
+                    let _ = write!(line, ", Lower={}", number(lower));
+                }
+                let _ = write!(line, ", Upper={}", number(damping.upper));
+                out.keyword(&line);
             }
         }
         Procedure::ModalDynamics(settings) => {

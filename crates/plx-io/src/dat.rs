@@ -143,6 +143,30 @@ const KINDS: &[Kind] = &[
         &["KE"],
         Ids::None,
     ),
+    kind(
+        "total model internal energy",
+        "MODEL_INTERNAL_ENERGY",
+        &["ALLIE"],
+        Ids::None,
+    ),
+    kind(
+        "total model kinetic energy",
+        "MODEL_KINETIC_ENERGY",
+        &["ALLKE"],
+        Ids::None,
+    ),
+    kind(
+        "total model external work",
+        "MODEL_EXTERNAL_WORK",
+        &["ALLWK"],
+        Ids::None,
+    ),
+    kind(
+        "total model damping dissipation",
+        "MODEL_DAMPING_DISSIPATION",
+        &["ALLVD"],
+        Ids::None,
+    ),
     kind("volume", "VOLUME", &["EVOL"], Ids::Id),
     kind("total volume", "TOTAL_VOLUME", &["VOL"], Ids::None),
     kind("heat flux", "HEAT_FLUX", &["Q1", "Q2", "Q3"], Ids::IdPoint),
@@ -469,17 +493,18 @@ pub fn parse_dat(text: &str) -> DatImport {
                     i -= 1;
                     break;
                 };
-                // Cyclic symmetry: nodal diameter, then the mode within it.
-                if line.split_whitespace().count() == 3 {
-                    let Some(local) = tokens.next().and_then(|t| t.parse::<u32>().ok()) else {
-                        break;
-                    };
+                // Cyclic symmetry: nodal diameter, then the mode within it, then the
+                // direction. Nodalis's complex modes: the direction, then the nodal diameter
+                // of the mode (`-` without one).
+                let mut next = tokens.next();
+                if let Some(local) = next.and_then(|t| t.parse::<u32>().ok()) {
                     let Some(mode) = cyclic_mode(offset + local) else {
                         continue;
                     };
                     m = mode;
+                    next = tokens.next();
                 }
-                let direction = match tokens.next() {
+                let direction = match next {
                     Some("F") => 1.0,
                     Some("B") => -1.0,
                     _ => 0.0,
@@ -488,6 +513,13 @@ pub fn parse_dat(text: &str) -> DatImport {
                 let row = data.row(step, m, frequency);
                 let name = "TURNING_DIRECTION";
                 data.add(&set, "EIGENVALUE_OUTPUT", name, name, row, direction);
+                // Every mode gets a value where the column exists, −1 without a diameter,
+                // so the values line up with the modes.
+                if let Some(diameter) = tokens.next() {
+                    let diameter = diameter.parse::<u32>().map_or(-1.0, f64::from);
+                    let name = "NODAL_DIAMETER";
+                    data.add(&set, "EIGENVALUE_OUTPUT", name, name, row, diameter);
+                }
             }
             continue;
         }
@@ -613,7 +645,14 @@ pub fn parse_dat(text: &str) -> DatImport {
                 Ids::Id => 1,
                 Ids::IdPoint => 2,
             };
-            if values.len() < offset + kind.components.len() {
+            // The built-in solver leaves the trailing out-of-plane values of a 2D model
+            // out (the z value, the shear stresses xz and yz).
+            let least = match kind.components.len() {
+                3 => 2,
+                6 => 4,
+                n => n,
+            };
+            if values.len() < offset + least {
                 warnings.push(format!("Line {line_number}: too few values"));
                 continue;
             }
@@ -869,13 +908,13 @@ fn parse_number(text: &str) -> f64 {
 /// Adds von Mises, Tresca and the principal stresses to stress fields.
 fn add_stress_components(set: &mut HistorySet) {
     for field in set.fields.iter_mut().filter(|f| f.name == "STRESSES") {
-        let Some(base) = STRESS
-            .iter()
-            .map(|n| field.component(n))
-            .collect::<Option<Vec<_>>>()
-        else {
+        // The shear stresses out of the plane of a 2D model may be left out: zero.
+        let base: Vec<Option<&HistoryComponent>> =
+            STRESS.iter().map(|n| field.component(n)).collect();
+        if base[..4].iter().any(Option::is_none) {
             continue;
-        };
+        }
+        let first = base[0].expect("checked");
         let names = [
             "MISES",
             "TRESCA",
@@ -891,16 +930,15 @@ fn add_stress_components(set: &mut HistorySet) {
                 entries: Vec::new(),
             })
             .collect();
-        for (e, entry) in base[0].entries.iter().enumerate() {
+        for (e, entry) in first.entries.iter().enumerate() {
             let mut columns: Vec<Vec<f64>> = vec![Vec::new(); names.len()];
             for row in 0..entry.values.len() {
-                let value = |c: usize| {
-                    base[c]
-                        .entries
-                        .get(e)
+                let value = |c: usize| match base[c] {
+                    Some(component) => (component.entries.get(e))
                         .and_then(|x| x.values.get(row))
                         .copied()
-                        .unwrap_or(f64::NAN)
+                        .unwrap_or(f64::NAN),
+                    None => 0.0,
                 };
                 // S11, S22, S33, S12, S13, S23 as xx, yy, zz, xy, yz, zx.
                 let [xx, yy, zz, xy, xz, yz] = [0, 1, 2, 3, 4, 5].map(value);

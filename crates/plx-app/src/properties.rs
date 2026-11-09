@@ -255,7 +255,10 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
                 return;
             };
             rows.push(("Name", field.name.clone()));
-            let names: Vec<&str> = field.components.iter().map(|c| c.name.as_str()).collect();
+            let names: Vec<&str> = (field.components.iter())
+                .filter(|c| !c.out_of_plane)
+                .map(|c| c.name.as_str())
+                .collect();
             rows.push(("Components", names.join(", ")));
         }
         TreeItem::Component(f, c) => {

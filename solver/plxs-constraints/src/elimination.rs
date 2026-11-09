@@ -18,6 +18,72 @@ use std::sync::Arc;
 
 use plxs_linalg::{Pattern, SparseMatrix};
 
+/// The pattern of `Tᵀ K T` for the matrices on one pattern and where every entry of `K`
+/// lands in it (see [`ConstraintSet::reducer`]). It depends on the structure of `T` only,
+/// not on its values: the tangents of rigid bodies under finite rotations, whose `T` is
+/// relinearized in every iteration, reuse it too.
+#[derive(Clone, Debug)]
+pub struct ReducedPattern {
+    input: Arc<Pattern>,
+    pattern: Arc<Pattern>,
+    /// The structure of `T` the reducer was built for.
+    t_ptr: Vec<u32>,
+    t_col: Vec<u32>,
+    /// Per entry of the input: its reduced position when it lands on one reduced entry
+    /// with factor 1 (an entry between unconstrained DOFs, the usual case), else
+    /// `u32::MAX` and the entry is in `general`.
+    simple: Vec<u32>,
+    /// `(input entry, reduced position, index of tᵢₐ in `T`, index of tⱼᵦ, factor)` of the
+    /// other entries, in the order of the entries. The products are formed and summed in
+    /// the same order as a direct `Tᵀ K T` would, so the reduced matrix is the same to the
+    /// last bit (a mechanism's solution can hang on round-off of this size).
+    general: Vec<(u32, u32, u32, u32, f64)>,
+}
+
+impl ReducedPattern {
+    /// Whether the reducer was built for `pattern`.
+    pub fn fits(&self, pattern: &Arc<Pattern>) -> bool {
+        Arc::ptr_eq(&self.input, pattern) || *self.input == **pattern
+    }
+
+    /// Whether the reducer was built for `pattern` and the structure of `set`'s `T`.
+    fn fits_set(&self, pattern: &Arc<Pattern>, set: &ConstraintSet) -> bool {
+        self.fits(pattern) && self.t_ptr == set.t_ptr && self.t_col == set.t_col
+    }
+
+    /// The reduced pattern.
+    pub fn pattern(&self) -> &Arc<Pattern> {
+        &self.pattern
+    }
+
+    /// `Tᵀ K T` of `k`, which must be on the pattern the reducer was built for, with the
+    /// values `t_val` of `T` (on the structure the reducer was built for).
+    fn apply(&self, k: &SparseMatrix, t_val: &[f64]) -> SparseMatrix {
+        assert!(
+            self.fits(k.pattern()),
+            "the matrix is not on the reducer's pattern"
+        );
+        let mut out = SparseMatrix::zeros(self.pattern.clone());
+        let values = k.values();
+        let out_values = out.values_mut();
+        let mut general = self.general.iter().peekable();
+        for (entry, (&pos, &v)) in self.simple.iter().zip(values).enumerate() {
+            if pos != u32::MAX {
+                out_values[pos as usize] += v;
+                continue;
+            }
+            while let Some(&&(e, pos, ia, ib, factor)) = general.peek() {
+                if e as usize != entry {
+                    break;
+                }
+                general.next();
+                out_values[pos as usize] += (factor * t_val[ia as usize]) * v * t_val[ib as usize];
+            }
+        }
+        out
+    }
+}
+
 /// What to do when the preferred dependent DOF of a constraint is taken already.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Policy {
@@ -317,6 +383,12 @@ impl ConstraintSet {
         self.reduced
     }
 
+    /// `T` by rows: the row pointers (`len() + 1`), the columns (reduced unknowns) and
+    /// the values.
+    pub fn transform(&self) -> (&[u32], &[u32], &[f64]) {
+        (&self.t_ptr, &self.t_col, &self.t_val)
+    }
+
     fn t_row(&self, row: usize) -> impl Iterator<Item = (u32, f64)> + '_ {
         let range = self.t_ptr[row] as usize..self.t_ptr[row + 1] as usize;
         self.t_col[range.clone()]
@@ -325,9 +397,59 @@ impl ConstraintSet {
             .zip(self.t_val[range].iter().copied())
     }
 
+    /// The entries of row `row` of `T` with their indices into the value array.
+    fn t_row_indexed(&self, row: usize) -> impl Iterator<Item = (u32, u32)> + '_ {
+        let range = self.t_ptr[row] as usize..self.t_ptr[row + 1] as usize;
+        self.t_col[range.clone()]
+            .iter()
+            .copied()
+            .zip(range.map(|i| i as u32))
+    }
+
+    /// Whether row `row` of `T` is the identity row of a free DOF: a single entry 1 on the
+    /// DOF's own reduced unknown. Relinearizing the rows of rigid body members never
+    /// touches these rows.
+    fn is_identity_row(&self, row: usize) -> bool {
+        let range = self.t_ptr[row] as usize..self.t_ptr[row + 1] as usize;
+        range.len() == 1
+            && self.t_val[range.start] == 1.0
+            && self.free[self.t_col[range.start] as usize] as usize == row
+    }
+
+    /// Whether `T` only selects the free DOFs: every row is the identity row of its own
+    /// free DOF or empty (held, or not used by any element), so that `u = q` on the free
+    /// DOFs and `u = g` on the others.
+    pub fn is_selection(&self) -> bool {
+        (0..self.n).all(|row| self.t_ptr[row] == self.t_ptr[row + 1] || self.is_identity_row(row))
+    }
+
     /// `Tᵀ K T` on a new pattern.
     pub fn reduce(&self, k: &SparseMatrix) -> SparseMatrix {
-        let pattern = k.pattern();
+        self.reducer(k.pattern()).apply(k, &self.t_val)
+    }
+
+    /// [`Self::reduce`] with the reduced pattern kept in `cache` for the next matrix on
+    /// the same pattern (the tangents of Newton iterations): only the values are mapped
+    /// then, which is several times cheaper than building the pattern again. The cache
+    /// serves any set with the same structure of `T`, whatever its values (the rows of
+    /// rigid bodies relinearized at other rotations).
+    pub fn reduce_cached(
+        &self,
+        k: &SparseMatrix,
+        cache: &mut Option<ReducedPattern>,
+    ) -> SparseMatrix {
+        if !cache
+            .as_ref()
+            .is_some_and(|c| c.fits_set(k.pattern(), self))
+        {
+            *cache = Some(self.reducer(k.pattern()));
+        }
+        cache.as_ref().expect("built").apply(k, &self.t_val)
+    }
+
+    /// The reduced pattern of `Tᵀ K T` for matrices on `pattern`, with where every entry
+    /// of `K` lands.
+    pub fn reducer(&self, pattern: &Arc<Pattern>) -> ReducedPattern {
         assert_eq!(pattern.dimension(), self.n);
         let m = self.reduced;
         // Pass 1: the pattern.
@@ -350,24 +472,29 @@ impl ConstraintSet {
             list.dedup();
         }
         let reduced_pattern = Arc::new(Pattern::from_columns(m, rows));
-        // Pass 2: the values.
-        let mut out = SparseMatrix::zeros(reduced_pattern.clone());
-        let values = k.values();
+        // Pass 2: where each entry lands.
+        let mut simple = vec![u32::MAX; pattern.nnz()];
+        let mut general = Vec::new();
         let col_ptr = pattern.col_ptr();
-        let out_values = out.values_mut();
         for (j, &start) in col_ptr.iter().take(self.n).enumerate() {
             if self.t_ptr[j] == self.t_ptr[j + 1] {
                 continue;
             }
             let start = start as usize;
+            let identity_j = self.is_identity_row(j);
             for (offset, &i) in pattern.column(j).iter().enumerate() {
-                let v = values[start + offset];
-                if v == 0.0 {
+                let entry = start + offset;
+                let diagonal = i as usize == j;
+                if identity_j && self.is_identity_row(i as usize) {
+                    // One target with factor 1, whatever the values of the other rows.
+                    let a = self.t_col[self.t_ptr[i as usize] as usize];
+                    let b = self.t_col[self.t_ptr[j] as usize];
+                    let (r, c) = if a <= b { (a, b) } else { (b, a) };
+                    simple[entry] = reduced_pattern.position(r, c).unwrap() as u32;
                     continue;
                 }
-                let diagonal = i as usize == j;
-                for (a, ta) in self.t_row(i as usize) {
-                    for (b, tb) in self.t_row(j) {
+                for (a, ia) in self.t_row_indexed(i as usize) {
+                    for (b, ib) in self.t_row_indexed(j) {
                         if diagonal && a > b {
                             continue;
                         }
@@ -376,12 +503,19 @@ impl ConstraintSet {
                         // the same reduced entry, twice on a reduced diagonal.
                         let factor = if !diagonal && a == b { 2.0 } else { 1.0 };
                         let pos = reduced_pattern.position(r, c).unwrap();
-                        out_values[pos] += factor * ta * v * tb;
+                        general.push((entry as u32, pos as u32, ia, ib, factor));
                     }
                 }
             }
         }
-        out
+        ReducedPattern {
+            input: pattern.clone(),
+            pattern: reduced_pattern,
+            t_ptr: self.t_ptr.clone(),
+            t_col: self.t_col.clone(),
+            simple,
+            general,
+        }
     }
 
     /// `Tᵀ f`.

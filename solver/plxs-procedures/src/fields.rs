@@ -9,6 +9,8 @@ use plxs_core::results::{
 use plxs_core::state::IntegrationPointField;
 use plxs_core::{Model, ProgressEvent, Result, Step};
 
+use rayon::prelude::*;
+
 use crate::ProcedureContext;
 
 /// The variables a field request asks for, upper case, from all `*NODE FILE` / `*EL FILE`
@@ -49,9 +51,8 @@ pub fn add_mode(
     imaginary: Option<&[f64]>,
 ) {
     let order = node_order(ctx.model);
-    let zeros = vec![0.0; u.len()];
     let rows = |u: &[f64]| -> Vec<[f32; 3]> {
-        let (reported, _) = ctx.table.reported(ctx.model, u, &zeros);
+        let reported = ctx.table.reported_displacements(u);
         (order.iter())
             .map(|&(_, i)| {
                 let at = i as usize * 3;
@@ -126,29 +127,36 @@ pub fn nodal_average_with(
     let nodes = model.nodes.len();
     let mut sum = vec![[0.0; 6]; nodes];
     let mut count = vec![0u32; nodes];
-    let mut per_element = Vec::with_capacity(table.entries.len());
-    for (index, entry) in table.entries.iter().enumerate() {
-        let formulation = table.formulation(entry);
-        let ips = formulation.integration_points();
-        let start = table.layout.offsets[index] as usize;
-        let e = formulation.extrapolation();
-        let mut nodal = vec![[0.0; 6]; entry.nodes.len()];
-        for (a, node) in nodal.iter_mut().enumerate() {
-            for g in 0..ips {
-                let w = e[a * ips + g];
-                let at = (start + g) * 6;
-                for (k, v) in node.iter_mut().enumerate() {
-                    *v += w * field.values[at + k];
+    // The extrapolation of every element in parallel; the sums at the shared nodes after.
+    let per_element: Vec<Vec<[f64; 6]>> = table
+        .entries
+        .par_iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let formulation = table.formulation(entry);
+            let ips = formulation.integration_points();
+            let start = table.layout.offsets[index] as usize;
+            let e = formulation.extrapolation();
+            let mut nodal = vec![[0.0; 6]; entry.nodes.len()];
+            for (a, node) in nodal.iter_mut().enumerate() {
+                for g in 0..ips {
+                    let w = e[a * ips + g];
+                    let at = (start + g) * 6;
+                    for (k, v) in node.iter_mut().enumerate() {
+                        *v += w * field.values[at + k];
+                    }
                 }
             }
-        }
+            nodal
+        })
+        .collect();
+    for (entry, nodal) in table.entries.iter().zip(&per_element) {
         for (a, &n) in entry.nodes.iter().enumerate() {
             for k in 0..6 {
                 sum[n as usize][k] += nodal[a][k];
             }
             count[n as usize] += 1;
         }
-        per_element.push(nodal);
     }
     for (nodes, values) in extra {
         for (&n, value) in nodes.iter().zip(values) {
@@ -381,7 +389,12 @@ pub fn build_fields_with(
         })
         .unzip();
     // Internal unknowns (thickness change of plane stress nodes) are no displacements.
-    let (u, reactions) = &table.reported(model, u, reactions);
+    // The reported forces cost an element stiffness of every plane element: only for `RF`.
+    let (u, reactions) = &if has("RF") {
+        table.reported(model, u, reactions)
+    } else {
+        (table.reported_displacements(u), Vec::new())
+    };
     if has("U") {
         fields.push(vector_field("DISP", ["D1", "D2", "D3"], &order, u));
     }
@@ -489,8 +502,8 @@ pub fn unsupported_outputs(step: &Step) -> Vec<String> {
     // `V` only means something in dynamic steps, `PU`/`PHS` in steady state and complex
     // frequency steps; CalculiX ignores them in the others.
     let known = [
-        "U", "V", "S", "E", "RF", "ERR", "NOE", "PEEQ", "ENER", "NT", "HFL", "RFL", "PU", "PHS",
-        "SEN", "CDIS", "CSTR", "CELS", "EVOL",
+        "U", "V", "A", "S", "E", "RF", "ERR", "NOE", "PEEQ", "ENER", "NT", "HFL", "RFL", "PU",
+        "PHS", "SEN", "CDIS", "CSTR", "CELS", "EVOL",
     ];
     let mut out = Vec::new();
     for v in requested(step) {

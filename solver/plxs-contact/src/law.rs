@@ -109,6 +109,44 @@ impl Law {
         }
     }
 
+    /// The linear relation `p = K d` with a rounded start, compression only: `K d²/(2δ)` up
+    /// to `d = δ`, `K (d − δ/2)` beyond (other relations as for a face-to-face point). The
+    /// relation is convex and has a continuous slope: Newton's iterations for a light body
+    /// resting on a stiff spring (gravity alone presses a part by picometres onto another)
+    /// approach the overclosure from above instead of jumping between a closed spring and an
+    /// open one, which with a kink at zero they do as long as the overclosure is below the
+    /// accuracy of a correction.
+    pub fn rounded_pressure(&self, d: f64, delta: f64) -> (f64, f64) {
+        match self {
+            Law::Linear { k, .. } if delta > 0.0 => {
+                if d <= 0.0 {
+                    (0.0, 0.0)
+                } else if d < delta {
+                    (0.5 * k * d * d / delta, k * d / delta)
+                } else {
+                    (k * (d - 0.5 * delta), *k)
+                }
+            }
+            _ => self.face_pressure(d),
+        }
+    }
+
+    /// The energy `∫₀ᵈ p` of [`Law::rounded_pressure`].
+    pub fn rounded_energy(&self, d: f64, delta: f64) -> f64 {
+        match self {
+            Law::Linear { k, .. } if delta > 0.0 => {
+                if d <= 0.0 {
+                    0.0
+                } else if d < delta {
+                    k * d * d * d / (6.0 * delta)
+                } else {
+                    k * (0.5 * d * d - 0.5 * delta * d + delta * delta / 6.0)
+                }
+            }
+            _ => self.face_energy(d),
+        }
+    }
+
     /// Pressure and its derivative at the overclosure `d` for a face-to-face integration
     /// point: compression only, nothing for a clearance.
     pub fn face_pressure(&self, d: f64) -> (f64, f64) {

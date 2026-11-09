@@ -32,8 +32,6 @@ pub struct ContactRegion {
     pub behavior: ContactBehavior,
     #[serde(default)]
     pub settings: ContactSettings,
-    pub color_a: [u8; 3],
-    pub color_b: [u8; 3],
     /// The contact detection that found the region; `None` for a region made by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detected_by: Option<crate::Id>,
@@ -52,8 +50,6 @@ impl ContactRegion {
             side_b: Region::Faces(Vec::new()),
             behavior,
             settings: ContactSettings::default(),
-            color_a: [255, 0, 0],
-            color_b: [0, 0, 255],
             detected_by: None,
             edited: false,
         }
@@ -102,7 +98,6 @@ impl ContactRegion {
     /// Swaps side A and side B, together with a master side chosen by hand.
     pub fn flip(&mut self) {
         std::mem::swap(&mut self.side_a, &mut self.side_b);
-        std::mem::swap(&mut self.color_a, &mut self.color_b);
         self.settings.sides = self.settings.sides.map(SideRoles::flipped);
     }
 }
@@ -642,7 +637,7 @@ impl FeModel {
 
     /// Young's modulus of each element with a section whose material has one.
     pub(crate) fn young_of_elements(&self, mesh: &FeMesh) -> HashMap<ElementId, f64> {
-        self.material_of_elements(mesh, |m| m.elastic.map(|e| e.young))
+        self.material_of_elements(mesh, |m| m.small_strain_elastic().map(|e| e.young))
     }
 
     /// A property of the material of each element with a section whose material has it.
@@ -734,7 +729,7 @@ impl FeModel {
         formulation: ContactMethod,
     ) -> Resolved {
         let active = self.steps.iter().filter(|s| s.active);
-        let nlgeom = active.clone().any(|s| s.kind.nlgeom());
+        let nlgeom = active.clone().any(|s| self.step_nlgeom(&s.kind));
         let thermal = active.clone().any(|s| conducts_across_contacts(&s.kind));
         let a = Side::new(&region.side_a, mesh, properties);
         let b = Side::new(&region.side_b, mesh, properties);
@@ -775,20 +770,10 @@ impl FeModel {
         // Interactions of one region each, whose friction a step changes.
         let mut private: Vec<String> = Vec::new();
         for (r, (region, item)) in self.contact_regions.iter().zip(&resolved.items).enumerate() {
-            let (master, slave, master_color, slave_color) = if item.a_is_master {
-                (
-                    &region.side_a,
-                    &region.side_b,
-                    region.color_a,
-                    region.color_b,
-                )
+            let (master, slave) = if item.a_is_master {
+                (&region.side_a, &region.side_b)
             } else {
-                (
-                    &region.side_b,
-                    &region.side_a,
-                    region.color_b,
-                    region.color_a,
-                )
+                (&region.side_b, &region.side_a)
             };
             match &item.kind {
                 ResolvedKind::Tie { tolerance, adjust } => {
@@ -800,8 +785,6 @@ impl FeModel {
                     tie.adjust = *adjust;
                     tie.master = master.clone();
                     tie.slave = slave.clone();
-                    tie.master_color = master_color;
-                    tie.slave_color = slave_color;
                     let nodes: BTreeSet<NodeId> = if region.active {
                         slave.nodes(mesh).into_iter().collect()
                     } else {
@@ -883,8 +866,6 @@ impl FeModel {
                     pair.clearance = *clearance;
                     pair.master = master.clone();
                     pair.slave = slave.clone();
-                    pair.master_color = master_color;
-                    pair.slave_color = slave_color;
                     lowered.contact_pairs.push(pair);
                     origin.pair_regions.push(r);
                 }
@@ -1221,7 +1202,11 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
     }
 }
 
-/// Whether a step type takes contact; the mortar formulation takes static steps only.
+/// Whether a step type takes contact; the mortar formulation takes static and dynamic
+/// steps only.
 pub fn mortar_supports(kind: &StepKind) -> bool {
-    matches!(kind, StepKind::Static(_) | StepKind::Visco(_))
+    matches!(
+        kind,
+        StepKind::Static(_) | StepKind::Visco(_) | StepKind::Dynamic(_)
+    )
 }

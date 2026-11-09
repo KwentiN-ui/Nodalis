@@ -10,20 +10,12 @@ repository.workspace = true
 faer.workspace = true
 rayon.workspace = true
 plxs-core.workspace = true
-# The multigrid cycle on the graphics card (feature `gpu`): the wgpu of the user interface.
-wgpu = { version = "30", optional = true, default-features = false, features = [
-    "std",
-    "parking_lot",
-    "wgsl",
-    "vulkan",
-    "dx12",
-    "metal",
-] }
-pollster = { version = "1", optional = true }
+# The multigrid cycle on the graphics card (feature `gpu`).
+plxs-gpu = { workspace = true, optional = true }
 bytemuck = { workspace = true, optional = true }
 
 [features]
-gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+gpu = ["dep:plxs-gpu", "dep:bytemuck"]
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }

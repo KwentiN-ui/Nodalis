@@ -43,6 +43,7 @@ mod frames;
 mod history;
 mod minimap;
 mod numbers;
+mod saving;
 mod workspace;
 
 /// Storage key of the project file open at exit, reopened at the next start.
@@ -1479,6 +1480,16 @@ impl Node {
         Some(Self::new(id, name, block))
     }
 
+    /// Brings the state of an analysis up to date after the project changed its model
+    /// through [`Self::exposing_fe_mut`]: an open window counts the change, a closed analysis
+    /// finds its state again.
+    fn model_changed(&mut self) {
+        match self.window_mut() {
+            Some(window) => window.note_change(),
+            None => self.refresh_closed(),
+        }
+    }
+
     /// Finds the state of a closed analysis from its data, once after it changed.
     fn refresh_closed(&mut self) {
         let Some(analysis) = self.as_analysis_mut() else {
@@ -1585,7 +1596,7 @@ impl Node {
         };
         let changed = fe.set_value(&path, value);
         if changed {
-            self.refresh_closed();
+            self.model_changed();
         }
         changed
     }
@@ -1941,6 +1952,8 @@ pub struct ProjectApp {
     new_analysis: Option<(egui::Pos2, ModelPropertiesDialog)>,
     /// A project file being read on a worker thread, with notes on its conversion.
     opening: Option<(PathBuf, Receiver<Opened>)>,
+    /// The save running on a worker thread, and what autosave needs to know.
+    saver: saving::Saver,
     /// Analyses Update Project still has to solve, in order, and those it solves.
     update_queue: VecDeque<u64>,
     updating: Vec<u64>,
@@ -2062,6 +2075,7 @@ impl ProjectApp {
             dragging: None,
             new_analysis: None,
             opening: None,
+            saver: Default::default(),
             update_queue: VecDeque::new(),
             updating: Vec::new(),
             shown_title: String::new(),
@@ -3871,7 +3885,7 @@ impl ProjectApp {
             return format!("Speed not set: {name} has no active Complex Frequency step.");
         }
         crate::campbell::set_speed(fe, speed);
-        node.refresh_closed();
+        node.model_changed();
         self.sync_due = true;
         format!(
             "{name}: Complex Frequency step set to {shown} rpm; solve it for the results there."
@@ -4434,6 +4448,7 @@ impl ProjectApp {
         self.in_project = true;
         self.active = None;
         self.add_first_analysis();
+        self.forget_edits();
         self.output.push("New project".into());
     }
 
@@ -4523,6 +4538,7 @@ impl ProjectApp {
                 });
                 self.path = Some(path);
                 self.forget_solves();
+                self.forget_edits();
             }
             Err(error) => self.output.push(format!("Not opened: {error}")),
         }
@@ -4555,68 +4571,6 @@ impl ProjectApp {
             frames: self.frames.clone(),
             compact: self.compact.iter().copied().collect(),
             format: plx_model::PROJECT_FORMAT,
-        }
-    }
-
-    /// Saves the project to its file, or to one the user picks for a new project or with
-    /// `save_as`.
-    fn save(&mut self, save_as: bool) {
-        if let Some(name) = self
-            .nodes
-            .iter()
-            .find(|n| n.window().is_some_and(|w| w.model().is_none()))
-        {
-            self.output
-                .push(format!("Not saved: {} is still loading.", name.name));
-            return;
-        }
-        let path = match &self.path {
-            Some(path) if !save_as => path.clone(),
-            _ => {
-                let Some(path) = pick_project_file(self.path.as_deref(), "Save Project", "") else {
-                    return;
-                };
-                path
-            }
-        };
-        let project = self.project(true);
-        match plx_io::project::save_project(&path, &project) {
-            Ok(()) => {
-                let line = timestamped(format!("{} saved", path.display()));
-                self.output.push(line.clone());
-                let folder = crate::analysis::job_name(
-                    &path.file_stem().unwrap_or_default().to_string_lossy(),
-                );
-                for node in &mut self.nodes {
-                    if let Some(window) = node.window_mut() {
-                        window.saved(&path);
-                        window.set_project_folder(folder.clone());
-                        window.message(line.clone());
-                    }
-                }
-                self.path = Some(path);
-            }
-            Err(error) => self.output.push(format!("Not saved: {error}")),
-        }
-    }
-
-    /// Saves a copy of the project without the results of its analyses, for example to send
-    /// it; the open project stays on its own file and keeps its results.
-    fn save_without_results(&mut self) {
-        let Some(path) = pick_project_file(
-            self.path.as_deref(),
-            "Save Project Without Results",
-            "-without-results",
-        ) else {
-            return;
-        };
-        let project = self.project(false);
-        match plx_io::project::save_project(&path, &project) {
-            Ok(()) => self.output.push(timestamped(format!(
-                "{} saved without results",
-                path.display()
-            ))),
-            Err(error) => self.output.push(format!("Not saved: {error}")),
         }
     }
 
@@ -5157,6 +5111,8 @@ impl ProjectApp {
         let solve = selected.and_then(|id| self.solves.iter().find(|s| s.id == id));
         let output: Vec<&str> = solve.map(|s| s.output()).unwrap_or_default();
         let dropped = solve.map_or(0, |s| s.dropped());
+        let profile = solve.filter(|s| !s.active()).and_then(|s| s.profile());
+        let steps = solve.map(|s| s.step_lines().to_vec()).unwrap_or_default();
         ui.horizontal(|ui| {
             let row = rows.iter().find(|r| Some(r.id) == selected);
             let active = row.is_some_and(|r| r.active);
@@ -5191,6 +5147,16 @@ impl ProjectApp {
                 clear = true;
             }
             ui.separator();
+            if let Some(row) = row {
+                let info = crate::solver_profile::ReportInfo {
+                    name: &row.name,
+                    state: &row.state,
+                    seconds: row.seconds.unwrap_or(0.0),
+                    steps: &steps,
+                };
+                crate::solver_profile::buttons(ui, profile.as_ref(), &info);
+                ui.separator();
+            }
             ui.label("Filter:");
             ui.add(
                 egui::TextEdit::singleline(&mut filter)
@@ -5259,7 +5225,7 @@ impl ProjectApp {
             );
             ui.separator();
             // The lines go one below the other, not in the row of the list.
-            ui.vertical(|ui| {
+            ui.vertical(|ui| crate::solver_profile::with_output(ui, profile.as_ref(), |ui| {
                 let area = egui::ScrollArea::both()
                     .id_salt(("monitor output", selected))
                     .auto_shrink([false, false])
@@ -5273,7 +5239,7 @@ impl ProjectApp {
                         .collect();
                     crate::virtual_table::lines(ui, area, &shown);
                 }
-            });
+            }));
         });
         self.monitor.filter = filter;
         if pick.is_some() {
@@ -7644,6 +7610,10 @@ impl ProjectApp {
             // What links take from it follows its changes.
             let revision = window.revision();
             if revision != analysis.seen {
+                // A window that is done loading has not changed the analysis.
+                if analysis.seen.is_some() && revision.is_some() {
+                    self.saver.window_edits += 1;
+                }
                 analysis.seen = revision;
                 changed = true;
             }
@@ -7772,6 +7742,7 @@ impl eframe::App for ProjectApp {
         let ctx = ui.ctx().clone();
         crate::style::sync(&ctx);
         self.poll_opening();
+        self.poll_saving(&ctx);
         self.check_active();
         if crate::crash_log::take_device_lost() {
             self.output.push(
@@ -7898,6 +7869,9 @@ impl ProjectApp {
                 if let Some((path, _)) = &self.opening {
                     ui.spinner();
                     ui.label(format!("Opening {} …", path.display()));
+                } else if let Some(status) = crate::save_status::get(&ctx) {
+                    ui.spinner();
+                    ui.label(status);
                 } else {
                     let file = (self.path.as_ref())
                         .map_or_else(|| "not saved yet".into(), |p| p.display().to_string());
@@ -9694,22 +9668,28 @@ fn campbell_rows(node: &Node, incoming: &[(Vec<String>, String)], state: CellSta
     const SHOWN: usize = 5;
     let critical = window.critical_speeds();
     for (index, speed) in critical.iter().enumerate().take(SHOWN) {
-        let order = crate::numeric::format_physical(speed.order);
+        let order = speed.order_label();
         rows.push(row(
             &["Campbell", "Critical", &index.to_string()],
             format!(
-                "{order}x: {} rpm",
+                "{order}: {} rpm",
                 crate::numeric::format_physical(crate::campbell::rpm(speed.speed).round())
             ),
             NodeIcon::Results,
-            format!(
-                "Critical speed: mode {}{} crosses the {order}x engine order line here.",
-                speed.mode,
-                match speed.whirl.letter() {
-                    "" => String::new(),
-                    letter => format!(" ({letter})"),
-                }
-            ),
+            if speed.order == 0.0 {
+                format!(
+                    "Critical speed: the backward wave of mode {} ({}) comes to rest here, a \
+                     standing wave in the stationary frame.",
+                    speed.mode,
+                    speed.branch_label()
+                )
+            } else {
+                format!(
+                    "Critical speed: mode {} ({}) crosses the {order} engine order line here.",
+                    speed.mode,
+                    speed.branch_label()
+                )
+            },
         ));
     }
     if critical.len() > SHOWN {
@@ -12460,6 +12440,7 @@ mod tests {
             kind: plx_model::LoadKind::force([0.0, -10.0, 0.0]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         model.steps.push(step);
         let force = plx_model::ValuePath::new(
@@ -13183,6 +13164,7 @@ mod tests {
                     frequency: 200.0 - 10.0 * i as f64,
                     whirl: Whirl::Backward,
                     unstable: false,
+                    nodal_diameter: None,
                 }],
             })
             .collect();
@@ -13209,7 +13191,7 @@ mod tests {
         // The 1x line f = speed / 2 pi meets the mode at 200 / (1 / 2 pi + 0.05) = 956 rad/s.
         let texts: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
         assert_eq!(texts[2..], ["1x: 9131 rpm"]);
-        assert!(rows[2].tip.contains("mode 1 (B)"), "{}", rows[2].tip);
+        assert!(rows[2].tip.contains("mode 1 (backward)"), "{}", rows[2].tip);
     }
 
     #[test]

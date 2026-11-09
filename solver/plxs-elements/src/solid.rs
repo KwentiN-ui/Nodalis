@@ -41,6 +41,23 @@ pub struct SolidElement {
     /// For plane and axisymmetric elements: how the 2D element expands into this 3D one.
     /// The public methods then take and return values of the 2D nodes.
     expansion: Option<Box<Expansion>>,
+    /// `dN/dξ` of every node at every point of the rule: constant on the reference
+    /// element, so computed once.
+    reference_gradients: Vec<Vec<[f64; 3]>>,
+}
+
+/// `dN/dξ` of all nodes at every point of `rule`.
+fn reference_gradients(family: Family, rule: &IntegrationRule) -> Vec<Vec<[f64; 3]>> {
+    let count = family.node_count();
+    rule.points
+        .iter()
+        .map(|&p| {
+            let mut n = vec![0.0; count];
+            let mut dn = vec![[0.0; 3]; count];
+            family.shape(p, &mut n, &mut dn);
+            dn
+        })
+        .collect()
 }
 
 /// Nodal values of a plane or axisymmetric element as CalculiX reports them, see
@@ -102,6 +119,7 @@ pub fn solid(kind: ElementType) -> Option<SolidElement> {
     Some(SolidElement {
         kind,
         family,
+        reference_gradients: reference_gradients(family, &rule),
         rule,
         formulation,
         extrapolation,
@@ -240,6 +258,24 @@ pub(crate) struct Point {
     pub(crate) n: Vec<f64>,
 }
 
+/// The Jacobian determinant and `dN/dx` from `dN/dξ` and the node coordinates.
+fn cartesian_gradients(dn: &[[f64; 3]], coords: &[[f64; 3]]) -> (f64, Vec<[f64; 3]>) {
+    let j = jacobian(dn, coords);
+    let (det, inv) = invert3(&j);
+    // dN/dξ_r = Σ_c J_rc dN/dx_c with J_rc = dx_c/dξ_r, so dN/dx_c = Σ_r inv[c][r] dN/dξ_r.
+    let dndx = dn
+        .iter()
+        .map(|d| {
+            let mut g = [0.0; 3];
+            for (c, gc) in g.iter_mut().enumerate() {
+                *gc = d[0] * inv[c][0] + d[1] * inv[c][1] + d[2] * inv[c][2];
+            }
+            g
+        })
+        .collect();
+    (det, dndx)
+}
+
 fn jacobian(dn: &[[f64; 3]], coords: &[[f64; 3]]) -> [[f64; 3]; 3] {
     let mut j = [[0.0; 3]; 3];
     for (d, x) in dn.iter().zip(coords) {
@@ -282,6 +318,7 @@ impl SolidElement {
     pub fn with_rule(mut self, rule: IntegrationRule, extrapolation: Vec<f64>) -> Self {
         assert_eq!(extrapolation.len(), rule.len() * self.node_count());
         self.extrapolation = extrapolation;
+        self.reference_gradients = reference_gradients(self.family, &rule);
         self.rule = rule;
         self
     }
@@ -304,12 +341,15 @@ impl SolidElement {
     }
 
     /// Whether the third DOF of the element's nodes takes part in the stiffness (not for
-    /// plane strain and axisymmetric elements, whose nodes move in their plane only).
+    /// plane and axisymmetric elements, whose nodes move in their plane only).
     pub fn uses_out_of_plane(&self) -> bool {
-        !matches!(
-            self.expansion.as_deref().map(|x| x.kind),
-            Some(PlaneKind::Strain | PlaneKind::Axisymmetric)
-        )
+        self.expansion.is_none()
+    }
+
+    /// Whether the element is a plane stress element: its material must make the thickness
+    /// stress zero (`plxs_materials::plane_stress`).
+    pub fn is_plane_stress(&self) -> bool {
+        self.expansion.as_deref().map(|x| x.kind) == Some(PlaneKind::Stress)
     }
 
     /// For plane and axisymmetric elements: displacements and nodal forces (`K u`) of the
@@ -324,13 +364,8 @@ impl SolidElement {
     ) -> Option<ReportedNodal> {
         let x = self.expansion.as_deref()?;
         let coords3 = x.coordinates(coords);
-        let mut k3 = Vec::new();
-        self.stiffness_3d(&coords3, d, &mut k3);
         let u3 = x.expand(u);
-        let n3 = u3.len();
-        let f3: Vec<f64> = (0..n3)
-            .map(|i| (0..n3).map(|j| k3[i * n3 + j] * u3[j]).sum())
-            .collect();
+        let f3 = self.linear_force_3d(&coords3, d, &u3);
         let mut condensed = vec![0.0; self.dof_count()];
         x.condense_vector(&f3, &mut condensed);
         Some(ReportedNodal {
@@ -338,6 +373,36 @@ impl SolidElement {
             forces: x.reported_forces(&f3),
             condensed,
         })
+    }
+
+    /// `K₃ u₃` of the 3D element. With the full displacement formulation as `Σ Bᵀ D B u₃`
+    /// over the integration points, without the element matrix (a 2D model's results ask
+    /// for it of every element at every written increment); the other formulations
+    /// multiply their matrix.
+    fn linear_force_3d(&self, coords: &[[f64; 3]], d: &[[f64; 6]; 6], u3: &[f64]) -> Vec<f64> {
+        let n3 = u3.len();
+        if self.formulation != Formulation::Standard {
+            let mut k3 = Vec::new();
+            self.stiffness_3d(coords, d, &mut k3);
+            return (0..n3)
+                .map(|i| (0..n3).map(|j| k3[i * n3 + j] * u3[j]).sum())
+                .collect();
+        }
+        let mut f3 = vec![0.0; n3];
+        let mut b = vec![0.0; 6 * n3];
+        for (&p, &w) in self.rule.points.iter().zip(&self.rule.weights) {
+            let point = self.point(p, coords);
+            Self::fill_b(&point.dndx, &mut b);
+            let strain: [f64; 6] =
+                std::array::from_fn(|r| (0..n3).map(|c| b[r * n3 + c] * u3[c]).sum());
+            let stress: [f64; 6] =
+                std::array::from_fn(|r| (0..6).map(|k| d[r][k] * strain[k]).sum());
+            let f = point.det * w;
+            for (c, out) in f3.iter_mut().enumerate() {
+                *out += f * (0..6).map(|r| b[r * n3 + c] * stress[r]).sum::<f64>();
+            }
+        }
+        f3
     }
 
     /// Number of faces (edges of 2D elements) that can carry a pressure.
@@ -366,20 +431,23 @@ impl SolidElement {
         let mut n = vec![0.0; count];
         let mut dn = vec![[0.0; 3]; count];
         self.family.shape(p, &mut n, &mut dn);
-        let j = jacobian(&dn, coords);
-        let (det, inv) = invert3(&j);
-        // dN/dξ_r = Σ_c J_rc dN/dx_c with J_rc = dx_c/dξ_r, so dN/dx_c = Σ_r inv[c][r] dN/dξ_r.
-        let dndx = dn
-            .iter()
-            .map(|d| {
-                let mut g = [0.0; 3];
-                for (c, gc) in g.iter_mut().enumerate() {
-                    *gc = d[0] * inv[c][0] + d[1] * inv[c][1] + d[2] * inv[c][2];
-                }
-                g
-            })
-            .collect();
+        let (det, dndx) = cartesian_gradients(&dn, coords);
         Point { det, dndx, n }
+    }
+
+    /// The Jacobian determinant and the Cartesian shape function derivatives at integration
+    /// point `ip` of the rule (from the stored reference derivatives).
+    pub(crate) fn rule_point(&self, ip: usize, coords: &[[f64; 3]]) -> (f64, Vec<[f64; 3]>) {
+        cartesian_gradients(&self.reference_gradients[ip], coords)
+    }
+
+    /// Whether a three-dimensional element is turned inside out or folded: its Jacobian
+    /// determinant is zero or negative at an integration point. Its stiffness then has
+    /// negative eigenvalues, an implicit solution diverges and an explicit one grows without
+    /// bound. Plane and axisymmetric elements are not checked (`false`).
+    pub fn inverted(&self, coords: &[[f64; 3]]) -> bool {
+        self.expansion.is_none()
+            && (0..self.rule.points.len()).any(|ip| self.rule_point(ip, coords).0 <= 0.0)
     }
 
     /// Element volume (of the full circumference for axisymmetric elements).
@@ -503,6 +571,32 @@ impl SolidElement {
         self.hourglass_stiffness(coords, d, &mean, volume, out);
     }
 
+    /// The hourglass base vectors of the eight-node brick.
+    pub const HOURGLASS_BASE: [[f64; 8]; 4] = [
+        [1.0, 1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0],
+        [1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0],
+        [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0],
+        [-1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0],
+    ];
+
+    /// `ε` of the hourglass stiffness `ε Σ_α γ_α γ_αᵀ ⊗ I` of the uniform-strain
+    /// hexahedron (Young's modulus from the isotropic material matrix).
+    pub(crate) fn hourglass_coefficient(
+        &self,
+        d: &[[f64; 6]; 6],
+        mean: &[[f64; 3]],
+        volume: f64,
+    ) -> f64 {
+        let mu = d[3][3];
+        let lambda = d[0][1];
+        let young = mu * (3.0 * lambda + 2.0 * mu) / (lambda + mu);
+        let bb: f64 = mean
+            .iter()
+            .map(|m| m[0] * m[0] + m[1] * m[1] + m[2] * m[2])
+            .sum();
+        0.004 * young * volume * bb / 8.0
+    }
+
     /// Adds the hourglass control stiffness of the uniform-strain hexahedron to `out`
     /// (Young's modulus from the isotropic material matrix).
     pub(crate) fn hourglass_stiffness(
@@ -514,21 +608,8 @@ impl SolidElement {
         out: &mut [f64],
     ) {
         let ndof = self.dof_count_3d();
-        let mu = d[3][3];
-        let lambda = d[0][1];
-        let young = mu * (3.0 * lambda + 2.0 * mu) / (lambda + mu);
-        let bb: f64 = mean
-            .iter()
-            .map(|m| m[0] * m[0] + m[1] * m[1] + m[2] * m[2])
-            .sum();
-        let epsilon = 0.004 * young * volume * bb / 8.0;
-        const H: [[f64; 8]; 4] = [
-            [1.0, 1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0],
-            [1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0],
-            [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0],
-            [-1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0],
-        ];
-        for h in &H {
+        let epsilon = self.hourglass_coefficient(d, mean, volume);
+        for h in &Self::HOURGLASS_BASE {
             // Flanagan-Belytschko: γ = h − Σ_j (h·x_j) b_j, orthogonal to the linear
             // displacement fields. CalculiX subtracts the term of the global z coordinate
             // only (j = 3), which was identified from its stiffness matrices of distorted and
@@ -647,7 +728,16 @@ impl SolidElement {
     /// Engineering strains at the integration points for nodal displacements `u`.
     pub fn strains(&self, coords: &[[f64; 3]], d: &[[f64; 6]; 6], u: &[f64]) -> Vec<[f64; 6]> {
         if let Some(x) = &self.expansion {
-            return self.strains_3d(&x.coordinates(coords), d, &x.expand(u));
+            let mut e = self.strains_3d(&x.coordinates(coords), d, &x.expand(u));
+            if x.kind != PlaneKind::Axisymmetric {
+                // No transverse shear in the plane (its value is round-off of the equal
+                // in-plane displacements of the layers).
+                for e in &mut e {
+                    e[4] = 0.0;
+                    e[5] = 0.0;
+                }
+            }
+            return e;
         }
         self.strains_3d(coords, d, u)
     }
@@ -974,6 +1064,42 @@ fn solve_dense(a: &mut [f64], m: usize, b: &[f64], n: usize) -> Vec<f64> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_linear_force_is_the_stiffness_times_the_displacements() {
+        let d = isotropic(210_000.0, 0.3);
+        for kind in [
+            ElementType::C3D20,
+            ElementType::C3D20R,
+            ElementType::C3D10,
+            ElementType::C3D15,
+            ElementType::C3D8,
+            ElementType::C3D8R,
+            ElementType::C3D8I,
+        ] {
+            let e = solid(kind).unwrap();
+            let coords: Vec<[f64; 3]> = (e.family.node_coordinates().iter().enumerate())
+                .map(|(i, c)| {
+                    let s = (i as f64 * 0.731).sin();
+                    [
+                        2.0 * c[0] + 0.1 * s,
+                        1.5 * c[1] - 0.05 * s,
+                        c[2] + 0.07 * s * s,
+                    ]
+                })
+                .collect();
+            let n = e.dof_count_3d();
+            let u: Vec<f64> = (0..n).map(|i| 1e-3 * (i as f64 * 0.37).sin()).collect();
+            let mut k = Vec::new();
+            e.stiffness_3d(&coords, &d, &mut k);
+            let f = e.linear_force_3d(&coords, &d, &u);
+            let scale = f.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            for (a, fa) in f.iter().enumerate() {
+                let ku: f64 = (0..n).map(|c| k[a * n + c] * u[c]).sum();
+                assert!((ku - fa).abs() < 1e-12 * scale, "{kind}: {ku} vs {fa}");
+            }
+        }
+    }
+
     fn isotropic(e: f64, nu: f64) -> [[f64; 6]; 6] {
         let l = e * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
         let g = e / (2.0 * (1.0 + nu));
@@ -1001,6 +1127,29 @@ mod tests {
     fn all_kinds() -> Vec<ElementType> {
         use ElementType::*;
         vec![C3D8, C3D8R, C3D8I, C3D20, C3D20R, C3D4, C3D10, C3D6, C3D15]
+    }
+
+    #[test]
+    fn a_folded_element_is_inverted() {
+        for kind in all_kinds() {
+            let e = solid(kind).unwrap();
+            let coords = match e.family {
+                Family::Hex8 | Family::Hex20 => unit_cube(e.family),
+                _ => reference(e.family),
+            };
+            assert!(!e.inverted(&coords), "{kind}");
+            // Mirrored: turned inside out.
+            let mirrored: Vec<[f64; 3]> = coords.iter().map(|c| [-c[0], c[1], c[2]]).collect();
+            assert!(e.inverted(&mirrored), "{kind}");
+        }
+        // A brick whose top face is pushed through its bottom on one side only: positive
+        // at some integration points, negative at others.
+        let e = solid(ElementType::C3D8).unwrap();
+        let mut coords = unit_cube(Family::Hex8);
+        for c in coords.iter_mut().filter(|c| c[2] > 0.5 && c[0] > 0.5) {
+            c[2] = -2.0;
+        }
+        assert!(e.inverted(&coords));
     }
 
     #[test]
@@ -1345,9 +1494,54 @@ impl SolidElement {
         };
         let mut full = self.clone();
         full.extrapolation = vec![0.0; rule.len() * self.family.node_count()];
+        full.reference_gradients = reference_gradients(self.family, &rule);
         full.rule = rule;
         full.formulation = formulation;
         Some(full)
+    }
+
+    /// The volume of the element and the volume average of its shape function gradients
+    /// as a row over its DOFs (`g[3a + c] = (1/V) ∫ ∂N_a/∂x_c dV`), in the reference
+    /// configuration: `g · v` is the mean volumetric strain rate of the nodal velocities
+    /// `v`, and `V (g · v) g` the nodal forces of a unit pressure rate (the linear bulk
+    /// viscosity of explicit time integration). Plane and axisymmetric elements average over
+    /// their expanded element and return the row on their 2D DOFs and the volume of the
+    /// thickness or the full circumference.
+    pub fn volume_mean_gradients(&self, coords: &[[f64; 3]]) -> (f64, Vec<f64>) {
+        let expanded;
+        let (coords3, x) = match self.expansion.as_deref() {
+            Some(x) => {
+                expanded = x.coordinates(coords);
+                (expanded.as_slice(), Some(x))
+            }
+            None => (coords, None),
+        };
+        let rule = self.mass_rule();
+        let nodes = self.family.node_count();
+        let mut g3 = vec![0.0; 3 * nodes];
+        let mut volume = 0.0;
+        for (&p, &w) in rule.points.iter().zip(&rule.weights) {
+            let point = self.point(p, coords3);
+            let dv = point.det * w;
+            volume += dv;
+            for (a, d) in point.dndx.iter().enumerate() {
+                for c in 0..3 {
+                    g3[3 * a + c] += dv * d[c];
+                }
+            }
+        }
+        if volume > 0.0 {
+            g3.iter_mut().for_each(|g| *g /= volume);
+        }
+        match x {
+            None => (volume, g3),
+            Some(x) => {
+                let mut g2 = vec![0.0; self.dof_count()];
+                x.condense_vector(&g3, &mut g2);
+                g2.iter_mut().for_each(|g| *g /= x.scale);
+                (volume * x.scale, g2)
+            }
+        }
     }
 
     /// Consistent mass matrix (row-major `3n × 3n`) for the density `rho`:

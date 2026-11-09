@@ -607,6 +607,18 @@ impl Picker {
                 }
                 picker.patch(face)
             }
+            SelectBy::GeometryPart | SelectBy::Part if target == Target::Nodes => {
+                // The nodes of the whole part, inside a solid too: an initial velocity or
+                // temperature of the part on its skin alone left the inside at rest (a
+                // projectile struck from within at the first increment).
+                let elements = model.mesh.elements();
+                return Items::Nodes(
+                    (model.mesh.parts[hit.part].elements.iter())
+                        .filter_map(|&id| model.mesh.element_index(id))
+                        .flat_map(|e| elements[e].nodes.iter().copied())
+                        .collect(),
+                );
+            }
             SelectBy::GeometryPart | SelectBy::Part => (0..picker.faces().len()).collect(),
             SelectBy::GeometryEdgeAngle | SelectBy::EdgeAngle | SelectBy::Edge => {
                 let limit = (self.select_by != SelectBy::Edge).then_some(angle);
@@ -1588,6 +1600,18 @@ mod tests {
         assert!(parts.is_empty());
         parts.box_select(&model, &area(true), Operation::Replace);
         assert_eq!(parts.names(), BTreeSet::from([name]));
+    }
+
+    /// The part mode picks every node of a solid part, the inside too: an initial velocity
+    /// picked this way moved only the skin of a projectile.
+    #[test]
+    fn the_part_mode_picks_the_nodes_inside_a_solid_too() {
+        let (model, hit) = beam_hit(95.0, 5.0);
+        let picked = nodes(picker(SelectBy::Part).pick(&model, &hit, Target::Nodes, 0.5));
+        let all: BTreeSet<NodeId> = model.mesh.node_ids().iter().copied().collect();
+        // 11 x 3 x 3 nodes, 11 of them inside the 2 x 2 elements across.
+        assert_eq!(all.len(), 99);
+        assert_eq!(picked, all);
     }
 
     #[test]

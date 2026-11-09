@@ -10,7 +10,7 @@
 use plx_mesh::FeMesh;
 use serde::{Deserialize, Serialize};
 
-use crate::{FeModel, Id, Region};
+use crate::{FeModel, Id, Region, UnitSystem};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReferencePoint {
@@ -40,6 +40,17 @@ pub enum PointDefinition {
     CenterOfGravity(Region),
     /// The centre of the bounding box of a selection.
     BoundingBoxCenter(Region),
+}
+
+impl PointDefinition {
+    /// The selection of a point at the centre of faces.
+    pub fn region(&self) -> Option<&Region> {
+        match self {
+            PointDefinition::CenterOfGravity(region)
+            | PointDefinition::BoundingBoxCenter(region) => Some(region),
+            PointDefinition::Global | PointDefinition::Local { .. } => None,
+        }
+    }
 }
 
 impl ReferencePoint {
@@ -479,58 +490,78 @@ impl FeModel {
         self.planes.iter().find(|p| p.name == name)
     }
 
-    /// The keys of the features that results take over from the FE model, by their ids, see
-    /// [`FeModel::add_missing_features`].
-    pub fn feature_keys(&self) -> Vec<String> {
-        let points = (self.reference_points.iter()).map(|r| feature_key("RP", r.id));
-        let systems = (self.coordinate_systems.iter()).map(|c| feature_key("CS", c.id));
-        let planes = self.planes.iter().map(|p| feature_key("Plane", p.id));
-        points.chain(systems).chain(planes).collect()
+    /// The features the FE model shares with its results: reference points, coordinate
+    /// systems and planes. Result paths and result planes belong to the results alone.
+    pub fn shared_features(&self) -> FeModel {
+        FeModel {
+            reference_points: self.reference_points.clone(),
+            coordinate_systems: self.coordinate_systems.clone(),
+            planes: self.planes.clone(),
+            ..FeModel::default()
+        }
     }
 
-    /// Copies the features of another model that this one lacks, e.g. those of the FE model
-    /// into its results; returns the keys of those copied. A feature is there when this
-    /// model has it, or one of its name of its own.
-    pub fn add_missing_features(&mut self, other: &FeModel) -> Vec<String> {
-        let mut added = Vec::new();
-        for point in &other.reference_points {
-            let there = (self.reference_points.iter())
-                .any(|own| own.id == point.id || own.name == point.name);
-            if !there {
-                self.reference_points.push(point.clone());
-                added.push(feature_key("RP", point.id));
-            }
-        }
-        for system in &other.coordinate_systems {
-            let there = (self.coordinate_systems.iter())
-                .any(|own| own.id == system.id || own.name == system.name);
-            if !there {
-                self.coordinate_systems.push(system.clone());
-                added.push(feature_key("CS", system.id));
-            }
-        }
-        for plane in &other.planes {
-            let there =
-                (self.planes.iter()).any(|own| own.id == plane.id || own.name == plane.name);
-            if !there {
-                self.planes.push(plane.clone());
-                added.push(feature_key("Plane", plane.id));
-            }
-        }
-        added
+    /// Whether the shared features, see [`FeModel::shared_features`], are the same.
+    pub fn same_shared_features(&self, other: &FeModel) -> bool {
+        self.reference_points == other.reference_points
+            && self.coordinate_systems == other.coordinate_systems
+            && self.planes == other.planes
     }
 
-    /// Removes the features that were taken over from an FE model (`inherited` are their
-    /// keys) and are no longer in `current`, the FE model now; features made on the
-    /// results stay.
-    pub fn drop_removed_features(&mut self, inherited: &[String], current: &FeModel) {
-        let keys = current.feature_keys();
-        let gone = |key: String| inherited.contains(&key) && !keys.contains(&key);
-        self.reference_points
-            .retain(|r| !gone(feature_key("RP", r.id)));
-        self.coordinate_systems
-            .retain(|c| !gone(feature_key("CS", c.id)));
-        self.planes.retain(|p| !gone(feature_key("Plane", p.id)));
+    /// Replaces the shared features with those of `source`, see
+    /// [`FeModel::shared_features`].
+    pub fn set_shared_features(&mut self, source: &FeModel) {
+        self.reference_points = source.reference_points.clone();
+        self.coordinate_systems = source.coordinate_systems.clone();
+        self.planes = source.planes.clone();
+    }
+
+    /// Takes over an edit of the shared features made on results: `before` and `after` are
+    /// the features of the results before and after the edit, in `units`, this the FE model
+    /// in [`crate::STORED`] units. Items the edit did not change keep their values here, so
+    /// that converting them back and forth never rounds them; a renamed item keeps the
+    /// references to it, which go by its id.
+    pub fn take_feature_edit(&mut self, before: &FeModel, after: &FeModel, units: UnitSystem) {
+        fn merge<T: Clone + PartialEq>(
+            own: &[T],
+            before: &[T],
+            after: &[T],
+            converted: &[T],
+            id: impl Fn(&T) -> Id,
+        ) -> Vec<T> {
+            (after.iter().zip(converted))
+                .map(|(item, converted)| {
+                    let kept = before
+                        .contains(item)
+                        .then(|| own.iter().find(|o| id(o) == id(item)));
+                    kept.flatten().unwrap_or(converted).clone()
+                })
+                .collect()
+        }
+        let before = before.shared_features();
+        let mut converted = after.shared_features();
+        converted.convert_features(&crate::convert::Conversion::new(units, crate::STORED));
+        self.reference_points = merge(
+            &self.reference_points,
+            &before.reference_points,
+            &after.reference_points,
+            &converted.reference_points,
+            |r| r.id,
+        );
+        self.coordinate_systems = merge(
+            &self.coordinate_systems,
+            &before.coordinate_systems,
+            &after.coordinate_systems,
+            &converted.coordinate_systems,
+            |c| c.id,
+        );
+        self.planes = merge(
+            &self.planes,
+            &before.planes,
+            &after.planes,
+            &converted.planes,
+            |p| p.id,
+        );
     }
 
     /// Recomputes the positions of reference points defined by a coordinate system or a
@@ -548,11 +579,6 @@ impl FeModel {
         }
         errors
     }
-}
-
-/// The key of a feature taken over by results: its kind and id.
-fn feature_key(kind: &str, id: Id) -> String {
-    format!("{kind}:{}", id.raw())
 }
 
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -664,6 +690,82 @@ mod tests {
     }
 
     #[test]
+    fn results_hand_their_feature_edits_to_the_fe_model() {
+        use crate::UnitSystem;
+        // The FE model in metres, its results in millimetres.
+        let mut fe = FeModel::default();
+        let mut hub = CoordinateSystem::new("Hub");
+        hub.origin = [0.1, 0.0, 0.0];
+        hub.point_x = [0.3, 0.0, 0.0];
+        let hub_id = hub.id;
+        fe.coordinate_systems.push(hub);
+        let mut step = crate::Step::new_static("Rotor");
+        step.kind = crate::StepKind::ComplexFrequency(crate::ComplexFrequencyStep {
+            system: Some(hub_id),
+            ..Default::default()
+        });
+        fe.steps.push(step);
+        let mut results = fe.shared_features();
+        let to_mm = crate::convert::Conversion::new(crate::STORED, UnitSystem::MmTonSC);
+        results.convert_features(&to_mm);
+        // A coordinate system made on the results arrives in metres.
+        let before = results.clone();
+        let mut local = CoordinateSystem::new("Local");
+        local.origin = [5.0, 0.0, 0.0];
+        local.point_x = [5.0, 10.0, 0.0];
+        results.coordinate_systems.push(local);
+        let kept = fe.coordinate_systems[0].clone();
+        fe.take_feature_edit(&before, &results, UnitSystem::MmTonSC);
+        assert_eq!(fe.coordinate_systems.len(), 2);
+        // The unchanged one keeps its values exactly.
+        assert_eq!(fe.coordinate_systems[0], kept);
+        assert!(close(fe.coordinate_systems[1].origin, [0.005, 0.0, 0.0]));
+        // A rename on the results keeps the step on the system.
+        let before = results.clone();
+        results.coordinate_systems[0].name = "Shaft".into();
+        fe.take_feature_edit(&before, &results, UnitSystem::MmTonSC);
+        assert_eq!(fe.coordinate_systems[0].name, "Shaft");
+        let crate::StepKind::ComplexFrequency(complex) = &fe.steps[0].kind else {
+            unreachable!()
+        };
+        assert_eq!(complex.system, Some(hub_id));
+        // And a deletion goes as well.
+        let before = results.clone();
+        results.coordinate_systems.remove(1);
+        fe.take_feature_edit(&before, &results, UnitSystem::MmTonSC);
+        let names: Vec<_> = fe
+            .coordinate_systems
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, ["Shaft"]);
+    }
+
+    #[test]
+    fn springs_on_a_renamed_point_follow_it() {
+        let mut model = FeModel::default();
+        model
+            .reference_points
+            .push(ReferencePoint::new("RP-1", [0.0; 3]));
+        let rp = model.reference_points[0].id;
+        let mut spring = crate::Spring::new("Spring-1");
+        spring.ends = [
+            crate::SpringEnd::Region(crate::Region::ReferencePoint(rp)),
+            crate::SpringEnd::World,
+        ];
+        model.constraints.push(crate::Constraint::Spring(spring));
+        model.reference_points[0].name = "Hub".into();
+        let crate::Constraint::Spring(spring) = &model.constraints[0] else {
+            unreachable!()
+        };
+        assert_eq!(
+            spring.ends[0],
+            crate::SpringEnd::Region(crate::Region::ReferencePoint(rp))
+        );
+        assert_eq!(model.name_of(rp), Some("Hub"));
+    }
+
+    #[test]
     fn planes_resolve_their_definitions() {
         let mut model = FeModel::default();
         model
@@ -706,9 +808,27 @@ mod tests {
             name: "Plane_Result-1".into(),
             plane: model.planes[0].id,
         });
+        // So does the rotation axis of a complex frequency step: the z axis through the origin.
+        let mut step = crate::Step::new_static("Rotor");
+        step.kind = crate::StepKind::ComplexFrequency(crate::ComplexFrequencyStep {
+            system: Some(system),
+            ..Default::default()
+        });
+        model.steps.push(step);
+        let complex = |model: &FeModel| match &model.steps[0].kind {
+            crate::StepKind::ComplexFrequency(c) => c.clone(),
+            _ => unreachable!(),
+        };
+        let (point, axis) = complex(&model).axis_in(&model).unwrap();
+        assert!(close(point, [0.0, 0.0, 5.0]) && close(axis, [0.0, 0.0, 1.0]));
         model.coordinate_systems[0].name = "Turned".into();
         model.planes[0].name = "Cut".into();
         assert!(model.planes[0].resolve(&model).is_ok());
+        assert_eq!(complex(&model).system, Some(system));
+        assert!(complex(&model).axis_in(&model).is_ok());
+        let mut missing = complex(&model);
+        missing.system = Some(Id::new());
+        assert!(missing.axis_in(&model).is_err());
         assert_eq!(model.result_planes[0].plane, model.planes[0].id);
     }
 
@@ -751,27 +871,6 @@ mod tests {
         assert!((0..3).all(|k| (p[k] - [-1.0, 0.0, 0.0][k]).abs() < 1e-12));
         let back = cs.local(p).unwrap();
         assert!((back[0] - 2.0).abs() < 1e-12 && (back[1].to_degrees() - 90.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn results_lose_features_the_fe_model_dropped_but_keep_their_own() {
-        let mut fe = FeModel::default();
-        fe.reference_points
-            .push(ReferencePoint::new("RP-1", [0.0; 3]));
-        let mut results = FeModel::default();
-        let inherited = results.add_missing_features(&fe);
-        assert_eq!(
-            inherited,
-            [format!("RP:{}", fe.reference_points[0].id.raw())]
-        );
-        results
-            .reference_points
-            .push(ReferencePoint::new("Mine", [1.0; 3]));
-        // The reference point is deleted from the FE model before the next solve.
-        fe.reference_points.clear();
-        results.drop_removed_features(&inherited, &fe);
-        let names: Vec<_> = results.reference_points.iter().map(|r| &r.name).collect();
-        assert_eq!(names, ["Mine"]);
     }
 
     #[test]

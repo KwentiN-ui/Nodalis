@@ -24,7 +24,6 @@ pub fn amplitude_form(
     view: &mut AmplitudeView,
     units: UnitSystem,
 ) {
-    let time_unit = units.unit(Quantity::Time);
     egui::Grid::new("amplitude form")
         .max_col_width(crate::dock::column_limit(ui))
         .num_columns(2)
@@ -52,36 +51,83 @@ pub fn amplitude_form(
         });
     ui.add_space(6.0);
     ui.strong("Data Points");
+    points_editor(
+        ui,
+        &mut amplitude.points,
+        view,
+        units,
+        "amplitude points",
+        None,
+    );
+    if let Some(problem) = amplitude.points_problem() {
+        ui.colored_label(crate::style::error(), problem);
+    }
+    ui.weak(
+        "Linear between the points, constant before the first and after the last.\n\
+         Without an amplitude a load ramps up linearly in a static step.",
+    );
+}
+
+/// The points of a table over time as an editable table with the curve they make: rows to
+/// add, remove, sort and paste from the clipboard. The values are factors (`value` `None`)
+/// or of a quantity, shown in the unit system's unit.
+pub fn points_editor(
+    ui: &mut Ui,
+    points: &mut Vec<[f64; 2]>,
+    view: &mut AmplitudeView,
+    units: UnitSystem,
+    id: &str,
+    value: Option<(&str, Quantity)>,
+) {
+    let time_unit = units.unit(Quantity::Time);
     let time_header = if time_unit.is_empty() {
         "Time".to_string()
     } else {
         format!("Time [{time_unit}]")
     };
+    let value_header = match value {
+        None => "Amplitude [/]".to_string(),
+        Some((label, quantity)) => {
+            let unit = units.unit(quantity);
+            if unit.is_empty() {
+                label.to_string()
+            } else {
+                format!("{label} [{unit}]")
+            }
+        }
+    };
     let mut remove = None;
     let table = egui::ScrollArea::vertical()
-        .id_salt("amplitude points")
+        .id_salt(id)
         .max_height(180.0)
         .auto_shrink([false, true])
         .show(ui, |ui| {
-            egui::Grid::new("amplitude points grid")
+            egui::Grid::new((id, "grid"))
                 .num_columns(4)
                 .striped(true)
                 .spacing([12.0, 4.0])
                 .show(ui, |ui| {
                     ui.strong("#");
                     ui.strong(&time_header);
-                    ui.strong("Amplitude [/]");
+                    ui.strong(&value_header);
                     ui.label("");
                     ui.end_row();
-                    let removable = amplitude.points.len() > 1;
-                    for (i, [time, factor]) in amplitude.points.iter_mut().enumerate() {
+                    let removable = points.len() > 1;
+                    for (i, [time, factor]) in points.iter_mut().enumerate() {
                         ui.label((i + 1).to_string());
                         ui.add(
                             numeric::without_unit(time, units, Quantity::Time)
                                 .speed(0.01)
                                 .min_decimals(1),
                         );
-                        ui.add(numeric::drag_value(factor).speed(0.01).min_decimals(1));
+                        match value {
+                            None => ui.add(numeric::drag_value(factor).speed(0.01).min_decimals(1)),
+                            Some((_, quantity)) => ui.add(
+                                numeric::without_unit(factor, units, quantity)
+                                    .speed(0.01)
+                                    .min_decimals(1),
+                            ),
+                        };
                         if ui
                             .add_enabled(removable, egui::Button::new("Remove").small())
                             .clicked()
@@ -93,23 +139,23 @@ pub fn amplitude_form(
                 });
         });
     if let Some(i) = remove {
-        amplitude.points.remove(i);
+        points.remove(i);
     }
     let table_hovered = ui.rect_contains_pointer(table.inner_rect);
     ui.horizontal(|ui| {
         if ui.button("Add Row").clicked() {
             // Continues the last step in time, as a new row in the table starts empty.
-            let next = match amplitude.points.as_slice() {
+            let next = match points.as_slice() {
                 [.., a, b] => [b[0] + (b[0] - a[0]).max(0.0), b[1]],
                 [b] => [b[0] + 1.0, b[1]],
                 [] => [0.0, 0.0],
             };
-            amplitude.points.push(next);
+            points.push(next);
         }
         if ui
             .button("Paste from Clipboard")
             .on_hover_text(
-                "Replaces the table with two columns time and amplitude from the \
+                "Replaces the table with two columns, time and value, from the \
                  clipboard, e.g. from a spreadsheet. Ctrl+V over the \
                  table does the same.",
             )
@@ -120,7 +166,7 @@ pub fn amplitude_form(
                 .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
         }
         if ui.button("Sort by Time").clicked() {
-            amplitude.points.sort_by(|a, b| a[0].total_cmp(&b[0]));
+            points.sort_by(|a, b| a[0].total_cmp(&b[0]));
         }
     });
     // Ctrl+V over the table, while no text field takes it.
@@ -135,29 +181,27 @@ pub fn amplitude_form(
         && (view.awaiting_paste || (table_hovered && !typing))
     {
         view.awaiting_paste = false;
-        let points = parse_points(&text, units);
-        view.paste_note = Some(if points.is_empty() {
+        let pasted = parse_points(&text, units, value.map(|(_, q)| q));
+        view.paste_note = Some(if pasted.is_empty() {
             "The clipboard contains no number pairs.".into()
         } else {
-            format!("{} points pasted.", points.len())
+            format!("{} points pasted.", pasted.len())
         });
-        if !points.is_empty() {
-            amplitude.points = points;
+        if !pasted.is_empty() {
+            *points = pasted;
         }
     }
     if let Some(note) = &view.paste_note {
         ui.weak(note);
     }
-    if let Some(problem) = amplitude.points_problem() {
-        ui.colored_label(crate::style::error(), problem);
-    }
-    let (times, factors): (Vec<f64>, Vec<f64>) =
-        amplitude.points.iter().map(|[t, a]| (*t, *a)).unzip();
-    crate::features::plot(ui, &times, &factors, &time_header, true, 220.0);
-    ui.weak(
-        "Linear between the points, constant before the first and after the last.\n\
-         Without an amplitude a load ramps up linearly in a static step.",
-    );
+    // The curve in the units of the table.
+    let (times, values): (Vec<f64>, Vec<f64>) = (points.iter())
+        .map(|&[t, a]| {
+            let value = value.map_or(a, |(_, q)| units.shown(a, q));
+            (units.shown(t, Quantity::Time), value)
+        })
+        .unzip();
+    crate::features::plot(ui, &times, &values, &time_header, true, 220.0);
 }
 
 /// The checks of the dialog's OK.
@@ -178,7 +222,7 @@ fn time_span_label(span: AmplitudeTime) -> &'static str {
 /// Time and amplitude from pasted text: one point per line, the two values separated by a
 /// tab, a semicolon, spaces or a comma. Lines that are not two numbers, such as a header,
 /// are skipped; a decimal comma is fine when the values are separated otherwise.
-fn parse_points(text: &str, units: UnitSystem) -> Vec<[f64; 2]> {
+fn parse_points(text: &str, units: UnitSystem, value: Option<Quantity>) -> Vec<[f64; 2]> {
     text.lines()
         .filter_map(|line| {
             let line = line.trim();
@@ -196,7 +240,11 @@ fn parse_points(text: &str, units: UnitSystem) -> Vec<[f64; 2]> {
             match fields.as_slice() {
                 [time, factor] => {
                     let time = units.parse_value(time, Quantity::Time).ok()?;
-                    Some([time, parse_number(factor)?])
+                    let value = match value {
+                        Some(quantity) => units.parse_value(factor, quantity).ok()?,
+                        None => parse_number(factor)?,
+                    };
+                    Some([time, value])
                 }
                 _ => None,
             }
@@ -266,11 +314,17 @@ mod tests {
         let units = UnitSystem::default();
         let text = "Time\tAmplitude\n0\t0\n0,5\t1,5\n1\t1\n";
         assert_eq!(
-            parse_points(text, units),
+            parse_points(text, units, None),
             [[0.0, 0.0], [0.5, 1.5], [1.0, 1.0]]
         );
-        assert_eq!(parse_points("0, 0\n2, 1", units), [[0.0, 0.0], [2.0, 1.0]]);
-        assert_eq!(parse_points("1 2\n3;4", units), [[1.0, 2.0], [3.0, 4.0]]);
-        assert!(parse_points("Hello", units).is_empty());
+        assert_eq!(
+            parse_points("0, 0\n2, 1", units, None),
+            [[0.0, 0.0], [2.0, 1.0]]
+        );
+        assert_eq!(
+            parse_points("1 2\n3;4", units, None),
+            [[1.0, 2.0], [3.0, 4.0]]
+        );
+        assert!(parse_points("Hello", units, None).is_empty());
     }
 }

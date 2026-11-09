@@ -324,6 +324,7 @@ impl Expander {
         let original = self.analysis.model.clone();
         self.replace_elements()?;
         self.drop_unused_nodes();
+        self.initial_motion();
         self.u1_nodes()?;
         self.transforms()?;
         let knot_nodes = self.knot_nodes();
@@ -331,6 +332,21 @@ impl Expander {
         self.remap_steps(&original)?;
         let mut model = std::mem::take(&mut self.analysis.model);
         model.constraints.equations.append(&mut self.equations);
+        model.shell_fibres = self
+            .groups
+            .values()
+            .flatten()
+            .filter(|g| g.kind == Kind::Shell)
+            .map(|g| {
+                g.nodes
+                    .iter()
+                    .zip(&g.used)
+                    .filter(|(_, u)| **u)
+                    .map(|(n, _)| *n)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|f| f.len() >= 2)
+            .collect();
         let groups: BTreeMap<NodeId, Vec<Vec<NodeId>>> = self
             .groups
             .iter()
@@ -572,6 +588,71 @@ impl Expander {
             }
         }
         model.nodes = nodes;
+    }
+
+    /// `*INITIAL CONDITIONS, TYPE=VELOCITY / DISPLACEMENT` on a structural node move its
+    /// whole section: the original node depends on its expansion through the constraints,
+    /// so the values go to the expanded nodes, translations as they are and rotations
+    /// (DOFs 4 to 6) as the rigid motion `ω × r` of the section about the node.
+    fn initial_motion(&mut self) {
+        let model = &mut self.analysis.model;
+        let moved = |entries: &[(NodeRef, u8, f64)], model: &plxs_core::model::Model| {
+            let mut added: Vec<(NodeRef, u8, f64)> = Vec::new();
+            for (region, dof, value) in entries {
+                for node in model.nodes_of(region) {
+                    let Some(groups) = self.groups.get(&node) else {
+                        continue;
+                    };
+                    let Some(x0) = model.nodes.coordinates(node) else {
+                        continue;
+                    };
+                    for group in groups {
+                        for (&id, _) in group.nodes.iter().zip(&group.used).filter(|(_, u)| **u) {
+                            match dof {
+                                1..=3 => added.push((NodeRef::Node(id), *dof, *value)),
+                                4..=6 => {
+                                    let Some(x) = model.nodes.coordinates(id) else {
+                                        continue;
+                                    };
+                                    let r = [x[0] - x0[0], x[1] - x0[1], x[2] - x0[2]];
+                                    let mut w = [0.0; 3];
+                                    w[*dof as usize - 4] = *value;
+                                    let v = [
+                                        w[1] * r[2] - w[2] * r[1],
+                                        w[2] * r[0] - w[0] * r[2],
+                                        w[0] * r[1] - w[1] * r[0],
+                                    ];
+                                    for (k, c) in v.iter().enumerate() {
+                                        if *c != 0.0 {
+                                            added.push((NodeRef::Node(id), k as u8 + 1, *c));
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            added
+        };
+        let velocities = moved(&model.initial.velocities, model);
+        let displacements = moved(&model.initial.displacements, model);
+        // Rotations add up per node and component (several DOFs 4 to 6 on one node).
+        let merge = |into: &mut Vec<(NodeRef, u8, f64)>, added: Vec<(NodeRef, u8, f64)>| {
+            let mut sums: BTreeMap<(NodeId, u8), f64> = BTreeMap::new();
+            for (region, dof, value) in added {
+                if let NodeRef::Node(id) = region {
+                    *sums.entry((id, dof)).or_default() += value;
+                }
+            }
+            into.extend(
+                sums.into_iter()
+                    .map(|((id, dof), v)| (NodeRef::Node(id), dof, v)),
+            );
+        };
+        merge(&mut model.initial.velocities, velocities);
+        merge(&mut model.initial.displacements, displacements);
     }
 
     /// U1 beams keep their nodes; the rotations of every U1 node live on a helper node,

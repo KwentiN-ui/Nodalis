@@ -577,6 +577,7 @@ impl ShapeMix {
                             name: name.clone(),
                             values,
                             derived: false,
+                            out_of_plane: false,
                         })
                         .collect(),
                     rank: self.rank,
@@ -973,6 +974,7 @@ mod tests {
             name: name.into(),
             values: vec![value, 0.0],
             derived: false,
+            out_of_plane: false,
         };
         let mut disp_field = Field::new(
             "DISP",

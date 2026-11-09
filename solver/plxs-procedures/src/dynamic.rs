@@ -21,7 +21,8 @@
 //! **Increments**: `DIRECT` keeps the initial size; otherwise the size grows by 1.5 from the
 //! third increment on up to the maximum size, as CalculiX does for a linear step.
 //!
-//! **Explicit** (`EXPLICIT`) and `NLGEOM` are refused as not implemented yet.
+//! **Explicit** (`EXPLICIT`, `INTEGRATION=EXPLICIT`) goes to [`crate::explicit_dynamic`]. `NLGEOM` and nonlinear
+//! materials go to [`crate::nonlinear_dynamic`].
 //!
 //! **Damping**: Rayleigh `C = α_R M + β_R K` from `*DAMPING` in the step.
 //!
@@ -50,7 +51,8 @@ use plxs_output::StaRow;
 use rayon::prelude::*;
 
 use crate::equations::{Equations, FirstOrWarnings, in_increment};
-use crate::fields::{build_fields, internal_energy_density, nodal_average_scalar, node_order};
+use crate::fields::{internal_energy_density, nodal_average_scalar, node_order};
+use crate::profile::Phase;
 use crate::static_linear::{integration_point_results, writes_increment};
 use crate::{Procedure, ProcedureContext, StepOutcome};
 
@@ -58,14 +60,14 @@ pub struct DynamicProcedure;
 
 /// Integration parameters of one increment size.
 #[derive(Clone, Copy, Debug)]
-struct Scheme {
-    alpha: f64,
-    beta: f64,
-    gamma: f64,
+pub(crate) struct Scheme {
+    pub(crate) alpha: f64,
+    pub(crate) beta: f64,
+    pub(crate) gamma: f64,
 }
 
 impl Scheme {
-    fn of(parameters: &Dynamic) -> Scheme {
+    pub(crate) fn of(parameters: &Dynamic) -> Scheme {
         Scheme::new(parameters.alpha.unwrap_or(-0.05))
     }
 
@@ -80,6 +82,7 @@ impl Scheme {
 }
 
 /// The state of the time integration at the start of an increment.
+#[derive(Clone)]
 pub(crate) struct Motion {
     pub(crate) u: Vec<f64>,
     pub(crate) v: Vec<f64>,
@@ -87,7 +90,11 @@ pub(crate) struct Motion {
 }
 
 /// Values given per node (or node set) and DOF, as `*INITIAL CONDITIONS` lists them.
-fn initial_values(model: &Model, table: &ElementTable, entries: &[(NodeRef, u8, f64)]) -> Vec<f64> {
+pub(crate) fn initial_values(
+    model: &Model,
+    table: &ElementTable,
+    entries: &[(NodeRef, u8, f64)],
+) -> Vec<f64> {
     let mut out = vec![0.0; table.dofs.len()];
     for (region, dof, value) in entries {
         let nodes: Vec<u32> = match region {
@@ -140,18 +147,9 @@ impl Procedure for DynamicProcedure {
                 "DynamicProcedure needs a *DYNAMIC step".into(),
             ));
         };
-        if parameters.explicit {
-            // ccx 2.21's explicit scheme updates the displacements with the trapezoidal rule
-            // of the velocities and is not the β = 0 member of the α-method; it is not
-            // identified yet (single-DOF oracles in the M3 T13 notes).
+        if parameters.integration != plxs_core::step::Integration::Implicit {
             return Err(Error::Unsupported(format!(
-                "procedure not implemented yet: *DYNAMIC, EXPLICIT (step {})",
-                step.name
-            )));
-        }
-        if step.nlgeom {
-            return Err(Error::Unsupported(format!(
-                "procedure not implemented yet: *DYNAMIC, NLGEOM (step {})",
+                "DynamicProcedure integrates implicitly only (step {})",
                 step.name
             )));
         }
@@ -178,6 +176,7 @@ impl Procedure for DynamicProcedure {
         let k = ctx.stiffness.take().unwrap();
         let mut m = SparseMatrix::zeros(ctx.pattern.clone());
         assemble_mass_with(ctx.table, ctx.model, MassRule::Full, &mut m)?;
+        ctx.profile.add(Phase::Assembly, started);
         progress.event(ProgressEvent::Info(format!(
             "stiffness and mass assembled in {:.2} s",
             started.elapsed().as_secs_f64()
@@ -192,6 +191,7 @@ impl Procedure for DynamicProcedure {
             rayleigh,
             &parameters.increments,
             parameters.solver,
+            parameters.damping_ratio,
         );
         ctx.stiffness = Some(k);
         outcome
@@ -211,6 +211,7 @@ impl DynamicProcedure {
         rayleigh: plxs_core::step::Rayleigh,
         increments: &plxs_core::step::Incrementation,
         solver: plxs_core::step::EquationSolver,
+        damping_ratio: Option<plxs_core::step::DampingRatio>,
     ) -> Result<StepOutcome> {
         let n = ctx.table.dofs.len();
         // `K + c M` (and the matrix of the initial accelerations) is positive definite: the
@@ -225,6 +226,31 @@ impl DynamicProcedure {
             .unwrap_or(f64::INFINITY);
         let start_total = ctx.state.total_time;
         let Scheme { alpha, beta, gamma } = scheme;
+        progress.event(ProgressEvent::Info(format!(
+            "time step {} s resolves vibrations up to {} Hz (10 steps per period)",
+            short(initial),
+            short(1.0 / (10.0 * initial))
+        )));
+        // The constraints are needed for the eigenfrequency of a damping ratio, before the
+        // damping is known.
+        let spc0 = Spc::of_step(ctx.model, step, &ctx.table.dofs, 0.0, start_total, period)?;
+        let active = ctx.table.active_dofs();
+        let set = ctx
+            .constraints
+            .step_set(ctx.model.nodes.len(), &active, &spc0.dofs);
+        let rayleigh = match damping_ratio {
+            Some(ratio) => fit_damping(ctx, &set, k, m, ratio, solver, progress)?,
+            None => {
+                if rayleigh.alpha != 0.0 || rayleigh.beta != 0.0 {
+                    progress.event(ProgressEvent::Info(format!(
+                        "Rayleigh damping alpha = {}, beta = {}",
+                        short(rayleigh.alpha),
+                        short(rayleigh.beta)
+                    )));
+                }
+                rayleigh
+            }
+        };
         let damping = |x: &[f64]| -> Vec<f64> {
             if rayleigh.alpha == 0.0 && rayleigh.beta == 0.0 {
                 return vec![0.0; x.len()];
@@ -235,11 +261,6 @@ impl DynamicProcedure {
         };
 
         // Constraints: the DOFs prescribed in this step do not change; their values may.
-        let spc0 = Spc::of_step(ctx.model, step, &ctx.table.dofs, 0.0, start_total, period)?;
-        let active = ctx.table.active_dofs();
-        let set = ctx
-            .constraints
-            .step_set(ctx.model.nodes.len(), &active, &spc0.dofs);
         for warning in &set.warnings {
             progress.event(ProgressEvent::Warning(warning.clone()));
         }
@@ -315,7 +336,11 @@ impl DynamicProcedure {
             let started = std::time::Instant::now();
             // The internal forces of the start state with the same full integration
             // (a static preload: ten times closer to ccx than with K u₀).
-            let ku = if motion.u.iter().any(|v| *v != 0.0) {
+            let ku = if motion.u.iter().all(|v| *v == 0.0) {
+                vec![0.0; n]
+            } else if full_matrices(ctx.table) {
+                multiply(k, &motion.u)
+            } else {
                 let k_full = initial_acceleration_matrix(
                     ctx.table,
                     ctx.model,
@@ -325,8 +350,6 @@ impl DynamicProcedure {
                     false,
                 )?;
                 multiply(&k_full, &motion.u)
-            } else {
-                vec![0.0; n]
             };
             let cv = damping(&motion.v);
             let r = combine(&[(1.0, &f0), (-1.0, &ku), (-1.0, &cv)], n);
@@ -334,8 +357,13 @@ impl DynamicProcedure {
             // stiffness-proportional damping).
             let undamped = plxs_core::step::Rayleigh::default();
             let (c_m, c_k) = matrix_factors(scheme, undamped, initial / 10.0, true);
-            let a0_matrix =
-                initial_acceleration_matrix(ctx.table, ctx.model, &ctx.pattern, c_m, c_k, true)?;
+            // Where no element differs (no reduced integration, no C3D4, no membranes),
+            // the matrix is the combination of K and M of the step.
+            let a0_matrix = if full_matrices(ctx.table) {
+                SparseMatrix::linear_combination(m, c_m, k, c_k)
+            } else {
+                initial_acceleration_matrix(ctx.table, ctx.model, &ctx.pattern, c_m, c_k, true)?
+            };
             let a_red = set.reduce(&a0_matrix);
             let coordinates = || Unknowns::from_free(&set.free, 3, &ctx.model.nodes.coordinates);
             equations
@@ -378,7 +406,25 @@ impl DynamicProcedure {
             .as_ref()
             .map(|e| nodal_average_scalar(ctx.table, ctx.model, e));
         let mut factored_dt: Option<f64> = None;
+        // The effective matrix of the factorized increment size.
+        let mut a_matrix: Option<SparseMatrix> = None;
+        // `K u` and `C v` of the state an increment starts from, carried from the one before.
+        let mut ku0 = multiply(k, &motion.u);
+        let mut cv0 = damping(&motion.v);
+        let damped = rayleigh.alpha != 0.0 || rayleigh.beta != 0.0;
+        // Stresses are evaluated for the increments whose fields are written and for
+        // every increment when a history output prints them.
+        let history_stresses = step.outputs.el_print.iter().any(|request| {
+            request.set.is_some()
+                && request
+                    .variables
+                    .iter()
+                    .any(|v| matches!(v.trim().to_ascii_uppercase().as_str(), "S" | "E" | "ENER"))
+        });
         let mut f_prev = f0;
+        // Energies of the whole model, when a history output asks for them.
+        let energy_requests = energy_requests(step);
+        let (mut external_work, mut dissipation) = (0.0, 0.0);
         let mut stresses = ctx.table.layout.field(6);
         let mut strains = ctx.table.layout.field(6);
         let mut reactions = vec![0.0; n];
@@ -405,9 +451,17 @@ impl DynamicProcedure {
                 size = (size * 1.5).min(maximum);
             }
             let remaining = period - time;
-            let last = size >= remaining * (1.0 - 1e-9);
-            let dt = if last { remaining } else { size };
-            let t1 = time + dt;
+            // Fixed increments are counted rather than summed, so that the n-th one ends
+            // exactly at n times the size (the frames a Dynamic step writes lie there).
+            let (last, t1) = if increments.direct {
+                let end = increment as f64 * size;
+                let last = end >= period * (1.0 - 1e-9);
+                (last, if last { period } else { end })
+            } else {
+                let last = size >= remaining * (1.0 - 1e-9);
+                (last, if last { period } else { time + size })
+            };
+            let dt = t1 - time;
             let total = start_total + t1;
             progress.event(ProgressEvent::Increment {
                 step: ctx.step_number,
@@ -421,10 +475,14 @@ impl DynamicProcedure {
             // Effective matrix A = c_m M + c_k K (Rayleigh damping folded in).
             let c1 = 1.0 / (beta * dt * dt);
             let (c_m, c_k) = matrix_factors(scheme, rayleigh, dt, false);
-            let a_matrix = SparseMatrix::linear_combination(m, c_m, k, c_k);
             if factored_dt.is_none_or(|d| (d - dt).abs() > 1e-12 * dt) {
                 let started = std::time::Instant::now();
-                let a_red = set.reduce(&a_matrix);
+                let a = a_matrix.insert(SparseMatrix::linear_combination(m, c_m, k, c_k));
+                ctx.profile.add(Phase::Assembly, started);
+                let started = std::time::Instant::now();
+                let a_red = set.reduce(a);
+                ctx.profile.add(Phase::Reduction, started);
+                let started = std::time::Instant::now();
                 let coordinates =
                     || Unknowns::from_free(&set.free, 3, &ctx.model.nodes.coordinates);
                 equations
@@ -439,6 +497,7 @@ impl DynamicProcedure {
                         },
                     )
                     .map_err(|e| numerical(e, ctx.step_number, increment, &equations))?;
+                ctx.profile.add(Phase::Factorization, started);
                 progress.event(ProgressEvent::Info(format!(
                     "system matrix factorized in {:.2} s",
                     started.elapsed().as_secs_f64()
@@ -446,6 +505,7 @@ impl DynamicProcedure {
                 factored_dt = Some(dt);
             }
 
+            let started = std::time::Instant::now();
             let (f1, _) = load_at(t1)?;
             let g1 = spc_at(t1)?;
             // Predictors.
@@ -458,8 +518,6 @@ impl DynamicProcedure {
                 n,
             );
             let v_tilde = combine(&[(1.0, &motion.v), (dt * (1.0 - gamma), &motion.a)], n);
-            let ku0 = multiply(k, &motion.u);
-            let cv0 = damping(&motion.v);
             let f_eff = combine(
                 &[
                     (1.0 + alpha, &f1),
@@ -473,9 +531,15 @@ impl DynamicProcedure {
             let mu = multiply(m, &u_tilde);
             let damp_arg = combine(&[(1.0, &v_tilde), (-gamma * dt * c1, &u_tilde)], n);
             let cd = damping(&damp_arg);
-            let r = combine(&[(1.0, &f_eff), (c1, &mu), (-(1.0 + alpha), &cd)], n);
-            let ag = multiply(&a_matrix, &g1);
-            let mut x = set.reduce_rhs(&combine(&[(1.0, &r), (-1.0, &ag)], n));
+            let mut r = combine(&[(1.0, &f_eff), (c1, &mu), (-(1.0 + alpha), &cd)], n);
+            // Prescribed motion enters through `A g`; nothing to do while it is zero.
+            if g1.iter().any(|v| *v != 0.0) {
+                let ag = multiply(a_matrix.as_ref().expect("factorized"), &g1);
+                r = combine(&[(1.0, &r), (-1.0, &ag)], n);
+            }
+            let mut x = set.reduce_rhs(&r);
+            ctx.profile.add(Phase::Vectors, started);
+            let started = std::time::Instant::now();
             equations
                 .solve(
                     &mut ctx.solver,
@@ -486,19 +550,58 @@ impl DynamicProcedure {
                     },
                 )
                 .map_err(|e| in_increment(e, ctx.step_number, increment))?;
+            ctx.profile.add(Phase::Solve, started);
+            let started = std::time::Instant::now();
             let u1 = set.expand(&x, &g1);
             let a1 = combine(&[(c1, &u1), (-c1, &u_tilde)], n);
             let v1 = combine(&[(1.0, &v_tilde), (gamma * dt, &a1)], n);
 
             k.multiply(&u1, &mut reactions);
+            let ku1 = reactions.clone();
+            // `C v₁` (and `M v₁`, which it shares with the kinetic energy) for the next
+            // increment and the energies.
+            let mv1 = (damped || !energy_requests.is_empty()).then(|| multiply(m, &v1));
+            let cv1 = match &mv1 {
+                Some(mv1) if damped => {
+                    let kv1 = multiply(k, &v1);
+                    combine(&[(rayleigh.alpha, mv1), (rayleigh.beta, &kv1)], n)
+                }
+                _ => vec![0.0; n],
+            };
+            if !energy_requests.is_empty() {
+                let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
+                let du = combine(&[(1.0, &u1), (-1.0, &motion.u)], n);
+                let f_mean = combine(&[(0.5, &f_prev), (0.5, &f1)], n);
+                external_work += dot(&f_mean, &du);
+                dissipation += 0.5 * dt * (dot(&motion.v, &cv0) + dot(&v1, &cv1));
+                let energies = Energies {
+                    internal: 0.5 * dot(&u1, &reactions),
+                    kinetic: 0.5 * dot(&v1, mv1.as_deref().expect("mass product")),
+                    external_work,
+                    dissipation,
+                };
+                write_energies(
+                    ctx.results,
+                    &energy_requests,
+                    &energies,
+                    (ctx.step_number, increment, total),
+                );
+            }
             ctx.constraints
                 .transfer_forces(&mut reactions, &spc0.dofs, &active);
-            integration_point_results(ctx.table, ctx.model, &u1, &mut strains, &mut stresses);
+            ctx.profile.add(Phase::Vectors, started);
+            let started = std::time::Instant::now();
+            let writes = writes_increment(step, increment, if last { increment } else { u32::MAX });
+            if writes || last || history_stresses {
+                integration_point_results(ctx.table, ctx.model, &u1, &mut strains, &mut stresses);
+            }
             motion = Motion {
                 u: u1,
                 v: v1,
                 a: a1,
             };
+            ku0 = ku1;
+            cv0 = cv1;
             f_prev = f1;
             time = t1;
 
@@ -510,7 +613,7 @@ impl DynamicProcedure {
                 correction: 0.0,
                 converged: true,
             });
-            if writes_increment(step, increment, if last { increment } else { u32::MAX }) {
+            if writes {
                 write_increment(
                     ctx,
                     step,
@@ -520,6 +623,7 @@ impl DynamicProcedure {
                     &reactions,
                     (&stresses, &strains),
                     carried_nodal.as_deref(),
+                    None,
                 );
             }
             crate::history::write_history_with_velocities(
@@ -534,6 +638,7 @@ impl DynamicProcedure {
                 &strains,
                 None,
             );
+            ctx.profile.add(Phase::Results, started);
             // CalculiX counts a linear increment as two iterations.
             ctx.sta.push(StaRow {
                 step: ctx.step_number,
@@ -583,10 +688,169 @@ impl DynamicProcedure {
     }
 }
 
+/// The energies of the whole model at the end of an increment.
+#[derive(Clone)]
+pub(crate) struct Energies {
+    /// `½ uᵀ K u`.
+    pub(crate) internal: f64,
+    /// `½ vᵀ M v`.
+    pub(crate) kinetic: f64,
+    /// The work of the loads since the start of the step (trapezoidal rule).
+    pub(crate) external_work: f64,
+    /// The energy the Rayleigh damping dissipated since the start of the step.
+    pub(crate) dissipation: f64,
+}
+
+/// The variables (`ALLIE`, `ALLKE`, `ALLWK`, `ALLVD`) of each `*EL PRINT` of the step that
+/// asks for energies of the model, with its set.
+pub(crate) fn energy_requests(step: &Step) -> Vec<(String, Vec<String>)> {
+    (step.outputs.el_print.iter())
+        .filter_map(|request| {
+            let variables: Vec<String> = (request.variables.iter())
+                .map(|v| v.trim().to_ascii_uppercase())
+                .filter(|v| ["ALLIE", "ALLKE", "ALLWK", "ALLVD"].contains(&v.as_str()))
+                .collect();
+            (!variables.is_empty()).then(|| (request.set.clone().unwrap_or_default(), variables))
+        })
+        .collect()
+}
+
+/// One history block per requested energy, a single total row each.
+pub(crate) fn write_energies(
+    results: &mut plxs_core::Results,
+    requests: &[(String, Vec<String>)],
+    energies: &Energies,
+    (step, increment, time): (u32, u32, f64),
+) {
+    for (set, variables) in requests {
+        for variable in variables {
+            let (quantity, value) = match variable.as_str() {
+                "ALLIE" => ("total model internal energy", energies.internal),
+                "ALLKE" => ("total model kinetic energy", energies.kinetic),
+                "ALLWK" => ("total model external work", energies.external_work),
+                _ => ("total model damping dissipation", energies.dissipation),
+            };
+            results.history.push(plxs_core::results::HistoryBlock {
+                step,
+                increment,
+                quantity: quantity.into(),
+                set: set.clone(),
+                time,
+                rows: vec![(0, vec![value])],
+            });
+        }
+    }
+}
+
+/// A value to four significant digits.
+pub(crate) fn short(value: f64) -> String {
+    if value != 0.0 && !(1e-3..1e6).contains(&value.abs()) {
+        return format!("{value:.3e}");
+    }
+    let digits = (3 - value.abs().max(1e-3).log10().floor() as i32).max(0) as usize;
+    let text = format!("{value:.digits$}");
+    if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        text
+    }
+}
+
+/// The Rayleigh damping of a damping ratio: met exactly at the lower frequency (the lowest
+/// eigenfrequency of the constrained model unless given) and the upper one.
+pub(crate) fn fit_damping(
+    ctx: &ProcedureContext<'_>,
+    set: &plxs_constraints::ConstraintSet,
+    k: &SparseMatrix,
+    m: &SparseMatrix,
+    damping: plxs_core::step::DampingRatio,
+    solver: plxs_core::step::EquationSolver,
+    progress: &mut dyn Progress,
+) -> Result<plxs_core::step::Rayleigh> {
+    let upper = damping.upper;
+    let mut zero_modes = 0;
+    let lower = match damping.lower {
+        Some(lower) => lower,
+        None => {
+            progress.event(ProgressEvent::Info(
+                "damping: computing the lowest eigenfrequencies to fit it to".into(),
+            ));
+            let started = std::time::Instant::now();
+            let k_free = set.reduce(k);
+            let m_free = set.reduce(m);
+            let coordinates =
+                Unknowns::from_free(&set.free, 3, &ctx.model.nodes.coordinates).coordinates;
+            // Rigid body modes of a free structure come first; the damping is fitted at the
+            // first elastic one.
+            let pairs = crate::eigen::lanczos_modes(
+                ctx,
+                &k_free,
+                &m_free,
+                7,
+                None,
+                solver,
+                coordinates,
+                progress,
+            )?;
+            let frequencies: Vec<f64> = (pairs.values.iter())
+                .map(|l| l.max(0.0).sqrt() / std::f64::consts::TAU)
+                .collect();
+            // Zero modes (rigid bodies, mechanisms such as a pendulum on a joint) come out
+            // as numerical noise far below the elastic ones.
+            let largest = frequencies.iter().copied().fold(0.0_f64, f64::max);
+            let zero = 1e-4 * upper.max(10.0 * largest);
+            zero_modes = frequencies.iter().filter(|f| **f <= zero).count();
+            let lowest = frequencies.iter().copied().find(|f| *f > zero);
+            match lowest {
+                Some(f) => {
+                    progress.event(ProgressEvent::Info(format!(
+                        "lowest eigenfrequency {} Hz in {:.2} s",
+                        short(f),
+                        started.elapsed().as_secs_f64()
+                    )));
+                    f
+                }
+                None => 0.0,
+            }
+        }
+    };
+    let lower = if lower > 0.0 && lower < upper {
+        lower
+    } else {
+        progress.event(ProgressEvent::Warning(format!(
+            "the lowest eigenfrequency {} Hz is not below the highest resolved frequency \
+             {} Hz; the damping is fitted between {} and {} Hz",
+            short(lower),
+            short(upper),
+            short(upper / 10.0),
+            short(upper)
+        )));
+        upper / 10.0
+    };
+    let mut rayleigh = plxs_core::step::Rayleigh::from_ratio(damping.ratio, lower, upper);
+    if zero_modes > 0 {
+        // Mass-proportional damping acts on the absolute velocities and would brake the
+        // free motion of the zero modes (a swinging pendulum) like a viscous fluid.
+        rayleigh.alpha = 0.0;
+        progress.event(ProgressEvent::Info(format!(
+            "{zero_modes} rigid body or mechanism mode(s): stiffness-proportional damping only"
+        )));
+    }
+    progress.event(ProgressEvent::Info(format!(
+        "damping {} % fitted between {} and {} Hz (alpha = {}, beta = {})",
+        short(damping.ratio * 100.0),
+        short(lower),
+        short(upper),
+        short(rayleigh.alpha),
+        short(rayleigh.beta)
+    )));
+    Ok(rayleigh)
+}
+
 /// `c_m M + c_k K` with the fully integrated stiffness and mass of reduced elements (and
 /// the springs and linear blocks of the stiffness): the matrix of the initial accelerations
 /// (`system`), or with `c_m = 0, c_k = 1` the stiffness for their internal forces.
-fn initial_acceleration_matrix(
+pub(crate) fn initial_acceleration_matrix(
     table: &ElementTable,
     model: &Model,
     pattern: &std::sync::Arc<plxs_linalg::Pattern>,
@@ -634,6 +898,17 @@ fn initial_acceleration_matrix(
     Ok(out)
 }
 
+/// Whether the matrix of the initial accelerations equals the combination of the step's
+/// K and M: no element is integrated differently there (reduced integration, C3D4), and no
+/// native membrane (which [`initial_acceleration_matrix`] leaves out).
+fn full_matrices(table: &ElementTable) -> bool {
+    table.membranes.is_empty()
+        && table.formulations.iter().all(|formulation| {
+            formulation.fully_integrated().is_none()
+                && formulation.family != plxs_elements::Family::Tet4
+        })
+}
+
 fn missing_density(model: &Model, entry: &plxs_assembly::elements::ElementEntry) -> Error {
     Error::input(
         "*DENSITY",
@@ -648,7 +923,7 @@ fn missing_density(model: &Model, entry: &plxs_assembly::elements::ElementEntry)
 /// displacement form `A = M/(βΔt²) + (1+α)γ/(βΔt) C + (1+α) K` of the increments, in the
 /// acceleration form `A = M + (1+α)γΔt C + (1+α)βΔt² K` of the initial accelerations
 /// (`acceleration_form`); `C = α_R M + β_R K`.
-fn matrix_factors(
+pub(crate) fn matrix_factors(
     scheme: Scheme,
     rayleigh: plxs_core::step::Rayleigh,
     dt: f64,
@@ -669,7 +944,7 @@ fn matrix_factors(
 }
 
 /// `*STEP, INC=`: the largest number of increments of the step.
-fn ctx_max_increments(step: &Step) -> u32 {
+pub(crate) fn ctx_max_increments(step: &Step) -> u32 {
     if step.max_increments == 0 {
         100
     } else {
@@ -677,7 +952,7 @@ fn ctx_max_increments(step: &Step) -> u32 {
     }
 }
 
-fn numerical(e: Error, step: u32, increment: u32, equations: &Equations) -> Error {
+pub(crate) fn numerical(e: Error, step: u32, increment: u32, equations: &Equations) -> Error {
     match e {
         Error::Numerical {
             failure, message, ..
@@ -707,9 +982,10 @@ pub(crate) fn write_increment(
     reactions: &[f64],
     (stresses, strains): (&IntegrationPointField, &IntegrationPointField),
     carried: Option<&[f64]>,
+    material: Option<&IntegrationPointField>,
 ) {
-    let mut fields = build_fields(
-        ctx.table, ctx.model, step, &motion.u, reactions, stresses, strains,
+    let mut fields = crate::fields::build_fields_with(
+        ctx.table, ctx.model, step, &motion.u, reactions, stresses, strains, material,
     );
     if let (Some(carried), Some(ener)) = (carried, fields.iter_mut().find(|f| f.name == "ENER")) {
         let order = node_order(ctx.model);
@@ -721,8 +997,7 @@ pub(crate) fn write_increment(
     let has = |v: &str| variables.iter().any(|x| x == v);
     let order = node_order(ctx.model);
     if has("V") {
-        let zero = vec![0.0; motion.v.len()];
-        let (v, _) = ctx.table.reported(ctx.model, &motion.v, &zero);
+        let v = ctx.table.reported_displacements(&motion.v);
         let field = ResultField {
             name: "VELO".into(),
             components: vec!["V1".into(), "V2".into(), "V3".into()],
@@ -736,6 +1011,32 @@ pub(crate) fn write_increment(
             .position(|f| f.name == "DISP")
             .map_or(0, |p| p + 1);
         fields.insert(at, field);
+    }
+    if has("A") {
+        let a = ctx.table.reported_displacements(&motion.a);
+        let field = ResultField {
+            name: "ACCE".into(),
+            components: vec!["A1".into(), "A2".into(), "A3".into()],
+            nodes: order.iter().map(|&(id, _)| id).collect(),
+            values: (0..3)
+                .map(|k| order.iter().map(|&(_, i)| a[i as usize * 3 + k]).collect())
+                .collect(),
+        };
+        let at = fields
+            .iter()
+            .position(|f| f.name == "VELO" || f.name == "DISP")
+            .map_or(0, |p| p + 1);
+        fields.insert(at, field);
+    }
+    if let Some(evaluation) = &ctx.contact.last {
+        let contact =
+            crate::contact::contact_fields(ctx.model, step, &ctx.contact, evaluation, &order);
+        // As in a static increment: the contact fields before the error estimator.
+        let at = fields
+            .iter()
+            .position(|f| f.name == "ERROR")
+            .unwrap_or(fields.len());
+        fields.splice(at..at, contact);
     }
     ctx.results.increments.push(ResultsIncrement {
         step: ctx.step_number,
@@ -774,6 +1075,14 @@ mod tests {
         let (c_m, c_k) = matrix_factors(s, undamped, dt, true);
         assert_eq!(c_m, 1.0);
         assert!((c_k - 0.9 * s.beta * dt * dt).abs() < 1e-18);
+    }
+
+    #[test]
+    fn short_values_keep_four_digits() {
+        assert_eq!(short(48.2345), "48.23");
+        assert_eq!(short(2.0), "2");
+        assert_eq!(short(0.00025), "2.500e-4");
+        assert_eq!(short(1000.0), "1000");
     }
 
     #[test]

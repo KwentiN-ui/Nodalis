@@ -36,6 +36,11 @@ pub struct Model {
     /// `<job>.eig`).
     #[serde(skip)]
     pub stored_modes_file: Option<std::path::PathBuf>,
+    /// The fibres of expanded shells: the nodes through the thickness of every shell node
+    /// (bottom, middle, top; the ones the elements use), for the selective mass scaling of
+    /// explicit steps. Set by the expansion, empty otherwise.
+    #[serde(default)]
+    pub shell_fibres: Vec<Vec<NodeId>>,
     #[serde(skip)]
     element_index: HashMap<ElementId, u32>,
 }

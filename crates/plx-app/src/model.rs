@@ -100,9 +100,9 @@ pub struct Model {
     geometry_index: std::sync::OnceLock<crate::geometry_selection::GeometryIndex>,
     /// Hot spots defined on a results file, with their values.
     pub hot_spots: crate::hot_spots::HotSpots,
-    /// Keys of the features of these results that come from the FE model, see
-    /// [`FeModel::add_missing_features`]; the others were made on the results.
-    pub inherited_features: Vec<String>,
+    /// The shared features of the FE model, see [`plx_model::FeModel::shared_features`], as
+    /// these results last took them over, in stored units; results follow later changes.
+    pub shared_from: Option<plx_model::FeModel>,
     /// Plots of result paths shown in the 3D view.
     pub path_plots: Vec<crate::path_plot::PathPlot>,
     /// Faces and parts drawn in the highlight colour.
@@ -679,6 +679,26 @@ pub fn load_analysis(path: &Path, analysis: plx_io::project::ProjectAnalysis) ->
 }
 
 impl Model {
+    /// Takes over the reference points, coordinate systems and planes of the FE model `fe`,
+    /// in stored units, when they changed since these results last did; returns whether
+    /// they did.
+    pub fn follow_shared_features(&mut self, fe: &plx_model::FeModel) -> bool {
+        if (self.shared_from.as_ref()).is_some_and(|taken| taken.same_shared_features(fe)) {
+            return false;
+        }
+        let mut features = fe.shared_features();
+        features.convert_features(&plx_model::convert::Conversion::new(
+            plx_model::STORED,
+            self.stored_units(),
+        ));
+        self.fe.set_shared_features(&features);
+        // Points on picked nodes or faces sit where the results' mesh has them; those that
+        // cannot be placed keep the position of the FE model.
+        let _ = self.fe.update_reference_points(&self.mesh);
+        self.shared_from = Some(fe.shared_features());
+        true
+    }
+
     /// What the user defined on these results, for results bound to a project.
     pub fn results_settings(&self) -> Option<plx_results::ResultsSettings> {
         let view = self.results.as_ref()?;
@@ -694,7 +714,6 @@ impl Model {
                 .map(|part| part.name.clone())
                 .collect(),
             mesh: Some(self.mesh.fingerprint()),
-            inherited_features: self.inherited_features.clone(),
             ..view.settings()
         })
         .map(|mut settings| {
@@ -722,7 +741,6 @@ impl Model {
         self.fe.planes = settings.planes.clone();
         self.fe.result_paths = settings.result_paths.clone();
         self.fe.result_planes = settings.result_planes.clone();
-        self.inherited_features = settings.inherited_features.clone();
         self.hot_spots.definitions = settings.hot_spots.clone();
         let view = &settings.view;
         for part in &mut self.parts {
@@ -808,7 +826,7 @@ impl Model {
             geometry_topology: Default::default(),
             geometry_index: Default::default(),
             hot_spots: Default::default(),
-            inherited_features: Vec::new(),
+            shared_from: None,
             path_plots: Vec::new(),
             highlight: Highlight::default(),
             clip: None,
@@ -2422,6 +2440,7 @@ mod tests {
             name: name.into(),
             values: vec![1.0; 4],
             derived: false,
+            out_of_plane: false,
         };
         let stress = ["SXX", "SYY", "SZZ", "SXY", "SYZ", "SZX"]
             .map(component)
@@ -3352,6 +3371,7 @@ S
             kind: LoadKind::Gravity([0.0, 0.0, -gravity]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         let solid = Section {
             name: "Section-1".into(),

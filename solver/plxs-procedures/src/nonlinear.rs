@@ -17,7 +17,7 @@ use plxs_assembly::{
     NonlinearInput, Spc, add_membrane_pressures, assemble_nonlinear, load_vector,
     loads::add_carried_loads, membrane_pressures, rotate_concentrated_loads,
 };
-use plxs_constraints::ConstraintSet;
+use plxs_constraints::{ConstraintSet, ReducedPattern};
 use plxs_core::step::{DefaultAmplitude, Incrementation, Procedure as ProcedureKind};
 use plxs_core::{Convergence, Divergence, Error, Progress, ProgressEvent, Result, Step, Stop};
 use plxs_linalg::SparseMatrix;
@@ -186,7 +186,13 @@ impl Procedure for NonlinearStatic {
                 "the step period must be positive",
             ));
         }
-        let mut dt = increments.initial().min(period);
+        let maximum = increments
+            .maximum
+            .filter(|m| *m > 0.0)
+            .unwrap_or(1e30)
+            .min(period);
+        // The first increment respects the largest one as every later increment does.
+        let mut dt = increments.initial().min(period).min(maximum);
         if dt <= 0.0 {
             return Err(Error::input(
                 step.procedure.keyword(),
@@ -198,7 +204,7 @@ impl Procedure for NonlinearStatic {
             .unwrap_or(f64::INFINITY)
             .min(dt)
             .min(1e-5 * period);
-        let maximum = increments.maximum.unwrap_or(1e30).min(period);
+        let mut frames = crate::frames::Frames::of(&increments, period);
         let direct = increments.direct;
         let total_dofs = ctx.table.dofs.len();
         let start_total = ctx.state.total_time;
@@ -241,7 +247,12 @@ impl Procedure for NonlinearStatic {
             set.reduced_len()
         )));
         let discrete: Vec<&DiscreteElement> = ctx.table.discrete.iter().collect();
+        // Rigid bodies follow finite rotations under NLGEOM.
+        let large_rotations = step.nlgeom && constraints.has_finite_rotations();
         let mut k = SparseMatrix::zeros(ctx.pattern.clone());
+        // The pattern of `Tᵀ K T` and where each entry of `K` lands, kept over the Newton
+        // iterations and increments while the matrix pattern and `T` stay.
+        let mut reducer: Option<ReducedPattern> = None;
         // Contact: *MODEL CHANGE / *CHANGE FRICTION of the step, then a contact state per
         // slave point.
         for warning in ctx.contact.begin_step(step, ctx.state) {
@@ -277,6 +288,10 @@ impl Procedure for NonlinearStatic {
         let mut warned = false;
         let carried = ctx.state.loads.clone();
         let mut applied: Vec<f64> = Vec::new();
+        // Increments end at the points of the amplitudes (and value tables) the step follows,
+        // so a motion that changes direction is applied as given; the increment size cut to
+        // reach a point is restored afterwards, like that of a frame.
+        let breakpoints = step.amplitude_times(ctx.model, start_total, period);
         while time < period * (1.0 - 1e-12) {
             if ctx.cancel.is_cancelled() {
                 return Ok(StepOutcome::Cancelled);
@@ -293,11 +308,25 @@ impl Procedure for NonlinearStatic {
                 });
             }
             let mut attempt = 0u32;
+            // The planned size of an increment shortened to end on a frame, which the next
+            // increment resumes.
+            let mut planned: Option<f64>;
             let converged = loop {
                 attempt += 1;
+                let full = dt;
                 if dt > period - time {
                     dt = period - time;
                 }
+                if let Some(frames) = &frames {
+                    dt = frames.limit(time, dt);
+                }
+                let tolerance = period * 1e-9;
+                if let Some(&next) = breakpoints.iter().find(|&&t| t > time + tolerance)
+                    && time + dt > next + tolerance
+                {
+                    dt = next - time;
+                }
+                planned = (dt < full).then_some(full);
                 let step_time = time + dt;
                 let total = start_total + step_time;
                 progress.event(ProgressEvent::Increment {
@@ -389,6 +418,8 @@ impl Procedure for NonlinearStatic {
                     direct,
                     (visco && cetol > 0.0).then_some(cetol),
                     &mut equations,
+                    large_rotations.then_some((active.as_slice(), spc_end.dofs.as_slice())),
+                    &mut reducer,
                 )?;
                 match result {
                     Ok(converged) => break converged,
@@ -477,8 +508,12 @@ impl Procedure for NonlinearStatic {
             } = converged;
             // The forces the constraints carry to their independent nodes, for the output.
             let mut forces = output.f_int.clone();
-            ctx.constraints
-                .transfer_forces(&mut forces, &spc_end.dofs, &active);
+            let rotated = large_rotations.then(|| ctx.constraints.at_rotations(&u));
+            rotated.as_ref().unwrap_or(ctx.constraints).transfer_forces(
+                &mut forces,
+                &spc_end.dofs,
+                &active,
+            );
             ctx.state.displacements.per_node = 3;
             ctx.state.displacements.values.clear();
             ctx.state.displacements.values.extend_from_slice(&u);
@@ -489,7 +524,11 @@ impl Procedure for NonlinearStatic {
             ctx.state.total_time = total;
             let last = time >= period * (1.0 - 1e-12);
             let started = Instant::now();
-            if crate::static_linear::writes_increment_at(step, increment, last) {
+            let write = match &mut frames {
+                Some(frames) => frames.reached(time) || last,
+                None => crate::static_linear::writes_increment_at(step, increment, last),
+            };
+            if write {
                 write_increment(
                     ctx,
                     step,
@@ -552,6 +591,9 @@ impl Procedure for NonlinearStatic {
             });
 
             // The size of the next increment.
+            if let Some(full) = planned {
+                dt = full;
+            }
             if !direct && !last {
                 let fast = iterations <= controls.fast_iterations;
                 if iterations > controls.slow_iterations {
@@ -572,7 +614,7 @@ impl Procedure for NonlinearStatic {
 impl NonlinearStatic {
     /// Adds the springs and the closed gaps to the tangent and their forces to `f_int`;
     /// returns which discrete elements act (springs always, gaps when closed at `u`).
-    fn add_discrete(
+    pub(crate) fn add_discrete(
         discrete: &[&DiscreteElement],
         u: &[f64],
         k: &mut SparseMatrix,
@@ -630,6 +672,8 @@ impl NonlinearStatic {
         direct: bool,
         cetol: Option<f64>,
         equations: &mut Equations,
+        large_rotations: Option<(&[bool], &[u32])>,
+        reducer: &mut Option<ReducedPattern>,
     ) -> Result<std::result::Result<Converged, Failure>> {
         let total_dofs = ctx.table.dofs.len();
         // Start from the converged displacements, u = T v + g_start. A change of the
@@ -715,10 +759,27 @@ impl NonlinearStatic {
             let residual_full: Vec<f64> = (0..total_dofs)
                 .map(|d| f_ext[d] - output.f_int[d] - if pending_g { k_delta[d] } else { 0.0 })
                 .collect();
+            // With rigid bodies under finite rotations, the constraints linearized at `u`.
+            let rotated = large_rotations.map(|(active, held)| {
+                ctx.constraints
+                    .at_rotations(&u)
+                    .step_set(ctx.model.nodes.len(), active, held)
+            });
+            let set = rotated.as_ref().unwrap_or(set);
             let started = Instant::now();
             let residual = set.reduce_rhs(&residual_full);
             ctx.profile.add(Phase::Reduction, started);
             let r_max = residual.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            // An inverted element of a hyperelastic material has no stress (NaN, which the
+            // maximum above skips): the increment is cut back before the tangent is
+            // factorized.
+            if residual.iter().any(|r| !r.is_finite()) {
+                return Ok(Err(Failure::Diverging(
+                    Divergence::NotFinite,
+                    "an element is turned inside out (the residual is not finite)".into(),
+                    false,
+                )));
+            }
             let du_max = u
                 .iter()
                 .zip(&u_start)
@@ -835,7 +896,7 @@ impl NonlinearStatic {
             // Solve Tᵀ K T Δv = Tᵀ r and correct u = T v + g.
             iteration += 1;
             let started = Instant::now();
-            let k_reduced = set.reduce(k);
+            let k_reduced = set.reduce_cached(k, reducer);
             ctx.profile.add(Phase::Reduction, started);
             let started = Instant::now();
             let coordinates = || Unknowns::from_free(&set.free, 3, &ctx.model.nodes.coordinates);
@@ -944,6 +1005,9 @@ impl NonlinearStatic {
                     *ui += d;
                 }
                 pending_g = false;
+            }
+            if let Some((_, held)) = large_rotations {
+                ctx.constraints.project_rigid(&mut u, held);
             }
         }
     }

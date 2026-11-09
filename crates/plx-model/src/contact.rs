@@ -4,10 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CompressionOnly, NodeTie, Region, RigidBody, Spring};
-
-/// The default colour of contact and constraint surfaces, yellow.
-pub const DEFAULT_SURFACE_COLOR: [u8; 3] = [255, 255, 0];
+use crate::{CompressionOnly, NodeTie, Region, RigidBody, Spring, SpringEnd};
 
 /// Mechanical and thermal behaviour of touching surfaces (`*SURFACE INTERACTION`), referred to
 /// by contact pairs.
@@ -271,8 +268,6 @@ pub struct ContactPair {
     pub clearance: Option<f64>,
     pub master: Region,
     pub slave: Region,
-    pub master_color: [u8; 3],
-    pub slave_color: [u8; 3],
 }
 
 /// The name of a swapped pair: `<slave>_to_<master>` for `<master>_to_<slave>`, other
@@ -304,8 +299,6 @@ impl ContactPair {
             clearance: None,
             master: Region::Faces(Vec::new()),
             slave: Region::Faces(Vec::new()),
-            master_color: DEFAULT_SURFACE_COLOR,
-            slave_color: DEFAULT_SURFACE_COLOR,
         }
     }
 }
@@ -319,6 +312,7 @@ pub enum Constraint {
     /// them to the model's ties, listed with the contact pairs.
     Tie(Tie),
     RigidBody(RigidBody),
+    Joint(crate::Joint),
     /// Only in projects saved while node ties were constraints; [`crate::FeModel::migrate`]
     /// moves them to the model's node ties, where they belong with the contact pairs.
     NodeTie(NodeTie),
@@ -331,6 +325,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => &c.name,
             Constraint::Tie(tie) => &tie.name,
             Constraint::RigidBody(c) => &c.name,
+            Constraint::Joint(c) => &c.name,
             Constraint::NodeTie(c) => &c.name,
         }
     }
@@ -341,6 +336,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => c.active,
             Constraint::Tie(tie) => tie.active,
             Constraint::RigidBody(c) => c.active,
+            Constraint::Joint(c) => c.active,
             Constraint::NodeTie(c) => c.active,
         }
     }
@@ -351,6 +347,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => &mut c.active,
             Constraint::Tie(tie) => &mut tie.active,
             Constraint::RigidBody(c) => &mut c.active,
+            Constraint::Joint(c) => &mut c.active,
             Constraint::NodeTie(c) => &mut c.active,
         }
     }
@@ -361,6 +358,7 @@ impl Constraint {
             Constraint::Spring(c) => c.visible,
             Constraint::CompressionOnly(c) => c.visible,
             Constraint::RigidBody(c) => c.visible,
+            Constraint::Joint(c) => c.visible,
             Constraint::Tie(_) | Constraint::NodeTie(_) => true,
         }
     }
@@ -371,6 +369,7 @@ impl Constraint {
             Constraint::Spring(c) => Some(&mut c.visible),
             Constraint::CompressionOnly(c) => Some(&mut c.visible),
             Constraint::RigidBody(c) => Some(&mut c.visible),
+            Constraint::Joint(c) => Some(&mut c.visible),
             Constraint::Tie(_) | Constraint::NodeTie(_) => None,
         }
     }
@@ -381,6 +380,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => &mut c.name,
             Constraint::Tie(tie) => &mut tie.name,
             Constraint::RigidBody(c) => &mut c.name,
+            Constraint::Joint(c) => &mut c.name,
             Constraint::NodeTie(c) => &mut c.name,
         }
     }
@@ -390,12 +390,11 @@ impl Constraint {
     pub fn swap_master_slave(&mut self) -> bool {
         let (name, master, slave) = match self {
             Constraint::Tie(tie) => (&mut tie.name, &mut tie.master, &mut tie.slave),
-            Constraint::Spring(Spring {
-                name,
-                master: Some(master),
-                region,
-                ..
-            }) => (name, master, region),
+            Constraint::Spring(spring) if spring.master_slave().is_some() => {
+                spring.ends.swap(0, 1);
+                spring.name = swapped_name(&spring.name);
+                return true;
+            }
             _ => return false,
         };
         std::mem::swap(master, slave);
@@ -407,7 +406,7 @@ impl Constraint {
     pub fn master_slave(&self) -> Option<[&Region; 2]> {
         match self {
             Constraint::Tie(tie) => Some([&tie.master, &tie.slave]),
-            Constraint::Spring(c) => Some([c.master.as_ref()?, &c.region]),
+            Constraint::Spring(c) => c.master_slave(),
             _ => None,
         }
     }
@@ -415,20 +414,26 @@ impl Constraint {
     /// The regions the constraint is defined on, master before slave.
     pub fn regions(&self) -> Vec<&Region> {
         match self {
-            Constraint::Spring(c) => c.master.iter().chain([&c.region]).collect(),
+            Constraint::Spring(c) => c.ends.iter().rev().filter_map(SpringEnd::region).collect(),
             Constraint::CompressionOnly(c) => vec![&c.region],
             Constraint::Tie(tie) => vec![&tie.master, &tie.slave],
             Constraint::RigidBody(c) => vec![&c.region],
+            Constraint::Joint(c) => c.ends.iter().rev().filter_map(SpringEnd::region).collect(),
             Constraint::NodeTie(c) => vec![&c.region],
         }
     }
 
     pub fn regions_mut(&mut self) -> Vec<&mut Region> {
         match self {
-            Constraint::Spring(c) => c.master.iter_mut().chain([&mut c.region]).collect(),
+            Constraint::Spring(c) => (c.ends.iter_mut().rev())
+                .filter_map(SpringEnd::region_mut)
+                .collect(),
             Constraint::CompressionOnly(c) => vec![&mut c.region],
             Constraint::Tie(tie) => vec![&mut tie.master, &mut tie.slave],
             Constraint::RigidBody(c) => vec![&mut c.region],
+            Constraint::Joint(c) => (c.ends.iter_mut().rev())
+                .filter_map(SpringEnd::region_mut)
+                .collect(),
             Constraint::NodeTie(c) => vec![&mut c.region],
         }
     }
@@ -446,8 +451,6 @@ pub struct Tie {
     pub adjust: bool,
     pub master: Region,
     pub slave: Region,
-    pub master_color: [u8; 3],
-    pub slave_color: [u8; 3],
     /// Makes the tie the cyclic symmetry of a sector: the slave side is the master side
     /// rotated by one sector about the axis (`*TIE, CYCLIC SYMMETRY`).
     #[serde(default)]
@@ -599,8 +602,6 @@ impl Tie {
             adjust: true,
             master: Region::Faces(Vec::new()),
             slave: Region::Faces(Vec::new()),
-            master_color: DEFAULT_SURFACE_COLOR,
-            slave_color: DEFAULT_SURFACE_COLOR,
             cyclic: None,
         }
     }
@@ -647,7 +648,7 @@ impl ContactScale {
         let mut young = ElementYoung::new();
         for section in &model.sections {
             let Some(e) = (section.material.and_then(|m| model.material(m)))
-                .and_then(|m| m.elastic)
+                .and_then(|m| m.small_strain_elastic())
                 .map(|elastic| elastic.young)
                 .filter(|&e| e > 0.0)
             else {

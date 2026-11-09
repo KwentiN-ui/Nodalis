@@ -23,6 +23,33 @@ When results are opened, Nodalis shows the Results workspace with the last incre
 / History Outputs: values from the `.dat` file and history outputs you create (@history-outputs).
 / Hot Spot Stresses, Paths, Plane Results: evaluations described in the following sections.
 
+=== Results of 2D models <results-2d>
+
+A 2D model (plane stress, plane strain, axisymmetric, @model-properties) lies in the X-Y plane,
+so its displacements, velocities, accelerations and forces have no Z component and its stresses
+and strains no shear out of the plane. The built-in solver does not keep these components: the
+result file is smaller, and the results tree lists only what the model computes, such as `U1`
+and `U2` of `DISP` and `S11`, `S22`, `S33`, `S12` of `STRESS`. The same holds for the history
+outputs.
+
+A component is left out only where it is zero in every increment. Components that carry values
+in 2D stay:
+
+- `S33` and `E33` of an axisymmetric model are the hoop stress and strain.
+- `S33` of a plane strain model is the stress across the thickness; its `E33` is zero and left
+  out.
+- `E33` of a plane stress model is the thickness strain. `S33`, `S13` and `S23` of plane
+  stress are zero at every integration point (the thickness strain is found there so that the
+  stress across the thickness vanishes) and left out. The transverse shear stresses at the
+  integration points of axisymmetric elements stay in the history output.
+- The rotation of a reference point about the Z axis.
+
+`ALL`, `MISES` and the principal values are computed with the left out components as zero. A
+CalculiX export (#menu("File", "Export", "CalculiX Results (.frd) ...")) writes every component, as
+CalculiX does.
+
+#screenshot("results-2d-tree.png", [Results of a plane strain model: no Z components, no `E33`])
+
 Results list the parts of the model they were computed from, as in the FE Model workspace, also
 when several parts share a section. A `.frd` file itself only groups the elements by material;
 Nodalis reads the parts from the input file CalculiX ran, the `.inp` file of the same name next
@@ -50,8 +77,9 @@ it; the other tiles act at once and show pressed while their option is on.
   [Deformation], [#ui("Undeformed"), #ui("True scale"), #ui("Automatic") with factors from
     0.25 to 5, or #ui("User defined"), with the #ui("Factor") below them; it is typed for
     #ui("User defined"). Results open in #ui("Automatic"); static and dynamic
-    steps of a model with contact open in #ui("True scale"), so touching parts do not appear to
-    penetrate each other. Contact is recognised by a
+    steps of a model with contact, and steps with large deformations (nonlinear geometry), open in
+    #ui("True scale"), so touching parts do not appear to penetrate each other and large
+    motions are not exaggerated. Contact is recognised by a
     contact pair in the input file next to the results (same name, as CalculiX leaves it) or
     contact results in the file. Until you pick a deformation yourself, it follows the shown
     step. Mode shapes have a deformation of their own (@mode-shapes): the tile is then called
@@ -109,6 +137,11 @@ results with a single increment have none.
 
 #screenshot("results-timeline.png", [The timeline of three static steps and a frequency step
   with the frequency of each mode])
+
+In a Dynamic step with #ui("Automatic (implicit/explicit)") (@dynamic-automatic) the parts the
+solver integrated explicitly are orange, labelled #ui("explicit") where they are wide enough;
+the rest of the step was integrated implicitly. Hovering over an increment of an explicit part
+tells how many explicit time steps it took instead of the iterations.
 
 #screenshot("results-step-list.png", [The #ui("Step") list: each step of the FE model with its kind,
   its increments and the time it covers])

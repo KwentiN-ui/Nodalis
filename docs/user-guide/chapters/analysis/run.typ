@@ -104,6 +104,47 @@ The status at the end is #ui("completed"), #ui("finished with errors, results av
 and Nodalis adds a line "Possible cause: ..." with a remedy, for example for distorted
 elements, missing material data, rigid body motion or missing convergence.
 
+=== Solver profile <solver-profile>
+
+The solver measures on every run where its time goes, at no noticeable cost. Once a run is
+finished, the monitor shows the profile left of the output: the solver time, the size of the
+model as solved (nodes, elements and degrees of freedom, with shells and beams expanded) and a
+table of the phases, the longest first, with their time, their share of the solver time and how
+often they ran.
+
+#fields(
+  [Assembly], [Element matrices and internal forces into the global system.],
+  [Constraint reduction], [Constraints (ties, couplings, rigid bodies, equations) eliminated
+    from the system.],
+  [Symbolic analysis], [Ordering and structure of the direct solver; reused while the
+    pattern of the matrix stays the same.],
+  [Factorization], [The numeric factorization of the direct solver, or the setup of the
+    preconditioner of the iterative solver.],
+  [Solve], [Forward and back substitution, or the iterations of the iterative solver.],
+  [Vector arithmetic], [Predictors, right-hand sides, reactions and energies of the time
+    increments.],
+  [Results], [Stresses, strains and the result fields of the increments.],
+  [Loads and constraints], [Loads and prescribed displacements of each increment.],
+  [Contact], [Contact search and evaluation of the contact springs.],
+  [Writing results], [Handing the results to Nodalis at the end of the run.],
+  [Other], [The time no phase measured: preparing the model and the steps, and work of a
+    procedure that has no phase of its own.],
+)
+
+#ui("Profile") in the top row hides and shows the table in every monitor. #ui("Copy Report")
+copies a plain text report to the clipboard: the versions of Nodalis and the solver, the
+operating system, the number of cores and threads, the graphics card and whether the solver
+uses it, the analysis with its status and time, the size of the model, the steps with their
+kind and the profile. For a model that solves suspiciously slowly, paste it into an issue on
+GitHub; it is already formatted as a code block.
+
+#screenshot("solver-profile.png", [The profile of a linear static run in the solution monitor; the
+  iterative solve takes the largest share])
+
+The profile covers the solver itself. Meshing and preparing the model before the run are not
+in it; the running time in the top row includes them. A stopped run and a run with a step that
+did not converge show the profile up to where they ended.
+
 == Analyses that continue others <restart>
 
 One analysis can continue another one after a step, through a state link in the project
@@ -226,8 +267,8 @@ the cause and the remedy:
 - *Contact does not converge*: the same, while the contact status was still changing in the
   last iterations (points opening and closing again), with the remedies for contact.
 - *Temperatures do not converge* in a heat transfer step.
-- *More increments needed than allowed*: the step needs more increments than
-  #ui("Max. increments").
+- *More increments needed than allowed*: the step needs more increments than the
+  #ui("Increment limit") set under #ui("Advanced settings") of the step (off by default).
 - *Rigid body motion possible* for a singular stiffness matrix, with the model check of the
   solver that names the parts that move (@solver-model-check).
 - *Stiffness not positive definite*, *Not enough memory*, *Iterative equation solver failed*

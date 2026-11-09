@@ -28,8 +28,8 @@ use plxs_procedures::{ProcedureContext, run_step};
 pub use cache::StepCache;
 pub use check::{Check, check_analysis, check_input, format_diagnostic};
 pub use job::{
-    JobOptions, JobOutcome, KeptResults, format_event, run_analysis_keeping, run_input_file,
-    run_job, run_job_keeping,
+    JobOptions, JobOutcome, JobProfile, KeptResults, ProfileSink, format_event,
+    run_analysis_keeping, run_input_file, run_job, run_job_keeping,
 };
 pub use plxs_procedures::StepOutcome;
 pub use plxs_procedures::fields::unsupported_outputs;
@@ -192,6 +192,7 @@ impl Session {
             contact: std::mem::take(&mut self.contact),
             contact_pattern: self.contact_pattern.take(),
             profile: std::mem::take(&mut self.profile),
+            segment: None,
         };
         // The procedure runs on the session's pool in a thread of its own; events come
         // through a channel so that the caller's (not necessarily `Send`) progress sink
@@ -269,12 +270,26 @@ impl Session {
         &self.results
     }
 
+    pub fn results_mut(&mut self) -> &mut Results {
+        &mut self.results
+    }
+
     /// Time per phase of the steps so far, with the symbolic analyses the direct solver
     /// reused.
     pub fn profile(&self) -> plxs_procedures::profile::Profile {
         let mut profile = self.profile.clone();
         profile.analyses_reused = self.solver.analyses_reused();
         profile
+    }
+
+    /// Threads the session computes on.
+    pub fn threads(&self) -> usize {
+        self.threads
+    }
+
+    /// Degrees of freedom of the model, before constraints are eliminated.
+    pub fn degrees_of_freedom(&self) -> usize {
+        self.pattern.dimension()
     }
 
     /// Rows of the `.sta` file so far.

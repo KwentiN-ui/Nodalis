@@ -179,8 +179,10 @@ impl FeModel {
             visit(&mut plane.plane);
         }
         for constraint in &mut self.constraints {
-            if let Constraint::RigidBody(body) = constraint {
-                visit(&mut body.reference_point);
+            match constraint {
+                Constraint::RigidBody(body) => visit(&mut body.reference_point),
+                Constraint::Joint(joint) => optional(&mut joint.system, visit),
+                _ => {}
             }
         }
         for section in &mut self.sections {
@@ -199,6 +201,9 @@ impl FeModel {
             optional(&mut tie.detected_by, visit);
         }
         for step in &mut self.steps {
+            if let crate::StepKind::ComplexFrequency(complex) = &mut step.kind {
+                optional(&mut complex.system, visit);
+            }
             for bc in &mut step.boundary_conditions {
                 optional(&mut bc.amplitude, visit);
                 optional(&mut bc.distribution, visit);

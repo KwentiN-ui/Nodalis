@@ -12,7 +12,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId};
 
-use crate::{Formulation, Region, SymmetryPlane, symmetry_dofs, symmetry_plane};
+use crate::{
+    Formulation, Region, RemoteBehavior, SpringLayout, SymmetryPlane, symmetry_dofs, symmetry_plane,
+};
 
 use crate::{
     BoundaryKind, Constraint, ContactMethod, DefinedFieldKind, FeModel, LoadKind, Material,
@@ -63,6 +65,21 @@ pub enum Problem {
     InvalidPlastic,
     /// A creep law with nonpositive constants, or without elasticity.
     InvalidCreep,
+    /// A hyperelastic material the solver refuses: constants that give no positive initial
+    /// shear modulus, Poisson's ratio of 0.5 or more, or plasticity or creep beside it.
+    InvalidHyperelastic,
+    /// A hyperelastic material whose stress stops growing with the strain somewhere
+    /// between a stretch of 0.1 and 10 in a basic test (Drucker unstable): elements
+    /// strained that far make the solution unstable.
+    UnstableHyperelastic,
+    /// A hyperelastic material where the solver takes its initial linear stiffness:
+    /// trusses, membranes and general beams, and steps without large deformations
+    /// (coupled temperature-displacement, modal dynamics, sensitivity).
+    HyperelasticLinearized,
+    /// An explicit Dynamic step on elements with full integration that have a reduced
+    /// variant (C3D8, C3D20, S4, S8, CPS4, ...): reduced integration is several times
+    /// faster there.
+    ExplicitFullIntegration,
     NoConductivity,
     NoSpecificHeat,
     NoInitialTemperature,
@@ -131,6 +148,23 @@ pub enum Problem {
     InvalidCyclicSymmetry,
     /// An initial velocity in a model without a Dynamic step.
     VelocityIgnored,
+    /// A Dynamic step with fewer frames than its frequency limit needs to show a vibration
+    /// of that frequency: the solver resolves it, the results do not.
+    FramesTooFew,
+    /// A Dynamic step by modal superposition in a model with contact or plasticity, which
+    /// the superposition does not follow.
+    ModalStepNonlinear,
+    /// An amplitude a Dynamic step follows whose points all lie after the step's duration:
+    /// the load stays at its first value.
+    AmplitudeOutsideStep,
+    /// A time table of a boundary condition or load with points after the end of its step:
+    /// the rest of the table is not applied.
+    TableBeyondStep,
+    /// An excitation whose signal the solver cannot evaluate: no width, no frequency, an
+    /// end before the start, a start after the step.
+    InvalidSignal,
+    /// An excitation in a step other than a Dynamic step, which does not follow time.
+    ExcitationIgnored,
     /// A Coriolis complex frequency step without a centrifugal load before it.
     NoRotation,
     /// Contact pairs in a frequency step without perturbation: the solver ignores them.
@@ -142,8 +176,8 @@ pub enum Problem {
     InvalidTiedContact,
     /// Contact pairs of different formulations: the solver takes one for all of them.
     ContactFormulationsDiffer,
-    /// Mortar contact in a step that is not static: the solver takes mortar in static steps
-    /// only.
+    /// Mortar contact in a step that is neither static nor dynamic: the solver takes mortar
+    /// in static and dynamic steps only.
     MortarNotSupported,
     /// A contact region whose sides do not touch in the mesh: a bonded one ties nothing,
     /// another one lets its parts move freely until they meet.
@@ -213,6 +247,11 @@ impl Problem {
             | Problem::SymmetryOffAxis
             | Problem::SkewedSymmetryShared
             | Problem::VelocityIgnored
+            | Problem::FramesTooFew
+            | Problem::ModalStepNonlinear
+            | Problem::AmplitudeOutsideStep
+            | Problem::TableBeyondStep
+            | Problem::ExcitationIgnored
             | Problem::NoLoad
             | Problem::UnusedAmplitude
             | Problem::UnusedDistribution
@@ -232,7 +271,10 @@ impl Problem {
             | Problem::LockWithoutPreload
             | Problem::BoltWithoutPreload
             | Problem::BoltHeldAtCut
-            | Problem::NoCreep => Severity::Warning,
+            | Problem::NoCreep
+            | Problem::UnstableHyperelastic
+            | Problem::HyperelasticLinearized
+            | Problem::ExplicitFullIntegration => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -275,6 +317,10 @@ impl Problem {
             Problem::RigidBeamNodes => "Beam or shell nodes in a rigid body",
             Problem::InvalidPlastic => "Invalid plasticity",
             Problem::InvalidCreep => "Invalid creep law",
+            Problem::InvalidHyperelastic => "Invalid hyperelastic material",
+            Problem::UnstableHyperelastic => "Hyperelastic material unstable at large strains",
+            Problem::HyperelasticLinearized => "Hyperelastic material computed linearly",
+            Problem::ExplicitFullIntegration => "Full integration in an explicit step",
             Problem::NoExpansion => "Temperature without thermal expansion",
             Problem::NoStoredModes => "No stored eigenmodes",
             Problem::NoSensitivityBase => "No step for the sensitivities",
@@ -288,6 +334,12 @@ impl Problem {
             Problem::BoltHeldAtCut => "Bolt held at its cut",
             Problem::InvalidCyclicSymmetry => "Invalid cyclic symmetry",
             Problem::VelocityIgnored => "Initial velocity without a Dynamic step",
+            Problem::FramesTooFew => "Too few frames for the frequency limit",
+            Problem::ModalStepNonlinear => "Modal superposition is linear",
+            Problem::AmplitudeOutsideStep => "Amplitude starts after the step",
+            Problem::TableBeyondStep => "Table goes beyond the step",
+            Problem::InvalidSignal => "Invalid excitation signal",
+            Problem::ExcitationIgnored => "Excitation outside a Dynamic step",
             Problem::NoRotation => "No rotation",
             Problem::ContactIgnored => "Contact ignored",
             Problem::ContactWithCoriolis => "Contact with Coriolis",
@@ -388,6 +440,32 @@ impl Problem {
             Problem::InvalidCreep => {
                 "The solver reads Norton's creep law only after an isotropic elasticity and \
                  refuses a constant A or an exponent n that is not positive."
+            }
+            Problem::InvalidHyperelastic => {
+                "A hyperelastic material needs constants that give a positive initial shear \
+                 modulus and a Poisson's ratio below 0.5 (fully incompressible materials \
+                 need hybrid elements, which Nodalis does not have). It cannot be plastic \
+                 or creep at the same time."
+            }
+            Problem::UnstableHyperelastic => {
+                "With these constants the nominal stress stops growing with the stretch in \
+                 a basic test (uniaxial, equibiaxial or planar): the material is unstable \
+                 there (Drucker). If the model strains that far, the solver loses \
+                 convergence or finds unphysical deformations. Constants fitted to data of \
+                 a single test often are unstable in the other modes."
+            }
+            Problem::ExplicitFullIntegration => {
+                "An explicit step computes the internal forces of every element in every one \
+                 of its many time steps. Elements with reduced integration (C3D8R, C3D20R, \
+                 S4R, S8R) evaluate one or eight points instead of eight or 27: the step runs \
+                 several times faster, usually with the same accuracy for impacts and \
+                 crashes."
+            }
+            Problem::HyperelasticLinearized => {
+                "Trusses, membranes and beams with general profiles, and steps without \
+                 large deformations (coupled temperature-displacement, modal superposition, \
+                 sensitivities) use the initial linear stiffness of a hyperelastic \
+                 material. That is right for small strains only."
             }
             Problem::InvalidPlastic => {
                 "The hardening curve of a plastic material lists the yield stress over the \
@@ -507,8 +585,8 @@ impl Problem {
                  (x along the plane normal), and a node can have only one such system."
             }
             Problem::IncrementExceedsStep => {
-                "The initial increment is larger than the time period of the step, \
-                 which the solver rejects."
+                "The initial or fixed increment under Advanced settings is longer than the \
+                 duration of the step; the solver shortens it to the duration."
             }
             Problem::WheelOffSurface => {
                 "At some positions of the moving load a wheel is partly or fully off the \
@@ -597,6 +675,33 @@ impl Problem {
                 "Only a Dynamic step (time integration) starts from an initial velocity; \
                  static, frequency and thermal steps ignore it without a message."
             }
+            Problem::ModalStepNonlinear => {
+                "A Dynamic step with Modal superposition follows the motion in the eigenmodes \
+                 of the linear model: contact pairs and regions do not act in it, and \
+                 materials stay elastic. The step runs, but without them."
+            }
+            Problem::FramesTooFew => {
+                "The solver resolves vibrations up to the frequency limit, but the results \
+                 keep only the frames: a vibration needs at least two frames per period to \
+                 be seen in them. The computation is still correct, the animation and the \
+                 history of the frames miss the fast part."
+            }
+            Problem::AmplitudeOutsideStep => {
+                "All points of the amplitude lie after the end of the step. Within the step \
+                 the load stays at the factor of the first point, and the change the \
+                 amplitude describes never happens."
+            }
+            Problem::TableBeyondStep => {
+                "The table of a value has points after the end of the step: the step stops \
+                 at its duration, so the value never reaches them."
+            }
+            Problem::InvalidSignal => {
+                "The solver cannot evaluate the signal of the excitation as it is set."
+            }
+            Problem::ExcitationIgnored => {
+                "An excitation follows its signal over time, which only a Dynamic step \
+                 integrates. The step leaves it out."
+            }
             Problem::NoRotation => {
                 "The Coriolis forces of a Complex Frequency step come from its rotational \
                  speed. At standstill the complex eigenfrequencies are the eigenfrequencies \
@@ -615,8 +720,8 @@ impl Problem {
                  Connections."
             }
             Problem::MortarNotSupported => {
-                "The solver takes mortar contact in static steps only. In frequency, \
-                 buckling, dynamic and thermal steps the run aborts or the contact is left \
+                "The solver takes mortar contact in static and dynamic steps only. In \
+                 frequency, buckling and thermal steps the run aborts or the contact is left \
                  out."
             }
             Problem::ContactRegionOpen => {
@@ -830,6 +935,22 @@ impl Problem {
             Problem::InvalidCreep => {
                 "Edit the material: enter the elasticity and positive values of A and n."
             }
+            Problem::InvalidHyperelastic => {
+                "Edit the material: give positive moduli (C10, mu) and a Poisson's ratio \
+                 below 0.5, e.g. 0.49, and untick Plasticity and Creep."
+            }
+            Problem::UnstableHyperelastic => {
+                "Check the constants, fit them to test data of several modes, or use a \
+                 simpler model (Neo-Hooke, Yeoh), which stays stable."
+            }
+            Problem::ExplicitFullIntegration => {
+                "Change the element type of the parts to the reduced variant (Mesh settings, \
+                 element type), or keep it where bending of a single element layer matters."
+            }
+            Problem::HyperelasticLinearized => {
+                "Model the part with solid or shell elements, or use a Static or Dynamic \
+                 step (direct integration), which computes large deformations."
+            }
             Problem::InvalidPlastic => {
                 "Edit the material: enter the elastic constants and a hardening curve that \
                  starts at plastic strain 0 with the yield stress, e.g. 235 MPa at 0 and \
@@ -903,7 +1024,8 @@ impl Problem {
                  file (.frd) of the global model."
             }
             Problem::IncrementExceedsStep => {
-                "In the step choose an initial increment no larger than the time period."
+                "In the step's Advanced settings choose an increment no longer than the \
+                 duration, or set it back to automatic."
             }
             Problem::NoLoad => "Under Loads create a load or activate a deactivated one.",
             Problem::UnusedDistribution => {
@@ -949,6 +1071,29 @@ impl Problem {
                  keep the nodal diameter range within 0 to half the number of sectors."
             }
             Problem::VelocityIgnored => "Add a Dynamic step or deactivate the initial condition.",
+            Problem::ModalStepNonlinear => {
+                "Set the method of the step to Direct integration, or deactivate the contact \
+                 and the plasticity if they do not matter in it."
+            }
+            Problem::FramesTooFew => {
+                "Raise the frames of the step to at least twice the frequency limit times \
+                 the duration, or lower the frequency limit."
+            }
+            Problem::AmplitudeOutsideStep => {
+                "Move the points of the amplitude into the duration of the step (step time \
+                 starts at 0), or lengthen the step."
+            }
+            Problem::TableBeyondStep => {
+                "Set the duration of the step to the last time of the table, or shorten \
+                 the table."
+            }
+            Problem::InvalidSignal => {
+                "Open the excitation and correct its signal: positive width and frequencies, \
+                 an end after the start, a start inside the step."
+            }
+            Problem::ExcitationIgnored => {
+                "Move the excitation into a Dynamic step, or use a Force with an amplitude."
+            }
             Problem::InvalidBolt => {
                 "Pick the two faces of the cut on the geometry, or element faces of solid \
                  elements."
@@ -1034,9 +1179,9 @@ impl Problem {
                  material data, and for heat across contact check the gap conductance."
             }
             Problem::IncrementLimit => {
-                "Raise Max. increments in the step (Incrementation Automatic or Direct). \
-                 If the increments are small without need, also raise the initial and \
-                 the maximum increment."
+                "Raise the Increment limit in the step's Advanced settings, or switch it \
+                 off. If the increments are small without need, also raise the initial and \
+                 the largest increment."
             }
             Problem::NotPositiveDefinite => {
                 "Choose the Direct equation solver in the step, which also solves \
@@ -1363,10 +1508,12 @@ impl FeModel {
             if !(k.is_finite() && k > 0.0) || nodes.is_empty() {
                 continue;
             }
-            let mut spring = crate::Spring::new(format!("PLX_Weak_Springs_{}", part.name));
+            let mut spring = crate::Spring::to_world(
+                format!("PLX_Weak_Springs_{}", part.name),
+                Region::Nodes(nodes),
+                [k; 3],
+            );
             spring.visible = false;
-            spring.region = Region::Nodes(nodes);
-            spring.stiffness = [k; 3];
             springs.push(spring);
         }
         springs
@@ -1431,7 +1578,7 @@ impl FeModel {
                 ),
             ));
         }
-        let nlgeom = (self.steps.iter()).find(|s| s.active && s.kind.nlgeom());
+        let nlgeom = (self.steps.iter()).find(|s| s.active && self.step_nlgeom(&s.kind));
         for (i, region) in self.contact_regions.iter().enumerate() {
             if let Some(step) = nlgeom.filter(|_| {
                 region.active && region.behavior == crate::ContactBehavior::NoSeparation
@@ -1466,7 +1613,10 @@ impl FeModel {
                 findings.push(Finding::new(
                     ModelItem::Step(s),
                     Problem::MortarNotSupported,
-                    format!("{}: mortar contact in a step that is not static", step.name),
+                    format!(
+                        "{}: mortar contact in a step that is neither static nor dynamic",
+                        step.name
+                    ),
                 ));
             }
         }
@@ -1499,6 +1649,7 @@ impl FeModel {
             }
         }
         self.check_materials(&mut findings);
+        self.check_hyperelastic_use(mesh, &mut findings);
         self.check_sections(mesh, &mut findings);
         for (part, bad) in mesh_check.distorted.iter().enumerate() {
             if !bad.is_empty() {
@@ -1531,6 +1682,8 @@ impl FeModel {
         self.check_cyclic_symmetry(mesh, &mut findings);
         self.check_tied_contacts(&mut findings);
         self.check_amplitudes(&mut findings);
+        self.check_tables(&mut findings);
+        self.check_excitations(&mut findings);
         let used = self.used_distributions();
         for (i, distribution) in self.distributions.iter().enumerate() {
             if !used.contains(&distribution.id) {
@@ -1549,7 +1702,7 @@ impl FeModel {
         let general_beams = self.general_beam_sections(mesh);
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
             self.check_step(s, mesh, mesh_check, &trusses, &mut findings);
-            let general_fits = !step.kind.nlgeom()
+            let general_fits = !self.step_nlgeom(&step.kind)
                 && matches!(
                     step.kind,
                     StepKind::Static(_)
@@ -1564,7 +1717,11 @@ impl FeModel {
                     format!(
                         "{}{}: {} use general beam profiles",
                         step.name,
-                        if step.kind.nlgeom() { " (Nlgeom)" } else { "" },
+                        if self.step_nlgeom(&step.kind) {
+                            " (Nlgeom)"
+                        } else {
+                            ""
+                        },
                         general_beams.join(", ")
                     ),
                 ));
@@ -1642,26 +1799,116 @@ impl FeModel {
                     format!("{} prescribes temperatures (Defined Field)", step.name),
                 ));
             }
+            if let StepKind::Dynamic(settings) = &step.kind {
+                self.check_dynamic_step(s, step, settings, &mut findings);
+                if settings.method.uses_explicit() {
+                    const FULL: [&str; 10] = [
+                        "C3D8", "C3D20", "S4", "S8", "CPS4", "CPS8", "CPE4", "CPE8", "CAX4", "CAX8",
+                    ];
+                    let full = (mesh.elements().iter())
+                        .filter(|e| FULL.contains(&e.type_name.to_ascii_uppercase().as_str()))
+                        .count();
+                    if full > 0 {
+                        findings.push(Finding::new(
+                            ModelItem::Step(s),
+                            Problem::ExplicitFullIntegration,
+                            format!(
+                                "{}: {full} element(s) with full integration; reduced \
+                                 integration (S4R, S8R, C3D8R) makes explicit steps several \
+                                 times faster",
+                                step.name
+                            ),
+                        ));
+                    }
+                }
+            }
             if let StepKind::Static(settings)
             | StepKind::Visco(crate::ViscoStep {
                 increments: settings,
                 ..
             }) = &step.kind
-                && settings.incrementation != crate::Incrementation::Default
-                && settings.initial_increment > settings.time_period
+                && let Some(increment) = match settings.control.size {
+                    crate::IncrementSize::Fixed(dt) => Some(dt),
+                    crate::IncrementSize::Automatic => settings.control.initial,
+                }
+                && increment > settings.duration
             {
                 findings.push(Finding::new(
                     ModelItem::Step(s),
                     Problem::IncrementExceedsStep,
-                    format!(
-                        "Initial increment {} > time period {}",
-                        settings.initial_increment, settings.time_period
-                    ),
+                    format!("Increment {} > duration {}", increment, settings.duration),
                 ));
             }
         }
         findings.sort_by_key(|f| f.severity());
         findings
+    }
+
+    /// Settings of a Dynamic step that run but show less than intended.
+    fn check_dynamic_step(
+        &self,
+        s: usize,
+        step: &crate::Step,
+        settings: &crate::DynamicStep,
+        findings: &mut Vec<Finding>,
+    ) {
+        if let crate::DynamicMethod::Modal { .. } = settings.method {
+            let contact = (self.contact_pairs.iter()).filter(|c| c.active).count()
+                + self.contact_regions.len();
+            let plastic = (self.materials.iter())
+                .filter(|m| m.plastic.is_some())
+                .count();
+            if contact + plastic > 0 {
+                findings.push(Finding::new(
+                    ModelItem::Step(s),
+                    Problem::ModalStepNonlinear,
+                    format!(
+                        "{}: {contact} contact definition(s) and {plastic} plastic material(s) \
+                         are not followed by modal superposition",
+                        step.name
+                    ),
+                ));
+            }
+        }
+        if let Some(limit) = settings.frequency_limit
+            && (settings.frames as f64) < 2.0 * limit * settings.duration
+        {
+            findings.push(Finding::new(
+                ModelItem::Step(s),
+                Problem::FramesTooFew,
+                format!(
+                    "{}: {} frames over {} show vibrations up to {:.4} only, the limit is {}",
+                    step.name,
+                    settings.frames,
+                    settings.duration,
+                    settings.frames as f64 / (2.0 * settings.duration),
+                    limit
+                ),
+            ));
+        }
+        for (i, amplitude) in self.amplitudes.iter().enumerate() {
+            let after = |t: f64| t + amplitude.shift_time >= settings.duration;
+            if amplitude.time_span == crate::AmplitudeTime::Step
+                && !amplitude.points.is_empty()
+                && amplitude.points.iter().all(|p| after(p[0]))
+                && self
+                    .step_amplitudes(step)
+                    .iter()
+                    .any(|a| a.name == amplitude.name)
+            {
+                findings.push(Finding::new(
+                    ModelItem::Amplitude(i),
+                    Problem::AmplitudeOutsideStep,
+                    format!(
+                        "{} starts at {} after the end of {} at {}",
+                        amplitude.name,
+                        amplitude.points[0][0] + amplitude.shift_time,
+                        step.name,
+                        settings.duration
+                    ),
+                ));
+            }
+        }
     }
 
     /// Contact pairs with tied surface behavior the solver rejects.
@@ -1732,7 +1979,30 @@ impl FeModel {
                 bodies.push((ModelItem::Load(s, i), name, nodes));
             }
         }
-        if let Some(step) = (self.steps.iter()).find(|s| s.active && s.kind.nlgeom()) {
+        // A rigid joint couples each selection end to a point of its own.
+        let all = self.directly_held_nodes_in(mesh, |_| true);
+        for (i, constraint) in self.constraints.iter().enumerate() {
+            let Constraint::Joint(joint) = constraint else {
+                continue;
+            };
+            if !joint.active || joint.behavior != crate::RemoteBehavior::Rigid {
+                continue;
+            }
+            let Ok(origin) = self.joint_origin(mesh, joint) else {
+                continue;
+            };
+            for region in joint.ends.iter().filter_map(crate::SpringEnd::selection) {
+                let spec = crate::Displacement {
+                    location: Some(origin),
+                    ..crate::Displacement::rigid([None; 6])
+                };
+                if let Ok(point) = spec.resolve(self, mesh, region, &all) {
+                    let nodes = point.nodes.into_iter().collect();
+                    bodies.push((ModelItem::Constraint(i), &joint.name, nodes));
+                }
+            }
+        }
+        if let Some(step) = (self.steps.iter()).find(|s| s.active && self.step_nlgeom(&s.kind)) {
             let expanded = crate::expanded_nodes(mesh);
             for (item, name, nodes) in &bodies {
                 let count = nodes.iter().filter(|n| expanded.contains(n)).count();
@@ -1904,6 +2174,74 @@ impl FeModel {
         }
     }
 
+    /// Excitations outside Dynamic steps and signals the solver would reject.
+    fn check_excitations(&self, findings: &mut Vec<Finding>) {
+        for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
+            for (i, load) in step.loads.iter().enumerate() {
+                let LoadKind::Excitation(excitation) = &load.kind else {
+                    continue;
+                };
+                if !load.active {
+                    continue;
+                }
+                let StepKind::Dynamic(dynamic) = &step.kind else {
+                    findings.push(Finding::new(
+                        ModelItem::Load(s, i),
+                        Problem::ExcitationIgnored,
+                        format!("{}: {} is not a Dynamic step", load.name, step.name),
+                    ));
+                    continue;
+                };
+                if let Some(reason) = excitation.signal.problem(dynamic.duration) {
+                    findings.push(Finding::new(
+                        ModelItem::Load(s, i),
+                        Problem::InvalidSignal,
+                        format!("{}: {reason}", load.name),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Time tables with points after the end of their step.
+    fn check_tables(&self, findings: &mut Vec<Finding>) {
+        for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
+            let period = step.kind.period();
+            for table in step.tables() {
+                let Some(last) = table.table.points.last().map(|p| p[0]) else {
+                    continue;
+                };
+                if last <= period * (1.0 + 1e-9) {
+                    continue;
+                }
+                let (item, name, labels): (_, _, &[&str]) = match table.owner {
+                    crate::TableOwner::BoundaryCondition(i) => (
+                        ModelItem::BoundaryCondition(s, i),
+                        &step.boundary_conditions[i].name,
+                        &["U1", "U2", "U3", "UR1", "UR2", "UR3"],
+                    ),
+                    crate::TableOwner::Load(i) => (
+                        ModelItem::Load(s, i),
+                        &step.loads[i].name,
+                        match step.loads[i].kind {
+                            LoadKind::Moment(_) => &["M1", "M2", "M3"],
+                            LoadKind::Pressure(_) => &["the pressure"],
+                            _ => &["F1", "F2", "F3"],
+                        },
+                    ),
+                };
+                findings.push(Finding::new(
+                    item,
+                    Problem::TableBeyondStep,
+                    format!(
+                        "{name}: the table of {} goes to time {last}, {} ends at {period}",
+                        labels[table.component], step.name
+                    ),
+                ));
+            }
+        }
+    }
+
     fn check_tied_contacts(&self, findings: &mut Vec<Finding>) {
         for (i, pair) in self.contact_pairs.iter().enumerate() {
             let Some(interaction) = (pair.interaction)
@@ -1962,12 +2300,48 @@ impl FeModel {
                 continue;
             }
             let item = ModelItem::Material(i);
-            match material.elastic {
-                None if mechanical => findings.push(Finding::new(
-                    item,
-                    Problem::NoElastic,
-                    format!("{} has no elasticity", material.name),
-                )),
+            if let Some(hyper) = &material.hyperelastic
+                && mechanical
+            {
+                let detail = match hyper.problem() {
+                    Some(problem) => Some(format!("{}: {problem}", material.name)),
+                    None if material.plastic.is_some() || material.creep.is_some() => Some(
+                        format!("{} is hyperelastic and plastic or creeping", material.name),
+                    ),
+                    None => None,
+                };
+                match detail {
+                    Some(detail) => {
+                        findings.push(Finding::new(item, Problem::InvalidHyperelastic, detail))
+                    }
+                    None => {
+                        if let Some((mode, stretch)) = hyper.unstable_stretch() {
+                            findings.push(Finding::new(
+                                item,
+                                Problem::UnstableHyperelastic,
+                                format!(
+                                    "{}: unstable in {} {} at a stretch of {stretch:.2}",
+                                    material.name,
+                                    mode.label().to_lowercase(),
+                                    if stretch < 1.0 {
+                                        "compression"
+                                    } else {
+                                        "tension"
+                                    },
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+            match material.elastic.filter(|_| material.hyperelastic.is_none()) {
+                None if mechanical && material.hyperelastic.is_none() => {
+                    findings.push(Finding::new(
+                        item,
+                        Problem::NoElastic,
+                        format!("{} has no elasticity", material.name),
+                    ))
+                }
                 Some(e) if e.young <= 0.0 || e.poisson >= 0.5 || e.poisson <= -1.0 => {
                     findings.push(Finding::new(
                         item,
@@ -2036,6 +2410,54 @@ impl FeModel {
     /// Parts with elements no section covers.
     /// The beam sections on elements whose cross-section is a general profile, which
     /// the solver knows only as the user element U1.
+    /// Hyperelastic materials where the solver takes the initial linear stiffness.
+    fn check_hyperelastic_use(&self, mesh: &FeMesh, findings: &mut Vec<Finding>) {
+        for (i, section) in self.sections.iter().enumerate() {
+            let material = section.material.and_then(|m| self.material(m));
+            let Some(material) = material.filter(|m| m.hyperelastic.is_some()) else {
+                continue;
+            };
+            if section.region.elements(mesh).is_empty() {
+                continue;
+            }
+            let linear = match &section.kind {
+                SectionKind::Truss { .. } => Some("trusses"),
+                SectionKind::Membrane { .. } => Some("membranes"),
+                kind if self.section_profile(kind).is_some_and(|p| !p.is_native()) => {
+                    Some("beams with a general profile")
+                }
+                _ => None,
+            };
+            if let Some(what) = linear {
+                findings.push(Finding::new(
+                    ModelItem::Section(i),
+                    Problem::HyperelasticLinearized,
+                    format!(
+                        "{}: {what} of the hyperelastic {}",
+                        section.name, material.name
+                    ),
+                ));
+            }
+        }
+        if !self.has_hyperelastic() {
+            return;
+        }
+        for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
+            let linear = match &step.kind {
+                StepKind::CoupledTempDisp(_) | StepKind::Sensitivity(_) => true,
+                StepKind::Dynamic(d) => matches!(d.method, crate::DynamicMethod::Modal { .. }),
+                _ => false,
+            };
+            if linear {
+                findings.push(Finding::new(
+                    ModelItem::Step(s),
+                    Problem::HyperelasticLinearized,
+                    format!("{}: no large deformations in this step", step.name),
+                ));
+            }
+        }
+    }
+
     fn general_beam_sections(&self, mesh: &FeMesh) -> Vec<&str> {
         (self.sections.iter())
             .filter(|s| {
@@ -2200,7 +2622,7 @@ impl FeModel {
             }
             let formulation = self.formulation(mesh, s, i);
             if let BoundaryKind::Displacement(displacement) = &bc.kind {
-                moved |= (displacement.values.iter()).any(|v| v.is_some_and(|v| v != 0.0));
+                moved |= (0..6).any(|d| displacement.moves(d));
             }
             let values: Vec<(usize, f64)> = match &bc.kind {
                 // The nodes follow the rigid body of a point, see `check_rigid_body`.
@@ -2224,9 +2646,12 @@ impl FeModel {
                     }
                     Vec::new()
                 }
+                // A value that follows a table differs from any other: NaN.
                 BoundaryKind::Displacement(displacement) => (displacement.values.iter())
                     .enumerate()
-                    .filter_map(|(d, v)| v.map(|v| (d, v)))
+                    .filter_map(|(d, v)| {
+                        v.map(|v| (d, displacement.table(d).map_or(v, |_| f64::NAN)))
+                    })
                     .collect(),
                 // Degree of freedom 11.
                 BoundaryKind::Temperature(t) => vec![(10, *t)],
@@ -2289,9 +2714,7 @@ impl FeModel {
             // Rotations held at zero do no harm; nothing turns solid nodes anyway.
             if let BoundaryKind::Displacement(displacement) = &bc.kind
                 && formulation == Some(Formulation::Nodes)
-                && displacement.values[3..]
-                    .iter()
-                    .any(|v| v.is_some_and(|v| v != 0.0))
+                && (3..6).any(|d| displacement.moves(d))
                 && bc.region.reference_point().is_none()
                 && (space.is_2d() || !trusses.rotational.iter().any(|&r| r))
             {
@@ -2400,7 +2823,10 @@ impl FeModel {
                     load.active
                         && matches!(
                             load.kind,
-                            LoadKind::Force { .. } | LoadKind::Moment(_) | LoadKind::RemoteForce(_)
+                            LoadKind::Force { .. }
+                                | LoadKind::Moment(_)
+                                | LoadKind::RemoteForce(_)
+                                | LoadKind::Excitation(_)
                         )
                         && load.region.nodes(mesh).iter().any(|n| nodes.contains(n))
                 });
@@ -2453,7 +2879,8 @@ impl FeModel {
                 }
                 loaded = true;
                 let directions: Vec<usize> = match load.kind {
-                    LoadKind::Force { value: f, .. } => {
+                    LoadKind::Force { value: f, .. }
+                    | LoadKind::Excitation(crate::Excitation { value: f, .. }) => {
                         (0..3).filter(|&d| f[d] != 0.0 && d < dofs).collect()
                     }
                     LoadKind::Moment(m) => (0..3)
@@ -2465,7 +2892,10 @@ impl FeModel {
                     LoadKind::Pressure(_) | LoadKind::Centrifugal { .. } => {
                         (0..dofs.min(3)).collect()
                     }
-                    LoadKind::Gravity(g) => (0..3).filter(|&d| g[d] != 0.0 && d < dofs).collect(),
+                    LoadKind::Gravity(_) | LoadKind::StandardGravity(_) => {
+                        let g = load.kind.gravity_vector().unwrap_or_default();
+                        (0..3).filter(|&d| g[d] != 0.0 && d < dofs).collect()
+                    }
                     // Heat flows go into temperatures, which nothing but a temperature holds.
                     _ => Vec::new(),
                 };
@@ -2573,6 +3003,56 @@ impl FeModel {
         out
     }
 
+    /// The degrees of freedom (translations 0..3, rotations 3..6) that active springs to
+    /// ground hold at a point, a reference point or the point of a boundary condition or
+    /// remote force.
+    fn spring_point_dofs(&self, point: &Region) -> Vec<usize> {
+        // A plane model turns about z only, an axisymmetric one not at all.
+        let rotations: &[usize] = match self.properties.space {
+            ModelSpace::ThreeD => &[0, 1, 2],
+            ModelSpace::PlaneStress | ModelSpace::PlaneStrain => &[2],
+            ModelSpace::Axisymmetric => &[],
+        };
+        let mut out = Vec::new();
+        for constraint in self.constraints.iter().filter(|c| c.active()) {
+            let Constraint::Spring(spring) = constraint else {
+                continue;
+            };
+            if spring.layout() != Some(SpringLayout::PointToWorld { point }) {
+                continue;
+            }
+            out.extend((0..3).filter(|&d| spring.stiffness[d] > 0.0));
+            out.extend(
+                (rotations.iter())
+                    .filter(|&&d| spring.rotational[d] > 0.0)
+                    .map(|d| d + 3),
+            );
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The regions of the mesh a point drives: those of the rigid bodies of a reference
+    /// point, or the region of the boundary condition or remote force a point belongs to.
+    fn point_regions(&self, mesh: &FeMesh, point: &Region) -> Vec<Region> {
+        match point {
+            Region::ReferencePoint(name) => (self.constraints.iter())
+                .filter_map(|c| match c {
+                    Constraint::RigidBody(body) if body.active && body.reference_point == *name => {
+                        Some(body.region.clone())
+                    }
+                    _ => None,
+                })
+                .collect(),
+            Region::RemotePoint(id) => (self.remote_point_of(mesh, *id))
+                .map(|(region, _)| region.clone())
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Finds pieces of the model that can move as a rigid body in a static step: the rigid
     /// body motions a support at point x in direction n prevents are those with
     /// n . (t + w x (x - c)) != 0, so a piece is held when the rows [n, (x - c) x n] of its
@@ -2661,19 +3141,37 @@ impl FeModel {
         };
         for constraint in self.constraints.iter().filter(|c| c.active()) {
             match constraint {
-                Constraint::Spring(c) if c.master.is_none() => {
-                    for node in c.region.nodes(mesh) {
-                        for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
-                            support(node, axis(d), false);
+                Constraint::Spring(c) => match c.layout() {
+                    Some(SpringLayout::SelectionToWorld { selection }) => {
+                        for node in selection.nodes(mesh) {
+                            for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
+                                support(node, axis(d), false);
+                            }
                         }
                     }
-                }
+                    // Springs on a point to ground hold the point's region below.
+                    Some(SpringLayout::PointToWorld { .. }) | None => {}
+                    Some(_) => {
+                        // Two connected ends join their pieces like a tie.
+                        let [a, b] = c.ends.each_ref().map(|end| match end.region() {
+                            Some(r) if crate::constraint::is_point(r) => {
+                                (self.point_regions(mesh, r).into_iter())
+                                    .flat_map(|r| pieces(&r))
+                                    .collect()
+                            }
+                            Some(r) => pieces(r),
+                            None => Vec::new(),
+                        });
+                        join(&mut ties, &a, &b);
+                        join(&mut contacts, &a, &b);
+                    }
+                },
                 Constraint::CompressionOnly(c) => {
                     for (node, normal) in face_normals(mesh, &c.region) {
                         support(node, normal, false);
                     }
                 }
-                Constraint::Tie(_) | Constraint::Spring(_) => {
+                Constraint::Tie(_) => {
                     if let Some([master, slave]) = constraint.master_slave() {
                         let (a, b) = (pieces(master), pieces(slave));
                         join(&mut ties, &a, &b);
@@ -2685,10 +3183,59 @@ impl FeModel {
                     join(&mut ties, &tied, &[]);
                     join(&mut contacts, &tied, &[]);
                 }
+                Constraint::Joint(joint) => {
+                    let regions = |end: &crate::SpringEnd| -> Vec<Region> {
+                        match end.region() {
+                            Some(r) if crate::constraint::is_point(r) => {
+                                self.point_regions(mesh, r)
+                            }
+                            Some(r) => vec![r.clone()],
+                            None => Vec::new(),
+                        }
+                    };
+                    let [a, b] = joint.ends.each_ref().map(regions);
+                    if a.is_empty() || b.is_empty() {
+                        // A joint to ground holds its end in the held directions of its
+                        // frame like a displacement on a point.
+                        let free = joint.free_dofs();
+                        for region in a.iter().chain(&b) {
+                            let Some(centre) = region.centroid(mesh) else {
+                                continue;
+                            };
+                            let Some(node) = nearest_node(mesh, region, centre) else {
+                                continue;
+                            };
+                            let axes = (self.joint_frame(mesh, joint).ok())
+                                .map(|(_, axes)| axes)
+                                .or_else(|| {
+                                    (self.coordinate_system_or_global(joint.system))
+                                        .and_then(|system| system.directions_at(centre).ok())
+                                })
+                                .unwrap_or([axis(0), axis(1), axis(2)]);
+                            for dof in (0..6).filter(|&d| !free[d]) {
+                                if dof < 3 || space == ModelSpace::ThreeD {
+                                    support(node, axes[dof % 3], dof >= 3);
+                                }
+                            }
+                        }
+                    } else {
+                        // Two connected ends join their pieces like a tie.
+                        let pieces_of = |regions: &[Region]| -> Vec<usize> {
+                            regions.iter().flat_map(&pieces).collect()
+                        };
+                        let (a, b) = (pieces_of(&a), pieces_of(&b));
+                        join(&mut ties, &a, &b);
+                        join(&mut contacts, &a, &b);
+                    }
+                }
                 Constraint::RigidBody(body) => {
-                    let tied = pieces(&body.region);
-                    join(&mut ties, &tied, &[]);
-                    join(&mut contacts, &tied, &[]);
+                    // A deformable coupling only averages its selection: it joins nothing
+                    // by itself, but a boundary condition on its point holds it all the same.
+                    if body.behavior == RemoteBehavior::Rigid {
+                        let tied = pieces(&body.region);
+                        join(&mut ties, &tied, &[]);
+                        join(&mut contacts, &tied, &[]);
+                    }
                     // A boundary condition on the reference point holds the body: its
                     // translations like a support at the node nearest the point, its
                     // rotations like those of a beam node.
@@ -2698,7 +3245,13 @@ impl FeModel {
                     let Some(node) = nearest_node(mesh, &body.region, point.position) else {
                         continue;
                     };
-                    for dof in self.point_dofs(s, body.reference_point) {
+                    let springs =
+                        self.spring_point_dofs(&Region::ReferencePoint(body.reference_point));
+                    for dof in self
+                        .point_dofs(s, body.reference_point)
+                        .into_iter()
+                        .chain(springs)
+                    {
                         if dof < 3 {
                             support(node, axis(dof), false);
                         } else if dof < 6 && space == ModelSpace::ThreeD {
@@ -2737,16 +3290,32 @@ impl FeModel {
             for dof in (0..6).filter(|&d| held[d].is_some()) {
                 support(node, axes[dof % 3], dof >= 3);
             }
+            // Springs to ground on the point hold it in the global directions.
+            for dof in self.spring_point_dofs(&Region::RemotePoint(bc.id)) {
+                support(node, axis(dof % 3), dof >= 3);
+            }
         }
         // A rigid remote force joins its selection like a rigid body, holding nothing.
-        for (_, _, region, remote) in self.remote_forces().filter(|(t, ..)| *t == s) {
+        // Springs to ground on its point hold it.
+        for (_, i, region, remote) in self.remote_forces().filter(|(t, ..)| *t == s) {
             if remote.behavior != crate::RemoteBehavior::Rigid {
                 continue;
             }
             if let Ok((point, _)) = self.remote_force_nodes(mesh, region, remote) {
-                let tied = pieces(&Region::Nodes(point.nodes));
+                let position = point.position;
+                let region = Region::Nodes(point.nodes);
+                let tied = pieces(&region);
                 join(&mut ties, &tied, &[]);
                 join(&mut contacts, &tied, &[]);
+                let id = self.steps[s].loads[i].id;
+                let springs = self.spring_point_dofs(&Region::RemotePoint(id));
+                if let (false, Some(node)) =
+                    (springs.is_empty(), nearest_node(mesh, &region, position))
+                {
+                    for dof in springs {
+                        support(node, axis(dof % 3), dof >= 3);
+                    }
+                }
             }
         }
         for tie in self.node_ties.iter().filter(|t| t.active) {
@@ -2912,15 +3481,22 @@ impl FeModel {
             match constraint {
                 // Moved to the node ties when the project was read.
                 Constraint::NodeTie(_) => {}
-                Constraint::Spring(c) if c.master.is_none() => {
-                    for node in c.region.nodes(mesh) {
-                        for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
-                            add(&mut gram, node, axis(d));
+                Constraint::Spring(c) => match c.layout() {
+                    Some(SpringLayout::SelectionToWorld { selection }) => {
+                        for node in selection.nodes(mesh) {
+                            for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
+                                add(&mut gram, node, axis(d));
+                            }
                         }
                     }
-                }
+                    _ => {
+                        for region in c.ends.iter().filter_map(crate::SpringEnd::selection) {
+                            mark(region, &mut held_otherwise);
+                        }
+                    }
+                },
                 Constraint::CompressionOnly(c) => mark(&c.region, &mut held_otherwise),
-                Constraint::Tie(_) | Constraint::Spring(_) => {
+                Constraint::Tie(_) => {
                     for region in constraint.master_slave().into_iter().flatten() {
                         mark(region, &mut held_otherwise);
                     }
@@ -2928,6 +3504,11 @@ impl FeModel {
                 Constraint::RigidBody(body) => {
                     if !self.point_dofs(s, body.reference_point).is_empty() {
                         mark(&body.region, &mut held_otherwise);
+                    }
+                }
+                Constraint::Joint(joint) => {
+                    for region in joint.ends.iter().filter_map(crate::SpringEnd::selection) {
+                        mark(region, &mut held_otherwise);
                     }
                 }
             }
@@ -3256,7 +3837,7 @@ pub(crate) fn describe_motions(space: ModelSpace, free: &[[f64; 6]]) -> String {
 
 /// Eigenvalues and eigenvectors of the upper left `n` x `n` block of a symmetric matrix by
 /// Jacobi rotations; small enough to be exact for the six rigid body unknowns.
-fn eigen(matrix: &[[f64; 6]; 6], n: usize) -> ([f64; 6], [[f64; 6]; 6]) {
+pub(crate) fn eigen(matrix: &[[f64; 6]; 6], n: usize) -> ([f64; 6], [[f64; 6]; 6]) {
     let mut a = *matrix;
     let mut v = [[0.0; 6]; 6];
     for (i, row) in v.iter_mut().enumerate() {
@@ -3570,6 +4151,7 @@ mod tests {
             kind: LoadKind::force([0.0, 0.0, -1.0]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         let steel = steel();
         let steel_id = steel.id;
@@ -3619,6 +4201,44 @@ mod tests {
             problems(&check(&model, &mesh)),
             [(ModelItem::Section(0), Problem::MissingReference)]
         );
+    }
+
+    #[test]
+    fn a_table_beyond_the_end_of_its_step_is_reported() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        let mut displacement = crate::Displacement::new([None, Some(0.0), None, None, None, None]);
+        displacement.tables[1] = Some(crate::ValueTable {
+            points: vec![[0.0, 0.0], [1.0, -0.8], [2.0, 0.8]],
+        });
+        model.steps[0]
+            .boundary_conditions
+            .push(crate::BoundaryCondition {
+                id: crate::Id::new(),
+                name: "Move".into(),
+                active: true,
+                visible: true,
+                region: crate::Region::Nodes(vec![1]),
+                kind: BoundaryKind::Displacement(displacement),
+                amplitude: None,
+                distribution: None,
+            });
+        let beyond = |model: &FeModel| {
+            (check(model, &mesh).into_iter())
+                .filter(|f| f.problem == Problem::TableBeyondStep)
+                .map(|f| f.detail)
+                .collect::<Vec<_>>()
+        };
+        // A new static step lasts 1.
+        assert_eq!(
+            beyond(&model),
+            ["Move: the table of U2 goes to time 2, Step-1 ends at 1"]
+        );
+        let StepKind::Static(settings) = &mut model.steps[0].kind else {
+            unreachable!()
+        };
+        settings.duration = 2.0;
+        assert!(beyond(&model).is_empty());
     }
 
     #[test]
@@ -3685,6 +4305,40 @@ mod tests {
             problems(&check(&model, &mesh)),
             [(ModelItem::Material(0), Problem::InvalidCreep)]
         );
+    }
+
+    #[test]
+    fn hyperelastic_materials_are_checked() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        model.materials[0].elastic = None;
+        model.materials[0].hyperelastic = Some(crate::Hyperelastic::neo_hooke(1e6, 0.49));
+        assert_eq!(check(&model, &mesh), []);
+        model.materials[0].hyperelastic.as_mut().unwrap().poisson = 0.5;
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::Material(0), Problem::InvalidHyperelastic)]
+        );
+        model.materials[0].hyperelastic = Some(crate::Hyperelastic {
+            model: crate::HyperelasticModel::MooneyRivlin,
+            constants: vec![-0.2e6, 0.7e6],
+            poisson: 0.49,
+            test_data: Vec::new(),
+        });
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::Material(0), Problem::UnstableHyperelastic)]
+        );
+        model.materials[0].hyperelastic = Some(crate::Hyperelastic::neo_hooke(1e6, 0.49));
+        model.materials[0].plastic = Some(crate::Plastic::default());
+        assert!(
+            problems(&check(&model, &mesh))
+                .contains(&(ModelItem::Material(0), Problem::InvalidHyperelastic))
+        );
+        model.materials[0].plastic = None;
+        // The static step computes with large deformations.
+        assert!(!model.steps[0].kind.nlgeom());
+        assert!(model.step_nlgeom(&model.steps[0].kind));
     }
 
     #[test]
@@ -3756,6 +4410,41 @@ mod tests {
             problems(&check(&model, &mesh)),
             [(ModelItem::Step(0), Problem::NoLoad)]
         );
+    }
+
+    #[test]
+    fn modal_superposition_warns_about_contact_and_plasticity() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        model.steps[0].kind = StepKind::Dynamic(crate::DynamicStep {
+            method: crate::DynamicMethod::Modal { modes: 10 },
+            ..crate::DynamicStep::default()
+        });
+        assert_eq!(check(&model, &mesh), []);
+        model.materials[0].plastic = Some(crate::Plastic {
+            hardening: crate::Hardening::Isotropic,
+            points: vec![
+                crate::PlasticPoint {
+                    stress: 235.0,
+                    plastic_strain: 0.0,
+                    temperature: 0.0,
+                },
+                crate::PlasticPoint {
+                    stress: 360.0,
+                    plastic_strain: 0.2,
+                    temperature: 0.0,
+                },
+            ],
+        });
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::Step(0), Problem::ModalStepNonlinear)]
+        );
+        let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
+            unreachable!()
+        };
+        settings.method = crate::DynamicMethod::Direct;
+        assert_eq!(check(&model, &mesh), []);
     }
 
     #[test]
@@ -3888,6 +4577,36 @@ mod tests {
         assert!(problems(&check(&model, &mesh)).contains(&(item, Problem::SkewedSymmetryShared)));
     }
 
+    /// A hinge: a displacement on a point with the rotation about z free, held by a
+    /// torsion spring from that point to ground.
+    #[test]
+    fn a_torsion_spring_on_the_point_of_a_hinge_holds_it() {
+        let mesh = cubes(1, false);
+        let mut model = model(&mesh);
+        let free_z = [Some(0.0), Some(0.0), Some(0.0), Some(0.0), Some(0.0), None];
+        let hinge = crate::Id::new();
+        model.steps[0].boundary_conditions[0] = BoundaryCondition {
+            id: hinge,
+            distribution: None,
+            name: "Hinge".into(),
+            active: true,
+            visible: true,
+            region: Region::Nodes(vec![2, 3, 6, 7]),
+            kind: BoundaryKind::Displacement(crate::Displacement::rigid(free_z)),
+            amplitude: None,
+        };
+        let detail = &check(&model, &mesh)[0].detail;
+        assert!(detail.ends_with(": rotation about Z free"), "{detail}");
+        let mut spring = crate::Spring::new("Torsion");
+        spring.ends = [
+            crate::SpringEnd::Region(Region::RemotePoint(hinge)),
+            crate::SpringEnd::World,
+        ];
+        spring.rotational = [0.0, 0.0, 100.0];
+        model.constraints.push(Constraint::Spring(spring));
+        assert_eq!(check(&model, &mesh), []);
+    }
+
     #[test]
     fn missing_supports_name_the_free_motions() {
         let mesh = cubes(1, false);
@@ -3926,11 +4645,13 @@ mod tests {
         let detail = &check(&model, &mesh)[0].detail;
         assert!(detail.ends_with(": rotation about X free"), "{detail}");
         // A spring on a third corner holds it.
-        model.constraints.push(Constraint::Spring(crate::Spring {
-            region: Region::Nodes(vec![7]),
-            stiffness: [0.0, 0.0, 1.0],
-            ..crate::Spring::new("Spring-1")
-        }));
+        model
+            .constraints
+            .push(Constraint::Spring(crate::Spring::to_world(
+                "Spring-1",
+                Region::Nodes(vec![7]),
+                [0.0, 0.0, 1.0],
+            )));
         assert_eq!(check(&model, &mesh), []);
     }
 
@@ -3968,7 +4689,10 @@ mod tests {
         let springs = model.weak_springs(&mesh);
         assert_eq!(springs.len(), 1, "{springs:?}");
         assert_eq!(springs[0].name, "PLX_Weak_Springs_PART-2");
-        assert_eq!(springs[0].region, Region::Nodes((9..=16).collect()));
+        assert_eq!(
+            springs[0].selection(),
+            Some(&Region::Nodes((9..=16).collect()))
+        );
         // A unit cube of steel: 1e-6 E L.
         assert!(
             (springs[0].stiffness[2] - 0.21).abs() < 1e-12,
@@ -4161,6 +4885,7 @@ mod tests {
             kind: LoadKind::Gravity([0.0, 0.0, -9.81]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         assert_eq!(
             problems(&check(&model, &mesh)),
@@ -5009,6 +5734,7 @@ mod tests {
             kind: LoadKind::ConcentratedFlux(10.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         model.steps = vec![step];
         // Displacements are free in a heat transfer, and no elasticity is needed.

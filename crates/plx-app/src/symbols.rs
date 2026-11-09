@@ -63,6 +63,9 @@ pub enum Kind {
     CompressionOnly {
         flipped: bool,
     },
+    /// A joint: lines from both ends to the joint, a ball at it and arrows for its free
+    /// degrees of freedom.
+    Joint(Box<plx_model::Joint>),
 }
 
 impl Kind {
@@ -75,18 +78,29 @@ impl Kind {
                 },
                 body.region.clone(),
             ),
-            Constraint::Spring(spring) => (
-                Kind::Spring {
-                    stiffness: spring.stiffness,
-                    to_surface: spring.master.is_some(),
-                },
-                spring.region.clone(),
-            ),
+            // At the selection, else at the point; an axis shows translational and
+            // rotational springs alike.
+            Constraint::Spring(spring) => {
+                let rotational = spring.acting_rotational();
+                (
+                    Kind::Spring {
+                        stiffness: std::array::from_fn(|i| spring.stiffness[i].max(rotational[i])),
+                        to_surface: spring.master_slave().is_some(),
+                    },
+                    (spring.selection())
+                        .or_else(|| spring.ends.iter().find_map(plx_model::SpringEnd::point))?
+                        .clone(),
+                )
+            }
             Constraint::CompressionOnly(support) => (
                 Kind::CompressionOnly {
                     flipped: support.flipped,
                 },
                 support.region.clone(),
+            ),
+            Constraint::Joint(joint) => (
+                Kind::Joint(Box::new(joint.clone())),
+                joint.locating_end()?.clone(),
             ),
             Constraint::Tie(_) | Constraint::NodeTie(_) => return None,
         })
@@ -205,6 +219,47 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     }
                 }
             }
+            // Lines from nodes spread over each selection end, or from a point end, to the
+            // joint, a ball at it, and arrows along the frame axes for free translations
+            // and moment arrows about them for free rotations.
+            Kind::Joint(ref joint) => {
+                let Ok((origin, axes)) = model.fe.joint_frame(&model.mesh, joint) else {
+                    continue;
+                };
+                let origin = DVec3::from(origin);
+                add(origin, DVec3::Z, SymbolShape::Ball);
+                let free = joint.free_dofs();
+                for &d in model.fe.properties.space.remote_dofs() {
+                    if free[d] {
+                        let shape = if d < 3 {
+                            SymbolShape::Arrow
+                        } else {
+                            SymbolShape::MomentArrow
+                        };
+                        add(origin, DVec3::from(axes[d % 3]), shape);
+                    }
+                }
+                let to = (origin - model.origin()).as_vec3();
+                for end in &joint.ends {
+                    let Some(region) = end.region() else {
+                        continue;
+                    };
+                    let points = match model.fe.point_position(&model.mesh, region) {
+                        Some(point) => vec![DVec3::from(point)],
+                        None => node_points(model, region, &visible),
+                    };
+                    for index in sample(&points, DIVISIONS / 2.0) {
+                        if points[index].distance(origin) > 0.0 {
+                            symbols.push(Symbol {
+                                position: (points[index] - model.origin()).as_vec3(),
+                                direction: Vec3::ZERO,
+                                shape: SymbolShape::LineTo(to),
+                                color,
+                            });
+                        }
+                    }
+                }
+            }
             // Cones with their tips on the faces and a ground plate behind them, on the side
             // the support pushes from: outside, or inside the material when flipped.
             Kind::CompressionOnly { flipped } => {
@@ -235,16 +290,26 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                 }
             }
             // Applied to all nodes, an arrow at the nodes; else one for the total force.
-            Kind::Load(LoadKind::Force {
-                value: force,
-                each_node: true,
-            }) => {
+            Kind::Load(
+                LoadKind::Force {
+                    value: force,
+                    each_node: true,
+                }
+                | LoadKind::Excitation(plx_model::Excitation {
+                    value: force,
+                    each_node: true,
+                    ..
+                }),
+            ) => {
                 let points = node_points(model, &item.region, &visible);
                 for index in sample(&points, DIVISIONS) {
                     add(points[index], DVec3::from(force), SymbolShape::Arrow);
                 }
             }
-            Kind::Load(LoadKind::Force { value: force, .. }) => {
+            Kind::Load(
+                LoadKind::Force { value: force, .. }
+                | LoadKind::Excitation(plx_model::Excitation { value: force, .. }),
+            ) => {
                 if let Some(center) = region_center(model, &item.region, &visible) {
                     add(center, DVec3::from(force), SymbolShape::Arrow);
                 }
@@ -304,7 +369,8 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                 }
             }
             // Gravity as an arrow at the centre of the loaded elements.
-            Kind::Load(LoadKind::Gravity(acceleration)) => {
+            Kind::Load(ref kind @ (LoadKind::Gravity(_) | LoadKind::StandardGravity(_))) => {
+                let acceleration = kind.gravity_vector().unwrap_or_default();
                 if let Some(center) = region_center(model, &item.region, &visible) {
                     add(center, DVec3::from(acceleration), SymbolShape::Arrow);
                 }
@@ -501,6 +567,13 @@ fn node_points(model: &Model, region: &Region, visible: &Visible) -> Vec<DVec3> 
     if let Region::ReferencePoint(id) = region {
         return (model.fe.reference_point(*id).into_iter())
             .map(|point| DVec3::from(point.position))
+            .collect();
+    }
+    // The point of a boundary condition or remote force, at the centre of its region.
+    if let Region::RemotePoint(id) = region {
+        return (model.fe.remote_point_of(&model.mesh, *id).into_iter())
+            .filter_map(|(region, _)| region.centroid(&model.mesh))
+            .map(DVec3::from)
             .collect();
     }
     let coords = model.exploded_coords();

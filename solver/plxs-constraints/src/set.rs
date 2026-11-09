@@ -11,15 +11,12 @@ use plxs_core::{ElementFamily, Model};
 
 use crate::cyclic::CyclicSymmetry;
 use crate::elimination::{Added, ConstraintSet, Eliminator, LinearConstraint, Policy};
+use crate::joint::{End, JointData, JointRow};
 use crate::tie;
 use crate::transform::{Rotation, node_rotations};
 
 /// Degrees of freedom per node of the primary numbering (`node * 3 + d`).
 const PER_NODE: u32 = 3;
-
-/// Offset of the two expanded layers of a plane node in a rigid body (any positive value
-/// gives the same constraints).
-const PLANE_HALF_THICKNESS: f64 = 0.5;
 
 /// The model-level constraints, independent of the step.
 #[derive(Clone, Debug, Default)]
@@ -41,6 +38,27 @@ pub struct ModelConstraints {
     pub cyclic_real: Vec<LinearConstraint>,
     /// Slave nodes (dense indices) of each tie that are too far from its master surface.
     pub untied: Vec<(String, Vec<u32>)>,
+    /// The rows of the rigid bodies in `constraints`, for large rotations (see
+    /// [`ModelConstraints::at_rotations`]).
+    pub rigid: Vec<RigidRow>,
+    /// The joints of the model and their held rows in `constraints`.
+    pub joints: Vec<JointData>,
+    pub joint_rows: Vec<JointRow>,
+}
+
+/// One row `u_i,d - u_ref,d - (R(θ) r - r)_d = 0` of a rigid body; linear in `θ` it is the
+/// constraint the model starts with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RigidRow {
+    /// Index into [`ModelConstraints::constraints`].
+    pub constraint: usize,
+    /// Dense node indices of the member, the reference node and the rotation node.
+    pub member: u32,
+    pub reference: u32,
+    pub rotation: u32,
+    /// Position of the member relative to the reference node, undeformed.
+    pub r: [f64; 3],
+    pub d: u32,
 }
 
 impl ModelConstraints {
@@ -154,52 +172,112 @@ impl ModelConstraints {
                 ));
             };
             let x_ref = model.nodes.coordinates[reference as usize];
-            for member in rigid_body_nodes(model, &body.nodes) {
-                if member == reference || member == rot {
-                    continue;
-                }
+            let members: Vec<u32> = rigid_body_nodes(model, &body.nodes)
+                .into_iter()
+                .filter(|&member| member != reference && member != rot)
+                .collect();
+            let any_plane = members.iter().any(|&member| plane[member as usize]);
+            for member in members {
                 let x = model.nodes.coordinates[member as usize];
                 let r = [x[0] - x_ref[0], x[1] - x_ref[1], x[2] - x_ref[2]];
                 // A plane stress or plane strain node joins the rigid body in its plane
                 // only: its out-of-plane DOF (the thickness change of plane stress) stays
-                // out, as the ccx results show. The node is taken at z = ±t/2 so that the
-                // body cannot rotate about x or y and its reference node does not move out
-                // of plane (any positive t gives the same constraints).
+                // out, as the ccx results show.
                 let in_plane = plane[member as usize];
-                let layers: &[f64] = if in_plane {
-                    &[PLANE_HALF_THICKNESS, -PLANE_HALF_THICKNESS]
-                } else {
-                    &[0.0]
-                };
-                for &offset in layers {
-                    let r = [r[0], r[1], r[2] + offset];
-                    // u_i - u_ref - θ × r = 0, θ the "translations" of the rotation node.
-                    let rows: [[(u32, f64); 2]; 3] = [
-                        [(1, -r[2]), (2, r[1])],
-                        [(2, -r[0]), (0, r[2])],
-                        [(0, -r[1]), (1, r[0])],
-                    ];
-                    for (d, theta) in rows.iter().enumerate() {
-                        let own = d < 2 || !in_plane;
-                        let mut global = vec![(reference * PER_NODE + d as u32, -1.0)];
-                        if own {
-                            global.insert(0, (member * PER_NODE + d as u32, 1.0));
-                        }
-                        for &(k, a) in theta {
-                            if a != 0.0 {
-                                global.push((rot * PER_NODE + k, a));
-                            }
-                        }
-                        let preferred = if own { member } else { reference };
-                        mc.push_global(
-                            &global,
-                            preferred * PER_NODE + d as u32,
-                            Policy::Repivot,
-                            origin,
-                        );
+                // u_i - u_ref - θ × r = 0, θ the "translations" of the rotation node.
+                let rows: [[(u32, f64); 2]; 3] = [
+                    [(1, -r[2]), (2, r[1])],
+                    [(2, -r[0]), (0, r[2])],
+                    [(0, -r[1]), (1, r[0])],
+                ];
+                for (d, theta) in rows.iter().enumerate() {
+                    if in_plane && d == 2 {
+                        continue;
                     }
+                    mc.rigid.push(RigidRow {
+                        constraint: mc.constraints.len(),
+                        member,
+                        reference,
+                        rotation: rot,
+                        r,
+                        d: d as u32,
+                    });
+                    let mut global = vec![
+                        (member * PER_NODE + d as u32, 1.0),
+                        (reference * PER_NODE + d as u32, -1.0),
+                    ];
+                    for &(k, a) in theta {
+                        if a != 0.0 {
+                            global.push((rot * PER_NODE + k, a));
+                        }
+                    }
+                    mc.push_global(
+                        &global,
+                        member * PER_NODE + d as u32,
+                        Policy::Repivot,
+                        origin,
+                    );
                 }
             }
+            // A body with plane members stays in their plane: it does not rotate about x
+            // or y, and its reference node does not move out of plane. The rows hold these
+            // DOFs themselves, so that they stay the dependent ones at every rotation
+            // (rows holding the plane through a second layer of every plane node pivot on
+            // one rotation or the other as the body turns, and the set of unknowns changes
+            // from one Newton iteration to the next).
+            if any_plane {
+                for dof in [rot * PER_NODE, rot * PER_NODE + 1, reference * PER_NODE + 2] {
+                    mc.push_global(&[(dof, 1.0)], dof, Policy::Repivot, origin);
+                }
+            }
+        }
+
+        // Joints: rows on global DOFs, solved for the second end.
+        for joint in &model.constraints.joints {
+            let origin = mc.label(format!("*JOINT {}", joint.name));
+            let mut ends = [None; 2];
+            for (slot, end) in ends.iter_mut().zip(&joint.ends) {
+                let Some([reference, rotation]) = *end else {
+                    continue;
+                };
+                let (Some(r), Some(q)) =
+                    (model.nodes.index(reference), model.nodes.index(rotation))
+                else {
+                    return Err(plxs_core::Error::undefined(
+                        "*JOINT",
+                        "node",
+                        format!("{reference} or {rotation}"),
+                    ));
+                };
+                *slot = Some(End {
+                    reference: r,
+                    rotation: q,
+                    position: model.nodes.coordinates[r as usize],
+                });
+            }
+            let data = JointData {
+                ends,
+                origin: joint.origin,
+                axes: joint.axes,
+                fixed: joint.fixed,
+            };
+            let rows = data.linear_rows();
+            let index = mc.joints.len();
+            for (dof, row) in rows.iter().enumerate() {
+                if !data.fixed[dof] || row.is_empty() {
+                    continue;
+                }
+                let Some(preferred) = data.preferred(dof) else {
+                    continue;
+                };
+                mc.joint_rows.push(JointRow {
+                    constraint: mc.constraints.len(),
+                    joint: index,
+                    dof,
+                });
+                mc.push_global(row, preferred, Policy::Repivot, origin);
+            }
+            mc.joints.push(data);
         }
 
         // Equations: terms refer to local directions at transformed nodes.
@@ -283,6 +361,26 @@ impl ModelConstraints {
         self.constraints.is_empty() && self.rotations.is_empty() && self.cyclic_real.is_empty()
     }
 
+    /// Holds the primary DOFs `dofs` at zero: explicit steps under finite rotations keep the
+    /// unknowns of the unrotated constraints, and a rotation that the rotated rows refer to
+    /// only by a vanishing coefficient (no member moves with it to first order) would
+    /// otherwise become an unknown without mass.
+    pub fn hold(&mut self, dofs: &[u32]) {
+        if dofs.is_empty() {
+            return;
+        }
+        let origin = self.labels.len() as u32;
+        self.labels.push("rotations held at zero".to_owned());
+        for &dof in dofs {
+            self.constraints.push(LinearConstraint {
+                terms: vec![(dof, 1.0)],
+                preferred: dof,
+                policy: Policy::Repivot,
+                origin,
+            });
+        }
+    }
+
     /// The dense nodes any constraint refers to, ascending and unique. Nodes outside every
     /// element (rigid body reference and rotation nodes, remote points) take their
     /// stiffness from these constraints alone, so their DOFs must not be held at zero.
@@ -299,6 +397,121 @@ impl ModelConstraints {
 
     pub fn rotation(&self, node: u32) -> Option<&Rotation> {
         self.rotations.get(&node)
+    }
+
+    /// Whether the model has rigid bodies or joints, whose constraints are nonlinear in
+    /// large rotations.
+    pub fn has_finite_rotations(&self) -> bool {
+        !self.rigid.is_empty() || !self.joint_rows.is_empty()
+    }
+
+    /// The constraints linearized at the displacements `u` (all DOFs, global directions,
+    /// three per node): the rows of the rigid bodies take the derivative of `R(θ) r` at
+    /// the rotation `θ` of their rotation node, so that an increment `Δu = T Δv` of a
+    /// Newton iteration follows the rotated body to first order. With
+    /// [`ModelConstraints::project_rigid`] after each correction the members sit exactly
+    /// where the finite rotation puts them (NLGEOM).
+    pub fn at_rotations(&self, u: &[f64]) -> ModelConstraints {
+        let mut out = self.clone();
+        for row in &self.rigid {
+            let theta = node_vector(u, row.rotation);
+            let w = rotated_derivative(theta, row.r);
+            let d = row.d;
+            let mut global = vec![
+                (row.member * PER_NODE + d, 1.0),
+                (row.reference * PER_NODE + d, -1.0),
+            ];
+            for (k, &w) in w[d as usize].iter().enumerate() {
+                if w.abs() > 1e-14 * norm(row.r).max(1e-300) {
+                    global.push((row.rotation * PER_NODE + k as u32, -w));
+                }
+            }
+            let old = &self.constraints[row.constraint];
+            out.constraints[row.constraint] = primary(
+                &self.rotations,
+                u32::MAX,
+                &global,
+                old.preferred,
+                old.policy,
+                old.origin,
+            );
+            // `primary` maps the preferred DOF once more; keep the one of the model.
+            out.constraints[row.constraint].preferred = old.preferred;
+        }
+        let linearized: Vec<_> = self.joints.iter().map(|j| j.rows_at(u)).collect();
+        for row in &self.joint_rows {
+            let old = &self.constraints[row.constraint];
+            let terms = &linearized[row.joint][row.dof];
+            if terms.is_empty() {
+                continue;
+            }
+            out.constraints[row.constraint] = primary(
+                &self.rotations,
+                u32::MAX,
+                terms,
+                old.preferred,
+                old.policy,
+                old.origin,
+            );
+            out.constraints[row.constraint].preferred = old.preferred;
+        }
+        out
+    }
+
+    /// Moves the members of the rigid bodies to `u_ref + R(θ) r - r`, the place the finite
+    /// rotation `θ` of the rotation node gives them. Members with a DOF in `held` (primary
+    /// DOFs prescribed in the step) or at a transformed node keep their displacements.
+    pub fn project_rigid(&self, u: &mut [f64], held: &[u32]) {
+        self.project_joints(u, held);
+        for row in &self.rigid {
+            let member = row.member;
+            let dof = member * PER_NODE + row.d;
+            if self.rotations.contains_key(&member)
+                || self.rotations.contains_key(&row.reference)
+                || held.contains(&dof)
+            {
+                continue;
+            }
+            let theta = node_vector(u, row.rotation);
+            let reference = node_vector(u, row.reference);
+            let rotated = rotate(theta, row.r);
+            let d = row.d as usize;
+            if let Some(value) = u.get_mut(dof as usize) {
+                *value = reference[d] + rotated[d] - row.r[d];
+            }
+        }
+    }
+
+    /// Puts the second ends of the joints back on to their joints (a chain of joints in
+    /// any order after a few passes). Rows whose dependent DOF is held in the step or lies
+    /// at a transformed node keep their values.
+    fn project_joints(&self, u: &mut [f64], held: &[u32]) {
+        if self.joint_rows.is_empty() {
+            return;
+        }
+        for _ in 0..3 {
+            for (index, joint) in self.joints.iter().enumerate() {
+                let transformed = (joint.ends.iter().flatten()).any(|e| {
+                    [e.reference, e.rotation]
+                        .iter()
+                        .any(|n| self.rotations.contains_key(n))
+                });
+                if transformed {
+                    continue;
+                }
+                let mut rows = Vec::new();
+                let mut dependent = Vec::new();
+                for row in self.joint_rows.iter().filter(|r| r.joint == index) {
+                    let p = self.constraints[row.constraint].preferred;
+                    if held.contains(&p) || dependent.contains(&p) {
+                        continue;
+                    }
+                    rows.push(row.dof);
+                    dependent.push(p);
+                }
+                joint.project(u, &rows, &dependent);
+            }
+        }
     }
 
     /// Carries the forces at the dependent DOFs of the multi-point constraints over to the
@@ -480,6 +693,109 @@ impl ModelConstraints {
     }
 }
 
+/// The three values of node `node` in a vector with three per node.
+fn node_vector(u: &[f64], node: u32) -> [f64; 3] {
+    let at = node as usize * PER_NODE as usize;
+    match u.get(at..at + 3) {
+        Some(v) => [v[0], v[1], v[2]],
+        None => [0.0; 3],
+    }
+}
+
+pub(crate) fn norm(v: [f64; 3]) -> f64 {
+    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+}
+
+/// `R(θ) r` with the rotation `R` of the rotation vector `θ` (Rodrigues' formula).
+pub fn rotate(theta: [f64; 3], r: [f64; 3]) -> [f64; 3] {
+    let angle = norm(theta);
+    let cross = |a: [f64; 3], b: [f64; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let tr = cross(theta, r);
+    let ttr = cross(theta, tr);
+    // sin(φ)/φ and (1 - cos(φ))/φ², by their series near zero.
+    let (a, b) = if angle < 1e-4 {
+        let a2 = angle * angle;
+        (1.0 - a2 / 6.0, 0.5 - a2 / 24.0)
+    } else {
+        (angle.sin() / angle, (1.0 - angle.cos()) / (angle * angle))
+    };
+    [
+        r[0] + a * tr[0] + b * ttr[0],
+        r[1] + a * tr[1] + b * ttr[1],
+        r[2] + a * tr[2] + b * ttr[2],
+    ]
+}
+
+/// The matrix of the rotation `θ` (columns `R e_k`).
+fn rotation_matrix(theta: [f64; 3]) -> [[f64; 3]; 3] {
+    let mut m = [[0.0; 3]; 3];
+    for (k, column) in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        .into_iter()
+        .enumerate()
+    {
+        let c = rotate(theta, column);
+        for d in 0..3 {
+            m[d][k] = c[d];
+        }
+    }
+    m
+}
+
+fn skew(v: [f64; 3]) -> [[f64; 3]; 3] {
+    [[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]]
+}
+
+fn matrix_product(a: [[f64; 3]; 3], b: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let mut m = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            m[i][j] = (0..3).map(|k| a[i][k] * b[k][j]).sum();
+        }
+    }
+    m
+}
+
+/// `∂(R(θ) r)/∂θ` (row `d`, column `k`): `-[R r]× R T(θ)` with the tangent map
+/// `T(θ) = I - b [θ]× + c [θ]×²` of the rotation vector, `b = (1 - cos φ)/φ²`,
+/// `c = (φ - sin φ)/φ³` (`R(θ + δ) = R(θ) R(T δ)` to first order).
+fn rotated_derivative(theta: [f64; 3], r: [f64; 3]) -> [[f64; 3]; 3] {
+    let phi = norm(theta);
+    let (b, c) = if phi < 1e-4 {
+        let p2 = phi * phi;
+        (0.5 - p2 / 24.0, 1.0 / 6.0 - p2 / 120.0)
+    } else {
+        (
+            (1.0 - phi.cos()) / (phi * phi),
+            (phi - phi.sin()) / (phi * phi * phi),
+        )
+    };
+    let st = skew(theta);
+    let st2 = matrix_product(st, st);
+    let mut t = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            t[i][j] = f64::from(u8::from(i == j)) - b * st[i][j] + c * st2[i][j];
+        }
+    }
+    let m = matrix_product(
+        matrix_product(skew(rotate(theta, r)), rotation_matrix(theta)),
+        t,
+    );
+    let mut w = [[0.0; 3]; 3];
+    for d in 0..3 {
+        for k in 0..3 {
+            w[d][k] = -m[d][k];
+        }
+    }
+    w
+}
+
 /// Nodes used only by plane stress and plane strain elements (dense index).
 fn plane_nodes(model: &Model) -> Vec<bool> {
     let n = model.nodes.len();
@@ -571,4 +887,46 @@ fn rigid_body_nodes(model: &Model, nodes: &RigidBodyNodes) -> Vec<u32> {
         }
     };
     ids.iter().filter_map(|&id| model.nodes.index(id)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rotation_vector_turns_a_point_about_its_axis() {
+        let quarter = [0.0, 0.0, std::f64::consts::FRAC_PI_2];
+        let p = rotate(quarter, [2.0, 0.0, 1.0]);
+        assert!((p[0]).abs() < 1e-12 && (p[1] - 2.0).abs() < 1e-12 && (p[2] - 1.0).abs() < 1e-12);
+        // Small rotations are θ × r.
+        let w = rotated_derivative([0.0; 3], [1.0, 2.0, 3.0]);
+        let cross = [[0.0, 3.0, -2.0], [-3.0, 0.0, 1.0], [2.0, -1.0, 0.0]];
+        for d in 0..3 {
+            for k in 0..3 {
+                assert!((w[d][k] - cross[d][k]).abs() < 1e-8, "{d} {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_derivative_of_a_rotated_point_matches_central_differences() {
+        let theta = [0.3, -0.5, 0.8];
+        let r = [1.0, 2.0, -0.5];
+        let w = rotated_derivative(theta, r);
+        let h = 1e-6;
+        for k in 0..3 {
+            let (mut plus, mut minus) = (theta, theta);
+            plus[k] += h;
+            minus[k] -= h;
+            let (p, m) = (rotate(plus, r), rotate(minus, r));
+            for d in 0..3 {
+                let numeric = (p[d] - m[d]) / (2.0 * h);
+                assert!(
+                    (w[d][k] - numeric).abs() < 1e-7,
+                    "{d} {k}: {} vs {numeric}",
+                    w[d][k]
+                );
+            }
+        }
+    }
 }

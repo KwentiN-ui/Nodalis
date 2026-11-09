@@ -56,6 +56,58 @@ impl Step {
     }
 }
 
+impl Step {
+    /// The step times strictly inside `(0, period)` at which an amplitude the step's
+    /// boundaries, loads or fields follow has a point: where the curve bends, so increments
+    /// should end there to apply the table as given. `start_total` is the total time at the
+    /// start of the step. Ascending, without duplicates.
+    pub fn amplitude_times(&self, model: &crate::Model, start_total: f64, period: f64) -> Vec<f64> {
+        let l = &self.loads;
+        let names = (self.boundaries.iter().map(|b| &b.amplitude))
+            .chain(l.concentrated.iter().map(|c| &c.amplitude))
+            .chain(l.distributed.iter().map(|d| &d.amplitude))
+            .chain(l.concentrated_flux.iter().map(|c| &c.amplitude))
+            .chain(l.distributed_flux.iter().map(|d| &d.amplitude))
+            .chain(
+                l.films
+                    .iter()
+                    .flat_map(|f| [&f.amplitude, &f.film_amplitude]),
+            )
+            .chain(
+                l.radiations
+                    .iter()
+                    .flat_map(|r| [&r.amplitude, &r.radiation_amplitude]),
+            )
+            .chain(self.fields.iter().map(|f| &f.amplitude))
+            .flatten();
+        let mut seen: Vec<&str> = Vec::new();
+        let mut times = Vec::new();
+        for name in names {
+            if seen.contains(&name.as_str()) {
+                continue;
+            }
+            seen.push(name);
+            let Some(amplitude) = model.amplitude(name) else {
+                continue;
+            };
+            let offset = if amplitude.total_time {
+                start_total
+            } else {
+                0.0
+            };
+            for t in amplitude.corner_times() {
+                let time = t + amplitude.shift_x - offset;
+                if time > period * 1e-9 && time < period * (1.0 - 1e-9) {
+                    times.push(time);
+                }
+            }
+        }
+        times.sort_by(f64::total_cmp);
+        times.dedup_by(|a, b| (*a - *b).abs() <= period * 1e-9);
+        times
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DefaultAmplitude {
     Ramp,
@@ -171,6 +223,22 @@ pub struct Incrementation {
     pub maximum: Option<f64>,
     /// `DIRECT`: fixed increments, no automatic control.
     pub direct: bool,
+    /// `FRAMES=` (Nodalis): result frames evenly spaced over the period, the last one at
+    /// its end. The increments are shortened to end on them and only they are written
+    /// (instead of every `FREQUENCY`-th increment). `None`: every increment counts.
+    #[serde(default)]
+    pub frames: Option<u32>,
+}
+
+impl Incrementation {
+    /// The step time of frame `k` (1-based) of `frames` over `period`.
+    pub fn frame_time(period: f64, frames: u32, k: u32) -> f64 {
+        if k >= frames {
+            period
+        } else {
+            period * f64::from(k) / f64::from(frames)
+        }
+    }
 }
 
 impl Incrementation {
@@ -257,10 +325,99 @@ pub struct Dynamic {
     pub solver: EquationSolver,
     /// `ALPHA=`: numerical damping of the HHT-alpha integration (`-1/3..0`).
     pub alpha: Option<f64>,
-    pub explicit: bool,
+    /// How the equation of motion is integrated over time (`INTEGRATION=`, Nodalis; ccx's
+    /// `EXPLICIT` reads as [`Integration::Explicit`]).
+    #[serde(default)]
+    pub integration: Integration,
+    /// Implicit: the time increments. Explicit: `initial` is the interval of the result
+    /// frames; the time step follows from the stability of the mesh.
     pub increments: Incrementation,
     /// `*DAMPING, ALPHA=, BETA=` in the step: Rayleigh damping.
     pub rayleigh: Option<Rayleigh>,
+    /// `*DAMPING, RATIO=, LOWER=, UPPER=` (Nodalis): a viscous damping ratio, applied as
+    /// the Rayleigh damping that meets it at the lower and upper frequency. Without a lower
+    /// frequency the solver takes the lowest eigenfrequency of the model.
+    #[serde(default)]
+    pub damping_ratio: Option<DampingRatio>,
+    /// `EVENTS` (Nodalis): besides the increments, a result frame at every sub-increment
+    /// at which a contact closes or opens and at the sub-increments an impact is split
+    /// into, so the results show the contact events between the frames.
+    #[serde(default)]
+    pub event_frames: bool,
+}
+
+/// How a `*DYNAMIC` step integrates the equation of motion.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum Integration {
+    /// The α-method of Hilber, Hughes and Taylor with Newton iterations where the model is
+    /// nonlinear: unconditionally stable, one equation system per increment.
+    #[default]
+    Implicit,
+    /// Central differences with a lumped mass: many small time steps below the stability
+    /// limit of the mesh, no equation system.
+    Explicit(ExplicitControls),
+    /// Implicit while the motion is smooth, explicit through impacts and where the
+    /// implicit increments would have to become tiny.
+    Automatic {
+        explicit: ExplicitControls,
+        /// Implicit sub-increments below this multiple of the stable explicit time step
+        /// switch to explicit (`SWITCH=`; 0 never switches).
+        switch_factor: f64,
+    },
+}
+
+impl Integration {
+    /// The default factor of [`Integration::Automatic`].
+    pub const DEFAULT_SWITCH_FACTOR: f64 = 30.0;
+
+    /// The explicit controls of an explicit or automatic step.
+    pub fn explicit(&self) -> Option<&ExplicitControls> {
+        match self {
+            Integration::Implicit => None,
+            Integration::Explicit(c) | Integration::Automatic { explicit: c, .. } => Some(c),
+        }
+    }
+}
+
+/// What the explicit integration of a step may be told.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ExplicitControls {
+    /// `MASS SCALING=`: elements whose stable time step lies below this target get the mass
+    /// that lifts them to it.
+    pub mass_scaling: Option<f64>,
+    /// `TIME STEP=`: the time step is at most this long (the stable one if shorter).
+    pub time_step: Option<f64>,
+    /// `SHELL INERTIA=FULL`: no selective mass scaling of expanded shells (by default the
+    /// inertia of their thickness modes is raised so that the thickness does not limit the
+    /// time step).
+    #[serde(default)]
+    pub full_shell_inertia: bool,
+}
+
+/// A damping ratio fitted as Rayleigh damping between two frequencies (cycles per time).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DampingRatio {
+    pub ratio: f64,
+    pub lower: Option<f64>,
+    pub upper: f64,
+}
+
+impl Rayleigh {
+    /// The coefficients that meet the damping ratio `zeta` exactly at `f1` and `f2`:
+    /// `alpha = 2 zeta w1 w2 / (w1 + w2)`, `beta = 2 zeta / (w1 + w2)`.
+    pub fn from_ratio(zeta: f64, f1: f64, f2: f64) -> Self {
+        let (w1, w2) = (std::f64::consts::TAU * f1, std::f64::consts::TAU * f2);
+        Self {
+            alpha: 2.0 * zeta * w1 * w2 / (w1 + w2),
+            beta: 2.0 * zeta / (w1 + w2),
+        }
+    }
+
+    /// The damping ratio at the frequency `f`.
+    pub fn ratio_at(&self, f: f64) -> f64 {
+        let w = std::f64::consts::TAU * f;
+        self.alpha / (2.0 * w) + self.beta * w / 2.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -562,4 +719,46 @@ pub struct RestartWrite {
 pub struct Controls {
     pub parameters: String,
     pub values: Vec<f64>,
+}
+
+#[cfg(test)]
+mod amplitude_time_tests {
+    use super::*;
+    use crate::{Amplitude, Model};
+
+    #[test]
+    fn the_points_of_followed_amplitudes_inside_the_step_are_listed_once() {
+        let mut model = Model::default();
+        let table = |name: &str, total_time, points: Vec<(f64, f64)>| Amplitude {
+            name: name.into(),
+            total_time,
+            shift_x: 0.0,
+            shift_y: 0.0,
+            points,
+            signal: None,
+        };
+        model.amplitudes = vec![
+            table(
+                "A",
+                false,
+                vec![(0.0, 0.0), (0.5, 1.0), (1.0, 2.0), (3.0, 0.0)],
+            ),
+            // Total time 2.5 is step time 0.5 of a step starting at 2.
+            table("B", true, vec![(2.5, 0.0), (3.25, 1.0)]),
+            table("UNUSED", false, vec![(0.25, 0.0)]),
+        ];
+        let mut step = Step::new("Step-1", Procedure::NoAnalysis);
+        let boundary = |amplitude: &str| Boundary {
+            region: NodeRef::Node(1),
+            first_dof: 1,
+            last_dof: 1,
+            value: Some(1.0),
+            amplitude: Some(amplitude.into()),
+            fixed: false,
+            submodel_step: None,
+            load_case: None,
+        };
+        step.boundaries = vec![boundary("A"), boundary("B"), boundary("A")];
+        assert_eq!(step.amplitude_times(&model, 2.0, 2.0), [0.5, 1.0, 1.25]);
+    }
 }

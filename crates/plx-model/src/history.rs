@@ -28,6 +28,9 @@ pub enum HistoryKind {
     /// Values of all contact elements (`*CONTACT PRINT`); the contact pair gives master and
     /// slave of the contact forces `CF`.
     Contact { pair: Option<crate::Id> },
+    /// Energies of the whole model over the time of a Dynamic step: internal, kinetic,
+    /// external work and damping dissipation (`*EL PRINT` of all elements, `TOTALS=ONLY`).
+    Energies,
 }
 
 /// Whether sums over the region are printed, CalculiX's `TOTALS` parameter.
@@ -63,6 +66,7 @@ impl HistoryKind {
                 "S", "E", "ME", "PEEQ", "HFL", "ENER", "ELSE", "ELKE", "EVOL", "EBHE",
             ],
             HistoryKind::Contact { .. } => &["CDIS", "CSTR", "CELS", "CNUM", "CF"],
+            HistoryKind::Energies => &["ALLIE", "ALLKE", "ALLWK", "ALLVD"],
         }
     }
 
@@ -72,6 +76,7 @@ impl HistoryKind {
             HistoryKind::Node { .. } => "Node Output",
             HistoryKind::Element { .. } => "Element Output",
             HistoryKind::Contact { .. } => "Contact Output",
+            HistoryKind::Energies => "Energies",
         }
     }
 
@@ -81,20 +86,21 @@ impl HistoryKind {
             HistoryKind::Node { .. } => "NH_Output",
             HistoryKind::Element { .. } => "EH_Output",
             HistoryKind::Contact { .. } => "CH_Output",
+            HistoryKind::Energies => "Energies",
         }
     }
 
     pub fn region(&self) -> Option<&Region> {
         match self {
             HistoryKind::Node { region } | HistoryKind::Element { region } => Some(region),
-            HistoryKind::Contact { .. } => None,
+            HistoryKind::Contact { .. } | HistoryKind::Energies => None,
         }
     }
 
     pub fn region_mut(&mut self) -> Option<&mut Region> {
         match self {
             HistoryKind::Node { region } | HistoryKind::Element { region } => Some(region),
-            HistoryKind::Contact { .. } => None,
+            HistoryKind::Contact { .. } | HistoryKind::Energies => None,
         }
     }
 }
@@ -130,6 +136,21 @@ impl HistoryOutput {
             kind: HistoryKind::Contact { pair },
             variables: vec!["CDIS".into(), "CSTR".into()],
             totals: Totals::No,
+        }
+    }
+
+    /// The energies of the whole model, which a new Dynamic step prints.
+    pub fn energies(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            active: true,
+            kind: HistoryKind::Energies,
+            variables: HistoryKind::Energies
+                .choices()
+                .iter()
+                .map(|v| v.to_string())
+                .collect(),
+            totals: Totals::Only,
         }
     }
 

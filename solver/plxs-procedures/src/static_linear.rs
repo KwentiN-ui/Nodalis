@@ -7,6 +7,7 @@ use plxs_assembly::{
     ElementTable, Spc, assemble_stiffness, load_vector, rotate_concentrated_loads,
 };
 use plxs_core::state::IntegrationPointField;
+use plxs_core::step::Incrementation;
 use plxs_core::step::Procedure as ProcedureKind;
 use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Step};
 use plxs_linalg::SparseMatrix;
@@ -32,15 +33,16 @@ impl Procedure for StaticLinear {
                 "StaticLinear needs a *STATIC step".into(),
             ));
         };
-        // A linear step is solved once, at its end: CalculiX ignores the initial increment
-        // and `DIRECT` of a purely linear *STATIC step and reports a single increment of
-        // the size of the period (checked with ccx 2.21; the increments only show with
-        // NLGEOM or other nonlinearities, which are not this procedure's).
+        // A linear step is solved once per result frame (`FRAMES=`, Nodalis), with the
+        // one factorization; without frames once, at its end: CalculiX ignores the initial
+        // increment and `DIRECT` of a purely linear *STATIC step and reports a single
+        // increment of the size of the period (checked with ccx 2.21).
         let period = parameters.increments.period();
         if period <= 0.0 {
             return Err(Error::input("*STATIC", "the step period must be positive"));
         }
-        let (initial, count) = (period, 1);
+        let count = parameters.increments.frames.unwrap_or(1).max(1);
+        let framed = parameters.increments.frames.is_some();
 
         // Stiffness: assembled once per model, reused by every linear step.
         if ctx.stiffness.is_none() {
@@ -56,7 +58,7 @@ impl Procedure for StaticLinear {
             )));
         }
         let k = ctx.stiffness.take().unwrap();
-        let outcome = Self::increments(ctx, step, progress, &k, period, initial, count);
+        let outcome = Self::increments(ctx, step, progress, &k, period, framed, count);
         ctx.stiffness = Some(k);
         outcome
     }
@@ -70,7 +72,7 @@ impl StaticLinear {
         progress: &mut dyn Progress,
         k: &SparseMatrix,
         period: f64,
-        initial: f64,
+        framed: bool,
         count: u32,
     ) -> Result<StepOutcome> {
         let total_dofs = ctx.table.dofs.len();
@@ -146,8 +148,8 @@ impl StaticLinear {
             if ctx.cancel.is_cancelled() {
                 return Ok(StepOutcome::Cancelled);
             }
-            let time = (f64::from(increment) * initial).min(period);
-            let size = time - (f64::from(increment - 1) * initial).min(period);
+            let time = Incrementation::frame_time(period, count, increment);
+            let size = time - Incrementation::frame_time(period, count, increment - 1);
             let total = start_total + time;
             progress.event(ProgressEvent::Increment {
                 step: ctx.step_number,
@@ -306,7 +308,7 @@ impl StaticLinear {
             let results_started = std::time::Instant::now();
             integration_point_results(ctx.table, ctx.model, &u, &mut strains, &mut stresses);
             if let (Some(th), Some(e)) = (&thermal, &thermal_strains) {
-                th.correct_stresses(e, &mut stresses);
+                th.correct_stresses(e, &mut strains, &mut stresses);
             }
             if let Some(t) = &t {
                 ctx.state.temperatures = Some(plxs_core::state::NodalField {
@@ -321,7 +323,7 @@ impl StaticLinear {
             ctx.state.strains = strains.clone();
             ctx.state.loads = Some(applied);
 
-            if writes_increment(step, increment, count) {
+            if framed || writes_increment(step, increment, count) {
                 write_increment(
                     ctx, step, increment, time, total, &u, &reactions, &stresses, &strains, None,
                 )?;
@@ -406,7 +408,14 @@ pub fn integration_point_results(
             let coords = table.coordinates(model, entry);
             let d = table.material_matrix(entry);
             let ue = table.gather(entry, u);
-            let e = formulation.strains(&coords, d, &ue);
+            let mut e = formulation.strains(&coords, d, &ue);
+            // Plane stress: the thickness strain that makes the thickness stress zero (the
+            // displacements leave it at zero; thermal strains add theirs later).
+            for eps in &mut e {
+                if let Some(ezz) = table.thickness_strain(entry, eps, 0.0) {
+                    eps[2] = ezz;
+                }
+            }
             let s: Vec<[f64; 6]> = e
                 .iter()
                 .map(|eps| {

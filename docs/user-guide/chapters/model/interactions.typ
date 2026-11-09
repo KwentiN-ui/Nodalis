@@ -8,15 +8,21 @@ Create them with #ui("Constraint") on the #ui("Connections") tab of the ribbon.
 #screenshot("constraint.png", [Spring dialog: springs from a surface to ground])
 
 #fields(
-  [Spring], [Springs in the global directions on the nodes of the region. #ui("K1"),
-    #ui("K2"), #ui("K3") are the stiffnesses; 0 means no spring in that direction. Like a
-    force, the stiffness is that of the whole region and is spread over its nodes: on faces
-    by area, on edges by length, on points in equal shares. #ui("Per area") gives a
-    stiffness per area of the faces instead (force per volume, a bedding modulus). With
-    #ui("Apply to all nodes individually") every node gets the whole stiffness. A single
-    node or point is a point spring. In a 2D model (plane stress, plane strain,
-    axisymmetric) there is no #ui("K3"): the dialog offers the first two directions only
-    (@spring-2d).],
+  [Spring], [Springs in the global directions between #ui("End 1") and #ui("End 2"). Each end
+    is #ui("World") (fixed ground), a #ui("Selection in the 3D view"), a #ui("Node Set") or
+    #ui("Surface"), or a #ui("Reference Point"): a reference point of a rigid body, or the
+    point that a Displacement/Rotation condition or a Remote Force creates on faces.
+    #ui("K1"), #ui("K2"), #ui("K3") are the stiffnesses; 0 means no spring
+    in that direction. Like a force, the stiffness is that of the whole selection and is
+    spread over its nodes: on faces by area, on edges by length, on points in equal shares.
+    #ui("Per area") gives a stiffness per area of the faces instead (force per volume, a
+    bedding modulus). With #ui("Apply to all nodes individually") every node gets the whole
+    stiffness. A single node or point is a point spring. In a 2D model (plane stress, plane
+    strain, axisymmetric) there is no #ui("K3"): the dialog offers the first two directions
+    only (@spring-2d).],
+  [Joint], [A kinematic joint between #ui("End 1") and #ui("End 2"), such as a hinge or a
+    slider: like a Displacement/Rotation condition, but relative to another body instead of
+    to ground (@joints).],
   [Compression Only], [A support that only takes pressure, like a part resting on a rigid floor.
     By default it pushes onto the surface from outside; #ui("Flip") under #ui("Direction")
     makes it push the surface outward from inside the material. #ui("Clearance") is the
@@ -35,15 +41,36 @@ outputs behave the same when you change their type.
 
 #screenshot("constraint-type-switch.png", [The faces picked for a spring are still selected after switching to Compression Only])
 
-#ui("Connection") at the bottom of the spring dialog decides where the springs end.
-#ui("Surface to World") connects them to ground (`SPRING1` elements). #ui("Surface to Surface")
-adds a #ui("Target surface"): every node of the region is connected to the closest point of
-the target surface (`SPRING2` elements and `*EQUATION`s), for example an elastic bearing
-between two parts. The region is the slave and the target surface the master side: choose the
-finer mesh as region. #ui("Swap Master/Slave") in the context menu exchanges the two.
+The two ends decide what the springs connect; the order does not matter, except with a
+selection on both ends.
 
-#screenshot("constraint-spring-surface.png", [Spring between two surfaces: the target surface
-  in red, the region in purple])
+- *Selection and World*: every node of the selection gets springs to ground (`SPRING1`
+  elements).
+- *Selection and selection*: every node of #ui("End 1") is connected to the closest point of
+  the faces of #ui("End 2") (`SPRING2` elements and `*EQUATION`s), for example an elastic
+  bearing between two parts. #ui("End 1") is the slave and #ui("End 2") the master side:
+  choose the finer mesh for #ui("End 1"). #ui("Swap Master/Slave") in the context menu
+  exchanges the two.
+- *Selection and point*: every node of the selection gets springs to the point.
+- *Point and World* or *point and point*: springs on the translations of the point and, with
+  #ui("KR1"), #ui("KR2"), #ui("KR3"), rotational springs about the global axes in moment per
+  radian. Nodes of a selection have no rotations, so only these two combinations offer
+  rotational stiffness. A plane model turns about z only and offers #ui("KR3") alone; an
+  axisymmetric model has no rotational springs.
+
+A hinge with a torsion spring, for example in a Dynamic step: hold the faces of the bore with
+a Displacement/Rotation condition that fixes the translations and leaves the rotation about
+the hinge axis free. Its point then appears under #ui("Reference Point") of the spring dialog
+(listed under "Displacements on a point"); choose it as #ui("End 1"), #ui("World") as
+#ui("End 2") and give #ui("KR3") (for a hinge about z). Between two such points the spring
+couples two parts instead. A reference point needs a rigid body that it drives, as for
+boundary conditions on it.
+
+#screenshot("constraint-spring-hinge.png", [Torsion spring on the point of a Displacement/Rotation
+  condition with the rotation about z free])
+
+#screenshot("constraint-spring-surface.png", [Spring between two surfaces: #ui("End 2") in red,
+  #ui("End 1") in purple])
 
 #screenshot("constraint-spring-2d.png", [Spring in a plane stress model: only #ui("K1") and
   #ui("K2")]) <spring-2d>
@@ -51,7 +78,8 @@ finer mesh as region. #ui("Swap Master/Slave") in the context menu exchanges the
 The 3D view of the FE model shows active constraints in yellow, together with
 the symbols of any step: a coil spring for each direction with stiffness, at the centre of
 the faces of a spring to ground or at each of its nodes (at their centre for ten nodes or
-more), and at points spread over the region of a spring to a surface; cones with a ground plate
+more), at points spread over the selection of a spring to a surface, and at the point of a
+spring between points and ground; cones with a ground plate
 on the side a compression only support pushes from (@compression-only); and lines to the
 reference point of a rigid body (@rigid-body). The selected or edited constraint is red. Ties
 have no symbol.
@@ -76,6 +104,63 @@ constraint out of the input file.
 #screenshot("constraint-hide.png", [Hidden spring and the context menu of Constraints])
 
 #limitation[User-defined equations are not available yet.]
+
+=== Joints <joints>
+
+A joint holds the motion of #ui("End 2") relative to #ui("End 1") in some directions and
+leaves the others free, like a Displacement/Rotation condition that holds a part against
+another part instead of against ground. The ends are the same as for a spring: #ui("World"),
+a selection, a node set or surface, or a point (a reference point of a rigid body, or the
+point of a Displacement/Rotation condition or Remote Force). A selection follows a point of
+its own at the joint, rigidly (#ui("Rigid"), the selection keeps its shape) or on average
+(#ui("Deformable")), chosen under #ui("Behavior").
+
+#screenshot("constraint-joint.png", [A revolute joint from the side face of a cantilever to ground
+  about the face normal: the ball marks the joint at the centre of the face, the double arrow
+  its free rotation about the axis])
+
+#ui("Joint type") chooses the free relative degrees of freedom in the joint frame:
+
+#fields(
+  [Fixed], [Nothing is free: the two ends move as one, a rigid connection.],
+  [Revolute], [A hinge: the ends turn against each other about z.],
+  [Cylindrical], [Turning about and sliding along z.],
+  [Slider], [Sliding along z without turning.],
+  [Spherical], [A ball joint: all rotations free, no sliding.],
+  [Planar], [Sliding in the x-y plane and turning about z.],
+  [General], [Each of #ui("Ux"), #ui("Uy"), #ui("Uz"), #ui("URx"), #ui("URy"), #ui("URz")
+    #ui("Fixed") or #ui("Free").],
+)
+
+The joint sits at its #ui("Location"): by default the centre of #ui("End 1") (of #ui("End 2")
+when #ui("End 1") is #ui("World")), or coordinates in the #ui("Coordinate system"). The
+#ui("Axis") is the axis of a revolute, cylindrical or slider joint and the normal of a planar
+joint, the z axis of the joint frame:
+
+#fields(
+  [Face normal], [The mean outward normal of the faces of #ui("End 1") (of #ui("End 2") when
+    #ui("End 1") has no faces), e.g. the face where a hub sits on its shaft. The faces must be
+    (nearly) flat; nodes instead of faces give the normal of the plane they lie in. The
+    default of a new joint.],
+  [Cylinder axis], [The axis of the cylindrical faces of #ui("End 1"), e.g. a bore or a pin.],
+  [Z of the coordinate system], [The z axis of the #ui("Coordinate system").],
+  [Direction], [A direction in the #ui("Coordinate system").],
+)
+
+The dialog shows the global #ui("Axis direction") it finds. The x axis of the frame is the x
+direction of the coordinate system turned normal to the axis. The axis is taken in the
+starting position and then turns with #ui("End 1"): with #ui("Large deformations") in a
+Static or Dynamic step a hinge stays a hinge however far its parts turn or bend, as in a
+mechanism. In a plane model a joint holds #ui("Ux"), #ui("Uy") and #ui("URz") only, so a
+revolute joint is a hinge normal to the model plane.
+
+The 3D view draws a joint as lines from both ends to a ball at the joint, with an arrow for
+each free translation and a double arrow for each free rotation along the axes of the joint
+frame.
+
+A joint fixes the relative motion only; a revolute joint between two parts and nothing else
+leaves the second part free to turn, which a static step rejects as a mechanism. Hold it with
+a boundary condition, a load in a Dynamic step or a rotational spring on a point.
 
 == Contacts <contacts>
 
@@ -225,7 +310,7 @@ all contact regions share. CalculiX allows only one contact #ui("Formulation") p
 "Which method?" below). Auto takes surface to surface, or the method of your manual contact
 pairs if you have any. The #ui("Stiffness factor") replaces the 10 of the normal stiffness.
 The model check reports a manual contact pair whose method differs from the formulation, and
-mortar contact in a step other than static.
+mortar contact in a step that is neither static nor dynamic.
 
 #screenshot("connection-settings-weak-springs.png", [Connection settings with weak springs for
   parts held only by contact])
@@ -521,8 +606,8 @@ the shell (S3 and up). For a contact on a shell edge use #ui("Surface to surface
     Slower per iteration. A good choice for static contact.],
   [Mortar], [Face-to-face mortar contact. The most accurate contact pressure and little
     dependence on which side is master, which matters when you read contact pressures. Static
-    steps only, element-face surfaces required, and the slowest method. Try it if surface to
-    surface gives oscillating pressures; it is not meant for dynamics.],
+    and Dynamic steps only, element-face surfaces required, and the slowest method. Try it if
+    surface to surface gives oscillating pressures.],
   [Massless], [Massless node-to-face contact for explicit dynamics. Use it only in explicit
     dynamic steps.],
 )

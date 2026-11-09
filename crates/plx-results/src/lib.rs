@@ -58,9 +58,6 @@ pub struct ResultsSettings {
     /// [`plx_mesh::FeMesh::fingerprint`] of the results' mesh, to tell whether what refers
     /// to its nodes and elements still fits results of another run.
     pub mesh: Option<u64>,
-    /// Keys of the features taken over from the FE model, see
-    /// [`plx_model::FeModel::add_missing_features`]; the others were made on the results.
-    pub inherited_features: Vec<String>,
 }
 
 impl ResultsSettings {
@@ -157,6 +154,10 @@ pub struct Component {
     pub values: Vec<f32>,
     /// Computed by nodalis rather than read from the file.
     pub derived: bool,
+    /// An out-of-plane component of a 2D model, zero everywhere: the built-in solver leaves
+    /// it out of the results, and it is filled in with zeros for what computes with all
+    /// components of the field (magnitudes, invariants, transformations), but not listed.
+    pub out_of_plane: bool,
 }
 
 impl Component {
@@ -208,7 +209,7 @@ impl FieldRank {
     /// number of raw components.
     pub fn of_calculix(name: &str, raw_components: usize) -> Self {
         match (name, raw_components) {
-            ("DISP" | "MODE" | "VELO" | "FORC" | "FLUX" | "NORM", 3) => FieldRank::Vector,
+            ("DISP" | "MODE" | "VELO" | "ACCE" | "FORC" | "FLUX" | "NORM", 3) => FieldRank::Vector,
             ("STRESS" | "ZZSTR", 6) => FieldRank::Tensor(TensorKind::Stress),
             ("TOSTRAIN" | "MESTRAIN", 6) => FieldRank::Tensor(TensorKind::Strain),
             _ => FieldRank::Scalar,

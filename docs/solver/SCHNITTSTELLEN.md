@@ -603,6 +603,13 @@ beobachtet, nicht aus dem Quelltext:
 - **Amplituden**: Wert bei Zeit t = Tabelle(t − SHIFTX) + SHIFTY, linear zwischen den Punkten,
   vor dem ersten und nach dem letzten Punkt konstant; t ist die Step-Zeit oder mit
   `TIME=TOTAL TIME` die Gesamtzeit.
+- **Signal-Amplituden** (Nodalis, `*AMPLITUDE, SHAPE=...`): plxs wertet die Form exakt zu jeder
+  Zeit aus, statt einer Tabelle; außerhalb von Start..Ende ist der Wert 0 (plus SHIFTY).
+  `SHAPE=PULSE` mit `Start, Breite` (Halbsinus, Ersatz für einen Dirac-Stoß), `SHAPE=SINE` mit
+  `Start, Ende, Frequenz, Phase in Grad`, `SHAPE=CHIRP` mit `Start, Ende, Startfrequenz,
+  Endfrequenz` und `SWEEP=LINEAR|LOG`. Wo eine Prozedur zwischen Knickpunkten linear
+  interpoliert (Inkrementgrenzen der nichtlinearen Statik, Abschnitte der expliziten
+  GPU-Integration), liefert `Amplitude::corner_times` 48 Stützstellen je Periode.
 - **Übernahme in den nächsten Step** (`plxs-input/src/carry.rs`, aufgelöst im Leser, die IR
   bleibt unverändert):
   - Ein `*CLOAD` ohne `OP=NEW` ersetzt die übernommene Last an demselben Knoten und DOF;

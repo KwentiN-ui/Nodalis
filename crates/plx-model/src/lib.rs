@@ -20,14 +20,18 @@ pub mod convert;
 mod cross_section;
 mod detection;
 mod distribution;
+mod dynamic;
 mod element_type;
 pub mod equation;
+mod excitation;
 mod exposed;
 mod features;
 mod field;
 pub mod fingerprint;
 mod geometry;
 mod history;
+pub mod hyperelastic;
+pub mod hyperelastic_fit;
 mod id;
 pub mod library;
 mod measure;
@@ -46,10 +50,12 @@ mod signature;
 mod solver_diagnostics;
 mod study;
 mod symmetry;
+mod tables;
 pub mod units;
+pub use tables::{StepTable, TableOwner};
 mod validity;
 
-pub use amplitude::{Amplitude, AmplitudeTime};
+pub use amplitude::{Amplitude, AmplitudeTime, ValueTable, no_tables};
 pub use bolt::{Bolt, BoltAction, BoltChange, LoweredBolts, Preload, ResolvedBolt};
 pub use cad_operation::{CadOperation, CadOperationKind};
 pub use checks::{
@@ -62,12 +68,14 @@ pub use connection::{
     ResolvedKind, STIFFNESS_FACTOR, SideRoles, Stiffness, TIED_STIFFNESS_FACTOR, TOLERANCE_FACTOR,
     WEAK_SPRING_FACTOR, conducts_across_contacts, mortar_supports,
 };
-pub use constraint::{CompressionOnly, NodeTie, RigidBody, Spring};
+pub use constraint::{
+    CompressionOnly, Joint, JointAxis, JointKind, NodeTie, RigidBody, Spring, SpringEnd,
+    SpringLayout,
+};
 pub use contact::{
-    Constraint, ContactMethod, ContactPair, ContactScale, CyclicSymmetry, DEFAULT_SURFACE_COLOR,
-    ElementYoung, Friction, GapConductance, InteractionProperty, NORMAL_STIFFNESS_FACTOR,
-    STICK_SLOPE_RATIO, SectorDisplay, SurfaceBehavior, SurfaceInteraction, Tie,
-    default_stick_slope,
+    Constraint, ContactMethod, ContactPair, ContactScale, CyclicSymmetry, ElementYoung, Friction,
+    GapConductance, InteractionProperty, NORMAL_STIFFNESS_FACTOR, STICK_SLOPE_RATIO, SectorDisplay,
+    SurfaceBehavior, SurfaceInteraction, Tie, default_stick_slope,
 };
 pub use contact_check::{ContactCheck, ContactStatus};
 pub use contact_steps::{ContactChange, ContactState};
@@ -80,7 +88,9 @@ pub use detection::{
     auto_detection_tolerance, auto_geometry_detection_tolerance,
 };
 pub use distribution::{Distribution, DistributionKind, Interpolation, Sampler, parse_points};
+pub use dynamic::{Integration, RayleighFit, StableStepEstimate, StepLimit};
 pub use element_type::{PartElementType, element_type_options};
+pub use excitation::{Excitation, Signal, SignalKind, Sweep};
 pub use exposed::{Exposed, Field, ItemRef, ValuePath};
 pub use features::{
     CoordinatePlane, CoordinateSystem, CoordinateSystemKind, GLOBAL, Plane, PlaneSource,
@@ -92,6 +102,7 @@ pub use geometry::{
     MeshingParameters, Recombination,
 };
 pub use history::{HistoryKind, HistoryOutput, Totals};
+pub use hyperelastic::{Hyperelastic, HyperelasticModel, TestMode};
 pub use id::Id;
 pub use library::MaterialLibrary;
 pub use measure::{Extreme, MeasureKind, MeasureRegion, POINT_AXES};
@@ -240,7 +251,7 @@ impl FeModel {
                 (step.boundary_conditions.iter().map(|b| &b.region))
                     .chain(step.loads.iter().map(|l| &l.region))
                     .chain(step.history_outputs.iter().filter_map(|h| h.kind.region()))
-                    .chain(step.kind.design_region())
+                    .chain(step.kind.region())
             }))
     }
 
@@ -371,7 +382,7 @@ impl FeModel {
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
                     .chain(step.defined_fields.iter_mut().map(|f| &mut f.region))
                     .chain((step.history_outputs.iter_mut()).filter_map(|h| h.kind.region_mut()))
-                    .chain(step.kind.design_region_mut())
+                    .chain(step.kind.region_mut())
             }))
     }
 
@@ -441,7 +452,7 @@ impl FeModel {
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
                     .chain(step.defined_fields.iter_mut().map(|f| &mut f.region))
                     .chain((step.history_outputs.iter_mut()).filter_map(|h| h.kind.region_mut()))
-                    .chain(step.kind.design_region_mut())
+                    .chain(step.kind.region_mut())
             }));
         for region in regions {
             match region {
@@ -470,6 +481,9 @@ pub struct Material {
     pub name: String,
     pub density: Option<f64>,
     pub elastic: Option<Elastic>,
+    /// Hyperelasticity: a strain energy model for large strains in place of `elastic`.
+    #[serde(default)]
+    pub hyperelastic: Option<Hyperelastic>,
     /// Thermal conductivity (`*CONDUCTIVITY`), for heat transfer.
     #[serde(default)]
     pub conductivity: Option<f64>,
@@ -485,6 +499,17 @@ pub struct Material {
     /// Creep by Norton's law (`*CREEP`), which acts in Visco steps.
     #[serde(default)]
     pub creep: Option<Creep>,
+}
+
+impl Material {
+    /// The elastic constants at small strains: the linear elasticity, or the initial moduli
+    /// of a hyperelastic material.
+    pub fn small_strain_elastic(&self) -> Option<Elastic> {
+        match &self.hyperelastic {
+            Some(hyper) => Some(hyper.small_strain()),
+            None => self.elastic,
+        }
+    }
 }
 
 /// Norton's creep law (`*CREEP, LAW=NORTON`): the equivalent creep strain rate is
@@ -689,13 +714,28 @@ pub enum StepKind {
 }
 
 impl StepKind {
+    /// How long the step lasts in step time: the time period of static, heat transfer,
+    /// visco and modal dynamics steps, the duration of a dynamic one; 1 for the others.
+    pub fn period(&self) -> f64 {
+        match self {
+            StepKind::Static(settings) => settings.period(),
+            StepKind::HeatTransfer(settings)
+            | StepKind::CoupledTempDisp(settings)
+            | StepKind::UncoupledTempDisp(settings) => settings.increments.period(),
+            StepKind::Visco(settings) => settings.increments.period(),
+            StepKind::Dynamic(settings) => settings.duration,
+            StepKind::ModalDynamics(settings) => settings.time_period,
+            _ => 1.0,
+        }
+    }
+
     /// Whether the step is computed with large deformations (`NLGEOM`).
     pub fn nlgeom(&self) -> bool {
         match self {
             StepKind::Static(settings) => settings.nlgeom,
             StepKind::CoupledTempDisp(settings) => settings.increments.nlgeom,
-            StepKind::Dynamic(settings) => settings.increments.nlgeom,
             StepKind::Visco(settings) => settings.increments.nlgeom,
+            StepKind::Dynamic(settings) => settings.large_deformations,
             _ => false,
         }
     }
@@ -715,6 +755,24 @@ impl StepKind {
             self,
             StepKind::Frequency(_) | StepKind::ComplexFrequency(_) | StepKind::Sensitivity(_)
         )
+    }
+
+    /// The region the step itself acts on: the design region of a sensitivity step, the
+    /// rotating elements of a complex frequency step.
+    pub fn region(&self) -> Option<&Region> {
+        match self {
+            StepKind::Sensitivity(settings) => Some(&settings.design_region),
+            StepKind::ComplexFrequency(settings) => Some(&settings.region),
+            _ => None,
+        }
+    }
+
+    pub fn region_mut(&mut self) -> Option<&mut Region> {
+        match self {
+            StepKind::Sensitivity(settings) => Some(&mut settings.design_region),
+            StepKind::ComplexFrequency(settings) => Some(&mut settings.region),
+            _ => None,
+        }
     }
 
     /// The design region of a sensitivity step.
@@ -797,6 +855,10 @@ impl StepKind {
         if matches!(kind, LoadKind::Moving(_)) {
             return matches!(self, StepKind::Static(_));
         }
+        // An excitation shakes the structure over time, which only a dynamic step follows.
+        if matches!(kind, LoadKind::Excitation(_)) {
+            return matches!(self, StepKind::Dynamic(_));
+        }
         self.supports_loads()
             && if kind.is_thermal() {
                 self.is_thermal()
@@ -804,18 +866,6 @@ impl StepKind {
                 self.is_mechanical()
             }
     }
-}
-
-/// How the increments of a step are chosen.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Incrementation {
-    /// CalculiX's own defaults; no increment data is written.
-    #[default]
-    Default,
-    /// Automatic increments within the given limits.
-    Automatic,
-    /// Fixed increments of `initial_increment` (`DIRECT`).
-    Direct,
 }
 
 /// How a step solves its systems of equations.
@@ -863,35 +913,163 @@ impl LinearSolverChoice {
     }
 }
 
-/// Settings of a `*STATIC` step, with the default values.
+/// Settings of a static step (also the increments of heat transfer and visco steps): how
+/// long it lasts, how many result frames it keeps and whether it follows large
+/// deformations. How the solver divides the duration into increments is derived from these
+/// (see [`StaticStep::plan`]); [`IncrementControl`] overrides it where needed.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StaticStep {
-    /// Geometrically nonlinear (`NLGEOM`).
+    /// Length of the step in (pseudo) time; loads ramp up over it.
+    pub duration: f64,
+    /// Result frames kept over the duration, evenly spaced, the last one at the end. The
+    /// increments are shortened where needed so that they end on the frames.
+    pub frames: u32,
+    /// Large displacements and rotations (`NLGEOM`).
     pub nlgeom: bool,
-    pub incrementation: Incrementation,
-    /// Maximum number of increments (`INC`), written unless incrementation is default.
-    pub max_increments: u32,
-    pub initial_increment: f64,
-    pub time_period: f64,
-    pub min_increment: f64,
-    pub max_increment: f64,
-    /// Missing in projects saved before the solver could be chosen.
-    #[serde(default)]
+    /// How the increments are chosen; automatic by default.
+    pub control: IncrementControl,
     pub solver: LinearSolverChoice,
 }
 
 impl Default for StaticStep {
     fn default() -> Self {
         Self {
+            duration: 1.0,
+            frames: 1,
             nlgeom: false,
-            incrementation: Incrementation::Default,
-            max_increments: 100,
-            initial_increment: 1.0,
-            time_period: 1.0,
-            min_increment: 1e-5,
-            max_increment: 1e30,
+            control: IncrementControl::default(),
             solver: LinearSolverChoice::Automatic,
         }
+    }
+}
+
+/// The advanced increment settings of a [`StaticStep`]: everything `None` is derived from
+/// the duration and the frames.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IncrementControl {
+    pub size: IncrementSize,
+    /// Size of the first increment (automatic increments).
+    pub initial: Option<f64>,
+    /// Smallest increment a cutback may reach before the step fails (automatic increments).
+    pub minimum: Option<f64>,
+    /// Largest increment (automatic increments).
+    pub maximum: Option<f64>,
+    /// Most increments the step may take; `None` sets no limit.
+    pub limit: Option<u32>,
+}
+
+/// Whether the solver chooses the increment sizes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum IncrementSize {
+    /// Grown after easy increments, cut back after failed ones.
+    #[default]
+    Automatic,
+    /// Always this size (shortened to end on the frames); a failed increment fails the step.
+    Fixed(f64),
+}
+
+/// The increments a [`StaticStep`] asks of the solver, with every automatic value resolved.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IncrementPlan {
+    pub duration: f64,
+    pub frames: u32,
+    /// The first increment; with fixed increments, every one.
+    pub initial: f64,
+    pub minimum: f64,
+    pub maximum: f64,
+    pub fixed: bool,
+    /// `None`: no limit.
+    pub limit: Option<u32>,
+}
+
+impl StaticStep {
+    /// The most frames a step may keep.
+    pub const MAX_FRAMES: u32 = 100_000;
+    /// A step with large deformations starts with at most this share of its duration.
+    pub const NONLINEAR_START: f64 = 0.1;
+
+    /// The length of the step in time (its duration).
+    pub fn period(&self) -> f64 {
+        self.duration
+    }
+
+    /// The time between two result frames.
+    pub fn frame_interval(&self) -> f64 {
+        self.duration / f64::from(self.frames.max(1))
+    }
+
+    /// The increments of the step, `nlgeom` saying whether it is solved with large
+    /// deformations (it may be switched on by the materials). Automatically, the first
+    /// increment is a frame interval, with large deformations at most a tenth of the
+    /// duration; the smallest one 1e-5 of the duration, the largest one the duration. The
+    /// first increment never exceeds the largest one.
+    pub fn plan(&self, nlgeom: bool) -> IncrementPlan {
+        let duration = self.duration;
+        let c = &self.control;
+        let maximum = c.maximum.unwrap_or(duration).min(duration);
+        let (initial, fixed) = match c.size {
+            IncrementSize::Fixed(dt) => (dt.min(duration), true),
+            IncrementSize::Automatic => {
+                let automatic = if nlgeom {
+                    self.frame_interval().min(Self::NONLINEAR_START * duration)
+                } else {
+                    self.frame_interval()
+                };
+                (c.initial.unwrap_or(automatic).min(maximum), false)
+            }
+        };
+        let minimum = c.minimum.unwrap_or(1e-5 * duration).min(initial);
+        IncrementPlan {
+            duration,
+            frames: self.frames.max(1),
+            initial,
+            minimum,
+            maximum,
+            fixed,
+            limit: c.limit,
+        }
+    }
+
+    /// What is wrong with the settings, if anything.
+    pub fn problem(&self) -> Option<String> {
+        let positive = |v: f64| v.is_finite() && v > 0.0;
+        if !positive(self.duration) {
+            return Some("The duration must be greater than 0.".into());
+        }
+        if !(1..=Self::MAX_FRAMES).contains(&self.frames) {
+            return Some(format!(
+                "The number of frames must lie between 1 and {}.",
+                Self::MAX_FRAMES
+            ));
+        }
+        let c = &self.control;
+        if let IncrementSize::Fixed(dt) = c.size
+            && !(positive(dt) && dt <= self.duration)
+        {
+            return Some(
+                "A fixed increment must be greater than 0 and no longer than the duration.".into(),
+            );
+        }
+        for (value, name) in [
+            (c.initial, "initial"),
+            (c.minimum, "smallest"),
+            (c.maximum, "largest"),
+        ] {
+            if value.is_some_and(|v| !positive(v)) {
+                return Some(format!("The {name} increment must be greater than 0."));
+            }
+        }
+        if let (Some(min), Some(max)) = (c.minimum, c.maximum)
+            && min > max
+        {
+            return Some("The smallest increment must not exceed the largest one.".into());
+        }
+        if c.limit == Some(0) {
+            return Some("The increment limit must be at least 1.".into());
+        }
+        None
     }
 }
 
@@ -946,57 +1124,297 @@ pub struct FrequencyStep {
     pub solver: LinearSolverChoice,
 }
 
-/// Settings of a `*DYNAMIC` step, with the default values; it
-/// extends the static step by the time integration and the damping.
+/// Settings of a Dynamic step (direct time integration): what the user decides, how long
+/// the step lasts, how many result frames it keeps and how the structure is damped. The
+/// time step, the numerical damping of the integration and the Rayleigh coefficients are
+/// derived from it when the model is lowered for the solver.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DynamicStep {
-    /// Increments, time period, geometric nonlinearity and solver as in a static step.
-    pub increments: StaticStep,
-    /// Numerical damping of the Hilber-Hughes-Taylor integration (`ALPHA=`), between -1/3
-    /// and 0; CalculiX's default is -0.05.
-    pub alpha: f64,
-    /// Implicit or explicit integration of the structure and the fluid (`EXPLICIT=`).
-    pub procedure: DynamicProcedure,
-    /// Rayleigh damping of the whole model, written as `*DAMPING` in the step
-    /// does; `None` leaves the model undamped.
-    pub damping: Option<RayleighDamping>,
+    /// How the response is computed: direct integration of all equations, or the
+    /// superposition of a number of eigenmodes (linear models).
+    #[serde(default)]
+    pub method: DynamicMethod,
+    /// Length of the step in time.
+    pub duration: f64,
+    /// Result frames written over the duration, evenly spaced, the last one at the end.
+    pub frames: u32,
+    /// Also a frame whenever a contact closes or opens and at the sub-steps of an impact,
+    /// between the evenly spaced frames (direct integration only).
+    #[serde(default = "default_true")]
+    pub event_frames: bool,
+    pub damping: Damping,
+    pub time_step: TimeStep,
+    /// Highest frequency the integration must resolve: the time step is at most
+    /// `1 / (20 f)`. `None` leaves it to the frames and the amplitudes.
+    pub frequency_limit: Option<f64>,
+    pub numerical_damping: NumericalDamping,
+    pub solver: LinearSolverChoice,
+    /// Large displacements and rotations (`NLGEOM`): Newton iterations in every time step,
+    /// rigid bodies turn by finite angles. Off, the motion is linear (small deformations).
+    #[serde(default)]
+    pub large_deformations: bool,
+    /// Explicit integration: the stable time step mass scaling raises the elements to
+    /// (they get the mass that needs); `None` scales nothing.
+    #[serde(default)]
+    pub mass_scaling: Option<f64>,
+    /// Automatic method: implicit time steps shorter than this multiple of the stable
+    /// explicit time step go on explicitly; `None` takes the default
+    /// ([`DynamicStep::DEFAULT_SWITCH_FACTOR`]), 0 never switches.
+    #[serde(default)]
+    pub switch_factor: Option<f64>,
+    /// Explicit integration: expanded shells keep the whole inertia of their thickness
+    /// modes. Off (the default), the solver raises it so that the thickness does not set
+    /// the time step (selective mass scaling; translations unchanged).
+    #[serde(default)]
+    pub full_shell_inertia: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for DynamicStep {
     fn default() -> Self {
         Self {
-            increments: StaticStep {
-                incrementation: Incrementation::Automatic,
-                initial_increment: 0.01,
-                ..StaticStep::default()
-            },
-            alpha: -0.05,
-            procedure: DynamicProcedure::Implicit,
-            damping: None,
+            method: DynamicMethod::Direct,
+            duration: 1.0,
+            frames: 200,
+            event_frames: true,
+            damping: Damping::None,
+            time_step: TimeStep::Automatic,
+            frequency_limit: None,
+            numerical_damping: NumericalDamping::Normal,
+            solver: LinearSolverChoice::Automatic,
+            large_deformations: false,
+            mass_scaling: None,
+            switch_factor: None,
+            full_shell_inertia: false,
         }
     }
 }
 
 impl DynamicStep {
+    /// The most frames a step may keep.
+    pub const MAX_FRAMES: u32 = 100_000;
+
+    /// The switch factor of the Automatic method when none is given: an implicit time step
+    /// costs about as much as 30 to 100 explicit ones.
+    pub const DEFAULT_SWITCH_FACTOR: f64 = 30.0;
+
     /// What is wrong with the settings, if anything.
     pub fn problem(&self) -> Option<String> {
-        if !(-1.0 / 3.0..=0.0).contains(&self.alpha) {
-            return Some("Alpha must lie between -1/3 and 0.".into());
+        if self.duration.is_nan() || self.duration <= 0.0 {
+            return Some("The duration must be greater than 0.".into());
         }
-        if self.increments.incrementation == Incrementation::Default {
-            return Some("A dynamic step needs its time period and increments.".into());
+        if !(1..=Self::MAX_FRAMES).contains(&self.frames) {
+            return Some(format!(
+                "The number of frames must lie between 1 and {}.",
+                Self::MAX_FRAMES
+            ));
         }
-        if self.increments.time_period <= 0.0 || self.increments.initial_increment <= 0.0 {
+        if let TimeStep::Fixed(dt) = self.time_step
+            && !(dt > 0.0 && dt <= self.duration)
+        {
             return Some(
-                "The time period and the initial increment must be greater than 0.".into(),
+                "A fixed time step must be greater than 0 and no longer than the duration.".into(),
             );
         }
-        if let Some(damping) = &self.damping
-            && (damping.alpha < 0.0 || damping.beta < 0.0)
+        if let Some(t) = self.mass_scaling
+            && !(t > 0.0 && t <= self.duration)
         {
-            return Some("The damping coefficients cannot be negative.".into());
+            return Some(
+                "The mass scaling time step must be greater than 0 and no longer than the \
+                 duration."
+                    .into(),
+            );
         }
-        None
+        if let Some(k) = self.switch_factor
+            && !(k >= 0.0 && k.is_finite())
+        {
+            return Some("The switch factor must be 0 or greater.".into());
+        }
+        if let Some(f) = self.frequency_limit
+            && (f.is_nan() || f <= 0.0)
+        {
+            return Some("The frequency limit must be greater than 0.".into());
+        }
+        if let DynamicMethod::Modal { modes } = self.method {
+            if modes == 0 {
+                return Some("Modal superposition needs at least one mode.".into());
+            }
+            if self.large_deformations {
+                return Some(
+                    "Modal superposition is linear: switch off Large deformations or use \
+                     Direct integration."
+                        .into(),
+                );
+            }
+        }
+        match self.damping {
+            Damping::None => None,
+            Damping::Ratio { zeta, range } => {
+                if !(zeta > 0.0 && zeta <= 1.0) {
+                    return Some("The damping ratio must lie between 0 and 1 (100 %).".into());
+                }
+                match range {
+                    DampingRange::Between(f1, f2) if !(f1 > 0.0 && f2 > f1) => Some(
+                        "The damping range needs 0 < lower frequency < upper frequency.".into(),
+                    ),
+                    _ => None,
+                }
+            }
+            Damping::Rayleigh(r) if r.alpha < 0.0 || r.beta < 0.0 => {
+                Some("The damping coefficients cannot be negative.".into())
+            }
+            Damping::Rayleigh(_) => None,
+        }
+    }
+
+    /// Time between two result frames.
+    pub fn frame_interval(&self) -> f64 {
+        self.duration / self.frames.max(1) as f64
+    }
+}
+
+/// How a Dynamic step computes the response over time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DynamicMethod {
+    /// Implicit direct integration of the equation of motion (HHT-alpha), unconditionally
+    /// stable; takes contact, large deformations and plasticity.
+    #[default]
+    Direct,
+    /// Superposition of the lowest `modes` eigenmodes, which the solver computes first:
+    /// every time step then costs almost nothing, so fine steps and long durations of
+    /// linear models (no contact, no large deformations) come cheap. The response is
+    /// exact in the modes it has; the modes must reach above the frequencies the loads
+    /// excite.
+    Modal { modes: u32 },
+    /// Explicit integration (central differences, lumped mass): many small time steps
+    /// below the stability limit of the mesh, no equation system. For impacts, crashes and
+    /// drop tests with buckling and plasticity.
+    Explicit,
+    /// Implicit while the motion is smooth, explicit through impacts and wherever the
+    /// implicit time steps would have to become tiny; the solver switches within the step.
+    Automatic,
+}
+
+impl DynamicMethod {
+    /// The number of modes a new modal step superposes.
+    pub const DEFAULT_MODES: u32 = 30;
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            DynamicMethod::Direct => "Implicit (direct integration)",
+            DynamicMethod::Modal { .. } => "Modal superposition",
+            DynamicMethod::Explicit => "Explicit",
+            DynamicMethod::Automatic => "Automatic (implicit/explicit)",
+        }
+    }
+
+    /// What the method is for, as the dialog explains it.
+    pub fn hint(&self) -> &'static str {
+        match self {
+            DynamicMethod::Direct => {
+                "Large implicit time steps with an equation system each: smooth motions, \
+                 vibrations, slow drop tests. Takes contact, large deformations and plasticity."
+            }
+            DynamicMethod::Modal { .. } => {
+                "Superposes the lowest eigenmodes: fine steps and long durations of linear \
+                 models come cheap."
+            }
+            DynamicMethod::Explicit => {
+                "Thousands of tiny time steps without equation solving: impacts, crashes, drop \
+                 tests with buckling and plasticity. Each step must be shorter than a wave \
+                 needs to cross the smallest element; the estimate is shown below."
+            }
+            DynamicMethod::Automatic => {
+                "Implicit while the motion is smooth, explicit through impacts and wherever the \
+                 implicit time steps would have to become tiny: a drop, a hit, then the slow \
+                 motion afterwards. The output and the solver log show where it switched."
+            }
+        }
+    }
+
+    /// Whether the method integrates explicitly.
+    pub fn is_explicit(&self) -> bool {
+        matches!(self, DynamicMethod::Explicit)
+    }
+
+    /// Whether the method integrates explicitly at least in parts of the step.
+    pub fn uses_explicit(&self) -> bool {
+        matches!(self, DynamicMethod::Explicit | DynamicMethod::Automatic)
+    }
+}
+
+/// The time step of a Dynamic step.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum TimeStep {
+    /// Fine enough for the frames, the amplitudes of the loads and the frequency limit.
+    #[default]
+    Automatic,
+    /// At most this long; shortened so the frames fall on time steps.
+    Fixed(f64),
+}
+
+/// The structural damping of a Dynamic step.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum Damping {
+    /// Undamped; only the numerical damping of the integration removes energy.
+    #[default]
+    None,
+    /// Viscous damping ratio (1 = critical), applied as Rayleigh damping that has exactly
+    /// this ratio at both ends of `range` and less between them.
+    Ratio { zeta: f64, range: DampingRange },
+    /// Mass and stiffness proportional coefficients given directly.
+    Rayleigh(RayleighDamping),
+}
+
+/// The frequencies at which a damping ratio is met exactly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum DampingRange {
+    /// From the lowest eigenfrequency of the model to the highest frequency the time step
+    /// resolves.
+    #[default]
+    Automatic,
+    /// Between two frequencies, in cycles per time unit.
+    Between(f64, f64),
+}
+
+/// The numerical damping of the time integration: it removes the high frequencies the time
+/// step cannot resolve.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NumericalDamping {
+    /// Slight (HHT alpha -0.05).
+    #[default]
+    Normal,
+    /// None (alpha 0, the trapezoidal rule): energy is conserved.
+    None,
+    /// The most the scheme allows (alpha -1/3).
+    Strong,
+}
+
+impl NumericalDamping {
+    pub const ALL: [NumericalDamping; 3] = [
+        NumericalDamping::Normal,
+        NumericalDamping::None,
+        NumericalDamping::Strong,
+    ];
+
+    /// The alpha of the Hilber-Hughes-Taylor integration.
+    pub fn alpha(self) -> f64 {
+        match self {
+            NumericalDamping::Normal => -0.05,
+            NumericalDamping::None => 0.0,
+            NumericalDamping::Strong => -1.0 / 3.0,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            NumericalDamping::Normal => "Normal",
+            NumericalDamping::None => "None",
+            NumericalDamping::Strong => "Strong",
+        }
     }
 }
 
@@ -1157,50 +1575,6 @@ pub struct ModeDamping {
     pub ratio: f64,
 }
 
-/// How a dynamic step integrates over time, CalculiX's `EXPLICIT` parameter of `*DYNAMIC`:
-/// the structure and, with fluids, the fluid.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DynamicProcedure {
-    /// Implicit for both, the default; unconditionally stable.
-    #[default]
-    Implicit,
-    /// Implicit structure, explicit fluid (`EXPLICIT=1`).
-    ImplicitExplicit,
-    /// Explicit structure, implicit fluid (`EXPLICIT=2`).
-    ExplicitImplicit,
-    /// Explicit for both (`EXPLICIT=3`); needs increments below the stability limit.
-    Explicit,
-}
-
-impl DynamicProcedure {
-    pub const ALL: [DynamicProcedure; 4] = [
-        DynamicProcedure::Implicit,
-        DynamicProcedure::ImplicitExplicit,
-        DynamicProcedure::ExplicitImplicit,
-        DynamicProcedure::Explicit,
-    ];
-
-    /// The value of `EXPLICIT=`; `None` for the implicit default.
-    pub fn keyword(self) -> Option<u8> {
-        match self {
-            DynamicProcedure::Implicit => None,
-            DynamicProcedure::ImplicitExplicit => Some(1),
-            DynamicProcedure::ExplicitImplicit => Some(2),
-            DynamicProcedure::Explicit => Some(3),
-        }
-    }
-
-    /// Name of the procedure in the GUI.
-    pub fn label(self) -> &'static str {
-        match self {
-            DynamicProcedure::Implicit => "Implicit / Implicit",
-            DynamicProcedure::ImplicitExplicit => "Implicit / Explicit",
-            DynamicProcedure::ExplicitImplicit => "Explicit / Implicit",
-            DynamicProcedure::Explicit => "Explicit / Explicit",
-        }
-    }
-}
-
 /// Rayleigh damping: the damping matrix is `alpha` times the mass plus `beta` times the
 /// stiffness matrix. For a damping ratio zeta at the circular frequency omega,
 /// `alpha = 2 zeta omega` (mass) or `beta = 2 zeta / omega` (stiffness).
@@ -1232,7 +1606,8 @@ impl Default for FrequencyStep {
 /// centrifugal forces (with [`ComplexFrequencyStep::stiffening`]), a frequency step that
 /// stores [`ComplexFrequencyStep::num_modes`] eigenmodes (a perturbation of the preload
 /// with stiffening) and the complex frequency step on those modes. Only the complex modes
-/// are kept as results. The rotation acts on the whole model.
+/// are kept as results. The rotation acts on [`ComplexFrequencyStep::region`]; the rest of
+/// the model stands still.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ComplexFrequencyStep {
     /// Number of complex eigenfrequencies to compute.
@@ -1245,6 +1620,15 @@ pub struct ComplexFrequencyStep {
     pub point: [f64; 3],
     /// Direction of the rotation axis.
     pub axis: [f64; 3],
+    /// A coordinate system whose z axis is the rotation axis, through its origin; `None`
+    /// takes [`ComplexFrequencyStep::point`] and [`ComplexFrequencyStep::axis`].
+    #[serde(default)]
+    pub system: Option<Id>,
+    /// The elements that rotate (parts or an element set); no parts picked: the whole
+    /// model. Centrifugal forces, stress stiffening, spin softening and Coriolis forces act
+    /// on these elements only.
+    #[serde(default = "whole_model")]
+    pub region: Region,
     /// Stress stiffening and spin softening by the centrifugal forces: the eigenmodes are
     /// those of the structure preloaded by the rotation. Off, they are those at standstill
     /// (as some other programs compute them).
@@ -1263,6 +1647,8 @@ impl Default for ComplexFrequencyStep {
             speed: 0.0,
             point: [0.0; 3],
             axis: [0.0, 0.0, 1.0],
+            system: None,
+            region: whole_model(),
             stiffening: true,
             num_modes: 20,
             solver: LinearSolverChoice::Automatic,
@@ -1270,12 +1656,43 @@ impl Default for ComplexFrequencyStep {
     }
 }
 
+/// No parts picked: the region of a step that acts on the whole model.
+fn whole_model() -> Region {
+    Region::Parts(Vec::new())
+}
+
 impl ComplexFrequencyStep {
+    /// Whether the whole model rotates.
+    pub fn rotates_whole_model(&self) -> bool {
+        matches!(&self.region, Region::Parts(parts) if parts.is_empty())
+    }
+
+    /// The rotation axis in `fe`: a point on it and its unit direction, from the coordinate
+    /// system when the step names one.
+    pub fn axis_in(&self, fe: &FeModel) -> Result<([f64; 3], [f64; 3]), String> {
+        let (point, axis) = match self.system {
+            Some(id) => {
+                let system = fe
+                    .coordinate_system(id)
+                    .ok_or("The coordinate system does not exist")?;
+                (system.origin, system.axes()?[2])
+            }
+            None => (self.point, self.axis),
+        };
+        let length = axis.iter().map(|c| c * c).sum::<f64>().sqrt();
+        if length == 0.0 || !length.is_finite() {
+            return Err("The rotation axis has no direction.".into());
+        }
+        Ok((point, axis.map(|c| c / length)))
+    }
+
     /// What keeps the settings from being solved, in words.
     pub fn problem(&self) -> Option<String> {
-        let length = self.axis.iter().map(|c| c * c).sum::<f64>().sqrt();
-        if length == 0.0 || !length.is_finite() {
-            return Some("The rotation axis has no direction.".into());
+        if self.system.is_none() {
+            let length = self.axis.iter().map(|c| c * c).sum::<f64>().sqrt();
+            if length == 0.0 || !length.is_finite() {
+                return Some("The rotation axis has no direction.".into());
+            }
         }
         if self.num_frequencies == 0 {
             return Some("Compute at least one complex frequency.".into());
@@ -1331,11 +1748,15 @@ pub struct ViscoStep {
 impl Default for ViscoStep {
     fn default() -> Self {
         Self {
+            // Creep starts fast: small first increments that grow while the creep strain
+            // tolerance allows.
             increments: StaticStep {
-                incrementation: Incrementation::Automatic,
-                max_increments: 1000,
-                initial_increment: 1.0,
-                time_period: 1000.0,
+                duration: 1000.0,
+                frames: 10,
+                control: IncrementControl {
+                    initial: Some(1.0),
+                    ..IncrementControl::default()
+                },
                 ..StaticStep::default()
             },
             creep_tolerance: 1e-4,
@@ -1511,7 +1932,7 @@ impl Step {
             kind: StepKind::Dynamic(DynamicStep::default()),
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
-            history_outputs: Vec::new(),
+            history_outputs: vec![HistoryOutput::energies("Energies")],
             field_outputs: FieldOutput::dynamic_defaults(),
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),
@@ -1523,6 +1944,8 @@ impl Step {
     pub fn new_modal_dynamics(name: impl Into<String>) -> Self {
         Self {
             kind: StepKind::ModalDynamics(ModalDynamicsStep::default()),
+            field_outputs: FieldOutput::modal_dynamics_defaults(),
+            history_outputs: Vec::new(),
             ..Self::new_dynamic(name)
         }
     }
@@ -1532,6 +1955,7 @@ impl Step {
         Self {
             kind: StepKind::SteadyStateDynamics(SteadyStateDynamicsStep::default()),
             field_outputs: FieldOutput::defaults(),
+            history_outputs: Vec::new(),
             ..Self::new_dynamic(name)
         }
     }
@@ -1575,6 +1999,9 @@ pub struct BoundaryCondition {
     pub distribution: Option<Id>,
 }
 
+// The tables of a displacement make it larger than the other kinds; there are few
+// boundary conditions, so boxing would only add indirection.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum BoundaryKind {
     /// Prescribed displacements (U1..U3) and rotations (UR1..UR3) of the region, held at
@@ -1631,6 +2058,7 @@ impl Load {
             kind,
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
             distribution: None,
         }
     }
@@ -1676,6 +2104,11 @@ pub struct Load {
     /// `RADIATION AMPLITUDE`); other loads have none.
     #[serde(default)]
     pub factor_amplitude: Option<Id>,
+    /// A time table per component of the value (force and moment x, y, z; the pressure)
+    /// that replaces the component: it follows the table over the step time instead of
+    /// the amplitude. See [`LoadKind::table_components`].
+    #[serde(default, skip_serializing_if = "crate::no_tables")]
+    pub tables: [Option<ValueTable>; 3],
     /// Distribution the value is scaled by over the region; `None` is the same value
     /// everywhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1727,6 +2160,10 @@ pub enum LoadKind {
     /// Gravity, as the acceleration vector acting on the elements of the region
     /// (`*DLOAD`, `GRAV`). Needs the density of the materials.
     Gravity([f64; 3]),
+    /// Standard gravity along one axis of the global system (`*DLOAD`, `GRAV`): the user
+    /// picks the direction, the size is [`STANDARD_GRAVITY`]. Lowered to the same
+    /// acceleration vector as [`LoadKind::Gravity`] when the model is exported.
+    StandardGravity(GravityDirection),
     /// Rotation of the elements of the region about an axis through `point` along `axis`
     /// at `speed` radians per time (`*DLOAD`, `CENTRIF`).
     /// The solver takes the square of the speed; the model keeps the speed the user entered.
@@ -1738,6 +2175,9 @@ pub enum LoadKind {
     /// Wheel loads that travel over a surface region, one static step per position; see
     /// [`MovingLoad`].
     Moving(MovingLoad),
+    /// A force that follows a signal (an impulse, a sine, a frequency sweep) to excite the
+    /// structure in a dynamic step; see [`Excitation`].
+    Excitation(Excitation),
 }
 
 impl LoadKind {
@@ -1746,6 +2186,26 @@ impl LoadKind {
         LoadKind::Force {
             value,
             each_node: false,
+        }
+    }
+
+    /// How many components of the value can follow a time table of their own: the three
+    /// of a force or moment, the pressure; none for the other loads.
+    pub fn table_components(&self) -> usize {
+        match self {
+            LoadKind::Force { .. } | LoadKind::Moment(_) => 3,
+            LoadKind::Pressure(_) => 1,
+            _ => 0,
+        }
+    }
+
+    /// The quantity of the values in the time tables of the components, if it takes any.
+    pub fn table_quantity(&self) -> Option<units::Quantity> {
+        match self {
+            LoadKind::Force { .. } => Some(units::Quantity::Force),
+            LoadKind::Moment(_) => Some(units::Quantity::Moment),
+            LoadKind::Pressure(_) => Some(units::Quantity::Pressure),
+            _ => None,
         }
     }
 
@@ -1768,15 +2228,93 @@ impl LoadKind {
                 | LoadKind::RemoteForce(_)
                 | LoadKind::PreTension { .. }
                 | LoadKind::Gravity(_)
+                | LoadKind::StandardGravity(_)
                 | LoadKind::Centrifugal { .. }
                 | LoadKind::Moving(_)
+                | LoadKind::Excitation(_)
         )
     }
 
     /// Whether the load acts on the mass of the elements (gravity, centrifugal), so the
     /// materials need a density.
     pub fn is_body_force(&self) -> bool {
-        matches!(self, LoadKind::Gravity(_) | LoadKind::Centrifugal { .. })
+        matches!(
+            self,
+            LoadKind::Gravity(_) | LoadKind::StandardGravity(_) | LoadKind::Centrifugal { .. }
+        )
+    }
+
+    /// The acceleration vector of a gravity load, in the stored units (m/s²): what the user
+    /// typed for [`LoadKind::Gravity`], the standard acceleration along the picked axis for
+    /// [`LoadKind::StandardGravity`].
+    pub fn gravity_vector(&self) -> Option<[f64; 3]> {
+        match self {
+            LoadKind::Gravity(g) => Some(*g),
+            LoadKind::StandardGravity(direction) => Some(direction.vector()),
+            _ => None,
+        }
+    }
+}
+
+/// The standard acceleration of gravity in m/s², the unit the model stores accelerations in.
+pub const STANDARD_GRAVITY: f64 = 9.80665;
+
+/// The axis of the global system a standard gravity acts along, with its sign.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GravityDirection {
+    PlusX,
+    MinusX,
+    PlusY,
+    MinusY,
+    PlusZ,
+    #[default]
+    MinusZ,
+}
+
+impl GravityDirection {
+    pub const ALL: [GravityDirection; 6] = [
+        GravityDirection::PlusX,
+        GravityDirection::MinusX,
+        GravityDirection::PlusY,
+        GravityDirection::MinusY,
+        GravityDirection::PlusZ,
+        GravityDirection::MinusZ,
+    ];
+
+    /// The directions of a 2D model, which lies in the X-Y plane.
+    pub const PLANAR: [GravityDirection; 4] = [
+        GravityDirection::PlusX,
+        GravityDirection::MinusX,
+        GravityDirection::PlusY,
+        GravityDirection::MinusY,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GravityDirection::PlusX => "+X",
+            GravityDirection::MinusX => "-X",
+            GravityDirection::PlusY => "+Y",
+            GravityDirection::MinusY => "-Y",
+            GravityDirection::PlusZ => "+Z",
+            GravityDirection::MinusZ => "-Z",
+        }
+    }
+
+    /// The unit vector of the direction.
+    pub fn unit(self) -> [f64; 3] {
+        match self {
+            GravityDirection::PlusX => [1.0, 0.0, 0.0],
+            GravityDirection::MinusX => [-1.0, 0.0, 0.0],
+            GravityDirection::PlusY => [0.0, 1.0, 0.0],
+            GravityDirection::MinusY => [0.0, -1.0, 0.0],
+            GravityDirection::PlusZ => [0.0, 0.0, 1.0],
+            GravityDirection::MinusZ => [0.0, 0.0, -1.0],
+        }
+    }
+
+    /// The standard acceleration along the direction.
+    pub fn vector(self) -> [f64; 3] {
+        self.unit().map(|c| c * STANDARD_GRAVITY)
     }
 }
 
@@ -1930,6 +2468,87 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_static_step_derives_its_increments_from_duration_and_frames() {
+        let mut step = StaticStep {
+            duration: 2.0,
+            frames: 4,
+            ..StaticStep::default()
+        };
+        let plan = step.plan(false);
+        assert_eq!(plan.initial, 0.5);
+        assert_eq!(plan.maximum, 2.0);
+        assert!((plan.minimum - 2e-5).abs() < 1e-15);
+        assert_eq!(plan.limit, None, "no limit on the number of increments");
+        // Large deformations start with at most a tenth of the duration.
+        assert_eq!(step.plan(true).initial, 0.2);
+        step.frames = 20;
+        assert_eq!(step.plan(true).initial, 0.1);
+    }
+
+    #[test]
+    fn the_first_increment_never_exceeds_the_largest_one() {
+        let step = StaticStep {
+            control: IncrementControl {
+                initial: Some(0.5),
+                maximum: Some(0.1),
+                ..IncrementControl::default()
+            },
+            ..StaticStep::default()
+        };
+        let plan = step.plan(true);
+        assert_eq!(plan.initial, 0.1);
+        assert_eq!(plan.maximum, 0.1);
+        // Automatic as well: one frame over the whole step, the largest increment smaller.
+        let step = StaticStep {
+            control: IncrementControl {
+                maximum: Some(0.25),
+                ..IncrementControl::default()
+            },
+            ..StaticStep::default()
+        };
+        assert_eq!(step.plan(false).initial, 0.25);
+    }
+
+    #[test]
+    fn fixed_increments_and_wrong_settings() {
+        let mut step = StaticStep {
+            control: IncrementControl {
+                size: IncrementSize::Fixed(0.05),
+                limit: Some(30),
+                ..IncrementControl::default()
+            },
+            ..StaticStep::default()
+        };
+        let plan = step.plan(false);
+        assert!(plan.fixed);
+        assert_eq!(plan.initial, 0.05);
+        assert_eq!(plan.limit, Some(30));
+        assert_eq!(step.problem(), None);
+        step.control.size = IncrementSize::Fixed(2.0);
+        assert!(step.problem().is_some(), "longer than the duration");
+        step.control.size = IncrementSize::Automatic;
+        step.frames = 0;
+        assert!(step.problem().is_some());
+        step.frames = 1;
+        step.control.minimum = Some(0.5);
+        step.control.maximum = Some(0.1);
+        assert!(step.problem().is_some(), "smallest above largest");
+    }
+
+    #[test]
+    fn settings_of_older_static_steps_fall_back_to_the_defaults() {
+        // An old project: its fields are ignored, the automatic settings take over and no
+        // increment limit is carried over.
+        let old = "(nlgeom: true, incrementation: Automatic, max_increments: 100, \
+            initial_increment: 0.1, time_period: 1.0, min_increment: 1e-5, \
+            max_increment: 0.1, solver: Automatic)";
+        let step: StaticStep = ron::from_str(old).unwrap();
+        assert!(step.nlgeom);
+        assert_eq!(step.duration, 1.0);
+        assert_eq!(step.control, IncrementControl::default());
+    }
+
+    #[test]
     fn eigenvalue_steps_start_without_field_outputs() {
         for step in [
             Step::new_frequency("F"),
@@ -2002,6 +2621,7 @@ mod tests {
             kind: LoadKind::Pressure(1.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         model.steps.push(step);
         model.rename_part("A", "C");
@@ -2027,5 +2647,29 @@ mod tests {
             next_name("Material", ["Material-1", "MATERIAL-2", "Steel"]),
             "Material-3"
         );
+    }
+}
+
+#[cfg(test)]
+mod standard_gravity_tests {
+    use super::*;
+
+    #[test]
+    fn standard_gravity_is_the_standard_acceleration_along_its_axis() {
+        for direction in GravityDirection::ALL {
+            let vector = direction.vector();
+            let size = vector.iter().map(|c| c * c).sum::<f64>().sqrt();
+            assert!((size - STANDARD_GRAVITY).abs() < 1e-12);
+            assert_eq!(
+                LoadKind::StandardGravity(direction).gravity_vector(),
+                Some(vector)
+            );
+        }
+        assert_eq!(
+            LoadKind::StandardGravity(GravityDirection::MinusY).gravity_vector(),
+            Some([0.0, -STANDARD_GRAVITY, 0.0])
+        );
+        assert_eq!(LoadKind::Pressure(1.0).gravity_vector(), None);
+        assert!(LoadKind::StandardGravity(GravityDirection::MinusZ).is_body_force());
     }
 }

@@ -8,7 +8,7 @@ use plx_render::StandardView;
 use plx_results::hot_spot::{HotSpot, HotSpotPath};
 
 use crate::analysis::{Analysis, MonitorEvent, RunView};
-use crate::animation::{AnimationKind, ColorLimits, Playback};
+use crate::animation::{AnimationKind, ColorLimits, Pace, Playback};
 use crate::animation_export::{self, Format};
 use crate::exploded::{ExplodedDialog, ExplodedResult};
 use crate::features::{FeatureDialog, FeatureKind, FeatureResult};
@@ -30,7 +30,7 @@ use crate::overlay::{Marker, Overlay};
 use crate::path_plot::{self, PathPlot, PlotEvent};
 use crate::properties;
 use crate::query::{QueryAction, QueryWindow};
-use crate::results::{Deformation, ResultsView, format_legend_value};
+use crate::results::{Deformation, ResultsView, format_legend_value, format_value};
 use crate::screenshot::{self, Screenshot};
 use crate::section::{PlaneDefinition, SectionDialog, SectionResult, SectionView};
 use crate::selection::Operation;
@@ -570,6 +570,10 @@ impl AnalysisWindow {
         run.seconds = solve.seconds();
         run.progress = solve.progress();
         run.copy(&solve.output(), solve.output_total());
+        if run.profile.is_none() && !solve.active() {
+            run.profile = solve.profile();
+            run.steps = solve.step_lines().to_vec();
+        }
     }
 
     /// The project's solve is done: the analysis takes the mesh it made and the results it
@@ -654,6 +658,15 @@ impl AnalysisWindow {
         workbench.results_changed = true;
         workbench.symbols_shown = None;
         Some(&mut model.fe)
+    }
+
+    /// Counts a change the project made through [`Self::fe_mut`] at once, as one the user can
+    /// undo, so that the state of the analysis follows it also while its window is not shown
+    /// (the window records changes only at the end of its own frames).
+    pub fn note_change(&mut self) {
+        if let Some(model) = &mut self.workbench.model {
+            crate::undo::record(model);
+        }
     }
 
     /// Whether a Check Model run of the window runs.
@@ -902,7 +915,8 @@ impl AnalysisWindow {
     fn status_bar(&mut self, ui: &mut egui::Ui) -> bool {
         let mut cancel = false;
         ui.horizontal(|ui| {
-            self.workbench.output_tabs(ui);
+            let idle = self.workbench.recording.is_none();
+            ui.add_enabled_ui(idle, |ui| self.workbench.output_tabs(ui));
             ui.separator();
             // Nodalis shows the unit system of the model at the right.
             if let Some(model) = &self.workbench.model {
@@ -927,6 +941,12 @@ impl AnalysisWindow {
     /// What the program does or shows; returns whether the meshing was cancelled.
     fn status_text(&self, ui: &mut egui::Ui) -> bool {
         let mut cancel = false;
+        // The project being saved, in the background.
+        if let Some(status) = crate::save_status::get(ui.ctx()) {
+            ui.spinner();
+            ui.label(status);
+            ui.separator();
+        }
         ui.horizontal(|ui| match (&self.loading, self.workbench.shown()) {
             (Some(path), _) => {
                 ui.spinner();
@@ -937,10 +957,23 @@ impl AnalysisWindow {
                     let (done, all) = recording.progress();
                     ui.spinner();
                     ui.label(format!(
-                        "Recording {}: frame {} of {all} (Esc cancels)",
+                        "Recording {}: frame {} of {all}",
                         recording.file,
                         (done + 1).min(all)
                     ));
+                    let fraction = if all == 0 {
+                        0.0
+                    } else {
+                        done as f32 / all as f32
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(fraction)
+                            .desired_width(180.0)
+                            .show_percentage(),
+                    );
+                    cancel = (ui.small_button("Stop"))
+                        .on_hover_text("Stop the export and discard the file (Esc).")
+                        .clicked();
                 }
             }
             (None, _) if self.workbench.animation_encoding.is_some() => {
@@ -1346,15 +1379,19 @@ impl AnalysisWindow {
         // Under the System theme, the operating system may switch between light and dark.
         crate::style::sync(&ctx);
         let shift_command = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
-        if ctx.input_mut(|i| i.consume_key(shift_command, egui::Key::S)) {
+        // While frames of an animation are recorded, the progress window takes all input.
+        let recording = self.workbench.recording.is_some();
+        if !recording && ctx.input_mut(|i| i.consume_key(shift_command, egui::Key::S)) {
             self.workbench.requests.push(Request::Save(true));
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
+        if !recording && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
             self.workbench.requests.push(Request::Save(false));
         }
-        self.workbench.results_keys(&ctx);
+        if !recording {
+            self.workbench.results_keys(&ctx);
+        }
         // A focused text field undoes its own typing.
-        if !ctx.egui_wants_keyboard_input() {
+        if !recording && !ctx.egui_wants_keyboard_input() {
             // Ctrl+Z matches with Shift held too, so Redo is checked first.
             if ctx.input_mut(|i| i.consume_key(shift_command, egui::Key::Z)) {
                 self.workbench.redo();
@@ -1365,6 +1402,7 @@ impl AnalysisWindow {
         }
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             (i.raw.dropped_files.iter())
+                .filter(|_| !recording)
                 .map(|f| f.path().to_path_buf())
                 .filter(|p| !p.as_os_str().is_empty())
                 .collect()
@@ -1412,8 +1450,13 @@ impl AnalysisWindow {
         self.workbench.play_sound(&ctx);
         let cancel = egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         if cancel.inner {
-            self.workbench.cancel_meshing();
+            match &mut self.workbench.recording {
+                Some(recording) => recording.cancel(),
+                None => self.workbench.cancel_meshing(),
+            }
         }
+        self.workbench
+            .recording_blocker(&ctx, cancel.response.rect.top());
         // The fixed layout: tree on the left over the full height, 3D view with the
         // output below it; only the separators move.
         let pane = egui::Frame::new()
@@ -1515,8 +1558,11 @@ impl AnalysisWindow {
         });
         let view = self.workbench.viewport.rect;
         // The floating bar, at the bottom of what the properties panel leaves of the view;
-        // not in a screenshot.
-        if self.workbench.shown().is_some() && !self.workbench.screenshot.capturing(&ctx) {
+        // not in a screenshot or in the frames of a recorded animation.
+        if self.workbench.shown().is_some()
+            && !self.workbench.screenshot.capturing(&ctx)
+            && self.workbench.recording.is_none()
+        {
             let mut free = view;
             if let Some(panel) = crate::dock::over_view(&ctx) {
                 free.max.x = free.max.x.min(panel.left());
@@ -1602,26 +1648,6 @@ struct BoundWork(String, PathBuf, Result<PathBuf, String>);
 
 /// The global results of a submodel, read on a worker thread.
 type GlobalWork = Result<Box<model::GlobalModel>, String>;
-
-/// Drops the features of saved results settings that came from the FE model and are gone
-/// from `current`.
-fn drop_removed_features(
-    settings: &mut plx_results::ResultsSettings,
-    current: &plx_model::FeModel,
-) {
-    let mut fe = plx_model::FeModel {
-        reference_points: std::mem::take(&mut settings.reference_points),
-        coordinate_systems: std::mem::take(&mut settings.coordinate_systems),
-        planes: std::mem::take(&mut settings.planes),
-        ..plx_model::FeModel::default()
-    };
-    fe.drop_removed_features(&settings.inherited_features, current);
-    let kept = fe.feature_keys();
-    settings.inherited_features.retain(|key| kept.contains(key));
-    settings.reference_points = fe.reference_points;
-    settings.coordinate_systems = fe.coordinate_systems;
-    settings.planes = fe.planes;
-}
 
 fn saved_camera(saved: plx_results::saved_view::SavedCamera) -> plx_render::Camera {
     plx_render::Camera {
@@ -1812,33 +1838,12 @@ impl Workbench {
                             .apply(ViewCommand::View(StandardView::Front), None);
                     }
                     let mut model = model;
-                    // Results get the features of the FE model; reloaded ones keep their own
-                    // and their paths.
                     // The Results tab shows the results of the analysis: new results, e.g.
-                    // of another run, replace those shown.
+                    // of another run, replace those shown and keep their features and paths.
                     let previous = (!self.results.is_empty()).then_some(0);
-                    // Features taken over from the FE model are not kept when it lost them.
-                    let features = self.model.as_ref().map(|project| {
-                        let mut features = project.fe.clone();
-                        features.convert_features(&plx_model::convert::Conversion::new(
-                            plx_model::STORED,
-                            model.units(),
-                        ));
-                        features
-                    });
-                    let current = features.clone().unwrap_or_default();
                     if let Some(index) = previous {
-                        let (old, inherited) = (&self.results[index].fe, &self.results[index]);
-                        let mut old = old.clone();
-                        if features.is_some() {
-                            old.drop_removed_features(&inherited.inherited_features, &current);
-                        }
-                        let kept = old.feature_keys();
-                        model.inherited_features = (inherited.inherited_features.iter())
-                            .filter(|key| kept.contains(key))
-                            .cloned()
-                            .collect();
-                        model.fe.add_missing_features(&old);
+                        let old = &self.results[index].fe;
+                        model.fe.set_shared_features(old);
                         model.fe.result_paths = old.result_paths.clone();
                         model.fe.result_planes = old.result_planes.clone();
                     }
@@ -1847,9 +1852,6 @@ impl Workbench {
                     let carried = (self.carried_settings.take())
                         .filter(|(path, _)| *path == model.path)
                         .map(|(_, mut settings)| {
-                            if features.is_some() {
-                                drop_removed_features(&mut settings, &current);
-                            }
                             if settings.mesh != Some(model.mesh.fingerprint()) {
                                 let changes = settings.without_mesh_references();
                                 (self.output).extend(changes.into_iter().map(|change| {
@@ -1882,14 +1884,10 @@ impl Workbench {
                         }
                         rebuild = true;
                     }
-                    if let Some(features) = &features {
-                        // Results are stored in the units they show; the FE model in SI ones.
-                        let added = model.fe.add_missing_features(features);
-                        for key in added {
-                            if !model.inherited_features.contains(&key) {
-                                model.inherited_features.push(key);
-                            }
-                        }
+                    // Results share the reference points, coordinate systems and planes of the
+                    // FE model: they show the same ones and edits on them go back.
+                    if let Some(project) = &self.model {
+                        model.follow_shared_features(&project.fe);
                     }
                     // Results read again, e.g. after the analysis ran once more, keep their
                     // colour scale.
@@ -3019,7 +3017,11 @@ impl Workbench {
         if let Some(model) = self.results.get(index)
             && let Some(view) = &model.results
         {
-            let dialog = TransformationDialog::new(index, &view.transformations, model);
+            // The results file has no model properties of its own: the model space is the
+            // analysis's.
+            let space = (self.model.as_ref())
+                .map_or(plx_model::ModelSpace::ThreeD, |m| m.fe.properties.space);
+            let dialog = TransformationDialog::new(index, &view.transformations, model, space);
             self.transformation_dialog = Some(dialog);
             self.update_contour();
         }
@@ -3429,6 +3431,25 @@ impl Workbench {
             }
             LibraryResult::Cancel => self.material_library = None,
         }
+    }
+
+    /// While an animation is recorded, an invisible layer over everything above the status
+    /// bar takes all input, so nothing in or around the recorded view can change; the status
+    /// bar holds the progress and the Stop button. Nothing is drawn, so nothing of it can end
+    /// up in the frames.
+    fn recording_blocker(&mut self, ctx: &egui::Context, bottom: f32) {
+        if self.recording.is_none() {
+            return;
+        }
+        let screen = ctx.content_rect();
+        let rect = egui::Rect::from_min_max(screen.min, egui::pos2(screen.max.x, bottom));
+        egui::Area::new(crate::ids::window(ctx, "recording blocker"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.min)
+            .interactable(true)
+            .show(ctx, |ui| {
+                ui.allocate_rect(rect, egui::Sense::click_and_drag());
+            });
     }
 
     /// Asks before Remove Results, which Undo cannot take back.
@@ -4840,9 +4861,20 @@ impl Workbench {
                 TreeView::Results => self.results.get_mut(self.current_result),
                 _ => self.model.as_mut(),
             };
+            let before = model.as_ref().map(|m| m.fe.shared_features());
             if let Some(model) = model
                 && crate::features::delete(&mut model.fe, feature)
             {
+                if let (TreeView::Results, Some(before)) = (view, &before) {
+                    self.share_feature_edit(self.current_result, before);
+                }
+                let model = match view {
+                    TreeView::Results => self.results.get_mut(self.current_result),
+                    _ => self.model.as_mut(),
+                };
+                let Some(model) = model else {
+                    return;
+                };
                 self.tree.selected = None;
                 self.feature_dialog = None;
                 if let Some(view) = &mut model.results
@@ -5210,6 +5242,9 @@ impl Workbench {
     fn undo_blocked(&self) -> Option<&'static str> {
         if self.tree_view == TreeView::Results {
             return Some("Undo and Redo work on the Geometry and FE Model tabs.");
+        }
+        if self.recording.is_some() {
+            return Some("Wait until the animation is recorded.");
         }
         if self.meshing.is_some() {
             return Some("Wait until meshing has finished.");
@@ -5805,8 +5840,13 @@ impl Workbench {
                         plot.path = path.name.clone();
                     }
                 }
+                let results = dialog.results;
+                let before = model.fe.shared_features();
                 dialog.apply(&mut model.fe, &model.mesh);
                 self.viewport.preview = Default::default();
+                if let Some(index) = results {
+                    self.share_feature_edit(index, &before);
+                }
             }
             FeatureResult::Cancel => {
                 // The plot of a path that was not created goes with it.
@@ -5818,9 +5858,31 @@ impl Workbench {
         }
     }
 
+    /// Carries an edit of the reference points, coordinate systems or planes of results over
+    /// to the FE model, which shares them; `before` are the features of the results before.
+    fn share_feature_edit(&mut self, results: usize, before: &plx_model::FeModel) {
+        let (Some(model), Some(project)) = (self.results.get_mut(results), self.model.as_mut())
+        else {
+            return;
+        };
+        if model.fe.same_shared_features(before) {
+            return;
+        }
+        let units = model.stored_units();
+        project.fe.take_feature_edit(before, &model.fe, units);
+        let errors = project.fe.update_reference_points(&project.mesh);
+        self.output.extend(errors);
+        // The results took the edit already; they need not take it back.
+        model.shared_from = Some(project.fe.shared_features());
+    }
+
     /// Results take the coordinate systems of their features, for transformed field outputs.
+    /// They also follow the reference points, coordinate systems and planes of the FE model.
     fn sync_result_features(&mut self) {
         for model in &mut self.results {
+            if let Some(project) = &self.model {
+                model.follow_shared_features(&project.fe);
+            }
             let Some(view) = &mut model.results else {
                 continue;
             };
@@ -6835,6 +6897,7 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
     let positions = (view.animation.as_ref())
         .and_then(|a| view.steps.step_of(a.start_increment))
         .is_some_and(|s| s.has_positions());
+    let time_unit = view.units.unit(plx_model::Quantity::Time);
     egui::Window::new("Animation")
         .id(crate::ids::window(ctx, "animation"))
         .open(&mut open)
@@ -6882,8 +6945,67 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
                         }
                         ui.end_row();
                     }
+                    if animation.can_play_by_time() {
+                        ui.label("Timing");
+                        ui.horizontal(|ui| {
+                            for (pace, label, tip) in [
+                                (
+                                    Pace::Frames,
+                                    "By frame",
+                                    "One increment per frame, however far apart in time they lie",
+                                ),
+                                (
+                                    Pace::Time,
+                                    "By time",
+                                    "The frames follow the simulation time evenly over the \
+                                     duration, interpolated between the increments; the extra \
+                                     frames at an impact do not slow the playback down",
+                                ),
+                            ] {
+                                if ui
+                                    .radio(animation.pace == pace, label)
+                                    .on_hover_text(tip)
+                                    .clicked()
+                                    && animation.pace != pace
+                                {
+                                    animation.retime(|a| a.pace = pace);
+                                    event = WindowEvent::Settings;
+                                }
+                            }
+                        });
+                        ui.end_row();
+                    }
+                    if animation.by_time() {
+                        ui.label("Duration");
+                        let mut duration = animation.duration;
+                        let seconds = numeric::drag_value(&mut duration)
+                            .range(0.5..=120.0)
+                            .speed(0.1)
+                            .suffix(" s");
+                        if ui
+                            .add(seconds)
+                            .on_hover_text(
+                                "Seconds the playback takes from the first to the last increment",
+                            )
+                            .changed()
+                        {
+                            animation.retime(|a| a.duration = duration);
+                            event = WindowEvent::Settings;
+                        }
+                        ui.end_row();
+                    }
                     ui.label("Frames per second");
-                    ui.add(numeric::drag_value(&mut animation.fps).range(1.0..=60.0));
+                    let mut fps = animation.fps;
+                    if ui
+                        .add(numeric::drag_value(&mut fps).range(1.0..=60.0))
+                        .changed()
+                    {
+                        // By time, the frame rate also sets the number of frames.
+                        animation.retime(|a| a.fps = fps);
+                        if animation.by_time() {
+                            event = WindowEvent::Settings;
+                        }
+                    }
                     ui.end_row();
                     ui.label("Playback");
                     ui.horizontal(|ui| {
@@ -6949,7 +7071,10 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
                     target = Some(slider);
                 }
                 ui.add_space(8.0);
-                ui.label(format!("Frame {} of {}", frame + 1, last + 1));
+                ui.label(match animation.time() {
+                    Some(time) => format!("{} {time_unit}", format_value(time as f32)),
+                    None => format!("Frame {} of {}", frame + 1, last + 1),
+                });
                 ui.add_space(8.0);
                 let tip = if exporting {
                     "Export Animation (the last export is still being written)"
@@ -7130,21 +7255,6 @@ pub(crate) fn note_solver_findings(analysis: &mut Analysis, findings: &[plx_mode
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn carried_settings_lose_reference_points_deleted_from_the_fe_model() {
-        let inherited = plx_model::ReferencePoint::new("RP-1", [0.0; 3]);
-        let key = format!("RP:{}", inherited.id.raw());
-        let mut settings = plx_results::ResultsSettings {
-            reference_points: vec![inherited, plx_model::ReferencePoint::new("Mine", [1.0; 3])],
-            inherited_features: vec![key],
-            ..Default::default()
-        };
-        drop_removed_features(&mut settings, &plx_model::FeModel::default());
-        let names: Vec<_> = settings.reference_points.iter().map(|r| &r.name).collect();
-        assert_eq!(names, ["Mine"]);
-        assert!(settings.inherited_features.is_empty());
-    }
 
     #[test]
     fn bound_results_keep_the_workspace_the_project_window_asked_for() {

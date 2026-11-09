@@ -154,6 +154,7 @@ mod tests {
             name: format!("C{k}"),
             values: vec![0.0],
             derived: false,
+            out_of_plane: false,
         };
         Field::new(name, (0..raw).map(component).collect())
     }

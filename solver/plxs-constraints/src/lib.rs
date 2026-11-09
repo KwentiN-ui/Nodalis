@@ -18,11 +18,12 @@
 
 pub mod cyclic;
 pub mod elimination;
+pub mod joint;
 pub mod set;
 pub mod tie;
 pub mod transform;
 
 pub use cyclic::CyclicSymmetry;
-pub use elimination::{ConstraintSet, Eliminator, LinearConstraint, Policy};
+pub use elimination::{ConstraintSet, Eliminator, LinearConstraint, Policy, ReducedPattern};
 pub use set::ModelConstraints;
 pub use transform::Rotation;

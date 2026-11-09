@@ -60,13 +60,35 @@ pub(crate) fn reference_stiffness(
         && ctx.state.displacements.values.len() == ctx.table.dofs.len();
     let k = if perturbed {
         let mut k = SparseMatrix::zeros(ctx.pattern.clone());
-        assemble_tangent_stiffness(
-            ctx.table,
-            ctx.model,
-            &ctx.state.displacements.values,
-            &ctx.state.stresses,
-            &mut k,
-        )?;
+        if ctx.table.hyperelastic {
+            // The material tangent of a hyperelastic body changes with its deformation:
+            // the consistent tangent of the preloaded state (material and initial stress
+            // parts at once).
+            let input = plxs_assembly::nonlinear::NonlinearInput {
+                u: &ctx.state.displacements.values,
+                nlgeom: true,
+                dt: 1.0,
+                time: 1.0,
+                creep_active: false,
+                temperature: 0.0,
+                follower: &[],
+            };
+            plxs_assembly::nonlinear::assemble_nonlinear(
+                ctx.table,
+                ctx.model,
+                &input,
+                &*ctx.state,
+                Some(&mut k),
+            );
+        } else {
+            assemble_tangent_stiffness(
+                ctx.table,
+                ctx.model,
+                &ctx.state.displacements.values,
+                &ctx.state.stresses,
+                &mut k,
+            )?;
+        }
         crate::complex::add_spin_softening(ctx.model, ctx.table, step, &mut k)?;
         progress.event(ProgressEvent::Info(format!(
             "tangent stiffness of the preloaded state assembled in {:.2} s",

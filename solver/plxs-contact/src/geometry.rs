@@ -259,12 +259,16 @@ impl ContactFace {
         out
     }
 
-    /// Shape functions and geometry at natural coordinates.
-    pub fn at(&self, coords: &[[f64; 3]], p: [f64; 2]) -> FacePoint {
-        let m = self.nodes.len();
-        let mut n = vec![0.0; m];
-        let mut dn = vec![[0.0; 2]; m];
-        self.shape(self.quadratic, p, &mut n, &mut dn);
+    /// The point and the two tangents at natural coordinates, with the shape functions
+    /// written to `n` and `dn` (as long as the face has nodes).
+    fn place(
+        &self,
+        coords: &[[f64; 3]],
+        p: [f64; 2],
+        n: &mut [f64],
+        dn: &mut [[f64; 2]],
+    ) -> ([f64; 3], [[f64; 3]; 2]) {
+        self.shape(self.quadratic, p, n, dn);
         let mut x = [0.0; 3];
         let mut t = [[0.0; 3]; 2];
         for (i, &node) in self.nodes.iter().enumerate() {
@@ -275,6 +279,18 @@ impl ContactFace {
                 t[1][d] += dn[i][1] * c[d];
             }
         }
+        if self.planar.is_some() {
+            t[1] = [0.0, 0.0, 1.0];
+        }
+        (x, t)
+    }
+
+    /// Shape functions and geometry at natural coordinates.
+    pub fn at(&self, coords: &[[f64; 3]], p: [f64; 2]) -> FacePoint {
+        let m = self.nodes.len();
+        let mut n = vec![0.0; m];
+        let mut dn = vec![[0.0; 2]; m];
+        let (x, mut t) = self.place(coords, p, &mut n, &mut dn);
         if let Some(planar) = self.planar {
             // An edge: the second tangent is the out-of-plane axis, the area per unit ξ
             // the edge length times the width out of plane.
@@ -360,14 +376,33 @@ impl ContactFace {
     /// Closest point projection of `x` on the face (clamped to the face): natural
     /// coordinates and the geometry there.
     pub fn project(&self, coords: &[[f64; 3]], x: [f64; 3]) -> ([f64; 2], FacePoint) {
+        let p = self.project_natural(coords, x);
+        (p, self.at(coords, p))
+    }
+
+    /// The natural coordinates of the closest point projection of `x` (clamped to the
+    /// face), without allocating: the projection runs for every candidate face of every
+    /// contact point.
+    pub fn project_natural(&self, coords: &[[f64; 3]], x: [f64; 3]) -> [f64; 2] {
+        const MOST: usize = 8;
+        let m = self.nodes.len();
+        let (mut n_stack, mut dn_stack) = ([0.0; MOST], [[0.0; 2]; MOST]);
+        let (mut n_heap, mut dn_heap);
+        let (n, dn): (&mut [f64], &mut [[f64; 2]]) = if m <= MOST {
+            (&mut n_stack[..m], &mut dn_stack[..m])
+        } else {
+            n_heap = vec![0.0; m];
+            dn_heap = vec![[0.0; 2]; m];
+            (&mut n_heap, &mut dn_heap)
+        };
         let mut p = self.centre();
         for _ in 0..30 {
-            let fp = self.at(coords, p);
-            let r = sub(x, fp.x);
-            let g = [dot(fp.t[0], r), dot(fp.t[1], r)];
-            let a = dot(fp.t[0], fp.t[0]);
-            let b = dot(fp.t[0], fp.t[1]);
-            let c = dot(fp.t[1], fp.t[1]);
+            let (at, t) = self.place(coords, p, n, dn);
+            let r = sub(x, at);
+            let g = [dot(t[0], r), dot(t[1], r)];
+            let a = dot(t[0], t[0]);
+            let b = dot(t[0], t[1]);
+            let c = dot(t[1], t[1]);
             let det = a * c - b * b;
             if det.abs() < 1e-300 {
                 break;
@@ -380,8 +415,24 @@ impl ContactFace {
                 break;
             }
         }
-        let fp = self.at(coords, p);
-        (p, fp)
+        p
+    }
+
+    /// The point of the face at natural coordinates, without allocating.
+    pub fn point(&self, coords: &[[f64; 3]], p: [f64; 2]) -> [f64; 3] {
+        const MOST: usize = 8;
+        let m = self.nodes.len();
+        if m > MOST {
+            return self.at(coords, p).x;
+        }
+        let (mut n, mut dn) = ([0.0; MOST], [[0.0; 2]; MOST]);
+        self.place(coords, p, &mut n[..m], &mut dn[..m]).0
+    }
+
+    /// The distance from `x` to the bounding box of the face nodes: no point of the face
+    /// is closer.
+    pub fn box_distance(&self, coords: &[[f64; 3]], x: [f64; 3]) -> f64 {
+        outside(self.bounds(coords), x)
     }
 
     /// Whether natural coordinates lie strictly inside the face (not on its clamped border).
@@ -617,11 +668,18 @@ impl FaceGrid {
     /// Faces in cells; every face is registered in all cells its box inflated by `margin`
     /// touches.
     pub fn new(faces: &[ContactFace], coords: &[[f64; 3]], cell: f64, margin: f64) -> Self {
+        let boxes: Vec<([f64; 3], [f64; 3])> = faces.iter().map(|f| f.bounds(coords)).collect();
+        Self::of_boxes(&boxes, cell, margin)
+    }
+
+    /// Boxes (lowest and highest corner) in cells, each in all cells it touches inflated by
+    /// `margin`; the candidates are indices into `boxes`. The swept boxes of the
+    /// continuous collision detection ([`crate::ccd`]) take this.
+    pub fn of_boxes(boxes: &[([f64; 3], [f64; 3])], cell: f64, margin: f64) -> Self {
         let cell = cell.max(1e-12);
         let key = |x: f64| (x / cell).floor() as i64;
         let mut cells: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
-        for (index, face) in faces.iter().enumerate() {
-            let (lo, hi) = face.bounds(coords);
+        for (index, (lo, hi)) in boxes.iter().enumerate() {
             let lo = lo.map(|v| key(v - margin));
             let hi = hi.map(|v| key(v + margin));
             for i in lo[0]..=hi[0] {
@@ -640,6 +698,24 @@ impl FaceGrid {
         self.cells
             .get(&(key(x[0]), key(x[1]), key(x[2])))
             .map_or(&[], Vec::as_slice)
+    }
+
+    /// The entries of all cells a box touches, sorted and unique, into `out`.
+    pub fn candidates_in(&self, lo: [f64; 3], hi: [f64; 3], out: &mut Vec<u32>) {
+        out.clear();
+        let key = |v: f64| (v / self.cell).floor() as i64;
+        let (lo, hi) = (lo.map(key), hi.map(key));
+        for i in lo[0]..=hi[0] {
+            for j in lo[1]..=hi[1] {
+                for k in lo[2]..=hi[2] {
+                    if let Some(list) = self.cells.get(&(i, j, k)) {
+                        out.extend_from_slice(list);
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
     }
 }
 
@@ -722,6 +798,16 @@ pub fn dual_coefficients(mass: &[f64], diag: &[f64], m: usize) -> Vec<f64> {
         }
     }
     out
+}
+
+/// The distance of `x` from a box (lowest, highest coordinates); zero inside it.
+pub fn outside((lo, hi): ([f64; 3], [f64; 3]), x: [f64; 3]) -> f64 {
+    let mut sum = 0.0;
+    for d in 0..3 {
+        let out = (lo[d] - x[d]).max(x[d] - hi[d]).max(0.0);
+        sum += out * out;
+    }
+    sum.sqrt()
 }
 
 #[cfg(test)]

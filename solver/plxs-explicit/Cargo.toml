@@ -1,0 +1,25 @@
+[package]
+name = "plxs-explicit"
+description = "Nodalis solver: explicit time steps on the graphics card (wgpu compute shaders)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The time steps on the graphics card (feature `gpu`).
+plxs-gpu = { workspace = true, optional = true }
+bytemuck = { workspace = true, optional = true }
+rayon.workspace = true
+
+[features]
+gpu = ["dep:plxs-gpu", "dep:bytemuck"]
+
+
+[dev-dependencies]
+# The processor's material laws, the reference of the kernels' laws.
+plxs-core.workspace = true
+plxs-materials.workspace = true
+
+[lints]
+workspace = true

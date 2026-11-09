@@ -80,12 +80,6 @@ pub fn region_form(
     behavior_rows(ui, "contact region type", "Type", &mut region.behavior);
     sides.ui_named(ui, model, ["Side A", "Side B"]);
     (region.side_a, region.side_b) = sides.regions();
-    ui.label("Side A color");
-    ui.color_edit_button_srgb(&mut region.color_a);
-    ui.end_row();
-    ui.label("Side B color");
-    ui.color_edit_button_srgb(&mut region.color_b);
-    ui.end_row();
     let resolved = view.resolved(model, region).clone();
     ui.label("");
     ui.toggle_value(&mut view.advanced, "Advanced settings")
@@ -1526,6 +1520,7 @@ mod tests {
             expansion: None,
             plastic: None,
             creep: None,
+            hyperelastic: None,
         });
         model.fe.sections.push(Section {
             name: "Section-1".into(),
@@ -1555,6 +1550,7 @@ mod tests {
             kind: LoadKind::Pressure(100.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         model.fe.steps.push(step);
         model.fe.contact_detections.push(ContactDetection {
@@ -1680,6 +1676,7 @@ mod tests {
             expansion: None,
             plastic: None,
             creep: None,
+            hyperelastic: None,
         });
         model.fe.sections.push(Section {
             name: "Section-1".into(),
@@ -1709,6 +1706,7 @@ mod tests {
             kind: LoadKind::Pressure(10.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
         });
         model.fe.steps.push(step);
         model.fe.contact_detections.push(ContactDetection {

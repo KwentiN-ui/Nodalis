@@ -677,6 +677,7 @@ mod tests {
                     _ => column(&|_| 0.0),
                 },
                 derived: false,
+                out_of_plane: false,
             })
             .collect();
         Increment {
