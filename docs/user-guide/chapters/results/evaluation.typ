@@ -118,6 +118,25 @@ order keeps the selected columns but clears a selection of rows.
 #screenshot("history-table-sorted.png", [Rows sorted by the displacement of node 1, and the
   plot of the time over it])
 
+=== Plots across tables <history-plot-tables>
+
+Several tables can be open at once: a double-click on another component opens it in a window of
+its own, and a double-click on one already open brings its window to the front. A plot takes the
+columns selected in all open tables. A plain click on a header starts a new selection, and the
+other tables clear theirs; #key("Ctrl")-click headers in another window to add its columns.
+The column selected first is the x axis and is marked #ui("(X)"); the other windows show how
+many columns are selected elsewhere, and #ui("Plot") in any of them draws them all.
+
+For a spring curve, for example, open `U3` under `DISPLACEMENTS` and `RF3` under `FORCES`,
+click the `U3` column of the node, #key("Ctrl")-click the `RF3` column of the same node in the
+other window and press #key("Ctrl+P"): the force is drawn over the displacement. The rows are
+those of the x axis' table, in its order; a row of another table belongs to the row with the
+same step and increment (or the same step and time). Where a table has no such row, or the row
+lies outside the rows selected in that table, the curve has a gap. Curves of a plot across
+tables name their component as well, e.g. `RF3 59016`.
+
+#screenshot("history-table-across.png", [`RF3` over `U3` of one node from two tables])
+
 === Steps in the plot <history-plot-steps>
 
 A plot over the step, increment or time column shows the steps as bands behind the curves, with

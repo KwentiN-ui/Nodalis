@@ -7,6 +7,14 @@
 //!
 //! The arrow at the right of a header sorts the rows by that column (again: the other way
 //! round). Selection, Copy and Plot work on the rows in the order shown.
+//!
+//! Several tables can be open at once, and a plot takes the columns chosen in all of them:
+//! a plain click starts a new selection (the other tables let theirs go), Ctrl adds columns
+//! of another table. The column chosen first is the x axis; the rows of the other tables
+//! are matched to its rows by step and increment, see [`plot`].
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use egui::{Color32, Modifiers, Rect, Sense, Stroke, pos2, vec2};
 use plx_results::history_output::{HistoryComponent, HistorySet};
@@ -41,7 +49,13 @@ pub struct Selection {
     /// Where the last plain click was, for Shift clicks and drags: column and row (`None`
     /// on the header).
     anchor: Option<(usize, Option<usize>)>,
+    /// When the selection began, counted over all tables: the table whose selection began
+    /// first gives the x axis of a plot over several tables. 0 while nothing is chosen.
+    started: u64,
 }
+
+/// Counts the selections begun, for [`Selection::started`].
+static SELECTIONS: AtomicU64 = AtomicU64::new(1);
 
 impl Selection {
     pub fn contains(&self, column: usize, row: usize) -> bool {
@@ -59,6 +73,19 @@ impl Selection {
 
     /// A press on a header (`row` is `None`) or a cell, with the keyboard modifiers.
     pub fn press(&mut self, column: usize, row: Option<usize>, modifiers: Modifiers) {
+        if !modifiers.shift && !modifiers.command {
+            // A plain click begins a new selection.
+            self.started = 0;
+        }
+        self.choose(column, row, modifiers);
+        if self.columns.is_empty() {
+            self.started = 0;
+        } else if self.started == 0 {
+            self.started = SELECTIONS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn choose(&mut self, column: usize, row: Option<usize>, modifiers: Modifiers) {
         if modifiers.shift
             && let Some((from, from_row)) = self.anchor
         {
@@ -103,6 +130,24 @@ impl Selection {
     }
 }
 
+/// What the other open tables have chosen, for the Plot button and the x mark.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shared {
+    /// Columns chosen in the other tables.
+    pub elsewhere: usize,
+    /// This table's first chosen column is the x axis of the plot.
+    pub holds_x: bool,
+}
+
+impl Default for Shared {
+    fn default() -> Self {
+        Self {
+            elsewhere: 0,
+            holds_x: true,
+        }
+    }
+}
+
 /// Which component is shown: indices of set, field and component, and the selection.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HistoryTable {
@@ -119,7 +164,13 @@ pub struct HistoryTable {
     /// Keyboard shortcuts go to the table after a click into it, until a click elsewhere.
     active: bool,
     /// Why the selection could not be plotted.
-    message: Option<String>,
+    pub message: Option<String>,
+    /// What the other tables have chosen, as of this frame.
+    shared: Shared,
+    /// A plain click began a new selection here, so the other tables let theirs go.
+    pub took_over: bool,
+    /// Brings the window to the front, e.g. when its component is opened again.
+    pub raise: bool,
 }
 
 /// The steps of the results and their increments, which name the steps of the rows and
@@ -145,7 +196,8 @@ impl Places<'_> {
 pub enum TableAction {
     None,
     Close,
-    Plot(Box<XyData>),
+    /// Plot the columns chosen in all tables, see [`plot`].
+    Plot,
 }
 
 /// The values of a table: the columns' titles and a value per row and column.
@@ -164,6 +216,17 @@ impl Columns<'_> {
 
     fn rows(&self) -> usize {
         self.set.rows.len()
+    }
+
+    /// The title of a column in a plot: an entry of a plot over several tables also names
+    /// its component, e.g. `RF3 59016`.
+    fn label(&self, column: usize, many: bool) -> String {
+        let title = self.title(column);
+        if many && column >= FIXED_COLUMNS {
+            format!("{} {title}", self.component.name)
+        } else {
+            title.to_string()
+        }
     }
 
     fn title(&self, column: usize) -> &str {
@@ -262,6 +325,30 @@ impl HistoryTable {
             menu_column: None,
             active: false,
             message: None,
+            shared: Shared::default(),
+            took_over: false,
+            raise: false,
+        }
+    }
+
+    /// Lets the chosen columns go.
+    pub fn clear_selection(&mut self) {
+        self.selection.clear();
+    }
+
+    /// The window's id; each component has a window of its own.
+    pub fn id(&self, ctx: &egui::Context) -> egui::Id {
+        crate::ids::window(ctx, ("history table", self.set, self.field, self.component))
+    }
+
+    /// The rows of the selection in the order shown: indices in the file.
+    fn chosen_rows(&self, table: &Columns) -> Vec<usize> {
+        let order = self.order(table);
+        match self.selection.rows {
+            Some((first, last)) => {
+                order[first.min(order.len())..(last + 1).min(order.len())].to_vec()
+            }
+            None => order,
         }
     }
 
@@ -358,87 +445,15 @@ impl HistoryTable {
         lines.join("\n") + "\n"
     }
 
-    /// The diagram of the selection: the first chosen column over x, the others as curves.
+    /// The diagram of this table's selection alone, see [`plot`].
+    #[cfg(test)]
     pub fn plot(
         &self,
         sets: &[HistorySet],
         kind: AnalysisKind,
         places: Places,
     ) -> Result<XyData, String> {
-        let table = (self.columns(sets, kind, places)).ok_or("The table has no data.")?;
-        let columns = &self.selection.columns;
-        if columns.len() < 2 {
-            return Err("Select at least two columns for a plot; \
-                        the first one selected becomes the x axis."
-                .into());
-        }
-        let order = self.order(&table);
-        let rows = match self.selection.rows {
-            Some((first, last)) => &order[first.min(order.len())..(last + 1).min(order.len())],
-            None => &order[..],
-        };
-        let x = rows.iter().map(|&r| table.value(r, columns[0])).collect();
-        let curves = (columns[1..].iter())
-            .map(|&c| {
-                let values = rows.iter().map(|&r| table.value(r, c)).collect();
-                (table.title(c).to_string(), values)
-            })
-            .collect();
-        let mut data = XyData {
-            title: format!(
-                "{}.{}.{}",
-                table.set.name, table.field, table.component.name
-            ),
-            x_label: table.title(columns[0]).to_string(),
-            x,
-            curves,
-            guides: Vec::new(),
-            y_max: None,
-            ..Default::default()
-        };
-        let row_data: Vec<(u32, u32, f64)> = rows.iter().map(|&r| table.set.rows[r]).collect();
-        // The increment of the results each row shows.
-        data.increments = (row_data.iter())
-            .map(|&(step, increment, _)| {
-                (places.increments.iter()).position(|i| i.step == step && i.increment == increment)
-            })
-            .collect();
-        // The steps as bands, a band for each run of rows of one step.
-        for (row, &(step, _, _)) in row_data.iter().enumerate() {
-            let place = places.step(step);
-            let name = match place {
-                Some((number, Some(name))) => format!("{number} {name}"),
-                Some((number, None)) => format!("Step {number}"),
-                None => format!("Step {step}"),
-            };
-            match data.bands.last_mut() {
-                Some(band) if band.name == name => band.rows[1] = row,
-                _ => data.bands.push(crate::xy_plot::Band {
-                    name,
-                    rows: [row, row],
-                }),
-            }
-        }
-        if data.bands.len() < 2 {
-            data.bands.clear();
-        }
-        // Over the step, increment or time the plot can switch between the total time, the
-        // step time and the increments, when all rows run over time.
-        let times = row_times(places, &row_data);
-        if columns[0] < FIXED_COLUMNS
-            && let Some(times) = times.filter(|t| !t.is_empty())
-        {
-            data.x_axes = vec![
-                ("Total time".into(), times.iter().map(|t| t.1).collect()),
-                ("Step time".into(), times.iter().map(|t| t.0).collect()),
-                (
-                    "Increment".into(),
-                    (1..=times.len()).map(|n| n as f64).collect(),
-                ),
-            ];
-            data.choose_x_axis(if columns[0] == 1 { 2 } else { 0 });
-        }
-        Ok(data)
+        plot(&[self], sets, kind, places)
     }
 
     /// Shows the window.
@@ -449,10 +464,16 @@ impl HistoryTable {
         kind: AnalysisKind,
         places: Places,
         unit: Option<&str>,
+        shared: Shared,
     ) -> TableAction {
         let Some(table) = self.columns(sets, kind, places) else {
             return TableAction::Close;
         };
+        self.shared = shared;
+        let id = self.id(ctx);
+        if std::mem::take(&mut self.raise) {
+            ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, id));
+        }
         let mut action = TableAction::None;
         let mut open = true;
         let mut close = false;
@@ -461,7 +482,7 @@ impl HistoryTable {
             table.set.name, table.field, table.component.name
         );
         let window = egui::Window::new(title)
-            .id(crate::ids::window(ctx, "history table"))
+            .id(id)
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -479,21 +500,27 @@ impl HistoryTable {
                     if ui.button("Copy").clicked() {
                         ui.ctx().copy_text(self.text(sets, kind, places));
                     }
-                    let plottable = self.selection.columns.len() >= 2;
                     if ui
-                        .add_enabled(plottable, egui::Button::new("Plot"))
+                        .add_enabled(self.plottable(), egui::Button::new("Plot"))
                         .on_hover_text("Ctrl+P")
                         .on_disabled_hover_text("Select at least two columns")
                         .clicked()
                     {
-                        action = self.plot_action(sets, kind, places);
+                        action = self.plot_action();
+                    }
+                    if self.shared.elsewhere > 0 {
+                        ui.weak(format!(
+                            "+{} selected in other windows",
+                            self.shared.elsewhere
+                        ));
                     }
                 });
                 ui.weak(
                     "Select columns via the header (Ctrl: more, Shift: range), cells by \
                      dragging. The arrow in a header sorts the rows. Ctrl+P plots the \
                      selection in the order shown, the first column selected becomes the x \
-                     axis.",
+                     axis. Ctrl+click headers in another History Output window to plot its \
+                     columns too; its rows are matched by step and increment.",
                 );
                 if let Some(message) = &self.message {
                     ui.colored_label(crate::style::error(), message);
@@ -521,7 +548,7 @@ impl HistoryTable {
                 (plot, copy)
             });
             if plot {
-                action = self.plot_action(sets, kind, places);
+                action = self.plot_action();
             }
             if copy {
                 ctx.copy_text(self.text(sets, kind, places));
@@ -533,22 +560,14 @@ impl HistoryTable {
         action
     }
 
-    fn plot_action(
-        &mut self,
-        sets: &[HistorySet],
-        kind: AnalysisKind,
-        places: Places,
-    ) -> TableAction {
-        match self.plot(sets, kind, places) {
-            Ok(data) => {
-                self.message = None;
-                TableAction::Plot(Box::new(data))
-            }
-            Err(message) => {
-                self.message = Some(message);
-                TableAction::None
-            }
-        }
+    /// The columns chosen here and in the other tables are enough for a plot.
+    fn plottable(&self) -> bool {
+        self.selection.columns.len() + self.shared.elsewhere >= 2
+    }
+
+    fn plot_action(&mut self) -> TableAction {
+        self.message = None;
+        TableAction::Plot
     }
 
     /// The cells, drawn only where they are visible; the header stays at the top.
@@ -608,6 +627,7 @@ impl HistoryTable {
                         let (column, row) = cell_at(p);
                         let modifiers = ui.input(|i| i.modifiers);
                         self.selection.press(column, row, modifiers);
+                        self.took_over |= !modifiers.command && !modifiers.shift;
                         self.sort_press = false;
                     }
                     self.active = true;
@@ -633,6 +653,7 @@ impl HistoryTable {
                     };
                     if !inside {
                         self.selection.press(column, row, Modifiers::NONE);
+                        self.took_over = true;
                     }
                     self.active = true;
                 }
@@ -641,12 +662,14 @@ impl HistoryTable {
                         ui.ctx().copy_text(self.text(sets, kind, places));
                         ui.close();
                     }
-                    let plottable = self.selection.columns.len() >= 2;
                     if ui
-                        .add_enabled(plottable, egui::Button::new("Plot              Ctrl+P"))
+                        .add_enabled(
+                            self.plottable(),
+                            egui::Button::new("Plot              Ctrl+P"),
+                        )
                         .clicked()
                     {
-                        action = Some(self.plot_action(sets, kind, places));
+                        action = Some(self.plot_action());
                         ui.close();
                     }
                     if ui.button("Clear Selection").clicked() {
@@ -754,7 +777,7 @@ impl HistoryTable {
             vec2(view.width(), HEADER_HEIGHT),
         );
         painter.rect_filled(band, 0.0, crate::style::adapt(Color32::from_gray(236)));
-        let x_column = self.selection.columns.first().copied();
+        let x_column = (self.selection.columns.first().copied()).filter(|_| self.shared.holds_x);
         for column in first..=last {
             let cell = Rect::from_min_size(
                 pos2(origin.x + table.left(column), top),
@@ -769,7 +792,7 @@ impl HistoryTable {
                 painter.rect_filled(cell, 0.0, fill);
             }
             let mut title = table.title(column).to_string();
-            if x_column == Some(column) && self.selection.columns.len() > 1 {
+            if x_column == Some(column) && self.plottable() {
                 title.push_str(" (X)");
             }
             let sorted = self.sort.filter(|s| s.column == column);
@@ -808,6 +831,147 @@ impl HistoryTable {
             Stroke::new(1.0, crate::style::adapt(Color32::from_gray(160))),
         );
     }
+}
+
+/// What each of the open tables shares with the others: the columns chosen elsewhere and
+/// whether it holds the x axis.
+pub fn shared(tables: &[&HistoryTable]) -> Vec<Shared> {
+    let total: usize = tables.iter().map(|t| t.selection.columns.len()).sum();
+    let x = (tables.iter().enumerate())
+        .filter(|(_, t)| !t.selection.columns.is_empty())
+        .min_by_key(|(_, t)| t.selection.started)
+        .map(|(i, _)| i);
+    (tables.iter().enumerate())
+        .map(|(i, t)| Shared {
+            elsewhere: total - t.selection.columns.len(),
+            holds_x: x == Some(i),
+        })
+        .collect()
+}
+
+/// The diagram of the columns chosen in the tables: the column chosen first over x, the
+/// others as curves, table by table in the order their selections began.
+///
+/// The rows are those of the x axis' table, in the order it shows them. A row of another
+/// table belongs to the row with the same step and increment (or, failing that, the same
+/// step and time); where there is none, or the row is outside that table's chosen rows, the
+/// curve has a gap.
+pub fn plot(
+    tables: &[&HistoryTable],
+    sets: &[HistorySet],
+    kind: AnalysisKind,
+    places: Places,
+) -> Result<XyData, String> {
+    let mut chosen: Vec<(&HistoryTable, Columns)> = (tables.iter())
+        .filter(|t| !t.selection.columns.is_empty())
+        .filter_map(|t| Some((*t, t.columns(sets, kind, places)?)))
+        .collect();
+    chosen.sort_by_key(|(t, _)| t.selection.started);
+    let count: usize = chosen.iter().map(|(t, _)| t.selection.columns.len()).sum();
+    if count < 2 {
+        return Err(
+            "Select at least two columns for a plot, in this or another History \
+                    Output window; the first one selected becomes the x axis."
+                .into(),
+        );
+    }
+    let many = chosen.len() > 1;
+    let (x_table, x_columns) = &chosen[0];
+    let x_column = x_table.selection.columns[0];
+    let rows = x_table.chosen_rows(x_columns);
+    let row_data: Vec<(u32, u32, f64)> = rows.iter().map(|&r| x_columns.set.rows[r]).collect();
+    let x = rows.iter().map(|&r| x_columns.value(r, x_column)).collect();
+    let mut curves = Vec::new();
+    for (index, (table, columns)) in chosen.iter().enumerate() {
+        let chosen_columns = &table.selection.columns[usize::from(index == 0)..];
+        // The row of this table for each row of the plot.
+        let matched: Vec<Option<usize>> = if index == 0 {
+            rows.iter().map(|&r| Some(r)).collect()
+        } else {
+            matching_rows(&row_data, columns.set, &table.chosen_rows(columns))
+        };
+        for &column in chosen_columns {
+            let values = (matched.iter())
+                .map(|r| r.map_or(f64::NAN, |r| columns.value(r, column)))
+                .collect();
+            curves.push((columns.label(column, many), values));
+        }
+    }
+    let title = (chosen.iter())
+        .map(|(_, c)| format!("{}.{}.{}", c.set.name, c.field, c.component.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut data = XyData {
+        title,
+        x_label: x_columns.label(x_column, many),
+        x,
+        curves,
+        guides: Vec::new(),
+        y_max: None,
+        ..Default::default()
+    };
+    // The increment of the results each row shows.
+    data.increments = (row_data.iter())
+        .map(|&(step, increment, _)| {
+            (places.increments.iter()).position(|i| i.step == step && i.increment == increment)
+        })
+        .collect();
+    // The steps as bands, a band for each run of rows of one step.
+    for (row, &(step, _, _)) in row_data.iter().enumerate() {
+        let place = places.step(step);
+        let name = match place {
+            Some((number, Some(name))) => format!("{number} {name}"),
+            Some((number, None)) => format!("Step {number}"),
+            None => format!("Step {step}"),
+        };
+        match data.bands.last_mut() {
+            Some(band) if band.name == name => band.rows[1] = row,
+            _ => data.bands.push(crate::xy_plot::Band {
+                name,
+                rows: [row, row],
+            }),
+        }
+    }
+    if data.bands.len() < 2 {
+        data.bands.clear();
+    }
+    // Over the step, increment or time the plot can switch between the total time, the
+    // step time and the increments, when all rows run over time.
+    let times = row_times(places, &row_data);
+    if x_column < FIXED_COLUMNS
+        && let Some(times) = times.filter(|t| !t.is_empty())
+    {
+        data.x_axes = vec![
+            ("Total time".into(), times.iter().map(|t| t.1).collect()),
+            ("Step time".into(), times.iter().map(|t| t.0).collect()),
+            (
+                "Increment".into(),
+                (1..=times.len()).map(|n| n as f64).collect(),
+            ),
+        ];
+        data.choose_x_axis(if x_column == 1 { 2 } else { 0 });
+    }
+    Ok(data)
+}
+
+/// For each row of the plot, the row of `set` among `allowed` with the same step and
+/// increment, or else the same step and time.
+fn matching_rows(
+    plot_rows: &[(u32, u32, f64)],
+    set: &HistorySet,
+    allowed: &[usize],
+) -> Vec<Option<usize>> {
+    let by_increment: HashMap<(u32, u32), usize> = (allowed.iter())
+        .map(|&r| ((set.rows[r].0, set.rows[r].1), r))
+        .collect();
+    (plot_rows.iter())
+        .map(|&(step, increment, time)| {
+            by_increment.get(&(step, increment)).copied().or_else(|| {
+                let close = |t: f64| (t - time).abs() <= 1e-9 * time.abs().max(1.0);
+                (allowed.iter().copied()).find(|&r| set.rows[r].0 == step && close(set.rows[r].2))
+            })
+        })
+        .collect()
 }
 
 /// A small triangle at the right of a header: up when ascending, down when descending.
@@ -1056,5 +1220,104 @@ mod tests {
         sets[0].rows[3].2 = 2.0;
         let data = table.plot(&sets, AnalysisKind::Static, places).unwrap();
         assert_eq!(data.x, [0.5, 1.0, 1.5, 3.0]);
+    }
+
+    /// Forces of a node in a set of their own, written at every second increment only.
+    fn forces() -> HistorySet {
+        HistorySet {
+            name: "NH_OUTPUT-2".into(),
+            rows: vec![(1, 1, 0.25), (1, 3, 1.0)],
+            fields: vec![HistoryField {
+                name: "FORCES".into(),
+                components: vec![HistoryComponent {
+                    name: "RF3".into(),
+                    entries: vec![HistoryEntry {
+                        name: "41".into(),
+                        values: vec![10.0, 40.0],
+                    }],
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn columns_of_several_tables_plot_together_matched_by_increment() {
+        let mut sets = sets();
+        sets.push(forces());
+        let mut displacements = HistoryTable::new(0, 0, 0);
+        let mut forces = HistoryTable::new(1, 0, 0);
+        // U3 of node 41 first, so it is the x axis, then RF3 in the other window with Ctrl.
+        displacements.selection.press(3, None, Modifiers::NONE);
+        forces.selection.press(3, None, Modifiers::COMMAND);
+        let tables = [&displacements, &forces];
+        let shared = shared(&tables);
+        assert_eq!(
+            shared,
+            [
+                Shared {
+                    elsewhere: 1,
+                    holds_x: true
+                },
+                Shared {
+                    elsewhere: 1,
+                    holds_x: false
+                }
+            ]
+        );
+        let data = plot(&tables, &sets, AnalysisKind::Static, no_places()).unwrap();
+        assert_eq!(data.x_label, "U3 41");
+        assert_eq!(data.x, [-1.0, -2.0, -4.0]);
+        assert_eq!(data.curves.len(), 1);
+        assert_eq!(data.curves[0].0, "RF3 41");
+        // Increment 2 has no force: a gap.
+        let y = &data.curves[0].1;
+        assert_eq!((y[0], y[2]), (10.0, 40.0));
+        assert!(y[1].is_nan());
+        assert_eq!(
+            data.title,
+            "NH_OUTPUT-1.DISPLACEMENTS.U3, NH_OUTPUT-2.FORCES.RF3"
+        );
+        // The force chosen first is the x axis; the displacements follow the force's rows.
+        let mut displacements = HistoryTable::new(0, 0, 0);
+        let mut forces = HistoryTable::new(1, 0, 0);
+        forces.selection.press(3, None, Modifiers::NONE);
+        displacements.selection.press(3, None, Modifiers::COMMAND);
+        displacements.selection.press(4, None, Modifiers::COMMAND);
+        let data = plot(
+            &[&displacements, &forces],
+            &sets,
+            AnalysisKind::Static,
+            no_places(),
+        )
+        .unwrap();
+        assert_eq!(data.x, [10.0, 40.0]);
+        assert_eq!(data.curves[0], ("U3 41".to_string(), vec![-1.0, -4.0]));
+        assert_eq!(data.curves[1].0, "U3 62");
+        // One column in each table is enough, one column in all of them is not.
+        forces.selection.press(3, None, Modifiers::COMMAND);
+        displacements.selection.clear();
+        displacements.selection.press(3, None, Modifiers::NONE);
+        assert!(
+            plot(
+                &[&displacements, &forces],
+                &sets,
+                AnalysisKind::Static,
+                no_places()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rows_without_the_same_increment_are_matched_by_time() {
+        let mut other = forces();
+        other.rows = vec![(1, 7, 0.5), (2, 1, 1.0)];
+        let plot_rows = [(1, 1, 0.25), (1, 2, 0.5), (1, 3, 1.0)];
+        assert_eq!(
+            matching_rows(&plot_rows, &other, &[0, 1]),
+            [None, Some(0), None]
+        );
+        // Rows outside the other table's chosen rows are gaps.
+        assert_eq!(matching_rows(&plot_rows, &other, &[1]), [None, None, None]);
     }
 }
