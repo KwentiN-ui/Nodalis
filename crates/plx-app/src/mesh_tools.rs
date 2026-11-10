@@ -2,12 +2,15 @@
 //! the part's context menu, and Merge Coincident Nodes and Renumber All of the Mesh menu.
 //!
 //! A transform is a mesh operation: it is kept under Mesh > Mesh Operations, applied again
-//! whenever its parts are meshed anew, and can be edited or deleted later.
+//! whenever its parts are meshed anew, and can be edited or deleted later. Its numbers can
+//! be exposed as parameters of the analysis with their P buttons, for the project window to
+//! set them through value links.
 
 use egui::Ui;
 use plx_mesh::MeshTransform;
-use plx_model::{MeshOperation, MeshOperationKind, Quantity, UnitSystem};
+use plx_model::{Field, ItemRef, MeshOperation, MeshOperationKind, Quantity, UnitSystem};
 
+use crate::expose;
 use crate::model::Model;
 use crate::numeric;
 
@@ -127,6 +130,10 @@ pub struct MeshToolDialog {
     first_node: u32,
     first_element: u32,
     error: Option<String>,
+    /// The expose buttons of a transform's numbers, see [`Self::set_linked`].
+    expose: Option<expose::Scope>,
+    /// The exposed parameters of the analysis that value links give, with where from.
+    linked: Vec<(u32, String)>,
 }
 
 impl MeshToolDialog {
@@ -170,7 +177,51 @@ impl MeshToolDialog {
             first_node: 1,
             first_element: 1,
             error: None,
+            expose: None,
+            linked: Vec::new(),
         }
+    }
+
+    /// The exposed parameters value links give, by key, with the blocks they come from: the
+    /// dialog shows those numbers read-only.
+    pub fn set_linked(&mut self, linked: Vec<(u32, String)>) {
+        if self.linked != linked {
+            self.linked = linked;
+            self.expose = None;
+        }
+    }
+
+    /// The transform as it is in the model, when the dialog edits one.
+    fn original(&self, model: &Model) -> Option<ItemRef> {
+        let MeshTool::Operation(index) = self.tool else {
+            return None;
+        };
+        let operation = model.fe.mesh_operations.get(index)?;
+        Some(ItemRef::MeshOperation(operation.name.clone()))
+    }
+
+    /// Draws the transform's form with the expose buttons of its numbers.
+    fn exposing_transform_form(&mut self, ui: &mut Ui, model: &Model) {
+        let units = model.fe.properties.units;
+        let two_d = model.fe.properties.space.is_2d();
+        let mut scope = match self.expose.take() {
+            Some(scope) => scope,
+            None => expose::Scope::new(&model.fe, self.original(model), &self.linked),
+        };
+        // The numbers the transform has as the dialog shows it now.
+        let name = self.name.trim().to_owned();
+        let draft = plx_model::FeModel {
+            mesh_operations: vec![MeshOperation {
+                name: name.clone(),
+                parts: Vec::new(),
+                kind: MeshOperationKind::Transform(self.transform.transform()),
+            }],
+            ..Default::default()
+        };
+        scope.available = draft.exposable(&ItemRef::MeshOperation(name));
+        let transform = &mut self.transform;
+        scope.show(ui, |ui| transform_form(ui, transform, two_d, units));
+        self.expose = Some(scope);
     }
 
     fn title(&self) -> &'static str {
@@ -194,7 +245,6 @@ impl MeshToolDialog {
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
                 let units = model.fe.properties.units;
-                let two_d = model.fe.properties.space.is_2d();
                 egui::Grid::new("mesh tool grid")
                     .num_columns(2)
                     .spacing([12.0, 6.0])
@@ -206,7 +256,7 @@ impl MeshToolDialog {
                             ui.label("Parts");
                             parts_list(ui, &mut self.parts, model);
                             ui.end_row();
-                            transform_form(ui, &mut self.transform, two_d, units);
+                            self.exposing_transform_form(ui, model);
                         }
                         MeshTool::MergeNodes => {
                             ui.label("Tolerance");
@@ -278,8 +328,15 @@ impl MeshToolDialog {
     /// Applies the tool to the model and says what changed, or why nothing did.
     pub fn apply(&mut self, model: &mut Model) -> Result<String, String> {
         let result = self.run(model);
-        if let Err(error) = &result {
-            self.error = Some(error.clone());
+        match &result {
+            Err(error) => self.error = Some(error.clone()),
+            // The exposed parameters follow the transform, under its new name.
+            Ok(_) => {
+                if let Some(scope) = self.expose.take() {
+                    let item = ItemRef::MeshOperation(self.name.trim().to_owned());
+                    scope.apply(&mut model.fe, &item);
+                }
+            }
         }
         result
     }
@@ -404,27 +461,35 @@ fn parts_list(ui: &mut Ui, parts: &mut Vec<String>, model: &Model) {
         });
 }
 
+/// A row per component of `vector`, each with its expose button of `fields`.
 fn vector_rows(
     ui: &mut Ui,
     vector: &mut [f64; 3],
-    labels: [&str; 3],
+    (labels, fields): ([&str; 3], [Field; 3]),
     two_d: bool,
     quantity: Option<Quantity>,
     units: UnitSystem,
 ) {
     let count = if two_d { 2 } else { 3 };
-    for (value, label) in vector.iter_mut().zip(labels).take(count) {
+    for ((value, label), field) in vector.iter_mut().zip(labels).zip(fields).take(count) {
         ui.label(label);
-        match quantity {
-            Some(quantity) => {
-                ui.add(numeric::quantity(value, units, quantity).speed(0.1));
-            }
-            None => {
-                ui.add(numeric::drag_value(value).speed(0.1));
-            }
-        }
+        expose::field(ui, field, |ui| match quantity {
+            Some(quantity) => ui.add(numeric::quantity(value, units, quantity).speed(0.1)),
+            None => ui.add(numeric::drag_value(value).speed(0.1)),
+        });
         ui.end_row();
     }
+}
+
+/// Drag values of a direction in one row, each with its expose button of `fields`.
+fn direction_row(ui: &mut Ui, direction: &mut [f64; 3], fields: [Field; 3], count: usize) {
+    ui.horizontal(|ui| {
+        for (value, field) in direction.iter_mut().zip(fields).take(count) {
+            expose::field(ui, field, |ui| {
+                ui.add(numeric::drag_value(value).speed(0.1))
+            });
+        }
+    });
 }
 
 fn transform_form(ui: &mut Ui, draft: &mut TransformDraft, two_d: bool, units: UnitSystem) {
@@ -443,19 +508,20 @@ fn transform_form(ui: &mut Ui, draft: &mut TransformDraft, two_d: bool, units: U
         });
     ui.end_row();
     let length = Some(Quantity::Length);
+    let point = (["X", "Y", "Z"], Field::LOCATION);
     match draft.kind {
         TransformKind::Translate => {
             vector_rows(
                 ui,
                 &mut draft.translation,
-                ["dX", "dY", "dZ"],
+                (["dX", "dY", "dZ"], Field::VECTOR),
                 two_d,
                 length,
                 units,
             );
         }
         TransformKind::Rotate => {
-            vector_rows(ui, &mut draft.point, ["X", "Y", "Z"], two_d, length, units);
+            vector_rows(ui, &mut draft.point, point, two_d, length, units);
             if two_d {
                 ui.label("Axis");
                 ui.label("Z");
@@ -463,30 +529,28 @@ fn transform_form(ui: &mut Ui, draft: &mut TransformDraft, two_d: bool, units: U
                 draft.axis = [0.0, 0.0, 1.0];
             } else {
                 ui.label("Axis");
-                ui.horizontal(|ui| {
-                    for a in draft.axis.iter_mut() {
-                        ui.add(numeric::drag_value(a).speed(0.1));
-                    }
-                });
+                direction_row(ui, &mut draft.axis, Field::AXIS, 3);
                 ui.end_row();
             }
             ui.label("Angle");
-            ui.add(
-                numeric::drag_value(&mut draft.angle)
-                    .speed(1.0)
-                    .suffix(" °"),
-            );
+            expose::field(ui, Field::Angle, |ui| {
+                ui.add(
+                    numeric::drag_value(&mut draft.angle)
+                        .speed(1.0)
+                        .suffix(" °"),
+                )
+            });
             ui.end_row();
         }
         TransformKind::Mirror => {
-            vector_rows(ui, &mut draft.point, ["X", "Y", "Z"], two_d, length, units);
+            vector_rows(ui, &mut draft.point, point, two_d, length, units);
             ui.label("Normal");
-            ui.horizontal(|ui| {
-                let count = if two_d { 2 } else { 3 };
-                for n in draft.normal.iter_mut().take(count) {
-                    ui.add(numeric::drag_value(n).speed(0.1));
-                }
-            });
+            direction_row(
+                ui,
+                &mut draft.normal,
+                Field::NORMAL,
+                if two_d { 2 } else { 3 },
+            );
             ui.end_row();
             if two_d {
                 draft.normal[2] = 0.0;
@@ -496,11 +560,11 @@ fn transform_form(ui: &mut Ui, draft: &mut TransformDraft, two_d: bool, units: U
             ui.end_row();
         }
         TransformKind::Scale => {
-            vector_rows(ui, &mut draft.center, ["X", "Y", "Z"], two_d, length, units);
+            vector_rows(ui, &mut draft.center, point, two_d, length, units);
             vector_rows(
                 ui,
                 &mut draft.factors,
-                ["Factor X", "Factor Y", "Factor Z"],
+                (["Factor X", "Factor Y", "Factor Z"], Field::SCALE),
                 two_d,
                 None,
                 units,

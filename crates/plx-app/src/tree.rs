@@ -126,6 +126,9 @@ pub fn item_of(fe: &FeModel, item: &plx_model::ItemRef) -> Option<TreeItem> {
         ItemRef::InitialCondition(name) => TreeItem::InitialCondition(
             (fe.initial_conditions.iter()).position(|c| &c.name == name)?,
         ),
+        ItemRef::MeshOperation(name) => {
+            TreeItem::MeshOperation((fe.mesh_operations.iter()).position(|o| &o.name == name)?)
+        }
     })
 }
 
