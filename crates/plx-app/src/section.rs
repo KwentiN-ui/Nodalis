@@ -83,6 +83,9 @@ pub struct SectionView {
     pub flipped: bool,
     /// The "lighten section colors".
     pub lighten: bool,
+    /// Parts, by name, that the plane does not cut: they show whole, e.g. a rope running
+    /// through cut sheaves.
+    pub uncut: BTreeSet<String>,
 }
 
 impl SectionView {
@@ -103,6 +106,7 @@ impl SectionView {
             },
             flipped: view_direction[axis] < 0.0,
             lighten: true,
+            uncut: BTreeSet::new(),
         }
     }
 
@@ -203,6 +207,8 @@ enum Picking {
     Point,
     /// The first point of the normal, then the second one.
     Normal(Option<DVec3>),
+    /// Parts to keep whole, or to cut again.
+    Parts,
 }
 
 /// How the dialog was closed.
@@ -248,7 +254,7 @@ impl SectionDialog {
         }
     }
 
-    /// Whether a click in the 3D view picks a point.
+    /// Whether a click in the 3D view picks a point or a part.
     pub fn picks(&self) -> bool {
         self.picking.is_some()
     }
@@ -286,6 +292,12 @@ impl SectionDialog {
         let Some((hit, precision)) = pick else {
             return;
         };
+        if self.picking == Some(Picking::Parts) {
+            if let Some(part) = model.parts.get(hit.part) {
+                toggle(&mut self.draft.uncut, &part.name);
+            }
+            return;
+        }
         let picked = self.picker.pick(model, hit, Target::Nodes, precision);
         if let Items::Nodes(nodes) = picked.resolved(&model.mesh, Target::Nodes) {
             self.take(model, nodes);
@@ -293,6 +305,9 @@ impl SectionDialog {
     }
 
     pub fn preview(&self, model: &Model, hit: &Hit, precision: f32) -> Preview {
+        if self.picking == Some(Picking::Parts) {
+            return crate::selection::PartPicks::preview(model, hit);
+        }
         let items = self.picker.pick(model, hit, Target::Nodes, precision);
         crate::selection::preview(model, &items)
     }
@@ -331,7 +346,7 @@ impl SectionDialog {
                     self.marked.clear();
                 }
             }
-            None => {}
+            Some(Picking::Parts) | None => {}
         }
     }
 
@@ -374,7 +389,7 @@ impl SectionDialog {
                 }
             });
         if let Some(window) = window
-            && self.picking.is_some()
+            && self.picking.is_some_and(|p| p != Picking::Parts)
         {
             let can_undo = !self.marked.is_empty();
             if let Some(action) =
@@ -431,6 +446,9 @@ impl SectionDialog {
             if ui.radio(kind == 2, "Point and normal").clicked() && kind != 2 {
                 let (point, normal) = self.draft.as_point_normal(self.center);
                 self.draft.set_point_normal(point, normal);
+                if self.picking == Some(Picking::Parts) {
+                    self.picking = None;
+                }
             }
         });
         ui.add_space(4.0);
@@ -557,9 +575,61 @@ impl SectionDialog {
             }
             ui.checkbox(&mut self.draft.lighten, "Lighten cut surfaces");
         });
+        self.uncut_row(ui, model);
         // A changed plane takes effect at once.
         self.draft.resolve(fe);
         ui.weak("Drag arrow: move, drag arcs: tilt");
+    }
+}
+
+impl SectionDialog {
+    /// The parts the plane leaves whole: picked in the 3D view, or ticked in a list of all
+    /// parts, for one hidden behind others.
+    fn uncut_row(&mut self, ui: &mut Ui, model: &Model) {
+        let picking = self.picking == Some(Picking::Parts);
+        ui.horizontal(|ui| {
+            ui.label("Uncut parts");
+            if crate::setup::pick_button(ui, picking) {
+                self.picking = if picking { None } else { Some(Picking::Parts) };
+                self.marked.clear();
+            }
+            let uncut = &mut self.draft.uncut;
+            let label = match uncut.len() {
+                0 => "None".to_string(),
+                1..=2 => uncut.iter().cloned().collect::<Vec<_>>().join(", "),
+                n => format!("{n} Parts"),
+            };
+            ui.menu_button(label, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(300.0)
+                    .show(ui, |ui| {
+                        for part in &model.parts {
+                            let mut kept = uncut.contains(&part.name);
+                            if ui.checkbox(&mut kept, &part.name).changed() {
+                                toggle(uncut, &part.name);
+                            }
+                        }
+                    });
+            })
+            .response
+            .on_hover_text("Parts the section does not cut");
+            if ui
+                .add_enabled(!uncut.is_empty(), egui::Button::new("Clear"))
+                .clicked()
+            {
+                uncut.clear();
+            }
+        });
+        if picking {
+            ui.weak("Click parts to keep them whole or to cut them again.");
+        }
+    }
+}
+
+/// Adds a name to the set, or removes it when it is there.
+fn toggle(set: &mut BTreeSet<String>, name: &str) {
+    if !set.remove(name) {
+        set.insert(name.to_string());
     }
 }
 
@@ -625,6 +695,7 @@ mod tests {
             },
             flipped: false,
             lighten: true,
+            uncut: BTreeSet::new(),
         };
         tilted.translate(5.0);
         assert!((tilted.anchor(DVec3::ZERO) - DVec3::new(0.0, 3.0, 4.0)).length() < EPS);
@@ -674,6 +745,7 @@ mod tests {
             },
             flipped: false,
             lighten: true,
+            uncut: BTreeSet::new(),
         };
         assert!(section.resolve(&fe));
         assert!(!section.resolve(&fe));

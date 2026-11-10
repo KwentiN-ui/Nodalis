@@ -109,6 +109,9 @@ pub struct Model {
     pub highlight: Highlight,
     /// The section view plane in render coordinates; picking ignores what it cuts off.
     pub clip: Option<ClipPlane>,
+    /// Parts, by index, that the section view leaves whole: neither cut nor clipped for
+    /// picking.
+    pub uncut: HashSet<usize>,
     /// Centre of the mesh; render positions are relative to it.
     origin: DVec3,
     skins: Vec<PartSkin>,
@@ -791,6 +794,7 @@ impl Model {
             path_plots: Vec::new(),
             highlight: Highlight::default(),
             clip: None,
+            uncut: HashSet::new(),
             origin,
             skins,
             section_cells: Default::default(),
@@ -1801,6 +1805,9 @@ impl Model {
             .zip(&self.parts)
             .enumerate()
             .map(|(index, (cells, info))| {
+                if self.uncut.contains(&index) {
+                    return RenderMesh::default();
+                }
                 let color = color(info);
                 let mut mesh = section_mesh(
                     cells,
@@ -1824,6 +1831,9 @@ impl Model {
             let moved = transform_coords(&coords, &instance);
             let parts = meshes.iter_mut().zip(cells).zip(&self.parts);
             for (index, ((mesh, cells), info)) in parts.enumerate() {
+                if self.uncut.contains(&index) {
+                    continue;
+                }
                 let color = color(info);
                 let scalars = scalars.as_deref();
                 let mut copy =
@@ -2059,6 +2069,11 @@ impl Model {
         Ok(())
     }
 
+    /// Whether the section view cuts off a point of a part, relative to the model origin.
+    fn clipped(&self, part: usize, point: Vec3) -> bool {
+        !self.uncut.contains(&part) && self.clip.is_some_and(|clip| clip.distance(point) < 0.0)
+    }
+
     /// The nearest visible face hit by a ray, both relative to the model origin.
     pub fn pick(&self, origin: Vec3, direction: Vec3) -> Option<Hit> {
         let coords = self.shown_coords();
@@ -2079,7 +2094,7 @@ impl Model {
                         continue;
                     };
                     let point = origin + direction * t;
-                    if self.clip.is_some_and(|clip| clip.distance(point) < 0.0) {
+                    if self.clipped(part, point) {
                         continue;
                     }
                     if best.is_none_or(|(nearest, _)| t < nearest) {
@@ -2123,9 +2138,7 @@ impl Model {
                 };
                 let on_ray = origin + u * t;
                 let on_line = a + (b - a) * s;
-                if on_ray.distance(on_line) > tolerance(on_ray)
-                    || self.clip.is_some_and(|clip| clip.distance(on_line) < 0.0)
-                {
+                if on_ray.distance(on_line) > tolerance(on_ray) || self.clipped(part, on_line) {
                     continue;
                 }
                 if best.is_none_or(|(nearest, _)| t < nearest) {
@@ -2780,6 +2793,24 @@ mod tests {
             }
         }
         assert!(hits > 50, "{hits}");
+    }
+
+    #[test]
+    fn uncut_parts_have_no_section_faces_and_stay_pickable() {
+        let mut model = load(&testdata("wuerfel_c3d10.inp"), UnitSystem::Unitless)
+            .unwrap()
+            .model;
+        let center = model.origin;
+        let faces = model.section_meshes(center, DVec3::Z, true);
+        assert!(!faces[0].triangles.is_empty());
+        let clip = plx_render::clip_plane(center, DVec3::Z, model.origin);
+        model.clip = Some(clip);
+        let below = Vec3::new(0.0, 0.0, -1e-3) + (center - model.origin).as_vec3();
+        assert!(model.clipped(0, below));
+        model.uncut.insert(0);
+        assert!(!model.clipped(0, below));
+        let faces = model.section_meshes(center, DVec3::Z, true);
+        assert!(faces[0].triangles.is_empty() && faces[0].feature_edges.is_empty());
     }
 
     /// Times a click on a part of a large assembly and the redrawn scene with it
