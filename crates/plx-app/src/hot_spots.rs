@@ -440,7 +440,10 @@ mod tests {
         let toe_index = results.mesh.node_index(toe[0]).unwrap();
         let drawn = results.node_position(toe_index).unwrap();
         let undeformed = results.to_render([40.0, 5.0, 10.0]);
-        assert!((drawn - undeformed).length() > 1e-3, "no deformation to test");
+        assert!(
+            (drawn - undeformed).length() > 1e-3,
+            "no deformation to test"
+        );
         assert!((shown.ends[0] - drawn).length() < 1e-4, "{:?}", shown.ends);
         assert_eq!(shown.track.len(), shown.distances.len());
         assert_eq!(shown.track.first(), Some(&shown.ends[0]));
