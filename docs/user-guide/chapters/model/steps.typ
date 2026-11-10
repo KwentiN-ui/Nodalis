@@ -159,8 +159,10 @@ solved:
     visco, implicit and explicit dynamic and heat transfer steps, and the eigenvalue
     iteration of frequency and buckle steps (see below). It only solves positive
     definite systems: the model must be held against every rigid body motion, and a tangent
-    that loses its stiffness (close to buckling) stops it. Then the analysis stops with a
-    message that names the direct solver.],
+    that loses its stiffness (close to buckling) stops it. A tangent that turns indefinite
+    only during the iterations of an increment (a part lifting off and floating on weak
+    springs) cuts the increment back; one that is indefinite from the start of an increment
+    stops the analysis with a message that names the direct solver.],
 )
 
 #screenshot("equation-solver.png", [Equation solver of a static step])

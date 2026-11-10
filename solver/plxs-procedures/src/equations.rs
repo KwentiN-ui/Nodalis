@@ -49,8 +49,10 @@ pub const UNSYMMETRIC_TOLERANCE: f64 = 1e-10;
 pub const UNSYMMETRIC_ACCEPTED: f64 = 1e-6;
 
 /// The iterative solver as the preconditioner of GMRES: the relative residual it stops
-/// at, and its iterations at most.
-pub const PRECONDITIONER_TOLERANCE: f64 = 1e-4;
+/// at, and its iterations at most. One digit is enough: the flexible GMRES takes a few
+/// more outer iterations, each far cheaper (a contact gasket sliding with friction solved
+/// 40 % faster than with 1e-4, most of the work went into the inner digits).
+pub const PRECONDITIONER_TOLERANCE: f64 = 1e-1;
 pub const PRECONDITIONER_ITERATIONS: usize = 100;
 
 /// Without a way to ask the platform for its free memory, the automatic choice assumes
@@ -269,8 +271,8 @@ impl Equations {
     /// of sliding friction.
     ///
     /// Iterative, `k` preconditions by a loose solve with the multigrid
-    /// ([`PRECONDITIONER_TOLERANCE`], at most [`PRECONDITIONER_ITERATIONS`]): a few digits
-    /// suffice, GMRES resolves the rest. When GMRES still misses [`UNSYMMETRIC_ACCEPTED`]
+    /// ([`PRECONDITIONER_TOLERANCE`], at most [`PRECONDITIONER_ITERATIONS`]): one digit
+    /// suffices, GMRES resolves the rest. When GMRES still misses [`UNSYMMETRIC_ACCEPTED`]
     /// the multigrid is built anew for `k`, then the automatic choice factorizes `k`
     /// directly, but only when the factor fits into the memory; failing all that, the best
     /// iterate goes on to the Newton iteration with a warning.

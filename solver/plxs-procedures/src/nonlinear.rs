@@ -1014,7 +1014,7 @@ impl NonlinearStatic {
                         .collect()
                 })
                 .unwrap_or_default();
-            let dv = if unsymmetric.is_empty() {
+            let solved = if unsymmetric.is_empty() {
                 let mut dv = residual;
                 let mut sink = crate::equations::FirstOrWarnings {
                     inner: &mut *progress,
@@ -1022,8 +1022,7 @@ impl NonlinearStatic {
                 };
                 equations
                     .solve(&mut ctx.solver, &mut dv, &mut sink)
-                    .map_err(|e| in_increment(e, ctx.step_number, increment))?;
-                dv
+                    .map(|()| dv)
             } else {
                 // Sliding friction makes the tangent unsymmetric: GMRES on the full
                 // tangent, preconditioned by the factorized symmetric part.
@@ -1039,18 +1038,37 @@ impl NonlinearStatic {
                         *o += r;
                     }
                 };
-                equations
-                    .solve_unsymmetric(
-                        &mut ctx.solver,
-                        &k_reduced,
-                        coordinates,
-                        &apply,
-                        &residual,
-                        &mut *progress,
-                    )
-                    .map_err(|e| in_increment(e, ctx.step_number, increment))?
+                equations.solve_unsymmetric(
+                    &mut ctx.solver,
+                    &k_reduced,
+                    coordinates,
+                    &apply,
+                    &residual,
+                    &mut *progress,
+                )
             };
             ctx.profile.add(Phase::Solve, started);
+            let dv = match solved {
+                Ok(dv) => dv,
+                // A tangent that turns indefinite on the way (a body lifting off and
+                // floating on weak springs, a buckling geometry) stops the iterative solver
+                // where the direct one goes on. The tangent of the converged state was
+                // positive definite (it solved the first iteration), so a smaller increment
+                // usually stays on that side: cut back instead of giving up the step.
+                Err(Error::Numerical {
+                    failure: plxs_core::Failure::NotPositiveDefinite,
+                    ..
+                }) if iteration > 0 && equations.is_iterative() => {
+                    return Ok(Err(Failure::Diverging(
+                        Divergence::Equations,
+                        "the tangent is not positive definite in this iteration, which the \
+                         iterative equation solver needs (the direct one is not limited by it)"
+                            .into(),
+                        false,
+                    )));
+                }
+                Err(error) => return Err(in_increment(error, ctx.step_number, increment)),
+            };
             let mut du = set.expand(&dv, &vec![0.0; total_dofs]);
             // A correction that drives contact points deep into the master (a body held
             // only by weak springs until it touches) is shortened; see
