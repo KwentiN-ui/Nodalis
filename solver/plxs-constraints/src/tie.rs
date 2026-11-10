@@ -12,14 +12,24 @@
 //! Plane stress, plane strain and axisymmetric elements are tied along their edges (edge k
 //! from corner k to corner k + 1, midside node `corners + k`), in their plane only.
 //!
+//! Native membranes (`M3D3`, `M3D4`, `M3D4R`) have the faces of a shell: `S1` (`SNEG`) and
+//! `S2` (`SPOS`) are the element itself, `S3`.. its edges (edge k from corner k to corner
+//! k + 1). CalculiX expands a membrane to a solid layer of its thickness, whose faces lie
+//! half a thickness off the reference surface; plxs computes the membrane in its reference
+//! surface, so a slave node anywhere within the layer (between bottom and top, shifted by
+//! the section offset) counts as lying on every face of the membrane. All three
+//! displacements are tied, a membrane has no rotations to couple.
+//!
 //! No CalculiX code was consulted.
 
 use std::collections::{HashMap, HashSet};
 
 use plxs_core::constraints::Tie;
 use plxs_core::mesh::Surface;
+use plxs_core::section::SectionKind;
 use plxs_core::{ElementFamily, ElementType};
 use plxs_core::{Error, Model, Result};
+use plxs_elements::membrane::is_native as is_membrane;
 use plxs_elements::shape::face_shape;
 use plxs_elements::solid;
 
@@ -30,6 +40,44 @@ pub struct MasterFace {
     pub nodes: Vec<u32>,
     pub corners: usize,
     pub quadratic: bool,
+    /// Faces of a membrane: the layer the membrane stands for.
+    pub layer: Option<Layer>,
+}
+
+/// The layer of a membrane around its reference surface: from `bottom` to `top` along the
+/// element normal (signed distances), and the corner nodes that give the normal.
+#[derive(Clone, Debug)]
+pub struct Layer {
+    pub bottom: f64,
+    pub top: f64,
+    pub corners: Vec<u32>,
+}
+
+impl Layer {
+    /// Unit normal of the membrane element (right hand rule over its corners).
+    fn normal(&self, coords: &[[f64; 3]]) -> [f64; 3] {
+        let c = |i: usize| coords[self.corners[i] as usize];
+        let (a, b) = if self.corners.len() == 3 {
+            (sub(c(1), c(0)), sub(c(2), c(0)))
+        } else {
+            (sub(c(2), c(0)), sub(c(3), c(1)))
+        };
+        let n = [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ];
+        let l = norm(n);
+        if l > 0.0 { n.map(|v| v / l) } else { n }
+    }
+
+    /// The point of the layer closest to `x` above or below `y` on the reference surface.
+    fn closest(&self, coords: &[[f64; 3]], x: [f64; 3], y: [f64; 3]) -> [f64; 3] {
+        let n = self.normal(coords);
+        let r = sub(x, y);
+        let h = (r[0] * n[0] + r[1] * n[1] + r[2] * n[2]).clamp(self.bottom, self.top);
+        [y[0] + h * n[0], y[1] + h * n[1], y[2] + h * n[2]]
+    }
 }
 
 /// The coupling of one slave node.
@@ -92,13 +140,47 @@ pub fn surface_faces(model: &Model, keyword: &str, name: &str) -> Result<Vec<Mas
                     .ok_or_else(|| Error::undefined(keyword, "node", id.to_string()))
             })
             .collect::<Result<Vec<u32>>>()?;
+        let layer = if is_membrane(element.kind) {
+            let (thickness, offset) = element
+                .section
+                .and_then(|s| match &model.sections.get(s as usize)?.kind {
+                    SectionKind::Membrane {
+                        thickness, offset, ..
+                    } => Some((*thickness, *offset)),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    Error::input(
+                        keyword,
+                        format!("membrane element {} has no membrane section", element.id),
+                    )
+                })?;
+            let corners = (0..element.kind.node_count().min(4))
+                .map(|k| nodes_of(model, keyword, element.nodes[k]))
+                .collect::<Result<Vec<u32>>>()?;
+            Some(Layer {
+                bottom: (offset - 0.5) * thickness,
+                top: (offset + 0.5) * thickness,
+                corners,
+            })
+        } else {
+            None
+        };
         out.push(MasterFace {
             nodes,
             corners: corners.len(),
             quadratic,
+            layer,
         });
     }
     Ok(out)
+}
+
+fn nodes_of(model: &Model, keyword: &str, id: plxs_core::NodeId) -> Result<u32> {
+    model
+        .nodes
+        .index(id)
+        .ok_or_else(|| Error::undefined(keyword, "node", id.to_string()))
 }
 
 /// The faces of an element kind (local corner and midside nodes of each face) and whether
@@ -118,6 +200,14 @@ fn face_table(kind: ElementType) -> Option<(Vec<(Vec<usize>, Vec<usize>)>, bool)
             })
             .collect();
         return Some((faces, quadratic));
+    }
+    if is_membrane(kind) {
+        // S1 (SNEG) and S2 (SPOS) are the element, S3.. its edges.
+        let corners = kind.node_count();
+        let element: Vec<usize> = (0..corners).collect();
+        let mut faces = vec![(element.clone(), Vec::new()), (element, Vec::new())];
+        faces.extend((0..corners).map(|k| (vec![k, (k + 1) % corners], Vec::new())));
+        return Some((faces, false));
     }
     if !matches!(
         kind.family(),
@@ -173,6 +263,22 @@ pub fn surface_nodes(model: &Model, keyword: &str, name: &str) -> Result<Vec<u32
     Ok(out)
 }
 
+/// The layers of the membrane faces of an element surface, by dense node (the first face
+/// of a node gives its layer); empty for other surfaces.
+fn membrane_layers(model: &Model, name: &str) -> Result<HashMap<u32, Layer>> {
+    let mut out = HashMap::new();
+    if let Some(Surface::Element(_)) = model.sets.surfaces.get(name) {
+        for face in surface_faces(model, "*TIE", name)? {
+            if let Some(layer) = face.layer {
+                for &n in &face.nodes {
+                    out.entry(n).or_insert_with(|| layer.clone());
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Shape functions of an edge (2 corners, then the midside node) at `xi` in [-1, 1].
 fn line_shape(quadratic: bool, xi: f64, n: &mut [f64], dn: &mut [[f64; 2]]) {
     if quadratic {
@@ -192,6 +298,10 @@ fn line_shape(quadratic: bool, xi: f64, n: &mut [f64], dn: &mut [[f64; 2]]) {
 
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
 fn norm(a: [f64; 3]) -> f64 {
@@ -275,7 +385,10 @@ impl MasterFace {
             }
         }
         let (n, y, _) = self.evaluate(coords, p);
-        (n, y)
+        match &self.layer {
+            Some(layer) => (n, layer.closest(coords, x, y)),
+            None => (n, y),
+        }
     }
 
     fn bounds(&self, coords: &[[f64; 3]]) -> ([f64; 3], [f64; 3]) {
@@ -287,6 +400,12 @@ impl MasterFace {
                 lo[d] = lo[d].min(c[d]);
                 hi[d] = hi[d].max(c[d]);
             }
+        }
+        // A membrane's layer reaches beyond its reference surface.
+        if let Some(layer) = &self.layer {
+            let h = layer.bottom.abs().max(layer.top.abs());
+            lo = lo.map(|v| v - h);
+            hi = hi.map(|v| v + h);
         }
         (lo, hi)
     }
@@ -326,6 +445,7 @@ pub fn couplings(
 ) -> Result<(Vec<Coupling>, Vec<u32>)> {
     let faces = surface_faces(model, "*TIE", &tie.master)?;
     let slaves = surface_nodes(model, "*TIE", &tie.slave)?;
+    let slave_layers = membrane_layers(model, &tie.slave)?;
     if faces.is_empty() {
         return Ok((Vec::new(), slaves));
     }
@@ -340,10 +460,15 @@ pub fn couplings(
     let cell = typical.max(tolerance).max(1e-12);
     let key = |x: f64| (x / cell).floor() as i64;
     let mut grid: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
+    // Slaves on membrane faces reach as far as their layer.
+    let reach = tolerance
+        + (slave_layers.values())
+            .map(|l| l.bottom.abs().max(l.top.abs()))
+            .fold(0.0, f64::max);
     for (index, face) in faces.iter().enumerate() {
         let (lo, hi) = face.bounds(coords);
-        let lo = lo.map(|v| key(v - tolerance));
-        let hi = hi.map(|v| key(v + tolerance));
+        let lo = lo.map(|v| key(v - reach));
+        let hi = hi.map(|v| key(v + reach));
         for i in lo[0]..=hi[0] {
             for j in lo[1]..=hi[1] {
                 for k in lo[2]..=hi[2] {
@@ -363,7 +488,18 @@ pub fn couplings(
         let mut best: Option<(f64, Vec<f64>, [f64; 3], u32)> = None;
         if let Some(candidates) = grid.get(&(key(x[0]), key(x[1]), key(x[2]))) {
             for &f in candidates {
-                let (n, y) = faces[f as usize].project(coords, x);
+                let face = &faces[f as usize];
+                let (mut n, mut y) = face.project(coords, x);
+                // A slave on a membrane face stands for its layer: the closest point of
+                // the layer is tied, the node keeps its place in the layer.
+                if let Some(layer) = slave_layers.get(&slave) {
+                    let at = layer.closest(coords, y, x);
+                    if at != x {
+                        let (n2, y2) = face.project(coords, at);
+                        n = n2;
+                        y = add(y2, sub(x, at));
+                    }
+                }
                 let d = norm(sub(x, y));
                 if best.as_ref().is_none_or(|b| d < b.0) {
                     best = Some((d, n, y, f));
@@ -378,7 +514,7 @@ pub fn couplings(
                     masters: face.nodes.iter().copied().zip(n).collect(),
                     point,
                     distance,
-                    planar: face.corners == 2,
+                    planar: face.corners == 2 && face.layer.is_none(),
                 });
             }
             _ => missed.push(slave),
