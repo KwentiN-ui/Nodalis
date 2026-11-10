@@ -1,0 +1,106 @@
+name: Bump version and release
+
+# Per Knopf (Actions > "Bump version and release" > Run workflow): setzt die Version im
+# Workspace (Cargo.toml und Cargo.lock), committet direkt auf den Default-Branch, legt das
+# Tag vX.Y.Z an und startet den Release-Workflow dafür. Kein PR, also auch kein Eintrag in
+# den Release Notes.
+#
+# Ein mit GITHUB_TOKEN gepushtes Tag löst keine anderen Workflows aus (das gilt nicht für
+# workflow_dispatch). Deshalb startet der letzte Schritt release.yml ausdrücklich auf dem Tag;
+# dort ist github.ref dann refs/tags/vX.Y.Z, und die Jobs hängen ihre Dateien ans Release.
+#
+# Voraussetzung: Der Default-Branch darf von github-actions[bot] direkt beschrieben werden
+# (bei Branch-Schutz oder Ruleset eine Bypass-Ausnahme dafür eintragen).
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Neue Version ohne v, z. B. 0.3.3"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: bump-version
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bump:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Prüfen
+        env:
+          VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$REF_NAME" != "$DEFAULT_BRANCH" ]; then
+            echo "::error::Muss auf $DEFAULT_BRANCH laufen, nicht auf $REF_NAME."
+            exit 1
+          fi
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Ungültige Version '$VERSION' (erwartet X.Y.Z, ohne v)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Tag darf noch nicht existieren
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::Tag v$VERSION existiert schon."
+            exit 1
+          fi
+
+      - name: Version setzen
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          # Nur die Zeile version = "..." in [workspace.package]; alle Crates erben sie.
+          awk -v v="$VERSION" '
+            /^\[/ { in_pkg = ($0 == "[workspace.package]") }
+            in_pkg && /^version = / && !done { print "version = \"" v "\""; done = 1; next }
+            { print }
+            END { if (!done) exit 1 }
+          ' Cargo.toml > Cargo.toml.new
+          mv Cargo.toml.new Cargo.toml
+          # Nur die Workspace-Mitglieder in Cargo.lock nachziehen, keine Abhängigkeit aktualisieren.
+          cargo update --workspace
+          git diff --stat
+          # Die Lockfile darf sich nur in den version-Zeilen ändern.
+          if git diff -U0 Cargo.lock | grep -E '^[+-][^+-]' | grep -Ev '^[+-]version = '; then
+            echo "::error::Cargo.lock ändert mehr als Versionen."
+            exit 1
+          fi
+          git diff --quiet && { echo "::error::Keine Änderung, steht die Version schon so?"; exit 1; }
+          true
+
+      - name: Committen, taggen, pushen
+        env:
+          VERSION: ${{ inputs.version }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "Release $VERSION"
+          git tag -a "v$VERSION" -m "v$VERSION"
+          git push origin "HEAD:refs/heads/$DEFAULT_BRANCH"
+          git push origin "refs/tags/v$VERSION"
+
+      - name: Release-Workflow auf dem Tag starten
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: gh workflow run release.yml --ref "v$VERSION"
