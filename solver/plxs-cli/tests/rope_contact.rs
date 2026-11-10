@@ -8,6 +8,8 @@
 //! - A rope wrapped by 90° around a fixed drum, held at one end and pulled at the other,
 //!   slides with the tension ratio of Euler-Eytelwein, `e^(-μφ)` (the benchmark of
 //!   Konyukhov and Shala 2022); without friction both ends carry the same tension.
+//! - A rope in a groove of its own radius, held out of the plane by nothing but the groove,
+//!   carries the force of the first case and stays in the groove's middle.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -211,4 +213,103 @@ fn a_rope_sliding_round_a_drum_keeps_the_euler_eytelwein_ratio() {
         "{} vs {expected}",
         held / pulled
     );
+}
+
+/// A sheave with a round groove of the rope's own radius about the circle of radius
+/// [`DRUM`] + [`ROPE`] around `centre`, from 70° to 110°: C3D8 4 mm thick behind the groove
+/// over ±80° across it (nodes in DRUMN, the groove the surface DRUMS).
+fn grooved_sheave(centre: [f64; 2]) -> String {
+    let (steps, across) = (80, 16);
+    let axis = DRUM + ROPE;
+    let id = |j: usize, depth: usize, k: usize| 1001 + 2 * (across + 1) * j + 2 * k + depth;
+    let mut s = String::from("*Node, Nset=DRUMN\n");
+    for j in 0..=steps {
+        let angle = (70.0 + 40.0 * j as f64 / steps as f64).to_radians();
+        for k in 0..=across {
+            let phi = (-80.0 + 160.0 * k as f64 / across as f64).to_radians();
+            // depth 1 is the groove, depth 0 the back of the sheave behind it.
+            for (depth, rho) in [ROPE + 4.0, ROPE].into_iter().enumerate() {
+                let radius = axis - rho * phi.cos();
+                let (x, y) = (
+                    centre[0] + radius * angle.cos(),
+                    centre[1] + radius * angle.sin(),
+                );
+                writeln!(s, "{}, {x}, {y}, {}", id(j, depth, k), rho * phi.sin()).unwrap();
+            }
+        }
+    }
+    s.push_str("*Element, Type=C3D8, Elset=DRUM\n");
+    let mut e = 5001;
+    for j in 0..steps {
+        for k in 0..across {
+            let corners = [
+                id(j, 0, k),
+                id(j, 1, k),
+                id(j + 1, 1, k),
+                id(j + 1, 0, k),
+                id(j, 0, k + 1),
+                id(j, 1, k + 1),
+                id(j + 1, 1, k + 1),
+                id(j + 1, 0, k + 1),
+            ];
+            let corners: Vec<String> = corners.iter().map(|c| c.to_string()).collect();
+            writeln!(s, "{e}, {}", corners.join(", ")).unwrap();
+            e += 1;
+        }
+    }
+    s
+}
+
+#[test]
+fn a_rope_in_a_groove_of_its_own_radius_is_held_sideways_by_both_flanks() {
+    // As the sheave lifting the rope by 3°, but the sheave has a groove that fits the rope
+    // and nothing else holds the rope out of the plane: only one end against twisting.
+    // The rope touches the groove all across; with only its axis node against the nearest
+    // groove face it was pushed from flank to flank and the solver cut back to nothing.
+    let (a, n, tension) = (150.0, 80, 20000.0);
+    let mut s = String::from("*Node, Nset=ROPEN\n");
+    for i in 0..=n {
+        writeln!(s, "{}, {}, 0, 0", i + 1, 2.0 * a * i as f64 / n as f64).unwrap();
+    }
+    let gap = 0.05;
+    s.push_str(&grooved_sheave([a, -(DRUM + ROPE + gap)]));
+    s.push_str(
+        "*User element, Type=U1, Nodes=2, Integration points=2, Maxdof=6\n\
+         *Element, Type=U1, Elset=ROPE\n",
+    );
+    for i in 1..=n {
+        writeln!(s, "{i}, {i}, {}", i + 1).unwrap();
+    }
+    write!(
+        s,
+        "*Material, Name=ROPE\n*Elastic\n{YOUNG}, 0.3\n*Material, Name=STEEL\n*Elastic\n210000, 0.3\n\
+         *Beam section, Elset=ROPE, Material=ROPE, Section=GENERAL, Contact radius={ROPE}\n\
+         {AREA}, {INERTIA}, 0, {INERTIA}, 0.8333333\n0, 0, 1\n\
+         *Solid section, Elset=DRUM, Material=STEEL\n\
+         *Surface, Name=DRUMS, Type=Element\nDRUM, S4\n*Surface, Name=ROPES, Type=Node\nROPEN\n"
+    )
+    .unwrap();
+    let lift = a * 1.5_f64.to_radians().tan();
+    let middle = n / 2 + 1;
+    let input = format!(
+        "{s}{}*Boundary\n1, 1, 4, 0\n{end}, 2, 3, 0\nDRUMN, 1, 3, 0\n\
+         *Step, Nlgeom\n*Static\n*Cload\n{end}, 1, {tension}\n*End step\n\
+         *Step, Nlgeom\n*Static\n0.1, 1\n*Boundary\nDRUMN, 2, 2, {}\n\
+         *Node print, Nset=ROPEN\nRF, U\n*End step\n",
+        contact(0.0),
+        lift + gap,
+        end = n + 1,
+    );
+    let dat = run("groove", &input);
+    let force = -last_row(&dat, "forces", 1)[1] - last_row(&dat, "forces", n + 1)[1];
+    let lambda = (YOUNG * INERTIA / tension).sqrt();
+    let expected = 2.0 * tension * lift / (a - lambda * (a / lambda).tanh());
+    assert!(
+        (force - expected).abs() < 2e-2 * expected,
+        "{force} vs {expected}"
+    );
+    let top = last_row(&dat, "displacements", middle);
+    assert!((top[1] - lift).abs() < 2e-2 * lift, "{top:?} vs {lift}");
+    // Held in the middle of the groove.
+    assert!(top[2].abs() < 1e-3 * lift, "{top:?}");
 }
