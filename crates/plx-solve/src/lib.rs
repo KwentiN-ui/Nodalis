@@ -20,6 +20,7 @@ pub use plxs_core::{Diagnostic, DiagnosticCode};
 pub use plxs_procedures::profile::{Phase, Profile};
 pub use plxs_session::JobProfile;
 
+pub mod awake;
 pub mod live;
 pub mod process;
 
@@ -131,6 +132,8 @@ pub struct Run {
     diagnostics: Arc<Mutex<Option<Vec<Diagnostic>>>>,
     /// Where the time of the run went, once results were written.
     profile: plxs_session::ProfileSink,
+    /// Keeps the computer from going to standby while the run is active.
+    awake: Option<awake::Guard>,
 }
 
 /// An analysis lowered from the model for the solver, which validates it first.
@@ -600,6 +603,7 @@ impl Run {
             check,
             diagnostics,
             profile,
+            awake: Some(awake::Guard::new()),
         })
     }
 
@@ -663,6 +667,7 @@ impl Run {
             // Detached: the thread holds only shared buffers, which outlive the run.
             self.handle.take();
             self.status = JobStatus::Killed;
+            self.awake = None;
         }
     }
 
@@ -720,6 +725,7 @@ impl Run {
             return;
         };
         let finished = handle.join().unwrap_or(Finished::Error);
+        self.awake = None;
         // A model check computes no results.
         let results = !self.check
             && self
