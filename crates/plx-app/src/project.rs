@@ -163,8 +163,12 @@ enum Block {
 #[derive(Clone)]
 struct NumberBlock {
     units: UnitSystem,
-    /// `None` until a link gives it the kind of the other end.
+    /// `None` until a link gives it the kind of the other end. Of a product or quotient,
+    /// the kind of its result.
     kind: Option<ValueKind>,
+    /// Of a product or quotient, the kinds of A and B, which the kind of the result follows
+    /// from (see [`MathOp::settle_kinds`]); `None` while open.
+    operands: [Option<ValueKind>; 2],
     operation: MathOp,
     values: Vec<f64>,
 }
@@ -194,8 +198,8 @@ impl NumberBlock {
         }
         (self.operation.inputs().iter().enumerate())
             .map(|(i, label)| {
-                let kind = if i == 1 && self.operation.scales() {
-                    Some(ValueKind::Factor)
+                let kind = if self.operation.combines() {
+                    self.operands.get(i).copied().flatten()
                 } else {
                     self.kind
                 };
@@ -207,6 +211,50 @@ impl NumberBlock {
                 )
             })
             .collect()
+    }
+
+    /// The kind of the number of the row of `path`: its result or an input; `Some(None)`
+    /// while it has none yet.
+    fn kind_at(&self, switch: bool, path: &[String]) -> Option<Option<ValueKind>> {
+        match path {
+            [cell, name] if cell == links::VALUE && name == RESULT => Some(self.kind),
+            [cell, key] if cell == links::PARAMETERS => (self.inputs(switch).into_iter())
+                .find(|(k, ..)| k == key)
+                .map(|(_, _, kind, _)| kind),
+            _ => None,
+        }
+    }
+
+    /// The kinds of A, B and the result of a product or quotient.
+    fn kinds(&self) -> [Option<ValueKind>; 3] {
+        [self.operands[0], self.operands[1], self.kind]
+    }
+
+    /// The kinds of A, B and the result, with the one missing found from the other two;
+    /// unchanged with an error when they do not fit together.
+    fn settle(&mut self) -> Result<(), String> {
+        let [a, b, result] = self.operation.settle_kinds(self.kinds())?;
+        self.operands = [a, b];
+        self.kind = result;
+        Ok(())
+    }
+
+    /// The block after the number of the row of `path` became of `kind`, with the kinds
+    /// that follow from it; an error says why it cannot.
+    fn with_kind(&self, switch: bool, path: &[String], kind: ValueKind) -> Result<Self, String> {
+        let mut block = self.clone();
+        match path {
+            [cell, key] if cell == links::PARAMETERS && !switch && self.operation.combines() => {
+                let index = ["a", "b"].iter().position(|k| k == key);
+                if let Some(slot) = index.and_then(|i| block.operands.get_mut(i)) {
+                    *slot = Some(kind);
+                }
+            }
+            [cell, key] if cell == links::PARAMETERS && key == INDEX && switch => {}
+            _ => block.kind = Some(kind),
+        }
+        block.settle()?;
+        Ok(block)
     }
 
     /// The number it gives.
@@ -930,13 +978,7 @@ impl Node {
     /// or an input; `Some(None)` while the block has no kind yet.
     fn number_kind(&self, path: &[String]) -> Option<Option<ValueKind>> {
         let (number, switch) = self.as_number()?;
-        match path {
-            [cell, name] if cell == links::VALUE && name == RESULT => Some(number.kind),
-            [cell, key] if cell == links::PARAMETERS => (number.inputs(switch).into_iter())
-                .find(|(k, ..)| k == key)
-                .map(|(_, _, kind, _)| kind),
-            _ => None,
-        }
+        number.kind_at(switch, path)
     }
 
     fn window(&self) -> Option<&AnalysisWindow> {
@@ -1218,6 +1260,7 @@ impl Node {
                 let block = NumberBlock {
                     units: math.units,
                     kind: math.kind,
+                    operands: math.operands,
                     operation: math.operation,
                     values: math.values,
                 };
@@ -1229,6 +1272,7 @@ impl Node {
                 let block = NumberBlock {
                     units: switch.units,
                     kind: switch.kind,
+                    operands: [None; 2],
                     operation: MathOp::default(),
                     values,
                 };
@@ -1371,6 +1415,7 @@ impl Node {
                 units: math.units,
                 operation: math.operation,
                 kind: math.kind,
+                operands: math.operands,
                 values: math.values.clone(),
             }),
             Block::Switch(switch) => ProjectNode::Switch(file::SwitchBlock {
@@ -1861,11 +1906,9 @@ enum Action {
     /// A new Math or Switch block at the position.
     AddMath(egui::Pos2),
     AddSwitch(egui::Pos2),
-    /// The operation of a Math block, the kind of the numbers of a Math or Switch block, the
-    /// value of one of their inputs by key, or the number of choices of a Switch block
-    /// changed in its block.
+    /// The operation of a Math block, the value of one of the inputs of a Math or Switch
+    /// block by key, or the number of choices of a Switch block changed in its block.
     SetOperation(u64, MathOp),
-    SetNumberKind(u64, Option<ValueKind>),
     SetNumberInput(u64, String, f64),
     SetChoices(u64, usize),
 }
@@ -2958,7 +3001,13 @@ impl ProjectApp {
                     print.add(format!("{kind:?}").as_bytes());
                 }
                 Block::Math(number) | Block::Switch(number) => {
-                    print.add(format!("{:?}{:?}", number.operation, number.kind).as_bytes());
+                    print.add(
+                        format!(
+                            "{:?}{:?}{:?}",
+                            number.operation, number.kind, number.operands
+                        )
+                        .as_bytes(),
+                    );
                     let switch = node.kind() == Kind::Switch;
                     for (key, _, _, value) in number.inputs(switch) {
                         if !driven(links::PARAMETERS, &key) {
@@ -5919,7 +5968,6 @@ impl ProjectApp {
             self.output.push(format!("Not linked: {why}"));
             return;
         }
-        self.adopt_kind(source, &item, target, &slot);
         let (item, slot) = self.study_column(source, item, target, slot);
         let feedback = item.first().is_some_and(|c| c == links::LOOP);
         if slot.first().is_some_and(|c| c == links::MEASURE) {
@@ -6497,6 +6545,7 @@ impl ProjectApp {
             return;
         }
         self.sync_due = false;
+        self.refresh_number_kinds();
         self.apply_values();
         self.evaluate_measures();
         self.evaluate_deformed();
@@ -7173,7 +7222,6 @@ impl ProjectApp {
             | Action::AddMath(_)
             | Action::AddSwitch(_)
             | Action::SetOperation(..)
-            | Action::SetNumberKind(..)
             | Action::SetNumberInput(..)
             | Action::SetChoices(..) => Vec::new(),
         })
@@ -7368,12 +7416,6 @@ impl ProjectApp {
                 self.add_switch(pos);
             }
             Action::SetOperation(id, operation) => self.set_operation(id, operation),
-            Action::SetNumberKind(id, kind) => {
-                if let Some((number, _)) = self.node(id).and_then(Node::as_number_mut) {
-                    number.kind = kind;
-                }
-                self.sync_due = true;
-            }
             Action::SetNumberInput(id, key, value) => {
                 if let Some((number, switch)) = self.node(id).and_then(Node::as_number_mut) {
                     number.set(switch, &key, value);
@@ -8027,10 +8069,9 @@ enum RowWidget {
     Exposed(u32),
     /// The file a mesh export block writes to.
     ExportPath,
-    /// The operation of a Math block, the kind of the numbers of a Math or Switch block, one
-    /// of their inputs by index, and the number of choices of a Switch block.
+    /// The operation of a Math block, one of the inputs of a Math or Switch block by index,
+    /// and the number of choices of a Switch block.
     Operation,
-    NumberKind,
     Input(usize),
     Choices,
 }
@@ -9098,6 +9139,11 @@ fn refusal(
                 links::label(item)
             )
         });
+    }
+    if item.first().is_some_and(|c| c == links::VALUE)
+        && let Some(why) = numbers::number_refusal(nodes, existing, source, item, target, slot)
+    {
+        return why;
     }
     if item.first().is_some_and(|c| c == links::VALUE) || feedback {
         let (given, taken) = (
@@ -10318,10 +10364,7 @@ impl Viewer {
         let link_color = wire_color(&[links::VALUE.to_owned()]);
         // The fields of a Math or Switch block leave room for the label of its operation.
         let width = match widget {
-            RowWidget::Operation
-            | RowWidget::NumberKind
-            | RowWidget::Input(_)
-            | RowWidget::Choices => 112.0,
+            RowWidget::Operation | RowWidget::Input(_) | RowWidget::Choices => 106.0,
             _ => 118.0,
         };
         // The label senses the pointer left of the field only, so that the field shows its
@@ -10434,10 +10477,7 @@ impl Viewer {
         );
         ui.spacing_mut().interact_size.y = field.height();
         match widget {
-            RowWidget::Operation
-            | RowWidget::NumberKind
-            | RowWidget::Input(_)
-            | RowWidget::Choices => {
+            RowWidget::Operation | RowWidget::Input(_) | RowWidget::Choices => {
                 self.edit_number_row(&mut ui, id, row, widget, field, &tip);
                 return;
             }
@@ -10596,7 +10636,6 @@ impl Viewer {
             | RowWidget::Value(_)
             | RowWidget::Exposed(_)
             | RowWidget::Operation
-            | RowWidget::NumberKind
             | RowWidget::Input(_)
             | RowWidget::Choices => return,
         };
@@ -12549,12 +12588,15 @@ mod tests {
         let mut nodes = vec![parameters, math, switch];
         let value = |name: &str| vec![links::VALUE.to_owned(), name.to_owned()];
         let input = |key: &str| vec![links::PARAMETERS.to_owned(), key.to_owned()];
-        // Without a kind, A takes any number; B of a product is a factor.
+        // Without links, A and B of a product take numbers of any kind.
         assert_eq!(
             refusal(&nodes, &[], 1, &value("Length"), 2, &input("a")),
             None
         );
-        assert!(refusal(&nodes, &[], 1, &value("Length"), 2, &input("b")).is_some());
+        assert_eq!(
+            refusal(&nodes, &[], 1, &value("Length"), 2, &input("b")),
+            None
+        );
         // The index of a switch is a count; its result goes on to a block of any kind.
         assert_eq!(
             refusal(&nodes, &[], 1, &value("Cells"), 3, &input(INDEX)),
@@ -12564,14 +12606,22 @@ mod tests {
             refusal(&nodes, &[], 3, &value(RESULT), 2, &input("a")),
             None
         );
-        // Once it has a kind, it takes only numbers of that kind.
+        // A sum takes only numbers of the kind its links give it.
         if let Some((number, _)) = nodes[1].as_number_mut() {
-            number.kind = Some(ValueKind::Quantity(Quantity::Force));
+            number.operation = MathOp::Add;
         }
-        assert!(refusal(&nodes, &[], 1, &value("Length"), 2, &input("a")).is_some());
+        let mut links = vec![Link {
+            source: 1,
+            target: 2,
+            item: value("Cells"),
+            slot: input("a"),
+            ..Default::default()
+        }];
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        assert!(refusal(&nodes, &links, 1, &value("Length"), 2, &input("b")).is_some());
         assert_eq!(
             value_kind(&nodes, 2, &value(RESULT)),
-            Some(ValueKind::Quantity(Quantity::Force))
+            Some(ValueKind::Count)
         );
         assert_eq!(parameter_label(&nodes, 3, &input("2")), "Choice 2");
         // A count is kept whole.
@@ -12580,6 +12630,112 @@ mod tests {
         assert!(number.set(true, "1", 2.4));
         assert_eq!(number.values[1], 2.0);
         assert!(!number.set(true, "9", 1.0));
+    }
+
+    #[test]
+    fn a_quotient_of_a_force_and_a_length_is_a_stiffness() {
+        let force = ValueKind::Quantity(Quantity::Force);
+        let stiffness = ValueKind::Quantity(Quantity::ForcePerLength);
+        let parameters = Node::read(ProjectNode::Parameters(file::ParameterSet {
+            id: 1,
+            name: "Parameters".into(),
+            parameters: vec![
+                Parameter::new("RF3", force, 4912.0),
+                Parameter::new("U3", ValueKind::LENGTH, 0.01),
+                Parameter::new("Stiffness", stiffness, 1.0),
+                Parameter::new("Area", ValueKind::Quantity(Quantity::Area), 1.0),
+            ],
+            ..Default::default()
+        }));
+        let math = Node::read(ProjectNode::Math(file::MathBlock {
+            id: 2,
+            name: "Math".into(),
+            operation: MathOp::Divide,
+            values: vec![0.0, 0.0],
+            ..Default::default()
+        }));
+        let sum = Node::read(ProjectNode::Math(file::MathBlock {
+            id: 3,
+            name: "Sum".into(),
+            ..Default::default()
+        }));
+        let mut nodes = vec![parameters, math, sum];
+        let value = |name: &str| vec![links::VALUE.to_owned(), name.to_owned()];
+        let input = |key: &str| vec![links::PARAMETERS.to_owned(), key.to_owned()];
+        let link = |item: Vec<String>, slot: Vec<String>, from_math: bool| Link {
+            source: if from_math { 2 } else { 1 },
+            target: if from_math { 3 } else { 2 },
+            item,
+            slot,
+            ..Default::default()
+        };
+        let result = value(RESULT);
+        // The force goes to A, then the length to B: the result is a force per length.
+        assert_eq!(refusal(&nodes, &[], 1, &value("RF3"), 2, &input("a")), None);
+        let mut links = vec![link(value("RF3"), input("a"), false)];
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        assert_eq!(value_kind(&nodes, 2, &input("a")), Some(force));
+        // Unlinked, B is a factor until a length goes to it.
+        assert_eq!(value_kind(&nodes, 2, &input("b")), Some(ValueKind::Factor));
+        assert_eq!(value_kind(&nodes, 2, &result), Some(force));
+        assert_eq!(
+            refusal(&nodes, &links, 1, &value("U3"), 2, &input("b")),
+            None
+        );
+        links.push(link(value("U3"), input("b"), false));
+        let (changed, removed) = numbers::refresh_kinds(&mut nodes, &mut links);
+        assert!(changed && !removed);
+        assert_eq!(value_kind(&nodes, 2, &result), Some(stiffness));
+        // Of a block with a force at A and a stiffness at its result, B is a length.
+        links.pop();
+        links.push(Link {
+            source: 1,
+            target: 3,
+            item: value("Stiffness"),
+            slot: input("a"),
+            ..Default::default()
+        });
+        links.push(link(result.clone(), input("b"), true));
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        assert_eq!(value_kind(&nodes, 2, &input("b")), Some(ValueKind::LENGTH));
+        assert!(refusal(&nodes, &links, 1, &value("Area"), 2, &input("b")).is_some());
+        // With a length at B, the result goes on only to a force per length.
+        links.truncate(1);
+        links.push(link(value("U3"), input("b"), false));
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        let sum_of_areas = Link {
+            source: 1,
+            target: 3,
+            item: value("Area"),
+            slot: input("a"),
+            ..Default::default()
+        };
+        links.push(sum_of_areas);
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        let why = refusal(&nodes, &links, 2, &result, 3, &input("b")).unwrap();
+        assert!(why.contains("force per length"), "{why}");
+        links.pop();
+        // A product of a force and a length is a moment.
+        if let Some((number, _)) = nodes[1].as_number_mut() {
+            number.operation = MathOp::Multiply;
+        }
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        assert_eq!(
+            value_kind(&nodes, 2, &result),
+            Some(ValueKind::Quantity(Quantity::Moment))
+        );
+        // A sum of a force and a length is none: the link of B goes.
+        if let Some((number, _)) = nodes[1].as_number_mut() {
+            number.operation = MathOp::Add;
+        }
+        let (_, removed) = numbers::refresh_kinds(&mut nodes, &mut links);
+        assert!(removed);
+        assert_eq!(links.len(), 1);
+        assert_eq!(value_kind(&nodes, 2, &result), Some(force));
+        // Unlinked, its numbers have no kind again.
+        links.clear();
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        assert_eq!(value_kind(&nodes, 2, &result), None);
     }
 
     #[test]
@@ -12812,14 +12968,22 @@ mod tests {
             value_kind(&nodes, 2, &value),
             Some(ValueKind::Quantity(Quantity::Frequency))
         );
-        // A Math block without a kind takes the value, and then only values of its kind.
-        assert_eq!(refusal(&nodes, &[], 1, &value, 3, &input), None);
-        let kind = value_kind(&nodes, 1, &value);
+        // A sum without links takes the value, and then only values of its kind.
         if let Some((number, _)) = nodes[2].as_number_mut() {
-            number.kind = kind;
+            number.operation = MathOp::Add;
         }
         assert_eq!(refusal(&nodes, &[], 1, &value, 3, &input), None);
-        assert!(refusal(&nodes, &[], 2, &value, 3, &input).is_some());
+        let mut links = vec![Link {
+            source: 1,
+            target: 3,
+            item: value.clone(),
+            slot: input.clone(),
+            ..Default::default()
+        }];
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        let b = vec![links::PARAMETERS.to_owned(), "b".to_owned()];
+        assert_eq!(refusal(&nodes, &links, 1, &value, 3, &b), None);
+        assert!(refusal(&nodes, &links, 2, &value, 3, &b).is_some());
     }
 
     #[test]

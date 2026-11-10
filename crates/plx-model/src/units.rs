@@ -210,7 +210,7 @@ impl Dimension {
         }
     }
 
-    fn powi(self, n: i8) -> Self {
+    pub fn powi(self, n: i8) -> Self {
         Self::new(
             self.length * n,
             self.mass * n,
@@ -220,7 +220,7 @@ impl Dimension {
         )
     }
 
-    fn times(self, other: Self) -> Self {
+    pub fn times(self, other: Self) -> Self {
         Self::new(
             self.length + other.length,
             self.mass + other.mass,
@@ -228,6 +228,49 @@ impl Dimension {
             self.temperature + other.temperature,
             self.angle + other.angle,
         )
+    }
+
+    /// This dimension divided by `other`.
+    pub fn over(self, other: Self) -> Self {
+        self.times(other.powi(-1))
+    }
+
+    /// Whether it is a pure number, without unit.
+    pub fn is_none(self) -> bool {
+        self == Self::default()
+    }
+
+    /// The quantity of this dimension, `None` for a pure number or one no quantity has. Of
+    /// those that share one, a moment goes before an energy, and a temperature is a change
+    /// of temperature: a product or quotient of temperatures has no zero of its scale.
+    pub fn quantity(self) -> Option<Quantity> {
+        Quantity::ALL
+            .into_iter()
+            .filter(|q| *q != Quantity::Temperature)
+            .find(|q| q.dimension() == self)
+    }
+
+    /// The dimension in SI base units, such as "kg m^-1 s^-2", for messages.
+    pub fn si(self) -> String {
+        let parts: Vec<String> = [
+            ("kg", self.mass),
+            ("m", self.length),
+            ("s", self.time),
+            ("K", self.temperature),
+            ("rad", self.angle),
+        ]
+        .into_iter()
+        .filter(|(_, power)| *power != 0)
+        .map(|(unit, power)| match power {
+            1 => unit.to_owned(),
+            _ => format!("{unit}^{power}"),
+        })
+        .collect();
+        if parts.is_empty() {
+            "no unit".to_owned()
+        } else {
+            parts.join(" ")
+        }
     }
 }
 

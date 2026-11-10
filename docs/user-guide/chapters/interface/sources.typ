@@ -388,36 +388,53 @@ several numbers by an index, for variants such as three sheet thicknesses. Add t
 #menu("Parameters", "Math") and #menu("Parameters", "Switch"), or
 search them with #key("Shift+A").
 
-#screenshot("schematic-math-switch.png", [A parameter study varies the width and the variant:
-  the Math block Height doubles the width, the Switch block Thickness picks the thickness of
-  the variant, and both results are outputs of the study])
+#screenshot("schematic-math-switch.png", [The Math block Height doubles the width, the Switch
+  block Thickness picks the thickness of the variant, and the Math block Gap subtracts one from
+  the other. Gap takes millimetres from the height, so the thickness is a length too])
 
 Their inputs are rows with a violet pin on the left: type a number, or drag a value pin to it,
 from a Parameters block, from another Math or Switch block, from the #ui("Inputs") of a
 parameter study (@parameter-study) or from the value of a Measure block (@measure-block), such as the largest
 stress, to compute a key figure from results. The #ui("Result") row at the bottom shows the number the
-block gives; drag its pin on the right to any number of the same kind, to another Math or
-Switch block or to the #ui("Outputs") of a study. Blocks that take the result are out of date
-when it changes, as with a parameter.
+block gives; drag its pin on the right to a number of its kind, to another Math or Switch
+block or to the #ui("Outputs") of a study. Blocks that take the result are out of date when it
+changes, as with a parameter.
 
 #fields(
   [Operation], [Math only: #ui("Add") (A + B), #ui("Subtract") (A - B), #ui("Multiply")
     (A × B), #ui("Divide") (A / B), #ui("Minimum"), #ui("Maximum") or #ui("Clamp"), which
     keeps #ui("Value") between #ui("Min") and #ui("Max"). A product or quotient gives no
     result when dividing by zero.],
-  [Kind], [What the numbers are, as for a parameter: a length, a force, a count or a factor.
-    #ui("Any") takes the kind of the first number linked to the block. The B of
-    #ui("Multiply") and #ui("Divide") is always a factor, so a length times 2 stays a
-    length.],
   [Index], [Switch only: which choice the block gives, counted from 1. Out of range, the block
     gives no result.],
   [Choice 1, 2, ...], [Switch only: the numbers to choose from. #ui("Add") adds one,
     #ui("Remove") removes the last one with its link; a switch holds up to 20.],
 )
 
-A value link joins like with like here too: once a block has a kind, it takes only numbers of
-that kind, and the output pane says why a link was refused. Changing the operation removes
-links to inputs the block no longer has.
+==== Units of the numbers
+
+A Math or Switch block has no unit of its own: its links give it one. A sum, a difference, a
+minimum, a maximum, a clamp and a switch take numbers of one kind, the kind of the first number
+linked to them or of the number their result goes to; a link that brings another kind is
+refused, and the output pane says why. A product and a quotient combine the units of A and B
+instead, so a force over a length is a stiffness, for instance the reaction force over the
+displacement that two Measure blocks read from the results of a step:
+
+#screenshot("schematic-math-units.png", [The stiffness of a spring from a force and the travel
+  it causes: 4912 N over 10 mm gives 491.2 N/mm])
+
+The kind of the result follows from those of A and B: a length times a length is an area, a
+force times a length a moment, a length over a time a velocity and a length over a length a
+factor without unit. It also works the other way round: with a force at A and the result linked
+to a stiffness, B is a length and its field shows millimetres. An input of a product that no
+link gives, and that the other numbers do not make anything else, is a factor, so a length
+times 2 stays a length. A link is refused when its unit does not fit, or when no kind of number
+has the unit that would follow, such as a second moment of area times a pressure. Typed values
+are kept in SI units and shown in the units of the block, so a value typed while a block had
+another unit keeps its number in SI units.
+
+Changing the operation removes links to inputs the block no longer has, and links whose kinds
+no longer fit, such as the length at B when a quotient of a force and a length becomes a sum.
 
 Every number field of a block, in a Math, Switch or Parameters block, a mesh block or an
 exposed parameter, works the same way. A number with more digits than the field holds shows

@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::Quantity;
+use crate::units::Dimension;
 
 /// What a number is, so that a value link joins like with like: a force goes to a force, a
 /// count of elements to a count.
@@ -48,6 +49,21 @@ impl ValueKind {
             Self::Quantity(quantity) => Some(quantity),
             _ => None,
         }
+    }
+
+    /// The powers of the base units its numbers are made of; none for a count or a factor.
+    pub fn dimension(self) -> Dimension {
+        self.quantity()
+            .map_or_else(Dimension::default, Quantity::dimension)
+    }
+
+    /// The kind of numbers of a dimension: a factor without unit, else its quantity (see
+    /// [`Dimension::quantity`]); `None` when no kind has it.
+    pub fn of_dimension(dimension: Dimension) -> Option<Self> {
+        if dimension.is_none() {
+            return Some(Self::Factor);
+        }
+        dimension.quantity().map(Self::Quantity)
     }
 
     /// Whether a value of this kind may go to a number of kind `to`: only like to like, a
