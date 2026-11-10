@@ -753,7 +753,7 @@ impl EditDialog {
                     .show(ui, |ui| {
                         if !table {
                             ui.label("Display");
-                            ui.horizontal_wrapped(|ui| {
+                            crate::layout::wrapped_row(ui, |ui| {
                                 ui.radio_value(&mut draft.on_path, false, "In Box");
                                 ui.radio_value(&mut draft.on_path, true, "On Path");
                             });

@@ -265,7 +265,7 @@ fn sector_rows(
         return;
     };
     ui.label("Results show");
-    ui.horizontal_wrapped(|ui| {
+    crate::layout::wrapped_row(ui, |ui| {
         ui.radio_value(&mut cyclic.display, SectorDisplay::Single, "Single sector")
             .on_hover_text("Only the modelled sector (NGRAPH=1).");
         ui.radio_value(&mut cyclic.display, SectorDisplay::All, "All sectors")
@@ -800,7 +800,7 @@ impl Rows<'_> {
     fn gap_conductance(&mut self, ui: &mut Ui, conductance: &mut GapConductance) {
         let text = "Constant conductance or table over pressure and temperature.";
         self.row(ui, ("Kind", text), |ui| {
-            ui.horizontal_wrapped(|ui| {
+            crate::layout::wrapped_row(ui, |ui| {
                 let constant = matches!(conductance, GapConductance::Constant(_));
                 let mut response = ui.radio(constant, "Constant");
                 if response.clicked() && !constant {

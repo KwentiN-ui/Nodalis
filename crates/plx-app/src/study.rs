@@ -450,7 +450,7 @@ impl StudyEditor {
                         }
                     });
                 ui.separator();
-                ui.horizontal_wrapped(|ui| {
+                crate::layout::wrapped_row(ui, |ui| {
                     ui.radio_value(&mut fill.mode, FillMode::Grid, "All combinations")
                         .on_hover_text("A point for every combination of the values.");
                     ui.radio_value(&mut fill.mode, FillMode::OneAtATime, "One at a time")

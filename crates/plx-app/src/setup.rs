@@ -1529,7 +1529,7 @@ fn point_rows(
         .as_ref()
         .is_some_and(|s| s.kind == plx_model::CoordinateSystemKind::Cylindrical);
     ui.label("Location");
-    ui.horizontal_wrapped(|ui| {
+    crate::layout::wrapped_row(ui, |ui| {
         if ui.radio(remote.location.is_none(), "Centroid").clicked() {
             remote.location = None;
         }
@@ -1687,7 +1687,7 @@ fn symmetry_rows(ui: &mut egui::Ui, normal: &mut Option<[f64; 3]>, region: &Regi
     let space = model.fe.properties.space;
     let plane = symmetry_plane(&model.mesh, region, space, *normal);
     ui.label("Plane normal");
-    ui.horizontal_wrapped(|ui| {
+    crate::layout::wrapped_row(ui, |ui| {
         if ui.radio(normal.is_none(), "From selection").clicked() {
             *normal = None;
         }
@@ -3256,7 +3256,7 @@ impl Editor {
                         // Force, displacement or lock: one choice of the two flags.
                         let mut by = (*lock, *by_displacement);
                         ui.label("Preload by");
-                        ui.horizontal_wrapped(|ui| {
+                        crate::layout::wrapped_row(ui, |ui| {
                             ui.radio_value(&mut by, (false, false), "Force");
                             ui.radio_value(&mut by, (false, true), "Displacement");
                             ui.radio_value(&mut by, (true, *by_displacement), "Lock")
@@ -3638,7 +3638,7 @@ impl Editor {
                 ui.end_row();
                 ui.label("Source");
                 let by_value = field.kind.takes_region();
-                ui.horizontal_wrapped(|ui| {
+                crate::layout::wrapped_row(ui, |ui| {
                     if ui.radio(by_value, "By value").clicked() && !by_value {
                         field.kind = DefinedFieldKind::Temperature(20.0);
                     }
@@ -5121,7 +5121,7 @@ fn beam_form(ui: &mut Ui, beam: &mut BeamSection, fe: &FeModel, units: UnitSyste
         }
     }
     ui.label("Normal (1-direction)");
-    ui.horizontal_wrapped(|ui| {
+    crate::layout::wrapped_row(ui, |ui| {
         let automatic = matches!(beam.orientation, BeamOrientation::Automatic);
         if ui.radio(automatic, "Automatic").clicked() && !automatic {
             beam.orientation = BeamOrientation::Automatic;
@@ -6965,7 +6965,7 @@ fn validate_heat_transfer_step(settings: &HeatTransferStep) -> Result<(), String
 /// heat transfer, frequency and buckle.
 fn solver_row(ui: &mut Ui, solver: &mut LinearSolverChoice) {
     ui.label("Equation solver");
-    ui.horizontal_wrapped(|ui| {
+    crate::layout::wrapped_row(ui, |ui| {
         for choice in LinearSolverChoice::ALL {
             ui.radio_value(solver, choice, choice.name())
                 .on_hover_text(solver_hint(choice));

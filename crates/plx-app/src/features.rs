@@ -538,7 +538,7 @@ impl FeatureDialog {
             Draft::CoordinateSystem(system) => {
                 name_row(ui, &mut system.name);
                 ui.label("Type");
-                ui.horizontal_wrapped(|ui| {
+                crate::layout::wrapped_row(ui, |ui| {
                     for kind in CoordinateSystemKind::ALL {
                         ui.radio_value(&mut system.kind, kind, kind.label());
                     }
@@ -1109,7 +1109,7 @@ fn plane_rows(
     };
     ui.label("Type");
     let mut chosen = kind;
-    ui.horizontal_wrapped(|ui| {
+    crate::layout::wrapped_row(ui, |ui| {
         ui.radio_value(&mut chosen, 0, "Coordinate system");
         ui.radio_value(&mut chosen, 1, "Three points");
         ui.radio_value(&mut chosen, 2, "Point and normal");

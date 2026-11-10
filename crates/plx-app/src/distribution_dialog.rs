@@ -30,7 +30,7 @@ pub fn distribution_rows(
     let length = units.unit(Quantity::Length);
     ui.label("Type");
     let by_equation = matches!(distribution.kind, DistributionKind::Equation(_));
-    ui.horizontal_wrapped(|ui| {
+    crate::layout::wrapped_row(ui, |ui| {
         if ui.radio(by_equation, "Equation").clicked() && !by_equation {
             distribution.kind = DistributionKind::Equation("=1".into());
         }
