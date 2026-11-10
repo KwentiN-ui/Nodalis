@@ -31,7 +31,10 @@ Create them with #ui("Constraint") on the #ui("Connections") tab of the ribbon.
     whole value. Without a value the support is practically rigid (ten times the
     stiffness of the element layer under it). On solids and 2D models the support acts at the
     integration points of the faces, like a pressure spread over them, so that the contact
-    pressure and the stresses under it stay smooth on quadratic elements too. On shells it is
+    pressure and the stresses under it stay smooth on quadratic elements too. On a curved
+    surface meshed with flat faces (linear elements, straight midside nodes) it pushes along
+    the normal of the smooth surface, not along the kinked normals of the faces; edges sharper
+    than 40° stay sharp. On shells it is
     written as `GAPUNI` elements to fixed ground nodes, one per node; only there do
     #ui("Tensile force") and #ui("Offset") matter. With #ui("Nonlinear") the contact is solved
     nonlinearly, otherwise it is linearised in a linear step. On solids and 2D models the

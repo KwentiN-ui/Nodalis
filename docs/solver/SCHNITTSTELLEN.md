@@ -1578,6 +1578,12 @@ V-Zyklus, behaltene Hierarchie oft zu lange behalten.
   „statistics for slave set <Fläche>, master set GROUND“; ohne SLAVE alle Paare und Stützen.
   Nodalis: Stützen haben eine `Id` und stehen in `contact_pair_choices`, `plx-io::dat` nennt
   die Statistik nach der Stütze. Nur Flächenstützen (Volumen, 2D), nicht GAPUNI auf Schalen.
+- Normalen (2026-11-10): die Gaps drücken entlang geglätteter Knotennormalen (flächengewichtetes
+  Mittel der Flächen am Knoten mit weniger als 40° Knick, mit den Formfunktionen auf den
+  Gauß-Punkt interpoliert), nicht entlang der Flächennormalen. Ein Zylinder aus geraden
+  Flächen (gerade Mittenknoten, lineare Elemente) hielt sonst die Knoten auf den Knicken in zwei
+  Richtungen, CPRESS streifte entlang der Elementkanten (Ring C3D20, 24 Elemente: 31/57/41/56
+  statt glatt 51 … 31). Echte Kanten über 40° bleiben getrennt.
 - Grund: starre GAPUNI je Knoten auf C3D20-Flächen lassen die Eckknoten ohne Kraft (ihr
   konsistenter Anteil eines Drucks ist negativ), das gab ein Schachbrett in den Spannungen.
   FEAnalyst-Lasche (C3D20, Bohrung r 12, 3000 N): GAPUNI fleckig, Ecken 0 N; Flächenstütze
