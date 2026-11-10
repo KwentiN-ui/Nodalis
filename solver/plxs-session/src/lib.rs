@@ -377,7 +377,7 @@ impl Session {
             ));
         }
         let mut session = Session::new(model, options)?;
-        check_layout(&session.model, &snapshot.state)?;
+        check_layout(&session.model, &session.table, &snapshot.state)?;
         session.state = snapshot.state;
         session.average_force = snapshot.average_force;
         Ok(session)
@@ -412,9 +412,12 @@ fn read_stored_modes(
     Ok(modes)
 }
 
-fn check_layout(model: &Model, state: &State) -> Result<()> {
+/// The fields at integration points have an entry for every continuum element of the
+/// element table only: springs, gaps and general beams (U1) have no integration points
+/// there.
+fn check_layout(model: &Model, table: &ElementTable, state: &State) -> Result<()> {
     let nodes = model.nodes.len();
-    let elements = model.elements.len();
+    let elements = table.layout.offsets.len().saturating_sub(1);
     let nodal = |name: &str, field: Option<&plxs_core::state::NodalField>| -> Result<()> {
         match field {
             Some(f) if f.per_node == 0 || f.values.len() != nodes * f.per_node => {
@@ -437,7 +440,7 @@ fn check_layout(model: &Model, state: &State) -> Result<()> {
     ] {
         if !field.offsets.is_empty() && field.offsets.len() != elements + 1 {
             return Err(Error::Unsupported(format!(
-                "the restart state does not fit the model: {name} of {} elements, the model has {elements}",
+                "the restart state does not fit the model: {name} of {} elements, the model has {elements} with integration points",
                 field.offsets.len() - 1
             )));
         }
