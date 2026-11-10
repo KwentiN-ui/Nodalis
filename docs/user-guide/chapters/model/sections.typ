@@ -49,6 +49,8 @@ Create one with #ui("Cross-Section") on the #ui("Material") tab of the ribbon.
     #ui("General") takes over its values.],
   [Sketch], [A profile of your own drawn as polygons: an outline and any number of holes
     (@sketched-profiles).],
+  [Rope], [A steel wire rope by its diameter, outer wire diameter, fill factor and bending
+    stiffness (@rope-profiles).],
 )
 
 The sketch below the fields shows the profile with the 1-direction to the right and the
@@ -73,9 +75,12 @@ and second moments of area. So:
 - The beams need lines with 2 nodes; mesh the lines linear.
 - An unsymmetric profile such as an angle is written about its principal axes: Nodalis turns
   the normal about each beam by the angle of axis I, so that it bends askew as it should.
-- The solver computes Static steps without large deformations (#ui("Nlgeom")) and Frequency steps
-  (from CalculiX 2.23, which Nodalis ships), and the modal and steady state dynamics built on
-  them. The model check refuses other steps with "Step not possible with general beam profiles".
+- The solver computes Static, Frequency, Buckle, implicit Dynamic and Steady State Dynamics
+  steps. With #ui("Nlgeom") the beam is corotational: a frame turns with each element, so that
+  the beam takes displacements and rotations of any size while its strains stay small, and a
+  beam under tension gets stiffer across (stress stiffening). The explicit Dynamic step, heat
+  transfer and Visco steps are refused by the model check with "Step not possible with general
+  beam profiles".
 - The shear stiffness is k G A with k the share of the area in the web (a leg of an angle), and
   the torsion stiffness k G (I11 + I22). For open profiles the torsion is far too stiff, CalculiX
   knows no warping.
@@ -87,6 +92,55 @@ and second moments of area. So:
 
 #screenshot("general-beam-results.png", [A portal frame of I-beam columns and a channel
   girder, solved as U1 beams, with the profiles in the results])
+
+==== Rope profiles <rope-profiles>
+
+A steel wire rope is far softer in bending than a solid bar of its diameter: its wires slide
+against each other. A tube of the rope's diameter drawn in CAD is therefore several times too
+stiff, and in a measuring device that deflects a rope by a few degrees over a sheave the force
+then comes out wrong by a factor. #ui("Rope") is a general profile (@general-profiles) whose
+tension and bending stiffness are given separately:
+
+#fields(
+  [Bending stiffness], [#ui("Between slip and stick"): a share between the rope with sliding
+    wires (0) and with sticking wires (1). #ui("Measured (EI / E)"): the second moment of area
+    EI / E of a bending test under tension, E being the rope modulus. Switching keeps the
+    stiffness.],
+  [Rope diameter (d)], [The diameter of the rope. The rope is drawn as a circle of it.],
+  [Wire diameter], [The diameter δ of the outer wires, which sets the stiffness with sliding
+    wires.],
+  [Fill factor], [The metallic area over the area of the circle π d² / 4: about 0.45 to 0.6 for
+    stranded ropes, up to 0.75 for spiral strands.],
+  [Slip (0) to stick (1)], [The share, default 0.1; with #ui("Measured (EI / E)") the field
+    #ui("EI / E") instead.],
+)
+
+The section is written with the metallic area A = f π d² / 4 and the second moment I of the
+bending stiffness; the Young's modulus of the section's material is the rope modulus, about
+90 to 120 GPa for stranded ropes with a steel core and 150 to 170 GPa for spiral strands (the
+manufacturer's data sheet has the value). The two limits are those of the rope models of
+Costello and Papailiou with the wires as round bars:
+
+- slip, every wire bends on its own: I = A δ² / 16,
+- stick, the wires act as one section: I = A d² / 16, about half the solid bar.
+
+The dialog shows both and the value used, also as a share of the solid bar. Measured values
+lie in between; a 19 mm rope 3x7 bends with about 1/15 of the solid bar (Bruski 2020). The
+torsion stiffness is k G 2 I with k = 5/6, small like the bending stiffness.
+
+A rope carries its load by tension: compute it with #ui("Nlgeom"), pretension it in a first
+step and deflect it in a later one. The rope then follows a beam under tension T, whose bending
+dies away over the length λ = sqrt(EI / T). Pushing a rope sideways by δ in the middle of two
+supports 2a apart takes the force F = 2 T δ / (a - λ tanh(a / λ)), about λ / a more than the
+ideal rope's 2 T δ / a; the solver reproduces this to 0.3 % with elements of λ / 8. Mesh the
+rope near a sheave or clamp with elements of λ / 4 or shorter.
+
+#screenshot("cross-section-rope.png", [A rope of 10 mm with the default bending share 0.1: its
+  metallic area and the second moments of sliding and sticking wires])
+
+#limitation[The bending stiffness is constant: the hysteresis of a rope whose wires start to
+slide as it bends (Papailiou) is not modelled, nor the coupling of tension and torsion of a
+stranded rope. Compute both limits to see how much the result depends on it.]
 
 ==== Sketched profiles <sketched-profiles>
 

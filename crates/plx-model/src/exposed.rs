@@ -143,6 +143,11 @@ pub enum Field {
     I11,
     I22,
     ShearFactor,
+    /// The diameters, fill factor and bending stiffness of a rope.
+    Diameter,
+    WireDiameter,
+    FillFactor,
+    RopeBending,
     /// The duration of a static, heat transfer, visco or Dynamic step.
     Duration,
     /// The result frames of a static, heat transfer, visco or Dynamic step.
@@ -200,6 +205,10 @@ impl Field {
             Self::I11 => "I11",
             Self::I22 => "I22",
             Self::ShearFactor => "k",
+            Self::Diameter => "d",
+            Self::WireDiameter => "Wire diameter",
+            Self::FillFactor => "Fill factor",
+            Self::RopeBending => "Bending",
             Self::Duration => "Duration",
             Self::Frames => "Frames",
             Self::DampingRatio => "Damping ratio",
@@ -218,7 +227,7 @@ impl Field {
     pub const ROTATION: [Self; 3] = [Self::RotationX, Self::RotationY, Self::RotationZ];
     pub const LOCATION: [Self; 3] = [Self::LocationX, Self::LocationY, Self::LocationZ];
     pub const AXIS: [Self; 3] = [Self::AxisX, Self::AxisY, Self::AxisZ];
-    pub const ALL: [Self; 44] = [
+    pub const ALL: [Self; 48] = [
         Self::Value,
         Self::X,
         Self::Y,
@@ -252,6 +261,10 @@ impl Field {
         Self::I11,
         Self::I22,
         Self::ShearFactor,
+        Self::Diameter,
+        Self::WireDiameter,
+        Self::FillFactor,
+        Self::RopeBending,
         Self::Duration,
         Self::Frames,
         Self::DampingRatio,

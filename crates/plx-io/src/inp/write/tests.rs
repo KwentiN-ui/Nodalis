@@ -11690,3 +11690,42 @@ fn a_force_in_a_system_of_its_own_is_written_in_global_directions() {
         "{text}"
     );
 }
+
+/// A rope is a general section of U1 with its metallic area and the second moment of its
+/// bending stiffness, and comes back from the comment.
+#[test]
+fn rope_profiles_are_written_with_their_metallic_area() {
+    let mesh = line_chain(10, 0, 1000.0, false);
+    let rope = BeamProfile::Rope {
+        diameter: 16.0,
+        wire: 1.0,
+        fill: 0.5,
+        bending: plx_model::RopeBending::Share(0.25),
+    };
+    let mut model = line_model(
+        &mesh,
+        SectionKind::Beam(BeamSection {
+            orientation: BeamOrientation::Direction([0.0, 0.0, 1.0]),
+            ..beam("Rope")
+        }),
+        LoadKind::force([0.0, 0.0, 100.0]),
+    );
+    model.cross_sections.push(CrossSection {
+        id: named("Rope"),
+        name: "Rope".into(),
+        profile: rope.clone(),
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let area = 0.5 * std::f64::consts::PI * 64.0;
+    let inertia = area * (1.0 + 0.25 * (256.0 - 1.0)) / 16.0;
+    let at = text.find("Section=General\n").expect(&text);
+    let written: Vec<f64> = (text[at..].lines().nth(1).unwrap().split(','))
+        .map(|v| v.trim().parse().unwrap())
+        .collect();
+    for (w, e) in written.iter().zip([area, inertia, 0.0, inertia, 5.0 / 6.0]) {
+        assert!((w - e).abs() <= 1e-9 * e.abs(), "{written:?}");
+    }
+    let import = read_inp_str(&text, None).unwrap();
+    assert_eq!(import.cross_sections[0].profile, rope);
+    assert_eq!(import.mesh.element(1).unwrap().type_name, "U1");
+}

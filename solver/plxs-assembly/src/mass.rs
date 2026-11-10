@@ -93,6 +93,18 @@ pub fn assemble_mass_with(
         })?;
         m.add_block(&membrane.dofs, &membrane.formulation.mass(rho));
     }
+    for beam in &table.beams {
+        let me = beam.mass().ok_or_else(|| {
+            Error::input(
+                "*DENSITY",
+                format!(
+                    "element {} has no density; a frequency or dynamic analysis needs *DENSITY for every material",
+                    model.elements[beam.element as usize].id
+                ),
+            )
+        })?;
+        m.add_block(&beam.dofs, &me);
+    }
     Ok(())
 }
 
@@ -148,9 +160,13 @@ pub fn assemble_tangent_stiffness(
         }
         Ok(ke)
     })?;
-    // Constant stiffness blocks (U1) and native membranes (total Lagrangian tangent).
-    for block in table.linear_blocks.iter().filter(|b| !b.membrane) {
-        k.add_block(&block.dofs, &block.stiffness);
+    // Native membranes (total Lagrangian tangent) and general beams (corotational).
+    for beam in &table.beams {
+        let mut f = [0.0; 12];
+        let mut ke = [0.0; 144];
+        beam.formulation
+            .internal(&beam.gather(u), &mut f, Some(&mut ke));
+        k.add_block(&beam.dofs, &ke);
     }
     for membrane in &table.membranes {
         let ue = membrane.gather(u);
@@ -164,7 +180,7 @@ pub fn assemble_tangent_stiffness(
     Ok(())
 }
 
-/// Adds the initial stress stiffness of the native membranes for the displacements `u`
+/// Adds the initial stress stiffness of the native membranes and the general beams for the displacements `u`
 /// to `k_sigma` (after [`assemble_geometric_stiffness`], which covers the solids).
 pub fn add_membrane_geometric_stiffness(
     table: &ElementTable,
@@ -176,5 +192,9 @@ pub fn add_membrane_geometric_stiffness(
             .formulation
             .initial_stress_stiffness(&membrane.gather(u));
         k_sigma.add_block(&membrane.dofs, &ke);
+    }
+    for beam in &table.beams {
+        let ke = beam.formulation.initial_stress_stiffness(&beam.gather(u));
+        k_sigma.add_block(&beam.dofs, &ke);
     }
 }
