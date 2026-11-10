@@ -173,6 +173,12 @@ pub fn field(value: &mut f64, kind: ValueKind, units: UnitSystem) -> egui::DragV
             .range(1.0..=1e6)
             .speed(0.1)
             .fixed_decimals(0),
-        None => crate::numeric::drag_value(value).speed(0.01),
+        // In SI base units, with their names.
+        None => match kind {
+            ValueKind::Derived(dimension) => crate::numeric::drag_value(value)
+                .speed(0.01)
+                .suffix(format!(" {}", dimension.si())),
+            _ => crate::numeric::drag_value(value).speed(0.01),
+        },
     }
 }

@@ -23,7 +23,14 @@ pub(super) fn shown_number(value: f64, kind: Option<ValueKind>, units: UnitSyste
         )
         .trim()
         .to_owned(),
-        None => crate::results::format_value(value as f32),
+        None => match kind {
+            Some(ValueKind::Derived(dimension)) => format!(
+                "{} {}",
+                crate::results::format_value(value as f32),
+                dimension.si()
+            ),
+            _ => crate::results::format_value(value as f32),
+        },
     }
 }
 
@@ -71,7 +78,7 @@ pub(super) fn number_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Ve
         } else {
             match kind {
                 Some(ValueKind::Factor) => format!("{label}, a factor without unit"),
-                Some(kind) => format!("{label}, a {}", kind.label().to_lowercase()),
+                Some(kind) => format!("{label}, a {}", kind.describe()),
                 None if number.operation.combines() && !switch => format!(
                     "{label}, a number of any kind: the kind of the result follows from those \
                      of A and B, so a force over a length is a force per length. Unlinked and \
@@ -216,6 +223,13 @@ impl ProjectApp {
     }
 }
 
+/// Whether a number of kind `given` may go to one of kind `taken` at a Math or Switch block:
+/// one of the same unit, so a moment to an energy and a quantity in SI base units to the
+/// quantity it is.
+fn convertible(given: ValueKind, taken: ValueKind) -> bool {
+    given.dimension() == taken.dimension()
+}
+
 /// A Math or Switch block apart from its block: its id, its numbers and whether it is a
 /// switch.
 type Number = (u64, NumberBlock, bool);
@@ -258,6 +272,8 @@ fn settle_numbers(
         number.kind = None;
         number.operands = [None; 2];
     }
+    let ids: Vec<u64> = numbers.iter().map(|n| n.0).collect();
+    let is_number = |id: u64| ids.contains(&id);
     let kinds = |numbers: &[Number]| -> Vec<(Option<ValueKind>, [Option<ValueKind>; 2])> {
         (numbers.iter())
             .map(|(_, n, _)| (n.kind, n.operands))
@@ -278,7 +294,16 @@ fn settle_numbers(
                 let Some((_, number, switch)) = numbers.iter_mut().find(|n| n.0 == id) else {
                     continue;
                 };
-                if number.kind_at(*switch, path) == Some(None)
+                // A number found from others takes the name of a block outside with the same
+                // unit: a moment linked to an energy is an energy.
+                let other = if id == l.target { l.source } else { l.target };
+                let renamed = !*switch
+                    && !is_number(other)
+                    && number
+                        .kind_at(*switch, path)
+                        .flatten()
+                        .is_some_and(|own| own != kind && own.dimension() == kind.dimension());
+                if (number.kind_at(*switch, path) == Some(None) || renamed)
                     && let Ok(adopted) = number.with_kind(*switch, path, kind)
                 {
                     *number = adopted;
@@ -340,7 +365,9 @@ pub(super) fn refresh_kinds(nodes: &mut [Node], links: &mut Vec<Link>) -> (bool,
             let outside = |id, path: &[String]| value_kind(nodes, id, path);
             let given = kind_at(&numbers, &outside, l.source, &l.item);
             let taken = kind_at(&numbers, &outside, l.target, links::slot(l));
-            given.is_none() || taken.is_none() || given == taken
+            given
+                .zip(taken)
+                .is_none_or(|(given, taken)| convertible(given, taken))
         };
         let count = links.len();
         links.retain(fits);
@@ -402,7 +429,7 @@ pub(super) fn number_refusal(
     let (Some(given), Some(taken)) = (given, taken) else {
         return Some(None);
     };
-    if given == taken {
+    if convertible(given, taken) {
         return Some(None);
     }
     // Why a product or quotient at an end cannot take the kind of the other end.
@@ -437,7 +464,7 @@ pub(super) fn number_refusal(
                 None
             }
         });
-    let label = |kind: ValueKind| kind.label().to_lowercase();
+    let label = |kind: ValueKind| kind.describe();
     let name = |id: u64| (nodes.iter().find(|n| n.id == id)).map_or("", |n| n.name.as_str());
     Some(Some(match why {
         Some((id, path, kind, why)) => format!(

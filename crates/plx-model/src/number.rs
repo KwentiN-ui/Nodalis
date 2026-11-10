@@ -73,7 +73,7 @@ impl MathOp {
 
     /// The kinds of A, B and the result of a product or quotient, with a missing one found
     /// from the other two: a force over a force per length is a length. An error says why
-    /// the kinds do not fit together, or that no kind of number has the missing one's unit.
+    /// the kinds do not fit together. A unit no quantity has is a derived quantity.
     pub fn settle_kinds(
         self,
         kinds: [Option<ValueKind>; 3],
@@ -98,7 +98,7 @@ impl MathOp {
                             "{} is {}, not a {}",
                             self.formula(),
                             describe(dimension),
-                            result.label().to_lowercase()
+                            result.describe()
                         ))
                     };
                 }
@@ -122,15 +122,8 @@ impl MathOp {
             ),
             _ => return Ok(kinds),
         };
-        let Some(kind) = ValueKind::of_dimension(dimension) else {
-            let name = ["A", "B", "the result"][missing];
-            return Err(format!(
-                "{name} would be in {}, and no kind of number is",
-                dimension.si()
-            ));
-        };
         let mut kinds = kinds;
-        kinds[missing] = Some(kind);
+        kinds[missing] = Some(ValueKind::of_dimension(dimension));
         Ok(kinds)
     }
 
@@ -162,13 +155,13 @@ impl MathOp {
     }
 }
 
-/// What numbers of a dimension are, for messages: "a force", or "in kg m^3" for a dimension
-/// no kind of number has.
+/// What numbers of a dimension are, for messages: "a force", or "in kg m³" for a dimension
+/// no quantity has.
 fn describe(dimension: Dimension) -> String {
     match ValueKind::of_dimension(dimension) {
-        Some(ValueKind::Factor) => "a factor".to_owned(),
-        Some(kind) => format!("a {}", kind.label().to_lowercase()),
-        None => format!("in {}", dimension.si()),
+        ValueKind::Factor => "a factor".to_owned(),
+        ValueKind::Derived(_) => format!("in {}", dimension.si()),
+        kind => format!("a {}", kind.describe()),
     }
 }
 
@@ -246,10 +239,20 @@ mod tests {
         // Kinds that do not fit, and units no kind has.
         let wrong = divide([q(Force), q(Length), q(Pressure)]).unwrap_err();
         assert_eq!(wrong, "A / B is a force per length, not a pressure");
-        let none = multiply([q(SecondMomentOfArea), q(Pressure), None]).unwrap_err();
+        // An intermediate result of a unit no quantity has is a derived quantity, and
+        // turns back into a known one further on.
+        let derived = multiply([q(SecondMomentOfArea), q(Pressure), None]).unwrap()[2];
         assert_eq!(
-            none,
-            "the result would be in kg m^3 s^-2, and no kind of number is"
+            derived.map(ValueKind::describe).as_deref(),
+            Some("quantity in kg m³/s²")
+        );
+        assert_eq!(
+            divide([derived, q(Pressure), None]).unwrap()[2],
+            q(SecondMomentOfArea)
+        );
+        assert_eq!(
+            divide([q(Force), derived, q(Length)]).unwrap_err(),
+            "A / B is in 1/m², not a length"
         );
         // Only two of three known: nothing to find yet.
         assert_eq!(divide([q(Force), None, None]), Ok([q(Force), None, None]));

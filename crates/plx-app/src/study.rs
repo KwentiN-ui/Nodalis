@@ -910,6 +910,13 @@ pub fn shown(kind: ValueKind, value: f64, units: UnitSystem) -> String {
         }
         ValueKind::Count => format!("{value:.0}"),
         ValueKind::Factor => crate::results::format_value(value as f32),
+        ValueKind::Derived(dimension) => {
+            format!(
+                "{} {}",
+                crate::results::format_value(value as f32),
+                dimension.si()
+            )
+        }
     }
 }
 

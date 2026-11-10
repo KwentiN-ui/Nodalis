@@ -190,7 +190,7 @@ impl Quantity {
 }
 
 /// Powers of length, mass, time, temperature and angle a quantity is made of.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Dimension {
     pub length: i8,
     pub mass: i8,
@@ -250,26 +250,40 @@ impl Dimension {
             .find(|q| q.dimension() == self)
     }
 
-    /// The dimension in SI base units, such as "kg m^-1 s^-2", for messages.
+    /// The dimension in SI base units, such as "kg/(m s²)", short for the narrow fields of
+    /// the blocks.
     pub fn si(self) -> String {
-        let parts: Vec<String> = [
+        let units = [
             ("kg", self.mass),
             ("m", self.length),
             ("s", self.time),
             ("K", self.temperature),
             ("rad", self.angle),
-        ]
-        .into_iter()
-        .filter(|(_, power)| *power != 0)
-        .map(|(unit, power)| match power {
+        ];
+        let part = |(unit, power): (&str, i8)| match power {
             1 => unit.to_owned(),
+            2 => format!("{unit}²"),
+            3 => format!("{unit}³"),
             _ => format!("{unit}^{power}"),
-        })
-        .collect();
-        if parts.is_empty() {
-            "no unit".to_owned()
+        };
+        let over: Vec<String> = (units.into_iter())
+            .filter(|(_, power)| *power > 0)
+            .map(part)
+            .collect();
+        let under: Vec<String> = (units.into_iter())
+            .filter(|(_, power)| *power < 0)
+            .map(|(unit, power)| part((unit, -power)))
+            .collect();
+        let over = if over.is_empty() {
+            "1".to_owned()
         } else {
-            parts.join(" ")
+            over.join(" ")
+        };
+        match under.len() {
+            0 if over == "1" => "no unit".to_owned(),
+            0 => over,
+            1 => format!("{over}/{}", under[0]),
+            _ => format!("{over}/({})", under.join(" ")),
         }
     }
 }

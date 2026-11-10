@@ -12739,6 +12739,77 @@ mod tests {
     }
 
     #[test]
+    fn intermediate_results_have_any_unit_and_convert_back() {
+        let force = ValueKind::Quantity(Quantity::Force);
+        let parameters = Node::read(ProjectNode::Parameters(file::ParameterSet {
+            id: 1,
+            name: "Parameters".into(),
+            parameters: vec![
+                Parameter::new("F", force, 2.0),
+                Parameter::new("L", ValueKind::LENGTH, 3.0),
+                Parameter::new("E", ValueKind::Quantity(Quantity::Energy), 1.0),
+            ],
+            ..Default::default()
+        }));
+        let math = |id, operation| {
+            Node::read(ProjectNode::Math(file::MathBlock {
+                id,
+                name: format!("Math-{id}"),
+                operation,
+                values: vec![0.0, 0.0],
+                ..Default::default()
+            }))
+        };
+        let mut nodes = vec![
+            parameters,
+            math(2, MathOp::Multiply),
+            math(3, MathOp::Add),
+            math(4, MathOp::Multiply),
+            math(5, MathOp::Divide),
+        ];
+        let value = |name: &str| vec![links::VALUE.to_owned(), name.to_owned()];
+        let input = |key: &str| vec![links::PARAMETERS.to_owned(), key.to_owned()];
+        let link = |source, item: Vec<String>, target, key: &str| Link {
+            source,
+            target,
+            item,
+            slot: input(key),
+            ..Default::default()
+        };
+        let result = value(RESULT);
+        let mut links = vec![
+            link(1, value("F"), 2, "a"),
+            link(1, value("L"), 2, "b"),
+            link(1, value("E"), 3, "a"),
+            link(1, value("F"), 4, "a"),
+            link(1, value("F"), 4, "b"),
+        ];
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        // A force times a length, a moment, adds to an energy: the unit is the same.
+        assert_eq!(
+            value_kind(&nodes, 2, &result),
+            Some(ValueKind::Quantity(Quantity::Moment))
+        );
+        assert_eq!(refusal(&nodes, &links, 2, &result, 3, &input("b")), None);
+        // A force times a force has a unit no quantity has, and goes on to Math blocks...
+        let squared = value_kind(&nodes, 4, &result);
+        assert_eq!(
+            squared.map(ValueKind::describe).as_deref(),
+            Some("quantity in kg² m²/s^4")
+        );
+        assert_eq!(refusal(&nodes, &links, 4, &result, 5, &input("a")), None);
+        links.push(link(4, result.clone(), 5, "a"));
+        links.push(link(1, value("F"), 5, "b"));
+        let (_, removed) = numbers::refresh_kinds(&mut nodes, &mut links);
+        assert!(!removed);
+        // ... where over a force it is a force again.
+        assert_eq!(value_kind(&nodes, 5, &result), Some(force));
+        // A sum of an energy takes it no more.
+        let why = refusal(&nodes, &links, 4, &result, 3, &input("b")).unwrap();
+        assert!(why.contains("kg² m²/s^4"), "{why}");
+    }
+
+    #[test]
     fn a_frame_lies_around_its_blocks_with_its_label_above() {
         let mut graph = Snarl::new();
         graph.insert_node(egui::pos2(0.0, 0.0), 1);

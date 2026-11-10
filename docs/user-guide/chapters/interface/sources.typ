@@ -428,10 +428,17 @@ force times a length a moment, a length over a time a velocity and a length over
 factor without unit. It also works the other way round: with a force at A and the result linked
 to a stiffness, B is a length and its field shows millimetres. An input of a product that no
 link gives, and that the other numbers do not make anything else, is a factor, so a length
-times 2 stays a length. A link is refused when its unit does not fit, or when no kind of number
-has the unit that would follow, such as a second moment of area times a pressure. Typed values
-are kept in SI units and shown in the units of the block, so a value typed while a block had
-another unit keeps its number in SI units.
+times 2 stays a length. A link is refused only when its unit does not fit, such as a length at
+a sum of forces, or a moment from a product whose result goes to a stiffness.
+
+An intermediate result may have any unit. When no quantity has its unit, such as a force times
+a force, the block shows it in SI base units, and it goes on to other Math blocks only. Once a
+later block brings it back to a unit a quantity has, it is that quantity again and goes to any
+number of it. Numbers of the same unit fit together whatever their name: a moment goes to an
+energy and then takes that name.
+
+#screenshot("schematic-math-derived.png", [A force squared has no quantity of its own and is
+  shown in kg² m²/s^4; divided by the force again, it is a force of 4912 N])
 
 Changing the operation removes links to inputs the block no longer has, and links whose kinds
 no longer fit, such as the length at B when a quotient of a force and a length becomes a sum.
