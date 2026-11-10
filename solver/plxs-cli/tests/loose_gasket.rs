@@ -186,7 +186,7 @@ fn a_block_pressed_into_a_shallow_v_stays_centred() {
 /// springs to ground (`stabilize` on their `*SPRING`), pressed 0.2 down by a plate, which
 /// then lifts 0.4 and slides 0.5 sideways; friction 0.5. Bulging, the block touches the
 /// walls of the groove.
-fn gasket(stabilize: &str) -> String {
+fn gasket(stabilize: &str, solver: &str) -> String {
     let mut s = String::from("*NODE\n");
     let bottom = grid(&mut s, 1, [-0.8, 0.8], [-0.3, 0.0], 16, 3, |_| 0.0);
     let left = grid(&mut s, 101, [-0.8, -0.6], [0.0, 0.9], 2, 12, |_| 0.0);
@@ -252,7 +252,8 @@ fn gasket(stabilize: &str) -> String {
         writeln!(s, "{},", plate.node(i, 2)).unwrap();
     }
     writeln!(s, "*NSET, NSET=CENTRE\n{},", block.node(5, 5)).unwrap();
-    s.push_str(
+    write!(
+        s,
         "*MATERIAL, NAME=RUBBER\n*HYPERELASTIC, NEO HOOKE\n200, 0.0002\n\
 *MATERIAL, NAME=STEEL\n*ELASTIC\n2e5, 0.3\n\
 *SOLID SECTION, ELSET=BLOCK, MATERIAL=RUBBER\n*SOLID SECTION, ELSET=BOTTOM, MATERIAL=STEEL\n\
@@ -263,16 +264,17 @@ fn gasket(stabilize: &str) -> String {
 *CONTACT PAIR, INTERACTION=ROUGH, TYPE=SURFACE TO SURFACE\nGASKET, GROOVE\n\
 *CONTACT PAIR, INTERACTION=ROUGH, TYPE=SURFACE TO SURFACE\nGASKET, PLATE\n\
 *AMPLITUDE, NAME=SIDEWAYS\n0, 0, 1, 0, 2, 0.5\n*AMPLITUDE, NAME=DOWN\n0, 0, 1, -0.2, 2, 0.2\n\
-*STEP, NLGEOM, INC=1000\n*STATIC\n0.05, 2, 1e-5, 0.05\n*BOUNDARY\nFIX, 1, 2, 0\n\
+*STEP, NLGEOM, INC=1000\n*STATIC{solver}\n0.05, 2, 1e-5, 0.05\n*BOUNDARY\nFIX, 1, 2, 0\n\
 *BOUNDARY, AMPLITUDE=SIDEWAYS\nPRESS, 1, 1, 1\n*BOUNDARY, AMPLITUDE=DOWN\nPRESS, 2, 2, 1\n\
 *NODE PRINT, NSET=CENTRE\nU\n*END STEP\n",
-    );
+    )
+    .unwrap();
     s
 }
 
 #[test]
 fn a_gasket_the_plate_lets_go_of_stays_in_its_groove() {
-    let (finished, log, rows, dat) = run("gasket", &gasket(", STABILIZE=10"));
+    let (finished, log, rows, dat) = run("gasket", &gasket(", STABILIZE=10", ""));
     assert!(finished, "the step did not finish:\n{log}");
     assert_eq!(rows.last().unwrap()[5], 2.0, "{rows:?}");
     let cutbacks = rows.iter().filter(|r| r[2] > 1.0).count();
@@ -286,11 +288,29 @@ fn a_gasket_the_plate_lets_go_of_stays_in_its_groove() {
     );
 }
 
+/// The iterative equation solver on the same gasket: sliding friction (GMRES with the
+/// multigrid inside) and a tangent that may turn indefinite once the plate lifted off,
+/// which cuts the increment back instead of stopping the step.
+#[test]
+fn the_iterative_solver_lets_go_of_the_gasket_too() {
+    let (finished, log, rows, dat) = run(
+        "gasket-iterative",
+        &gasket(", STABILIZE=10", ", SOLVER=ITERATIVE CHOLESKY"),
+    );
+    assert!(finished, "the step did not finish:\n{log}");
+    assert_eq!(rows.last().unwrap()[5], 2.0, "{rows:?}");
+    let [x, y] = last_displacement(&dat);
+    assert!(
+        x > 0.0 && x < 0.1 + 1e-3 && y.abs() < 0.01,
+        "the gasket moved by ({x}, {y})"
+    );
+}
+
 /// Without the stabilization the loose gasket stops the step once the plate lifted off: the
 /// test above checks what the stabilization changes.
 #[test]
 fn a_gasket_on_weak_springs_alone_stops_once_the_plate_lifted_off() {
-    let (finished, _, rows, _) = run("gasket-weak", &gasket(""));
+    let (finished, _, rows, _) = run("gasket-weak", &gasket("", ""));
     let reached = rows.last().map_or(0.0, |r| r[5]);
     assert!(
         !finished && reached > 1.4 && reached < 2.0,
