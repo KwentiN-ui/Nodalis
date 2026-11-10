@@ -197,3 +197,63 @@ fn a_cantilever_column_buckles_at_the_euler_load() {
     let euler = std::f64::consts::PI.powi(2) * young * inertia / (4.0 * length * length);
     assert!((factor - euler).abs() < 1e-3 * euler, "{factor} vs {euler}");
 }
+
+/// The rows of the last block `name` of the frd file in `dir`: node and values.
+fn frd_block(dir: &Path, job: &str, name: &str) -> Vec<(usize, Vec<f64>)> {
+    let frd = std::fs::read_to_string(dir.join(format!("{job}.frd"))).unwrap();
+    let lines: Vec<&str> = frd.lines().collect();
+    let start = (lines.iter())
+        .rposition(|l| l.starts_with(&format!(" -4  {name} ")))
+        .unwrap_or_else(|| panic!("no {name} in the frd file"));
+    (lines[start + 1..].iter())
+        .take_while(|l| !l.starts_with(" -3"))
+        .filter(|l| l.starts_with(" -1"))
+        .map(|l| {
+            let node = l[3..13].trim().parse().unwrap();
+            let values = (l.as_bytes()[13..].chunks(12))
+                .map(|c| std::str::from_utf8(c).unwrap().trim().parse().unwrap())
+                .collect();
+            (node, values)
+        })
+        .collect()
+}
+
+#[test]
+fn a_beam_writes_its_normal_stress_and_section_forces() {
+    // A cantilever pulled along its axis and loaded across at the tip: N / A along it in
+    // STRESS, and in SECFORC the normal force and the bending moment Q (L - x).
+    let (n, length, area, pull, across) = (10, 1000.0, 100.0, 1000.0, 1.0);
+    let input = format!(
+        "{}*Boundary\n1, 1, 6, 0\n*Step\n*Static\n*Cload\n{tip}, 1, {pull}\n{tip}, 2, {across}\n\
+         *Node file\nU\n*El file\nS\n*End step\n",
+        beam(n, length, 210000.0, area, 1000.0, 7.85e-9),
+        tip = n + 1
+    );
+    let job = "section-forces";
+    let dir = work_dir(job);
+    std::fs::write(dir.join(format!("{job}.inp")), input).unwrap();
+    let output = Command::new(plxs())
+        .arg(job)
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stress = frd_block(&dir, job, "STRESS");
+    let forces = frd_block(&dir, job, "SECFORC");
+    assert_eq!(forces.len(), n + 1);
+    for (node, s) in &stress {
+        assert!(
+            (s[0] - pull / area).abs() < 1e-3 * pull / area,
+            "{node}: {s:?}"
+        );
+    }
+    for (node, f) in &forces {
+        let x = length * (*node - 1) as f64 / n as f64;
+        assert!((f[0] - pull).abs() < 1e-3 * pull, "{node}: {f:?}");
+        let moment = across * (length - x);
+        assert!(
+            (f[1] - moment).abs() < 1e-3 * across * length,
+            "{node}: {f:?} vs {moment}"
+        );
+    }
+}

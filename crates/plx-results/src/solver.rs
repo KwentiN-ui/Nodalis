@@ -316,14 +316,14 @@ pub fn from_solver(solved: &SolverResults) -> SolverImport {
                     if target.value == 0.0 {
                         target.value = value;
                     }
-                    target.fields.push(converted);
+                    target.fields.extend(crate::split_rotations(converted));
                 }
                 None => import.increments.push(Increment {
                     step: written.step,
                     increment,
                     kind,
                     value,
-                    fields: vec![converted],
+                    fields: crate::split_rotations(converted),
                     nodal_diameter,
                 }),
             }

@@ -341,7 +341,7 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `structural/symmetrie-30` | A | M2 | plxs 0.2.0 | S8, \*TRANSFORM, \*SHELL SECTION, \*STATIC |
 | `structural/symmetrie-frei` | A | M2 | plxs 0.2.0 | S8, \*SHELL SECTION, \*STATIC |
 | `structural/symmetrie-voll` | A | M2 | plxs 0.2.0 | S8, \*SHELL SECTION, \*STATIC |
-| `structural/u1-angle` | A | M2 | plxs 0.2.0 | \*USER ELEMENT, U1, \*BEAM SECTION, \*STATIC |
-| `structural/u1-beam` | A | M2 | plxs 0.2.0 | \*USER ELEMENT, U1, \*BEAM SECTION, \*STATIC |
-| `structural/u1-round-sketch` | A | M2 | plxs 0.2.0 | \*USER ELEMENT, U1, \*BEAM SECTION, \*STATIC |
-| `structural/u1-sketch` | A | M2 | plxs 0.2.0 | \*USER ELEMENT, U1, \*BEAM SECTION, \*STATIC |
+| `structural/u1-angle` | A | M2 | plxs 0.3.3 | \*USER ELEMENT, U1, \*BEAM SECTION, \*STATIC |
+| `structural/u1-beam` | A | M2 | plxs 0.3.3 | \*USER ELEMENT, U1, \*BEAM SECTION, \*STATIC |
+| `structural/u1-round-sketch` | A | M2 | plxs 0.3.3 | \*USER ELEMENT, U1, \*BEAM SECTION, \*STATIC |
+| `structural/u1-sketch` | A | M2 | plxs 0.3.3 | \*USER ELEMENT, U1, \*BEAM SECTION, \*STATIC |

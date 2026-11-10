@@ -385,7 +385,6 @@ fn companion_input(results: &Path) -> Option<PathBuf> {
 /// would show as a part per gap. Returns whether the input defines contact.
 fn adopt_input_parts(
     mesh: &mut FeMesh,
-    increments: &mut [plx_results::Increment],
     input: &Path,
     units: UnitSystem,
     sections: &mut InputSections,
@@ -393,7 +392,7 @@ fn adopt_input_parts(
     match read_inp(input) {
         Ok(mut import) => {
             mesh.remove_elements(&import.skipped_elements);
-            adopt_general_beams(mesh, increments, &import.mesh);
+            adopt_general_beams(mesh, &import.mesh);
             *sections = shown_sections(&mut import, units);
             let parts: Vec<_> = (import.mesh.parts.into_iter())
                 .map(|mut part| {
@@ -413,45 +412,14 @@ fn adopt_input_parts(
 }
 
 /// Adds the user elements U1 of general beam sections, which the solver leaves out of the
-/// results, from the input it ran: their nodes are there, so they are drawn as lines. Their
-/// stresses and strains are section forces, not stresses, so the nodes that belong to them
-/// only show none.
-fn adopt_general_beams(
-    mesh: &mut FeMesh,
-    increments: &mut [plx_results::Increment],
-    input: &FeMesh,
-) {
-    let mut beam_nodes = std::collections::BTreeSet::new();
+/// results, from the input it ran: their nodes are there, so they are drawn as lines and
+/// coloured by their results (the solver writes the normal stress along the beam there).
+fn adopt_general_beams(mesh: &mut FeMesh, input: &FeMesh) {
     for element in input.elements() {
         let missing = mesh.element(element.id).is_none()
             && element.nodes.iter().all(|&n| mesh.node(n).is_some());
         if missing && element.type_name.eq_ignore_ascii_case("U1") {
-            beam_nodes.extend(element.nodes.iter().copied());
             let _ = mesh.add_element(element.clone());
-        }
-    }
-    if beam_nodes.is_empty() {
-        return;
-    }
-    for element in mesh.elements() {
-        if !element.type_name.eq_ignore_ascii_case("U1") {
-            for node in &element.nodes {
-                beam_nodes.remove(node);
-            }
-        }
-    }
-    let indices: Vec<usize> = (beam_nodes.iter())
-        .filter_map(|&n| mesh.node_index(n))
-        .collect();
-    for field in increments.iter_mut().flat_map(|i| &mut i.fields) {
-        if matches!(field.rank, plx_results::FieldRank::Tensor(_)) {
-            for component in &mut field.components {
-                for &index in &indices {
-                    if let Some(value) = component.values.get_mut(index) {
-                        *value = f32::NAN;
-                    }
-                }
-            }
         }
     }
 }
@@ -536,15 +504,8 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
             crate::results::convert_results(&mut mesh, &mut increments, units);
             // The results group the elements by material; the input it ran, named like the
             // results, knows the parts.
-            contact = companion_input(path).map(|input| {
-                adopt_input_parts(
-                    &mut mesh,
-                    &mut increments,
-                    &input,
-                    units,
-                    &mut input_sections,
-                )
-            });
+            contact = companion_input(path)
+                .map(|input| adopt_input_parts(&mut mesh, &input, units, &mut input_sections));
             (
                 mesh,
                 warnings,
@@ -2496,7 +2457,7 @@ mod tests {
     }
 
     #[test]
-    fn general_beams_are_taken_from_the_input_without_their_section_forces() {
+    fn general_beams_are_taken_from_the_input() {
         let node_mesh = || {
             let mut mesh = FeMesh::default();
             for id in 1..=4 {
@@ -2517,34 +2478,9 @@ mod tests {
         input.add_element(element(1, "U1", vec![1, 2])).unwrap();
         input.add_element(element(2, "U1", vec![2, 3])).unwrap();
         input.add_element(element(3, "T3D2", vec![3, 4])).unwrap();
-        let component = |name: &str| plx_results::Component {
-            name: name.into(),
-            values: vec![1.0; 4],
-            derived: false,
-            out_of_plane: false,
-        };
-        let stress = ["SXX", "SYY", "SZZ", "SXY", "SYZ", "SZX"]
-            .map(component)
-            .to_vec();
-        let mut increments = vec![plx_results::Increment {
-            step: 1,
-            increment: 1,
-            kind: plx_results::AnalysisKind::Static,
-            value: 1.0,
-            fields: vec![
-                plx_results::Field::new("STRESS", stress),
-                plx_results::Field::new("DISP", ["D1", "D2", "D3"].map(component).to_vec()),
-            ],
-            nodal_diameter: None,
-        }];
-        adopt_general_beams(&mut mesh, &mut increments, &input);
+        adopt_general_beams(&mut mesh, &input);
         assert_eq!(mesh.element_count(), 3);
         assert_eq!(mesh.element(1).unwrap().type_name, "U1");
-        let sxx = &increments[0].fields[0].components[0].values;
-        // Node 3 belongs to the truss too and keeps its stress.
-        assert!(sxx[0].is_nan() && sxx[1].is_nan());
-        assert_eq!(sxx[2..], [1.0, 1.0]);
-        assert_eq!(increments[0].fields[1].components[0].values, vec![1.0; 4]);
     }
 
     fn testdata(name: &str) -> PathBuf {

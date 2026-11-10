@@ -1,5 +1,38 @@
 use crate::{Component, Field, FieldRank, TensorKind};
 
+/// Splits the rotations of beam nodes (`D4` to `D6` of `DISP`) and the moments on them
+/// (`F4` to `F6` of `FORC`), which the solver writes besides the translations and forces,
+/// into fields of their own, `ROTATION` (`UR1` to `UR3`) and `MOMENT` (`M1` to `M3`): the
+/// displacements stay a vector of three, so that their magnitude and the deformation scale
+/// are those of the translations, and every field converts into its own unit.
+pub fn split_rotations(mut field: Field) -> Vec<Field> {
+    let (raw, name, renamed): ([&str; 3], &str, [&str; 3]) = match field.name.as_str() {
+        "DISP" => (["D4", "D5", "D6"], "ROTATION", ["UR1", "UR2", "UR3"]),
+        "FORC" => (["F4", "F5", "F6"], "MOMENT", ["M1", "M2", "M3"]),
+        _ => return vec![field],
+    };
+    if !raw
+        .iter()
+        .all(|r| field.components.iter().any(|c| c.name == *r))
+    {
+        return vec![field];
+    }
+    let mut moved = Vec::new();
+    for (r, n) in raw.iter().zip(renamed) {
+        let at = (field.components.iter())
+            .position(|c| c.name == *r)
+            .unwrap();
+        let mut component = field.components.remove(at);
+        component.name = n.to_string();
+        moved.push(component);
+    }
+    let mut rebuilt = Field::new(field.name.clone(), std::mem::take(&mut field.components));
+    add_derived_components(&mut rebuilt);
+    let mut other = Field::new(name, moved);
+    add_derived_components(&mut other);
+    vec![rebuilt, other]
+}
+
 /// Adds the quantities shown besides the raw components, in this order: the
 /// magnitude `ALL` of vector fields first; for tensor fields the equivalent value(s) first and
 /// the principal values last. Which ones follows from the field's rank.

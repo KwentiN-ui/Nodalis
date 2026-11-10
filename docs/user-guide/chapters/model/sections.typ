@@ -85,8 +85,15 @@ and second moments of area. So:
 - The shear stiffness is k G A with k the share of the area in the web (a leg of an angle), and
   the torsion stiffness k G (I11 + I22). For open profiles the torsion is far too stiff, CalculiX
   knows no warping.
-- The results draw the beams as lines with their profile swept along them. CalculiX gives
-  section forces instead of stresses for them; the results show no stresses on these beams.
+- The results draw the beams as lines with their profile swept along them, coloured by their
+  results. The stress (S) of these beams is the normal stress N / A along the beam; the stress
+  of the outer fibres is not known, since a general section has no shape (and the wires of a
+  rope bend each about their own axis). #ui("SECFORC") holds the section forces at the nodes:
+  the normal force N, the bending moment M (its magnitude) and the torque MT. The rotations of
+  the beam nodes are the field #ui("ROTATION") (UR1 to UR3, as rotation vectors), the moments
+  of the reaction forces #ui("MOMENT"). A rope on a frictionless sheave may spin about its own
+  axis without resistance, which shows as a large UR about the rope's direction: it changes
+  nothing else; hold the rotation about the axis at one end to keep it at zero.
 
 #screenshot("cross-section-angle.png", [An angle: its principal axes are turned against the
   1-direction, and CalculiX takes it as a general section of U1])
