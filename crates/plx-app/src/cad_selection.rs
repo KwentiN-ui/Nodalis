@@ -685,10 +685,11 @@ mod tests {
     }
 
     /// A cantilever of two CAD lines along x, 0..60 and 60..100, meshed as beams: fixed at
-    /// x = 0, the lines tied at x = 60 and pulled down at x = 100, all picked on the lines
-    /// in the geometry mode. Meshed coarse, then both lines remeshed fine: the picks are CAD
-    /// vertices and edges, which find their nodes on both meshes, and the solver gives the
-    /// beam theory's tip deflection both times.
+    /// x = 0 and pulled down at x = 100, picked on the lines in the geometry mode. The lines
+    /// continue each other without a kink, so they are one part sharing the node at x = 60.
+    /// Meshed coarse, then remeshed fine: the picks are CAD vertices and edges, which find
+    /// their nodes on both meshes, and the solver gives the beam theory's tip deflection
+    /// both times.
     #[test]
     fn selections_on_lines_survive_remeshing() {
         if !gmsh_available() {
@@ -712,7 +713,7 @@ mod tests {
         geometry.meshing.max_size = 20.0;
         model.set_mesh(plx_mesher::generate_mesh(&geometry).unwrap().mesh);
         let lines: Vec<String> = model.mesh.parts.iter().map(|p| p.name.clone()).collect();
-        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines.len(), 1, "{lines:?}");
 
         // Looking down onto the lines at x, within 1 of them.
         let hit_at = |model: &Model, x: f64| {
@@ -749,7 +750,7 @@ mod tests {
             "{line:?}"
         );
         // A point, e.g. of a remote displacement, is the nearest end.
-        let point = Picker::default().pick(&model, &hit_at(&model, 80.0), Target::Point, 1.0);
+        let point = Picker::default().pick(&model, &hit_at(&model, 90.0), Target::Point, 1.0);
         let crate::selection::Items::Geometry(point) = point else {
             panic!("{point:?}");
         };
@@ -786,24 +787,12 @@ mod tests {
                 name: "Rect".into(),
                 profile: plx_model::BeamProfile::Rect { a: 10.0, b: 10.0 },
             }],
-            node_ties: vec![plx_model::NodeTie {
-                region: tied.clone(),
-                ..plx_model::NodeTie::new("Node_Tie-1")
-            }],
             steps: vec![Step::new_static("Step-1")],
             ..FeModel::default()
         };
-        // The other line by its part.
-        let other = (lines.iter())
-            .find(|name| {
-                let part = Region::Parts(vec![(*name).clone()]);
-                part.elements(&model.mesh) != line.elements(&model.mesh)
-            })
-            .unwrap();
-        let mut second = model.fe.sections[0].clone();
-        second.name = "Section-2".into();
-        second.region = Region::Parts(vec![other.clone()]);
-        model.fe.sections.push(second);
+        // The section on the whole part: the line picked away from its ends is one of its
+        // two CAD edges.
+        model.fe.sections[0].region = Region::Parts(lines.clone());
         let step = &mut model.fe.steps[0];
         step.boundary_conditions.push(BoundaryCondition {
             id: crate::test_ids::named("Fix"),
@@ -835,7 +824,7 @@ mod tests {
 
         let check = |model: &Model| {
             let mesh = &model.mesh;
-            for (region, x, count) in [(&fixed, 0.0, 1), (&tied, 60.0, 2), (&pulled, 100.0, 1)] {
+            for (region, x, count) in [(&fixed, 0.0, 1), (&tied, 60.0, 1), (&pulled, 100.0, 1)] {
                 assert!(region.missing_reference(mesh).is_none(), "{region:?}");
                 let nodes = region.nodes(mesh);
                 assert_eq!(nodes.len(), count, "{region:?}");
@@ -843,11 +832,9 @@ mod tests {
             }
             let elements = line.elements(mesh);
             assert!(!elements.is_empty());
-            assert_eq!(
-                elements,
-                Region::Parts(vec![lines.iter().find(|n| *n != other).unwrap().clone()])
-                    .elements(mesh)
-            );
+            // The edge picked is the part's first 60 of its 100.
+            let all = Region::Parts(lines.clone()).elements(mesh);
+            assert!(elements.len() < all.len(), "{elements:?} of {all:?}");
             elements.len()
         };
         let coarse = check(&model);

@@ -441,12 +441,45 @@ impl FeModel {
         let edited: Vec<(String, PartPair)> = (self.contact_regions.iter().filter(|r| ours(r)))
             .map(|r| (r.name.clone(), key(&r.side_a, &r.side_b)))
             .collect();
+        // Touching surfaces, then ropes lying on a surface: a rope slides over a sheave, so
+        // a bonded or no separation detection finds it as frictionless contact.
+        let mut candidates: Vec<(Region, Region, ContactBehavior)> = (items.iter())
+            .map(|item| {
+                (
+                    region(&item.master),
+                    region(&item.slave),
+                    detection.behavior,
+                )
+            })
+            .collect();
+        let rope_behavior = match detection.behavior {
+            ContactBehavior::Bonded | ContactBehavior::NoSeparation => {
+                ContactBehavior::Frictionless
+            }
+            other => other,
+        };
+        for (faces, rope) in self.ropes_on_surfaces(mesh, skins, &searched, tolerance) {
+            let faces = if display.is_some() {
+                Region::Geometry(mesh.cad_entities_touched(&faces))
+            } else {
+                match mesh.whole_cad_faces(&faces) {
+                    Some(entities) => Region::Geometry(entities),
+                    None => Region::Faces(faces),
+                }
+            };
+            let rope = Region::Parts(vec![mesh.parts[rope].name.clone()]);
+            candidates.push((faces, rope, rope_behavior));
+        }
         let mut found_again = HashSet::new();
-        for item in &items {
-            let mut found = ContactRegion::new("", detection.behavior);
-            found.side_a = region(&item.master);
-            found.side_b = region(&item.slave);
-            let empty = |r: &Region| matches!(r, Region::Faces(f) if f.is_empty());
+        for (side_a, side_b, behavior) in candidates {
+            let mut found = ContactRegion::new("", behavior);
+            found.side_a = side_a;
+            found.side_b = side_b;
+            let empty = |r: &Region| match r {
+                Region::Faces(f) => f.is_empty(),
+                Region::Geometry(g) => g.is_empty(),
+                _ => false,
+            };
             if empty(&found.side_a) || empty(&found.side_b) {
                 continue;
             }
@@ -489,6 +522,94 @@ impl FeModel {
             self.detect_line_ends(index, mesh, visible, &mut report);
         }
         Some(report)
+    }
+
+    /// Ropes lying on surfaces: of each searched part of line elements whose beam section
+    /// has a contact radius (a rope profile), the faces of other searched parts its axis
+    /// passes within the radius plus `tolerance`, widened to the whole surface patches they
+    /// lie on, so that the rope can run along them. One entry per rope and touched part:
+    /// the faces and the rope's part index.
+    fn ropes_on_surfaces(
+        &self,
+        mesh: &FeMesh,
+        skins: &[PartSkin],
+        searched: &[bool],
+        tolerance: f64,
+    ) -> Vec<(Vec<(plx_mesh::ElementId, u8)>, usize)> {
+        let coords = mesh.coords();
+        let elements = mesh.elements();
+        let mut found = Vec::new();
+        for (rope, skin) in skins.iter().enumerate() {
+            if !searched.get(rope).copied().unwrap_or(false) || skin.lines.is_empty() {
+                continue;
+            }
+            let part = Region::Parts(vec![mesh.parts[rope].name.clone()]);
+            let Some(radius) = self.contact_radius(&part, mesh) else {
+                continue;
+            };
+            let reach = radius + tolerance;
+            // Points along the axis, no further apart than the radius.
+            let mut points = Vec::new();
+            for &[i, j] in &skin.lines {
+                let (a, b) = (coords[i], coords[j]);
+                let length = distance(a, b);
+                let n = ((length / radius).ceil() as usize).max(1);
+                points.extend((0..=n).map(|k| {
+                    let t = k as f64 / n as f64;
+                    [0, 1, 2].map(|d| a[d] + t * (b[d] - a[d]))
+                }));
+            }
+            let (mut low, mut high) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+            for p in &points {
+                for d in 0..3 {
+                    low[d] = low[d].min(p[d] - reach);
+                    high[d] = high[d].max(p[d] + reach);
+                }
+            }
+            for (other, other_skin) in skins.iter().enumerate() {
+                if other == rope || !searched.get(other).copied().unwrap_or(false) {
+                    continue;
+                }
+                let mut patches = BTreeSet::new();
+                for face in &other_skin.faces {
+                    let corners: Vec<[f64; 3]> = face.corners.iter().map(|&c| coords[c]).collect();
+                    let outside = (0..3).any(|d| {
+                        corners.iter().all(|c| c[d] < low[d])
+                            || corners.iter().all(|c| c[d] > high[d])
+                    });
+                    if outside || patches.contains(&face.region) {
+                        continue;
+                    }
+                    let near = points.iter().any(|&p| {
+                        (1..corners.len() - 1).any(|k| {
+                            distance(
+                                p,
+                                crate::contact_check::closest_on_triangle(
+                                    p,
+                                    corners[0],
+                                    corners[k],
+                                    corners[k + 1],
+                                ),
+                            ) <= reach
+                        })
+                    });
+                    if near {
+                        patches.insert(face.region);
+                    }
+                }
+                if patches.is_empty() {
+                    continue;
+                }
+                let mut faces: Vec<(plx_mesh::ElementId, u8)> = (other_skin.faces.iter())
+                    .filter(|f| patches.contains(&f.region))
+                    .map(|f| (elements[f.element].id, (f.face + 1) as u8))
+                    .collect();
+                faces.sort_unstable();
+                faces.dedup();
+                found.push((faces, rope));
+            }
+        }
+        found
     }
 
     /// The node ties of the detection `index`: ends of beams and trusses of different parts
@@ -582,4 +703,8 @@ fn joint_region(mesh: &FeMesh, joint: &LineJoint) -> Region {
     } else {
         Region::Nodes(joint.nodes.clone())
     }
+}
+
+fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
+    (0..3).map(|d| (b[d] - a[d]).powi(2)).sum::<f64>().sqrt()
 }

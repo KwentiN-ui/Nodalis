@@ -11808,10 +11808,9 @@ fn rope_profiles_are_written_with_their_metallic_area() {
     assert_eq!(import.mesh.element(1).unwrap().type_name, "U1");
 }
 
-/// A rope part as the slave of a contact pair touches with its nodes: a node surface of
-/// node-to-surface contact; other methods are refused.
-#[test]
-fn a_rope_slave_is_a_node_surface() {
+/// A rope of 16 mm along x on a block under its middle: the block's top 8 mm below the
+/// rope's axis.
+fn rope_over_block() -> (FeMesh, FeModel) {
     use plx_mesh::{Element, ElementShape, Part};
     let mut mesh = line_chain(10, 0, 1000.0, false);
     // A block under the middle of the rope, its top face (S2) the master.
@@ -11857,6 +11856,14 @@ fn a_rope_slave_is_a_node_surface() {
             bending: plx_model::RopeBending::Share(0.1),
         },
     });
+    (mesh, model)
+}
+
+#[test]
+/// A rope part as the slave of a contact pair touches with its nodes: a node surface of
+/// node-to-surface contact; other methods are refused.
+fn a_rope_slave_is_a_node_surface() {
+    let (mesh, mut model) = rope_over_block();
     model.surface_interactions.push(SurfaceInteraction {
         id: named("Surface_Interaction-1"),
         name: "Surface_Interaction-1".into(),
@@ -11884,4 +11891,140 @@ fn a_rope_slave_is_a_node_surface() {
         write_inp(&mesh, &model, ""),
         Err(WriteError::Unsupported { .. })
     ));
+}
+
+#[test]
+fn a_detection_finds_a_rope_lying_on_a_surface() {
+    let (mesh, mut model) = rope_over_block();
+    model
+        .contact_detections
+        .push(plx_model::ContactDetection::new("Contact_Detection-1"));
+    let skins: Vec<_> = (mesh.parts.iter())
+        .map(|p| plx_mesh::extract_part_skin(&mesh, p, 30.0))
+        .collect();
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!(report.added, 1, "{report:?}");
+    let region = &model.contact_regions[0];
+    // A bonded detection finds the rope as frictionless contact: it slides over a sheave.
+    assert_eq!(region.behavior, plx_model::ContactBehavior::Frictionless);
+    assert_eq!(region.side_b, Region::Parts(vec!["BEAM".into()]));
+    assert!(region.side_a.faces(&mesh).contains(&(101, 2)), "{region:?}");
+    let resolved = model.resolve_contact(region, &mesh);
+    assert!(
+        resolved.node_to_surface && resolved.a_is_master,
+        "{resolved:?}"
+    );
+    // The contact check measures from the rope's surface: the nodes above the block touch.
+    let check = model.check_contact(region, &mesh).unwrap();
+    assert!(check.touching > 0, "{check:?}");
+    assert!(check.max_gap.unwrap_or(0.0) < 1e-6, "{check:?}");
+    // Written as node to surface contact with the rope's nodes, beside the surface to
+    // surface contact of the other regions.
+    let analysis = lowered(&mesh, &model);
+    let pair = &analysis.model.contact.pairs[0];
+    assert_eq!(pair.kind, plxs_core::contact::ContactKind::NodeToSurface);
+    assert!(matches!(
+        analysis.model.sets.surfaces.get(&pair.slave),
+        Some(plxs_core::mesh::Surface::Node(_))
+    ));
+    // A rope beside the block is not found.
+    let (mut far, mut model) = rope_over_block();
+    for id in 101..109 {
+        let p = far.node(id).unwrap();
+        far.set_node(id, [p[0], p[1] - 40.0, p[2]]);
+    }
+    model
+        .contact_detections
+        .push(plx_model::ContactDetection::new("Contact_Detection-1"));
+    let skins: Vec<_> = (far.parts.iter())
+        .map(|p| plx_mesh::extract_part_skin(&far, p, 30.0))
+        .collect();
+    let report = model
+        .detect_contacts(0, &far, &skins, &[true, true])
+        .unwrap();
+    assert_eq!(report.added, 0, "{report:?}");
+}
+
+#[test]
+fn quadratic_lines_of_a_rope_are_written_as_two_u1_each() {
+    // Meshed with second order, as lines from CAD are by default: B32 of 3 nodes.
+    let mesh = line_chain(5, 0, 1000.0, true);
+    let mut model = line_model(
+        &mesh,
+        SectionKind::Beam(BeamSection {
+            orientation: BeamOrientation::Direction([0.0, 0.0, 1.0]),
+            ..beam("Rope")
+        }),
+        LoadKind::force([0.0, 0.0, 100.0]),
+    );
+    model.cross_sections.push(CrossSection {
+        id: named("Rope"),
+        name: "Rope".into(),
+        profile: BeamProfile::Rope {
+            diameter: 16.0,
+            wire: 1.0,
+            fill: 0.5,
+            bending: plx_model::RopeBending::Share(0.1),
+        },
+    });
+    let check = plx_model::MeshCheck::new(&mesh, model.properties.space);
+    assert!(
+        !(model.check(&mesh, &check).iter())
+            .any(|f| f.problem == plx_model::Problem::InvalidSection),
+        "{:?}",
+        model.check(&mesh, &check)
+    );
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let import = read_inp_str(&text, None).unwrap();
+    assert_eq!(import.mesh.element_count(), 10);
+    assert!(
+        (import.mesh.elements().iter()).all(|e| e.type_name == "U1" && e.nodes.len() == 2),
+        "{text}"
+    );
+    // The halves follow each other along the rope: the middle node joins them.
+    let first = import.mesh.element(1).unwrap();
+    assert_eq!(first.nodes, [1, 2]);
+    let second = (import.mesh.elements().iter()).find(|e| e.nodes == [2, 3]);
+    assert!(second.is_some(), "{text}");
+}
+
+#[test]
+fn a_rope_of_quadratic_lines_bends_like_one_of_twice_as_many_linear_ones() {
+    let rope = |mesh: &FeMesh| {
+        let mut model = line_model(
+            mesh,
+            SectionKind::Beam(BeamSection {
+                orientation: BeamOrientation::Direction([0.0, 0.0, 1.0]),
+                ..beam("Rope")
+            }),
+            LoadKind::force([0.0, 1.0, 0.0]),
+        );
+        model.cross_sections.push(CrossSection {
+            id: named("Rope"),
+            name: "Rope".into(),
+            profile: BeamProfile::Rope {
+                diameter: 16.0,
+                wire: 1.0,
+                fill: 0.5,
+                bending: plx_model::RopeBending::Share(0.1),
+            },
+        });
+        model
+    };
+    let quadratic = line_chain(5, 0, 1000.0, true);
+    let linear = line_chain(10, 0, 1000.0, false);
+    let tip = |mesh: &FeMesh, name: &str| {
+        let text = write_inp(mesh, &rope(mesh), "").unwrap();
+        let frd = run_solver(name, &text)?;
+        Some(node_value(&frd, "DISP", "U2", 11))
+    };
+    let (Some(q), Some(l)) = (
+        tip(&quadratic, "rope-quadratic"),
+        tip(&linear, "rope-linear"),
+    ) else {
+        return;
+    };
+    assert!(q > 0.0 && (q - l).abs() < 1e-9 * l, "{q} vs {l}");
 }

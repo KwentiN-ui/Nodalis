@@ -889,9 +889,10 @@ impl Problem {
                  material, or delete it."
             }
             Problem::InvalidSection => {
-                "Edit the section and choose the type that fits its elements, or change the \
-                 element type of the part (double-click it under Mesh). For a membrane \
-                 section mesh the part again with Second order off."
+                "Edit the section and choose the type that fits its elements. Solids and \
+                 shells can change their element type: double-click the part under Mesh. The \
+                 elements of lines follow their section; for a membrane section mesh the part \
+                 again with Second order off, under Meshing Parameters of that part only."
             }
             Problem::NoSection => {
                 "Under Sections create a section for the part or extend an existing one \
@@ -1609,7 +1610,9 @@ impl FeModel {
         }
         let (formulation, _) = self.contact_formulation();
         for (i, pair) in self.contact_pairs.iter().enumerate() {
-            if pair.active && pair.method != formulation {
+            // A rope or beam slave takes node to surface contact beside any formulation.
+            let rope = pair.method == ContactMethod::NodeToSurface && pair.slave.is_lines(mesh);
+            if pair.active && pair.method != formulation && !rope {
                 findings.push(Finding::new(
                     ModelItem::ContactPair(i),
                     Problem::ContactFormulationsDiffer,

@@ -257,6 +257,7 @@ millimetres or metres. Bonded regions whose slave sides share nodes are written 
 Instead of picking every pair of sides by hand, let Nodalis find them:
 #menu("Connections", "Detect Contacts") creates a contact detection. #ui("OK") searches the parts for surfaces that
 touch and adds a contact region for every pair it finds, listed under the detection in the tree.
+Ropes lying on a surface are found too, see @rope-contact.
 
 #screenshot("contact-detection-dialog.png", [A contact detection of all visible parts with the
   derived tolerance])
@@ -650,9 +651,17 @@ Hover over a method in the list to see a short description.
 ==== Ropes on sheaves <rope-contact>
 
 A rope of beam elements (@rope-profiles) can lie on a sheave, a drum or a clamp of solids or
-shells. Create a contact pair with the rope as slave: set #ui("Slave region") to #ui("Parts")
-and click the rope, and pick the running surface of the sheave as master. The slave of beams
-needs #ui("Node to surface"); the other methods are refused when the model is written.
+shells. Give the rope its rope profile first, then #menu("Connections", "Detect Contacts")
+finds it: every searched rope whose axis passes within its radius plus the tolerance of a
+surface of another part becomes a contact region from the whole faces it touches (side A) to
+the rope part (side B). A bonded or no separation detection makes these regions frictionless,
+as a rope slides over a sheave; change the type to #ui("Frictional") for friction.
+
+By hand, create a contact region (or, under #ui("Advanced"), a contact pair) and set one side
+to #ui("Parts") to click the rope; pick the running surface of the sheave for the other side.
+A rope side is always the slave of #ui("Node to surface") contact, whatever formulation the
+other contacts use; a contact pair of a rope refuses the other methods when the model is
+written. The contact check of the region measures the gap from the rope's surface.
 
 Every node of the rope is then a slave node that stays half the rope diameter (the
 #ui("Rope diameter") of its profile) outside the master surface, so the rope's surface, not its

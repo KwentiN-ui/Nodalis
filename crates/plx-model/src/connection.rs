@@ -379,6 +379,9 @@ pub struct Resolved {
     /// Plain-language reasons, one per decision, for the dialog: "Bonded as a tie
     /// constraint: linear, no contact iterations".
     pub why: Vec<String>,
+    /// A side is a rope or beam, whose nodes touch the other side: the region is a contact
+    /// pair of node to surface contact, whatever the formulation of the others.
+    pub node_to_surface: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -534,6 +537,8 @@ struct Side {
     /// Mean edge length of the faces, weighted by area.
     mesh_size: f64,
     area: f64,
+    /// Beams or trusses without faces: a rope that touches the other side with its nodes.
+    lines: bool,
 }
 
 impl Side {
@@ -563,10 +568,14 @@ impl Side {
             area += face_area;
             weighted += face_area * size;
         }
+        let mut lines = false;
         if faces.is_empty() {
             for element in region.elements(mesh) {
                 largest(&mut young, &properties.young, element);
                 largest(&mut conductivity, &properties.conductivity, element);
+                lines |= mesh
+                    .element(element)
+                    .is_some_and(|e| e.shape.family() == plx_mesh::ElementFamily::Line);
             }
         }
         Self {
@@ -574,6 +583,7 @@ impl Side {
             conductivity,
             mesh_size: if area > 0.0 { weighted / area } else { 0.0 },
             area,
+            lines,
         }
     }
 
@@ -700,6 +710,16 @@ impl FeModel {
             conductivity: self.material_of_elements(mesh, |m| m.conductivity),
             detections,
         }
+    }
+
+    /// The contact radius of the beams of `region`: half the diameter of a rope profile on
+    /// its elements, the distance its axis keeps from a surface it touches.
+    pub fn contact_radius(&self, region: &Region, mesh: &FeMesh) -> Option<f64> {
+        let elements: BTreeSet<ElementId> = region.elements(mesh).into_iter().collect();
+        (self.sections.iter())
+            .filter(|s| s.region.elements(mesh).iter().any(|e| elements.contains(e)))
+            .find_map(|s| self.section_profile(&s.kind)?.contact_radius())
+            .filter(|r| *r > 0.0)
     }
 
     /// The formulation of all contact pairs and why: the one chosen at the connections, else
@@ -882,7 +902,11 @@ impl FeModel {
                     let mut pair = ContactPair::new(region.name.clone(), Some(interaction));
                     pair.id = region.id;
                     pair.active = region.active;
-                    pair.method = resolved.formulation;
+                    pair.method = if item.node_to_surface {
+                        ContactMethod::NodeToSurface
+                    } else {
+                        resolved.formulation
+                    };
                     pair.small_sliding = *small_sliding;
                     pair.adjust = adjust.is_some();
                     pair.adjustment_size = *adjust;
@@ -964,7 +988,7 @@ fn union(a: &Region, b: &Region, mesh: &FeMesh) -> Region {
 /// The derivation for one region.
 fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Resolved {
     let Derivation {
-        formulation,
+        mut formulation,
         defaults,
         nlgeom,
         thermal,
@@ -973,9 +997,29 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
     } = *model;
     let settings = &region.settings;
     let mut why = Vec::new();
+    // A rope or beam has nodes only: it is the slave of node to surface contact.
+    let node_to_surface = a.lines != b.lines;
+    let mut contact = region.behavior;
+    if node_to_surface {
+        formulation = ContactMethod::NodeToSurface;
+        why.push(
+            "Node to surface: the nodes of the rope or beam touch the other side, kept the \
+             contact radius of its profile away"
+                .into(),
+        );
+        if contact == ContactBehavior::NoSeparation {
+            contact = ContactBehavior::Frictionless;
+            why.push("No separation of a rope as frictionless contact".into());
+        }
+    }
     // Master: the coarser mesh, so that the finer mesh's nodes cannot pass through it; then
     // the stiffer material; then the larger area.
     let a_is_master = match settings.sides {
+        _ if node_to_surface => {
+            let side = if b.lines { "A" } else { "B" };
+            why.push(format!("Master: side {side}, the surface the rope touches"));
+            b.lines
+        }
         Some(roles) => {
             why.push("Master side as chosen".into());
             roles == SideRoles::AIsMaster
@@ -1021,7 +1065,11 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
         ),
         None => format!("Tolerance: {TOLERANCE_FACTOR} x mesh size"),
     };
-    let bonded_method = match (region.behavior, settings.bonded_method) {
+    let bonded_method = match (contact, settings.bonded_method) {
+        (ContactBehavior::Bonded, _) if node_to_surface => {
+            why.push("Bonded as a tied contact: a rope is held by node to surface contact".into());
+            Some(BondedMethod::Contact)
+        }
         (ContactBehavior::Bonded, Some(BondedMethod::Contact))
             if formulation != ContactMethod::SurfaceToSurface =>
         {
@@ -1071,13 +1119,13 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
     let adjust_to_touch = match settings.interface {
         Some(InterfaceTreatment::AdjustToTouch) => true,
         Some(InterfaceTreatment::AsIs | InterfaceTreatment::Offset(_)) => false,
-        None => region.behavior == ContactBehavior::Bonded,
+        None => contact == ContactBehavior::Bonded,
     };
     let offset = match settings.interface {
         Some(InterfaceTreatment::Offset(offset)) => Some(offset),
         _ => None,
     };
-    let kind = if region.behavior == ContactBehavior::NoSeparation {
+    let kind = if contact == ContactBehavior::NoSeparation {
         why.push(
             "No separation as equations normal to the master side: linear, the sides slide \
              freely"
@@ -1137,15 +1185,11 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
             },
             (false, None) => SurfaceBehavior::Hard,
         };
-        let coefficient = if tied {
-            Some(0.1)
-        } else {
-            region.behavior.friction()
-        };
+        let coefficient = if tied { Some(0.1) } else { contact.friction() };
         let friction = coefficient.map(|coefficient| {
             // Rough and tied contact should not slide, frictional contact converges better
             // with the softer stick slope CalculiX recommends.
-            let ratio = if tied || region.behavior == ContactBehavior::Rough {
+            let ratio = if tied || contact == ContactBehavior::Rough {
                 1.0
             } else {
                 STICK_SLOPE_RATIO
@@ -1222,6 +1266,7 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
         mesh_size,
         conductivity,
         why,
+        node_to_surface,
     }
 }
 
