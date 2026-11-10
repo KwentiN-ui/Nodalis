@@ -136,7 +136,14 @@ colours.
   [Position slider], [Moves the plane through the model.],
   [Flip], [Shows the other half.],
   [Lighten cut surfaces], [Draws the cut faces lighter (default on).],
+  [Uncut parts], [Parts the plane does not cut, for example a rope running through cut sheaves.
+    With #ui("From selection \"...\"") pressed, a click on a part keeps it whole or cuts it
+    again; the list next to it ticks parts by name, also those hidden behind others.
+    #ui("Clear") cuts all parts again.],
 )
+
+#screenshot("section-view-uncut.png", [The rope is an uncut part: the sheaves are cut, the
+  rope stays whole])
 
 In the 3D view the plane has a manipulator: drag the arrow to move the plane, drag the arcs to
 tilt it. Changes are shown at once, as in every tool window (@tool-windows): #ui("Close")

@@ -299,6 +299,11 @@ impl Viewport {
         }
     }
 
+    /// Parts, by index, that the section view leaves whole.
+    pub fn set_uncut_parts(&mut self, uncut: &[bool]) {
+        self.renderer.set_unclipped_parts(uncut);
+    }
+
     /// Draws only the section faces of the parts while the section view is on.
     pub fn set_sections_only(&mut self, only: bool) {
         self.renderer.set_sections_only(only);

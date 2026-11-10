@@ -6285,6 +6285,7 @@ impl Workbench {
                 definition,
                 flipped: false,
                 lighten: false,
+                uncut: Default::default(),
             };
             (cut, true)
         });
@@ -6306,6 +6307,7 @@ impl Workbench {
         let models = self.model.iter_mut().chain(&mut self.geometry);
         for model in models.chain(&mut self.results) {
             model.clip = None;
+            model.uncut.clear();
         }
         let shown = match self.tree_view {
             TreeView::Results => self.results.get_mut(self.current_result),
@@ -6320,9 +6322,18 @@ impl Workbench {
                 let anchor = section.anchor(model.origin());
                 let normal = section.normal();
                 let clip = plx_render::clip_plane(anchor, normal, model.origin());
+                // Parts kept whole by name, so the choice holds for every model shown.
+                let uncut: Vec<bool> = (model.parts.iter())
+                    .map(|p| section.uncut.contains(&p.name))
+                    .collect();
+                model.uncut = (uncut.iter().enumerate())
+                    .filter(|(_, u)| **u)
+                    .map(|(i, _)| i)
+                    .collect();
                 let faces = model.section_meshes(anchor, normal, section.lighten);
                 model.clip = Some(clip);
                 self.viewport.set_section(Some((clip, &faces)));
+                self.viewport.set_uncut_parts(&uncut);
                 let alone = *alone && model.results.is_some();
                 self.viewport.set_sections_only(alone);
                 if alone {
@@ -6333,6 +6344,7 @@ impl Workbench {
             _ => {
                 self.viewport.set_section(None);
                 self.viewport.set_sections_only(false);
+                self.viewport.set_uncut_parts(&[]);
             }
         }
         // The legend of the shown results takes the range on the plane; the others their own.
