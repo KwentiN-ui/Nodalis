@@ -196,8 +196,9 @@ struct Workbench {
     field_output_dialog: Option<FieldOutputDialog>,
     /// Open dialog creating or editing a history output of the shown results.
     history_dialog: Option<HistoryOutputDialog>,
-    /// Open table of a history output component.
-    history_table: Option<HistoryTable>,
+    /// Open tables of history output components, a window each; a plot takes the columns
+    /// chosen in all of them.
+    history_tables: Vec<HistoryTable>,
     /// Diagram of a table selection.
     history_plot: Option<crate::xy_plot::XyData>,
     /// The tree selection whose region is highlighted.
@@ -349,7 +350,7 @@ impl AnalysisWindow {
                 material_library: None,
                 field_output_dialog: None,
                 history_dialog: None,
-                history_table: None,
+                history_tables: Vec::new(),
                 history_plot: None,
                 highlighted: None,
                 analysis: None,
@@ -2409,10 +2410,12 @@ impl Workbench {
         } else if let Some(TreeItem::HotSpot(index)) = response.open {
             self.edit_hot_spot(index);
         } else if let Some(TreeItem::HistoryComponent(set, field, component)) = response.open {
-            let same = (self.history_table.as_ref())
-                .is_some_and(|t| (t.set, t.field, t.component) == (set, field, component));
-            if !same {
-                self.history_table = Some(HistoryTable::new(set, field, component));
+            // A component already open comes to the front; another opens beside it.
+            match (self.history_tables.iter_mut())
+                .find(|t| (t.set, t.field, t.component) == (set, field, component))
+            {
+                Some(table) => table.raise = true,
+                None => (self.history_tables).push(HistoryTable::new(set, field, component)),
             }
         } else if let (Some(TreeItem::Model), TreeView::FeModel) = (&response.open, view) {
             self.edit_model_properties();
@@ -2625,7 +2628,7 @@ impl Workbench {
             && let Some(warnings) = view.set_history_sources(reports, moving_loads, &results.mesh)
         {
             (self.output).extend(warnings.into_iter().map(|w| format!("Warning: {w}")));
-            self.history_table = None;
+            self.history_tables.clear();
         }
         self.update_contour();
     }
@@ -2641,7 +2644,7 @@ impl Workbench {
             let reports = view.hot_spot_reports.clone();
             if let Some(warnings) = view.set_history_sources(reports, moving_loads, &results.mesh) {
                 (self.output).extend(warnings.into_iter().map(|w| format!("Warning: {w}")));
-                self.history_table = None;
+                self.history_tables.clear();
             }
         }
     }
@@ -3021,7 +3024,7 @@ impl Workbench {
     fn close_history_windows(&mut self) {
         self.history_dialog = None;
         self.hot_spot_dialog = None;
-        self.history_table = None;
+        self.history_tables.clear();
     }
 
     /// Switches the tree tab. The Results tab is a workspace of its own: the
@@ -4642,7 +4645,7 @@ impl Workbench {
                     self.output.push(format!("Warning: {warning}"));
                 }
                 // The table may show another component now.
-                self.history_table = None;
+                self.history_tables.clear();
                 if next {
                     dialog.next(&output, view);
                 } else {
@@ -4717,28 +4720,54 @@ impl Workbench {
                 self.history_plot = None;
             }
         }
-        let Some(mut table) = self.history_table.take() else {
+        if self.history_tables.is_empty() {
             return;
-        };
+        }
+        let mut tables = std::mem::take(&mut self.history_tables);
         let Some(view) = self.shown_results_view() else {
+            self.history_tables = tables;
             return;
         };
         let kind = view
             .current_increment()
             .map_or(plx_results::AnalysisKind::Static, |i| i.kind);
-        let unit = (view.history_output_index(table.set))
-            .and_then(|i| view.history_outputs.get(i))
-            .and_then(|o| o.unit());
         let places = crate::history_table::Places {
             steps: &view.steps,
             increments: &view.increments,
         };
-        match table.show(ctx, &view.history, kind, places, unit) {
-            crate::history_table::TableAction::Close => return,
-            crate::history_table::TableAction::Plot(data) => self.history_plot = Some(*data),
-            crate::history_table::TableAction::None => {}
+        let shared = crate::history_table::shared(&tables.iter().collect::<Vec<_>>());
+        let mut closed = Vec::new();
+        let mut plot_from = None;
+        for (index, table) in tables.iter_mut().enumerate() {
+            let unit = (view.history_output_index(table.set))
+                .and_then(|i| view.history_outputs.get(i))
+                .and_then(|o| o.unit());
+            match table.show(ctx, &view.history, kind, places, unit, shared[index]) {
+                crate::history_table::TableAction::Close => closed.push(index),
+                crate::history_table::TableAction::Plot => plot_from = Some(index),
+                crate::history_table::TableAction::None => {}
+            }
         }
-        self.history_table = Some(table);
+        // A plain click in one table begins a new selection: the others let theirs go.
+        if let Some(index) = tables.iter().position(|t| t.took_over) {
+            for (other, table) in tables.iter_mut().enumerate() {
+                table.took_over = false;
+                if other != index {
+                    table.clear_selection();
+                }
+            }
+        }
+        if let Some(index) = plot_from {
+            let all: Vec<&HistoryTable> = tables.iter().collect();
+            match crate::history_table::plot(&all, &view.history, kind, places) {
+                Ok(data) => self.history_plot = Some(data),
+                Err(message) => tables[index].message = Some(message),
+            }
+        }
+        for index in closed.into_iter().rev() {
+            tables.remove(index);
+        }
+        self.history_tables = tables;
     }
 
     /// Runs the contact detection `index` on the parts of the model and reports what it
