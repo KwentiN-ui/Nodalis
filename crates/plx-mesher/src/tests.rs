@@ -2201,3 +2201,29 @@ fn a_rope_drawn_on_a_sheave_is_found_as_node_to_surface_contact() {
         .unwrap();
     assert_eq!(report.added, 0, "{:#?}", model.contact_regions);
 }
+
+#[test]
+fn a_composite_curve_is_one_line_part() {
+    if !gmsh_available() {
+        return;
+    }
+    // A sphere and a rope of a straight piece that runs tangentially into an arc, which the
+    // CAD program exports as one curve of two trimmed curves.
+    let import = import_cad(&testdata("seilpendel.step"), UnitSystem::Unitless).unwrap();
+    let names = part_names(&import.geometry).unwrap();
+    assert_eq!(names, ["KUGEL", "LINE-1"]);
+    assert_eq!(import.display.part_dimensions, [3, 1]);
+    // Both edges are shown as parts of the one line, which is meshed as a whole.
+    let mesh = generate_mesh(&import.geometry).unwrap().mesh;
+    assert_eq!(mesh.parts.len(), 2);
+    let line = &mesh.parts[1];
+    let nodes: BTreeSet<_> = (line.elements.iter())
+        .flat_map(|&id| mesh.element(id).unwrap().nodes.clone())
+        .collect();
+    // The elements hang together: a chain has one node more than it has two-node elements.
+    let ends: BTreeSet<_> = (line.elements.iter())
+        .map(|&id| mesh.element(id).unwrap().nodes.len())
+        .collect();
+    assert_eq!(ends, BTreeSet::from([3]));
+    assert_eq!(nodes.len(), 2 * line.elements.len() + 1);
+}
