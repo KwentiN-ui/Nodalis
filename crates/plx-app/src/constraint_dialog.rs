@@ -551,7 +551,7 @@ fn spring_rows(
     if selection {
         ui.label("Stiffness");
         ui.add_enabled_ui(!spring.each_node, |ui| {
-            ui.horizontal_wrapped(|ui| {
+            crate::layout::wrapped_row(ui, |ui| {
                 ui.radio_value(&mut spring.per_area, false, "Total");
                 ui.radio_value(&mut spring.per_area, true, "Per area")
                     .on_hover_text("Stiffness per area of the faces of the selection.");
@@ -678,7 +678,7 @@ fn joint_rows(ui: &mut Ui, model: &Model, joint: &mut Joint, pair: &mut MasterSl
     let cylindrical =
         (system.as_ref()).is_some_and(|s| s.kind == plx_model::CoordinateSystemKind::Cylindrical);
     ui.label("Location");
-    ui.horizontal_wrapped(|ui| {
+    crate::layout::wrapped_row(ui, |ui| {
         let centre = if joint.ends[0].region().is_some() {
             "Centre of End 1"
         } else {

@@ -112,7 +112,7 @@ impl ColorScaleDialog {
                     .spacing([12.0, 4.0])
                     .show(ui, |ui| {
                         ui.label("Min/max limit type");
-                        ui.horizontal_wrapped(|ui| {
+                        crate::layout::wrapped_row(ui, |ui| {
                             let automatic = ui.radio_value(&mut manual, false, "Automatic");
                             let user = ui.radio_value(&mut manual, true, "Manual");
                             if automatic.changed() || user.changed() {

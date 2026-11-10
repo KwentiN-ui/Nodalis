@@ -52,7 +52,7 @@ pub fn bolt_form(
     );
     ui.end_row();
     ui.label("Preload by");
-    ui.horizontal_wrapped(|ui| {
+    crate::layout::wrapped_row(ui, |ui| {
         let value = bolt.preload.value();
         if ui
             .radio(matches!(bolt.preload, Preload::Force(_)), "Force")
