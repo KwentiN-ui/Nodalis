@@ -286,6 +286,7 @@ pub fn support_points(model: &Model, support: &CompressionOnly) -> Result<Suppor
             COMPRESSION_ONLY_STIFFNESS * young / h.max(1e-300)
         }
     };
+    let normals = smoothed_normals(&faces, coords);
     let mut points = Vec::new();
     for (f, face) in faces.iter().enumerate() {
         let (locals, weights) = face_rule(face);
@@ -295,12 +296,26 @@ pub fn support_points(model: &Model, support: &CompressionOnly) -> Result<Suppor
             if area <= 0.0 {
                 continue;
             }
-            // The face normal points out of the material; the ground pushes against it, or
-            // along it when flipped.
-            let direction = if support.flipped {
-                fp.normal
+            // The normal of the surface the faces stand for, interpolated from the smoothed
+            // normals at the nodes.
+            let mut normal = [0.0; 3];
+            for (&n, nn) in fp.n.iter().zip(&normals[f]) {
+                for k in 0..3 {
+                    normal[k] += n * nn[k];
+                }
+            }
+            let length = normal.iter().map(|c| c * c).sum::<f64>().sqrt();
+            let normal = if length > 0.0 {
+                normal.map(|c| c / length)
             } else {
-                fp.normal.map(|c| -c)
+                fp.normal
+            };
+            // The normal points out of the material; the ground pushes against it, or along
+            // it when flipped.
+            let direction = if support.flipped {
+                normal
+            } else {
+                normal.map(|c| -c)
             };
             let mut position = [0.0; 3];
             for (&n, &w) in face.nodes.iter().zip(&fp.n) {
@@ -324,6 +339,66 @@ pub fn support_points(model: &Model, support: &CompressionOnly) -> Result<Suppor
         points,
         stiffness,
     })
+}
+
+/// Faces whose normals differ by less than this angle (cosine) belong to one smooth
+/// surface: a cylinder meshed with straight-sided faces, not the edge of a box.
+const SMOOTH_SURFACE_COS: f64 = 0.766; // 40°
+
+/// The normal at every node of every face (outward): the area weighted mean of the normals
+/// of the faces at the node that lie on the same smooth surface as the face. A support on a
+/// curved surface meshed with flat faces pushes along the surface's normal then, not along
+/// the kinked normals of the faces: those would hold the nodes on a kink in two directions
+/// and stripe the pressure along the face edges.
+fn smoothed_normals(faces: &[ContactFace], coords: &[[f64; 3]]) -> Vec<Vec<[f64; 3]>> {
+    // Normal and area of each face, at its centre.
+    let centre_normals: Vec<([f64; 3], f64)> = faces
+        .iter()
+        .map(|face| {
+            // The centre and the area of the reference face.
+            let (centre, reference) = match face.corners {
+                3 => ([1.0 / 3.0, 1.0 / 3.0], 0.5),
+                4 => ([0.0, 0.0], 4.0),
+                _ => ([0.0, 0.0], 2.0),
+            };
+            let fp = face.at(coords, centre);
+            (fp.normal, fp.jacobian * reference)
+        })
+        .collect();
+    let mut at_node: std::collections::HashMap<u32, Vec<usize>> = Default::default();
+    for (f, face) in faces.iter().enumerate() {
+        for &n in &face.nodes {
+            at_node.entry(n).or_default().push(f);
+        }
+    }
+    faces
+        .iter()
+        .enumerate()
+        .map(|(f, face)| {
+            let own = centre_normals[f].0;
+            face.nodes
+                .iter()
+                .map(|n| {
+                    let mut sum = [0.0; 3];
+                    for &g in &at_node[n] {
+                        let (normal, area) = centre_normals[g];
+                        let cos: f64 = (0..3).map(|k| normal[k] * own[k]).sum();
+                        if cos >= SMOOTH_SURFACE_COS {
+                            for k in 0..3 {
+                                sum[k] += area * normal[k];
+                            }
+                        }
+                    }
+                    let length = sum.iter().map(|c| c * c).sum::<f64>().sqrt();
+                    if length > 0.0 {
+                        sum.map(|c| c / length)
+                    } else {
+                        own
+                    }
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// The gaps of a `*COMPRESSION ONLY` surface: one per integration point of every face (see
