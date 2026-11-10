@@ -643,11 +643,12 @@ impl Problem {
                  period. Without such a material it computes the same as a Static step."
             }
             Problem::GeneralBeamStep => {
-                "I, T, channel, angle and general profiles are not native beam sections: \
-                 they are written as general sections of the user element U1, a \
-                 linear beam. It computes Static steps without large deformations (Nlgeom), \
-                 Frequency steps, Dynamic steps by modal superposition and Steady \
-                 State Dynamics steps; other steps stop the run with an error."
+                "I, T, channel, angle, general and rope profiles are not native beam \
+                 sections: they are written as general sections of the user element U1, a \
+                 beam given by its stiffness values, corotational under large deformations \
+                 (Nlgeom). It computes Static, Frequency, Buckle, implicit Dynamic and \
+                 Steady State Dynamics steps; other steps (explicit Dynamic, heat transfer, \
+                 Visco) stop the run with an error."
             }
             Problem::InvalidCyclicSymmetry => {
                 "A cyclic symmetry tie models a whole part by one sector of a 3D mesh. The \
@@ -1718,26 +1719,22 @@ impl FeModel {
         let general_beams = self.general_beam_sections(mesh);
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
             self.check_step(s, mesh, mesh_check, &trusses, &mut findings);
-            let general_fits = !self.step_nlgeom(&step.kind)
-                && match &step.kind {
-                    StepKind::Static(_)
-                    | StepKind::Frequency(_)
-                    | StepKind::SteadyStateDynamics(_) => true,
-                    StepKind::Dynamic(d) => matches!(d.method, crate::DynamicMethod::Modal { .. }),
-                    _ => false,
-                };
+            // The solver computes general beams as corotational beams under Nlgeom.
+            let general_fits = match &step.kind {
+                StepKind::Static(_)
+                | StepKind::Frequency(_)
+                | StepKind::Buckle(_)
+                | StepKind::SteadyStateDynamics(_) => true,
+                StepKind::Dynamic(d) => !matches!(d.method, crate::DynamicMethod::Explicit),
+                _ => false,
+            };
             if !general_beams.is_empty() && !general_fits {
                 findings.push(Finding::new(
                     ModelItem::Step(s),
                     Problem::GeneralBeamStep,
                     format!(
-                        "{}{}: {} use general beam profiles",
+                        "{}: {} use general beam profiles",
                         step.name,
-                        if self.step_nlgeom(&step.kind) {
-                            " (Nlgeom)"
-                        } else {
-                            ""
-                        },
                         general_beams.join(", ")
                     ),
                 ));
@@ -5492,7 +5489,7 @@ mod tests {
     }
 
     #[test]
-    fn general_beam_profiles_refuse_steps_that_user_element_u1_cannot_take() {
+    fn general_beam_profiles_refuse_only_the_explicit_dynamic_step() {
         let mut mesh = FeMesh::default();
         for (id, x) in [0.0, 1.0, 2.0].into_iter().enumerate() {
             mesh.set_node(id as u32 + 1, [x, 0.0, 0.0]);
@@ -5526,21 +5523,18 @@ mod tests {
                 .map(|f| f.detail)
                 .collect::<Vec<_>>()
         };
-        // A linear static step is what U1 computes.
+        // Static steps, also with large deformations: the solver's beam is corotational.
         assert_eq!(refused(&model), Vec::<String>::new());
         let StepKind::Static(settings) = &mut model.steps[0].kind else {
             unreachable!()
         };
         settings.nlgeom = true;
-        assert_eq!(
-            refused(&model),
-            ["Step-1 (Nlgeom): Section-1 use general beam profiles"]
-        );
+        assert!(refused(&model).is_empty());
         model.steps[0].kind = StepKind::Buckle(Default::default());
-        assert_eq!(refused(&model).len(), 1);
+        assert!(refused(&model).is_empty());
         model.steps[0].kind = StepKind::Frequency(Default::default());
         assert!(refused(&model).is_empty());
-        // Modal superposition is linear too, direct integration is not.
+        // Implicit Dynamic steps take them, the explicit one has no kernel for them.
         let mut dynamic = crate::DynamicStep {
             method: crate::DynamicMethod::Modal {
                 modes: 10,
@@ -5551,8 +5545,14 @@ mod tests {
         model.steps[0].kind = StepKind::Dynamic(dynamic.clone());
         assert!(refused(&model).is_empty());
         dynamic.method = crate::DynamicMethod::Direct;
+        model.steps[0].kind = StepKind::Dynamic(dynamic.clone());
+        assert!(refused(&model).is_empty());
+        dynamic.method = crate::DynamicMethod::Explicit;
         model.steps[0].kind = StepKind::Dynamic(dynamic);
-        assert_eq!(refused(&model).len(), 1);
+        assert_eq!(
+            refused(&model),
+            ["Step-1: Section-1 use general beam profiles"]
+        );
         // Native profiles are CalculiX's own beams, which take every step.
         model.cross_sections[0].profile = crate::BeamProfile::ALL[0].clone();
         model.steps[0].kind = StepKind::Buckle(Default::default());

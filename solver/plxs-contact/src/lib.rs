@@ -57,6 +57,9 @@ pub struct SlavePoint {
     /// Slave face (index into [`Pair::slave_faces`]) and natural coordinates, `None` for a
     /// node.
     pub face: Option<(u32, [f64; 2])>,
+    /// Distance the point keeps from the master surface: the radius of a rope or beam whose
+    /// axis node it is (`CONTACT RADIUS=`), zero for others.
+    pub offset: f64,
 }
 
 /// A contact pair prepared for the solver.
@@ -298,6 +301,54 @@ fn first_young(model: &Model) -> f64 {
 }
 
 /// Young's modulus of the material of an element (dense index).
+/// The nodes on the axis of general beams with a contact radius (ropes): per dense node its
+/// radius and the length of beam it stands for (half of each element at it).
+fn rope_nodes(model: &Model) -> HashMap<u32, (f64, f64)> {
+    use plxs_core::section::{BeamProfile, SectionKind};
+    let mut out: HashMap<u32, (f64, f64)> = HashMap::new();
+    for element in &model.elements {
+        if element.kind != plxs_core::ElementType::U1 {
+            continue;
+        }
+        let Some(section) = element.section.and_then(|s| model.sections.get(s as usize)) else {
+            continue;
+        };
+        let SectionKind::Beam {
+            profile:
+                BeamProfile::General {
+                    contact_radius: Some(radius),
+                    ..
+                },
+            ..
+        } = &section.kind
+        else {
+            continue;
+        };
+        // After the expansion a U1 element holds the rotation helper of each node too.
+        let ends = match element.nodes.len() {
+            4 => [element.nodes[0], element.nodes[2]],
+            _ => [element.nodes[0], element.nodes[1]],
+        };
+        let Some(dense) = ends
+            .iter()
+            .map(|&id| model.nodes.index(id))
+            .collect::<Option<Vec<u32>>>()
+        else {
+            continue;
+        };
+        let length = geometry::norm(sub(
+            model.nodes.coordinates[dense[1] as usize],
+            model.nodes.coordinates[dense[0] as usize],
+        ));
+        for n in dense {
+            let entry = out.entry(n).or_insert((0.0, 0.0));
+            entry.0 = entry.0.max(*radius);
+            entry.1 += 0.5 * length;
+        }
+    }
+    out
+}
+
 fn element_young(model: &Model, element: u32) -> Option<f64> {
     let e = model.elements.get(element as usize)?;
     let section = model.sections.get(e.section? as usize)?;
@@ -396,23 +447,28 @@ impl ContactModel {
                             area[*n as usize] += a;
                         }
                     }
-                    if is_node_surface && slave_faces.is_empty() {
+                    let ropes = rope_nodes(model);
+                    let all_ropes = nodes.iter().all(|n| ropes.contains_key(n));
+                    if is_node_surface && slave_faces.is_empty() && !all_ropes {
                         out.warnings.push(format!(
                             "node surface {} has no exterior faces; unit areas are used for its contact springs",
                             pair.slave
                         ));
                     }
                     for n in nodes {
-                        let a = if area[n as usize] > 0.0 {
-                            area[n as usize]
-                        } else {
-                            1.0
+                        // A rope node presses on the strip of its diameter along its length.
+                        let rope = ropes.get(&n).copied();
+                        let a = match rope {
+                            Some((radius, length)) => 2.0 * radius * length,
+                            None if area[n as usize] > 0.0 => area[n as usize],
+                            None => 1.0,
                         };
                         points.push(SlavePoint {
                             nodes: vec![n],
                             weights: vec![1.0],
                             area: a,
                             face: None,
+                            offset: rope.map_or(0.0, |(radius, _)| radius),
                         });
                         cutoff.push(law.node_cutoff(c0, a));
                     }
@@ -427,6 +483,7 @@ impl ContactModel {
                                 weights: fp.n.clone(),
                                 area: w * fp.jacobian,
                                 face: Some((f as u32, *p)),
+                                offset: 0.0,
                             });
                             // Face-to-face springs act on overclosure only; the cutoff only
                             // decides which tied points are coupled.
@@ -538,6 +595,11 @@ impl ContactModel {
                     typical.max(distance.min(1e6)),
                     distance.min(1e6),
                 );
+                // Rope nodes move to their radius off the surface.
+                let offsets: HashMap<u32, f64> = (prepared.points.iter())
+                    .filter(|q| q.face.is_none() && q.offset > 0.0)
+                    .map(|q| (q.nodes[0], q.offset))
+                    .collect();
                 let mut moved = 0;
                 for n in slave_nodes {
                     if master_nodes.contains(&n)
@@ -546,17 +608,18 @@ impl ContactModel {
                         continue;
                     }
                     let x = coords[n as usize];
+                    let offset = offsets.get(&n).copied().unwrap_or(0.0);
                     let mut best: Option<(f64, [f64; 3])> = None;
                     for &f in grid.candidates(x) {
                         let (_, fp) = prepared.master[f as usize].project(&coords, x);
                         let d = geometry::norm(sub(x, fp.x));
                         if best.is_none_or(|b| d < b.0) {
-                            best = Some((d, fp.x));
+                            best = Some((d, sub(fp.x, scale(fp.normal, -offset))));
                         }
                     }
                     if let Some((d, y)) = best
-                        && d <= distance
-                        && d > 0.0
+                        && (d - offset).abs() <= distance
+                        && (d - offset).abs() > 0.0
                     {
                         model.nodes.coordinates[n as usize] = y;
                         moved += 1;
@@ -574,9 +637,9 @@ impl ContactModel {
             prepared.prepare_candidates(coords);
             let initial: Vec<Option<(u32, f64)>> = (0..prepared.points.len())
                 .map(|p| {
-                    prepared
-                        .closest(p, coords, None)
-                        .map(|(f, _, fp, x)| (f, dot(sub(x, fp.x), fp.normal)))
+                    prepared.closest(p, coords, None).map(|(f, _, fp, x)| {
+                        (f, dot(sub(x, fp.x), fp.normal) - prepared.points[p].offset)
+                    })
                 })
                 .collect();
             prepared.initial = initial;
@@ -1199,7 +1262,8 @@ impl Pair {
     /// Candidate master faces of every point: those whose box, inflated by two typical
     /// edge lengths plus the cutoff, contains the point.
     fn prepare_candidates(&mut self, current: &[[f64; 3]]) {
-        let reach = self.cutoff.iter().copied().fold(0.0, f64::max);
+        let reach = self.cutoff.iter().copied().fold(0.0, f64::max)
+            + self.points.iter().map(|q| q.offset).fold(0.0, f64::max);
         let margin = 2.0 * self.typical + reach;
         let grid = FaceGrid::new(&self.master, current, self.typical.max(margin), margin);
         self.candidates = (0..self.points.len())
@@ -1492,7 +1556,11 @@ impl Pair {
             if distance > 1e-9 * self.typical
                 && along != 0.0
                 && geometry::norm(sub(r, scale(n, along))) > 1e-6 * distance
-                && self.inner_edge(p, f, &fp.n)
+                // A rope beside the master's border touches its edge, if at all, at its
+                // radius from the edge: the distance to the edge counts, not the one along
+                // the normal of the face, which would let the rope rest on the face's plane
+                // far beyond its end.
+                && (self.inner_edge(p, f, &fp.n) || point.offset > 0.0)
             {
                 let sign = along.signum();
                 n = scale(r, sign / distance);
@@ -1500,6 +1568,8 @@ impl Pair {
                 corner = Some(distance);
             }
         }
+        // A rope touches with its surface, the radius off its axis.
+        geometric_gap -= point.offset;
         let initial_gap = self.initial[p].map_or(0.0, |(_, g)| g);
         let gap = match self.clearance {
             Some(c) => geometric_gap - initial_gap + c,

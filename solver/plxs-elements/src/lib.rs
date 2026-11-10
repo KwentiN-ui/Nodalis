@@ -9,6 +9,7 @@
 //! (Zienkiewicz & Taylor; Hughes; Bathe) for the formulations. No CalculiX code was
 //! consulted.
 
+pub mod corotational;
 pub mod expand;
 pub mod heat;
 pub mod membrane;

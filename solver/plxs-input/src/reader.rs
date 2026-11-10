@@ -842,6 +842,7 @@ impl Reader {
             "OFFSET2",
             "ORIENTATION",
             "NODAL THICKNESS",
+            "CONTACT RADIUS",
         ])?;
         if k.has("ORIENTATION") || k.has("NODAL THICKNESS") {
             return Err(k.error("ORIENTATION and NODAL THICKNESS are not supported"));
@@ -903,6 +904,7 @@ impl Reader {
                     torsion: v[4],
                     shear_area_1: v.get(5).copied(),
                     shear_area_2: v.get(6).copied(),
+                    contact_radius: k.number("CONTACT RADIUS")?,
                 }
             }
             other => return Err(k.error(format!("SECTION={other} is not supported"))),

@@ -1881,6 +1881,7 @@ fn beam_profile(profile: &BeamProfile) -> ir::section::BeamProfile {
             torsion: at(4),
             shear_area_1: None,
             shear_area_2: None,
+            contact_radius: profile.contact_radius(),
         },
     }
 }
@@ -2825,7 +2826,20 @@ fn contact_pairs(
             });
         };
         let master = sets.surface(&pair.name, "Master", &pair.master)?;
-        let slave = sets.surface(&pair.name, "Slave", &pair.slave)?;
+        // Beams and ropes as the slave side touch with their nodes, at the radius of a rope
+        // profile from the axis: a node surface of node-to-surface contact.
+        let lines = beam_side(sets.mesh, &pair.slave);
+        let slave = if lines {
+            if pair.method != ContactMethod::NodeToSurface {
+                return Err(WriteError::Unsupported {
+                    item: pair.name.clone(),
+                    reason: "a slave side of beams or ropes needs Node to Surface contact".into(),
+                });
+            }
+            sets.node_surface(&pair.name, "Slave", &pair.slave)?
+        } else {
+            sets.surface(&pair.name, "Slave", &pair.slave)?
+        };
         let kind = match pair.method {
             ContactMethod::NodeToSurface => c::ContactKind::NodeToSurface,
             ContactMethod::SurfaceToSurface => c::ContactKind::SurfaceToSurface,
@@ -2855,6 +2869,14 @@ fn contact_pairs(
         surfaces.insert(pair.id, (master, slave));
     }
     Ok((pairs, clearances, surfaces))
+}
+
+/// Whether a contact side is made of line elements (beams, ropes) rather than faces.
+fn beam_side(mesh: &FeMesh, region: &Region) -> bool {
+    region.faces(mesh).is_empty()
+        && (region.elements(mesh).iter())
+            .filter_map(|&e| mesh.element(e))
+            .any(|e| e.shape.family() == ElementFamily::Line)
 }
 
 /// What the steps share: the model's settings and the items lowered before them.

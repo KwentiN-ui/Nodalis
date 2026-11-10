@@ -81,6 +81,9 @@ pub struct ElementTable {
     pub membranes: Vec<Membrane>,
     /// For every model element (dense index) its membrane, `u32::MAX` for the others.
     pub membrane_of: Vec<u32>,
+    /// The general beams (U1) as corotational beams: under NLGEOM they replace their
+    /// linear stiffness among `linear_blocks`.
+    pub beams: Vec<Beam>,
     /// A material without `*ELASTIC`: allowed for pure heat transfer, where it gets zero
     /// elastic constants; [`Self::require_elastic`] refuses it for mechanical steps.
     pub missing_elastic: Option<String>,
@@ -121,12 +124,48 @@ impl Membrane {
     }
 }
 
+/// A general beam (U1) computed as a corotational beam
+/// (`plxs_elements::corotational`) in steps with large deformations.
+#[derive(Clone, Debug)]
+pub struct Beam {
+    /// Dense index of the element in the model.
+    pub element: u32,
+    /// Global DOFs: the translations and the rotation vector of the first node, then those
+    /// of the second.
+    pub dofs: [u32; 12],
+    pub formulation: plxs_elements::corotational::CorotationalBeam,
+    /// Density, when the material has one.
+    pub density: Option<f64>,
+    /// Area and second moments of area (CalculiX's `I11`, `I22`), for the mass.
+    pub area: f64,
+    pub i11: f64,
+    pub i22: f64,
+    /// Its linear stiffness among [`ElementTable::linear_blocks`].
+    pub block: usize,
+}
+
+impl Beam {
+    /// The element's DOF values out of the global ones.
+    pub fn gather(&self, u: &[f64]) -> [f64; 12] {
+        self.dofs.map(|d| u.get(d as usize).copied().unwrap_or(0.0))
+    }
+
+    /// The mass matrix (row-major 12 × 12), `None` without a density.
+    pub fn mass(&self) -> Option<[f64; 144]> {
+        let rho = self.density?;
+        Some(self.formulation.mass(rho, self.area, self.i11, self.i22))
+    }
+}
+
 /// A constant element stiffness on global DOFs.
 #[derive(Clone, Debug)]
 pub struct LinearBlock {
     pub dofs: Vec<u32>,
     /// Whether the block is the linear stiffness of a native membrane.
     pub membrane: bool,
+    /// Whether the block is the linear stiffness of a general beam, which steps with large
+    /// deformations compute as a corotational beam ([`ElementTable::beams`]).
+    pub beam: bool,
     /// Row-major, `dofs.len()` squared.
     pub stiffness: Vec<f64>,
 }
@@ -176,6 +215,7 @@ impl ElementTable {
         let mut offsets = Vec::with_capacity(model.elements.len() + 1);
         offsets.push(0u32);
         let mut linear_blocks = Vec::new();
+        let mut beams = Vec::new();
         let mut membranes = Vec::new();
         let mut membrane_of = vec![u32::MAX; model.elements.len()];
         let mut entry_of = Vec::with_capacity(model.elements.len());
@@ -211,11 +251,13 @@ impl ElementTable {
                 continue;
             }
             if element.kind == ElementType::U1 {
-                let block = Self::u1_block(model, element, temperature)?;
+                let (block, mut beam) = Self::u1_block(model, element, index as u32, temperature)?;
                 for &d in &block.dofs {
                     connected[d as usize / 3] = true;
                     uses_z[d as usize / 3] = true;
                 }
+                beam.block = linear_blocks.len();
+                beams.push(beam);
                 linear_blocks.push(block);
                 entry_of.push(u32::MAX);
                 continue;
@@ -230,6 +272,7 @@ impl ElementTable {
                 linear_blocks.push(LinearBlock {
                     dofs: membrane.dofs.clone(),
                     membrane: true,
+                    beam: false,
                     stiffness: membrane.formulation.stiffness(),
                 });
                 membrane.block = linear_blocks.len() - 1;
@@ -485,6 +528,7 @@ impl ElementTable {
             linear_blocks,
             membranes,
             membrane_of,
+            beams,
             missing_elastic,
             hyperelastic,
         })
@@ -492,7 +536,12 @@ impl ElementTable {
 
     /// The stiffness of a U1 beam. After the expansion its nodes are the first node, the
     /// helper node carrying its rotations, the second node and its rotation helper.
-    fn u1_block(model: &Model, element: &Element, temperature: f64) -> Result<LinearBlock> {
+    fn u1_block(
+        model: &Model,
+        element: &Element,
+        index: u32,
+        temperature: f64,
+    ) -> Result<(LinearBlock, Beam)> {
         use plxs_core::section::BeamProfile;
         let bad =
             |what: &str| Error::input("*ELEMENT", format!("U1 element {}: {what}", element.id));
@@ -535,17 +584,35 @@ impl ElementTable {
             young: elastic.young,
             poisson: elastic.poisson,
         };
-        let stiffness = plxs_elements::u1::stiffness(x(0), x(2), *normal, &u1)
-            .ok_or_else(|| bad("no length, or the section vector is parallel to the axis"))?;
-        let dofs = nodes
+        let degenerate = || bad("no length, or the section vector is parallel to the axis");
+        let stiffness =
+            plxs_elements::u1::stiffness(x(0), x(2), *normal, &u1).ok_or_else(degenerate)?;
+        let formulation =
+            plxs_elements::corotational::CorotationalBeam::new(x(0), x(2), *normal, &u1)
+                .ok_or_else(degenerate)?;
+        let dofs: Vec<u32> = nodes
             .iter()
             .flat_map(|&n| (0..3).map(move |d| n * 3 + d))
             .collect();
-        Ok(LinearBlock {
-            dofs,
-            membrane: false,
-            stiffness,
-        })
+        let beam = Beam {
+            element: index,
+            dofs: std::array::from_fn(|i| dofs[i]),
+            formulation,
+            density: plxs_materials::density(mat, temperature),
+            area: *area,
+            i11: *i11,
+            i22: *i22,
+            block: 0,
+        };
+        Ok((
+            LinearBlock {
+                dofs,
+                membrane: false,
+                beam: true,
+                stiffness,
+            },
+            beam,
+        ))
     }
 
     /// A native M3D3 membrane and its stiffness.

@@ -225,7 +225,8 @@ pub fn assemble_nonlinear(
     };
     // Native membranes (total Lagrangian under NLGEOM) and the other elements of constant
     // stiffness (U1). Membranes have no integration points in the layout.
-    for block in table.linear_blocks.iter().filter(|b| !b.membrane) {
+    // General beams are corotational under NLGEOM, linear otherwise.
+    for block in (table.linear_blocks.iter()).filter(|b| !b.membrane && !(b.beam && input.nlgeom)) {
         let n = block.dofs.len();
         for (i, &dof) in block.dofs.iter().enumerate() {
             let f: f64 = (0..n)
@@ -262,6 +263,29 @@ pub fn assemble_nonlinear(
         out.flux_count += fe.len() as u64;
         if let Some(k) = k.as_deref_mut() {
             k.add_block(&m.dofs, ke);
+        }
+    }
+    if input.nlgeom {
+        let beams: Vec<([f64; 12], [f64; 144])> = table
+            .beams
+            .par_iter()
+            .map(|b| {
+                let mut fe = [0.0; 12];
+                let mut ke = [0.0; 144];
+                b.formulation
+                    .internal(&b.gather(input.u), &mut fe, want_k.then_some(&mut ke));
+                (fe, ke)
+            })
+            .collect();
+        for (b, (fe, ke)) in table.beams.iter().zip(&beams) {
+            for (&dof, value) in b.dofs.iter().zip(fe) {
+                out.f_int[dof as usize] += value;
+                out.flux_sum += value.abs();
+            }
+            out.flux_count += 12;
+            if let Some(k) = k.as_deref_mut() {
+                k.add_block(&b.dofs, ke);
+            }
         }
     }
     for &(index, p) in input.follower {
