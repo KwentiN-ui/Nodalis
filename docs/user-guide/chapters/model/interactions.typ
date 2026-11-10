@@ -28,7 +28,7 @@ Create them with #ui("Constraint") on the #ui("Connections") tab of the ribbon.
     makes it push the surface outward from inside the material. #ui("Clearance") is the
     initial gap. #ui("Spring stiffness") is optional and belongs to the whole surface, spread
     over it by area; with #ui("Apply to all nodes individually") every node stands for the
-    whole value. Without a value the support is practically rigid (a thousand times the
+    whole value. Without a value the support is practically rigid (ten times the
     stiffness of the element layer under it). On solids and 2D models the support acts at the
     integration points of the faces, like a pressure spread over them, so that the contact
     pressure and the stresses under it stay smooth on quadratic elements too. On shells it is
