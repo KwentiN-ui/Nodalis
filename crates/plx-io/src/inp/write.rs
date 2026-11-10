@@ -482,6 +482,25 @@ fn lower_model_named(
     } else {
         mesh
     };
+    // General profiles, ropes among them, are sections of the 2-node user element U1:
+    // quadratic lines under them are split in two at their middle node.
+    let general_lines: BTreeSet<ElementId> = (model.sections.iter())
+        .filter(|s| (model.section_profile(&s.kind)).is_some_and(|p| !p.is_native()))
+        .flat_map(|s| s.region.elements(mesh))
+        .filter(|&e| {
+            mesh.element(e)
+                .is_some_and(|e| e.shape == plx_mesh::ElementShape::Line3)
+        })
+        .collect();
+    let halved;
+    let mesh = if general_lines.is_empty() {
+        mesh
+    } else {
+        let mut copy = mesh.clone();
+        copy.split_quadratic_lines(&general_lines, "B31");
+        halved = copy;
+        &halved
+    };
     // Bolts become pre-tension loads and ties, and switch off the contact regions on
     // their cuts.
     let (bolted, bolt_items);
@@ -2833,7 +2852,7 @@ fn contact_pairs(
         let master = sets.surface(&pair.name, "Master", &pair.master)?;
         // Beams and ropes as the slave side touch with their nodes, at the radius of a rope
         // profile from the axis: a node surface of node-to-surface contact.
-        let lines = beam_side(sets.mesh, &pair.slave);
+        let lines = pair.slave.is_lines(sets.mesh);
         let slave = if lines {
             if pair.method != ContactMethod::NodeToSurface {
                 return Err(WriteError::Unsupported {
@@ -2874,14 +2893,6 @@ fn contact_pairs(
         surfaces.insert(pair.id, (master, slave));
     }
     Ok((pairs, clearances, surfaces))
-}
-
-/// Whether a contact side is made of line elements (beams, ropes) rather than faces.
-fn beam_side(mesh: &FeMesh, region: &Region) -> bool {
-    region.faces(mesh).is_empty()
-        && (region.elements(mesh).iter())
-            .filter_map(|&e| mesh.element(e))
-            .any(|e| e.shape.family() == ElementFamily::Line)
 }
 
 /// What the steps share: the model's settings and the items lowered before them.

@@ -92,6 +92,15 @@ impl Region {
         ids.into_iter().collect()
     }
 
+    /// Whether the region is made of line elements (beams, ropes) rather than faces: a
+    /// rope touching a surface with its nodes.
+    pub fn is_lines(&self, mesh: &FeMesh) -> bool {
+        self.faces(mesh).is_empty()
+            && (self.elements(mesh).iter())
+                .filter_map(|&e| mesh.element(e))
+                .any(|e| e.shape.family() == plx_mesh::ElementFamily::Line)
+    }
+
     /// Element faces of the region, for pressure loads.
     pub fn faces(&self, mesh: &FeMesh) -> Vec<(ElementId, u8)> {
         match self {

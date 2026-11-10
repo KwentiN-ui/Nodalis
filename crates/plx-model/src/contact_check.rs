@@ -87,7 +87,7 @@ struct Piece {
 
 /// The closest point to `p` on the triangle `a b c` (Ericson, Real-Time Collision
 /// Detection, 5.1.5).
-fn closest_on_triangle(p: Point, a: Point, b: Point, c: Point) -> Point {
+pub(crate) fn closest_on_triangle(p: Point, a: Point, b: Point, c: Point) -> Point {
     let (ab, ac, ap) = (sub(b, a), sub(c, a), sub(p, a));
     let (d1, d2) = (dot(ab, ap), dot(ac, ap));
     if d1 <= 0.0 && d2 <= 0.0 {
@@ -309,38 +309,53 @@ impl FeModel {
     pub fn check_contacts(&self, mesh: &FeMesh) -> Vec<Option<ContactCheck>> {
         let resolved = self.resolve_contacts(mesh);
         (self.contact_regions.iter().zip(&resolved.items))
-            .map(|(region, resolved)| check_resolved(mesh, region, resolved))
+            .map(|(region, resolved)| self.check_resolved(mesh, region, resolved))
             .collect()
     }
 
     /// The contact check of `region`, also one not in the model yet.
     pub fn check_contact(&self, region: &ContactRegion, mesh: &FeMesh) -> Option<ContactCheck> {
-        check_resolved(mesh, region, &self.resolve_contact(region, mesh))
+        self.check_resolved(mesh, region, &self.resolve_contact(region, mesh))
+    }
+
+    fn check_resolved(
+        &self,
+        mesh: &FeMesh,
+        region: &ContactRegion,
+        resolved: &Resolved,
+    ) -> Option<ContactCheck> {
+        let (master, slave) = if resolved.a_is_master {
+            (&region.side_a, &region.side_b)
+        } else {
+            (&region.side_b, &region.side_a)
+        };
+        let tolerance =
+            (resolved.tolerance()).or(resolved.mesh_size.map(|h| crate::TOLERANCE_FACTOR * h))?;
+        // A rope touches with its surface, the contact radius off its axis.
+        let offset = if resolved.node_to_surface {
+            self.contact_radius(slave, mesh).unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        check(mesh, master, slave, tolerance, offset)
     }
 }
 
-fn check_resolved(
+/// The check of the slave nodes against the master faces; `offset` is subtracted from each
+/// distance, the radius of a rope whose axis the nodes are on.
+fn check(
     mesh: &FeMesh,
-    region: &ContactRegion,
-    resolved: &Resolved,
+    master: &Region,
+    slave: &Region,
+    tolerance: f64,
+    offset: f64,
 ) -> Option<ContactCheck> {
-    let (master, slave) = if resolved.a_is_master {
-        (&region.side_a, &region.side_b)
-    } else {
-        (&region.side_b, &region.side_a)
-    };
-    let tolerance =
-        (resolved.tolerance()).or(resolved.mesh_size.map(|h| crate::TOLERANCE_FACTOR * h))?;
-    check(mesh, master, slave, tolerance)
-}
-
-fn check(mesh: &FeMesh, master: &Region, slave: &Region, tolerance: f64) -> Option<ContactCheck> {
     let faces = master.faces(mesh);
     let nodes = slave.nodes(mesh);
     if faces.is_empty() || nodes.is_empty() || tolerance <= 0.0 {
         return None;
     }
-    let radius = NEAR * tolerance;
+    let radius = NEAR * tolerance + offset;
     let master = Master::new(mesh, &faces, radius);
     let mut check = ContactCheck {
         status: ContactStatus::FarOpen,
@@ -353,7 +368,7 @@ fn check(mesh: &FeMesh, master: &Region, slave: &Region, tolerance: f64) -> Opti
     };
     let mut near = false;
     for p in nodes.iter().filter_map(|&n| mesh.node(n)) {
-        let Some(d) = master.distance(p, radius) else {
+        let Some(d) = master.distance(p, radius).map(|d| d - offset) else {
             continue;
         };
         if d <= tolerance {

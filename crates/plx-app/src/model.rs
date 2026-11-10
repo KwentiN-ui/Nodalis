@@ -1800,6 +1800,7 @@ impl Model {
             let whole = highlight && self.highlight.parts.contains(&index);
             mesh.append(beam_mesh(
                 coords,
+                self.mesh.coords(),
                 skin,
                 self.origin,
                 info.color,

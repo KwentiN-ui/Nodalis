@@ -72,7 +72,8 @@ and second moments of area. So:
 
 - The beam axis runs through the centroid: the profile lies with its centroid on the nodes, and
   the section takes no offsets.
-- The beams need lines with 2 nodes; mesh the lines linear.
+- The beams have 2 nodes. Lines meshed with Second order (3 nodes, as lines from CAD are by
+  default) are written as two beams each, split at their middle node.
 - An unsymmetric profile such as an angle is written about its principal axes: Nodalis turns
   the normal about each beam by the angle of axis I, so that it bends askew as it should.
 - The solver computes Static, Frequency, Buckle, implicit Dynamic and Steady State Dynamics

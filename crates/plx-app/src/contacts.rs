@@ -56,7 +56,7 @@ impl MasterSlave {
     /// touches the master with its nodes (node to surface contact).
     pub fn new_pair(faces: Target) -> Self {
         Self {
-            slave: RegionDraft::new(PAIR_SLAVE_SOURCES, faces),
+            slave: RegionDraft::new(PART_SOURCES, faces),
             ..Self::new(faces)
         }
     }
@@ -69,8 +69,27 @@ impl MasterSlave {
         mesh: &FeMesh,
     ) -> Self {
         Self {
-            slave: RegionDraft::from_region(slave, PAIR_SLAVE_SOURCES, faces, mesh),
+            slave: RegionDraft::from_region(slave, PART_SOURCES, faces, mesh),
             ..Self::from_regions(master, slave, faces, mesh)
+        }
+    }
+
+    /// For contact regions: either side may also be whole parts, a rope or beam part
+    /// touching the surface of the other side.
+    pub fn new_region(faces: Target) -> Self {
+        Self {
+            master: RegionDraft::new(PART_SOURCES, faces),
+            slave: RegionDraft::new(PART_SOURCES, faces),
+            side: Side::Master,
+        }
+    }
+
+    /// [`Self::from_regions`] for a contact region, see [`Self::new_region`].
+    pub fn region_from_regions(a: &Region, b: &Region, faces: Target, mesh: &FeMesh) -> Self {
+        Self {
+            master: RegionDraft::from_region(a, PART_SOURCES, faces, mesh),
+            slave: RegionDraft::from_region(b, PART_SOURCES, faces, mesh),
+            side: Side::Master,
         }
     }
 
@@ -129,9 +148,9 @@ impl MasterSlave {
     }
 }
 
-/// Picked faces, a surface or whole parts: the slave side of a contact pair, which may be a
-/// rope or beam part.
-const PAIR_SLAVE_SOURCES: &[crate::setup::Source] = &[
+/// Picked faces, a surface or whole parts: the slave side of a contact pair and either side
+/// of a contact region, which may be a rope or beam part.
+const PART_SOURCES: &[crate::setup::Source] = &[
     crate::setup::Source::Selection,
     crate::setup::Source::Surface,
     crate::setup::Source::Parts,

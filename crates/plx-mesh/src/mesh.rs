@@ -143,6 +143,70 @@ impl FeMesh {
         Ok(())
     }
 
+    /// Splits each of the given 3-node lines `[a, m, b]` into two 2-node lines at its
+    /// middle node: `[a, m]` keeps the id, `[m, b]` gets the next free id and follows it in
+    /// its part and element sets. The segments along CAD edges are split alike. Returns the
+    /// pairs (kept id, new id).
+    pub fn split_quadratic_lines(
+        &mut self,
+        ids: &BTreeSet<ElementId>,
+        type_name: &str,
+    ) -> Vec<(ElementId, ElementId)> {
+        let mut next = self.elements.iter().map(|e| e.id).max().unwrap_or(0) + 1;
+        let mut halves = Vec::new();
+        let mut split_segments = Vec::new();
+        for index in 0..self.elements.len() {
+            let element = &mut self.elements[index];
+            if element.shape != ElementShape::Line3 || !ids.contains(&element.id) {
+                continue;
+            }
+            let [a, m, b] = [element.nodes[0], element.nodes[1], element.nodes[2]];
+            element.shape = ElementShape::Line2;
+            element.type_name = type_name.into();
+            element.nodes = vec![a, m];
+            let kept = element.id;
+            self.element_lookup.insert(next, self.elements.len());
+            self.elements.push(Element {
+                id: next,
+                type_name: type_name.into(),
+                shape: ElementShape::Line2,
+                nodes: vec![m, b],
+            });
+            halves.push((kept, next));
+            split_segments.push(([a, b], m));
+            next += 1;
+        }
+        let second: BTreeMap<ElementId, ElementId> = halves.iter().copied().collect();
+        let follow = |list: &mut Vec<ElementId>| {
+            let mut out = Vec::with_capacity(list.len());
+            for &id in list.iter() {
+                out.push(id);
+                out.extend(second.get(&id));
+            }
+            *list = out;
+        };
+        for part in &mut self.parts {
+            follow(&mut part.elements);
+        }
+        for set in self.element_sets.values_mut() {
+            follow(set);
+        }
+        let middles: BTreeMap<[NodeId; 2], NodeId> = (split_segments.into_iter())
+            .map(|([a, b], m)| ([a.min(b), a.max(b)], m))
+            .collect();
+        for segments in self.cad.segments.values_mut() {
+            let mut out = Vec::with_capacity(segments.len());
+            for &[a, b] in segments.iter() {
+                match middles.get(&[a.min(b), a.max(b)]) {
+                    Some(&m) => out.extend([[a, m], [m, b]]),
+                    None => out.push([a, b]),
+                }
+            }
+            *segments = out;
+        }
+        halves
+    }
+
     /// Separates the mesh along a cut: the given elements get copies of the given nodes, at
     /// the same place, under the new ids of `copies`, and no longer share them with the rest.
     pub fn split_nodes(
