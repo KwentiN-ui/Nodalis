@@ -1,5 +1,5 @@
-//! The step overview window: every boundary condition, load, defined field and model-wide
-//! item against the steps, Abaqus' load manager ([`plx_model::StepOverview`]). A click on a
+//! The step overview window: every boundary condition, load, defined field, history output
+//! and model-wide item against the steps, Abaqus' load manager ([`plx_model::StepOverview`]). A click on a
 //! cell opens the item in that step; its context menu copies the item to the following
 //! steps or removes it from them, the explicit "propagate" of other tools.
 
@@ -138,7 +138,7 @@ pub fn window(ctx: &egui::Context, open: &mut bool, fe: &FeModel) -> Option<Acti
                                 ui.end_row();
                             }
                             if overview.rows.is_empty() {
-                                ui.weak("No boundary conditions, loads or model-wide items.");
+                                ui.weak("No boundary conditions, loads, history outputs or model-wide items.");
                                 ui.end_row();
                             }
                         });
@@ -175,7 +175,32 @@ fn tree_item(fe: &FeModel, s: usize, key: &StepItemKey) -> Option<TreeItem> {
         StepItemKey::DefinedField(name) => {
             TreeItem::DefinedField(s, step.defined_fields.iter().position(|f| f.name == *name)?)
         }
+        StepItemKey::HistoryOutput(id) => {
+            TreeItem::HistoryOutput(s, step.history_outputs.iter().position(|h| h == id)?)
+        }
     })
+}
+
+/// The step and the step item a tree item stands for: a boundary condition, load, defined
+/// field or history output of a step.
+pub fn step_item_key(fe: &FeModel, item: &TreeItem) -> Option<(usize, StepItemKey)> {
+    let (s, key) = match *item {
+        TreeItem::BoundaryCondition(s, i) => (
+            s,
+            StepItemKey::BoundaryCondition(fe.steps.get(s)?.boundary_conditions.get(i)?.id),
+        ),
+        TreeItem::Load(s, i) => (s, StepItemKey::Load(fe.steps.get(s)?.loads.get(i)?.id)),
+        TreeItem::DefinedField(s, i) => (
+            s,
+            StepItemKey::DefinedField(fe.steps.get(s)?.defined_fields.get(i)?.name.clone()),
+        ),
+        TreeItem::HistoryOutput(s, i) => (
+            s,
+            StepItemKey::HistoryOutput(fe.step_history_output(s, i)?.id),
+        ),
+        _ => return None,
+    };
+    Some((s, key))
 }
 
 /// The words of the toast after copying or removing.
@@ -192,6 +217,7 @@ pub fn done(fe: &FeModel, action: &Action, count: usize) -> String {
             }
             TreeItem::Load(s, i) => Some(fe.steps[s].loads[i].name.clone()),
             TreeItem::DefinedField(s, i) => Some(fe.steps[s].defined_fields[i].name.clone()),
+            TreeItem::HistoryOutput(s, i) => fe.step_history_output(s, i).map(|h| h.name.clone()),
             _ => None,
         })
         .unwrap_or_default();
@@ -199,6 +225,9 @@ pub fn done(fe: &FeModel, action: &Action, count: usize) -> String {
     match (verb, count) {
         (_, 0) if verb == "Copied" => format!("No following step can take {name}"),
         (_, 0) => format!("No following step has {name}"),
+        ("Copied", _) if matches!(key, StepItemKey::HistoryOutput(_)) => {
+            format!("{count} more {steps} print {name}")
+        }
         ("Copied", _) => format!("Copied {name} to {count} following {steps}"),
         _ => format!("Removed {name} from {count} following {steps}"),
     }

@@ -99,8 +99,8 @@ found it (@results-timeline).
 ==== Step overview <step-overview>
 
 #menu("Steps", "Step Overview") (also in the context menu of #ui("Steps") in the tree) shows
-every boundary condition, load and defined field, and every model-wide item, against the
-steps. The second row says where each step starts. Each cell compares the item with the step
+every boundary condition, load, defined field and history output, and every model-wide item,
+against the steps. The second row says where each step starts. Each cell compares the item with the step
 the step starts from, for a probing step its base:
 
 #fields(
@@ -118,7 +118,9 @@ An empty cell is an item the step does not have and did not have before, or one 
 type cannot take (loads in a frequency step). Click a cell to open the item in that step, or a
 step name to open the step. The context menu of a cell copies the item to all following steps
 that can take it, in place of the one there (#ui("Copy to Following Steps")), or removes it
-from them (#ui("Remove from Following Steps")). Undo takes either back.
+from them (#ui("Remove from Following Steps")). The context menu of a boundary condition, load,
+defined field or history output in the tree offers the same two entries. Undo takes either
+back.
 
 #screenshot("step-overview.png", [Step overview: the pressure of Preload ramps down to zero in
   Unload, the frequency step Modes takes no loads, and the contact region Flange is switched
@@ -382,8 +384,29 @@ active step. Hovering over a variable shows what it is.
 
 CalculiX prints a history output at every increment, so a step gives one row per increment:
 a linear static step one row, a nonlinear step (Nlgeom, contact, plasticity) as many rows as it
-takes increments, a frequency or buckle step one row per mode. A history output also stays in
-effect in the following steps until a step defines history outputs of the same type (node, element or contact) of its own.
+takes increments, a frequency or buckle step one row per mode.
+
+==== One output for several steps <history-shared>
+
+A history output belongs to the model, and each step lists the ones it prints. A new step
+prints the history outputs of the last step before it (a Dynamic step prints the
+#ui("Energies") as well), and a step prints exactly the history outputs listed under it,
+nothing carried over from the steps before. The same output in several steps stays one output:
+
+- selecting it in one step highlights it in every step that prints it;
+- #ui("Edit …"), #ui("Activate") and #ui("Deactivate") change it for all of these steps;
+- #ui("Delete") removes it from every step;
+- #ui("Remove from This Step") in its context menu stops only this step from printing it;
+- #ui("Add to Following Steps") lets every following step that can print it print it too,
+  #ui("Remove from Following Steps") takes it out of them. The step overview has the same
+  entries (@step-overview).
+
+Since an output is one item, its name is unique in the model, and the Results workspace shows
+one table for it over all steps that print it. A sensitivity step prints no history outputs,
+and the #ui("Energies") only print in Dynamic steps.
+
+#screenshot("history-output-shared.png", [The history output Reactions printed by three steps,
+  selected in More_Load and highlighted in Load and Modes])
 
 When results are opened, the `.dat` file is read too, and the history outputs appear on the
 Results workspace (@history-outputs).

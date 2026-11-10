@@ -225,7 +225,7 @@ pub(crate) fn solve_beam_built_in(dir: &Path) -> std::path::PathBuf {
     let mut fe = beam_model(&mesh, LoadKind::force([0.0, 0.0, -1.0]), Region::Faces(tip));
     let fixed = (mesh.node_ids().iter().copied()).filter(|&n| mesh.node(n).unwrap()[0] == 0.0);
     let output = plx_model::HistoryOutput::node("H-Output-1", Region::Nodes(fixed.collect()));
-    fe.steps[0].history_outputs.push(output);
+    fe.put_history_output(0, output);
     let lowered = plx_io::inp::lower_unvalidated(&mesh, &fe, "built-in").unwrap();
     let prepared = crate::analysis::prepare(lowered, &fe, &[]);
     let mut run = Run::start_analysis(1, dir, "Beam", prepared).unwrap();

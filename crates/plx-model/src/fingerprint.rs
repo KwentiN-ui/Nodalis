@@ -47,6 +47,7 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
         distributions,
         initial_conditions,
         steps,
+        history_outputs,
         reference_points,
         coordinate_systems,
         planes,
@@ -111,6 +112,13 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
         }
     }
     hash.add_debug(&steps);
+    // The history outputs these steps print.
+    let printed: Vec<_> = (history_outputs.iter())
+        .filter(|o| steps.iter().any(|s| s.history_outputs.contains(&o.id)))
+        .collect();
+    if !printed.is_empty() {
+        hash.add_debug(&printed);
+    }
     hash.add_debug(mesh_sets);
     hash.add_debug(element_types);
     // Features only count when the model uses them: one made on the results, e.g. a

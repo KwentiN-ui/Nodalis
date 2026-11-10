@@ -335,6 +335,7 @@ fn chain_fingerprint(fe: &FeModel, steps: &[Step]) -> u64 {
     hash.add_debug(&fe.properties.kind);
     hash.add_debug(&fe.properties.global_results);
     hash.add_debug(&steps);
+    hash.add_debug(&fe.printed_history_outputs(steps));
     hash.finish()
 }
 
@@ -367,6 +368,7 @@ pub fn apply_chain(
     target.steps = source.steps[..=step].to_vec();
     let inherited = names(&target.steps);
     target.steps.extend(own);
+    target.adopt_history_outputs(source);
     inherited
 }
 
@@ -379,7 +381,9 @@ fn names(steps: &[Step]) -> Vec<String> {
 pub fn split_after(fe: &FeModel, index: usize, new: &mut FeModel) -> FeModel {
     let mut kept = fe.clone();
     kept.steps.truncate(index + 1);
+    kept.drop_unused_history_outputs();
     new.steps = fe.steps[index + 1..].to_vec();
+    new.adopt_history_outputs(fe);
     kept
 }
 
@@ -389,6 +393,7 @@ pub fn merge_into(source: &mut FeModel, target: &FeModel, link: &Link) -> Vec<St
     let own = own_steps(target, link);
     let moved = names(&own);
     source.steps.extend(own);
+    source.adopt_history_outputs(target);
     moved
 }
 
@@ -825,6 +830,7 @@ fn category_fingerprint(hash: &mut Fnv, fe: &FeModel, category: &str, name: Opti
                 }
             }
             hash.add_debug(&steps);
+            hash.add_debug(&fe.printed_history_outputs(&steps));
         }
         _ => {}
     }
@@ -976,6 +982,7 @@ fn copy_category(target: &mut FeModel, source: &FeModel, category: &str, name: M
         ),
         "Steps" => {
             copy(&mut target.steps, &source.steps, |s| &s.name, name);
+            target.adopt_history_outputs(source);
             for (step, global) in global_steps {
                 set_global_step(target, &step, global);
             }

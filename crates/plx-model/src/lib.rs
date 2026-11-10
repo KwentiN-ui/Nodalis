@@ -161,8 +161,10 @@ use serde::{Deserialize, Serialize};
 /// items of the model an internal id ([`Id`]) and lets items refer to each other by it in
 /// place of their names, so that renaming keeps the references; older formats are refused.
 /// Format 19 replaces the perturbation switches of the frequency, buckle and modal dynamic
-/// steps by the [`Base`] they are computed about; older formats are refused.
-pub const PROJECT_FORMAT: u32 = 19;
+/// steps by the [`Base`] they are computed about; older formats are refused. Format 20 keeps
+/// the history outputs once in the model ([`FeModel::history_outputs`]) and lets the steps
+/// list those they print by id; older formats are refused.
+pub const PROJECT_FORMAT: u32 = 20;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -212,6 +214,10 @@ pub struct FeModel {
     #[serde(default)]
     pub initial_conditions: Vec<InitialCondition>,
     pub steps: Vec<Step>,
+    /// Values printed into the `.dat` file, each once for the model; the steps list those
+    /// they print ([`Step::history_outputs`]).
+    #[serde(default)]
+    pub history_outputs: Vec<HistoryOutput>,
     /// The features: points and coordinate systems other items refer to by name.
     #[serde(default)]
     pub reference_points: Vec<ReferencePoint>,
@@ -259,10 +265,10 @@ impl FeModel {
             .chain(self.contact_regions.iter().flat_map(ContactRegion::regions))
             .chain(self.bolts.iter().flat_map(Bolt::regions))
             .chain(self.mesh_sets.iter().map(|s| &s.region))
+            .chain(self.history_outputs.iter().filter_map(|h| h.kind.region()))
             .chain(self.steps.iter().flat_map(|step| {
                 (step.boundary_conditions.iter().map(|b| &b.region))
                     .chain(step.loads.iter().map(|l| &l.region))
-                    .chain(step.history_outputs.iter().filter_map(|h| h.kind.region()))
                     .chain(step.kind.region())
             }))
     }
@@ -389,11 +395,11 @@ impl FeModel {
             .chain((self.contact_regions.iter_mut()).flat_map(ContactRegion::regions_mut))
             .chain(self.bolts.iter_mut().flat_map(Bolt::regions_mut))
             .chain(self.mesh_sets.iter_mut().map(|s| &mut s.region))
+            .chain((self.history_outputs.iter_mut()).filter_map(|h| h.kind.region_mut()))
             .chain(self.steps.iter_mut().flat_map(|step| {
                 (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
                     .chain(step.defined_fields.iter_mut().map(|f| &mut f.region))
-                    .chain((step.history_outputs.iter_mut()).filter_map(|h| h.kind.region_mut()))
                     .chain(step.kind.region_mut())
             }))
     }
@@ -460,11 +466,11 @@ impl FeModel {
             .chain(self.bolts.iter_mut().flat_map(Bolt::regions_mut))
             .chain(self.initial_conditions.iter_mut().map(|i| &mut i.region))
             .chain(self.mesh_sets.iter_mut().map(|s| &mut s.region))
+            .chain((self.history_outputs.iter_mut()).filter_map(|h| h.kind.region_mut()))
             .chain(self.steps.iter_mut().flat_map(|step| {
                 (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
                     .chain(step.defined_fields.iter_mut().map(|f| &mut f.region))
-                    .chain((step.history_outputs.iter_mut()).filter_map(|h| h.kind.region_mut()))
                     .chain(step.kind.region_mut())
             }));
         for region in regions {
@@ -677,9 +683,9 @@ pub struct Step {
     pub boundary_conditions: Vec<BoundaryCondition>,
     pub loads: Vec<Load>,
     pub field_outputs: Vec<FieldOutput>,
-    /// Values printed into the `.dat` file; steps saved before they existed have none.
+    /// The history outputs of the model the step prints, by id, in their order.
     #[serde(default)]
-    pub history_outputs: Vec<HistoryOutput>,
+    pub history_outputs: Vec<Id>,
     /// Temperatures prescribed for the step; steps saved before
     /// they existed have none.
     #[serde(default)]
@@ -854,6 +860,24 @@ impl StepKind {
             self.is_thermal()
         } else {
             self.is_mechanical()
+        }
+    }
+
+    /// Whether the step prints history outputs: an eigenvalue step prints one row per
+    /// mode, a sensitivity step evaluates the step before it and prints none.
+    pub fn prints_history(&self) -> bool {
+        !matches!(self, StepKind::Sensitivity(_))
+    }
+
+    /// Whether a history output of this kind prints anything in the step: only the time
+    /// integration of a Dynamic step computes the energies.
+    pub fn supports_history_output(&self, kind: &crate::HistoryKind) -> bool {
+        if !self.prints_history() {
+            false
+        } else if *kind == crate::HistoryKind::Energies {
+            matches!(self, StepKind::Dynamic(_))
+        } else {
+            true
         }
     }
 
@@ -1940,7 +1964,7 @@ impl Step {
             kind: StepKind::Dynamic(DynamicStep::default()),
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
-            history_outputs: vec![HistoryOutput::energies("Energies")],
+            history_outputs: Vec::new(),
             field_outputs: FieldOutput::dynamic_defaults(),
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),

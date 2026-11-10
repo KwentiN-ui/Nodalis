@@ -397,11 +397,29 @@ impl Built {
                     step.name = format!("Step-{}", steps.len() + 1);
                 }
                 assembler.begin(step);
+                // A step prints the history outputs it lists, none carried over from the
+                // steps before: the model keeps one output that each step lists or not.
+                let prints = |kind: fn(&Card) -> bool| block.cards.iter().any(kind);
+                let node = prints(|c| matches!(c, Card::NodePrint(_)));
+                let element = prints(|c| matches!(c, Card::ElPrint(_)));
+                let contact = prints(|c| matches!(c, Card::ContactPrint(_)));
                 for card in block.boundaries.into_iter().chain(block.cards) {
                     let _ = assembler.apply(&model, card);
                 }
                 let first = steps.len();
-                steps.extend(assembler.end(&model));
+                steps.extend(assembler.end(&model).map(|mut step| {
+                    let outputs = &mut step.outputs;
+                    for (own, list) in [
+                        (node, &mut outputs.node_print),
+                        (element, &mut outputs.el_print),
+                        (contact, &mut outputs.contact_print),
+                    ] {
+                        if !own {
+                            list.clear();
+                        }
+                    }
+                    step
+                }));
                 for step in first..steps.len() {
                     origins.insert(ir::ItemRef::Step(step), ModelItem::Step(origin));
                     if block.preparation {
@@ -4164,7 +4182,9 @@ fn step_block<'f>(
     let mut rest = defined_fields(sets, step, amplitudes, model)?;
     // Only the time integration computes the energies.
     let dynamic = matches!(step.kind, StepKind::Dynamic(_));
+    // The outputs of the model the step lists are written into it as its own.
     for output in (step.history_outputs.iter())
+        .filter_map(|&id| model.history_output(id))
         .filter(|o| o.active && (dynamic || o.kind != HistoryKind::Energies))
     {
         rest.extend(history_output(sets, output, pair_surfaces)?);

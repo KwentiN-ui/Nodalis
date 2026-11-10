@@ -719,7 +719,7 @@ pub fn save_project(path: &Path, project: &Project) -> Result<(), ProjectError> 
 
 /// The oldest format that can still be opened. While Nodalis is being designed, a new
 /// format is not converted: older projects are refused.
-pub const FIRST_PROJECT_FORMAT: u32 = 19;
+pub const FIRST_PROJECT_FORMAT: u32 = 20;
 
 /// The format of a project file, read before the rest, which depends on it.
 #[derive(Deserialize)]
@@ -1243,6 +1243,74 @@ mod tests {
         save_project(std::path::Path::new(&path), &project).unwrap();
     }
 
+    /// Writes a project of a beam with three steps that print the same history output, for
+    /// the user guide's screenshot of history outputs shared by steps:
+    /// `PLX_HISTORY_DEMO=path cargo test history_demo -- --ignored`.
+    #[test]
+    #[ignore]
+    fn history_demo_project() {
+        let Some(path) = std::env::var_os("PLX_HISTORY_DEMO") else {
+            return;
+        };
+        let mut mesh = FeMesh::default();
+        let [bottom, top] = add_block(
+            &mut mesh,
+            "Beam",
+            1,
+            [0.0, 0.0, 0.0],
+            [0.02, 0.02, 0.2],
+            [2, 2, 10],
+        );
+        let mut model = FeModel::default();
+        model.materials.push(Material {
+            name: "Steel".into(),
+            density: Some(7850.0),
+            elastic: Some(plx_model::Elastic {
+                young: 2.1e11,
+                poisson: 0.3,
+            }),
+            ..Default::default()
+        });
+        model.sections.push(plx_model::Section {
+            name: "Solid_Section-1".into(),
+            material: model.materials.last().map(|m| m.id),
+            region: Region::Parts(vec!["Beam".into()]),
+            thickness: 1.0,
+            kind: plx_model::SectionKind::Solid,
+        });
+        let mut step = plx_model::Step::new_static("Load");
+        step.boundary_conditions.push(plx_model::BoundaryCondition {
+            id: plx_model::Id::new(),
+            distribution: None,
+            name: "Fixed-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Faces(bottom),
+            kind: plx_model::BoundaryKind::displacement([Some(0.0); 6]),
+            amplitude: None,
+        });
+        step.loads.push(plx_model::Load::new(
+            "Force-1",
+            Region::Faces(top.clone()),
+            plx_model::LoadKind::Force {
+                value: [0.0, 100.0, 0.0],
+                each_node: false,
+            },
+        ));
+        let mut more = step.clone();
+        more.name = "More_Load".into();
+        let mut modes = plx_model::Step::new_frequency("Modes");
+        modes.boundary_conditions = step.boundary_conditions.clone();
+        model.steps = vec![step, more, modes];
+        let reactions = plx_model::HistoryOutput::node("Reactions", Region::Faces(top));
+        let id = reactions.id;
+        model.put_history_output(0, reactions);
+        model.steps[1].history_outputs.push(id);
+        model.steps[2].history_outputs.push(id);
+        let project = single(None, &mesh, &model, None);
+        save_project(std::path::Path::new(&path), &project).unwrap();
+    }
+
     /// Writes a project of a rubber pad (Yeoh) on a fixed base, compressed by 30 % from
     /// the top, for the user guide's screenshots of hyperelastic materials:
     /// `PLX_RUBBER_DEMO=path cargo test rubber_demo -- --ignored`.
@@ -1370,6 +1438,7 @@ mod tests {
         let [rp, plane, interaction, region, detection] = [(); 5].map(|_| plx_model::Id::new());
         let model = FeModel {
             bolts: Vec::new(),
+            history_outputs: Vec::new(),
             cross_sections: Vec::new(),
             distributions: Vec::new(),
             properties: Default::default(),

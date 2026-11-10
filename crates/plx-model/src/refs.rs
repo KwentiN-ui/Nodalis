@@ -200,6 +200,11 @@ impl FeModel {
         for tie in &mut self.node_ties {
             optional(&mut tie.detected_by, visit);
         }
+        for output in &mut self.history_outputs {
+            if let HistoryKind::Contact { pair } = &mut output.kind {
+                optional(pair, visit);
+            }
+        }
         for step in &mut self.steps {
             if let crate::StepKind::ComplexFrequency(complex) = &mut step.kind {
                 optional(&mut complex.system, visit);
@@ -225,11 +230,6 @@ impl FeModel {
             for field in &mut step.defined_fields {
                 optional(&mut field.amplitude, visit);
                 optional(&mut field.distribution, visit);
-            }
-            for output in &mut step.history_outputs {
-                if let HistoryKind::Contact { pair } = &mut output.kind {
-                    optional(pair, visit);
-                }
             }
             for change in &mut step.contact_changes {
                 visit(&mut change.region);
@@ -337,14 +337,13 @@ mod tests {
         let point = ReferencePoint::new("RP-1", [0.0; 3]);
         let id = point.id;
         model.reference_points.push(point);
-        let mut step = Step::new_static("Step-1");
+        model.steps.push(Step::new_static("Step-1"));
         let output = HistoryOutput::node("NH_Output-1", Region::ReferencePoint(id));
-        step.history_outputs.push(output);
-        model.steps.push(step);
+        model.put_history_output(0, output);
 
         model.reference_points[0].name = "Top".into();
 
-        let region = model.steps[0].history_outputs[0].kind.region().unwrap();
+        let region = model.history_outputs[0].kind.region().unwrap();
         assert_eq!(region.describe(&model), "Top");
         assert_eq!(
             model.reference_point(id).map(|r| r.name.as_str()),
@@ -356,13 +355,12 @@ mod tests {
     fn references_are_retargeted() {
         let mut model = FeModel::default();
         let (old, new) = (Id::new(), Id::new());
-        let mut step = Step::new_static("Step-1");
+        model.steps.push(Step::new_static("Step-1"));
         let output = HistoryOutput::node("NH_Output-1", Region::ReferencePoint(old));
-        step.history_outputs.push(output);
-        model.steps.push(step);
+        model.put_history_output(0, output);
         model.retarget(old, new);
         assert_eq!(
-            model.steps[0].history_outputs[0].kind.region(),
+            model.history_outputs[0].kind.region(),
             Some(&Region::ReferencePoint(new))
         );
     }
@@ -376,17 +374,16 @@ mod tests {
             .reference_points
             .push(ReferencePoint::new("RP-1", [0.0; 3]));
         let old = model.reference_points[0].id;
-        let mut step = Step::new_static("Step-1");
+        model.steps.push(Step::new_static("Step-1"));
         let output = HistoryOutput::node("NH_Output-1", Region::ReferencePoint(old));
-        step.history_outputs.push(output);
-        model.steps.push(step);
+        model.put_history_output(0, output);
         let before = model.item_ids();
         let other = ReferencePoint::new("RP-1", [1.0; 3]);
         let new = other.id;
         model.reference_points[0] = other;
         model.follow_replaced(&before);
         assert_eq!(
-            model.steps[0].history_outputs[0].kind.region(),
+            model.history_outputs[0].kind.region(),
             Some(&Region::ReferencePoint(new))
         );
     }

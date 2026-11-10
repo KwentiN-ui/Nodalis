@@ -75,9 +75,10 @@ impl ContactRegion {
 
     /// Whether an active step prints contact values of the region, a contact history
     /// output of it (`*CONTACT PRINT`).
-    pub fn prints_contact(&self, steps: &[Step]) -> bool {
+    pub fn prints_contact(&self, steps: &[Step], outputs: &[crate::HistoryOutput]) -> bool {
         (steps.iter().filter(|s| s.active))
             .flat_map(|s| &s.history_outputs)
+            .filter_map(|&id| outputs.iter().find(|o| o.id == id))
             .any(|o| {
                 o.active
                     && matches!(&o.kind, crate::HistoryKind::Contact { pair } if *pair == Some(self.id))

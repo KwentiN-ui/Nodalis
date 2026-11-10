@@ -813,12 +813,10 @@ fn coupled_tip(behavior: RemoteBehavior) -> (FeMesh, FeModel) {
 #[test]
 fn a_deformable_coupling_of_a_reference_point_is_written_as_equations() {
     let (mesh, mut model) = coupled_tip(RemoteBehavior::Deformable);
-    model.steps[0]
-        .history_outputs
-        .push(plx_model::HistoryOutput::node(
-            "Tip-1",
-            Region::ReferencePoint(named("RP-1")),
-        ));
+    model.put_history_output(
+        0,
+        plx_model::HistoryOutput::node("Tip-1", Region::ReferencePoint(named("RP-1"))),
+    );
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(!text.contains("*Rigid body"), "{text}");
     // Three translations and three rotations follow the face.
@@ -844,7 +842,7 @@ fn solver_moves_a_deformably_coupled_point_with_the_mean_of_its_face() {
     let (_, mut model) = coupled_tip(RemoteBehavior::Deformable);
     let mut output = plx_model::HistoryOutput::node("Tip", Region::ReferencePoint(named("RP-1")));
     output.variables = vec!["U".into()];
-    model.steps[0].history_outputs.push(output);
+    model.put_history_output(0, output);
     let text = write_inp(&mesh, &model, "").unwrap();
     let name = "coupling-deformable";
     dump_fixture(name, &text);
@@ -4991,7 +4989,7 @@ fn solver_reports_the_pressure_of_a_compression_only_support() {
     ));
     let mut output = HistoryOutput::contact("CH_Output-1", Some(named("Compression_Only-1")));
     output.variables = vec!["CF".into()];
-    step.history_outputs.push(output);
+    model.put_history_output(0, output);
     let text = write_inp(&blocks.mesh, &model, "").unwrap();
     assert!(
         text.contains(
@@ -7016,22 +7014,46 @@ fn solver_weighs_a_quadratic_cantilever() {
     );
 }
 
+/// One history output of the model, listed by two of three steps: the step that does not
+/// list it prints nothing, although the solver would carry the prints of the step before.
+#[test]
+fn a_step_prints_only_the_history_outputs_it_lists() {
+    let (mesh, mut model) = cantilever(tip_force());
+    let second = model.steps[0].clone();
+    model.steps.push(Step {
+        name: "Step-2".into(),
+        ..second.clone()
+    });
+    model.steps.push(Step {
+        name: "Step-3".into(),
+        ..second
+    });
+    let output = HistoryOutput::node("NH_Output-1", Region::Nodes(vec![99]));
+    let id = output.id;
+    model.put_history_output(0, output);
+    model.steps[2].history_outputs.push(id);
+    let analysis = lowered(&mesh, &model);
+    let printed: Vec<usize> = (analysis.steps.iter())
+        .map(|s| s.outputs.node_print.len())
+        .collect();
+    assert_eq!(printed, [1, 0, 1]);
+}
+
 #[test]
 fn history_outputs_become_print_keywords_with_their_sets() {
     let (mesh, mut model) = cantilever(tip_force());
-    let step = &mut model.steps[0];
     let mut nodes = HistoryOutput::node("NH_Output-1", Region::Nodes(vec![99]));
     nodes.totals = Totals::Yes;
-    step.history_outputs.push(nodes);
+    model.put_history_output(0, nodes);
     let mut elements = HistoryOutput::element("EH_Output-1", Region::Parts(vec!["EALL".into()]));
     elements.variables = vec!["S".into(), "EVOL".into()];
-    step.history_outputs.push(elements);
+    model.put_history_output(0, elements);
     let mut off = HistoryOutput::node("NH_Output-2", Region::NodeSet("FIX".into()));
     off.active = false;
-    step.history_outputs.push(off);
+    model.put_history_output(0, off);
     let mut empty = HistoryOutput::node("NH_Output-3", Region::NodeSet("FIX".into()));
     empty.variables.clear();
-    step.history_outputs.push(empty);
+    model.put_history_output(0, empty);
     let text = write_inp(&mesh, &model, "").unwrap();
     for expected in [
         "*Nset, Nset=INTERNAL_SELECTION-1_NH_OUTPUT-1\n99\n",
@@ -7053,12 +7075,12 @@ fn history_outputs_become_print_keywords_with_their_sets() {
 fn contact_forces_need_an_active_contact_pair() {
     let (mesh, mut model) = cantilever(tip_force());
     let mut output = HistoryOutput::contact("CH_Output-1", Some(named("Contact_Pair-1")));
-    model.steps[0].history_outputs.push(output.clone());
+    model.put_history_output(0, output.clone());
     // Without contact forces no surfaces are needed.
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("*Contact print\nCDIS, CSTR\n"), "{text}");
     output.variables.push("CF".into());
-    model.steps[0].history_outputs[0] = output;
+    model.history_outputs[0] = output;
     assert_eq!(
         write_inp(&mesh, &model, ""),
         Err(WriteError::UnknownContactPair {
@@ -7071,17 +7093,18 @@ fn contact_forces_need_an_active_contact_pair() {
 #[test]
 fn solver_prints_the_history_outputs_into_the_dat_file() {
     let (mesh, mut model) = cantilever(tip_force());
-    let step = &mut model.steps[0];
     let mut reactions = HistoryOutput::node("NH_Output-1", Region::NodeSet("FIX".into()));
     reactions.variables = vec!["RF".into()];
     reactions.totals = Totals::Only;
-    step.history_outputs.push(reactions);
-    step.history_outputs
-        .push(HistoryOutput::node("NH_Output-2", Region::Nodes(vec![99])));
+    model.put_history_output(0, reactions);
+    model.put_history_output(
+        0,
+        HistoryOutput::node("NH_Output-2", Region::Nodes(vec![99])),
+    );
     let mut volume = HistoryOutput::element("EH_Output-1", Region::Parts(vec!["EALL".into()]));
     volume.variables = vec!["S".into(), "EVOL".into()];
     volume.totals = Totals::Yes;
-    step.history_outputs.push(volume);
+    model.put_history_output(0, volume);
     let Some(dat) = run_dat("historie", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
@@ -7141,7 +7164,7 @@ fn solver_prints_the_contact_force_of_a_pair() {
     model.contact_pairs.push(pair);
     let mut output = HistoryOutput::contact("CH_Output-1", Some(named("Contact_Pair-1")));
     output.variables = ["CDIS", "CSTR", "CNUM", "CF"].map(String::from).to_vec();
-    model.steps[0].history_outputs.push(output);
+    model.put_history_output(0, output);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains(
         "*Contact print, Slave=INTERNAL_SELECTION-1_CONTACT_PAIR-1_SLAVE, \
@@ -9203,14 +9226,14 @@ fn solver_drives_a_quadratic_end_face_with_every_behavior() {
 #[test]
 fn a_point_history_output_prints_its_reference_and_rotation_node() {
     let (mesh, mut model) = rigid_tip(None, None);
-    (model.steps[0].history_outputs).push(HistoryOutput::node(
-        "NH_Output-1",
-        Region::ReferencePoint(named("RP-1")),
-    ));
+    model.put_history_output(
+        0,
+        HistoryOutput::node("NH_Output-1", Region::ReferencePoint(named("RP-1"))),
+    );
     let mut temperatures =
         HistoryOutput::node("NH_Output-2", Region::ReferencePoint(named("RP-1")));
     temperatures.variables = vec!["NT".into()];
-    model.steps[0].history_outputs.push(temperatures);
+    model.put_history_output(0, temperatures);
     let text = write_inp(&mesh, &model, "").unwrap();
     for expected in [
         "*Nset, Nset=INTERNAL_SELECTION-1_NH_OUTPUT-1\n100\n",
@@ -9238,10 +9261,10 @@ fn a_remote_point_history_output_prints_the_nodes_of_the_point() {
     let (mesh, mut model) = remote_cantilever(remote_with(values, |r| {
         r.behavior = Behavior::Deformable;
     }));
-    (model.steps[0].history_outputs).push(HistoryOutput::node(
-        "NH_Output-1",
-        Region::RemotePoint(named("Remote-1")),
-    ));
+    model.put_history_output(
+        0,
+        HistoryOutput::node("NH_Output-1", Region::RemotePoint(named("Remote-1"))),
+    );
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
         text.contains("*Nset, Nset=INTERNAL_SELECTION-1_NH_OUTPUT-1\n100\n"),
@@ -9288,7 +9311,7 @@ fn solver_prints_the_rotation_of_the_point_of_a_remote_force() {
         let mut output =
             HistoryOutput::node("NH_Output-1", Region::RemotePoint(named("Remote_Force-1")));
         output.variables = vec!["U".into()];
-        model.steps[0].history_outputs.push(output);
+        model.put_history_output(0, output);
         let text = write_inp(&mesh, &model, "").unwrap();
         assert!(
             text.contains("*Nset, Nset=INTERNAL_SELECTION-1_NH_OUTPUT-1\n100\n"),
@@ -9317,10 +9340,10 @@ fn solver_prints_the_rotation_of_the_point_of_a_remote_force() {
     // A deactivated remote force has no point.
     let (mesh, mut model) = cantilever(remote_force(|_| {}));
     model.steps[0].loads[0].active = false;
-    (model.steps[0].history_outputs).push(HistoryOutput::node(
-        "NH_Output-1",
-        Region::RemotePoint(named("Remote_Force-1")),
-    ));
+    model.put_history_output(
+        0,
+        HistoryOutput::node("NH_Output-1", Region::RemotePoint(named("Remote_Force-1"))),
+    );
     assert_eq!(
         write_inp(&mesh, &model, ""),
         Err(WriteError::UnknownRemotePoint {
@@ -9338,12 +9361,10 @@ fn point_moment(
     region: Region,
     name: &str,
 ) -> Option<(f64, f64, f64)> {
-    let step = &mut model.steps[0];
-    step.history_outputs
-        .push(HistoryOutput::node("NH_Output-1", region));
+    model.put_history_output(0, HistoryOutput::node("NH_Output-1", region));
     let mut clamp = HistoryOutput::node("NH_Output-2", Region::NodeSet("FIX".into()));
     clamp.variables = vec!["RF".into()];
-    step.history_outputs.push(clamp);
+    model.put_history_output(0, clamp);
     let dat = run_dat(name, &write_inp(mesh, &model, "").unwrap())?;
     let import = crate::dat::parse_dat(&dat);
     assert!(import.warnings.is_empty(), "{:?}", import.warnings);
@@ -9421,10 +9442,10 @@ fn solver_prints_the_rotation_of_a_deformable_remote_point() {
     let (mesh, mut model) = remote_cantilever(remote_with(values, |r| {
         r.behavior = Behavior::Deformable;
     }));
-    (model.steps[0].history_outputs).push(HistoryOutput::node(
-        "NH_Output-1",
-        Region::RemotePoint(named("Remote-1")),
-    ));
+    model.put_history_output(
+        0,
+        HistoryOutput::node("NH_Output-1", Region::RemotePoint(named("Remote-1"))),
+    );
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
         text.contains(
@@ -10391,7 +10412,7 @@ fn long_set_names_are_shortened_and_restored_in_the_history_output() {
     model.contact_regions[0].name = long.to_string();
     let mut output = HistoryOutput::contact("CH_Output-1", Some(model.contact_regions[0].id));
     output.variables = ["CF".to_string()].to_vec();
-    model.steps[0].history_outputs.push(output);
+    model.put_history_output(0, output);
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in text.lines().filter(|l| !l.starts_with("**")) {
         for part in line.split(',') {
@@ -10650,7 +10671,7 @@ fn solver_prints_the_contact_forces_of_a_bonded_region() {
     let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::Bonded);
     let mut output = HistoryOutput::contact("CH_Output-1", Some(named("Region-1")));
     output.variables = ["CDIS", "CSTR", "CF"].map(String::from).to_vec();
-    model.steps[0].history_outputs.push(output);
+    model.put_history_output(0, output);
     let resolved = model.resolve_contacts(&mesh);
     assert!(
         matches!(resolved.items[0].kind, plx_model::ResolvedKind::Pair { .. }),
@@ -10704,7 +10725,7 @@ fn contact_outputs_of_regions_without_contact_elements_are_left_out() {
         model.contact_regions[0].settings.bonded_method = method;
         let mut output = HistoryOutput::contact("CH_Output-1", Some(named("Region-1")));
         output.variables = ["CF".to_string()].to_vec();
-        model.steps[0].history_outputs.push(output);
+        model.put_history_output(0, output);
         let text = write_inp(&mesh, &model, "").unwrap();
         assert!(!text.contains("*Contact print"), "{behavior:?}");
         assert!(
@@ -10991,10 +11012,10 @@ fn solver_prints_the_plastic_strain_and_energy_of_the_bar() {
     let mut elements =
         HistoryOutput::element("EH_Output-1", Region::ElementSet("TIP_ELEMENTS".into()));
     elements.variables = vec!["S".into(), "PEEQ".into(), "ENER".into()];
-    model.steps[0].history_outputs.push(elements);
+    model.put_history_output(0, elements);
     let mut nodes = HistoryOutput::node("NH_Output-1", Region::NodeSet("FIX".into()));
     nodes.totals = Totals::Yes;
-    model.steps[0].history_outputs.push(nodes);
+    model.put_history_output(0, nodes);
     let Some(frd) = run_solver("plastisch-history", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
@@ -11267,9 +11288,8 @@ fn an_error_of_a_point_names_the_boundary_condition_of_its_step() {
 #[test]
 fn solver_fits_a_damping_ratio_and_prints_the_energies() {
     let (mesh, mut model) = dynamic_cantilever(1.5e-3, 2.5e-5, None);
+    model.put_history_output(0, plx_model::HistoryOutput::energies("Energies"));
     let step = &mut model.steps[0];
-    step.history_outputs
-        .push(plx_model::HistoryOutput::energies("Energies"));
     let StepKind::Dynamic(settings) = &mut step.kind else {
         unreachable!()
     };

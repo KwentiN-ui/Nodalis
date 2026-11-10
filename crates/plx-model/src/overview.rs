@@ -1,5 +1,5 @@
-//! The step overview: a table of every boundary condition, load, defined temperature and
-//! model-wide item against the steps, Abaqus' load manager. Each cell says what the item is
+//! The step overview: a table of every boundary condition, load, defined temperature,
+//! history output and model-wide item against the steps, Abaqus' load manager. Each cell says what the item is
 //! in that step compared with the step before it: created, the same, changed, switched off,
 //! removed, or acting in every step because it belongs to the model. Nothing here is stored;
 //! the overview is derived from the steps, which refer to the same item by its stable id.
@@ -12,6 +12,7 @@ pub enum OverviewGroup {
     BoundaryCondition,
     Load,
     DefinedField,
+    HistoryOutput,
     /// Constraints, ties, contact and bolts: they belong to the model, not to a step.
     ModelWide,
 }
@@ -22,18 +23,20 @@ impl OverviewGroup {
             Self::BoundaryCondition => "Boundary conditions",
             Self::Load => "Loads",
             Self::DefinedField => "Defined fields",
+            Self::HistoryOutput => "History outputs",
             Self::ModelWide => "Model-wide",
         }
     }
 }
 
 /// The step item a row stands for, the same in every step: boundary conditions and loads
-/// by their id, defined fields, which have none, by their name.
+/// and history outputs by their id, defined fields, which have none, by their name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StepItemKey {
     BoundaryCondition(Id),
     Load(Id),
     DefinedField(String),
+    HistoryOutput(Id),
 }
 
 /// What an item is in one step.
@@ -101,7 +104,7 @@ impl Cell {
 #[derive(Clone, Debug, PartialEq)]
 pub struct OverviewRow {
     pub group: OverviewGroup,
-    /// The step item, for boundary conditions, loads and defined fields.
+    /// The step item, for boundary conditions, loads, defined fields and history outputs.
     pub key: Option<StepItemKey>,
     pub name: String,
     /// One cell per step.
@@ -127,7 +130,8 @@ pub struct StepOverview {
 }
 
 impl FeModel {
-    /// Every boundary condition, load, defined field and model-wide item against the
+    /// Every boundary condition, load, defined field, history output and model-wide item
+    /// against the
     /// steps, each cell compared with the step the step starts from.
     pub fn step_overview(&self) -> StepOverview {
         let columns = (self.steps.iter().enumerate())
@@ -142,7 +146,7 @@ impl FeModel {
         // The rows in the order the items first appear.
         let mut keys: Vec<(StepItemKey, String)> = Vec::new();
         for step in &self.steps {
-            for (key, name) in step_items(step) {
+            for (key, name) in step_items(&self.history_outputs, step) {
                 if !keys.iter().any(|(k, _)| *k == key) {
                     keys.push((key, name));
                 }
@@ -152,6 +156,7 @@ impl FeModel {
             OverviewGroup::BoundaryCondition,
             OverviewGroup::Load,
             OverviewGroup::DefinedField,
+            OverviewGroup::HistoryOutput,
         ] {
             for (key, name) in keys.iter().filter(|(k, _)| key_group(k) == group) {
                 let cells = (0..self.steps.len())
@@ -177,8 +182,11 @@ impl FeModel {
             StepItemKey::BoundaryCondition(_) => true,
             StepItemKey::Load(_) => step.kind.supports_loads(),
             StepItemKey::DefinedField(_) => step.kind.supports_defined_fields(),
+            StepItemKey::HistoryOutput(id) => (self.history_output(*id))
+                .is_none_or(|output| step.kind.supports_history_output(&output.kind)),
         };
-        let item = find_item(step, key);
+        let outputs = &self.history_outputs;
+        let item = find_item(outputs, step, key);
         if item.is_none() && !takes {
             return Cell::Absent;
         }
@@ -187,7 +195,7 @@ impl FeModel {
         let previous = (0..s)
             .rev()
             .find(|&p| self.steps[p].active && self.steps[p].kind.continues_state());
-        let before = previous.and_then(|p| find_item(&self.steps[p], key));
+        let before = previous.and_then(|p| find_item(outputs, &self.steps[p], key));
         match (item, before) {
             (Some(item), _) if !item.active() => Cell::Off,
             (Some(_), None) => Cell::Created,
@@ -278,7 +286,8 @@ impl FeModel {
     /// in place of the one there: the explicit "propagate" of other tools. Returns how many
     /// steps got it.
     pub fn copy_to_following_steps(&mut self, s: usize, key: &StepItemKey) -> usize {
-        let Some(item) = self.steps.get(s).and_then(|step| find_item(step, key)) else {
+        let outputs = &self.history_outputs;
+        let Some(item) = (self.steps.get(s)).and_then(|step| find_item(outputs, step, key)) else {
             return 0;
         };
         let item = item.owned();
@@ -295,15 +304,16 @@ impl FeModel {
     pub fn remove_from_following_steps(&mut self, s: usize, key: &StepItemKey) -> usize {
         let mut removed = 0;
         for step in self.steps.iter_mut().skip(s + 1) {
-            let before = step_items(step).len();
+            let before = step_items(&self.history_outputs, step).len();
             match key {
                 StepItemKey::BoundaryCondition(id) => {
                     step.boundary_conditions.retain(|b| b.id != *id)
                 }
                 StepItemKey::Load(id) => step.loads.retain(|l| l.id != *id),
                 StepItemKey::DefinedField(name) => step.defined_fields.retain(|f| f.name != *name),
+                StepItemKey::HistoryOutput(id) => step.history_outputs.retain(|h| h != id),
             }
-            if step_items(step).len() < before {
+            if step_items(&self.history_outputs, step).len() < before {
                 removed += 1;
             }
         }
@@ -316,31 +326,50 @@ fn key_group(key: &StepItemKey) -> OverviewGroup {
         StepItemKey::BoundaryCondition(_) => OverviewGroup::BoundaryCondition,
         StepItemKey::Load(_) => OverviewGroup::Load,
         StepItemKey::DefinedField(_) => OverviewGroup::DefinedField,
+        StepItemKey::HistoryOutput(_) => OverviewGroup::HistoryOutput,
     }
 }
 
 /// The step items of a step with their names.
-fn step_items(step: &Step) -> Vec<(StepItemKey, String)> {
+fn step_items(outputs: &[crate::HistoryOutput], step: &Step) -> Vec<(StepItemKey, String)> {
     let boundaries = (step.boundary_conditions.iter())
         .map(|b| (StepItemKey::BoundaryCondition(b.id), b.name.clone()));
     let loads = (step.loads.iter()).map(|l| (StepItemKey::Load(l.id), l.name.clone()));
     let fields = (step.defined_fields.iter())
         .map(|f| (StepItemKey::DefinedField(f.name.clone()), f.name.clone()));
-    boundaries.chain(loads).chain(fields).collect()
+    let history = (step.history_outputs.iter())
+        .filter_map(|id| outputs.iter().find(|o| o.id == *id))
+        .map(|h| (StepItemKey::HistoryOutput(h.id), h.name.clone()));
+    boundaries
+        .chain(loads)
+        .chain(fields)
+        .chain(history)
+        .collect()
 }
 
 /// A step item, borrowed from a step or owned to be put into others.
 #[derive(Clone)]
-enum Item<B, L, F> {
+enum Item<B, L, F, H> {
     Boundary(B),
     Load(L),
     Field(F),
+    History(H),
 }
 
-type ItemRef<'a> = Item<&'a crate::BoundaryCondition, &'a crate::Load, &'a crate::DefinedField>;
-type ItemOwned = Item<crate::BoundaryCondition, crate::Load, crate::DefinedField>;
+type ItemRef<'a> = Item<
+    &'a crate::BoundaryCondition,
+    &'a crate::Load,
+    &'a crate::DefinedField,
+    &'a crate::HistoryOutput,
+>;
+type ItemOwned =
+    Item<crate::BoundaryCondition, crate::Load, crate::DefinedField, crate::HistoryOutput>;
 
-fn find_item<'a>(step: &'a Step, key: &StepItemKey) -> Option<ItemRef<'a>> {
+fn find_item<'a>(
+    outputs: &'a [crate::HistoryOutput],
+    step: &'a Step,
+    key: &StepItemKey,
+) -> Option<ItemRef<'a>> {
     match key {
         StepItemKey::BoundaryCondition(id) => (step.boundary_conditions.iter())
             .find(|b| b.id == *id)
@@ -349,6 +378,10 @@ fn find_item<'a>(step: &'a Step, key: &StepItemKey) -> Option<ItemRef<'a>> {
         StepItemKey::DefinedField(name) => (step.defined_fields.iter())
             .find(|f| f.name == *name)
             .map(Item::Field),
+        StepItemKey::HistoryOutput(id) => (step.history_outputs.contains(id))
+            .then(|| outputs.iter().find(|o| o.id == *id))
+            .flatten()
+            .map(Item::History),
     }
 }
 
@@ -358,6 +391,7 @@ impl ItemRef<'_> {
             Item::Boundary(b) => b.active,
             Item::Load(l) => l.active,
             Item::Field(f) => f.active,
+            Item::History(h) => h.active,
         }
     }
 
@@ -366,6 +400,7 @@ impl ItemRef<'_> {
             Item::Boundary(b) => b.name.clone(),
             Item::Load(l) => l.name.clone(),
             Item::Field(f) => f.name.clone(),
+            Item::History(h) => h.name.clone(),
         }
     }
 
@@ -395,6 +430,13 @@ impl ItemRef<'_> {
                 };
                 on(a) == on(b)
             }
+            (Item::History(a), Item::History(b)) => {
+                let on = |output: &crate::HistoryOutput| crate::HistoryOutput {
+                    active: true,
+                    ..output.clone()
+                };
+                on(a) == on(b)
+            }
             _ => false,
         }
     }
@@ -404,6 +446,7 @@ impl ItemRef<'_> {
             Item::Boundary(b) => Item::Boundary((*b).clone()),
             Item::Load(l) => Item::Load((*l).clone()),
             Item::Field(f) => Item::Field((*f).clone()),
+            Item::History(h) => Item::History((*h).clone()),
         }
     }
 }
@@ -427,6 +470,12 @@ impl ItemOwned {
             }
             Item::Field(f) if step.kind.supports_defined_fields() => {
                 put(&mut step.defined_fields, f, |o| o.name == f.name)
+            }
+            // The step lists the output of the model; nothing is copied.
+            Item::History(h) if step.kind.supports_history_output(&h.kind) => {
+                if !step.history_outputs.contains(&h.id) {
+                    step.history_outputs.push(h.id);
+                }
             }
             _ => return false,
         }
@@ -585,5 +634,39 @@ mod tests {
         assert!(fe.steps[1].boundary_conditions.is_empty());
         assert!(fe.steps[2].boundary_conditions.is_empty());
         assert_eq!(fe.steps[0].boundary_conditions.len(), 1);
+    }
+
+    #[test]
+    fn history_outputs_are_rows_listed_by_the_steps() {
+        let mut fe = chain();
+        let output = crate::HistoryOutput::node("NH_Output-1", Region::Parts(Vec::new()));
+        let id = output.id;
+        fe.put_history_output(0, output);
+        let overview = fe.step_overview();
+        let nh = row(&overview, "NH_Output-1");
+        assert_eq!(nh.group, OverviewGroup::HistoryOutput);
+        // Neither the frequency step nor Unload prints it.
+        assert_eq!(nh.cells, [Cell::Created, Cell::Removed, Cell::Removed]);
+
+        let key = StepItemKey::HistoryOutput(id);
+        assert_eq!(fe.copy_to_following_steps(0, &key), 2);
+        assert_eq!(fe.steps[2].history_outputs, [id]);
+        // Again it stays one output, listed once.
+        assert_eq!(fe.copy_to_following_steps(0, &key), 2);
+        assert_eq!(fe.steps[2].history_outputs, [id]);
+        assert_eq!(fe.history_outputs.len(), 1);
+        assert_eq!(row(&fe.step_overview(), "NH_Output-1").cells[2], Cell::Same);
+        assert_eq!(fe.remove_from_following_steps(0, &key), 2);
+        assert!(fe.steps[2].history_outputs.is_empty());
+
+        // The energies only go to Dynamic steps.
+        let energies = crate::HistoryOutput::energies("Energies");
+        let id = energies.id;
+        fe.put_history_output(0, energies);
+        fe.steps.push(Step::new_dynamic("Drop"));
+        let key = StepItemKey::HistoryOutput(id);
+        assert_eq!(fe.copy_to_following_steps(0, &key), 1);
+        assert!(fe.steps[2].history_outputs.is_empty());
+        assert_eq!(fe.steps[3].history_outputs, [id]);
     }
 }
