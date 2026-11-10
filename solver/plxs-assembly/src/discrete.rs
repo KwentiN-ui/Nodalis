@@ -206,12 +206,62 @@ impl DiscreteElement {
     }
 }
 
-/// The gaps of a `*COMPRESSION ONLY` surface: one per integration point of every face,
-/// between the point of the face and fixed ground, closing when the surface moves against
-/// the ground (into the material from outside, or out of it with `FLIP`). The rule is the
-/// Gauss rule of the face (3×3 on quadratic quadrilaterals, as for a pressure), its normal
-/// the face's in the reference configuration.
-pub fn surface_gaps(model: &Model, support: &CompressionOnly) -> Result<Vec<DiscreteElement>> {
+/// An integration point of a `*COMPRESSION ONLY` surface.
+#[derive(Clone, Debug)]
+pub struct SupportPoint {
+    /// Index of the face in [`SupportPoints::faces`].
+    pub face: usize,
+    /// Local coordinates of the point on its face.
+    pub local: [f64; 2],
+    /// Integration weight of the point on its face (without the Jacobian).
+    pub weight: f64,
+    /// The area the point stands for.
+    pub area: f64,
+    /// Direction the ground pushes the surface in.
+    pub direction: [f64; 3],
+    /// Shape functions of the face nodes at the point.
+    pub weights: Vec<f64>,
+    /// Position of the point in the reference configuration.
+    pub position: [f64; 3],
+}
+
+/// The faces and integration points of a `*COMPRESSION ONLY` surface with its stiffness
+/// per area.
+pub struct SupportPoints {
+    pub faces: Vec<ContactFace>,
+    pub points: Vec<SupportPoint>,
+    pub stiffness: f64,
+}
+
+impl SupportPoints {
+    /// The global DOFs of the nodes of a face.
+    pub fn dofs(&self, face: usize) -> Vec<u32> {
+        (self.faces[face].nodes.iter())
+            .flat_map(|&n| [n * 3, n * 3 + 1, n * 3 + 2])
+            .collect()
+    }
+
+    /// The opening of the gap at a point (negative: closed by that much).
+    pub fn opening(&self, point: &SupportPoint, clearance: f64, u: &[f64]) -> f64 {
+        let nodes = &self.faces[point.face].nodes;
+        clearance
+            + (nodes.iter().zip(&point.weights))
+                .map(|(&n, &w)| {
+                    (0..3)
+                        .map(|k| {
+                            w * point.direction[k]
+                                * u.get(n as usize * 3 + k).copied().unwrap_or(0.0)
+                        })
+                        .sum::<f64>()
+                })
+                .sum::<f64>()
+    }
+}
+
+/// The integration points of a `*COMPRESSION ONLY` surface: the Gauss rule of every face
+/// (3×3 on quadratic quadrilaterals, as for a pressure), the normal the face's in the
+/// reference configuration.
+pub fn support_points(model: &Model, support: &CompressionOnly) -> Result<SupportPoints> {
     const KEYWORD: &str = "*COMPRESSION ONLY";
     let faces = ContactFace::surface_faces(model, KEYWORD, &support.surface)?;
     let coords = &model.nodes.coordinates;
@@ -236,13 +286,10 @@ pub fn surface_gaps(model: &Model, support: &CompressionOnly) -> Result<Vec<Disc
             COMPRESSION_ONLY_STIFFNESS * young / h.max(1e-300)
         }
     };
-    let mut out = Vec::new();
-    for face in &faces {
-        let (points, weights) = face_rule(face);
-        let dofs: Vec<u32> = (face.nodes.iter())
-            .flat_map(|&n| [n * 3, n * 3 + 1, n * 3 + 2])
-            .collect();
-        for (p, w) in points.iter().zip(weights) {
+    let mut points = Vec::new();
+    for (f, face) in faces.iter().enumerate() {
+        let (locals, weights) = face_rule(face);
+        for (p, w) in locals.iter().zip(weights) {
             let fp = face.at(coords, *p);
             let area = fp.jacobian * w;
             if area <= 0.0 {
@@ -255,24 +302,50 @@ pub fn surface_gaps(model: &Model, support: &CompressionOnly) -> Result<Vec<Disc
             } else {
                 fp.normal.map(|c| -c)
             };
-            out.push(DiscreteElement {
-                element: face.element,
-                dofs: dofs.clone(),
-                kind: DiscreteKind::Gap {
-                    clearance: support.clearance,
-                    direction,
-                    stiffness: stiffness * area,
-                    weights: fp.n,
-                },
+            let mut position = [0.0; 3];
+            for (&n, &w) in face.nodes.iter().zip(&fp.n) {
+                for (k, x) in position.iter_mut().enumerate() {
+                    *x += w * coords[n as usize][k];
+                }
+            }
+            points.push(SupportPoint {
+                face: f,
+                local: *p,
+                weight: w,
+                area,
+                direction,
+                weights: fp.n,
+                position,
             });
         }
     }
-    Ok(out)
+    Ok(SupportPoints {
+        faces,
+        points,
+        stiffness,
+    })
 }
 
-/// Gauss points of a face in natural coordinates with their weights: the face rule of the
-/// elements (2×2 or 3×3 on quadrilaterals, 3 or 7 points on triangles), 2 or 3 points on the
-/// edges of plane and axisymmetric elements.
+/// The gaps of a `*COMPRESSION ONLY` surface: one per integration point of every face (see
+/// [`support_points`]), between the point of the face and fixed ground, closing when the
+/// surface moves against the ground (into the material from outside, or out of it with
+/// `FLIP`).
+pub fn surface_gaps(model: &Model, support: &CompressionOnly) -> Result<Vec<DiscreteElement>> {
+    let support_points = support_points(model, support)?;
+    Ok((support_points.points.iter())
+        .map(|p| DiscreteElement {
+            element: support_points.faces[p.face].element,
+            dofs: support_points.dofs(p.face),
+            kind: DiscreteKind::Gap {
+                clearance: support.clearance,
+                direction: p.direction,
+                stiffness: support_points.stiffness * p.area,
+                weights: p.weights.clone(),
+            },
+        })
+        .collect())
+}
+
 fn face_rule(face: &ContactFace) -> (Vec<[f64; 2]>, Vec<f64>) {
     if face.corners == 2 {
         let (p, w) = plxs_elements::shape::gauss_legendre(if face.quadratic { 3 } else { 2 });

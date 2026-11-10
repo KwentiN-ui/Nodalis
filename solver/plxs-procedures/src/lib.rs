@@ -33,6 +33,7 @@ pub mod sensitivity;
 mod shell_mass;
 pub mod static_linear;
 pub mod submodel;
+pub mod support;
 pub mod thermal;
 
 use std::sync::Arc;

@@ -247,6 +247,7 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `nonlinear/amplitude_force` | B | M2 | plxs 0.2.0 | C3D8, \*AMPLITUDE, \*STATIC, NLGEOM |
 | `nonlinear/druck-nur-druck` | B | M2 | plxs 0.3.2 | C3D8, SPRING1, \*PLASTIC, \*SPRING, \*COMPRESSION ONLY, \*STATIC |
 | `nonlinear/druck-nur-einzeln` | B | M2 | plxs 0.3.1 | C3D8, SPRING1, \*PLASTIC, \*SPRING, \*COMPRESSION ONLY, \*STATIC |
+| `nonlinear/druck-nur-pressung` | B | M2 | plxs 0.3.2 | C3D8, SPRING1, \*PLASTIC, \*SPRING, \*COMPRESSION ONLY, \*STATIC, \*CONTACT FILE, \*CONTACT PRINT |
 | `nonlinear/druck-nur-umgedreht-druck` | B | M2 | plxs 0.3.2 | C3D8, SPRING1, \*PLASTIC, \*SPRING, \*COMPRESSION ONLY, \*STATIC |
 | `nonlinear/druck-nur-umgedreht-zug` | B | M2 | plxs 0.3.2 | C3D8, SPRING1, \*PLASTIC, \*SPRING, \*COMPRESSION ONLY, \*STATIC |
 | `nonlinear/druck-nur-verteilt` | B | M2 | plxs 0.3.1 | C3D8, SPRING1, \*PLASTIC, \*SPRING, \*COMPRESSION ONLY, \*STATIC |

@@ -1069,6 +1069,16 @@ fn write_frame(
             ctx.results.history.extend(blocks);
         }
     }
+    for request in &step.outputs.contact_print {
+        ctx.results.history.extend(crate::support::history_blocks(
+            ctx.model,
+            request,
+            &state.motion.u,
+            ctx.step_number,
+            record,
+            total,
+        ));
+    }
 }
 
 /// The smallest part of a (sub-)increment the continuous collision detection cuts off

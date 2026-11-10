@@ -1436,7 +1436,10 @@ fn history_output_header(keyword: &str, set: &str, output: &HistoryOutput) -> St
         let _ = write!(header, ", {set}={name}");
     }
     if let Some((slave, master)) = &output.surfaces {
-        let _ = write!(header, ", Slave={slave}, Master={master}");
+        let _ = write!(header, ", Slave={slave}");
+        if !master.is_empty() {
+            let _ = write!(header, ", Master={master}");
+        }
     }
     if output.frequency != 1 {
         let _ = write!(header, ", Frequency={}", output.frequency);

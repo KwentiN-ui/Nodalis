@@ -342,6 +342,16 @@ impl StaticLinear {
                 &strains,
                 None,
             );
+            for request in &step.outputs.contact_print {
+                ctx.results.history.extend(crate::support::history_blocks(
+                    ctx.model,
+                    request,
+                    &u,
+                    ctx.step_number,
+                    increment,
+                    total,
+                ));
+            }
             ctx.profile.add(Phase::Results, results_started);
             ctx.sta.push(StaRow {
                 step: ctx.step_number,

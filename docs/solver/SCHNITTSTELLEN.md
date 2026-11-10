@@ -1571,6 +1571,13 @@ V-Zyklus, behaltene Hierarchie oft zu lange behalten.
   Elementkanten, 3 MPa zwischen Eck- und Mittenknoten bei 12 MPa). Der Writer rechnet die Gesamtsteifigkeit der
   Oberfläche (`k / A`) bzw. „Apply to all nodes individually“ (`k · Knoten / A`) um.
   Zugkraft σ∞ und Offset gibt es nur noch bei Schalen, die weiter GAPUNI bekommen.
+- Ergebnisse (2026-11-10): `*CONTACT FILE` mit CDIS/CSTR füllt COPEN und CPRESS auch an den
+  Knoten der Stützflächen (Gauß-Punkt-Werte per Least-Squares wie Face-to-Face-Kontakt auf die
+  Knoten, `plxs_procedures::support`); ohne Kontaktpaare listet das Feld nur die Stützknoten.
+  `*CONTACT PRINT, SLAVE=<Fläche>` ohne `MASTER` druckt `CF` einer Stützfläche als
+  „statistics for slave set <Fläche>, master set GROUND“; ohne SLAVE alle Paare und Stützen.
+  Nodalis: Stützen haben eine `Id` und stehen in `contact_pair_choices`, `plx-io::dat` nennt
+  die Statistik nach der Stütze. Nur Flächenstützen (Volumen, 2D), nicht GAPUNI auf Schalen.
 - Grund: starre GAPUNI je Knoten auf C3D20-Flächen lassen die Eckknoten ohne Kraft (ihr
   konsistenter Anteil eines Drucks ist negativ), das gab ein Schachbrett in den Spannungen.
   FEAnalyst-Lasche (C3D20, Bohrung r 12, 3000 N): GAPUNI fleckig, Ecken 0 N; Flächenstütze

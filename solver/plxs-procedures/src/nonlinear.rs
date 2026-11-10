@@ -592,6 +592,16 @@ impl Procedure for NonlinearStatic {
                     ctx.results.history.extend(blocks);
                 }
             }
+            for request in &step.outputs.contact_print {
+                ctx.results.history.extend(crate::support::history_blocks(
+                    ctx.model,
+                    request,
+                    &u,
+                    ctx.step_number,
+                    increment,
+                    total,
+                ));
+            }
             ctx.profile.add(Phase::Results, started);
             ctx.sta.push(StaRow {
                 step: ctx.step_number,

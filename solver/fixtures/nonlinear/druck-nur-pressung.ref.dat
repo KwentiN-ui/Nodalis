@@ -1,0 +1,24 @@
+
+                        S T E P       1
+
+
+                                INCREMENT     1
+
+
+ statistics for slave set INTERNAL_SELECTION-1_COMPRESSION_ONLY-1_SURFACE, master set GROUND and time  0.1000000E+01
+
+   total surface force (fx,fy,fz) and moment about the origin (mx,my,mz)
+
+    2.774897E-15  0.000000E+00  9.997620E+01  4.998810E+01 -4.998810E+01 -1.788149E-15
+
+   center of gravity and mean normal
+
+    5.000000E-01  5.000000E-01  1.099976E+00  2.775558E-17  0.000000E+00  1.000000E+00
+
+   moment about the center of gravity(mx,my,mz)
+
+    7.105427E-15 -2.131628E-14 -4.007008E-16
+
+   area,  normal force (+ = tension) and shear force (size)
+
+    1.000000E+00  9.997620E+01  3.944305E-31

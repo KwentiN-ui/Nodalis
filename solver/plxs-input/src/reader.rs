@@ -2625,6 +2625,10 @@ impl Reader {
                 (FileKind::Contact, Some(slave), Some(master)) => {
                     Some((normalized_name(slave), normalized_name(master)))
                 }
+                // A compression only surface: its master is the ground.
+                (FileKind::Contact, Some(slave), None) => {
+                    Some((normalized_name(slave), String::new()))
+                }
                 _ => None,
             },
         };

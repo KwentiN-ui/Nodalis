@@ -567,13 +567,24 @@ impl ContactFace {
     /// contact results).
     pub fn extrapolate(&self, values: &[f64]) -> Vec<f64> {
         let (points, weights) = self.integration();
+        self.extrapolate_from(&points, &weights, values)
+    }
+
+    /// Values at the face nodes from values at the given points of the face (with their
+    /// integration weights), fitted as in [`Self::extrapolate`].
+    pub fn extrapolate_from(
+        &self,
+        points: &[[f64; 2]],
+        weights: &[f64],
+        values: &[f64],
+    ) -> Vec<f64> {
         let m = self.corners;
         // Normal equations with the corner shape functions only (bilinear/linear fit).
         let mut a = vec![0.0; m * m];
         let mut b = vec![0.0; m];
         let mut n = vec![0.0; self.nodes.len()];
         let mut dn = vec![[0.0; 2]; self.nodes.len()];
-        for ((p, w), v) in points.iter().zip(&weights).zip(values) {
+        for ((p, w), v) in points.iter().zip(weights).zip(values) {
             self.shape(false, *p, &mut n[..m], &mut dn[..m]);
             for i in 0..m {
                 b[i] += w * n[i] * v;
