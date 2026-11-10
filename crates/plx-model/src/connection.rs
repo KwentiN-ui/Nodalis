@@ -628,8 +628,8 @@ impl FeModel {
             .collect()
     }
 
-    /// The contact pairs and the contact regions written as contact pairs, which contact
-    /// history outputs can print, by id and name.
+    /// The contact pairs, the contact regions written as contact pairs and the compression
+    /// only supports, which contact history outputs can print, by id and name.
     pub fn contact_pair_choices(&self) -> Vec<(Id, &str)> {
         let pairs = self.contact_pairs.iter().map(|p| (p.id, p.name.as_str()));
         let regions = (self.contact_regions.iter())
@@ -642,7 +642,20 @@ impl FeModel {
                 behavior => behavior.separates(),
             })
             .map(|r| (r.id, r.name.as_str()));
-        pairs.chain(regions).collect()
+        // A compression only support is a contact with the ground.
+        let supports = self.constraints.iter().filter_map(|c| match c {
+            crate::Constraint::CompressionOnly(s) => Some((s.id, s.name.as_str())),
+            _ => None,
+        });
+        pairs.chain(regions).chain(supports).collect()
+    }
+
+    /// The compression only support with an id.
+    pub fn compression_only(&self, id: Id) -> Option<&crate::CompressionOnly> {
+        self.constraints.iter().find_map(|c| match c {
+            crate::Constraint::CompressionOnly(s) if s.id == id => Some(s),
+            _ => None,
+        })
     }
 
     /// Young's modulus of each element with a section whose material has one.

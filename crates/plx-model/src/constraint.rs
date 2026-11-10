@@ -525,6 +525,10 @@ impl crate::FeModel {
 /// compression only support.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompressionOnly {
+    /// The internal identity a contact history output refers to; the user sees only the
+    /// name.
+    #[serde(default)]
+    pub id: crate::Id,
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,

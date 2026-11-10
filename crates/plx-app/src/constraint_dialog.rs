@@ -68,6 +68,7 @@ impl Type {
             Type::Spring => Constraint::Spring(Spring::new(name)),
             Type::Joint => Constraint::Joint(Joint::new(name)),
             Type::CompressionOnly => Constraint::CompressionOnly(CompressionOnly {
+                id: plx_model::Id::new(),
                 name,
                 active: true,
                 visible: true,

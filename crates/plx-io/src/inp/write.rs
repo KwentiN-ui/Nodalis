@@ -611,7 +611,12 @@ fn lower_model_named(
     let interactions = (model.surface_interactions.iter())
         .map(|i| interaction(i, &InteractionDefaults::of(i, mesh, model, &young)))
         .collect();
-    let (contact_pairs, clearances, pair_surfaces) = contact_pairs(&mut sets, model)?;
+    let (contact_pairs, clearances, mut pair_surfaces) = contact_pairs(&mut sets, model)?;
+    // A compression only support prints its contact forces as the slave of a pair whose
+    // master is the ground (no surface).
+    for (id, surface) in &generated.support_surfaces {
+        pair_surfaces.insert(*id, (String::new(), surface.clone()));
+    }
     let initial_conditions = initial_conditions(&mut sets, model)?;
     let design_variables = design_variables(&mut sets, model)?;
     let amplitudes = amplitudes(model)?;
@@ -4896,7 +4901,12 @@ fn history_output(
                             pair: pair.map_or_else(|| "(none)".into(), |p| p.to_string()),
                         }
                     })?;
-                request.surfaces = Some((ir_name(slave), ir_name(master)));
+                let master = if master.is_empty() {
+                    String::new()
+                } else {
+                    ir_name(master)
+                };
+                request.surfaces = Some((ir_name(slave), master));
             }
             Card::ContactPrint(request)
         }

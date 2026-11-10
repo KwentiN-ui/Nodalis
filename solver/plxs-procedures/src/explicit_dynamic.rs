@@ -2929,6 +2929,16 @@ impl Procedure for ExplicitDynamic {
                                 ctx.results.history.extend(blocks);
                             }
                         }
+                        for request in &step.outputs.contact_print {
+                            ctx.results.history.extend(crate::support::history_blocks(
+                                ctx.model,
+                                request,
+                                &motion.u,
+                                ctx.step_number,
+                                record,
+                                total,
+                            ));
+                        }
                         ctx.profile.add(Phase::Results, started);
                     }
                     if last_of_frame {

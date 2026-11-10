@@ -730,7 +730,8 @@ pub struct HistoryOutput {
     pub global: bool,
     pub time_points: Option<String>,
     /// `*CONTACT PRINT, SLAVE=, MASTER=`: the slave and master surface of the pair the
-    /// statistics (`CF`) are printed for (upper case); `None` for all pairs.
+    /// statistics (`CF`) are printed for (upper case); `None` for all pairs. An empty master
+    /// (`SLAVE=` alone) names a `*COMPRESSION ONLY` surface, which rests on the ground.
     #[serde(default)]
     pub surfaces: Option<(String, String)>,
 }

@@ -4614,9 +4614,14 @@ pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
         TreeItem::HistoryOutput(s, i) => {
             let output = fe.steps.get(s).and_then(|st| st.history_outputs.get(i));
             match output.map(|h| &h.kind) {
-                Some(HistoryKind::Contact { pair: Some(pair) }) => (fe.contact_pair(*pair))
-                    .map(|c| [&c.master, &c.slave])
-                    .or_else(|| fe.contact_region(*pair).map(|r| [&r.side_a, &r.side_b])),
+                Some(HistoryKind::Contact { pair: Some(pair) }) => {
+                    if let Some(support) = fe.compression_only(*pair) {
+                        return region_highlight(model, &support.region);
+                    }
+                    (fe.contact_pair(*pair))
+                        .map(|c| [&c.master, &c.slave])
+                        .or_else(|| fe.contact_region(*pair).map(|r| [&r.side_a, &r.side_b]))
+                }
                 _ => None,
             }
         }
@@ -4876,7 +4881,8 @@ fn history_output_form(
             ui.label("");
             ui.weak(
                 "The solver writes the values of all contact elements;
-                 the pair defines the surfaces of the contact forces CF.",
+                 the pair defines the surfaces of the contact forces CF.
+                 A compression only support gives the force it carries.",
             );
             ui.end_row();
         }
@@ -5025,7 +5031,9 @@ fn validate_history_output(
         HistoryKind::Contact { pair } => {
             if !(fe.contact_pair_choices().iter()).any(|(id, _)| Some(*id) == *pair) {
                 return Err(
-                    "Please select a contact pair; create one under Contact Pairs first.".into(),
+                    "Please select a contact pair or compression only support; create one \
+                     first."
+                        .into(),
                 );
             }
         }

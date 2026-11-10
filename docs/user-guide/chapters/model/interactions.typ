@@ -34,7 +34,12 @@ Create them with #ui("Constraint") on the #ui("Connections") tab of the ribbon.
     pressure and the stresses under it stay smooth on quadratic elements too. On shells it is
     written as `GAPUNI` elements to fixed ground nodes, one per node; only there do
     #ui("Tensile force") and #ui("Offset") matter. With #ui("Nonlinear") the contact is solved
-    nonlinearly, otherwise it is linearised in a linear step.],
+    nonlinearly, otherwise it is linearised in a linear step. On solids and 2D models the
+    support reports like a contact: a #ui("Contact Output") field output with `CSTR` and `CDIS`
+    shows its pressure (`CPRESS`, e.g. the bearing pressure in a bolt hole modelled without
+    the bolt) and its opening (`COPEN`, negative where it is closed), and a
+    #ui("Contact Output") history output with the support as its pair prints the force it
+    carries (`CF`).],
 )
 
 Changing the #ui("Type") while creating a constraint keeps the picks the new type can use. A

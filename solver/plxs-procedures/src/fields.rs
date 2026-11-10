@@ -463,10 +463,16 @@ pub fn write_increment(
     let mut fields = build_fields_with(
         ctx.table, ctx.model, step, u, reactions, stresses, strains, material,
     );
-    if let Some(evaluation) = &ctx.contact.last {
+    {
         let order = node_order(ctx.model);
-        let contact =
-            crate::contact::contact_fields(ctx.model, step, &ctx.contact, evaluation, &order);
+        let contact = crate::contact::contact_fields(
+            ctx.model,
+            step,
+            &ctx.contact,
+            ctx.contact.last.as_ref(),
+            u,
+            &order,
+        );
         // CalculiX writes the contact fields before the error estimator.
         let at = fields
             .iter()

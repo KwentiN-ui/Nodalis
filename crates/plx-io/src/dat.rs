@@ -807,10 +807,15 @@ fn repair_set_name(name: &str) -> String {
 }
 
 /// Name of the contact statistics of a slave and a master surface: the contact pair's name
-/// when both are surfaces written for its picked regions.
+/// when both are surfaces written for its picked regions, the compression only support's
+/// name for its surface on the ground.
 fn contact_set_name(slave: &str, master: &str) -> String {
     let slave = repair_set_name(slave);
     let master = repair_set_name(master);
+    // A compression only support of plxs rests on the ground: the support's name.
+    if master == "GROUND" {
+        return slave.strip_suffix("_SURFACE").unwrap_or(&slave).to_string();
+    }
     let slave = slave.strip_suffix("_SLAVE").unwrap_or(&slave);
     let master = master.strip_suffix("_MASTER").unwrap_or(&master);
     if slave == master {

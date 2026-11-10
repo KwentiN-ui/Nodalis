@@ -38,6 +38,9 @@ pub(super) struct Generated {
     pub material: Option<String>,
     /// `*Compression only` supports on element surfaces.
     pub compression_only: Vec<plxs_core::contact::CompressionOnly>,
+    /// The surface of each compression only support written as a surface support, which a
+    /// contact history output prints the contact forces of.
+    pub support_surfaces: Vec<(plx_model::Id, String)>,
 }
 
 /// An `*Element` block of generated elements.
@@ -461,6 +464,9 @@ impl Writer {
                 }
             });
             let surface = sets.surface(&support.name, "Surface", &support.region)?;
+            self.out
+                .support_surfaces
+                .push((support.id, surface.clone()));
             self.out
                 .compression_only
                 .push(plxs_core::contact::CompressionOnly {

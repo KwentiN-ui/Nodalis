@@ -371,7 +371,7 @@ active step. Hovering over a variable shows what it is.
 
 #fields(
   [Type], [#ui("Node Output") (region of nodes), #ui("Element Output") (parts, element set or
-    selection), #ui("Contact Output") (a contact pair) or #ui("Energies") (the whole model,
+    selection), #ui("Contact Output") (a contact pair or a compression only support) or #ui("Energies") (the whole model,
     Dynamic steps only, see @dynamic-step).],
   [Variables], [Node: `RF U V NT RFL`. Element: `S E ME PEEQ HFL ENER ELSE ELKE EVOL EBHE`.
     Contact: `CDIS CSTR CELS CNUM CF`. Energies: `ALLIE ALLKE ALLWK ALLVD`.],

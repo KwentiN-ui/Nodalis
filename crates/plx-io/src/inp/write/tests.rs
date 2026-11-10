@@ -4872,6 +4872,7 @@ fn solver_compression_only_support_takes_only_pressure() {
             [1000.0, 1000.0, 1000.0],
         ));
         let mut gaps = CompressionOnly {
+            id: plx_model::Id::new(),
             name: "Compression_Only-1".into(),
             active: true,
             visible: true,
@@ -4947,6 +4948,80 @@ fn solver_compression_only_support_takes_only_pressure() {
     let frd = run_solver("druck-nur-einzeln", &text).unwrap();
     let sink = mean_top(&blocks, &frd, "U3");
     assert!((sink + 0.01).abs() < 0.001, "{sink}");
+}
+
+/// A compression only support reports its pressure and opening in the contact field and
+/// the force it carries as contact statistics, chosen like a contact pair.
+#[test]
+fn solver_reports_the_pressure_of_a_compression_only_support() {
+    use plx_model::CompressionOnly;
+    let blocks = blocks(2, 2);
+    let support = CompressionOnly {
+        id: named("Compression_Only-1"),
+        name: "Compression_Only-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Faces(blocks.b_bottom.clone()),
+        clearance: 0.0,
+        spring_stiffness: None,
+        tensile_force: None,
+        each_node: false,
+        flipped: false,
+        offset: 0.0,
+        nonlinear: true,
+    };
+    let springs = Constraint::Spring(spring(
+        "Spring-1",
+        Region::Faces(blocks.b_bottom.clone()),
+        [1000.0, 1000.0, 1000.0],
+    ));
+    let mut model = blocks_model(
+        &blocks,
+        vec![springs, Constraint::CompressionOnly(support)],
+        [0.0, 0.0, -100.0],
+    );
+    assert!(
+        (model.contact_pair_choices().iter()).any(|(id, _)| *id == named("Compression_Only-1"))
+    );
+    let step = &mut model.steps[0];
+    step.field_outputs.push(FieldOutput::new(
+        "CF_Output-1",
+        OutputKind::Contact,
+        &["CDIS", "CSTR"],
+    ));
+    let mut output = HistoryOutput::contact("CH_Output-1", Some(named("Compression_Only-1")));
+    output.variables = vec!["CF".into()];
+    step.history_outputs.push(output);
+    let text = write_inp(&blocks.mesh, &model, "").unwrap();
+    assert!(
+        text.contains(
+            "*Contact print, Slave=INTERNAL_SELECTION-1_COMPRESSION_ONLY-1_SURFACE\nCF\n"
+        ),
+        "{text}"
+    );
+    let Some((frd, dat)) = run_frd_dat("druck-nur-pressung", &text) else {
+        return;
+    };
+    // 100 N on the 1 x 1 face: 100 at every node of the bottom face, closed by a hair.
+    for node in Region::Faces(blocks.b_bottom.clone()).nodes(&blocks.mesh) {
+        let pressure = node_value(&frd, "CONTACT", "CPRESS", node);
+        assert!((pressure - 100.0).abs() < 1.0, "{node}: {pressure}");
+        let opening = node_value(&frd, "CONTACT", "COPEN", node);
+        assert!(opening < 0.0 && opening > -1e-4, "{node}: {opening}");
+    }
+    assert!(dat.warnings.is_empty(), "{:?}", dat.warnings);
+    let set = (dat.sets.iter())
+        .find(|s| s.name == "COMPRESSION_ONLY-1")
+        .unwrap_or_else(|| panic!("{:?}", dat.sets.iter().map(|s| &s.name).collect::<Vec<_>>()));
+    let fz = *(set.field("TOTAL_SURFACE_FORCE").unwrap())
+        .component("FZ")
+        .unwrap()
+        .entries[0]
+        .values
+        .last()
+        .unwrap();
+    // The ground pushes the block up with the load.
+    assert!((fz - 100.0).abs() < 1.0, "{fz}");
 }
 
 /// A straight chain of `n` line elements along `axis` from 0 to `length`, numbered from 1;
