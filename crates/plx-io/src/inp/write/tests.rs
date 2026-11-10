@@ -10548,7 +10548,8 @@ fn solver_solves_a_part_held_only_by_contact_with_weak_springs() {
         );
         assert!(
             text.contains(
-                "*Spring, Elset=PLX_WEAK_SPRINGS_UPPER_DOF_3\n3\n0.11666666666666667, 0\n"
+                "*Spring, Elset=PLX_WEAK_SPRINGS_UPPER_DOF_3, Stabilize=10\n3\n\
+                 0.11666666666666667, 0\n"
             ),
             "{text}"
         );
@@ -10561,7 +10562,9 @@ fn solver_solves_a_part_held_only_by_contact_with_weak_springs() {
         };
         let bottom: Vec<NodeId> = (1..=9).collect();
         let reaction = node_sum(&frd, "FORC", "F3", &bottom);
-        assert!((reaction - 1000.0).abs() < 0.1, "{name}: {reaction}");
+        // The springs take 1e-6 E L g closing the gap g = 0.01 (0.02 N), their stabilization
+        // ten times that more in the increment the gap closes in, here the only one.
+        assert!((reaction - 1000.0).abs() < 0.3, "{name}: {reaction}");
     }
 }
 

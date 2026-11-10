@@ -441,6 +441,32 @@ fn joints_read_and_render_back() {
 }
 
 #[test]
+fn the_stabilization_of_springs_reads_and_renders_back() {
+    use plxs_core::section::SectionKind;
+    let text = cube(
+        "*Element, Type=SPRING1, Elset=WEAK\n2, 5\n\
+*Spring, Elset=WEAK, Stabilize=1000\n1\n0.5\n\
+*Step\n*Static\n*Boundary\nFIX, 1, 3\n*End step\n",
+    );
+    let stabilize = |analysis: &plxs_core::Analysis| {
+        (analysis.model.sections.iter())
+            .find_map(|s| match &s.kind {
+                SectionKind::Spring(spring) => Some(spring.stabilize),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let analysis = read(&text).unwrap();
+    assert_eq!(stabilize(&analysis), 1000.0);
+    let rendered = super::render(&analysis);
+    assert!(rendered.contains(", Stabilize=1000"), "{rendered}");
+    assert_eq!(stabilize(&read(&rendered).unwrap()), 1000.0);
+    let without = text.replace(", Stabilize=1000", "");
+    assert_eq!(stabilize(&read(&without).unwrap()), 0.0);
+    assert!(read(&text.replace("Stabilize=1000", "Stabilize=-1")).is_err());
+}
+
+#[test]
 fn event_frames_of_a_dynamic_step_read_and_render_back() {
     let text = cube("*Step\n*Dynamic, Direct, Events\n0.001, 0.1\n*End step\n");
     let analysis = read(&text).unwrap();

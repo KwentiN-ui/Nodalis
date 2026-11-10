@@ -108,6 +108,11 @@ pub struct Spring {
     pub stiffness: SpringStiffness,
     /// `ORIENTATION` is not written by Nodalis; springs act along global axes.
     pub orientation: Option<String>,
+    /// `STABILIZE` (own parameter): the spring also resists the displacement within each
+    /// increment of a nonlinear static step with this factor times its stiffness, a force
+    /// that starts from zero in every increment and so leaves none behind. Zero: none.
+    #[serde(default)]
+    pub stabilize: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

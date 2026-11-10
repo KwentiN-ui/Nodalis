@@ -33,6 +33,9 @@ pub struct DiscreteElement {
 pub enum DiscreteKind {
     Spring {
         stiffness: f64,
+        /// Stiffness against the displacement within the increment of a nonlinear static
+        /// step (`*SPRING, STABILIZE`): no force at the start of an increment.
+        stabilize: f64,
     },
     Gap {
         clearance: f64,
@@ -96,7 +99,10 @@ impl DiscreteElement {
                 Ok(Self {
                     element: index,
                     dofs,
-                    kind: DiscreteKind::Spring { stiffness },
+                    kind: DiscreteKind::Spring {
+                        stiffness,
+                        stabilize: spring.stabilize * stiffness,
+                    },
                 })
             }
             (SectionKind::Gap(gap), ElementType::GAPUNI) => {
@@ -132,7 +138,7 @@ impl DiscreteElement {
     /// The stiffness of a spring (row-major, `dofs.len()` squared), `None` for gaps.
     pub fn spring_stiffness(&self) -> Option<Vec<f64>> {
         match self.kind {
-            DiscreteKind::Spring { stiffness: k } => Some(if self.dofs.len() == 1 {
+            DiscreteKind::Spring { stiffness: k, .. } => Some(if self.dofs.len() == 1 {
                 vec![k]
             } else {
                 vec![k, -k, -k, k]

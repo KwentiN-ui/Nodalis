@@ -673,6 +673,53 @@ impl NonlinearStatic {
         acting
     }
 
+    /// Adds the stabilization of the springs that have one (`*SPRING, STABILIZE`): a
+    /// stiffness against the displacement since the start of the increment, `start`.
+    ///
+    /// A part held only by contact gets weak springs to ground, a millionth of its own
+    /// stiffness. When it lifts off again (a gasket the plate let go of, lying loose in its
+    /// groove), they are all that holds it, and a residual force far below the tolerance
+    /// moves it by tenths of a millimetre: every iteration threw it against another wall of
+    /// the groove, and smaller increments changed nothing. The stabilization holds it where
+    /// the increment started, and as its force begins at zero in every increment it pulls
+    /// nothing back towards where the part was long ago.
+    fn add_stabilization(
+        discrete: &[&DiscreteElement],
+        u: &[f64],
+        start: &[f64],
+        k: &mut SparseMatrix,
+        f_int: &mut [f64],
+    ) {
+        for element in discrete {
+            let DiscreteKind::Spring {
+                stiffness,
+                stabilize,
+            } = element.kind
+            else {
+                continue;
+            };
+            if stabilize <= 0.0 || stiffness == 0.0 {
+                continue;
+            }
+            let Some(mut block) = element.spring_stiffness() else {
+                continue;
+            };
+            let factor = stabilize / stiffness;
+            for v in &mut block {
+                *v *= factor;
+            }
+            let m = element.dofs.len();
+            k.add_block(&element.dofs, &block);
+            let moved: Vec<f64> = (element.dofs.iter())
+                .map(|&d| u[d as usize] - start.get(d as usize).copied().unwrap_or(0.0))
+                .collect();
+            for (a, &dof) in element.dofs.iter().enumerate() {
+                let f: f64 = (0..m).map(|b| block[a * m + b] * moved[b]).sum();
+                f_int[dof as usize] += f;
+            }
+        }
+    }
+
     /// One attempt at an increment: Newton iterations from the state at the start of the
     /// increment. `Ok(Err(..))` is a failed attempt the caller cuts back.
     #[allow(clippy::too_many_arguments)]
@@ -729,6 +776,13 @@ impl NonlinearStatic {
                 .into_iter()
                 .map(u8::from)
                 .collect();
+            Self::add_stabilization(
+                discrete,
+                &u,
+                &ctx.state.displacements.values,
+                k,
+                &mut output.f_int,
+            );
             let closed_gaps = discrete
                 .iter()
                 .zip(&status)

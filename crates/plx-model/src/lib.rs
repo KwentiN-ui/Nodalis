@@ -69,7 +69,7 @@ pub use connection::{
     BondedMethod, CONDUCTANCE_FACTOR, ContactBehavior, ContactDefaults, ContactRegion,
     ContactSettings, InterfaceTreatment, Lowered, ROUGH_FRICTION, Resolved, ResolvedContacts,
     ResolvedKind, STIFFNESS_FACTOR, SideRoles, Stiffness, TIED_STIFFNESS_FACTOR, TOLERANCE_FACTOR,
-    WEAK_SPRING_FACTOR, conducts_across_contacts, mortar_supports,
+    WEAK_SPRING_FACTOR, WEAK_SPRING_STABILIZATION, conducts_across_contacts, mortar_supports,
 };
 pub use constraint::{
     CompressionOnly, Joint, JointAxis, JointKind, NodeTie, RigidBody, Spring, SpringEnd,

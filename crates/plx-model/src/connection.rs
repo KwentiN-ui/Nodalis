@@ -335,6 +335,16 @@ pub const STIFFNESS_FACTOR: f64 = 10.0;
 /// and the springs take about 1e-6 of the load, plus a share of the order 1e-6 E g / (p L)
 /// for a gap g closed under the pressure p; 1e-8 fails node to surface contact again.
 pub const WEAK_SPRING_FACTOR: f64 = 1e-6;
+/// How much stiffer than the weak springs a part held only by contact is held against the
+/// motion within one increment of a static step (`*Spring, Stabilize=`), 1e-5 E L. Once it
+/// lifts off again (a gasket the plate let go of, loose in its groove) the weak springs alone
+/// let a residual force far below the tolerance move it by tenths of a millimetre, and the
+/// Newton iterations threw it from wall to wall. A gasket compressed, sheared and let go of
+/// solves with 3 to 1e4 (1 not), its reaction forces differ by less than 1e-3 between 1e2
+/// and 1e4. The force begins at zero in every increment, but in the increment a part moves
+/// in it takes this factor times the weak springs' share: closing an initial gap g in one
+/// increment, 1e-5 E L g.
+pub const WEAK_SPRING_STABILIZATION: f64 = 10.0;
 /// The factor of a bonded region modeled as a tied contact, which should not give way.
 pub const TIED_STIFFNESS_FACTOR: f64 = 100.0;
 /// Tie tolerance in units of the slave side's mesh size.

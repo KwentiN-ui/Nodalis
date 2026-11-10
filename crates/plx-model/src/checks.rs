@@ -1529,6 +1529,7 @@ impl FeModel {
                 [k; 3],
             );
             spring.visible = false;
+            spring.stabilize = crate::WEAK_SPRING_STABILIZATION;
             springs.push(spring);
         }
         springs
