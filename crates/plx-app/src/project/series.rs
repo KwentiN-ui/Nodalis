@@ -242,16 +242,15 @@ impl NumberBlock {
     }
 }
 
-/// A series as a block shows it: how many values and the range they span, with the unit of
-/// `kind`.
+/// A series as a block shows it: the range of its values with the unit of `kind`, and how
+/// many there are.
 pub(super) fn shown_series(series: &[f64], kind: Option<ValueKind>, units: UnitSystem) -> String {
     let finite = || series.iter().copied().filter(|v| v.is_finite());
     match (finite().reduce(f64::min), finite().reduce(f64::max)) {
-        (Some(low), Some(high)) => format!(
-            "{} values, {} to {}",
+        (Some(low), Some(high)) => crate::measure::range_text(
+            &numbers::shown_number(low, kind, units),
+            &numbers::shown_number(high, kind, units),
             series.len(),
-            numbers::shown_number(low, kind, units),
-            numbers::shown_number(high, kind, units)
         ),
         _ => format!("{} values", series.len()),
     }

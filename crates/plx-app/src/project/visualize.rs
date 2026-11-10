@@ -697,7 +697,7 @@ impl Viewer {
         };
         // The area of the data, with room for the numbers of the axes.
         let area = egui::Rect::from_min_max(
-            rect.min + egui::vec2(34.0, 8.0),
+            rect.min + egui::vec2(44.0, 16.0),
             rect.max - egui::vec2(8.0, 24.0),
         );
         let (xs, ys, x_label, y_label, bars) = match view.kind {
@@ -786,7 +786,7 @@ impl Viewer {
             ink.gamma_multiply(0.8),
         );
         painter.text(
-            area.left_top() + egui::vec2(3.0, 2.0),
+            egui::pos2(rect.left() + 4.0, rect.top() + 2.0),
             egui::Align2::LEFT_TOP,
             &y_label,
             small.clone(),

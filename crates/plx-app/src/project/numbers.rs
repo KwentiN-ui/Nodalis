@@ -549,6 +549,18 @@ impl Viewer {
                 else {
                     return;
                 };
+                // A series a link gives shows how many values it has.
+                if let Some(series) = block.series.get(index).cloned().flatten() {
+                    ui.add_enabled_ui(false, |ui| {
+                        ui.add_sized(
+                            field.size(),
+                            egui::Button::new(format!("{} values", series.len())),
+                        )
+                    })
+                    .response
+                    .on_disabled_hover_text(tip);
+                    return;
+                }
                 let before = value;
                 let kind = kind.unwrap_or(ValueKind::Factor);
                 let drag = crate::parameter_set::field(&mut value, kind, block.units);

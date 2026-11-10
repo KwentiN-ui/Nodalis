@@ -11356,12 +11356,39 @@ impl SnarlViewer<u64> for Viewer {
         }
     }
 
-    // A note has a body, its text; a Plot and a Mesh Preview block their picture, also
-    // compact.
+    // Only a note has a body: its text.
     fn has_body(&mut self, node: &u64) -> bool {
-        self.block(*node).is_some_and(|b| {
-            (b.kind == Kind::Note && !b.compact) || matches!(b.kind, Kind::Plot | Kind::MeshPreview)
-        })
+        self.block(*node)
+            .is_some_and(|b| b.kind == Kind::Note && !b.compact)
+    }
+
+    // A Plot and a Mesh Preview block show their picture below their rows, also compact.
+    fn has_footer(&mut self, node: &u64) -> bool {
+        self.block(*node)
+            .is_some_and(|b| matches!(b.kind, Kind::Plot | Kind::MeshPreview))
+    }
+
+    fn show_footer(
+        &mut self,
+        node: NodeId,
+        _inputs: &[InPin],
+        _outputs: &[OutPin],
+        ui: &mut egui::Ui,
+        snarl: &mut Snarl<u64>,
+    ) {
+        let id = snarl[node];
+        let Some(block) = self.block(id) else {
+            return;
+        };
+        match block.kind {
+            Kind::Plot => {
+                if let Some(view) = &block.plot {
+                    self.show_plot(ui, view);
+                }
+            }
+            Kind::MeshPreview => self.show_picture(ui, block.picture, block.has_mesh),
+            _ => {}
+        }
     }
 
     fn show_body(
@@ -11373,20 +11400,6 @@ impl SnarlViewer<u64> for Viewer {
         snarl: &mut Snarl<u64>,
     ) {
         let id = snarl[node];
-        if let Some(block) = self.block(id) {
-            match block.kind {
-                Kind::Plot => {
-                    if let Some(view) = &block.plot {
-                        self.show_plot(ui, view);
-                    }
-                    return;
-                }
-                Kind::MeshPreview => {
-                    return self.show_picture(ui, block.picture, block.has_mesh);
-                }
-                _ => {}
-            }
-        }
         let Some(note) = self.block(id).map(|b| b.note.clone()) else {
             return;
         };
@@ -12146,9 +12159,9 @@ const ANALYSIS_TIP: &str = "Adds an analysis: a model of its own with geometry, 
 const PARAMETERS_TIP: &str = "Adds a block of named numbers: drag the pin of one to a \
                               parameter of another block, such as a length of a mesh block, \
                               which then takes its value.";
-const MEASURE_TIP: &str = "Adds a block that computes a key figure from the results of a \
-                           step linked to it, such as the largest von Mises stress, the \
-                           displacement of a node or an eigenfrequency.";
+const MEASURE_TIP: &str = "Adds a block that reads from the results of a step linked to it: \
+                           the values of a field over a region, the displacement of a node, \
+                           a history output or an eigenfrequency.";
 const STUDY_TIP: &str = "Adds a parameter study: a table of design points, each a set of \
                          values it gives to exposed parameters of analyses or numbers of \
                          other blocks, solved in turn, with the values of Measure blocks it \

@@ -1475,34 +1475,40 @@ mod tests {
             ProjectNode::MeshPreview(MeshPreview {
                 id: 2,
                 name: "Beam".into(),
-                position: [0.0, 300.0],
+                position: [0.0, 250.0],
             }),
             measure(
                 3,
                 "Tip",
-                [300.0, -40.0],
+                [260.0, -60.0],
                 history("TIP", "DISPLACEMENTS", "U2"),
             ),
             measure(
                 4,
                 "Support",
-                [300.0, 120.0],
+                [260.0, 90.0],
                 history("SUPPORT", "TOTAL_FORCE", "RF2"),
             ),
-            math(5, "Force", [560.0, 120.0], MathOp::Multiply, vec![0.0, -1.0]),
-            plot(6, "Force over Deflection", [820.0, -40.0], PlotKind::Line),
+            math(5, "Force", [500.0, 90.0], MathOp::Multiply, vec![0.0, -1.0]),
+            plot(6, "Force over Deflection", [740.0, -60.0], PlotKind::Line),
             measure(
                 7,
                 "Stresses",
-                [300.0, 300.0],
+                [260.0, 240.0],
                 MeasureKind::FieldValues {
                     field: "STRESS".into(),
                     component: "MISES".into(),
                     region: MeasureRegion::All,
                 },
             ),
-            math(8, "Max Stress", [560.0, 300.0], MathOp::SeriesMax, vec![0.0]),
-            plot(9, "Stress Histogram", [820.0, 260.0], PlotKind::Histogram),
+            math(
+                8,
+                "Max Stress",
+                [500.0, 240.0],
+                MathOp::SeriesMax,
+                vec![0.0],
+            ),
+            plot(9, "Stress Histogram", [740.0, 200.0], PlotKind::Histogram),
         ]);
         let link = |source, item: &[&str], target, slot: &[&str]| Link {
             source,
@@ -2010,7 +2016,7 @@ mod tests {
         let parameters = ParameterSet {
             id: 6,
             name: "Parameters".into(),
-            position: [0.0, 300.0],
+            position: [0.0, 250.0],
             units: plx_model::UnitSystem::MmTonSC,
             parameters: vec![plx_model::Parameter::new(
                 "length",

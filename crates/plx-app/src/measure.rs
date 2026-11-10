@@ -329,18 +329,28 @@ pub fn value_kind(kind: &MeasureKind) -> Option<plx_model::ValueKind> {
     }
 }
 
-/// What a series shows in the block: how many values, and the range they span in `units`.
+/// What a series shows in the block: the range of its values in `units` and how many there
+/// are, "2.9 … 54.4 mm (20)".
 pub fn shown_series(kind: &MeasureKind, series: &[f64], units: UnitSystem) -> String {
     let finite = || series.iter().copied().filter(|v| v.is_finite());
     match (finite().reduce(f64::min), finite().reduce(f64::max)) {
-        (Some(low), Some(high)) => format!(
-            "{} values, {} to {}",
+        (Some(low), Some(high)) => crate::measure::range_text(
+            &shown(kind, low, units),
+            &shown(kind, high, units),
             series.len(),
-            shown(kind, low, units),
-            shown(kind, high, units)
         ),
         _ => format!("{} values", series.len()),
     }
+}
+
+/// The range of a series from its smallest to its largest value, each with its unit, and how
+/// many values it has: "2.9 … 54.4 mm (20)", the unit once where both have the same.
+pub fn range_text(low: &str, high: &str, count: usize) -> String {
+    let low = match (low.split_once(' '), high.split_once(' ')) {
+        (Some((number, unit)), Some((_, other))) if unit == other => number,
+        _ => low,
+    };
+    format!("{low} … {high} ({count})")
 }
 
 /// The value as the block shows it: in `units`, with its unit.
@@ -846,6 +856,12 @@ mod tests {
             })
             .sum();
         assert!((held - 10.0).abs() < 1e-3, "{held}");
+    }
+
+    #[test]
+    fn a_range_names_its_unit_once() {
+        assert_eq!(range_text("2.9 mm", "54.4 mm", 20), "2.9 … 54.4 mm (20)");
+        assert_eq!(range_text("2", "5", 3), "2 … 5 (3)");
     }
 
     #[test]
