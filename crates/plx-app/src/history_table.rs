@@ -222,7 +222,8 @@ impl Columns<'_> {
     /// its component, e.g. `RF3 59016`.
     fn label(&self, column: usize, many: bool) -> String {
         let title = self.title(column);
-        if many && column >= FIXED_COLUMNS {
+        // A total is named like its component already.
+        if many && column >= FIXED_COLUMNS && title != self.component.name {
             format!("{} {title}", self.component.name)
         } else {
             title.to_string()
@@ -1293,6 +1294,16 @@ mod tests {
         assert_eq!(data.x, [10.0, 40.0]);
         assert_eq!(data.curves[0], ("U3 41".to_string(), vec![-1.0, -4.0]));
         assert_eq!(data.curves[1].0, "U3 62");
+        // A total named like its component is not named twice.
+        sets[1].fields[0].components[0].entries[0].name = "RF3".into();
+        let data = plot(
+            &[&displacements, &forces],
+            &sets,
+            AnalysisKind::Static,
+            no_places(),
+        )
+        .unwrap();
+        assert_eq!(data.x_label, "RF3");
         // One column in each table is enough, one column in all of them is not.
         forces.selection.press(3, None, Modifiers::COMMAND);
         displacements.selection.clear();

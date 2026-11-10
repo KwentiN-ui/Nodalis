@@ -135,7 +135,8 @@ same step and increment (or the same step and time). Where a table has no such r
 lies outside the rows selected in that table, the curve has a gap. Curves of a plot across
 tables name their component as well, e.g. `RF3 59016`.
 
-#screenshot("history-table-across.png", [`RF3` over `U3` of one node from two tables])
+#screenshot("history-table-across.png", [The total reaction force `RF1` of a snap-fit over the
+  displacement `U1` of one node, from two tables])
 
 === Steps in the plot <history-plot-steps>
 
