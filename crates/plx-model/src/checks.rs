@@ -1578,7 +1578,7 @@ impl FeModel {
             ));
         }
         for (i, (region, item)) in self.contact_regions.iter().zip(&resolved.items).enumerate() {
-            if !region.prints_contact(&self.steps) {
+            if !region.prints_contact(&self.steps, &self.history_outputs) {
                 continue;
             }
             let reason = match item.kind {
@@ -2632,7 +2632,7 @@ impl FeModel {
                 ));
             }
         }
-        for (i, output) in step.history_outputs.iter().enumerate() {
+        for (i, output) in self.step_history_outputs(s).into_iter().enumerate() {
             if let Some(region) = output.kind.region()
                 && output.active
                 && !driven(region)

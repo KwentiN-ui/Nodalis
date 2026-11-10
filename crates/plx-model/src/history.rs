@@ -9,6 +9,9 @@ use crate::Region;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HistoryOutput {
+    /// The internal identity the steps that print the output refer to: one output of the
+    /// model, printed in every step that lists it.
+    pub id: crate::Id,
     pub name: String,
     /// A deactivated history output is left out of the input file.
     #[serde(default = "crate::active")]
@@ -109,6 +112,7 @@ impl HistoryOutput {
     /// The default nodal history output: reaction forces and displacements.
     pub fn node(name: impl Into<String>, region: Region) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
             kind: HistoryKind::Node { region },
@@ -120,6 +124,7 @@ impl HistoryOutput {
     /// The default element history output: stresses and strains.
     pub fn element(name: impl Into<String>, region: Region) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
             kind: HistoryKind::Element { region },
@@ -131,6 +136,7 @@ impl HistoryOutput {
     /// The default contact history output: contact displacements and stresses.
     pub fn contact(name: impl Into<String>, pair: Option<crate::Id>) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
             kind: HistoryKind::Contact { pair },
@@ -142,6 +148,7 @@ impl HistoryOutput {
     /// The energies of the whole model, which a new Dynamic step prints.
     pub fn energies(name: impl Into<String>) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
             kind: HistoryKind::Energies,
@@ -164,9 +171,125 @@ impl HistoryOutput {
     }
 }
 
+impl crate::FeModel {
+    /// The history output of the model with the id.
+    pub fn history_output(&self, id: crate::Id) -> Option<&HistoryOutput> {
+        self.history_outputs.iter().find(|o| o.id == id)
+    }
+
+    pub fn history_output_mut(&mut self, id: crate::Id) -> Option<&mut HistoryOutput> {
+        self.history_outputs.iter_mut().find(|o| o.id == id)
+    }
+
+    /// The history outputs step `s` prints, in its order; the tree's index of each is its
+    /// place in this list.
+    pub fn step_history_outputs(&self, s: usize) -> Vec<&HistoryOutput> {
+        let ids = self
+            .steps
+            .get(s)
+            .map(|step| step.history_outputs.as_slice());
+        (ids.unwrap_or_default().iter())
+            .filter_map(|&id| self.history_output(id))
+            .collect()
+    }
+
+    /// The `i`th history output of step `s`.
+    pub fn step_history_output(&self, s: usize, i: usize) -> Option<&HistoryOutput> {
+        let id = *self.steps.get(s)?.history_outputs.get(i)?;
+        self.history_output(id)
+    }
+
+    pub fn step_history_output_mut(&mut self, s: usize, i: usize) -> Option<&mut HistoryOutput> {
+        let id = *self.steps.get(s)?.history_outputs.get(i)?;
+        self.history_output_mut(id)
+    }
+
+    /// The steps that print the history output.
+    pub fn history_output_steps(&self, id: crate::Id) -> Vec<usize> {
+        (self.steps.iter().enumerate())
+            .filter(|(_, step)| step.history_outputs.contains(&id))
+            .map(|(s, _)| s)
+            .collect()
+    }
+
+    /// Adds `output` to the model and to step `s`, in place of the output of the model
+    /// with its id.
+    pub fn put_history_output(&mut self, s: usize, output: HistoryOutput) {
+        let id = output.id;
+        match self.history_output_mut(id) {
+            Some(existing) => *existing = output,
+            None => self.history_outputs.push(output),
+        }
+        if let Some(step) = self.steps.get_mut(s)
+            && !step.history_outputs.contains(&id)
+        {
+            step.history_outputs.push(id);
+        }
+    }
+
+    /// Takes the history output out of the model and out of every step.
+    pub fn delete_history_output(&mut self, id: crate::Id) {
+        self.history_outputs.retain(|o| o.id != id);
+        for step in &mut self.steps {
+            step.history_outputs.retain(|&o| o != id);
+        }
+    }
+
+    /// Takes over from `from` the history outputs the steps print, in place of those of
+    /// the same id, for steps taken from another analysis; drops those no step prints any
+    /// more.
+    pub fn adopt_history_outputs(&mut self, from: &crate::FeModel) {
+        let printed: Vec<crate::Id> = (self.steps.iter())
+            .flat_map(|s| s.history_outputs.iter().copied())
+            .collect();
+        for output in (from.history_outputs.iter()).filter(|o| printed.contains(&o.id)) {
+            match self.history_output_mut(output.id) {
+                Some(existing) => *existing = output.clone(),
+                None => self.history_outputs.push(output.clone()),
+            }
+        }
+        self.drop_unused_history_outputs();
+    }
+
+    /// The history outputs `steps` print, in the order of the model.
+    pub fn printed_history_outputs(&self, steps: &[crate::Step]) -> Vec<&HistoryOutput> {
+        (self.history_outputs.iter())
+            .filter(|o| steps.iter().any(|s| s.history_outputs.contains(&o.id)))
+            .collect()
+    }
+
+    /// Takes the history outputs no step prints out of the model.
+    pub fn drop_unused_history_outputs(&mut self) {
+        let used: std::collections::BTreeSet<crate::Id> = (self.steps.iter())
+            .flat_map(|s| s.history_outputs.iter().copied())
+            .collect();
+        self.history_outputs.retain(|o| used.contains(&o.id));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn steps_share_the_outputs_of_the_model() {
+        let mut fe = crate::FeModel {
+            steps: vec![crate::Step::new_static("A"), crate::Step::new_static("B")],
+            ..Default::default()
+        };
+        let output = HistoryOutput::node("NH_Output-1", Region::Nodes(vec![1]));
+        let id = output.id;
+        fe.put_history_output(0, output);
+        fe.steps[1].history_outputs.push(id);
+        fe.step_history_output_mut(1, 0).unwrap().active = false;
+        assert!(!fe.step_history_outputs(0)[0].active);
+        assert_eq!(fe.history_output_steps(id), [0, 1]);
+        fe.steps[0].history_outputs.clear();
+        fe.drop_unused_history_outputs();
+        assert_eq!(fe.history_outputs.len(), 1);
+        fe.delete_history_output(id);
+        assert!(fe.history_outputs.is_empty() && fe.steps[1].history_outputs.is_empty());
+    }
 
     #[test]
     fn variables_keep_their_order() {
@@ -174,15 +297,5 @@ mod tests {
         output.variables = vec!["U".into(), "XX".into(), "RF".into(), "U".into()];
         output.normalize_variables();
         assert_eq!(output.variables, ["RF", "U"]);
-    }
-
-    #[test]
-    fn old_projects_have_no_history_outputs() {
-        // A step saved before history outputs existed still loads.
-        let text = ron::to_string(&crate::Step::new_static("Step-1")).unwrap();
-        let old = text.replace(",history_outputs:[]", "");
-        assert_ne!(old, text);
-        let step: crate::Step = ron::from_str(&old).unwrap();
-        assert!(step.history_outputs.is_empty());
     }
 }

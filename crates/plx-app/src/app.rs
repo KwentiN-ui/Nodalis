@@ -2493,6 +2493,32 @@ impl Workbench {
                 *item = TreeItem::Step(to);
             }
         }
+        if let (Some((item, copy)), Some(model)) = (response.propagate, self.model.as_mut())
+            && let Some((s, key)) = crate::step_overview::step_item_key(&model.fe, &item)
+        {
+            let (count, action) = if copy {
+                let count = model.fe.copy_to_following_steps(s, &key);
+                (count, crate::step_overview::Action::Copy(s, key))
+            } else {
+                let count = model.fe.remove_from_following_steps(s, &key);
+                (count, crate::step_overview::Action::Remove(s, key))
+            };
+            let text = crate::step_overview::done(&model.fe, &action, count);
+            self.toast = Some(crate::toast::Toast::new(text, count > 0));
+        }
+        if let (Some(TreeItem::HistoryOutput(s, i)), Some(model)) =
+            (response.remove_from_step, self.model.as_mut())
+            && let Some(step) = model.fe.steps.get_mut(s)
+            && i < step.history_outputs.len()
+        {
+            step.history_outputs.remove(i);
+            // An output no step prints any more is gone.
+            model.fe.drop_unused_history_outputs();
+            if matches!(&self.tree.selected, Some((_, item)) if *item == TreeItem::HistoryOutput(s, i))
+            {
+                self.tree.selected = None;
+            }
+        }
         if let (Some(item), Some(model)) = (response.toggle_active, self.model.as_mut()) {
             // Several selected items all take the state the clicked one changes to.
             let selected = self.tree.selected_items(view);

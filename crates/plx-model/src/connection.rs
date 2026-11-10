@@ -514,6 +514,8 @@ struct Derivation<'a> {
     thermal: bool,
     /// The steps, which may switch regions off and on.
     steps: &'a [crate::Step],
+    /// The history outputs the steps refer to.
+    history_outputs: &'a [crate::HistoryOutput],
     /// The distance the detection that found the region searched within.
     detected_within: Option<f64>,
 }
@@ -785,6 +787,7 @@ impl FeModel {
             nlgeom,
             thermal,
             steps: &self.steps,
+            history_outputs: &self.history_outputs,
             detected_within,
         };
         resolve(region, &a, &b, &model)
@@ -929,12 +932,16 @@ impl FeModel {
         let regions: BTreeSet<Id> = self.contact_regions.iter().map(|r| r.id).collect();
         for step in &mut lowered.steps {
             step.contact_changes.retain(|c| pairs.contains(&c.region));
-            step.history_outputs.retain(|o| match &o.kind {
-                crate::HistoryKind::Contact { pair: Some(pair) } => {
-                    pairs.contains(pair) || !regions.contains(pair)
-                }
-                _ => true,
-            });
+        }
+        lowered.history_outputs.retain(|o| match &o.kind {
+            crate::HistoryKind::Contact { pair: Some(pair) } => {
+                pairs.contains(pair) || !regions.contains(pair)
+            }
+            _ => true,
+        });
+        let kept: BTreeSet<Id> = lowered.history_outputs.iter().map(|o| o.id).collect();
+        for step in &mut lowered.steps {
+            step.history_outputs.retain(|o| kept.contains(o));
         }
         // Contact results for the contact check after solving, where none are asked for.
         if (lowered.contact_pairs.iter().skip(origin.first_pair)).any(|p| p.active) {
@@ -993,6 +1000,7 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
         nlgeom,
         thermal,
         steps,
+        history_outputs,
         detected_within,
     } = *model;
     let settings = &region.settings;
@@ -1094,7 +1102,8 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
             Some(BondedMethod::Contact)
         }
         (ContactBehavior::Bonded, None)
-            if region.prints_contact(steps) && formulation == ContactMethod::SurfaceToSurface =>
+            if region.prints_contact(steps, history_outputs)
+                && formulation == ContactMethod::SurfaceToSurface =>
         {
             why.push(
                 "Bonded as a tied contact: a history output prints its contact values, which \

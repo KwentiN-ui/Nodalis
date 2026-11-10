@@ -61,7 +61,8 @@ impl FeModel {
             if let Some(i) = position(&mut step.loads.iter().map(|l| &l.name)) {
                 return Some(ModelItem::Load(s, i));
             }
-            if let Some(i) = position(&mut step.history_outputs.iter().map(|o| &o.name)) {
+            let history = self.step_history_outputs(s);
+            if let Some(i) = position(&mut history.iter().map(|o| &o.name)) {
                 return Some(ModelItem::HistoryOutput(s, i));
             }
             if let Some(i) = position(&mut step.defined_fields.iter().map(|f| &f.name)) {
@@ -378,8 +379,13 @@ impl FeModel {
                 }
             }
         }
-        for (s, step) in self.steps.iter().enumerate() {
-            for (i, output) in step.history_outputs.iter().enumerate() {
+        // Each output once, in the first step that prints it.
+        for output in &self.history_outputs {
+            let place = (self.steps.iter().enumerate()).find_map(|(s, step)| {
+                let i = step.history_outputs.iter().position(|&o| o == output.id)?;
+                Some((s, i))
+            });
+            if let Some((s, i)) = place {
                 let reason = match &output.kind {
                     crate::HistoryKind::Contact { pair } => (pair)
                         .and_then(|p| self.contact_name(p))

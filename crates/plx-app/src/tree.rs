@@ -350,6 +350,10 @@ pub struct TreeResponse {
     pub step_overview: bool,
     /// Move a step one place up (`true`) or down in the list of steps.
     pub move_step: Option<(usize, bool)>,
+    /// Copy a step item to every following step (`true`) or remove it from them.
+    pub propagate: Option<(TreeItem, bool)>,
+    /// Stop printing a history output in its step, keeping it in the others.
+    pub remove_from_step: Option<TreeItem>,
     /// Swap master and slave of a tie, spring connection or contact pair.
     pub swap_master_slave: Option<TreeItem>,
     /// Hide (`false`) or show the symbols of constraints, boundary conditions or loads.
@@ -984,6 +988,9 @@ struct Tree<'a> {
     symbols: HashMap<TreeItem, bool>,
     /// Number of steps, to disable "Move Down" on the last one.
     step_count: usize,
+    /// The history output of the model each history output row of a step stands for: one
+    /// output, shown in every step that prints it and selected in all of them together.
+    history_links: HashMap<TreeItem, plx_model::Id>,
     /// Names of the steps, for the menus that create an item in one of them.
     step_names: Vec<String>,
     /// The parts listed in the tree for the menu of "Parts".
@@ -1039,6 +1046,12 @@ impl Tree<'_> {
     fn is_selected(&self, item: &TreeItem) -> bool {
         match item {
             TreeItem::Part(index) => self.state.selected_parts(self.view).contains(index),
+            // A history output lights up in every step that prints it.
+            TreeItem::HistoryOutput(..) if self.history_links.contains_key(item) => {
+                let id = self.history_links.get(item);
+                (self.state.selected_items(self.view).iter())
+                    .any(|selected| self.history_links.get(selected) == id)
+            }
             _ => self.state.selected_items(self.view).contains(item),
         }
     }
@@ -1266,6 +1279,57 @@ impl Tree<'_> {
                         };
                         if ui.button(label).clicked() {
                             self.response.toggle_active = Some(item.clone());
+                        }
+                        separator(ui);
+                    }
+                    let step_item = match item {
+                        TreeItem::BoundaryCondition(s, _)
+                        | TreeItem::Load(s, _)
+                        | TreeItem::DefinedField(s, _)
+                        | TreeItem::HistoryOutput(s, _) => Some(s),
+                        _ => None,
+                    };
+                    if let Some(s) =
+                        step_item.filter(|_| !several && self.view == TreeView::FeModel)
+                    {
+                        let later = s + 1 < self.step_count;
+                        let history = matches!(item, TreeItem::HistoryOutput(..));
+                        let (label, hint) = if history {
+                            (
+                                "Add to Following Steps",
+                                "Every following step that can print it prints this output \
+                                 too; it stays one output, edited for all of them at once.",
+                            )
+                        } else {
+                            (
+                                "Copy to Following Steps",
+                                "Puts this item into every following step that can take it, \
+                                 in place of the one of the same name there.",
+                            )
+                        };
+                        if ui
+                            .add_enabled(later, egui::Button::new(label))
+                            .on_hover_text(hint)
+                            .clicked()
+                        {
+                            self.response.propagate = Some((item.clone(), true));
+                        }
+                        if ui
+                            .add_enabled(later, egui::Button::new("Remove from Following Steps"))
+                            .clicked()
+                        {
+                            self.response.propagate = Some((item.clone(), false));
+                        }
+                        if history
+                            && ui
+                                .button("Remove from This Step")
+                                .on_hover_text(
+                                    "This step no longer prints the output; the other steps \
+                                     keep it. Delete removes it from every step.",
+                                )
+                                .clicked()
+                        {
+                            self.response.remove_from_step = Some(item.clone());
                         }
                         separator(ui);
                     }
@@ -1857,6 +1921,7 @@ pub fn show(
         detected: HashMap::new(),
         replaced: Default::default(),
         step_count: 0,
+        history_links: HashMap::new(),
         step_names: Vec::new(),
         part_indices: Vec::new(),
         step_types: Vec::new(),
@@ -2096,6 +2161,13 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             return;
         }
         let text = counted("Steps", shown);
+        // All steps' rows of each history output first, so that selecting it in a later step
+        // lights it up in the earlier ones too.
+        for (s, step) in fe.steps.iter().enumerate() {
+            for (i, &id) in step.history_outputs.iter().enumerate() {
+                tree.history_links.insert(TreeItem::HistoryOutput(s, i), id);
+            }
+        }
         tree.branch(ui, steps, text, true, |tree, ui| {
             for (s, step) in fe.steps.iter().enumerate() {
                 if !step.active {
@@ -2119,8 +2191,10 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                 for (i, _) in (step.field_outputs.iter().enumerate()).filter(|(_, f)| !f.active) {
                     tree.inactive.insert(TreeItem::FieldOutput(s, i));
                 }
-                for (i, _) in (step.history_outputs.iter().enumerate()).filter(|(_, h)| !h.active) {
-                    tree.inactive.insert(TreeItem::HistoryOutput(s, i));
+                for (i, &id) in step.history_outputs.iter().enumerate() {
+                    if fe.history_output(id).is_some_and(|h| !h.active) {
+                        tree.inactive.insert(TreeItem::HistoryOutput(s, i));
+                    }
                 }
                 for (i, _) in (step.defined_fields.iter().enumerate()).filter(|(_, f)| !f.active) {
                     tree.inactive.insert(TreeItem::DefinedField(s, i));
@@ -2154,6 +2228,7 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                         .collect();
                     tree.step_container(ui, s, "Field Outputs", outputs);
                     let outputs = (step.history_outputs.iter().enumerate())
+                        .filter_map(|(i, &id)| Some((i, fe.history_output(id)?)))
                         .map(|(i, h)| (TreeItem::HistoryOutput(s, i), h.name.as_str()))
                         .collect();
                     tree.step_container(ui, s, "History Outputs", outputs);

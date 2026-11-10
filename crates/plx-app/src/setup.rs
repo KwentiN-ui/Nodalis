@@ -2146,13 +2146,13 @@ impl Editor {
                 Draft::FieldOutput(step, output)
             }
             NewItem::ContactHistoryOutput(step, contact) => {
-                let target = fe.steps.get(step)?;
+                fe.steps.get(step)?;
                 let pair = match contact {
                     ContactItem::Region(i) => fe.contact_regions.get(i)?.id,
                     ContactItem::Pair(i) => fe.contact_pairs.get(i)?.id,
                 };
                 let mut output = HistoryOutput::contact(
-                    next_name("CH_Output", names(&target.history_outputs, |h| &h.name)),
+                    next_name("CH_Output", names(&fe.history_outputs, |h| &h.name)),
                     Some(pair),
                 );
                 // The contact forces too, summed over the slave side.
@@ -2172,9 +2172,9 @@ impl Editor {
                 Draft::FieldOutput(step, output)
             }
             NewItem::HistoryOutput(step) => {
-                let target = fe.steps.get(step)?;
+                fe.steps.get(step)?;
                 let output = HistoryOutput::node(
-                    next_name("NH_Output", names(&target.history_outputs, |h| &h.name)),
+                    next_name("NH_Output", names(&fe.history_outputs, |h| &h.name)),
                     Region::Nodes(Vec::new()),
                 );
                 let region = history_region(&output.kind, fe, &FeMesh::default());
@@ -2375,7 +2375,7 @@ impl Editor {
                 (Draft::FieldOutput(s, output), i)
             }
             TreeItem::HistoryOutput(s, i) => {
-                let output = fe.steps.get(s)?.history_outputs.get(i)?.clone();
+                let output = fe.step_history_output(s, i)?.clone();
                 let region = history_region(&output.kind, fe, mesh);
                 (Draft::HistoryOutput(s, output, region), i)
             }
@@ -3842,7 +3842,13 @@ impl Editor {
             Draft::Load(step, ..) => names(&fe.steps[*step].loads, |l| &l.name),
             Draft::InitialCondition(..) => names(&fe.initial_conditions, |i| &i.name),
             Draft::FieldOutput(step, _) => names(&fe.steps[*step].field_outputs, |f| &f.name),
-            Draft::HistoryOutput(step, ..) => names(&fe.steps[*step].history_outputs, |h| &h.name),
+            // One output of the model, whichever steps print it.
+            Draft::HistoryOutput(_, output, _) => {
+                return (fe.history_outputs.iter())
+                    .filter(|h| h.id != output.id)
+                    .map(|h| h.name.as_str())
+                    .collect();
+            }
             Draft::DefinedField(step, ..) => names(&fe.steps[*step].defined_fields, |f| &f.name),
             Draft::Constraint(_) => fe.constraints.iter().map(Constraint::name).collect(),
             Draft::SurfaceInteraction(..) => names(&fe.surface_interactions, |s| &s.name),
@@ -4231,6 +4237,7 @@ impl Editor {
                     None => {
                         copy_items_of_last_step(fe, &mut step);
                         fe.steps.push(step);
+                        print_energies(fe, fe.steps.len() - 1);
                     }
                 }
             }
@@ -4341,11 +4348,11 @@ impl Editor {
                     *target = region.region();
                 }
                 output.normalize_variables();
-                let list = &mut fe.steps[s].history_outputs;
-                if let Some(existing) = index.and_then(|i| list.get(i)) {
+                // Edited once for every step that prints it.
+                if let Some(existing) = fe.history_output(output.id) {
                     output.active = existing.active;
                 }
-                put(list, index, output);
+                fe.put_history_output(s, output);
             }
             Draft::Constraint(draft) => {
                 fe.reference_points.extend(draft.new_point());
@@ -4418,7 +4425,12 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
         TreeItem::Material(i) => remove(&mut fe.materials, i),
         TreeItem::Section(i) => remove(&mut fe.sections, i),
         TreeItem::CrossSection(i) => remove(&mut fe.cross_sections, i),
-        TreeItem::Step(i) => remove(&mut fe.steps, i),
+        TreeItem::Step(i) => {
+            let removed = remove(&mut fe.steps, i);
+            // What only the step printed goes with it.
+            fe.drop_unused_history_outputs();
+            removed
+        }
         TreeItem::BoundaryCondition(s, i) => fe
             .steps
             .get_mut(s)
@@ -4431,10 +4443,14 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
             .steps
             .get_mut(s)
             .is_some_and(|st| remove(&mut st.field_outputs, i)),
-        TreeItem::HistoryOutput(s, i) => fe
-            .steps
-            .get_mut(s)
-            .is_some_and(|st| remove(&mut st.history_outputs, i)),
+        // Out of every step that prints it.
+        TreeItem::HistoryOutput(s, i) => match fe.step_history_output(s, i).map(|h| h.id) {
+            Some(id) => {
+                fe.delete_history_output(id);
+                true
+            }
+            None => false,
+        },
         TreeItem::DefinedField(s, i) => fe
             .steps
             .get_mut(s)
@@ -4523,9 +4539,7 @@ fn active_mut<'a>(fe: &'a mut FeModel, item: &TreeItem) -> Option<&'a mut bool> 
         TreeItem::FieldOutput(s, i) => (fe.steps.get_mut(s))
             .and_then(|st| st.field_outputs.get_mut(i))
             .map(|f| &mut f.active),
-        TreeItem::HistoryOutput(s, i) => (fe.steps.get_mut(s))
-            .and_then(|st| st.history_outputs.get_mut(i))
-            .map(|h| &mut h.active),
+        TreeItem::HistoryOutput(s, i) => fe.step_history_output_mut(s, i).map(|h| &mut h.active),
         TreeItem::DefinedField(s, i) => (fe.steps.get_mut(s))
             .and_then(|st| st.defined_fields.get_mut(i))
             .map(|f| &mut f.active),
@@ -4653,7 +4667,7 @@ pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
         TreeItem::ContactRegion(i) => fe.contact_regions.get(i).map(|r| [&r.side_a, &r.side_b]),
         TreeItem::Bolt(i) => fe.bolts.get(i).map(|b| [&b.side_a, &b.side_b]),
         TreeItem::HistoryOutput(s, i) => {
-            let output = fe.steps.get(s).and_then(|st| st.history_outputs.get(i));
+            let output = fe.step_history_output(s, i);
             match output.map(|h| &h.kind) {
                 Some(HistoryKind::Contact { pair: Some(pair) }) => {
                     if let Some(support) = fe.compression_only(*pair) {
@@ -4780,7 +4794,7 @@ pub fn item_region<'a>(fe: &'a FeModel, item: &TreeItem) -> Option<&'a Region> {
             .get(i)
             .map(|b| &b.region),
         TreeItem::Load(s, i) => fe.steps.get(s)?.loads.get(i).map(|l| &l.region),
-        TreeItem::HistoryOutput(s, i) => fe.steps.get(s)?.history_outputs.get(i)?.kind.region(),
+        TreeItem::HistoryOutput(s, i) => fe.step_history_output(s, i)?.kind.region(),
         TreeItem::DefinedField(s, i) => (fe.steps.get(s)?.defined_fields.get(i))
             .filter(|f| f.kind.takes_region())
             .map(|f| &f.region),
@@ -5966,6 +5980,37 @@ fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
     if step.kind.supports_defined_fields() {
         step.defined_fields = last.defined_fields.clone();
     }
+    // History outputs go on like the supports: the new step prints those of the last step
+    // that prints history, past sensitivity steps in between. They stay one output each.
+    let source = (fe.steps.iter().rev()).find(|s| s.kind.prints_history());
+    step.history_outputs = (source.into_iter().flat_map(|s| &s.history_outputs))
+        .filter(|&&id| {
+            (fe.history_output(id)).is_some_and(|o| step.kind.supports_history_output(&o.kind))
+        })
+        .copied()
+        .collect();
+}
+
+/// A new Dynamic step prints the energies of the model: the output of the model that
+/// prints them, or a new one.
+fn print_energies(fe: &mut FeModel, s: usize) {
+    if !matches!(fe.steps[s].kind, StepKind::Dynamic(_))
+        || (fe.step_history_outputs(s).iter()).any(|o| o.kind == HistoryKind::Energies)
+    {
+        return;
+    }
+    let output = (fe.history_outputs.iter())
+        .find(|o| o.kind == HistoryKind::Energies)
+        .cloned()
+        .unwrap_or_else(|| {
+            let taken = names(&fe.history_outputs, |h| &h.name);
+            if taken.contains(&"Energies") {
+                HistoryOutput::energies(next_name("Energies", taken))
+            } else {
+                HistoryOutput::energies("Energies")
+            }
+        });
+    fe.put_history_output(s, output);
 }
 
 /// The step kinds of the dialog: label, the kind with its settings and its default field
@@ -6095,13 +6140,6 @@ fn step_form(
             .show_ui(ui, |ui| {
                 for (label, kind, outputs) in step_kinds(fe) {
                     if ui.selectable_label(current == label, label).clicked() && current != label {
-                        // A Dynamic step prints the energies of the model by default.
-                        step.history_outputs
-                            .retain(|h| h.kind != HistoryKind::Energies);
-                        if matches!(kind, StepKind::Dynamic(_)) {
-                            step.history_outputs
-                                .push(HistoryOutput::energies("Energies"));
-                        }
                         step.kind = kind;
                         step.field_outputs = outputs;
                     }
@@ -7597,12 +7635,12 @@ mod tests {
         // History outputs follow a renamed remote displacement.
         let mut output = HistoryOutput::node("NH_Output-1", point);
         output.normalize_variables();
-        fe.steps[0].history_outputs.push(output);
+        fe.put_history_output(0, output);
         remote.name = "Shaft".into();
         let id = remote.id;
         fe.steps[0].boundary_conditions.push(remote);
         assert_eq!(
-            fe.steps[0].history_outputs[0].kind.region(),
+            fe.history_outputs[0].kind.region(),
             Some(&Region::RemotePoint(id))
         );
         assert_eq!(fe.name_of(id), Some("Shaft"));
@@ -7996,6 +8034,49 @@ mod tests {
         // A static step after it leaves the thermal items behind.
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
         assert!(names(&fe.steps[3]).is_empty());
+    }
+
+    #[test]
+    fn new_steps_print_the_history_outputs_of_the_last_one() {
+        let mut fe = FeModel::default();
+        fe.steps.push(Step::new_static("Step-1"));
+        let output = HistoryOutput::node("NH_Output-1", Region::Parts(Vec::new()));
+        let id = output.id;
+        fe.put_history_output(0, output);
+        // A sensitivity step prints none; the static step after it prints them again.
+        let mut editor = Editor::create(NewItem::Step, &fe).unwrap();
+        if let Draft::Step(step, _) = &mut editor.draft {
+            step.kind = StepKind::Sensitivity(Default::default());
+        }
+        editor.apply(&mut fe);
+        assert!(fe.steps[1].history_outputs.is_empty());
+        Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
+        assert_eq!(fe.steps[2].history_outputs, [id]);
+        // One output for both: editing it in one step changes it in the other.
+        let mut editor =
+            Editor::edit(&TreeItem::HistoryOutput(2, 0), &fe, &FeMesh::default()).unwrap();
+        if let Draft::HistoryOutput(_, output, _) = &mut editor.draft {
+            output.variables = vec!["U".into()];
+        }
+        editor.apply(&mut fe);
+        assert_eq!(fe.history_outputs.len(), 1);
+        assert_eq!(fe.step_history_outputs(0)[0].variables, ["U"]);
+        // A Dynamic step prints the energies besides them.
+        let mut editor = Editor::create(NewItem::Step, &fe).unwrap();
+        if let Draft::Step(step, _) = &mut editor.draft {
+            step.kind = StepKind::Dynamic(DynamicStep::default());
+        }
+        editor.apply(&mut fe);
+        let names: Vec<&str> = (fe.step_history_outputs(3).iter())
+            .map(|h| h.name.as_str())
+            .collect();
+        assert_eq!(names, ["NH_Output-1", "Energies"]);
+        // Deleting it in one step deletes it in all; a deleted step takes along what only
+        // it printed.
+        assert!(delete(&mut fe, &TreeItem::HistoryOutput(0, 0)));
+        assert!(fe.steps.iter().all(|s| !s.history_outputs.contains(&id)));
+        assert!(delete(&mut fe, &TreeItem::Step(3)));
+        assert!(fe.history_outputs.is_empty());
     }
 
     #[test]
