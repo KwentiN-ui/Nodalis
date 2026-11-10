@@ -190,6 +190,7 @@ impl PathPlot {
             distances: Vec::new(),
             values: Vec::new(),
             ends: [Vec3::ZERO; 2],
+            track: Vec::new(),
             placement: Placement {
                 on_path: false,
                 ..self.placement.clone()
@@ -219,6 +220,14 @@ impl PathPlot {
     ) -> Option<PlotBox> {
         let plot = self.hot_spot.plot(model, hot_spot).ok()?;
         let range = plot.range();
+        let track = track(
+            model,
+            plot.weights.iter().map(|w| (Some(w.as_slice()), None)),
+        );
+        let mut ends = plot.ends.map(|p| model.to_render(p));
+        if let [first, .., last] = track[..] {
+            ends = [first, last];
+        }
         Some(PlotBox {
             index,
             title: format!(
@@ -227,7 +236,8 @@ impl PathPlot {
                 plot.component.short(),
                 plot.node
             ),
-            ends: plot.ends.map(|p| model.to_render(p)),
+            ends,
+            track,
             distances: plot.distances,
             values: plot.values,
             placement: self.placement.clone(),
@@ -253,19 +263,51 @@ impl PathPlot {
         if !values.iter().any(|v| v.is_finite()) {
             return None;
         }
-        let (ends, _) = crate::features::path_line(model, path)?;
+        let (mut ends, _) = crate::features::path_line(model, path)?;
+        // Where the shown mesh is deformed the path is drawn on it, as the 3D view draws it.
+        let track = track(
+            model,
+            points
+                .iter()
+                .map(|p| (p.weights.as_deref(), Some(p.position))),
+        );
+        if let [first, .., last] = track[..] {
+            ends = [first, last];
+        }
         Some(PlotBox {
             index,
             title: format!("{}: {} {}", path.name, field.name, component.name),
             distances: points.iter().map(|p| p.distance).collect(),
             values,
             ends,
+            track,
             placement: self.placement.clone(),
             marks: None,
             auto_range: None,
             table: None,
         })
     }
+}
+
+/// Points of a path in render coordinates, where the shown mesh has them: interpolated
+/// between the drawn, deformed nodes, or at their position where they lie outside the mesh.
+/// Empty when a point has neither.
+fn track<'a>(
+    model: &Model,
+    points: impl Iterator<Item = (Option<&'a [(usize, f64)]>, Option<[f64; 3]>)>,
+) -> Vec<Vec3> {
+    points
+        .map(|(weights, position)| {
+            weights
+                .and_then(|weights| {
+                    weights.iter().try_fold(Vec3::ZERO, |sum, &(node, weight)| {
+                        Some(sum + model.node_position(node)? * weight as f32)
+                    })
+                })
+                .or_else(|| position.map(|p| model.to_render(p)))
+        })
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default()
 }
 
 /// A plot as the 3D view draws it.
@@ -277,6 +319,9 @@ pub struct PlotBox {
     pub values: Vec<f64>,
     /// Start and end of the path in render coordinates.
     pub ends: [Vec3; 2],
+    /// The points of `distances` as drawn, deformed like the shown mesh; empty to draw the
+    /// path straight between its ends.
+    pub track: Vec<Vec3>,
     pub placement: Placement,
     /// Read-out points and extrapolation of a hot spot.
     pub marks: Option<Marks>,
@@ -491,6 +536,15 @@ fn draw_on_path(
     id: egui::Id,
 ) -> Option<egui::Response> {
     let [a, b] = plot.ends.map(|p| project(camera, rect, p));
+    // The path on screen, point by point where it is known, else the line between its ends.
+    let track: Vec<Pos2> = if plot.track.len() == plot.distances.len() && plot.track.len() > 1 {
+        plot.track
+            .iter()
+            .map(|&p| project(camera, rect, p))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let along = b - a;
     if along.length() < 1.0 {
         return None;
@@ -520,7 +574,23 @@ fn draw_on_path(
     } else {
         0.0
     };
-    let base = |d: f64| a + along * (d / length.max(1e-300)) as f32;
+    let base = |d: f64| {
+        if track.is_empty() {
+            return a + along * (d / length.max(1e-300)) as f32;
+        }
+        // Along the sampled path, between the two samples around the distance.
+        let next = plot
+            .distances
+            .partition_point(|&s| s < d)
+            .clamp(1, track.len() - 1);
+        let (d0, d1) = (plot.distances[next - 1], plot.distances[next]);
+        let t = if d1 > d0 {
+            ((d - d0) / (d1 - d0)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        track[next - 1] + (track[next] - track[next - 1]) * t as f32
+    };
     let points: Vec<Option<(Pos2, Pos2)>> = (plot.distances.iter().zip(&plot.values))
         .map(|(&d, &v)| {
             v.is_finite()
@@ -541,7 +611,11 @@ fn draw_on_path(
     }
     painter.add(fill);
     let stroke = Stroke::new(2.0, CURVE);
-    painter.line_segment([a, b], Stroke::new(1.5, CURVE));
+    if track.len() > 1 {
+        painter.add(egui::Shape::line(track.clone(), Stroke::new(1.5, CURVE)));
+    } else {
+        painter.line_segment([a, b], Stroke::new(1.5, CURVE));
+    }
     let mut curve: Vec<Pos2> = Vec::new();
     for point in points.iter().chain([&None]) {
         match point {
