@@ -8932,6 +8932,192 @@ fn block_on_plate(plate_type: &str) -> (FeMesh, FeModel) {
     (mesh, model)
 }
 
+/// A membrane strip 20 x 10 x 1 in z = 0, held at x = 0, with a block 10 x 10 x 5 glued on
+/// its half x > 10, either the block's bottom on the strip's face SPOS (strip master) or the
+/// strip's face SPOS on the block's bottom (strip slave). The block is pulled along x by
+/// 1000 N and held across the strip at its top.
+fn block_on_membrane(strip_is_master: bool) -> (FeMesh, FeModel) {
+    let mut mesh = FeMesh::default();
+    let strip = |i: u32, j: u32| 1 + i + 5 * j;
+    for j in 0..3 {
+        for i in 0..5 {
+            mesh.set_node(strip(i, j), [5.0 * f64::from(i), 5.0 * f64::from(j), 0.0]);
+        }
+    }
+    for j in 0..2 {
+        for i in 0..4 {
+            mesh.add_element(plx_mesh::Element {
+                id: 1 + i + 4 * j,
+                type_name: "M3D4".into(),
+                shape: plx_mesh::ElementShape::Quad4,
+                nodes: vec![
+                    strip(i, j),
+                    strip(i + 1, j),
+                    strip(i + 1, j + 1),
+                    strip(i, j + 1),
+                ],
+            })
+            .unwrap();
+        }
+    }
+    // The block's mesh (3 x 3) does not match the strip's.
+    let block = |i: u32, j: u32, k: u32| 101 + i + 4 * j + 16 * k;
+    for k in 0..2 {
+        for j in 0..4 {
+            for i in 0..4 {
+                let at = [
+                    10.0 + 10.0 * f64::from(i) / 3.0,
+                    10.0 * f64::from(j) / 3.0,
+                    0.5 + 5.0 * f64::from(k),
+                ];
+                mesh.set_node(block(i, j, k), at);
+            }
+        }
+    }
+    for j in 0..3 {
+        for i in 0..3 {
+            let mut nodes = Vec::new();
+            for k in 0..2 {
+                nodes.extend([block(i, j, k), block(i + 1, j, k)]);
+                nodes.extend([block(i + 1, j + 1, k), block(i, j + 1, k)]);
+            }
+            mesh.add_element(plx_mesh::Element {
+                id: 101 + i + 3 * j,
+                type_name: "C3D8".into(),
+                shape: plx_mesh::ElementShape::Hex8,
+                nodes,
+            })
+            .unwrap();
+        }
+    }
+    for (name, elements) in [
+        ("STRIP", (1..=8).collect()),
+        ("BLOCK", (101..=109).collect()),
+    ] {
+        mesh.parts.push(plx_mesh::Part {
+            name: name.into(),
+            elements,
+        });
+    }
+    let mut step = Step::new_static("Step-1");
+    let bc = |name: &str, nodes: Vec<NodeId>, kind| BoundaryCondition {
+        id: plx_model::Id::new(),
+        distribution: None,
+        name: name.into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes(nodes),
+        kind,
+        amplitude: None,
+    };
+    // Each node held for itself, not as a remote point.
+    let each = |values| {
+        let mut d = plx_model::Displacement::new(values);
+        d.behavior = plx_model::Behavior::EachNode;
+        BoundaryKind::Displacement(d)
+    };
+    let held = each([Some(0.0), None, None, None, None, None]);
+    step.boundary_conditions
+        .push(bc("Held-1", vec![1, 6, 11], held));
+    step.boundary_conditions.push(bc(
+        "Held-2",
+        vec![1],
+        each([None, Some(0.0), None, None, None, None]),
+    ));
+    // A membrane holds nothing across its plane: the free half of the strip and the
+    // block's top stay flat.
+    let flat = each([None, None, Some(0.0), None, None, None]);
+    let mut flat_nodes: Vec<NodeId> = (1..=15).filter(|n| (n - 1) % 5 < 2).collect();
+    flat_nodes.extend(117..=132);
+    step.boundary_conditions
+        .push(bc("Flat-1", flat_nodes, flat));
+    step.loads.push(Load {
+        id: plx_model::Id::new(),
+        distribution: None,
+        name: "Pull-1".into(),
+        active: true,
+        visible: true,
+        // The block's side x = 20 (S4), 10 x 5: 20 MPa pull 1000 N.
+        region: Region::Faces((0..3).map(|j| (103 + 3 * j, 4)).collect()),
+        kind: LoadKind::Pressure(-20.0),
+        amplitude: None,
+        factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
+    });
+    let mut model = FeModel::default();
+    model.materials.push(Material {
+        id: named("Steel"),
+        name: "Steel".into(),
+        elastic: Some(Elastic {
+            young: 210_000.0,
+            poisson: 0.3,
+        }),
+        ..Default::default()
+    });
+    for (name, part, kind) in [
+        ("Section-1", "BLOCK", SectionKind::Solid),
+        (
+            "Section-2",
+            "STRIP",
+            SectionKind::Membrane {
+                thickness: 1.0,
+                offset: 0.0,
+            },
+        ),
+    ] {
+        model.sections.push(Section {
+            name: name.into(),
+            material: Some(named("Steel")),
+            region: Region::Parts(vec![part.into()]),
+            thickness: 1.0,
+            kind,
+        });
+    }
+    let mut tie = plx_model::Tie::new("Tie-1");
+    let under = Region::Faces([3, 4, 7, 8].iter().map(|&e| (e, 2)).collect());
+    let bottom = Region::Faces((101..=109).map(|e| (e, 1)).collect());
+    (tie.master, tie.slave) = if strip_is_master {
+        (under, bottom)
+    } else {
+        (bottom, under)
+    };
+    model.ties.push(tie);
+    model.steps.push(step);
+    (mesh, model)
+}
+
+#[test]
+fn a_block_glued_on_the_face_of_a_membrane_pulls_it() {
+    for strip_is_master in [true, false] {
+        let (mesh, model) = block_on_membrane(strip_is_master);
+        let text = write_inp(&mesh, &model, "").unwrap();
+        let name = format!("membrane-face-tie-{strip_is_master}");
+        let Some(frd) = run_solver(&name, &text) else {
+            return;
+        };
+        // The free half of the strip carries the 1000 N alone: it stretches by
+        // F L / (E t w) = 0.00476 (the block holds the strip's contraction at x = 10).
+        let stretched = [3, 8, 13]
+            .iter()
+            .map(|&n| node_value(&frd, "DISP", "U1", n))
+            .sum::<f64>()
+            / 3.0;
+        let expected = 1000.0 * 10.0 / (210_000.0 * 10.0);
+        assert!(
+            (stretched - expected).abs() < 0.03 * expected,
+            "{name}: {stretched} against {expected}"
+        );
+        // The block's corner above the strip's node 3 moves with it.
+        let (strip, block) = (
+            node_value(&frd, "DISP", "U1", 3),
+            node_value(&frd, "DISP", "U1", 101),
+        );
+        assert!((strip - block).abs() < 1e-6, "{name}: {strip} {block}");
+    }
+}
+
 #[test]
 fn the_edge_of_a_shell_or_membrane_tied_to_a_solid_carries_its_load() {
     for plate_type in ["S4", "M3D4"] {

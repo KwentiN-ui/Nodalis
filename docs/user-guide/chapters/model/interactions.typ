@@ -714,6 +714,17 @@ little wider than the rope (radius about 0.53 times the rope diameter).
     @cyclic-symmetry.],
 )
 
+Membranes (`M3D3`, `M3D4`, `M3D4R`, @membrane-section) can be tied with their faces and their
+edges, as master or as slave: a solid glued on a foil, a foil glued between two solids, or a
+membrane edge glued to the side of a solid or to another membrane. The solver computes a membrane
+in its mesh surface, so a node anywhere within the membrane's thickness (shifted by its offset)
+counts as lying on it, also on the membrane's top and bottom faces, and all three displacements
+are tied. A solid tied to a membrane edge cannot turn about that edge, although a real membrane
+would carry no moment there.
+
+#screenshot("membrane-tie.png", [A block glued on the top face of a membrane strip and pulled
+  along it: the free half of the strip carries the whole force])
+
 CalculiX ties the edge faces of membranes to nothing (the solver stops with a singular stiffness
 matrix), so Nodalis writes the slave side of a tie on membrane edges as a node surface of the
 edge's nodes; a membrane has no rotations that would need more.
