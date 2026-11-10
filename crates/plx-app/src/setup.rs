@@ -615,6 +615,9 @@ impl RegionDraft {
                     }
                 });
             wanted |= self.source != source;
+            if self.source != source {
+                self.prefill(&model.fe, &model.mesh);
+            }
             match self.source {
                 Source::Selection => {
                     ui.horizontal(|ui| {
@@ -666,6 +669,40 @@ impl RegionDraft {
             }
         });
         wanted
+    }
+
+    /// Chooses the first item of the kind just selected as the source, so that a model with
+    /// a single reference point or set needs no click on the combo box.
+    fn prefill(&mut self, fe: &FeModel, mesh: &FeMesh) {
+        match self.source {
+            Source::ReferencePoint => {
+                let valid = self
+                    .point
+                    .is_some_and(|id| fe.reference_point(id).is_some());
+                if !valid {
+                    self.point = fe.reference_points.first().map(|p| p.id);
+                    // Without reference points the first point of a remote displacement
+                    // or force is offered in their place.
+                    if self.point.is_none() && self.sources.contains(&Source::RemotePoint) {
+                        let (remotes, forces) = fe.remote_points(mesh);
+                        if let Some(&(id, _)) = remotes.first().or(forces.first()) {
+                            (self.source, self.point) = (Source::RemotePoint, Some(id));
+                        }
+                    }
+                }
+            }
+            Source::NodeSet | Source::ElementSet | Source::Surface => {
+                let mut names: Vec<&String> = match self.source {
+                    Source::NodeSet => mesh.node_sets.keys().collect(),
+                    Source::ElementSet => mesh.element_sets.keys().collect(),
+                    _ => mesh.surfaces.keys().collect(),
+                };
+                if !names.iter().any(|n| **n == self.set) {
+                    self.set = names.drain(..).next().cloned().unwrap_or_default();
+                }
+            }
+            _ => {}
+        }
     }
 
     /// The reference points, and where the region takes them the points of the remote
@@ -4785,7 +4822,7 @@ fn history_output_form(
     ui.label("Type");
     ui.horizontal_wrapped(|ui| {
         let current = output.kind.prefix();
-        let pair = model.fe.contact_pairs.first().map(|c| c.id);
+        let pair = model.fe.contact_pair_choices().first().map(|c| c.0);
         let kinds = [
             HistoryKind::Node {
                 region: Region::Nodes(Vec::new()),
@@ -7500,6 +7537,24 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("the dropped note deadlocked");
         assert!(shown);
+    }
+
+    #[test]
+    fn a_region_source_starts_with_the_first_item() {
+        let mut fe = FeModel::default();
+        let mesh = FeMesh::default();
+        let mut region = RegionDraft::new(SUPPORT_SOURCES, Target::Nodes);
+        region.source = Source::ReferencePoint;
+        region.prefill(&fe, &mesh);
+        assert!(region.is_empty());
+        let point = plx_model::ReferencePoint::new("RP-1", [0.0; 3]);
+        let id = point.id;
+        fe.reference_points.push(point);
+        fe.reference_points
+            .push(plx_model::ReferencePoint::new("RP-2", [1.0; 3]));
+        region.prefill(&fe, &mesh);
+        assert_eq!(region.region(), Region::ReferencePoint(id));
+        assert!(!region.is_empty());
     }
 
     #[test]
