@@ -369,9 +369,13 @@ pub struct MathBlock {
     pub units: plx_model::UnitSystem,
     #[serde(default)]
     pub operation: plx_model::MathOp,
-    /// What its numbers are; `None` until a link gives it the kind of the other end.
+    /// What its numbers are; `None` until a link gives it the kind of the other end. Of a
+    /// product or quotient, the kind of its result.
     #[serde(default)]
     pub kind: Option<plx_model::ValueKind>,
+    /// Of a product or quotient, the kinds of A and B; `None` while open.
+    #[serde(default)]
+    pub operands: [Option<plx_model::ValueKind>; 2],
     /// The values of its inputs, in SI units.
     #[serde(default)]
     pub values: Vec<f64>,
@@ -1865,6 +1869,10 @@ mod tests {
             units: plx_model::UnitSystem::MmTonSC,
             operation: plx_model::MathOp::Multiply,
             kind: Some(plx_model::ValueKind::LENGTH),
+            operands: [
+                Some(plx_model::ValueKind::LENGTH),
+                Some(plx_model::ValueKind::Factor),
+            ],
             values: vec![0.1, 2.0],
         };
         saved.nodes.push(ProjectNode::Math(math.clone()));
