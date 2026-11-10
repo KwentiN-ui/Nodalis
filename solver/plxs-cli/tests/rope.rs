@@ -210,7 +210,7 @@ fn frd_block(dir: &Path, job: &str, name: &str) -> Vec<(usize, Vec<f64>)> {
         .filter(|l| l.starts_with(" -1"))
         .map(|l| {
             let node = l[3..13].trim().parse().unwrap();
-            let values = (l[13..].as_bytes().chunks(12))
+            let values = (l.as_bytes()[13..].chunks(12))
                 .map(|c| std::str::from_utf8(c).unwrap().trim().parse().unwrap())
                 .collect();
             (node, values)
