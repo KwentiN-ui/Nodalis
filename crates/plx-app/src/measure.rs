@@ -8,8 +8,29 @@ use std::sync::mpsc::Receiver;
 use plx_io::frd::FrdImport;
 use plx_io::project::BoundResults;
 use plx_mesh::{NodeId, PointLocation};
-use plx_model::{Extreme, MeasureKind, MeasureRegion, UnitSystem};
+use plx_model::{MeasureKind, MeasureRegion, UnitSystem};
 use plx_results::AnalysisKind;
+
+/// What a measure computed: one number, or a series of them with the time of each value of
+/// a history.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Measured {
+    /// The number; of a series its last value.
+    pub value: f64,
+    /// The values of a series, in SI units; empty for one number.
+    pub series: Vec<f64>,
+    /// The times of the values of a whole history.
+    pub times: Vec<f64>,
+}
+
+impl Measured {
+    fn one(value: f64) -> Self {
+        Self {
+            value,
+            ..Self::default()
+        }
+    }
+}
 
 /// The value of `kind` in the results of step `step` (CalculiX's numbering, from 1): of its
 /// last increment, or of a mode. `node_sets` are those of the mesh the results belong to.
@@ -21,7 +42,7 @@ pub fn evaluate(
     dat: Option<&plx_io::dat::DatImport>,
     node_sets: &BTreeMap<String, Vec<NodeId>>,
     units: UnitSystem,
-) -> Result<f64, String> {
+) -> Result<Measured, String> {
     evaluate_expanded(kind, step, frd, dat, node_sets, &BTreeMap::new(), units)
 }
 
@@ -38,7 +59,7 @@ pub fn evaluate_expanded(
     node_sets: &BTreeMap<String, Vec<NodeId>>,
     expanded: &BTreeMap<NodeId, Vec<NodeId>>,
     units: UnitSystem,
-) -> Result<f64, String> {
+) -> Result<Measured, String> {
     let indices = |node: NodeId| plx_io::frd::node_indices(&frd.mesh, expanded, node);
     let increments: Vec<_> = frd.increments.iter().filter(|i| i.step == step).collect();
     let component = |field: &str, component: &str| {
@@ -50,10 +71,9 @@ pub fn evaluate_expanded(
         Ok::<_, String>(&values.values)
     };
     match kind {
-        MeasureKind::FieldExtreme {
+        MeasureKind::FieldValues {
             field,
             component: name,
-            extreme,
             region,
         } => {
             let values = component(field, name)?;
@@ -69,9 +89,14 @@ pub fn evaluate_expanded(
                         .collect()
                 }
             };
-            extreme
-                .of(picked)
-                .ok_or_else(|| "no values in the region".to_owned())
+            if picked.is_empty() {
+                return Err("no values in the region".to_owned());
+            }
+            Ok(Measured {
+                value: picked.last().copied().unwrap_or(f64::NAN),
+                series: picked,
+                times: Vec::new(),
+            })
         }
         MeasureKind::NodeValue {
             field,
@@ -89,11 +114,11 @@ pub fn evaluate_expanded(
                 .ok_or_else(|| format!("no value at node {node}"))?;
             let sum: f64 = picked.iter().sum();
             // Forces of the expanded nodes add up to the force at the node.
-            Ok(if matches!(field.as_str(), "FORC" | "RF") {
+            Ok(Measured::one(if matches!(field.as_str(), "FORC" | "RF") {
                 sum
             } else {
                 sum / picked.len() as f64
-            })
+            }))
         }
         MeasureKind::PointValue {
             field,
@@ -109,7 +134,7 @@ pub fn evaluate_expanded(
                         })
                         .sum();
                     if value.is_finite() {
-                        Ok(value)
+                        Ok(Measured::one(value))
                     } else {
                         Err(format!(
                             "{field} has no value at a node of the element at the point"
@@ -127,22 +152,37 @@ pub fn evaluate_expanded(
             set,
             field,
             component,
+            whole,
         } => {
             let dat = dat.ok_or("the run printed no history output (.dat)")?;
             let history = (dat.sets.iter())
                 .find(|s| s.name.eq_ignore_ascii_case(set))
                 .ok_or_else(|| format!("no history output of {set}"))?;
-            let row = (history.rows.iter())
-                .rposition(|(s, _, _)| *s == step)
+            let rows: Vec<(usize, f64)> = (history.rows.iter().enumerate())
+                .filter(|(_, (s, _, _))| *s == step)
+                .map(|(row, &(_, _, time))| (row, time))
+                .collect();
+            let &(last, _) = rows
+                .last()
                 .ok_or_else(|| format!("{set} has nothing of step {step}"))?;
             let entry = (history.field(field).and_then(|f| f.component(component)))
                 .and_then(|c| c.entries.first())
                 .ok_or_else(|| format!("{set} has no {field} {component}"))?;
-            entry
-                .values
-                .get(row)
-                .copied()
-                .ok_or_else(|| "the history output ends early".to_owned())
+            let value = |row: usize| {
+                (entry.values.get(row).copied())
+                    .ok_or_else(|| "the history output ends early".to_owned())
+            };
+            if !whole {
+                return value(last).map(Measured::one);
+            }
+            let series = (rows.iter())
+                .map(|&(row, _)| value(row))
+                .collect::<Result<Vec<f64>, String>>()?;
+            Ok(Measured {
+                value: value(last)?,
+                series,
+                times: rows.iter().map(|&(_, time)| time).collect(),
+            })
         }
         MeasureKind::Eigenfrequency { mode } => {
             let modes: Vec<f64> = (increments.iter())
@@ -155,6 +195,7 @@ pub fn evaluate_expanded(
             (mode.checked_sub(1))
                 .and_then(|i| modes.get(i as usize))
                 .copied()
+                .map(Measured::one)
                 .ok_or_else(|| format!("the step has {} modes, not {mode}", modes.len()))
         }
     }
@@ -181,7 +222,7 @@ pub struct Job {
 }
 
 /// Computes the measure on a worker thread; the receiver gets the value or why there is none.
-pub fn start(job: Job) -> Receiver<Result<f64, String>> {
+pub fn start(job: Job) -> Receiver<Result<Measured, String>> {
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = sender.send(run(&job));
@@ -189,7 +230,7 @@ pub fn start(job: Job) -> Receiver<Result<f64, String>> {
     receiver
 }
 
-fn run(job: &Job) -> Result<f64, String> {
+fn run(job: &Job) -> Result<Measured, String> {
     // Results of the built-in solver are read in memory, CalculiX's from their files.
     let read = job.results.read(&job.dir)?;
     let frd = read.results;
@@ -285,6 +326,20 @@ pub fn value_kind(kind: &MeasureKind) -> Option<plx_model::ValueKind> {
             plx_model::Quantity::Frequency,
         )),
         (field, component) => crate::results::field_value_kind(field, component),
+    }
+}
+
+/// What a series shows in the block: how many values, and the range they span in `units`.
+pub fn shown_series(kind: &MeasureKind, series: &[f64], units: UnitSystem) -> String {
+    let finite = || series.iter().copied().filter(|v| v.is_finite());
+    match (finite().reduce(f64::min), finite().reduce(f64::max)) {
+        (Some(low), Some(high)) => format!(
+            "{} values, {} to {}",
+            series.len(),
+            shown(kind, low, units),
+            shown(kind, high, units)
+        ),
+        _ => format!("{} values", series.len()),
     }
 }
 
@@ -394,7 +449,9 @@ impl MeasureEditor {
                     Choices::Read(_) => {
                         "Fields and components as the linked results have them. The value is \
                          that of the last increment of the step whose results are linked to \
-                         the block."
+                         the block. Field values give the value at every node of the region, \
+                         a series: a Math block takes its maximum, minimum or mean, a Plot \
+                         block draws its histogram."
                             .to_owned()
                     }
                     Choices::Reading(_) => "Reading the fields of the linked results...".into(),
@@ -452,23 +509,12 @@ impl MeasureEditor {
             _ => None,
         };
         match &mut self.kind {
-            MeasureKind::FieldExtreme {
+            MeasureKind::FieldValues {
                 field,
                 component,
-                extreme,
                 region,
             } => {
                 field_and_component(ui, offered.map(|o| o.fields.as_slice()), field, component);
-                ui.label("Take");
-                egui::ComboBox::from_id_salt("measure extreme")
-                    .selected_text(extreme.label())
-                    .width(200.0)
-                    .show_ui(ui, |ui| {
-                        for choice in Extreme::ALL {
-                            ui.selectable_value(extreme, choice, choice.label());
-                        }
-                    });
-                ui.end_row();
                 ui.label("Region");
                 let shown = match region {
                     MeasureRegion::All => "All nodes".to_owned(),
@@ -504,6 +550,7 @@ impl MeasureEditor {
                 set,
                 field,
                 component,
+                whole,
             } => {
                 let sets: Option<Vec<String>> =
                     offered.map(|o| o.history.iter().map(|(name, _)| name.clone()).collect());
@@ -520,6 +567,24 @@ impl MeasureEditor {
                 }
                 let fields = offered.map(|o| o.history_fields(set).unwrap_or_default());
                 field_and_component(ui, fields, field, component);
+                ui.label("Take");
+                egui::ComboBox::from_id_salt("measure take")
+                    .selected_text(if *whole {
+                        "Whole history"
+                    } else {
+                        "Last value"
+                    })
+                    .width(200.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(whole, false, "Last value")
+                            .on_hover_text("The value of the last increment of the step");
+                        ui.selectable_value(whole, true, "Whole history")
+                            .on_hover_text(
+                                "The values of all increments of the step, a series for Math and \
+                             Plot blocks, with their times as a second output",
+                            );
+                    });
+                ui.end_row();
             }
             MeasureKind::Eigenfrequency { mode } => {
                 ui.label("Mode");
@@ -622,10 +687,9 @@ mod tests {
         assert!(bound.solver.is_some());
         let restore = dir.join("restore");
         let job = Job {
-            kind: MeasureKind::FieldExtreme {
+            kind: MeasureKind::FieldValues {
                 field: "DISP".into(),
                 component: "U3".into(),
-                extreme: Extreme::Min,
                 region: MeasureRegion::All,
             },
             step: 1,
@@ -634,8 +698,11 @@ mod tests {
             units: UnitSystem::Unitless,
             dir: restore.clone(),
         };
-        let value = run(&job).unwrap();
-        assert!(value < 0.0, "{value}");
+        let measured = run(&job).unwrap();
+        let lowest = plx_model::MathOp::SeriesMin
+            .reduce(&measured.series)
+            .unwrap();
+        assert!(lowest < 0.0, "{lowest}");
         let offered = read_offered(bound, 1, restore.clone())
             .recv()
             .unwrap()
@@ -647,11 +714,11 @@ mod tests {
     }
 
     #[test]
-    fn measures_read_extremes_nodes_and_sets() {
+    fn measures_read_fields_nodes_and_sets() {
         let frd = plx_io::frd::read_frd(&testdata("kragbalken_c3d8.frd")).unwrap();
         let step = frd.increments.last().unwrap().step;
         let mises = MeasureKind::default();
-        let max = evaluate(
+        let all = evaluate(
             &mises,
             step,
             &frd,
@@ -660,13 +727,14 @@ mod tests {
             UnitSystem::default(),
         )
         .unwrap();
+        assert_eq!(all.series.len(), frd.mesh.node_ids().len());
+        let max = plx_model::MathOp::SeriesMax.reduce(&all.series).unwrap();
         assert!(max > 0.0);
         let first = frd.mesh.node_ids()[0];
         let sets = BTreeMap::from([("ONE".to_owned(), vec![first])]);
-        let in_set = MeasureKind::FieldExtreme {
+        let in_set = MeasureKind::FieldValues {
             field: "STRESS".into(),
             component: "MISES".into(),
-            extreme: Extreme::Max,
             region: MeasureRegion::NodeSet("ONE".into()),
         };
         let at = MeasureKind::NodeValue {
@@ -675,16 +743,14 @@ mod tests {
             node: first,
         };
         let one = evaluate(&in_set, step, &frd, None, &sets, UnitSystem::default()).unwrap();
-        assert_eq!(
-            one,
-            evaluate(&at, step, &frd, None, &sets, UnitSystem::default()).unwrap()
-        );
-        assert!(one <= max);
+        assert_eq!(one.series.len(), 1);
+        let node = evaluate(&at, step, &frd, None, &sets, UnitSystem::default()).unwrap();
+        assert_eq!(one.series[0], node.value);
+        assert!(node.series.is_empty() && node.value <= max);
         // Errors say why.
-        let missing = MeasureKind::FieldExtreme {
+        let missing = MeasureKind::FieldValues {
             field: "NOPE".into(),
             component: "X".into(),
-            extreme: Extreme::Max,
             region: MeasureRegion::All,
         };
         assert!(evaluate(&missing, step, &frd, None, &sets, UnitSystem::default()).is_err());
@@ -745,14 +811,14 @@ mod tests {
                 UnitSystem::default(),
             )
         };
-        let s11 = |extreme| MeasureKind::FieldExtreme {
+        let s11 = MeasureKind::FieldValues {
             field: "STRESS".into(),
             component: "S11".into(),
-            extreme,
             region: MeasureRegion::NodeSet("CLAMP".into()),
         };
-        let top = measure(&s11(Extreme::Max)).unwrap();
-        let bottom = measure(&s11(Extreme::Min)).unwrap();
+        let clamp = measure(&s11).unwrap().series;
+        let top = plx_model::MathOp::SeriesMax.reduce(&clamp).unwrap();
+        let bottom = plx_model::MathOp::SeriesMin.reduce(&clamp).unwrap();
         assert!(top > 60.0 && bottom < -60.0, "{top} {bottom}");
         // The tip sags by F L^3 / (3 E I) = 10 * 100^3 / (3 * 210000 * 20 * 8 / 12).
         let tip = measure(&MeasureKind::NodeValue {
@@ -760,7 +826,8 @@ mod tests {
             component: "U3".into(),
             node: 62,
         })
-        .unwrap();
+        .unwrap()
+        .value;
         let expected = -10.0 * 1e6 / (3.0 * 210_000.0 * 20.0 * 8.0 / 12.0);
         assert!(
             (tip - expected).abs() < 0.05 * expected.abs(),
@@ -775,9 +842,38 @@ mod tests {
                     node,
                 })
                 .unwrap()
+                .value
             })
             .sum();
         assert!((held - 10.0).abs() < 1e-3, "{held}");
+    }
+
+    #[test]
+    fn a_history_gives_its_last_value_or_the_whole_series_with_times() {
+        let dat = plx_io::dat::parse_dat(
+            "                        S T E P       1\n\n\
+             total force (fx,fy,fz) for set TOP and time  0.5000000E+00\n\n\
+             \x20      1.0  2.0  3.0\n\n\
+             total force (fx,fy,fz) for set TOP and time  0.1000000E+01\n\n\
+             \x20      2.0  4.0  6.0\n",
+        );
+        let frd = plx_io::frd::read_frd(&testdata("kragbalken_c3d8.frd")).unwrap();
+        let mut kind = MeasureKind::History {
+            set: "TOP".into(),
+            field: "TOTAL_FORCE".into(),
+            component: "RF3".into(),
+            whole: false,
+        };
+        let sets = BTreeMap::new();
+        let last = evaluate(&kind, 1, &frd, Some(&dat), &sets, UnitSystem::default()).unwrap();
+        assert_eq!(last, Measured::one(6.0));
+        if let MeasureKind::History { whole, .. } = &mut kind {
+            *whole = true;
+        }
+        let all = evaluate(&kind, 1, &frd, Some(&dat), &sets, UnitSystem::default()).unwrap();
+        assert_eq!(all.series, vec![3.0, 6.0]);
+        assert_eq!(all.times, vec![0.5, 1.0]);
+        assert_eq!(all.value, 6.0);
     }
 
     #[test]
@@ -796,8 +892,12 @@ mod tests {
                 component: "U2".into(),
                 point: frd.mesh.coords()[index],
             };
-            let a = evaluate(&at_node, step, &frd, None, &sets, UnitSystem::default()).unwrap();
-            let b = evaluate(&at_point, step, &frd, None, &sets, UnitSystem::default()).unwrap();
+            let a = (evaluate(&at_node, step, &frd, None, &sets, UnitSystem::default()))
+                .unwrap()
+                .value;
+            let b = (evaluate(&at_point, step, &frd, None, &sets, UnitSystem::default()))
+                .unwrap()
+                .value;
             assert!(
                 (a - b).abs() <= 1e-9 * a.abs().max(1e-12),
                 "node {node}: {a} != {b}"
@@ -824,6 +924,7 @@ mod tests {
         assert!(
             evaluate(&at(middle), step, &frd, None, &sets, UnitSystem::default())
                 .unwrap()
+                .value
                 .is_finite()
         );
         let far: [f64; 3] = std::array::from_fn(|k| high[k] + 10.0 * (high[k] - low[k]));

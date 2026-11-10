@@ -52,6 +52,10 @@ pub enum NodeIcon {
     Math,
     /// A Switch block: two inputs and a lever to one of them.
     Switch,
+    /// A Plot block: two axes with a curve.
+    Plot,
+    /// A Mesh Preview block: a framed picture of a triangle mesh.
+    Picture,
     /// A step of this type, drawn like in the tree of the FE model.
     StepType(StepGlyph),
 }
@@ -110,6 +114,21 @@ pub fn paint_scaled(painter: &Painter, min: Pos2, icon: NodeIcon, color: Color32
             line(&[p(4.5, 1.5), p(4.5, 7.5)]);
             line(&[p(6.5, 10.5), p(12.5, 10.5)]);
             line(&[p(11.0, 2.0), p(3.0, 12.0)]);
+        }
+        NodeIcon::Plot => {
+            line(&[p(1.5, 1.5), p(1.5, 12.5), p(12.5, 12.5)]);
+            line(&[
+                p(3.0, 10.5),
+                p(5.0, 6.0),
+                p(7.0, 8.0),
+                p(9.5, 3.5),
+                p(12.0, 4.5),
+            ]);
+        }
+        NodeIcon::Picture => {
+            closed(&[p(1.5, 2.5), p(12.5, 2.5), p(12.5, 11.5), p(1.5, 11.5)]);
+            line(&[p(3.5, 9.5), p(7.0, 4.5), p(10.5, 9.5), p(3.5, 9.5)]);
+            line(&[p(5.25, 7.0), p(8.75, 7.0), p(7.0, 9.5), p(5.25, 7.0)]);
         }
         NodeIcon::Switch => {
             dot(p(2.5, 3.5), 1.6);

@@ -330,7 +330,8 @@ for the answer has five blocks:
   the shoulder.
 + The analysis #ui("Tension") takes its geometry from the fillet block, holds the wide end
   and pulls the narrow end by 0.04 mm.
-+ A Measure block (@measure-block) reads the largest von Mises stress of its step.
++ A Measure block (@measure-block) reads the von Mises stresses of its step, and a Math block
+  (@math-switch) takes their maximum.
 + A parameter study takes that value as its output and gives its input to the
   #ui("Radius") of the fillet block: drag the pin of the study's #ui("Inputs") row onto the pin
   of the #ui("Radius") row.
@@ -394,8 +395,8 @@ search them with #key("Shift+A").
 
 Their inputs are rows with a violet pin on the left: type a number, or drag a value pin to it,
 from a Parameters block, from another Math or Switch block, from the #ui("Inputs") of a
-parameter study (@parameter-study) or from the value of a Measure block (@measure-block), such as the largest
-stress, to compute a key figure from results. The #ui("Result") row at the bottom shows the number the
+parameter study (@parameter-study) or from the value of a Measure block (@measure-block), such as the force
+at a node, to compute a key figure from results. The #ui("Result") row at the bottom shows the number the
 block gives; drag its pin on the right to a number of its kind, to another Math or Switch
 block or to the #ui("Outputs") of a study. Blocks that take the result are out of date when it
 changes, as with a parameter.
@@ -404,7 +405,9 @@ changes, as with a parameter.
   [Operation], [Math only: #ui("Add") (A + B), #ui("Subtract") (A - B), #ui("Multiply")
     (A × B), #ui("Divide") (A / B), #ui("Minimum"), #ui("Maximum") or #ui("Clamp"), which
     keeps #ui("Value") between #ui("Min") and #ui("Max"). A product or quotient gives no
-    result when dividing by zero.],
+    result when dividing by zero. Under #ui("Of a series"): #ui("Max"), #ui("Min"),
+    #ui("Max Abs") (the value of largest magnitude, with its sign) and #ui("Mean") make one
+    number of the series at their single input #ui("Values") (@series).],
   [Index], [Switch only: which choice the block gives, counted from 1. Out of range, the block
     gives no result.],
   [Choice 1, 2, ...], [Switch only: the numbers to choose from. #ui("Add") adds one,
@@ -453,6 +456,23 @@ names the block it comes from.
 #screenshot("schematic-number-fields.png", [A of the Math block comes from the parameter
   Length: the field shows 91.000273 mm, the tooltip the whole value 91.0002734375 mm])
 
+==== Series <series>
+
+A value link carries either one number or a *series*: a list of numbers, like an array of
+NumPy. Two Measure blocks give series (@measure-block): the values of a field at the nodes of
+a region, and the whole history of a step. A series goes only to a Math block or to a Plot
+block (@plot-block); a link of a series to a number that takes one, such as a parameter or a
+column of a study, is refused, and the output pane says so.
+
+A Math block computes with series value by value. A single number goes with every value of the
+series, so A × 2 doubles every value, and two series go pairwise, so they must have the same
+number of values; otherwise the block has no result and its tooltip says why. A value without a
+result, such as one divided by zero, is a gap in a plot. The #ui("Result") row then shows the
+number of values and their range, such as "21 values, 0 N to 80000 N", and gives a series.
+#ui("Max"), #ui("Min"), #ui("Max Abs") and #ui("Mean") turn a series back into one number: the
+largest von Mises stress is a Measure block of the field values of STRESS MISES followed by a
+Math block #ui("Max"). Units go with the series as with numbers.
+
 === Exposed parameters <exposed-parameters>
 
 Any number of an analysis that a study or a Parameters block should set, such as a force, a
@@ -483,11 +503,12 @@ Exposing a number does not change the analysis: only a new value makes it out of
 
 === Measure <measure-block>
 
-A Measure block computes one key figure from the results of a step: the largest von Mises
-stress, the displacement of a node or of any point of the model, a total force or an
-eigenfrequency. It is the number a
-parameter study reads, and a quick way to see the figure that matters without opening the results.
-Add it with #menu("Evaluate", "Measure"); it starts with the largest von Mises stress.
+A Measure block reads from the results of a step: the values of a field at the nodes of a
+region, the displacement of a node or of any point of the model, a history output such as a
+total force, or an eigenfrequency. One number is what a parameter study reads, and a quick way
+to see the figure that matters without opening the results; the values of a field and a whole
+history are series (@series) for Math and Plot blocks. Add it with #menu("Evaluate",
+"Measure"); it starts with the von Mises stresses at all nodes.
 
 #screenshot("measure-blocks.png", [Two Measure blocks: the lowest temperature of the thermal
   step Heat and the largest von Mises stress of the step Load that uses those temperatures])
@@ -504,16 +525,17 @@ last row, the value in its units with the state of the value:
   pane then says why, for example "step 1 has no field STRESS in the results".
 
 The value is computed anew in the background whenever the results or its definition change,
-and the output pane prints it ("Max stress: Maximum of STRESS MISES = 8.6 MPa"). The project
+and the output pane prints it ("Tip load: TOTAL_FORCE RF2 of SUPPORT = -80000 N"). The project
 file keeps the value, so a reopened project shows it at once. The pin on the right of the
-value row gives it to a parameter study (@parameter-study).
+value row gives it to a parameter study (@parameter-study). A series shows how many values it
+has and their range.
 
 #screenshot("measure-editor.png", [The editor of a Measure block])
 
 A double-click on the block opens its editor:
 
 #fields(
-  [Measure], [What it computes: #ui("Field extreme"), #ui("Value at a node"),
+  [Measure], [What it computes: #ui("Field values"), #ui("Value at a node"),
     #ui("Value at a point"), #ui("History output") or #ui("Eigenfrequency").],
   [Shown in], [The unit system of the value; it is stored in SI units.],
   [Field, Component], [The field and its component as the Results workspace names them:
@@ -521,9 +543,11 @@ A double-click on the block opens its editor:
     linked, both are lists of what those results have (a name they lack is shown in the
     warning color); without, they are typed. The value is that of the last increment of the
     step.],
-  [Take], [For a field extreme: #ui("Maximum"), #ui("Minimum") or #ui("Largest magnitude"),
-    which keeps the sign.],
-  [Region], [For a field extreme: all nodes, or a region of the analysis whose results are
+  [Take], [For a history output: #ui("Last value"), the value of the last increment of the
+    step, or #ui("Whole history"), the values of all its increments as a series. A whole
+    history gives a second output #ui("Time") above the values, the time of each value, to
+    plot the values over it.],
+  [Region], [For field values: all nodes, or a region of the analysis whose results are
     linked: a node set of its mesh or model, or the region of a boundary condition or load,
     such as #ui("Displacement_Rotation-1 (boundary condition)"). The region is found on the mesh the results
     were solved on, so a region picked on geometry or on the sides of a mesh block follows
@@ -587,3 +611,38 @@ block's context menu writes the file at once, whatever the state.
 The file holds the mesh only, not the loads or steps of an analysis that takes the same mesh,
 so it reads back as a mesh when an analysis imports it. A path the program cannot write
 shows as an error in the #ui("Mesh") row's tooltip and in the output window.
+
+=== Plot and Mesh Preview <plot-block>
+
+The blocks under #ui("Visualize") show results in the schematic itself, without opening an
+analysis. Add them with #menu("Evaluate", "Plot") and #menu("Evaluate", "Mesh Preview"), or
+search them with #key("Shift+A").
+
+#screenshot("visualize-blocks.png", [A cantilever bent far by a force at its tip. Force over
+  Deflection plots the reaction force, turned positive by a Math block, over the deflection of
+  the tip, both whole histories of the step; Stress Histogram counts the von Mises stresses of
+  all nodes, whose maximum a Math block Max gives. Beam shows the mesh of the analysis])
+
+A *Plot block* draws the numbers and series (@series) linked to it in the block, and draws
+again whenever they change. Its #ui("Type") row decides what it draws and which inputs it has:
+
+#fields(
+  [Line], [#ui("Y") over #ui("X"), joined by lines. Without a link to #ui("X") the values of
+    #ui("Y") are drawn over their number, 1, 2, 3 and so on. The #ui("Time") of a Measure
+    block of a whole history at #ui("X") draws the history over the time of the step.],
+  [Scatter], [The same as points without lines.],
+  [Histogram], [How many of the #ui("Values") fall into each of #ui("Bins") bins of equal
+    width between the smallest and the largest value, for instance how much of a part sees
+    which stress. #ui("Bins") is a count, typed in the block or linked.],
+)
+
+The axes show the smallest and the largest value and are named after the blocks that give
+them, with their units, which those blocks set. #ui("X") and #ui("Y") of different lengths are
+drawn as far as both go, with a warning in the corner. A single number counts as a series of
+one value.
+
+A *Mesh Preview block* shows a small picture of the mesh linked to its #ui("Mesh") row: drag
+the #ui("Mesh") of an analysis or of a mesh block there. The parts have the colors of the
+analysis, seen along the diagonal like the isometric view; a 2D mesh is seen from the front.
+The picture is drawn anew in the background whenever the mesh changes, so it stays a quick
+glance at the geometry beside its analysis.

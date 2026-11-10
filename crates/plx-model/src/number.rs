@@ -18,10 +18,18 @@ pub enum MathOp {
     Maximum,
     /// The value kept between a lower and an upper limit.
     Clamp,
+    /// The largest value of a series, such as the values of a field over a region.
+    SeriesMax,
+    /// The smallest value of a series.
+    SeriesMin,
+    /// The value of largest magnitude of a series, with its sign.
+    SeriesMaxAbs,
+    /// The mean of the values of a series.
+    SeriesMean,
 }
 
 impl MathOp {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 11] = [
         Self::Add,
         Self::Subtract,
         Self::Multiply,
@@ -29,7 +37,19 @@ impl MathOp {
         Self::Minimum,
         Self::Maximum,
         Self::Clamp,
+        Self::SeriesMax,
+        Self::SeriesMin,
+        Self::SeriesMaxAbs,
+        Self::SeriesMean,
     ];
+
+    /// Whether it makes one number of the values of a series.
+    pub fn reduces(self) -> bool {
+        matches!(
+            self,
+            Self::SeriesMax | Self::SeriesMin | Self::SeriesMaxAbs | Self::SeriesMean
+        )
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -40,6 +60,10 @@ impl MathOp {
             Self::Minimum => "Minimum",
             Self::Maximum => "Maximum",
             Self::Clamp => "Clamp",
+            Self::SeriesMax => "Max",
+            Self::SeriesMin => "Min",
+            Self::SeriesMaxAbs => "Max Abs",
+            Self::SeriesMean => "Mean",
         }
     }
 
@@ -53,6 +77,10 @@ impl MathOp {
             Self::Minimum => "the smaller of A and B",
             Self::Maximum => "the larger of A and B",
             Self::Clamp => "Value, but at least Min and at most Max",
+            Self::SeriesMax => "the largest of the Values of a series",
+            Self::SeriesMin => "the smallest of the Values of a series",
+            Self::SeriesMaxAbs => "the value of largest magnitude of a series, with its sign",
+            Self::SeriesMean => "the mean of the Values of a series",
         }
     }
 
@@ -60,6 +88,7 @@ impl MathOp {
     pub fn inputs(self) -> &'static [&'static str] {
         match self {
             Self::Clamp => &["Value", "Min", "Max"],
+            _ if self.reduces() => &["Values"],
             _ => &["A", "B"],
         }
     }
@@ -139,6 +168,9 @@ impl MathOp {
     /// The result of `values`, its inputs in order; `None` for a division by zero or too
     /// few values.
     pub fn apply(self, values: &[f64]) -> Option<f64> {
+        if self.reduces() {
+            return self.reduce(values.get(..1)?);
+        }
         let (a, b) = (*values.first()?, *values.get(1)?);
         let result = match self {
             Self::Add => a + b,
@@ -150,9 +182,63 @@ impl MathOp {
             Self::Maximum => a.max(b),
             // Like Blender: the upper limit wins when the limits cross.
             Self::Clamp => a.max(b).min(*values.get(2)?),
+            Self::SeriesMax | Self::SeriesMin | Self::SeriesMaxAbs | Self::SeriesMean => {
+                unreachable!("reduced above")
+            }
         };
         result.is_finite().then_some(result)
     }
+
+    /// The one number a reducing operation makes of `series`, NaN left out; `None` for any
+    /// other operation or without values.
+    pub fn reduce(self, series: &[f64]) -> Option<f64> {
+        let finite = series.iter().copied().filter(|v| v.is_finite());
+        match self {
+            Self::SeriesMax => finite.reduce(f64::max),
+            Self::SeriesMin => finite.reduce(f64::min),
+            Self::SeriesMaxAbs => finite.reduce(|a, b| if b.abs() > a.abs() { b } else { a }),
+            Self::SeriesMean => {
+                let (sum, count) = finite.fold((0.0, 0usize), |(s, n), v| (s + v, n + 1));
+                (count > 0).then(|| sum / count as f64)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The result of an operation on numbers and series element by element, like NumPy: a
+/// single number goes with every value of a series, and series go value by value, so they
+/// must be of one length. A value that has no result, such as one divided by zero, is NaN, a
+/// gap in a plot. An error says why the inputs do not go together.
+pub fn apply_series(op: MathOp, inputs: &[&[f64]]) -> Result<Vec<f64>, String> {
+    if op.reduces() {
+        let series = inputs.first().ok_or("no values")?;
+        return op
+            .reduce(series)
+            .map(|value| vec![value])
+            .ok_or_else(|| "the series has no values".into());
+    }
+    let mut length = 1;
+    for input in inputs {
+        match input.len() {
+            0 => return Err("an input has no values".into()),
+            1 => {}
+            n if length == 1 || n == length => length = n,
+            n => {
+                return Err(format!(
+                    "the series have {length} and {n} values: they go value by value and \
+                     need one length"
+                ));
+            }
+        }
+    }
+    let at = |input: &[f64], i: usize| if input.len() == 1 { input[0] } else { input[i] };
+    Ok((0..length)
+        .map(|i| {
+            let values: Vec<f64> = inputs.iter().map(|input| at(input, i)).collect();
+            op.apply(&values).unwrap_or(f64::NAN)
+        })
+        .collect())
 }
 
 /// What numbers of a dimension are, for messages: "a force", or "in kg m³" for a dimension
@@ -260,6 +346,43 @@ mod tests {
             MathOp::Add.settle_kinds([q(Force), None, None]),
             Ok([q(Force), None, None])
         );
+    }
+
+    #[test]
+    fn series_go_value_by_value_and_numbers_with_every_value() {
+        let a = [1.0, 2.0, 3.0];
+        let two = [2.0];
+        assert_eq!(
+            apply_series(MathOp::Multiply, &[&a, &two]),
+            Ok(vec![2.0, 4.0, 6.0])
+        );
+        assert_eq!(
+            apply_series(MathOp::Subtract, &[&two, &a]),
+            Ok(vec![1.0, 0.0, -1.0])
+        );
+        assert_eq!(
+            apply_series(MathOp::Add, &[&a, &[10.0, 20.0, 30.0]]),
+            Ok(vec![11.0, 22.0, 33.0])
+        );
+        let quotient = apply_series(MathOp::Divide, &[&a, &[1.0, 0.0, 3.0]]).unwrap();
+        assert!(quotient[1].is_nan() && quotient[2] == 1.0);
+        assert_eq!(
+            apply_series(MathOp::Clamp, &[&a, &[1.5], &[2.5]]),
+            Ok(vec![1.5, 2.0, 2.5])
+        );
+        assert!(apply_series(MathOp::Add, &[&a, &[1.0, 2.0]]).is_err());
+        assert_eq!(apply_series(MathOp::Add, &[&two, &[3.0]]), Ok(vec![5.0]));
+        // Max, Min, Max Abs and Mean make one number of a series.
+        let series = [1.0, -4.0, f64::NAN, 3.0];
+        assert_eq!(apply_series(MathOp::SeriesMax, &[&series]), Ok(vec![3.0]));
+        assert_eq!(apply_series(MathOp::SeriesMin, &[&series]), Ok(vec![-4.0]));
+        assert_eq!(
+            apply_series(MathOp::SeriesMaxAbs, &[&series]),
+            Ok(vec![-4.0])
+        );
+        assert_eq!(apply_series(MathOp::SeriesMean, &[&series]), Ok(vec![0.0]));
+        assert!(apply_series(MathOp::SeriesMean, &[&[f64::NAN]]).is_err());
+        assert_eq!(MathOp::SeriesMean.inputs(), ["Values"]);
     }
 
     #[test]
