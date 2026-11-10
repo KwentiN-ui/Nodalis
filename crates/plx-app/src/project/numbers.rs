@@ -158,9 +158,9 @@ impl ProjectApp {
             },
         };
         let (name, block) = if switch {
-            (self.unique_name("Switch"), Block::Switch(number))
+            (super::block_name("Switch"), Block::Switch(number))
         } else {
-            (self.unique_name("Math"), Block::Math(number))
+            (super::block_name("Math"), Block::Math(number))
         };
         self.nodes.push(Node::new(id, name.clone(), block));
         self.graph.insert_node(position, id);

@@ -2194,18 +2194,6 @@ impl ProjectApp {
             .map_or_else(|| "Untitled".into(), |s| s.to_string_lossy().into_owned())
     }
 
-    /// A name no analysis has: `base`, else `base-2`, `base-3` …
-    fn unique_name(&self, base: &str) -> String {
-        let taken = |name: &str| self.nodes.iter().any(|n| n.name.eq_ignore_ascii_case(name));
-        if !taken(base) {
-            return base.to_owned();
-        }
-        (2..)
-            .map(|i| format!("{base}-{i}"))
-            .find(|name| !taken(name))
-            .unwrap_or_default()
-    }
-
     /// An id no block had: those of deleted blocks stay theirs, for undo.
     fn next_id(&self) -> u64 {
         let highest = self.nodes.iter().map(|n| n.id).max().unwrap_or(0);
@@ -2220,7 +2208,7 @@ impl ProjectApp {
         properties: ModelProperties,
     ) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name(name);
+        let name = block_name(name);
         let mut data = ProjectAnalysis {
             id,
             name: name.clone(),
@@ -2240,7 +2228,7 @@ impl ProjectApp {
     /// Adds an empty materials or cross-sections block; returns its id.
     fn add_collection(&mut self, position: egui::Pos2, collection: Collection) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name(collection.title());
+        let name = block_name(collection.title());
         let block = Box::new(CollectionBlock {
             model: LinkedModel::default(),
             units: self.settings.new_model.units,
@@ -2261,7 +2249,7 @@ impl ProjectApp {
     /// Adds a mesh block meshing `primitive` and makes its mesh; returns its id.
     fn add_mesh(&mut self, position: egui::Pos2, primitive: MeshPrimitive) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name(primitive.label());
+        let name = block_name(primitive.label());
         let space = match &primitive {
             MeshPrimitive::Box { .. } => ModelSpace::ThreeD,
             MeshPrimitive::Rectangle { .. } => match self.settings.new_model.space {
@@ -2290,7 +2278,7 @@ impl ProjectApp {
     /// Adds a CAD operation block, a fillet of 1 mm; returns its id.
     fn add_cad_operation(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("CAD Operation");
+        let name = block_name("CAD Operation");
         let cad = CadBlock::new(Default::default(), UnitSystem::default(), None, None);
         self.nodes.push(Node::new(
             id,
@@ -2307,7 +2295,7 @@ impl ProjectApp {
 
     fn add_refine_mesh(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("Refine Mesh");
+        let name = block_name("Refine Mesh");
         self.nodes.push(Node::refine_block(
             id,
             name.clone(),
@@ -2326,7 +2314,7 @@ impl ProjectApp {
     /// Adds a parameters block with one length; returns its id.
     fn add_parameters(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("Parameters");
+        let name = block_name("Parameters");
         let block = ParametersBlock {
             units: self.settings.new_model.units,
             parameters: vec![Parameter::new("Length", ValueKind::LENGTH, 0.1)],
@@ -2345,7 +2333,7 @@ impl ProjectApp {
     /// Adds a note, whose text takes the keyboard at once.
     fn add_note(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("Note");
+        let name = block_name("Note");
         self.nodes
             .push(Node::new(id, name, Block::Note(String::new())));
         self.graph.insert_node(position, id);
@@ -2411,7 +2399,7 @@ impl ProjectApp {
     /// Adds a measure block of the largest von Mises stress; returns its id.
     fn add_measure(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("Measure");
+        let name = block_name("Measure");
         let block = MeasureBlock {
             units: self.settings.new_model.units,
             kind: MeasureKind::default(),
@@ -2469,10 +2457,10 @@ impl ProjectApp {
     ) -> std::path::PathBuf {
         (self.settings.solver.work_dir())
             .join(crate::analysis::job_name(&self.project_name()))
-            .join(crate::analysis::job_name(&self.name_of(id)))
+            .join(crate::analysis::job_dir(id))
             .join(format!(
                 "{}-{:016x}{suffix}",
-                crate::analysis::job_name(&source.name),
+                crate::analysis::job_dir(source.id),
                 bound.input.unwrap_or_default()
             ))
     }
@@ -2652,7 +2640,7 @@ impl ProjectApp {
     /// Adds a parameter study without columns; returns its id.
     fn add_study(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("Parameter Study");
+        let name = block_name("Parameter Study");
         let block = StudyBlock {
             units: self.settings.new_model.units,
             table: StudyTable::default(),
@@ -3615,7 +3603,7 @@ impl ProjectApp {
     /// Adds a mesh export block with no file yet; returns its id.
     fn add_mesh_export(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("Mesh Export");
+        let name = block_name("Mesh Export");
         self.nodes
             .push(Node::mesh_export(id, name.clone(), String::new(), None));
         self.graph.insert_node(position, id);
@@ -3629,7 +3617,7 @@ impl ProjectApp {
     /// Adds a file block and asks for its file; returns its id.
     fn add_file(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("File");
+        let name = block_name("File");
         let units = self.settings.new_model.units;
         self.nodes
             .push(Node::file_block(id, name.clone(), String::new(), units));
@@ -3798,7 +3786,7 @@ impl ProjectApp {
     /// Inserts a Campbell block with `window`; returns its id.
     fn insert_campbell(&mut self, position: egui::Pos2, window: CampbellWindow) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("Campbell");
+        let name = block_name("Campbell");
         self.nodes.push(Node::campbell_block(id, name, window));
         self.graph.insert_node(position, id);
         id
@@ -3888,7 +3876,7 @@ impl ProjectApp {
         let data = (source.link_data()).ok_or_else(|| format!("{} is loading.", source.name))?;
         let dir = (self.settings.solver.work_dir())
             .join(crate::analysis::job_name(&self.project_name()))
-            .join(crate::analysis::job_name(&self.name_of(id)));
+            .join(crate::analysis::job_dir(id));
         let solver = &self.settings.solver;
         window.start(solver, (data.mesh, data.fe), dir, keep)
     }
@@ -4674,7 +4662,7 @@ impl ProjectApp {
             return;
         };
         let new_id = self.next_id();
-        let name = self.unique_name(&name);
+        let name = block_name(&name);
         let Some(copy) = self.node(id).and_then(|n| n.copied(new_id, name.clone())) else {
             return;
         };
@@ -5034,7 +5022,7 @@ impl ProjectApp {
             name: name.clone(),
             ..data
         };
-        work_dir.push(crate::analysis::job_name(&name));
+        work_dir.push(crate::analysis::job_dir(id));
         analysis.solving = true;
         node.refresh_closed();
         let solve = BackgroundSolve::start(
@@ -6668,7 +6656,7 @@ impl ProjectApp {
             if at == target {
                 break;
             }
-            let job = crate::analysis::job_name(&self.name_of(at));
+            let job = crate::analysis::job_dir(at);
             incoming.continuation.upstream.push((dir.join(&job), job));
         }
         // The own steps of those that continue it, and of those that continue them.
@@ -6752,10 +6740,10 @@ impl ProjectApp {
                 let name = original.file_name()?.to_owned();
                 let dir = (self.settings.solver.work_dir())
                     .join(crate::analysis::job_name(&self.project_name()))
-                    .join(crate::analysis::job_name(&target.name))
+                    .join(crate::analysis::job_dir(target.id))
                     .join(format!(
                         "File-{}-{:016x}",
-                        crate::analysis::job_name(&source.name),
+                        crate::analysis::job_dir(source.id),
                         file.read.unwrap_or_default()
                     ));
                 let copy = dir.join(name);
@@ -6809,11 +6797,11 @@ impl ProjectApp {
                     // the source overwrites them. The target takes a copy in a folder named
                     // after the solved model, so that new modes make it out of date.
                     let project = crate::analysis::job_name(&self.project_name());
-                    let job = crate::analysis::job_name(&source.name);
+                    let job = crate::analysis::job_dir(source.id);
                     let solved = (self.settings.solver.work_dir().join(&project).join(&job))
                         .join(format!("{job}.eig"));
                     let dir = (self.settings.solver.work_dir().join(project))
-                        .join(crate::analysis::job_name(&target.name))
+                        .join(crate::analysis::job_dir(target.id))
                         .join(format!(
                             "Modes-{job}-{:016x}",
                             bound.input.unwrap_or_default()
@@ -6840,10 +6828,10 @@ impl ProjectApp {
                 let frd = bound.calculix_results_name()?;
                 let dir = (self.settings.solver.work_dir())
                     .join(crate::analysis::job_name(&self.project_name()))
-                    .join(crate::analysis::job_name(&target.name))
+                    .join(crate::analysis::job_dir(target.id))
                     .join(format!(
                         "Global-{}-{:016x}",
-                        crate::analysis::job_name(&source.name),
+                        crate::analysis::job_dir(source.id),
                         key
                     ));
                 let file = dir.join(&frd);
@@ -7474,9 +7462,7 @@ impl ProjectApp {
         };
         let mut open = true;
         let (mut done, mut cancelled) = (false, false);
-        let taken =
-            (self.nodes.iter()).any(|n| n.id != id && n.name.eq_ignore_ascii_case(name.trim()));
-        let valid = !name.trim().is_empty() && !taken;
+        let valid = !name.trim().is_empty();
         let noun = (self.nodes.iter().find(|n| n.id == id)).map_or("analysis", |n| n.kind().noun());
         egui::Window::new(format!("Rename {}", title_case(noun)))
             .id(crate::ids::window(ctx, "rename"))
@@ -7502,12 +7488,6 @@ impl ProjectApp {
                         }
                     }
                 });
-                if taken {
-                    ui.colored_label(
-                        ui.visuals().error_fg_color,
-                        "Another block of the project has this name.",
-                    );
-                }
                 ui.horizontal(|ui| {
                     if ui.add_enabled(valid, egui::Button::new("OK")).clicked() {
                         done = true;
@@ -7751,9 +7731,11 @@ impl ProjectApp {
                     self.solve_chain(id);
                 }
                 Request::StopSolve => self.stop_solve(id),
-                Request::OpenAnalysis(name) => {
-                    if let Some(source) = self.nodes.iter().find(|n| n.name == name) {
-                        let source = source.id;
+                Request::OpenAnalysis(path) => {
+                    let source = (self.links.iter())
+                        .find(|l| l.target == id && links::covers(&path, links::slot(l)))
+                        .map(|l| l.source);
+                    if let Some(source) = source {
                         self.open_window(ctx, source, None);
                     }
                 }
@@ -13766,4 +13748,10 @@ mod tests {
         std::fs::remove_file(&a).unwrap();
         std::fs::remove_file(&b).unwrap();
     }
+}
+
+/// The name a new block starts with: blocks may share a name, they are told apart by their
+/// ids, so it is always `base`.
+fn block_name(base: &str) -> String {
+    base.to_owned()
 }

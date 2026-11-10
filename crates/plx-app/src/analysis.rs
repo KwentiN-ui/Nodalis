@@ -196,6 +196,12 @@ impl RunView {
     }
 }
 
+/// The name of the files and folders of the block `id`: the blocks are free to share a name,
+/// so the folder of a run carries the id and never the name.
+pub fn job_dir(id: u64) -> String {
+    format!("a{id}")
+}
+
 /// The analysis name as the name of its files: the solver takes no spaces in them, and the
 /// file system no path separators.
 pub fn job_name(name: &str) -> String {
@@ -1179,5 +1185,18 @@ mod tests {
         // A new solve starts over.
         view.copy(&["first".to_owned()], 1);
         assert_eq!(view.lines, ["first"]);
+    }
+}
+
+#[cfg(test)]
+mod job_dir_tests {
+    use super::job_dir;
+
+    #[test]
+    fn job_dir_depends_on_the_id_only() {
+        assert_eq!(job_dir(12), "a12");
+        assert_ne!(job_dir(1), job_dir(11));
+        // The solver takes the name as it is.
+        assert_eq!(super::job_name(&job_dir(12)), job_dir(12));
     }
 }
