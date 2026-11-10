@@ -11968,6 +11968,12 @@ fn timestamped(message: String) -> String {
     format!("{} {message}", chrono::Local::now().format("%H:%M:%S"))
 }
 
+/// The name a new block starts with: blocks may share a name, they are told apart by their
+/// ids, so it is always `base`.
+fn block_name(base: &str) -> String {
+    base.to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     /// Zoomed out, the background has about as many dots as at true size, not a hundred
@@ -13748,10 +13754,4 @@ mod tests {
         std::fs::remove_file(&a).unwrap();
         std::fs::remove_file(&b).unwrap();
     }
-}
-
-/// The name a new block starts with: blocks may share a name, they are told apart by their
-/// ids, so it is always `base`.
-fn block_name(base: &str) -> String {
-    base.to_owned()
 }
