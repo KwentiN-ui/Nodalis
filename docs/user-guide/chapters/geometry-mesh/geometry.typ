@@ -22,6 +22,11 @@ selected at once. Gmsh with OpenCASCADE reads the files, so Gmsh must be availab
   CalculiX: upper case, letters, digits, `-` and `_`, German umlauts written out (`Stütze`
   becomes `STUETZE`). A name that is already taken gets a number appended (`OBEN-2`). Parts
   without a name in the file are called `SOLID-1`, `SHELL-1` or `LINE-1`.
+- Curves that lie outside any face become line parts. The pieces of a composite curve, a
+  straight piece that runs on into an arc for example, stay one line part: pieces that meet end
+  to end without a kink, and where no third curve ends, belong together, and the line is meshed
+  as a whole with a shared node at the joint. Curves that meet at a corner, as the members of a
+  frame do, stay parts of their own.
 
 #screenshot("geometry.png", [Imported geometry on the Geometry tab])
 
