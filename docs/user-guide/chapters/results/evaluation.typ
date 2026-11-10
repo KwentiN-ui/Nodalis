@@ -182,6 +182,9 @@ the other side of the path. #ui("Show in Box") puts it back into its box.
 
 #screenshot("path-plot-flipped.png", [The plot dragged across the path: negative height, other side])
 
+On a deformed shape the plot stands on the path as the view draws it: its baseline follows the
+deformed path, point by point, so the plot always starts at the deformed toe or start point.
+
 #ui("Edit ...") in the context menu, or a double-click on the plot, opens #ui("Edit Annotation").
 Changes show at once; #ui("Cancel") restores the plot.
 
