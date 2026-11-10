@@ -2155,7 +2155,7 @@ impl Editor {
                 let name = next_name("Contact_Region", names(&fe.contact_regions, |r| &r.name));
                 Draft::ContactRegion(
                     plx_model::ContactRegion::new(name, plx_model::ContactBehavior::Bonded),
-                    MasterSlave::new(contact_target(fe)),
+                    MasterSlave::new_region(contact_target(fe)),
                     RegionView::default(),
                 )
             }
@@ -2373,7 +2373,7 @@ impl Editor {
             }
             TreeItem::ContactRegion(i) => {
                 let region = fe.contact_regions.get(i)?.clone();
-                let sides = MasterSlave::from_regions(
+                let sides = MasterSlave::region_from_regions(
                     &region.side_a,
                     &region.side_b,
                     contact_target(fe),

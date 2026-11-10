@@ -2081,3 +2081,123 @@ fn quad_dominated_meshing_leaves_solids_whole() {
     let (a, b) = (total(&triangles), total(&quads));
     assert!((a - b).abs() / a < 1e-9, "Volume {b} instead of {a}");
 }
+
+/// A sheave of radius 100 and a rope of 16 drawn as two lines that meet 108 above its axis
+/// and fall away by 3 degrees to each side, as a rope deflected by a sheave is drawn in CAD.
+#[test]
+fn a_rope_drawn_on_a_sheave_is_found_as_node_to_surface_contact() {
+    if !gmsh_available() {
+        return;
+    }
+    let file = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        let ring = gmsh.add_rectangle([20.0, -10.0, 0.0], [80.0, 20.0], 0.0)?;
+        gmsh.revolve(
+            &[(2, ring)],
+            [0.0; 3],
+            [0.0, 1.0, 0.0],
+            std::f64::consts::TAU,
+        )?;
+        gmsh.remove_only(&[(2, ring)])?;
+        let drop = 200.0 * 3f64.to_radians().tan();
+        let a = gmsh.add_point([-200.0, 0.0, 108.0 - drop])?;
+        let b = gmsh.add_point([0.0, 0.0, 108.0])?;
+        let c = gmsh.add_point([200.0, 0.0, 108.0 - drop])?;
+        gmsh.add_line(a, b)?;
+        gmsh.add_line(b, c)?;
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    let geometry = Geometry {
+        source: "seilrolle.brep".into(),
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        meshing: MeshingParameters::for_diagonal(400.0),
+        mesh_items: Vec::new(),
+        part_names: Vec::new(),
+        refinement: 1.0,
+        signatures: Vec::new(),
+    };
+    let display = tessellate(&geometry).unwrap();
+    let skins: Vec<_> = (display.mesh.parts.iter())
+        .map(|part| {
+            let mut skin = plx_mesh::extract_part_skin(&display.mesh, part, 180.0);
+            for face in &mut skin.faces {
+                let id = display.mesh.elements()[face.element].id;
+                if let Some(CadEntity::Face(tag)) = display.entity(id) {
+                    face.region = tag as usize;
+                }
+            }
+            skin
+        })
+        .collect();
+    // The rope's diameter in the units of the display.
+    let reach = (display.mesh.coords().iter()).fold(0.0f64, |m, p| m.max(p[0]));
+    let scale = reach / 200.0;
+    // The two lines of the rope, which reach out beyond the sheave; the edges left of the
+    // revolved rectangle are lines too.
+    let mesh = &display.mesh;
+    let lines: Vec<String> = (mesh.parts.iter())
+        .filter(|p| {
+            (p.elements.iter().filter_map(|&e| mesh.element(e)))
+                .flat_map(|e| e.nodes.iter().filter_map(|&n| mesh.node(n)))
+                .any(|x| x[0].abs() > 150.0 * scale)
+        })
+        .map(|p| p.name.clone())
+        .collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    let mut model = plx_model::FeModel::default();
+    let rope = plx_model::CrossSection {
+        id: plx_model::Id::new(),
+        name: "Rope".into(),
+        profile: plx_model::BeamProfile::Rope {
+            diameter: 16.0 * scale,
+            wire: 1.0 * scale,
+            fill: 0.5,
+            bending: plx_model::RopeBending::Share(0.1),
+        },
+    };
+    model.sections.push(plx_model::Section {
+        name: "Rope".into(),
+        material: None,
+        region: plx_model::Region::Parts(lines.clone()),
+        thickness: 1.0,
+        kind: plx_model::SectionKind::Beam(plx_model::BeamSection {
+            cross_section: Some(rope.id),
+            ..plx_model::BeamSection::DEFAULT
+        }),
+    });
+    model.cross_sections.push(rope);
+    model
+        .contact_detections
+        .push(plx_model::ContactDetection::new("Contacts"));
+    let detection = plx_model::DetectionGeometry {
+        mesh: &display.mesh,
+        skins: &skins,
+        entities: &display.entities,
+        face_edges: &display.topology.face_edges,
+        part_dimensions: &display.part_dimensions,
+    };
+    let visible = vec![true; display.mesh.parts.len()];
+    let report = model
+        .detect_contacts_on_geometry(0, &detection, &visible)
+        .unwrap();
+    // Both lines touch the running surface at the top, where they meet.
+    assert_eq!(report.added, 2, "{:#?}", model.contact_regions);
+    for region in &model.contact_regions {
+        assert_eq!(region.behavior, plx_model::ContactBehavior::Frictionless);
+        let plx_model::Region::Geometry(faces) = &region.side_a else {
+            panic!("{region:?}");
+        };
+        assert!(
+            faces.iter().all(|f| matches!(f, CadEntity::Face(_))),
+            "{faces:?}"
+        );
+        assert!(matches!(&region.side_b, plx_model::Region::Parts(p) if p.len() == 1));
+    }
+    // Without the rope profile nothing touches: the lines are 8 off the surface.
+    model.sections.clear();
+    let report = model
+        .detect_contacts_on_geometry(0, &detection, &visible)
+        .unwrap();
+    assert_eq!(report.added, 0, "{:#?}", model.contact_regions);
+}

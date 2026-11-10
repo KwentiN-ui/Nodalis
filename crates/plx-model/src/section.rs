@@ -113,8 +113,9 @@ impl SectionKind {
                 None
             }
             (SectionKind::Truss { .. }, ElementShape::Line2 | ElementShape::Line3) => Some("T3D2"),
-            // The solver has the general profiles for its user element U1 only.
-            (SectionKind::Beam(_), ElementShape::Line2)
+            // The solver has the general profiles for its user element U1 only, of 2 nodes: a
+            // 3-node line is written as two of them.
+            (SectionKind::Beam(_), ElementShape::Line2 | ElementShape::Line3)
                 if profile.is_some_and(|p| !p.is_native()) =>
             {
                 Some("U1")
@@ -186,17 +187,6 @@ impl SectionKind {
             }
             SectionKind::Membrane { .. } => None,
             _ if !line => Some(format!("Element {} is not a line element", element.id)),
-            SectionKind::Beam(_)
-                if profile.is_some_and(|p| !p.is_native())
-                    && element.shape != ElementShape::Line2 =>
-            {
-                Some(format!(
-                    "Element {} has 3 nodes; {} profiles are general sections of the \
-                     user element U1, which needs lines with 2 nodes",
-                    element.id,
-                    profile.map_or("", BeamProfile::label)
-                ))
-            }
             SectionKind::Beam(_)
                 if profile.is_some_and(BeamProfile::needs_reduced_integration)
                     && element.shape != ElementShape::Line3 =>
@@ -318,16 +308,18 @@ mod tests {
         assert_eq!(beam.element_type(ElementShape::Tet4, rect), None);
         let pipe = Some(&BeamProfile::ALL[2]);
         assert_eq!(beam.element_type(ElementShape::Line3, pipe), Some("B32R"));
-        // General profiles are sections of the user element U1, which has 2 nodes.
+        // General profiles are sections of the user element U1, which has 2 nodes; a
+        // 3-node line is written as two.
         let angle = Some(&BeamProfile::ALL[7]);
         assert_eq!(beam.element_type(ElementShape::Line2, angle), Some("U1"));
+        assert_eq!(beam.element_type(ElementShape::Line3, angle), Some("U1"));
         let line3 = plx_mesh::Element {
             id: 4,
             type_name: "B32".into(),
             shape: ElementShape::Line3,
             nodes: vec![1, 2, 3],
         };
-        assert!(beam.rejects(&line3, angle).is_some());
+        assert_eq!(beam.rejects(&line3, angle), None);
         let truss = SectionKind::Truss { area: 2.0 };
         assert_eq!(truss.element_type(ElementShape::Line3, None), Some("T3D2"));
         assert_eq!(

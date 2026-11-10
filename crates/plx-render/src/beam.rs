@@ -77,9 +77,13 @@ impl Frame {
 /// the beam as feature edges.
 ///
 /// `scalars` holds a normalized contour value per node, as [`crate::part_render_mesh`]
-/// takes it.
+/// takes it. `rest` are the undeformed coordinates, where the section's normal places the
+/// profile; on the deformed line `coords` the profile turns along with the line, so that a
+/// beam bent until its axis runs along the normal does not twist.
+#[allow(clippy::too_many_arguments)]
 pub fn beam_mesh(
     coords: &[[f64; 3]],
+    rest: &[[f64; 3]],
     skin: &PartSkin,
     origin: DVec3,
     color: [f32; 3],
@@ -95,10 +99,12 @@ pub fn beam_mesh(
         return render;
     }
     let point = |node: usize| DVec3::from(coords[node]);
-    let direction = |index: usize| {
+    let rest_point = |node: usize| DVec3::from(rest.get(node).copied().unwrap_or(coords[node]));
+    let direction_in = |point: &dyn Fn(usize) -> DVec3, index: usize| {
         let [a, b] = skin.lines[index];
         (point(b) - point(a)).normalize_or_zero()
     };
+    let direction = |index: usize| direction_in(&point, index);
     // The ends of the segments with a profile at each node: (segment, end).
     let mut ends: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
     for (index, line) in skin.lines.iter().enumerate() {
@@ -121,17 +127,88 @@ pub fn beam_mesh(
         let cos = direction(index).dot(direction(other.0) * sign);
         (other.0 != index && cos >= JOIN_ANGLE_DEG.to_radians().cos()).then_some(other)
     };
+    // The tangent at a segment end, the mean of both segments where two join.
+    let tangent_in = |point: &dyn Fn(usize) -> DVec3, index: usize, end: usize| {
+        let own = direction_in(point, index);
+        match joined(index, end) {
+            Some((other, other_end)) => {
+                let sign = if other_end == end { -1.0 } else { 1.0 };
+                (own + direction_in(point, other) * sign).normalize_or(own)
+            }
+            None => own,
+        }
+    };
+    // Direction 1 at a segment end on the undeformed line: the normal projected.
+    let rest_n1 = |index: usize, end: usize| {
+        let normal = shapes[index]
+            .as_ref()
+            .expect("segments with a profile only")
+            .normal;
+        let tangent = tangent_in(&rest_point, index, end);
+        (normal - tangent * normal.dot(tangent))
+            .try_normalize()
+            .unwrap_or_else(|| tangent.any_orthonormal_vector())
+    };
+    // On the deformed line direction 1 is carried along each chain of joined segments, from
+    // the end that turned least, by the rotation between neighbouring tangents and the
+    // twist the undeformed line has there.
+    let mut n1s: HashMap<(usize, usize), DVec3> = HashMap::new();
+    let mut seeds: Vec<(f64, usize)> = (0..skin.lines.len())
+        .filter(|&i| shapes[i].is_some())
+        .map(|i| {
+            let turn = tangent_in(&rest_point, i, 0).dot(tangent_in(&point, i, 0));
+            (-turn, i)
+        })
+        .collect();
+    seeds.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (_, seed) in seeds {
+        if n1s.contains_key(&(seed, 0)) {
+            continue;
+        }
+        let start = turned(
+            rest_n1(seed, 0),
+            tangent_in(&rest_point, seed, 0),
+            tangent_in(&point, seed, 0),
+        );
+        // Both ways from the seed's first end: along the seed, and back into the segment
+        // joined before it.
+        let mut walks = vec![(seed, 0, start)];
+        if let Some((other, other_end)) = joined(seed, 0) {
+            walks.push((other, other_end, start));
+        }
+        for (mut index, mut from, mut n1) in walks {
+            while !n1s.contains_key(&(index, from)) {
+                n1s.insert((index, from), n1);
+                let to = 1 - from;
+                let (t0, t1) = (
+                    tangent_in(&point, index, from),
+                    tangent_in(&point, index, to),
+                );
+                let (r0, r1) = (
+                    tangent_in(&rest_point, index, from),
+                    tangent_in(&rest_point, index, to),
+                );
+                // The twist of the undeformed line between the two ends, about its tangent.
+                let carried = turned(rest_n1(index, from), r0, r1);
+                let target = rest_n1(index, to);
+                let twist = carried.cross(target).dot(r1).atan2(carried.dot(target));
+                n1 = rotate(turned(n1, t0, t1), t1, twist);
+                n1s.insert((index, to), n1);
+                match joined(index, to) {
+                    Some((other, other_end)) if !n1s.contains_key(&(other, other_end)) => {
+                        (index, from) = (other, other_end);
+                    }
+                    _ => break,
+                }
+            }
+        }
+    }
     let frame = |index: usize, end: usize| -> Frame {
         let shape = shapes[index]
             .as_ref()
             .expect("segments with a profile only");
-        let mut tangent = direction(index);
-        if let Some((other, other_end)) = joined(index, end) {
-            let sign = if other_end == end { -1.0 } else { 1.0 };
-            tangent = (tangent + direction(other) * sign).normalize_or(tangent);
-        }
-        let projected = shape.normal - tangent * shape.normal.dot(tangent);
-        let n1 = projected
+        let tangent = tangent_in(&point, index, end);
+        let n1 = (n1s[&(index, end)] - tangent * n1s[&(index, end)].dot(tangent))
             .try_normalize()
             .unwrap_or_else(|| tangent.any_orthonormal_vector());
         let n2 = tangent.cross(n1);
@@ -298,6 +375,27 @@ pub fn beam_mesh(
     render
 }
 
+/// `v` turned by the smallest rotation that takes the unit vector `from` to `to`; about any
+/// axis normal to them when they point opposite ways.
+fn turned(v: DVec3, from: DVec3, to: DVec3) -> DVec3 {
+    let axis = from.cross(to);
+    let (sin, cos) = (axis.length(), from.dot(to));
+    if sin < 1e-12 {
+        return if cos > 0.0 {
+            v
+        } else {
+            rotate(v, from.any_orthonormal_vector(), std::f64::consts::PI)
+        };
+    }
+    rotate(v, axis / sin, sin.atan2(cos))
+}
+
+/// `v` turned by `angle` about the unit `axis` (Rodrigues).
+fn rotate(v: DVec3, axis: DVec3, angle: f64) -> DVec3 {
+    let (sin, cos) = angle.sin_cos();
+    v * cos + axis.cross(v) * sin + axis * axis.dot(v) * (1.0 - cos)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +426,7 @@ mod tests {
     fn swept(mesh: &FeMesh, shape: Option<BeamShape>) -> RenderMesh {
         let skin = extract_part_skin(mesh, &mesh.parts[0], 30.0);
         beam_mesh(
+            mesh.coords(),
             mesh.coords(),
             &skin,
             DVec3::ZERO,
@@ -586,5 +685,75 @@ mod tests {
         };
         assert!((radius - 0.2).abs() < 1e-12, "{radius}");
         assert!(BeamShape::truss(0.0).is_none());
+    }
+
+    /// A rope along x with its normal along y, bent into a half circle in the x-y plane: its
+    /// axis runs along the normal half way. The profile follows the bend without twisting.
+    #[test]
+    fn a_beam_bent_along_its_normal_does_not_twist() {
+        let n = 36;
+        let mut mesh = FeMesh::default();
+        let length = std::f64::consts::PI * 100.0;
+        for i in 0..=n {
+            mesh.set_node(i + 1, [length * f64::from(i) / f64::from(n), 0.0, 0.0]);
+        }
+        for id in 1..=n {
+            mesh.add_element(Element {
+                id,
+                type_name: "B31".into(),
+                shape: ElementShape::Line2,
+                nodes: vec![id, id + 1],
+            })
+            .unwrap();
+        }
+        mesh.parts.push(Part {
+            name: "P".into(),
+            elements: (1..=n).collect(),
+        });
+        let rest = mesh.coords().to_vec();
+        let bent: Vec<[f64; 3]> = (0..=n)
+            .map(|i| {
+                let angle = std::f64::consts::PI * f64::from(i) / f64::from(n);
+                [100.0 * angle.sin(), 100.0 * (1.0 - angle.cos()), 0.0]
+            })
+            .collect();
+        let skin = extract_part_skin(&mesh, &mesh.parts[0], 30.0);
+        let shape = BeamShape {
+            profile: BeamProfile::Circ { radius: 5.0 },
+            normal: DVec3::Y,
+            offset: [0.0; 2],
+        };
+        let render = beam_mesh(
+            &bent,
+            &rest,
+            &skin,
+            DVec3::ZERO,
+            [1.0; 3],
+            |_| None,
+            |_| Some(shape.clone()),
+            None,
+        );
+        // Each wall quad runs from a point of the outline at one end to the same point at
+        // the other: no further than the segment's length plus the bend.
+        let segment = length / f64::from(n);
+        let node = |k: usize| render.origins[k].a;
+        let mut k = 0;
+        let mut quads = 0;
+        while k + 3 < render.vertices.len() {
+            if node(k) == node(k + 1) && node(k + 2) == node(k + 3) && node(k) != node(k + 2) {
+                let at = |j: usize| DVec3::from(render.vertices[j].position.map(f64::from));
+                let gap = (at(k) - at(k + 3)).length();
+                assert!(
+                    gap < 1.2 * segment,
+                    "{gap} vs {segment} at node {}",
+                    node(k)
+                );
+                quads += 1;
+                k += 4;
+            } else {
+                k += 1;
+            }
+        }
+        assert!(quads >= n as usize * 8, "{quads}");
     }
 }
