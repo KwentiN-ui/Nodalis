@@ -339,6 +339,10 @@ pub fn principal_stresses(s: &[f64; 6]) -> [f64; 3] {
     v
 }
 
+/// A general beam's two nodes, its stress and strain tensors there and its section forces
+/// `[N, T, M1, M2]` at them.
+type BeamValues = ([u32; 2], [[f64; 6]; 2], [[f64; 6]; 2], [[f64; 4]; 2]);
+
 /// The nodal fields of a displacement state as the step's `*NODE FILE` / `*EL FILE`
 /// requests ask for them, in CalculiX's order: DISP, STRESS, TOSTRAIN, FORC, ENER, ERROR.
 pub fn build_fields(
@@ -379,6 +383,45 @@ pub fn build_fields_with(
             ((m.nodes.as_slice(), e), (m.nodes.as_slice(), s))
         })
         .unzip();
+    // General beams (U1, ropes): the normal stress N / A and the extension along their
+    // current axis, at both nodes, and their section forces (`SECFORC`: normal force,
+    // bending moment, torque). The stress of the outer fibres is not known: a general
+    // section has no shape, and the wires of a rope bend each about their own axis.
+    let beam_values: Vec<BeamValues> = table
+        .beams
+        .iter()
+        .map(|b| {
+            let q = b.gather(u);
+            let linear = !step.nlgeom;
+            let (t, strain) = b.formulation.axis_and_strain(&q, linear);
+            let forces = b.formulation.section_forces(&q, linear);
+            let along = |v: f64| {
+                [
+                    v * t[0] * t[0],
+                    v * t[1] * t[1],
+                    v * t[2] * t[2],
+                    v * t[0] * t[1],
+                    v * t[1] * t[2],
+                    v * t[2] * t[0],
+                ]
+            };
+            let stress = forces.map(|f| along(if b.area > 0.0 { f[0] / b.area } else { 0.0 }));
+            (
+                [b.dofs[0] / 3, b.dofs[6] / 3],
+                stress,
+                [along(strain); 2],
+                forces,
+            )
+        })
+        .collect();
+    let beam_stresses: Vec<(&[u32], Vec<[f64; 6]>)> = (beam_values.iter())
+        .map(|(nodes, s, ..)| (&nodes[..], s.to_vec()))
+        .collect();
+    let beam_strains: Vec<(&[u32], Vec<[f64; 6]>)> = (beam_values.iter())
+        .map(|(nodes, _, e, _)| (&nodes[..], e.to_vec()))
+        .collect();
+    let membrane_stresses: Vec<_> = membrane_stresses.into_iter().chain(beam_stresses).collect();
+    let membrane_strains: Vec<_> = membrane_strains.into_iter().chain(beam_strains).collect();
     // Internal unknowns (thickness change of plane stress nodes) are no displacements.
     // The reported forces cost an element stiffness of every plane element: only for `RF`.
     let (u, reactions) = &if has("RF") {
@@ -397,6 +440,39 @@ pub fn build_fields_with(
             &order,
             &average,
         ));
+    }
+    if has("S") && !beam_values.is_empty() {
+        // Averaged over the beams at a node; other nodes have none.
+        // The bending moment as its magnitude: the beam's 1- and 2-direction turn with
+        // the rotation about its axis, which nothing may hold (a rope on a frictionless
+        // sheave spins freely), so the components alone would say little.
+        let mut sum = vec![[0.0; 3]; model.nodes.len()];
+        let mut count = vec![0u32; model.nodes.len()];
+        for (nodes, _, _, forces) in &beam_values {
+            for (&n, f) in nodes.iter().zip(forces) {
+                let values = [f[0], f[2].hypot(f[3]), f[1]];
+                for k in 0..3 {
+                    sum[n as usize][k] += values[k];
+                }
+                count[n as usize] += 1;
+            }
+        }
+        let beam_nodes: Vec<(u32, u32)> = (order.iter())
+            .filter(|&&(_, i)| count[i as usize] > 0)
+            .copied()
+            .collect();
+        fields.push(ResultField {
+            name: "SECFORC".into(),
+            components: ["N", "M", "MT"].map(String::from).to_vec(),
+            nodes: beam_nodes.iter().map(|&(id, _)| id).collect(),
+            values: (0..3)
+                .map(|k| {
+                    (beam_nodes.iter())
+                        .map(|&(_, i)| sum[i as usize][k] / f64::from(count[i as usize]))
+                        .collect()
+                })
+                .collect(),
+        });
     }
     if has("E") {
         let (average, _) = nodal_average_with(table, model, strains, &membrane_strains);

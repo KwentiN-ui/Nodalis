@@ -18,7 +18,7 @@ pub mod solver;
 pub mod steps;
 pub mod transformation;
 
-pub use derived::{add_derived_components, principal_values};
+pub use derived::{add_derived_components, principal_values, split_rotations};
 pub use equation::Equation;
 pub use field_output::{FieldOutput, FieldOutputKind, LimitBasis};
 pub use principal::{Principal, VectorSource};
@@ -209,7 +209,11 @@ impl FieldRank {
     /// number of raw components.
     pub fn of_calculix(name: &str, raw_components: usize) -> Self {
         match (name, raw_components) {
-            ("DISP" | "MODE" | "VELO" | "ACCE" | "FORC" | "FLUX" | "NORM", 3) => FieldRank::Vector,
+            (
+                "DISP" | "MODE" | "VELO" | "ACCE" | "FORC" | "FLUX" | "NORM" | "ROTATION"
+                | "MOMENT",
+                3,
+            ) => FieldRank::Vector,
             ("STRESS" | "ZZSTR", 6) => FieldRank::Tensor(TensorKind::Stress),
             ("TOSTRAIN" | "MESTRAIN", 6) => FieldRank::Tensor(TensorKind::Strain),
             _ => FieldRank::Scalar,

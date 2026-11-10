@@ -172,14 +172,14 @@ impl<'a> Reader<'a> {
                     if target.value == 0.0 {
                         target.value = block.value;
                     }
-                    target.fields.push(field);
+                    target.fields.extend(plx_results::split_rotations(field));
                 }
                 None => self.import.increments.push(Increment {
                     step: block.step,
                     increment: block.increment,
                     kind: block.kind,
                     value: block.value,
-                    fields: vec![field],
+                    fields: plx_results::split_rotations(field),
                     nodal_diameter: block.nodal_diameter,
                 }),
             }

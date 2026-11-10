@@ -1539,14 +1539,20 @@ fn field_measure(field: &str, component: &str) -> Option<Measure> {
         "DISP" | "DISPR" | "DISPI" | "DISPLACEMENTS" | "RELATIVE_CONTACT_DISPLACEMENT" => {
             Some(Of(Length))
         }
+        // Section forces of general beams and ropes: normal force, bending moment, torque.
+        "SECFORC" => match component.as_str() {
+            "N" => Some(Of(Force)),
+            "M" | "MT" => Some(Of(Moment)),
+            _ => None,
+        },
         "STRESS" | "STRESSR" | "STRESSI" | "ZZSTR" | "ZZSTRR" | "ZZSTRI" | "STRESSES"
         | "CONTACT_STRESS" => Some(Of(Pressure)),
         // Magnitudes and phase angles of complex results.
         "PDISP" => (component.starts_with("MAG")).then_some(Of(Length)),
         "PSTRESS" => (component.starts_with("MAG")).then_some(Of(Pressure)),
         "FORC" | "FORCR" | "FORCI" | "FORCES" | "TOTAL_FORCE" => Some(Of(Force)),
-        "ROTATIONS" => Some(Of(Angle)),
-        "MOMENTS" | "TOTAL_MOMENT" => Some(Of(Moment)),
+        "ROTATIONS" | "ROTATION" => Some(Of(Angle)),
+        "MOMENTS" | "MOMENT" | "TOTAL_MOMENT" => Some(Of(Moment)),
         "ANGULAR_VELOCITIES" => Some(Of(RotationalSpeed)),
         "VELO" | "VELOCITIES" => Some(Of(Velocity)),
         "ACCE" => Some(Of(Acceleration)),

@@ -337,6 +337,47 @@ impl CorotationalBeam {
         std::array::from_fn(|i| (0..7).map(|j| self.local[i * 7 + j] * d[j]).sum())
     }
 
+    /// The current axis (unit, from the first node to the second) and the extension
+    /// strain `(l - L) / L` for the DOFs `q`;
+    /// `linear`: the reference axis and the small strain, as in a step without NLGEOM.
+    pub fn axis_and_strain(&self, q: &[f64; 12], linear: bool) -> ([f64; 3], f64) {
+        let t = self.axes[0];
+        if linear {
+            let along: f64 = (0..3).map(|i| (q[6 + i] - q[i]) * t[i]).sum();
+            return (t, along / self.length);
+        }
+        let d: [f64; 3] = std::array::from_fn(|i| self.x0[1][i] + q[6 + i] - self.x0[0][i] - q[i]);
+        let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        let axis = if l > 0.0 { d.map(|x| x / l) } else { t };
+        (axis, (l - self.length) / self.length)
+    }
+
+    /// The section forces at the two nodes for the DOFs `q`: the normal force, the torque
+    /// and the bending moments `[N, T, M1, M2]` (about the beam's current 1- and
+    /// 2-direction), each as the part of the beam beyond the node (towards the second
+    /// node) carries it, so that the elements at a node agree.
+    /// `linear`: of the small deformation theory, as in a step without NLGEOM (where the
+    /// large deformation's shortening of the chord by the deflection would pull at the
+    /// beam).
+    pub fn section_forces(&self, q: &[f64; 12], linear: bool) -> [[f64; 4]; 2] {
+        let f = if linear {
+            // The local values linearised about the reference configuration.
+            let mut d = [0.0; 7];
+            for (i, &qi) in q.iter().enumerate() {
+                let mut x = [Hd::constant(0.0); 12];
+                x[i].a = 1.0;
+                let column = self.deformation(&x);
+                for (dk, c) in d.iter_mut().zip(column) {
+                    *dk += c.a * qi;
+                }
+            }
+            std::array::from_fn(|i| (0..7).map(|j| self.local[i * 7 + j] * d[j]).sum())
+        } else {
+            self.local_forces(q)
+        };
+        [[f[0], -f[1], -f[2], -f[3]], [f[0], f[4], f[5], f[6]]]
+    }
+
     /// The initial stress stiffness in the reference configuration for the local forces
     /// the DOFs `q` (a small, linear solution) cause: the second derivative of the work of
     /// these forces on the local values, what linear buckling scales.

@@ -210,6 +210,14 @@ impl OutputMap {
             .collect();
         let mut used = in_elements.clone();
         used.extend(self.rotations.keys().copied());
+        // General beams (U1) have stresses and section forces at their own nodes too, not
+        // at the rotation helpers they held before.
+        let mut in_elements = in_elements;
+        in_elements.extend(
+            (out.elements.iter())
+                .filter(|e| e.kind == ElementType::U1)
+                .flat_map(|e| e.nodes.iter().copied()),
+        );
         if used.len() == out.nodes.len() {
             results.set_mode_fields(mode_fields);
             return (out, results);
