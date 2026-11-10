@@ -35,11 +35,14 @@ pub fn nodal_values(
     let mut faces = false;
     for (pair, results) in contact.pairs.iter().zip(&evaluation.points) {
         if pair.slave_faces.is_empty() || pair.points.iter().all(|p| p.face.is_none()) {
-            // Node-to-face: the node's own values.
+            // Node-to-face: the node's own values; of the points around a rope's
+            // circumference, the one pressed hardest.
             for (point, r) in pair.points.iter().zip(results) {
                 let n = point.nodes[0] as usize;
                 if r.element {
-                    sum[n] = values_of(r);
+                    if !listed[n] || r.state.pressure >= sum[n][3] {
+                        sum[n] = values_of(r);
+                    }
                     energy[n] += r.energy;
                     listed[n] = true;
                 }

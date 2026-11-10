@@ -58,8 +58,11 @@ pub struct SlavePoint {
     /// node.
     pub face: Option<(u32, [f64; 2])>,
     /// Distance the point keeps from the master surface: the radius of a rope or beam whose
-    /// axis node it is (`CONTACT RADIUS=`), zero for others.
+    /// axis node it is (`CONTACT RADIUS=`) when it is tied to the master, zero for others
+    /// (an untied rope touches with the points of its circumference, [`SlavePoint::ring`]).
     pub offset: f64,
+    /// A point on a rope's circumference: off its axis node `nodes[0]` (with offset 0).
+    pub ring: Option<RopeRing>,
 }
 
 /// A contact pair prepared for the solver.
@@ -300,12 +303,20 @@ fn first_young(model: &Model) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Young's modulus of the material of an element (dense index).
-/// The nodes on the axis of general beams with a contact radius (ropes): per dense node its
-/// radius and the length of beam it stands for (half of each element at it).
-fn rope_nodes(model: &Model) -> HashMap<u32, (f64, f64)> {
+/// A node on the axis of a general beam with a contact radius (a rope).
+#[derive(Clone, Debug, Default)]
+struct RopeNode {
+    radius: f64,
+    /// The length of beam the node stands for: half of each element at it.
+    length: f64,
+    /// The nodes it is joined to along the rope (dense indices).
+    neighbours: Vec<u32>,
+}
+
+/// The nodes on the axis of general beams with a contact radius (ropes), per dense node.
+fn rope_nodes(model: &Model) -> HashMap<u32, RopeNode> {
     use plxs_core::section::{BeamProfile, SectionKind};
-    let mut out: HashMap<u32, (f64, f64)> = HashMap::new();
+    let mut out: HashMap<u32, RopeNode> = HashMap::new();
     for element in &model.elements {
         if element.kind != plxs_core::ElementType::U1 {
             continue;
@@ -340,15 +351,80 @@ fn rope_nodes(model: &Model) -> HashMap<u32, (f64, f64)> {
             model.nodes.coordinates[dense[1] as usize],
             model.nodes.coordinates[dense[0] as usize],
         ));
-        for n in dense {
-            let entry = out.entry(n).or_insert((0.0, 0.0));
-            entry.0 = entry.0.max(*radius);
-            entry.1 += 0.5 * length;
+        for (k, &n) in dense.iter().enumerate() {
+            let entry = out.entry(n).or_default();
+            entry.radius = entry.radius.max(*radius);
+            entry.length += 0.5 * length;
+            entry.neighbours.push(dense[1 - k]);
         }
     }
     out
 }
 
+/// Two unit vectors across a unit axis and across each other.
+fn across(axis: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    // The global axis most across it.
+    let k = (0..3)
+        .min_by(|&i, &j| axis[i].abs().total_cmp(&axis[j].abs()))
+        .unwrap_or(0);
+    let mut e = [0.0; 3];
+    e[k] = 1.0;
+    let e1 = normalized(sub(e, scale(axis, dot(e, axis))));
+    (e1, cross(axis, e1))
+}
+
+/// How many points around its circumference a rope node touches with
+/// ([`SlavePoint::ring`]).
+pub const ROPE_RING_POINTS: usize = 16;
+
+/// A point on the circumference of a rope: the rope's axis node, the radius off it, in a
+/// direction across the rope's current axis. A rope in a groove of its own radius touches
+/// it over half its circumference at once; with only the axis node (its distance to the
+/// nearest face less the radius) it held on to the one face nearest, and in a groove all
+/// faces are about as near: the rope was pushed from one flank to the other, unsupported
+/// sideways, and the solver cut back until it gave up.
+#[derive(Clone, Debug)]
+pub struct RopeRing {
+    pub radius: f64,
+    /// The rope's axis at the node in the reference configuration: from the first to the
+    /// second node (dense indices), the node itself at an end of the rope.
+    pub axis: [u32; 2],
+    pub rest_axis: [f64; 3],
+    /// The direction of the point off the axis in the reference configuration, across
+    /// `rest_axis`; it turns with the axis.
+    pub rest_direction: [f64; 3],
+}
+
+impl RopeRing {
+    /// The point's offset from the axis node in a configuration: the reference direction
+    /// turned by the rotation that takes the reference axis on to the current one (the
+    /// rope does not twist the points around: it is round).
+    fn offset(&self, current: &[[f64; 3]]) -> [f64; 3] {
+        let axis = normalized(sub(
+            current[self.axis[1] as usize],
+            current[self.axis[0] as usize],
+        ));
+        let a = self.rest_axis;
+        let d = self.rest_direction;
+        // Rodrigues' rotation from a to axis, applied to d: d + v x d + v x (v x d) / (1 + c)
+        // with v = a x axis, c = a . axis.
+        let v = cross(a, axis);
+        let c = dot(a, axis);
+        if c <= -0.999 {
+            return scale(d, self.radius);
+        }
+        let vd = cross(v, d);
+        let vvd = cross(v, vd);
+        let turned = [
+            d[0] + vd[0] + vvd[0] / (1.0 + c),
+            d[1] + vd[1] + vvd[1] / (1.0 + c),
+            d[2] + vd[2] + vvd[2] / (1.0 + c),
+        ];
+        scale(normalized(turned), self.radius)
+    }
+}
+
+/// Young's modulus of the material of an element (dense index).
 fn element_young(model: &Model, element: u32) -> Option<f64> {
     let e = model.elements.get(element as usize)?;
     let section = model.sections.get(e.section? as usize)?;
@@ -455,22 +531,67 @@ impl ContactModel {
                             pair.slave
                         ));
                     }
+                    let coords = &model.nodes.coordinates;
                     for n in nodes {
-                        // A rope node presses on the strip of its diameter along its length.
-                        let rope = ropes.get(&n).copied();
-                        let a = match rope {
-                            Some((radius, length)) => 2.0 * radius * length,
-                            None if area[n as usize] > 0.0 => area[n as usize],
-                            None => 1.0,
-                        };
-                        points.push(SlavePoint {
-                            nodes: vec![n],
-                            weights: vec![1.0],
-                            area: a,
-                            face: None,
-                            offset: rope.map_or(0.0, |(radius, _)| radius),
-                        });
-                        cutoff.push(law.node_cutoff(c0, a));
+                        let rope = ropes.get(&n);
+                        match rope {
+                            // A rope touches with its circumference; tied to the master it
+                            // keeps its axis node at its radius off it.
+                            Some(rope) if !law.is_tied() && !rope.neighbours.is_empty() => {
+                                let (a, b) = match rope.neighbours[..] {
+                                    [one] => (n.min(one), n.max(one)),
+                                    [first, second, ..] => (first, second),
+                                    [] => unreachable!(),
+                                };
+                                let rest_axis =
+                                    normalized(sub(coords[b as usize], coords[a as usize]));
+                                let (e1, e2) = across(rest_axis);
+                                let arc = std::f64::consts::TAU * rope.radius
+                                    / ROPE_RING_POINTS as f64
+                                    * rope.length;
+                                for k in 0..ROPE_RING_POINTS {
+                                    let angle =
+                                        std::f64::consts::TAU * k as f64 / ROPE_RING_POINTS as f64;
+                                    let (sin, cos) = angle.sin_cos();
+                                    points.push(SlavePoint {
+                                        nodes: vec![n],
+                                        weights: vec![1.0],
+                                        area: arc,
+                                        face: None,
+                                        offset: 0.0,
+                                        ring: Some(RopeRing {
+                                            radius: rope.radius,
+                                            axis: [a, b],
+                                            rest_axis,
+                                            rest_direction: [
+                                                cos * e1[0] + sin * e2[0],
+                                                cos * e1[1] + sin * e2[1],
+                                                cos * e1[2] + sin * e2[2],
+                                            ],
+                                        }),
+                                    });
+                                    cutoff.push(law.node_cutoff(c0, arc));
+                                }
+                            }
+                            _ => {
+                                // A rope node presses on the strip of its diameter along
+                                // its length.
+                                let a = match rope {
+                                    Some(rope) => 2.0 * rope.radius * rope.length,
+                                    None if area[n as usize] > 0.0 => area[n as usize],
+                                    None => 1.0,
+                                };
+                                points.push(SlavePoint {
+                                    nodes: vec![n],
+                                    weights: vec![1.0],
+                                    area: a,
+                                    face: None,
+                                    offset: rope.map_or(0.0, |rope| rope.radius),
+                                    ring: None,
+                                });
+                                cutoff.push(law.node_cutoff(c0, a));
+                            }
+                        }
                     }
                 }
                 _ => {
@@ -484,6 +605,7 @@ impl ContactModel {
                                 area: w * fp.jacobian,
                                 face: Some((f as u32, *p)),
                                 offset: 0.0,
+                                ring: None,
                             });
                             // Face-to-face springs act on overclosure only; the cutoff only
                             // decides which tied points are coupled.
@@ -597,8 +719,11 @@ impl ContactModel {
                 );
                 // Rope nodes move to their radius off the surface.
                 let offsets: HashMap<u32, f64> = (prepared.points.iter())
-                    .filter(|q| q.face.is_none() && q.offset > 0.0)
-                    .map(|q| (q.nodes[0], q.offset))
+                    .filter(|q| q.face.is_none())
+                    .filter_map(|q| {
+                        let radius = q.ring.as_ref().map_or(q.offset, |r| r.radius);
+                        (radius > 0.0).then_some((q.nodes[0], radius))
+                    })
                     .collect();
                 let mut moved = 0;
                 for n in slave_nodes {
@@ -1256,7 +1381,10 @@ impl Pair {
                 x[d] += w * c[d];
             }
         }
-        x
+        match &point.ring {
+            Some(ring) => geometry::add(x, ring.offset(current)),
+            None => x,
+        }
     }
 
     /// Candidate master faces of every point: those whose box, inflated by two typical

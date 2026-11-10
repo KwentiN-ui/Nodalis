@@ -143,6 +143,10 @@ pub fn norm(a: [f64; 3]) -> f64 {
     dot(a, a).sqrt()
 }
 
+pub fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
 pub fn scale(a: [f64; 3], s: f64) -> [f64; 3] {
     [a[0] * s, a[1] * s, a[2] * s]
 }
