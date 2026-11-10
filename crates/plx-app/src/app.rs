@@ -666,6 +666,33 @@ impl AnalysisWindow {
         Some(&mut model.fe)
     }
 
+    /// Sets the number at `path` of the FE model, for the project window to set an exposed
+    /// parameter; a number of a mesh operation moves the mesh along. Returns whether it
+    /// changed.
+    pub fn set_value(&mut self, path: &plx_model::ValuePath, value: f64) -> bool {
+        let workbench = &mut self.workbench;
+        let Some(model) = workbench.model.as_mut() else {
+            return false;
+        };
+        let changed = match path.item {
+            plx_model::ItemRef::MeshOperation(_) => {
+                if model.fe.value_at(path) == Some(value) {
+                    return false;
+                }
+                let mut changed = false;
+                model.edit_mesh(|mesh, fe| changed = fe.set_value_meshed(mesh, path, value));
+                changed
+            }
+            _ => model.fe.set_value(path, value),
+        };
+        if changed {
+            workbench.results_changed = true;
+            workbench.symbols_shown = None;
+            workbench.highlighted = None;
+        }
+        changed
+    }
+
     /// Counts a change the project made through [`Self::fe_mut`] at once, as one the user can
     /// undo, so that the state of the analysis follows it also while its window is not shown
     /// (the window records changes only at the end of its own frames).
@@ -3224,6 +3251,7 @@ impl Workbench {
         let (Some(dialog), Some(model)) = (&mut self.mesh_tool, &mut self.model) else {
             return;
         };
+        dialog.set_linked(crate::links::linked_parameters(&self.incoming.paths));
         match dialog.show(ctx, model) {
             MeshToolResult::Open => {}
             // On an error the dialog shows it and stays open.

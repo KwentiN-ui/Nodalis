@@ -1598,7 +1598,17 @@ impl Node {
         let Some(path) = fe.exposed(key).map(|e| e.path.clone()) else {
             return false;
         };
-        let changed = fe.set_value(&path, value);
+        // A number of a mesh operation moves the mesh of the analysis along.
+        let changed = match &mut self.block {
+            Block::Analysis(analysis) => match (&mut analysis.window, &mut analysis.data) {
+                (Some(window), _) => window.set_value(&path, value),
+                (None, Some(data)) => data.model.set_value_meshed(&mut data.mesh, &path, value),
+                _ => false,
+            },
+            _ => self
+                .exposing_fe_mut()
+                .is_some_and(|fe| fe.set_value(&path, value)),
+        };
         if changed {
             self.model_changed();
         }
@@ -9629,8 +9639,29 @@ fn study_analysis_print(data: links::Data, mesh: StudyMesh, driven: impl Fn(u32)
         }
     }
     let empty = plx_mesh::FeMesh::default();
+    // The parts that driven mesh operations move change from point to point: their nodes
+    // count without their coordinates.
+    let moved: Vec<usize> = (data.fe.exposed.iter())
+        .filter(|e| driven(e.key))
+        .filter_map(|e| match &e.path.item {
+            plx_model::ItemRef::MeshOperation(name) => {
+                data.fe.mesh_operations.iter().find(|o| &o.name == name)
+            }
+            _ => None,
+        })
+        .flat_map(|o| o.part_indices(data.mesh))
+        .collect();
+    let still;
     let fe_mesh = match mesh {
-        StudyMesh::Own => data.mesh,
+        StudyMesh::Own if moved.is_empty() => data.mesh,
+        StudyMesh::Own => {
+            let mut copy = data.mesh.clone();
+            for node in data.mesh.part_nodes(&moved) {
+                copy.set_node(node, [0.0; 3]);
+            }
+            still = copy;
+            &still
+        }
         StudyMesh::Remeshed | StudyMesh::None => &empty,
     };
     let mut print = plx_mesh::Fnv::new();
@@ -12606,6 +12637,57 @@ mod tests {
         };
         assert!(frames::frame_rect(&empty, &graph, &sizes).is_none());
         assert_eq!(frames::frame_of(&[empty], 5), Some(0));
+    }
+
+    #[test]
+    fn an_exposed_transform_moves_the_mesh_of_a_closed_analysis() {
+        let mut mesh = plx_mesh::FeMesh::default();
+        mesh.set_node(1, [0.0; 3]);
+        mesh.set_node(2, [1.0, 0.0, 0.0]);
+        mesh.add_element(plx_mesh::Element {
+            id: 1,
+            type_name: "T3D2".into(),
+            shape: plx_mesh::ElementShape::Line2,
+            nodes: vec![1, 2],
+        })
+        .unwrap();
+        mesh.parts.push(plx_mesh::Part {
+            name: "A".into(),
+            elements: vec![1],
+        });
+        let mut model = plx_model::FeModel::default();
+        let shift = plx_model::MeshOperation {
+            name: "Transform-1".into(),
+            parts: vec!["A".into()],
+            kind: plx_model::MeshOperationKind::Transform(plx_mesh::MeshTransform::Translate([
+                0.0, 1.0, 0.0,
+            ])),
+        };
+        model.set_mesh_operations(&mut mesh, vec![shift]);
+        let path = plx_model::ValuePath::new(
+            plx_model::ItemRef::MeshOperation("Transform-1".into()),
+            plx_model::Field::Y,
+        );
+        let key = model.expose(path.clone());
+        let data = ProjectAnalysis {
+            mesh,
+            model,
+            ..Default::default()
+        };
+        let mut analysis = Node::analysis(1, "Analysis-1".into(), data);
+        let rows = exposed_rows(analysis.exposing_fe().unwrap(), &BTreeSet::new(), &[]);
+        assert_eq!(rows[1].text, "Transform-1 Y");
+        assert!(analysis.set_exposed(key, 4.0));
+        let data = analysis.link_data().unwrap();
+        assert_eq!(data.fe.value_at(&path), Some(4.0));
+        assert_eq!(data.mesh.node(2), Some([1.0, 4.0, 0.0]));
+        // A study that drives the transform runs the same body at each of its points.
+        let print = |node: &Node| {
+            study_analysis_print(node.link_data().unwrap(), StudyMesh::Own, |k| k == key)
+        };
+        let before = print(&analysis);
+        assert!(analysis.set_exposed(key, 7.0));
+        assert_eq!(print(&analysis), before);
     }
 
     #[test]

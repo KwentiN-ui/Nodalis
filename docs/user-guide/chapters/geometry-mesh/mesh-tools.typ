@@ -46,6 +46,16 @@ Selecting one highlights its parts.
 - *Delete:* #ui("Delete") in the context menu, or #key("Del"), undoes the transform on the mesh
   and removes it; #menu("Edit", "Undo") brings it back.
 
+- *Parameters:* every number of a transform has a #ui("P") button in its dialog, like the
+  numbers of loads and materials (@exposed-parameters). An exposed number, such as
+  #ui("Transform-1 X"), is a row of the analysis' block in the project window, where a
+  Parameters block or a parameter study sets it; a new value moves the parts by the new
+  amount, the same way as editing the transform. The angle of a rotation is in degrees, the
+  axis, the normal and the scale factors are plain numbers. A value the transform cannot
+  take, such as a scale factor of zero or an axis of length zero, is not taken.
+
+#screenshot("transform-exposed.png", [The distance dX of a transform exposed as a parameter])
+
 A mesh operation names its parts; a part renamed under #ui("Mesh") stays in it. An analysis that
 takes its mesh from another one by a link takes its mesh operations too; change them in the
 analysis the mesh comes from.
