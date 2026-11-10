@@ -95,6 +95,10 @@ pub enum BeamProfile {
         torsion: f64,
         shear_area_1: Option<f64>,
         shear_area_2: Option<f64>,
+        /// `CONTACT RADIUS=` (own parameter): node-to-surface contact keeps the beam's axis
+        /// this far from the master surface, the radius of a rope.
+        #[serde(default)]
+        contact_radius: Option<f64>,
     },
 }
 

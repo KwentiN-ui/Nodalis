@@ -388,6 +388,7 @@ fn sections(out: &mut Out, model: &Model) {
                         torsion,
                         shear_area_1,
                         shear_area_2,
+                        ..
                     } => {
                         let mut values = vec![*area, *i11, *i12, *i22, *torsion];
                         match (shear_area_1, shear_area_2) {
@@ -408,6 +409,13 @@ fn sections(out: &mut Out, model: &Model) {
                 }
                 if *offset2 != 0.0 {
                     let _ = write!(header, ", Offset2={}", number(*offset2));
+                }
+                if let BeamProfile::General {
+                    contact_radius: Some(r),
+                    ..
+                } = profile
+                {
+                    let _ = write!(header, ", Contact radius={}", number(*r));
                 }
                 out.keyword(&header);
                 out.numbers(&values);

@@ -138,6 +138,9 @@ rope near a sheave or clamp with elements of λ / 4 or shorter.
 #screenshot("cross-section-rope.png", [A rope of 10 mm with the default bending share 0.1: its
   metallic area and the second moments of sliding and sticking wires])
 
+A rope that runs over a sheave or a drum touches it with its surface, half the rope diameter
+beside its axis: see @rope-contact.
+
 #limitation[The bending stiffness is constant: the hysteresis of a rope whose wires start to
 slide as it bends (Papailiou) is not modelled, nor the coupling of tension and torsion of a
 stranded rope. Compute both limits to see how much the result depends on it.]

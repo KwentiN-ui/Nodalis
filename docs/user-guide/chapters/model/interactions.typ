@@ -639,6 +639,36 @@ the shell (S3 and up). For a contact on a shell edge use #ui("Surface to surface
 
 Hover over a method in the list to see a short description.
 
+==== Ropes on sheaves <rope-contact>
+
+A rope of beam elements (@rope-profiles) can lie on a sheave, a drum or a clamp of solids or
+shells. Create a contact pair with the rope as slave: set #ui("Slave region") to #ui("Parts")
+and click the rope, and pick the running surface of the sheave as master. The slave of beams
+needs #ui("Node to surface"); the other methods are refused when the model is written.
+
+Every node of the rope is then a slave node that stays half the rope diameter (the
+#ui("Rope diameter") of its profile) outside the master surface, so the rope's surface, not its
+axis, rests on the sheave. Each node carries the contact force of its share of the rope, and
+friction from the #ui("Surface interaction") acts as on any other contact. Beside the edge of
+the master surface the distance is measured to the edge, so a rope that leaves a sheave of
+small width lifts off it smoothly instead of resting on the extended face.
+
+#screenshot("contact-pair-rope.png", [A rope wound round a sheave: the running surface of the
+  sheave as master (red), the rope part as slave (yellow), Node to surface])
+
+The solver was checked against two closed-form cases:
+
+- A sheave that deflects a pretensioned rope by 3 degrees touches it in one point, since the
+  rope's curvature α / 2λ stays below 1 / R of the sheave. The force is that of the formula in
+  @rope-profiles to 0.2 %.
+- A rope wrapped by 90 degrees round a fixed drum and pulled at one end slides with the tension
+  ratio e^(-μφ) of Euler and Eytelwein to 1 % (μ = 0.2), and without friction both ends carry
+  the same tension.
+
+Facet the sheave finely: a running surface of flat faces of 3 degrees each changes the rope
+tension by a few percent; faces of 0.5 to 1 degree give the round drum. A sliding rope with
+friction converges best in many small increments.
+
 === Ties <ties>
 
 #menu("Connections", "Tie") or #ui("Create Tie ...") in the context menu of

@@ -11718,7 +11718,10 @@ fn rope_profiles_are_written_with_their_metallic_area() {
     let text = write_inp(&mesh, &model, "").unwrap();
     let area = 0.5 * std::f64::consts::PI * 64.0;
     let inertia = area * (1.0 + 0.25 * (256.0 - 1.0)) / 16.0;
-    let at = text.find("Section=General\n").expect(&text);
+    // Contact keeps the rope's axis its radius off the master.
+    let at = text
+        .find("Section=General, Contact radius=8\n")
+        .expect(&text);
     let written: Vec<f64> = (text[at..].lines().nth(1).unwrap().split(','))
         .map(|v| v.trim().parse().unwrap())
         .collect();
@@ -11728,4 +11731,82 @@ fn rope_profiles_are_written_with_their_metallic_area() {
     let import = read_inp_str(&text, None).unwrap();
     assert_eq!(import.cross_sections[0].profile, rope);
     assert_eq!(import.mesh.element(1).unwrap().type_name, "U1");
+}
+
+/// A rope part as the slave of a contact pair touches with its nodes: a node surface of
+/// node-to-surface contact; other methods are refused.
+#[test]
+fn a_rope_slave_is_a_node_surface() {
+    use plx_mesh::{Element, ElementShape, Part};
+    let mut mesh = line_chain(10, 0, 1000.0, false);
+    // A block under the middle of the rope, its top face (S2) the master.
+    let corners = [
+        [450.0, -30.0, -10.0],
+        [550.0, -30.0, -10.0],
+        [550.0, -30.0, 10.0],
+        [450.0, -30.0, 10.0],
+        [450.0, -8.0, -10.0],
+        [550.0, -8.0, -10.0],
+        [550.0, -8.0, 10.0],
+        [450.0, -8.0, 10.0],
+    ];
+    for (i, c) in corners.into_iter().enumerate() {
+        mesh.set_node(101 + i as u32, c);
+    }
+    mesh.add_element(Element {
+        id: 101,
+        type_name: "C3D8".into(),
+        shape: ElementShape::Hex8,
+        nodes: (101..109).collect(),
+    })
+    .unwrap();
+    mesh.parts.push(Part {
+        name: "SHEAVE".into(),
+        elements: vec![101],
+    });
+    let mut model = line_model(
+        &mesh,
+        SectionKind::Beam(BeamSection {
+            orientation: BeamOrientation::Direction([0.0, 0.0, 1.0]),
+            ..beam("Rope")
+        }),
+        LoadKind::force([100.0, 0.0, 0.0]),
+    );
+    model.cross_sections.push(CrossSection {
+        id: named("Rope"),
+        name: "Rope".into(),
+        profile: BeamProfile::Rope {
+            diameter: 16.0,
+            wire: 1.0,
+            fill: 0.5,
+            bending: plx_model::RopeBending::Share(0.1),
+        },
+    });
+    model.surface_interactions.push(SurfaceInteraction {
+        id: named("Surface_Interaction-1"),
+        name: "Surface_Interaction-1".into(),
+        properties: vec![InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)],
+    });
+    let mut pair = ContactPair {
+        id: named("Contact_Pair-1"),
+        ..ContactPair::new("Contact_Pair-1", Some(named("Surface_Interaction-1")))
+    };
+    pair.master = Region::Faces(vec![(101, 2)]);
+    pair.slave = Region::Parts(vec!["BEAM".into()]);
+    pair.method = ContactMethod::NodeToSurface;
+    model.contact_pairs.push(pair);
+    let analysis = lowered(&mesh, &model);
+    let slave = &analysis.model.contact.pairs[0].slave;
+    assert!(
+        matches!(
+            analysis.model.sets.surfaces.get(slave),
+            Some(plxs_core::mesh::Surface::Node(_))
+        ),
+        "{slave}"
+    );
+    model.contact_pairs[0].method = ContactMethod::SurfaceToSurface;
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::Unsupported { .. })
+    ));
 }

@@ -52,6 +52,28 @@ impl MasterSlave {
         }
     }
 
+    /// For contact pairs: the slave may also be whole parts, so that a rope or beam part
+    /// touches the master with its nodes (node to surface contact).
+    pub fn new_pair(faces: Target) -> Self {
+        Self {
+            slave: RegionDraft::new(PAIR_SLAVE_SOURCES, faces),
+            ..Self::new(faces)
+        }
+    }
+
+    /// [`Self::from_regions`] for a contact pair, see [`Self::new_pair`].
+    pub fn pair_from_regions(
+        master: &Region,
+        slave: &Region,
+        faces: Target,
+        mesh: &FeMesh,
+    ) -> Self {
+        Self {
+            slave: RegionDraft::from_region(slave, PAIR_SLAVE_SOURCES, faces, mesh),
+            ..Self::from_regions(master, slave, faces, mesh)
+        }
+    }
+
     pub fn current(&self) -> &RegionDraft {
         match self.side {
             Side::Master => &self.master,
@@ -106,6 +128,14 @@ impl MasterSlave {
         Ok(())
     }
 }
+
+/// Picked faces, a surface or whole parts: the slave side of a contact pair, which may be a
+/// rope or beam part.
+const PAIR_SLAVE_SOURCES: &[crate::setup::Source] = &[
+    crate::setup::Source::Selection,
+    crate::setup::Source::Surface,
+    crate::setup::Source::Parts,
+];
 
 /// Master faces in the primary, slave faces in the secondary highlight colour.
 pub fn master_slave_highlight(model: &Model, master: &Region, slave: &Region) -> Highlight {

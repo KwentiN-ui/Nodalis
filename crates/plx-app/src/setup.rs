@@ -2182,7 +2182,7 @@ impl Editor {
                 let interaction = fe.surface_interactions.first().map(|s| s.id);
                 Draft::ContactPair(
                     ContactPair::new(next_name("Contact_Pair", existing), interaction),
-                    MasterSlave::new(contact_target(fe)),
+                    MasterSlave::new_pair(contact_target(fe)),
                 )
             }
             NewItem::Tie => {
@@ -2363,8 +2363,12 @@ impl Editor {
             }
             TreeItem::ContactPair(i) => {
                 let pair = fe.contact_pairs.get(i)?.clone();
-                let regions =
-                    MasterSlave::from_regions(&pair.master, &pair.slave, contact_target(fe), mesh);
+                let regions = MasterSlave::pair_from_regions(
+                    &pair.master,
+                    &pair.slave,
+                    contact_target(fe),
+                    mesh,
+                );
                 (Draft::ContactPair(pair, regions), i)
             }
             TreeItem::ContactRegion(i) => {
