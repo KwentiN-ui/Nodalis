@@ -118,6 +118,16 @@ pub fn fold_output(ctx: &egui::Context, folded: bool) {
     set_folded(ctx, "output", true, folded);
 }
 
+/// A row of widgets that wraps when it is too wide. Inside a `Grid` cell a plain
+/// `horizontal_wrapped` does not report the height of the wrapped lines, so the next row
+/// would be drawn over them. The vertical wrapper makes the cell take that height.
+pub fn wrapped_row<R>(
+    ui: &mut egui::Ui,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    ui.vertical(|ui| ui.horizontal_wrapped(add).inner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,14 +155,4 @@ mod tests {
         assert!(!fold.folded(false));
         assert!(fold.folded(true));
     }
-}
-
-/// A row of widgets that wraps when it is too wide. Inside a `Grid` cell a plain
-/// `horizontal_wrapped` does not report the height of the wrapped lines, so the next row
-/// would be drawn over them. The vertical wrapper makes the cell take that height.
-pub fn wrapped_row<R>(
-    ui: &mut egui::Ui,
-    add: impl FnOnce(&mut egui::Ui) -> R,
-) -> egui::InnerResponse<R> {
-    ui.vertical(|ui| ui.horizontal_wrapped(add).inner)
 }
