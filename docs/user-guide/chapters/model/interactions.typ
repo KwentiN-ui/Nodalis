@@ -651,12 +651,17 @@ shells. Create a contact pair with the rope as slave: set #ui("Slave region") to
 and click the rope, and pick the running surface of the sheave as master. The slave of beams
 needs #ui("Node to surface"); the other methods are refused when the model is written.
 
-Every node of the rope is then a slave node that stays half the rope diameter (the
-#ui("Rope diameter") of its profile) outside the master surface, so the rope's surface, not its
-axis, rests on the sheave. Each node carries the contact force of its share of the rope, and
-friction from the #ui("Surface interaction") acts as on any other contact. Beside the edge of
-the master surface the distance is measured to the edge, so a rope that leaves a sheave of
-small width lifts off it smoothly instead of resting on the extended face.
+Every node of the rope then touches the master with 16 points round its circumference, half
+the rope diameter (the #ui("Rope diameter") of its profile) off its axis, so the rope's surface,
+not its axis, rests on the sheave. The points turn with the rope's axis as it bends. A rope in a
+groove touches both flanks at once and is held sideways by them, also in a groove of exactly the
+rope's radius; nothing else needs to hold the rope out of the plane of the sheave. Each point
+carries the contact force of its share of the rope's surface, and friction from the
+#ui("Surface interaction") acts as on any other contact. The contact results of a rope node are
+those of its point pressed hardest. A bonded rope keeps its axis half the diameter off the
+master instead. Beside the edge of the master surface the distance is measured to the edge, so a
+rope that leaves a sheave of small width lifts off it smoothly instead of resting on the
+extended face.
 
 #screenshot("contact-pair-rope.png", [A rope wound round a sheave: the running surface of the
   sheave as master (red), the rope part as slave (yellow), Node to surface])
@@ -669,10 +674,15 @@ The solver was checked against two closed-form cases:
 - A rope wrapped by 90 degrees round a fixed drum and pulled at one end slides with the tension
   ratio e^(-μφ) of Euler and Eytelwein to 1 % (μ = 0.2), and without friction both ends carry
   the same tension.
+- A rope in a round groove of its own radius, held out of the plane only by the groove, gives
+  the force of the first case to 2 % and stays in the middle of the groove.
 
 Facet the sheave finely: a running surface of flat faces of 3 degrees each changes the rope
 tension by a few percent; faces of 0.5 to 1 degree give the round drum. A sliding rope with
-friction converges best in many small increments.
+friction converges best in many small increments. Mesh a groove finely too: the nodes of a coarse
+tetrahedral mesh of a groove lie a little inside the true round, and a rope drawn in the middle
+of a groove of its own radius then starts pressed into their high points. Real grooves are a
+little wider than the rope (radius about 0.53 times the rope diameter).
 
 === Ties <ties>
 
