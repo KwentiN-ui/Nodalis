@@ -42,9 +42,7 @@ jobs:
       - name: Gmsh und Systembibliotheken
         run: |
           [ -f ~/gmsh/libgmsh.so.4.15 ] || python3 scripts/fetch_gmsh.py --dest ~/gmsh
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends libglu1-mesa libxft2 \
-            libasound2-dev
+          scripts/ci_apt_install.sh libglu1-mesa libxft2 libasound2-dev
           echo "NODALIS_GMSH=$HOME/gmsh/libgmsh.so.4.15" >> "$GITHUB_ENV"
           echo "NODALIS_REQUIRE_GMSH=1" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
