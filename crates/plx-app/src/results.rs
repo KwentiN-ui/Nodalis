@@ -68,6 +68,9 @@ impl Deformation {
     }
 }
 
+/// A field of a steady state step at a phase angle, by increment, field and phase bits.
+type HarmonicEntry = ((usize, usize, u32), std::sync::Arc<Field>);
+
 /// Selection and display settings for the results of one `.frd` file.
 pub struct ResultsView {
     pub increments: Vec<Increment>,
@@ -137,6 +140,12 @@ pub struct ResultsView {
     /// Unit system of the values: that of the FE model the
     /// results belong to; the legend shows units after it.
     pub units: UnitSystem,
+    /// The phase angle `omega t` (degrees) of the period a steady state step is shown at, see
+    /// [`ResultsView::harmonic`].
+    pub harmonic_phase: f32,
+    /// The shown field of a steady state step at the shown phase, by increment, field and
+    /// phase: it is asked for several times a frame.
+    harmonic_cache: std::sync::Mutex<Option<HarmonicEntry>>,
     /// Characteristic model size for the automatic scale (cube root of the bounding
     /// box volume, square root of the area for flat models).
     model_size: f64,
@@ -249,6 +258,8 @@ impl ResultsView {
             units: UnitSystem::default(),
             model_size: bounds.map_or(1.0, model_size),
             deformation_peaks: Vec::new(),
+            harmonic_phase: 0.0,
+            harmonic_cache: Default::default(),
         };
         view.mode_amplitude = round_significant(0.25 * view.model_size, 2);
         view.deformation_peaks = (view.increments.iter())
@@ -803,7 +814,8 @@ impl ResultsView {
                 }
                 AnalysisKind::Sensitivity => "Sensitivity".to_owned(),
                 _ if category == Some(plx_results::steps::StepCategory::SteadyStateDynamics) => {
-                    format!("{entry}   Frequency: {value} {hertz}")
+                    let phase = self.harmonic().map_or(0.0, f32::to_degrees);
+                    format!("{entry}   Frequency: {value} {hertz}   Phase angle: {phase:.0} deg")
                 }
                 _ => {
                     let mut line = entry.clone();
@@ -927,7 +939,8 @@ impl ResultsView {
     /// Factor on the deformation of the shown animation frame; 1 without animation, and 1
     /// while a complex mode whirls, as its displacements already carry the phase.
     pub fn amplitude(&self) -> f32 {
-        if self.whirl().is_some() {
+        // A steady state step carries the phase in its values.
+        if self.whirl().is_some() || self.harmonic().is_some() {
             return 1.0;
         }
         self.animation.as_ref().map_or(1.0, Animation::amplitude)
@@ -939,6 +952,7 @@ impl ResultsView {
     pub fn value_amplitude(&self) -> f32 {
         let amplitude = match self.whirl() {
             Some((phase, _)) => phase.cos(),
+            None if self.harmonic().is_some() => 1.0,
             None => self.amplitude(),
         };
         match self.current() {
@@ -1055,7 +1069,155 @@ impl ResultsView {
             convergence,
             unconverged,
         );
+        self.add_harmonic_fields();
         self.follow_default_deformation();
+    }
+
+    /// Adds the amplitudes and phase lags to the increments of the steady state steps, in
+    /// front of their fields (see [`plx_results::harmonic`]); a field the user picked stays
+    /// shown, the first one gives way to the first amplitude.
+    fn add_harmonic_fields(&mut self) {
+        let shown = (self.current())
+            .filter(|_| self.field > 0)
+            .map(|(f, c)| (f.name.clone(), c.name.clone()));
+        let mut added = false;
+        for step in &self.steps.steps {
+            if step.category != plx_results::steps::StepCategory::SteadyStateDynamics {
+                continue;
+            }
+            for &index in &step.increments {
+                if let Some(increment) = self.increments.get_mut(index)
+                    && plx_results::harmonic::add_amplitudes(increment)
+                {
+                    added = true;
+                    if let Some(peak) = self.deformation_peaks.get_mut(index) {
+                        *peak = Default::default();
+                    }
+                }
+            }
+        }
+        if !added {
+            return;
+        }
+        *self.harmonic_cache.get_mut().unwrap() = None;
+        let found = shown.and_then(|(field, component)| {
+            let fields = &self.current_increment()?.fields;
+            let f = fields.iter().position(|f| f.name == field)?;
+            let c = (fields[f].components.iter()).position(|c| c.name == component);
+            Some((f, c.unwrap_or(0)))
+        });
+        let (field, component) = found.unwrap_or((0, 0));
+        self.field = field;
+        self.component = component;
+    }
+
+    /// Whether the shown step is a steady state step, whose results are a vibration.
+    pub fn shows_harmonic(&self) -> bool {
+        self.current_step()
+            .is_some_and(|s| s.category == plx_results::steps::StepCategory::SteadyStateDynamics)
+            && self.superposition.is_none()
+    }
+
+    /// The phase angle `omega t` (radians) a steady state step is shown at: one period over the
+    /// frames of a scale factor animation, else [`ResultsView::harmonic_phase`].
+    pub fn harmonic(&self) -> Option<f32> {
+        if !self.shows_harmonic() {
+            return None;
+        }
+        Some(match &self.animation {
+            // The frames divide the period evenly, the last one a step before the first
+            // again, so that a loop runs smoothly.
+            Some(a) if a.kind == AnimationKind::ScaleFactor => {
+                let count = a.frame_count();
+                a.frame.min(count - 1) as f32 / count as f32 * std::f32::consts::TAU
+            }
+            _ => self.harmonic_phase.to_radians(),
+        })
+    }
+
+    /// The shown field at the shown phase angle, when it is a field with an imaginary part
+    /// of a steady state step: `a cos(omega t) - b sin(omega t)`.
+    fn harmonic_field(&self) -> Option<std::sync::Arc<Field>> {
+        let phase = self.harmonic()?;
+        let key = (self.increment, self.field, phase.to_bits());
+        if let Some((cached, field)) = self.harmonic_cache.lock().unwrap().as_ref()
+            && *cached == key
+        {
+            return Some(field.clone());
+        }
+        let (shown, _) = self.current()?;
+        let increment = self.current_increment()?;
+        let imaginary = plx_results::harmonic::imaginary(increment, &shown.name)?;
+        let field = std::sync::Arc::new(plx_results::harmonic::at_phase(
+            shown,
+            Some(imaginary),
+            phase,
+        ));
+        *self.harmonic_cache.lock().unwrap() = Some((key, field.clone()));
+        Some(field)
+    }
+
+    /// Values of the shown component at the shown phase angle of a steady state step.
+    fn harmonic_values(&self) -> Option<Vec<f32>> {
+        let field = self.harmonic_field()?;
+        let (_, component) = self.current()?;
+        Some(field.component(&component.name)?.values.clone())
+    }
+
+    /// The displacements at the shown phase angle of a steady state step.
+    fn harmonic_displacements(&self) -> Option<Vec<[f32; 3]>> {
+        let phase = self.harmonic()?;
+        let increment = self.current_increment()?;
+        let real = increment.field("DISP")?;
+        let imaginary = plx_results::harmonic::imaginary(increment, "DISP");
+        let (cos, sin) = (phase.cos(), phase.sin());
+        fn column<'a>(field: Option<&'a Field>, name: &str) -> Option<&'a [f32]> {
+            field
+                .and_then(|f| f.component(name))
+                .map(|c| c.values.as_slice())
+        }
+        let [a, b] = [Some(real), imaginary].map(|f| ["U1", "U2", "U3"].map(|n| column(f, n)));
+        let nodes = a[0].map_or(0, <[f32]>::len);
+        Some(
+            (0..nodes)
+                .map(|i| {
+                    [0, 1, 2].map(|k| {
+                        let value = |c: Option<&[f32]>| {
+                            c.and_then(|c| c.get(i)).copied().filter(|v| v.is_finite())
+                        };
+                        value(a[k]).unwrap_or(0.0) * cos - value(b[k]).unwrap_or(0.0) * sin
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    /// Legend range of the shown component of a steady state step: over the whole period
+    /// while an animation keeps the colours of all frames, from the amplitudes; else that of
+    /// the shown phase.
+    fn harmonic_range(&self) -> Option<(f32, f32)> {
+        self.harmonic_field()?;
+        let (field, component) = self.current()?;
+        let all_frames = self.animation.as_ref().is_some_and(|a| {
+            a.kind == AnimationKind::ScaleFactor && a.limits == ColorLimits::AllFrames
+        });
+        let amplitude = (self.current_increment()?)
+            .field(&format!(
+                "{}{}",
+                field.name,
+                plx_results::harmonic::AMPLITUDE
+            ))
+            .and_then(|f| f.component(&component.name));
+        if all_frames && let Some(amplitude) = amplitude {
+            let (_, peak) = self.range_of(&amplitude.values)?;
+            return Some(if component.is_invariant() {
+                (0.0, peak)
+            } else {
+                (-peak, peak)
+            });
+        }
+        let values = self.shown_values()?;
+        self.range_of(&values)
     }
 
     /// Shows another increment, also while the animation window is open: the animation then
@@ -1084,7 +1246,14 @@ impl ResultsView {
         let modal = self.current_increment().is_some_and(|i| i.kind.is_modal());
         let increments = self.animated_increments(kind);
         let times = self.increment_times(&increments);
-        self.animation = Some(Animation::new(kind, increments, times, start, modal));
+        let mut animation = Animation::new(kind, increments, times, start, modal);
+        // A vibration repeats: it loops over its period from the moment the load peaks.
+        if kind == AnimationKind::ScaleFactor && self.shows_harmonic() {
+            animation.playback = crate::animation::Playback::Loop;
+            animation.frame = 0;
+            animation.play();
+        }
+        self.animation = Some(animation);
         self.show_animation_frame();
     }
 
@@ -1093,7 +1262,11 @@ impl ResultsView {
     /// increment grows from zero to its full size.
     pub fn automatic_animation(&self) -> AnimationKind {
         let modal = self.current_increment().is_some_and(|i| i.kind.is_modal());
-        let Some(step) = self.current_step().filter(|_| !modal) else {
+        // A steady state step vibrates through one period.
+        let Some(step) = self
+            .current_step()
+            .filter(|_| !modal && !self.shows_harmonic())
+        else {
             return AnimationKind::ScaleFactor;
         };
         if step.has_positions() {
@@ -1170,6 +1343,9 @@ impl ResultsView {
     /// Displacements as shown: those of the overlaid modes, or of the current increment,
     /// interpolated towards the next one while an animation plays by time.
     pub fn shown_displacements(&self) -> Option<std::borrow::Cow<'_, [[f32; 3]]>> {
+        if let Some(displacements) = self.harmonic_displacements() {
+            return Some(std::borrow::Cow::Owned(displacements));
+        }
         if let Some((phase, field)) = self.whirl() {
             return Some(std::borrow::Cow::Owned(Self::whirl_displacements(
                 phase, field,
@@ -1196,6 +1372,9 @@ impl ResultsView {
 
     /// Displacement of one node as shown.
     pub fn shown_displacement(&self, node: usize) -> Option<[f32; 3]> {
+        if self.harmonic().is_some() {
+            return self.harmonic_displacements()?.get(node).copied();
+        }
         if let Some((phase, field)) = self.whirl() {
             let nodes = field.component("MAG1").map_or(0, |c| c.values.len());
             return (node < nodes).then(|| Self::whirl_displacement(phase, field, node));
@@ -1240,6 +1419,9 @@ impl ResultsView {
         if let Some((phase, field)) = self.whirl()
             && let Some(values) = self.whirl_values(phase, field)
         {
+            return Some(std::borrow::Cow::Owned(values));
+        }
+        if let Some(values) = self.harmonic_values() {
             return Some(std::borrow::Cow::Owned(values));
         }
         if let Some((towards, fraction)) = self.interpolated_component() {
@@ -1295,6 +1477,7 @@ impl ResultsView {
     pub fn shown_values_on(&self, instance: &DAffine3) -> Option<std::borrow::Cow<'_, [f32]>> {
         if self.superposition.is_none()
             && self.whirl().is_none()
+            && self.harmonic_field().is_none()
             && let Some((field, _)) = self.current()
             && let Some(values) =
                 transformation::transformed_values(field, self.component, instance.matrix3)
@@ -1359,6 +1542,9 @@ impl ResultsView {
         let (field, component) = self.current()?;
         if let Some(superposition) = &self.superposition {
             return superposition.range;
+        }
+        if let Some(range) = self.harmonic_range() {
+            return Some(range);
         }
         let (min, max) = self.component_range(field, self.component)?;
         let Some(animation) = &self.animation else {
@@ -1594,6 +1780,12 @@ pub fn field_unit(field: &str, component: &str, units: UnitSystem) -> Option<Str
     if errors.iter().any(|e| field.eq_ignore_ascii_case(e)) {
         return Some("%".into());
     }
+    if field.ends_with(plx_results::harmonic::PHASE) {
+        return Some("deg".into());
+    }
+    if let Some(real) = field.strip_suffix(plx_results::harmonic::AMPLITUDE) {
+        return field_unit(real, component, units);
+    }
     match field_measure(field, component)? {
         Measure::Of(quantity) => unit(quantity),
         Measure::Per(a, b) => Some(format!("{}/{}", unit(a)?, unit(b)?)),
@@ -1689,6 +1881,17 @@ fn max_deformation(increment: &Increment) -> Option<f32> {
                 .fold(0.0, f32::max);
             return Some(peak.sqrt());
         }
+    }
+    // A steady state response reaches its amplitudes over a period.
+    if let Some(amplitude) = increment.field("DISP_AMPLITUDE") {
+        let magnitudes = Field::new(
+            String::new(),
+            (amplitude.components.iter())
+                .filter(|c| ["U1", "U2", "U3"].contains(&c.name.as_str()))
+                .cloned()
+                .collect(),
+        );
+        return max_deformation_of(&magnitudes);
     }
     // A complex mode reaches its magnitudes over a turn, not in its real part alone.
     let field = match increment
@@ -2139,6 +2342,68 @@ mod tests {
         assert_eq!(range(&view), Some((1.0, 2.0)));
         assert_eq!(view.maximum().map(|m| m.1), Some(2.0));
         assert!(view.shown_values().unwrap()[2].is_nan(), "drawn grey");
+    }
+
+    /// A node of a steady state step that moves along y in phase with the load and along z
+    /// a quarter period behind it, with the amplitude 2 in both.
+    #[test]
+    fn steady_state_results_show_amplitude_phase_and_the_moment_of_the_period() {
+        let mut real = increment(1, 1, AnalysisKind::Dynamic, &[[0.0, 2.0, 0.0]]);
+        let mut imaginary = increment(1, 1, AnalysisKind::Dynamic, &[[0.0, 0.0, -2.0]]);
+        let mut disp_i = imaginary.fields.remove(0);
+        disp_i.name = "DISPI".into();
+        disp_i.rank = plx_results::FieldRank::Scalar;
+        disp_i.components.retain(|c| !c.derived);
+        real.fields.push(disp_i);
+        let mut view = ResultsView::new(vec![real], Some(([0.0; 3], [10.0; 3])));
+        let record = plx_results::steps::StepRecord {
+            name: "Sweep".into(),
+            category: plx_results::steps::StepCategory::SteadyStateDynamics,
+            nlgeom: false,
+            perturbation: false,
+            time_period: None,
+            solver_steps: vec![1],
+            inherited_from: None,
+            base: None,
+        };
+        view.set_step_records(&[record], &[], None);
+        let names: Vec<&str> = (view.current_increment().unwrap().fields.iter())
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(names, ["DISP_AMPLITUDE", "DISP_PHASE", "DISP", "DISPI"]);
+        let (shown, component) = view.current().unwrap();
+        assert_eq!(
+            (shown.name.as_str(), component.name.as_str()),
+            ("DISP_AMPLITUDE", "ALL")
+        );
+        assert_eq!(view.shown_values().unwrap()[0], 2.0, "a circle of radius 2");
+        assert_eq!(
+            field_unit("DISP_PHASE", "U3", UnitSystem::default()).as_deref(),
+            Some("deg")
+        );
+        let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5);
+        assert!(close(
+            view.shown_displacements().unwrap()[0],
+            [0.0, 2.0, 0.0]
+        ));
+        // A quarter period later the node is at z.
+        view.harmonic_phase = 90.0;
+        assert!(close(
+            view.shown_displacements().unwrap()[0],
+            [0.0, 0.0, 2.0]
+        ));
+        view.field = 2; // DISP
+        view.component = 3; // U3
+        assert!((view.shown_values().unwrap()[0] - 2.0).abs() < 1e-5);
+        assert_eq!(view.amplitude(), 1.0);
+        // Animate plays the period in a loop from the moment the load peaks.
+        assert_eq!(view.automatic_animation(), AnimationKind::ScaleFactor);
+        view.start_animation(AnimationKind::ScaleFactor);
+        let animation = view.animation.as_mut().unwrap();
+        assert_eq!(animation.playback, crate::animation::Playback::Loop);
+        animation.limits = ColorLimits::AllFrames;
+        assert_eq!(view.harmonic(), Some(0.0));
+        assert_eq!(view.legend().map(|l| (l.min, l.max)), Some((-2.0, 2.0)));
     }
 
     #[test]

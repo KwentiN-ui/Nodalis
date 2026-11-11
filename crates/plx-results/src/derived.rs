@@ -9,6 +9,9 @@ pub fn split_rotations(mut field: Field) -> Vec<Field> {
     let (raw, name, renamed): ([&str; 3], &str, [&str; 3]) = match field.name.as_str() {
         "DISP" => (["D4", "D5", "D6"], "ROTATION", ["UR1", "UR2", "UR3"]),
         "FORC" => (["F4", "F5", "F6"], "MOMENT", ["M1", "M2", "M3"]),
+        // The imaginary parts of a steady state step, see [`crate::harmonic`].
+        "DISPI" => (["D4", "D5", "D6"], "ROTATIONI", ["UR1", "UR2", "UR3"]),
+        "FORCI" => (["F4", "F5", "F6"], "MOMENTI", ["M1", "M2", "M3"]),
         _ => return vec![field],
     };
     if !raw
