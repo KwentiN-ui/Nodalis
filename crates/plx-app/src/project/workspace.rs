@@ -27,7 +27,7 @@ impl BlockTile {
             Self::MeshExport => BlockKind::MeshExport,
             Self::Note => BlockKind::Note,
             Self::Plot => BlockKind::Plot,
-            Self::MeshPreview => BlockKind::MeshPreview,
+            Self::Preview => BlockKind::Preview,
         }
     }
 }

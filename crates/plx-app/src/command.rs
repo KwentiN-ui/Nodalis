@@ -98,7 +98,7 @@ pub enum BlockTile {
     MeshExport,
     Note,
     Plot,
-    MeshPreview,
+    Preview,
 }
 
 /// A command. The project carries out those of the Project workspace, an analysis the
@@ -789,12 +789,12 @@ fn build() -> Vec<Command> {
         "Places a block that plots series in the block: a line, points or a histogram.",
     ));
     add(place(
-        BlockTile::MeshPreview,
-        "Mesh\nPreview",
+        BlockTile::Preview,
+        "Preview",
         "Evaluate",
         "Visualize",
         Node(NodeIcon::Picture),
-        "Places a block that shows a small picture of the mesh linked to it.",
+        "Places a block that shows what is linked to it: a mesh, a number or a series.",
     ));
     add(place(
         BlockTile::Note,
@@ -2384,7 +2384,7 @@ mod tests {
             BlockTile::MeshExport,
             BlockTile::Note,
             BlockTile::Plot,
-            BlockTile::MeshPreview,
+            BlockTile::Preview,
         ] {
             assert!(find(Cmd::Place(block)).is_some(), "{block:?}");
         }

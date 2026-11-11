@@ -79,7 +79,7 @@ fn same_data(a: Option<&ProjectNode>, b: Option<&ProjectNode>) -> bool {
         (Some(ProjectNode::Math(a)), Some(ProjectNode::Math(b))) => a == b,
         (Some(ProjectNode::Switch(a)), Some(ProjectNode::Switch(b))) => a == b,
         (Some(ProjectNode::Plot(a)), Some(ProjectNode::Plot(b))) => a == b,
-        (Some(ProjectNode::MeshPreview(_)), Some(ProjectNode::MeshPreview(_))) => true,
+        (Some(ProjectNode::Preview(_)), Some(ProjectNode::Preview(_))) => true,
         (Some(ProjectNode::Group(a)), Some(ProjectNode::Group(b))) => {
             a.nodes == b.nodes && a.inputs == b.inputs && a.outputs == b.outputs
         }

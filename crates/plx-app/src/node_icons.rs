@@ -54,7 +54,7 @@ pub enum NodeIcon {
     Switch,
     /// A Plot block: two axes with a curve.
     Plot,
-    /// A Mesh Preview block: a framed picture of a triangle mesh.
+    /// A Preview block: a framed picture of a triangle mesh.
     Picture,
     /// A node group: two small blocks linked inside a frame.
     Group,

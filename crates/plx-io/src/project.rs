@@ -103,8 +103,9 @@ pub enum ProjectNode {
     Switch(SwitchBlock),
     /// A plot of the numbers linked to it, drawn in the block.
     Plot(PlotBlock),
-    /// A small picture of the mesh linked to it, drawn in the block.
-    MeshPreview(MeshPreview),
+    /// What is linked to it, drawn in the block: a mesh, a number or a series.
+    #[serde(alias = "MeshPreview")]
+    Preview(Preview),
     /// Blocks put together into one, which opens into a schematic of its own, like a node
     /// group of Blender.
     Group(NodeGroup),
@@ -135,7 +136,7 @@ impl ProjectNode {
             Self::Math(m) => m.id,
             Self::Switch(s) => s.id,
             Self::Plot(p) => p.id,
-            Self::MeshPreview(m) => m.id,
+            Self::Preview(m) => m.id,
             Self::Group(g) => g.id,
             Self::GroupInput(g) | Self::GroupOutput(g) => g.id,
         }
@@ -160,7 +161,7 @@ impl ProjectNode {
             Self::Math(m) => &m.name,
             Self::Switch(s) => &s.name,
             Self::Plot(p) => &p.name,
-            Self::MeshPreview(m) => &m.name,
+            Self::Preview(m) => &m.name,
             Self::Group(g) => &g.name,
             Self::GroupInput(g) | Self::GroupOutput(g) => &g.name,
         }
@@ -186,7 +187,7 @@ impl ProjectNode {
             Self::Math(m) => m.position,
             Self::Switch(s) => s.position,
             Self::Plot(p) => p.position,
-            Self::MeshPreview(m) => m.position,
+            Self::Preview(m) => m.position,
             Self::Group(g) => g.position,
             Self::GroupInput(g) | Self::GroupOutput(g) => g.position,
         }
@@ -450,10 +451,11 @@ fn default_bins() -> u32 {
     10
 }
 
-/// A Mesh Preview block: a small picture of the mesh linked to it, beside the analysis it
-/// belongs to, without opening it. The mesh comes by its link on every load.
+/// A Preview block: what is linked to it, drawn in the block: a small picture of a mesh
+/// beside the analysis it belongs to, a number, or a series with its statistics. What it
+/// shows comes by its link on every load. Format 21 called it Mesh Preview.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct MeshPreview {
+pub struct Preview {
     pub id: u64,
     pub name: String,
     #[serde(default)]
@@ -1437,7 +1439,7 @@ mod tests {
     }
 
     /// Writes a project of a cantilever bent far by a force at its tip, with Measure blocks
-    /// of whole histories and field values, Math, Plot and Mesh Preview blocks, for the user
+    /// of whole histories and field values, Math, Plot and Preview blocks, for the user
     /// guide's screenshots of the Visualize blocks:
     /// `PLX_VISUALIZE_DEMO=path cargo test visualize_demo -- --ignored`.
     #[test]
@@ -1546,7 +1548,7 @@ mod tests {
             })
         };
         project.nodes.extend([
-            ProjectNode::MeshPreview(MeshPreview {
+            ProjectNode::Preview(Preview {
                 id: 2,
                 name: "Beam".into(),
                 position: [0.0, 250.0],
@@ -1583,6 +1585,16 @@ mod tests {
                 vec![0.0],
             ),
             plot(9, "Stress Histogram", [740.0, 200.0], PlotKind::Histogram),
+            ProjectNode::Preview(Preview {
+                id: 10,
+                name: "Peak Stress".into(),
+                position: [980.0, 240.0],
+            }),
+            ProjectNode::Preview(Preview {
+                id: 11,
+                name: "Deflection".into(),
+                position: [980.0, -60.0],
+            }),
         ]);
         let link = |source, item: &[&str], target, slot: &[&str]| Link {
             source,
@@ -1603,6 +1615,8 @@ mod tests {
             link(5, &value, 6, &["Parameters", "y"]),
             link(7, &value, 8, &["Parameters", "a"]),
             link(7, &value, 9, &["Parameters", "values"]),
+            link(8, &value, 10, &["Parameters", "Input"]),
+            link(3, &value, 11, &["Parameters", "Input"]),
         ];
         save_project(std::path::Path::new(&path), &project).unwrap();
     }

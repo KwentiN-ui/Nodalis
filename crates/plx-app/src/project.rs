@@ -36,7 +36,7 @@ use crate::tree::TreeView;
 use crate::tree_icons::StepGlyph;
 use cad::{CAD_LENGTH, CadBlock};
 use deformed::{DEFORM_FACTOR, DEFORM_INCREMENT, DeformedBlock};
-use visualize::{MeshPicture, PlotBlock, PlotView, PreviewBlock};
+use visualize::{MeshPicture, PlotBlock, PlotView, PreviewBlock, PreviewView};
 
 mod cad;
 mod deformed;
@@ -76,7 +76,7 @@ enum Kind {
     Math,
     Switch,
     Plot,
-    MeshPreview,
+    Preview,
     Group,
     GroupInput,
     GroupOutput,
@@ -108,7 +108,7 @@ impl Kind {
             Self::Math => "math block",
             Self::Switch => "switch block",
             Self::Plot => "plot block",
-            Self::MeshPreview => "mesh preview block",
+            Self::Preview => "preview block",
             Self::Group => "group",
             Self::GroupInput => "group input",
             Self::GroupOutput => "group output",
@@ -171,8 +171,8 @@ enum Block {
     Switch(NumberBlock),
     /// A plot of the numbers and series linked to it.
     Plot(PlotBlock),
-    /// A small picture of the mesh linked to it.
-    MeshPreview(Box<PreviewBlock>),
+    /// What is linked to it: a picture of a mesh, a number or a series.
+    Preview(Box<PreviewBlock>),
     /// Blocks put together into one, see [`groups`].
     Group(Box<file::NodeGroup>),
     /// The blocks inside a group that give its inputs and take its outputs.
@@ -815,7 +815,7 @@ impl Node {
             Block::Math(_) => Kind::Math,
             Block::Switch(_) => Kind::Switch,
             Block::Plot(_) => Kind::Plot,
-            Block::MeshPreview(_) => Kind::MeshPreview,
+            Block::Preview(_) => Kind::Preview,
             Block::Group(_) => Kind::Group,
             Block::GroupInput => Kind::GroupInput,
             Block::GroupOutput => Kind::GroupOutput,
@@ -1033,7 +1033,7 @@ impl Node {
 
     fn as_preview(&self) -> Option<&PreviewBlock> {
         match &self.block {
-            Block::MeshPreview(p) => Some(p),
+            Block::Preview(p) => Some(p),
             _ => None,
         }
     }
@@ -1108,7 +1108,7 @@ impl Node {
             Block::Math(n) | Block::Switch(n) => n.units,
             Block::Plot(p) => p.units,
             Block::CadOperation(c) => c.units,
-            Block::MeshPreview(_)
+            Block::Preview(_)
             | Block::MeshExport(_)
             | Block::Campbell(_)
             | Block::RefineMesh(_)
@@ -1356,8 +1356,8 @@ impl Node {
                 plot.name,
                 Block::Plot(PlotBlock::new(plot.units, plot.kind, plot.bins)),
             ),
-            ProjectNode::MeshPreview(preview) => {
-                Self::new(preview.id, preview.name, Block::MeshPreview(Box::default()))
+            ProjectNode::Preview(preview) => {
+                Self::new(preview.id, preview.name, Block::Preview(Box::default()))
             }
             ProjectNode::Group(group) => {
                 Self::new(group.id, group.name.clone(), Block::Group(Box::new(group)))
@@ -1524,9 +1524,7 @@ impl Node {
                 bins: plot.bins,
             }),
             // It keeps no mesh: the link brings it again.
-            Block::MeshPreview(_) => {
-                ProjectNode::MeshPreview(file::MeshPreview { id, name, position })
-            }
+            Block::Preview(_) => ProjectNode::Preview(file::Preview { id, name, position }),
             Block::Group(group) => ProjectNode::Group(file::NodeGroup {
                 id,
                 name,
@@ -1632,7 +1630,7 @@ impl Node {
             Block::Math(math) => Block::Math(math.clone()),
             Block::Switch(switch) => Block::Switch(switch.clone()),
             Block::Plot(plot) => Block::Plot(PlotBlock::new(plot.units, plot.kind, plot.bins)),
-            Block::MeshPreview(_) => Block::MeshPreview(Box::default()),
+            Block::Preview(_) => Block::Preview(Box::default()),
             // A group is copied with its blocks, see [`ProjectApp::duplicate_group`].
             Block::Group(_) | Block::GroupInput | Block::GroupOutput => return None,
         };
@@ -1692,7 +1690,7 @@ impl Node {
             Block::DeformedMesh(d) => d.link_data(),
             Block::CadOperation(c) => c.link_data(),
             Block::MeshExport(e) => Some(e.model.data()),
-            Block::MeshPreview(p) => Some(p.model.data()),
+            Block::Preview(p) => Some(p.model.data()),
             Block::File(f) => Some(f.model.data()),
             Block::Parameters(_)
             | Block::Measure(_)
@@ -1723,7 +1721,7 @@ impl Node {
             Block::Materials(m) | Block::CrossSections(m) => Some(m.model.data_mut()),
             Block::Mesh(m) => Some(m.model.data_mut()),
             Block::MeshExport(e) => Some(e.model.data_mut()),
-            Block::MeshPreview(p) => Some(p.model.data_mut()),
+            Block::Preview(p) => Some(p.model.data_mut()),
             _ => None,
         }
     }
@@ -2037,9 +2035,9 @@ enum Action {
     SetOperation(u64, MathOp),
     SetNumberInput(u64, String, f64),
     SetChoices(u64, usize),
-    /// A new Plot or Mesh Preview block at the position.
+    /// A new Plot or Preview block at the position.
     AddPlot(egui::Pos2),
-    AddMeshPreview(egui::Pos2),
+    AddPreview(egui::Pos2),
     /// The kind of plot of a Plot block, or the bins of its histogram, changed in its block.
     SetPlotKind(u64, plx_model::PlotKind),
     SetBins(u64, u32),
@@ -2091,7 +2089,7 @@ pub struct ProjectApp {
     frame_label: Option<(usize, String)>,
     /// The note whose text takes the keyboard in the next frame.
     focus_note: Option<u64>,
-    /// The pictures of the Mesh Preview blocks, by block.
+    /// The pictures of the meshes of the Preview blocks, by block.
     pictures: HashMap<u64, MeshPicture>,
     /// The positions of the blocks in the last frame, and the blocks moved while a button
     /// is down, to put those dropped onto a frame in it.
@@ -4525,7 +4523,7 @@ impl ProjectApp {
                 return;
             }
             // Its numbers are edited in its block.
-            Some(Kind::Math | Kind::Switch | Kind::Plot | Kind::MeshPreview) => return,
+            Some(Kind::Math | Kind::Switch | Kind::Plot | Kind::Preview) => return,
             Some(Kind::Group) => return self.enter_group(id),
             Some(Kind::GroupInput | Kind::GroupOutput) => return,
             None => return,
@@ -5777,7 +5775,7 @@ impl ProjectApp {
                     (Kind::Plot, _) => {
                         visualize::plot_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
                     }
-                    (Kind::MeshPreview, _) => visualize::preview_rows(
+                    (Kind::Preview, _) => visualize::preview_rows(
                         n,
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
                     ),
@@ -5829,6 +5827,7 @@ impl ProjectApp {
                     has_mesh: n
                         .as_preview()
                         .is_some_and(|p| p.model.mesh.element_count() > 0),
+                    preview: self.preview_view(n),
                     framed: frames::frame_of(&self.frames, n.id).is_some(),
                     chain,
                     sockets: self.socket_kinds(n.id),
@@ -6068,7 +6067,8 @@ impl ProjectApp {
         if self.group_pin(from.0, from.1) || self.group_pin(to.0, to.1) {
             return self.group_refusal(from, to);
         }
-        let slot = self.checked_slot(to.0, to.1);
+        let slot = visualize::preview_slot(&self.nodes, to.0, from.1)
+            .unwrap_or_else(|| self.checked_slot(to.0, to.1));
         refusal(&self.nodes, &self.links, from.0, from.1, to.0, &slot)
     }
 
@@ -7449,7 +7449,7 @@ impl ProjectApp {
             | Action::SetNumberInput(..)
             | Action::SetChoices(..)
             | Action::AddPlot(_)
-            | Action::AddMeshPreview(_)
+            | Action::AddPreview(_)
             | Action::SetPlotKind(..)
             | Action::SetBins(..)
             | Action::Group(_)
@@ -7665,8 +7665,8 @@ impl ProjectApp {
             Action::AddPlot(pos) => {
                 self.add_plot(pos);
             }
-            Action::AddMeshPreview(pos) => {
-                self.add_mesh_preview(pos);
+            Action::AddPreview(pos) => {
+                self.add_preview(pos);
             }
             Action::SetPlotKind(id, kind) => self.set_plot_kind(id, kind),
             Action::SetBins(id, bins) => self.set_bins(id, bins),
@@ -7687,6 +7687,9 @@ impl ProjectApp {
                     let pin = |node, path| file::GroupPin { node, path };
                     self.link_pins(pin(source, item), pin(target, slot));
                 } else if let Some(slot) = self.new_choice(target, &slot) {
+                    self.link(source, item, target, slot);
+                } else if let Some(slot) = visualize::preview_slot(&self.nodes, target, &item) {
+                    self.keep_one_preview_link(target, &slot);
                     self.link(source, item, target, slot);
                 } else {
                     self.link(source, item, target, slot);
@@ -8401,9 +8404,11 @@ struct BlockView {
     number: Option<(NumberBlock, bool)>,
     /// What a Plot block draws.
     plot: Option<PlotView>,
-    /// Of a Mesh Preview block, the picture of its mesh once drawn, and whether it has one.
+    /// Of a Preview block, the picture of its mesh once drawn, whether it has one, and the
+    /// numbers it shows.
     picture: Option<egui::TextureId>,
     has_mesh: bool,
+    preview: Option<PreviewView>,
     /// The mark of the step chain at the rows of steps, by row path.
     chain: HashMap<Vec<String>, ChainMark>,
     /// Of a group and its Group Input and Group Output blocks, the type of each row of a
@@ -9433,10 +9438,11 @@ fn refusal(
         // of what it gives to; so does a Math or Switch block without a kind, at either end.
         let open =
             |id: u64, path: &[String]| node(id).is_some_and(|n| numbers::open_number(n, path));
-        // A plot takes numbers of any kind.
-        let plotted = target_node.as_plot().is_some_and(
+        // A plot and a preview take numbers of any kind.
+        let plotted = (target_node.as_plot().is_some_and(
             |p| matches!(slot, [_, key] if p.kind.inputs().iter().any(|(k, _)| k == key)),
-        ) && taken.is_none();
+        ) || target_node.as_preview().is_some())
+            && taken.is_none();
         let any = (feedback && given.is_none() && (taken.is_some() || open(target, slot)))
             || (open(source, item) && (taken.is_some() || open(target, slot)))
             || (open(target, slot) && given.is_some())
@@ -10284,7 +10290,7 @@ enum BlockKind {
     File,
     Note,
     Plot,
-    MeshPreview,
+    Preview,
 }
 
 fn block_kinds() -> Vec<BlockKind> {
@@ -10307,7 +10313,7 @@ fn block_kinds() -> Vec<BlockKind> {
         BlockKind::File,
         BlockKind::Note,
         BlockKind::Plot,
-        BlockKind::MeshPreview,
+        BlockKind::Preview,
     ]
 }
 
@@ -10440,12 +10446,14 @@ impl BlockKind {
                  line or points of Y over X, such as a whole history over its time, or a \
                  histogram of the values of a field. Its type of plot decides its inputs.",
             ),
-            Self::MeshPreview => (
+            Self::Preview => (
                 "Visualize",
-                "Mesh Preview",
-                "picture image thumbnail geometry mesh view visualize",
-                "Adds a block that shows a small picture of the mesh linked to it, so that the \
-                 schematic shows the geometry beside its analysis without opening it.",
+                "Preview",
+                "preview picture image thumbnail geometry mesh number value series vector \
+                 statistics view visualize",
+                "Adds a block that shows what is linked to it: a small picture of a mesh, so \
+                 that the schematic shows the geometry beside its analysis, a number, or a \
+                 series with its statistics.",
             ),
             Self::Note => (
                 "Note",
@@ -10483,7 +10491,7 @@ impl BlockKind {
             Self::File => Action::AddFile(pos),
             Self::Note => Action::AddNote(pos),
             Self::Plot => Action::AddPlot(pos),
-            Self::MeshPreview => Action::AddMeshPreview(pos),
+            Self::Preview => Action::AddPreview(pos),
         }
     }
 }
@@ -10612,7 +10620,7 @@ fn header_fill(kind: Kind) -> Option<egui::Color32> {
         Kind::Study | Kind::Campbell => crate::style::study_header(),
         Kind::MeshExport => crate::style::export_header(),
         Kind::Note => crate::style::note_header(),
-        Kind::Plot | Kind::MeshPreview => crate::style::visualize_header(),
+        Kind::Plot | Kind::Preview => crate::style::visualize_header(),
         Kind::Group | Kind::GroupInput | Kind::GroupOutput => crate::style::group_header(),
         _ => return None,
     })
@@ -11215,10 +11223,10 @@ impl SnarlViewer<u64> for Viewer {
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Plot, ink);
                 icon.on_hover_text("Plots the numbers and series linked to it");
             }
-            Kind::MeshPreview => {
+            Kind::Preview => {
                 let ink = ui.visuals().text_color();
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Picture, ink);
-                icon.on_hover_text("Shows a small picture of the mesh linked to it");
+                icon.on_hover_text("Shows the mesh, number or series linked to it");
             }
             Kind::Group => {
                 let ink = ui.visuals().text_color();
@@ -11312,7 +11320,7 @@ impl SnarlViewer<u64> for Viewer {
             Kind::Math => "Its operation and numbers are edited in the block.",
             Kind::Switch => "Its index and choices are edited in the block.",
             Kind::Plot => "Its type of plot and its inputs are chosen in the block.",
-            Kind::MeshPreview => "Shows the mesh linked to its Mesh row.",
+            Kind::Preview => "Shows the mesh, number or series linked to its row.",
             Kind::Group => {
                 "Double-click or Tab opens the group; Ctrl+Tab or the path at the top left \
                  goes back out."
@@ -11584,10 +11592,10 @@ impl SnarlViewer<u64> for Viewer {
             .is_some_and(|b| b.kind == Kind::Note && !b.compact)
     }
 
-    // A Plot and a Mesh Preview block show their picture below their rows, also compact.
+    // A Plot and a Preview block show their picture below their rows, also compact.
     fn has_footer(&mut self, node: &u64) -> bool {
         self.block(*node)
-            .is_some_and(|b| matches!(b.kind, Kind::Plot | Kind::MeshPreview))
+            .is_some_and(|b| matches!(b.kind, Kind::Plot | Kind::Preview))
     }
 
     fn show_footer(
@@ -11608,7 +11616,9 @@ impl SnarlViewer<u64> for Viewer {
                     self.show_plot(ui, view);
                 }
             }
-            Kind::MeshPreview => self.show_picture(ui, block.picture, block.has_mesh),
+            Kind::Preview => {
+                self.show_preview(ui, block.picture, block.has_mesh, block.preview.as_ref())
+            }
             _ => {}
         }
     }
@@ -12272,7 +12282,7 @@ fn node_menu(
             entry(ui, "Open Diagram …", "", Action::Open(id, None));
         } else if !matches!(
             kind,
-            Kind::RefineMesh | Kind::DeformedMesh | Kind::Plot | Kind::MeshPreview
+            Kind::RefineMesh | Kind::DeformedMesh | Kind::Plot | Kind::Preview
         ) {
             entry(ui, "Edit …", "", Action::Open(id, None));
         }

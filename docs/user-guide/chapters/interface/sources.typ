@@ -614,10 +614,10 @@ The file holds the mesh only, not the loads or steps of an analysis that takes t
 so it reads back as a mesh when an analysis imports it. A path the program cannot write
 shows as an error in the #ui("Mesh") row's tooltip and in the output window.
 
-=== Plot and Mesh Preview <plot-block>
+=== Plot and Preview <plot-block>
 
 The blocks under #ui("Visualize") show results in the schematic itself, without opening an
-analysis. Add them with #menu("Evaluate", "Plot") and #menu("Evaluate", "Mesh Preview"), or
+analysis. Add them with #menu("Evaluate", "Plot") and #menu("Evaluate", "Preview"), or
 search them with #key("Shift+A").
 
 #screenshot("visualize-blocks.png", [A cantilever bent far by a force at its tip. Force over
@@ -643,8 +643,23 @@ them, with their units, which those blocks set. #ui("X") and #ui("Y") of differe
 drawn as far as both go, with a warning in the corner. A single number counts as a series of
 one value.
 
-A *Mesh Preview block* shows a small picture of the mesh linked to its #ui("Mesh") row: drag
-the #ui("Mesh") of an analysis or of a mesh block there. The parts have the colors of the
-analysis, seen along the diagonal like the isometric view; a 2D mesh is seen from the front.
-The picture is drawn anew in the background whenever the mesh changes, so it stays a quick
-glance at the geometry beside its analysis.
+A *Preview block* shows whatever is linked to its one input, so that a glance at the
+schematic shows it without opening anything. Before a link the row is called #ui("Input");
+it takes the name of what it shows:
+
+#fields(
+  [Mesh], [A small picture of the mesh: drag the #ui("Mesh") of an analysis or of a mesh
+    block there. The parts have the colors of the analysis, seen along the diagonal like the
+    isometric view; a 2D mesh is seen from the front. The picture is drawn anew in the
+    background whenever the mesh changes.],
+  [Value], [A number, drawn large with its unit and the name of the block that gives it.
+    A series (@series) is drawn as a line over its index, with its count, mean, smallest and
+    largest value and standard deviation below.],
+)
+
+A new link replaces the one before, whatever it brought: a Preview block shows one thing.
+Until the analysis is solved, a linked number shows #ui("No value yet").
+
+#screenshot("preview-block.png", [Two Preview blocks: Deflection shows the series of the tip
+  deflection over the step with its statistics, Peak Stress the maximum stress that the Max
+  block gives])
