@@ -2506,10 +2506,14 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
             })
             .collect();
         if let Some(increment) = view.current_increment() {
-            fields = increment
-                .fields
-                .iter()
-                .map(|f| {
+            // The imaginary parts of a steady state step are in its amplitudes, phases and
+            // phase angle; the tree leaves them out.
+            let harmonic = view.shows_harmonic();
+            fields = (increment.fields.iter().enumerate())
+                .filter(|(_, f)| {
+                    !harmonic || !plx_results::harmonic::is_imaginary(increment, &f.name)
+                })
+                .map(|(index, f)| {
                     // Components out of the plane of a 2D model are zero and not listed;
                     // the rest keep their index in the field.
                     let components: Vec<(usize, String)> = (f.components.iter().enumerate())
@@ -2517,7 +2521,7 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                         .map(|(c, component)| (c, component.name.clone()))
                         .collect();
                     let derived = view.field_outputs.iter().any(|o| o.name == f.name);
-                    (f.name.clone(), components, derived)
+                    (index, f.name.clone(), components, derived)
                 })
                 .collect();
         }
@@ -2540,14 +2544,14 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                 tree.leaf(ui, TreeItem::FieldOutputs, text);
             } else {
                 tree.branch(ui, TreeItem::FieldOutputs, text, true, |tree, ui| {
-                    for (f, (name, components, derived)) in fields.into_iter().enumerate() {
+                    for (shown, (f, name, components, derived)) in fields.into_iter().enumerate() {
                         let item = if derived {
                             TreeItem::ResultFieldOutput(f)
                         } else {
                             TreeItem::Field(f)
                         };
                         // Nodalis opens the first two fields.
-                        tree.branch(ui, item, name, f < 2, |tree, ui| {
+                        tree.branch(ui, item, name, shown < 2, |tree, ui| {
                             for (c, component) in components {
                                 let item = TreeItem::Component(f, c);
                                 if tree.leaf(ui, item, component).clicked()

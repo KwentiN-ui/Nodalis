@@ -12800,3 +12800,71 @@ fn a_bolt_through_a_tapped_hole_is_tied_in_the_bore_and_cut_below_it() {
     assert!(foot < -1.0, "{foot}");
     assert!((foot + rim).abs() < 1e-4 * foot.abs(), "{foot} {rim}");
 }
+
+/// The imaginary parts of a frequency response (`DISPI`, `STRESSI`, ...) are the part of the
+/// response a quarter period behind the load, which only damping gives: undamped they are
+/// zero, damped they are not.
+#[test]
+fn solver_writes_imaginary_parts_that_damping_fills() {
+    let largest = |name: &str, damping: Option<ModalDamping>| {
+        let (mesh, mut model) = modal_cantilever(damping);
+        let StepKind::SteadyStateDynamics(settings) = &mut model.steps[2].kind else {
+            unreachable!()
+        };
+        // Below the first mode (about 800 Hz): no undamped resonance on the grid.
+        settings.lower_frequency = 100.0;
+        settings.upper_frequency = 700.0;
+        settings.data_points = 4;
+        let frd = run_solver(name, &write_inp(&mesh, &model, "").unwrap())?;
+        let sweep: Vec<_> = frd.increments.iter().filter(|i| i.step == 5).collect();
+        let field = sweep.first()?.field("DISPI")?;
+        Some(
+            (field.components.iter())
+                .flat_map(|c| c.values.iter())
+                .filter(|v| v.is_finite())
+                .fold(0.0_f32, |m, v| m.max(v.abs())),
+        )
+    };
+    let Some(undamped) = largest("ssd-ungedaempft", None) else {
+        return;
+    };
+    assert_eq!(undamped, 0.0);
+    let damped = largest("ssd-gedaempft", Some(ModalDamping::Constant(0.05))).unwrap();
+    assert!(damped > 0.0, "{damped}");
+}
+
+/// Writes a project of the cantilever of `kragbalken_c3d20r.inp` with a damped Steady State
+/// Dynamics step over its first modes, for the user guide's screenshots of steady state
+/// results: `PLX_SSD_DEMO=path cargo test steady_state_demo -- --ignored`.
+#[test]
+#[ignore]
+fn steady_state_demo_project() {
+    let Some(path) = std::env::var_os("PLX_SSD_DEMO") else {
+        return;
+    };
+    let (mesh, mut model) = modal_cantilever(Some(ModalDamping::Constant(0.02)));
+    let mut sweep = model.steps.pop().unwrap();
+    let StepKind::SteadyStateDynamics(settings) = &mut sweep.kind else {
+        unreachable!()
+    };
+    settings.lower_frequency = 0.0;
+    settings.upper_frequency = 6000.0;
+    settings.data_points = 20;
+    settings.bias = 3.0;
+    settings.modes = 10;
+    sweep.name = "Frequency response".into();
+    model.steps = vec![sweep];
+    let project = crate::project::Project {
+        nodes: vec![crate::project::ProjectNode::Analysis(Box::new(
+            crate::project::ProjectAnalysis {
+                id: 1,
+                name: "Analysis-1".into(),
+                mesh,
+                model,
+                ..Default::default()
+            },
+        ))],
+        ..Default::default()
+    };
+    crate::project::save_project(std::path::Path::new(&path), &project).unwrap();
+}

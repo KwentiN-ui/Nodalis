@@ -32,8 +32,41 @@ The response over time from the eigenmodes is a #ui("Dynamic") step with the met
     evenly.],
 )
 
-The results have one increment per frequency. The displacements are written as real part (`DISP`)
-and imaginary part (`DISPI`); the magnitude of a node is the length of both together.
+=== Results of a Steady State Dynamics step <steady-state-results>
+
+The results have one increment per frequency: #ui("Frequency") in the ribbon and the timeline
+step through them. At each frequency every point of the structure vibrates harmonically,
+`x(t) = A cos(Ωt − θ)`, with an amplitude `A` and a phase lag `θ` behind the load. The results
+tree shows this vibration:
+
+#fields(
+  [`DISP_AMPLITUDE`, `STRESS_AMPLITUDE`, ...], [The amplitude `A` of every component, the
+    largest value over the period. `ALL` of the displacements and `MISES` of the stresses
+    (`EQUIVALENT` of the strains) are the largest magnitude and equivalent value the period
+    reaches, not the magnitude of the component amplitudes: these peak at different
+    moments. Plotted over the frequencies (@history-outputs), the amplitude of a node gives
+    the frequency response curve.],
+  [`DISP_PHASE`, `STRESS_PHASE`, ...], [The phase lag `θ` of every component behind the load,
+    in degrees from −180 to 180. Below a resonance it is close to 0, above it close to 180;
+    in between, damping makes it pass through 90. Components that hardly move get 0.],
+  [`DISP`, `STRESS`, `TOSTRAIN`, `FORC`], [The values at the moment of the period that
+    #ui("Phase angle") picks: `Ωt` in degrees, 0 is the moment the load peaks. The deformed
+    shape follows it as well.],
+)
+
+#ui("Phase angle") is the slider at the top of the #ui("Frequency") panel. #ui("Animate")
+plays one period of the vibration in a loop: the deformation and the values at the moment
+of the period swing as the structure does; the amplitude and phase fields stay as they are.
+
+#screenshot("steady-state-results.png", [Results of a Steady State Dynamics step: the displacement amplitude near the first bending mode, with the phase angle in the Frequency panel])
+
+The solver writes the response as complex numbers, as CalculiX does: the real part in `DISP`,
+`STRESS`, ... and the imaginary part in `DISPI`, `STRESSI`, `TOSTRAII` and `FORCI`
+(`DISP` is the value at the phase angle 0, `DISPI` the negative of that at 90 degrees). The
+results tree leaves the imaginary parts out, since the amplitudes, phases and the phase angle
+show the same. Without #ui("Modal damping") the response is in phase or in antiphase with the
+load, the imaginary parts and the phase lags other than 0 and 180 are zero, and the amplitude
+at an eigenfrequency is unbounded: give the step damping for a realistic response.
 
 === Modal damping
 
