@@ -54,8 +54,13 @@ pub enum NodeIcon {
     Switch,
     /// A Plot block: two axes with a curve.
     Plot,
-    /// A Mesh Preview block: a framed picture of a triangle mesh.
+    /// A Preview block: a framed picture of a triangle mesh.
     Picture,
+    /// A node group: two small blocks linked inside a frame.
+    Group,
+    /// The Group Input block: an arrow into a frame; the Group Output block: one out of it.
+    GroupInput,
+    GroupOutput,
     /// A step of this type, drawn like in the tree of the FE model.
     StepType(StepGlyph),
 }
@@ -129,6 +134,24 @@ pub fn paint_scaled(painter: &Painter, min: Pos2, icon: NodeIcon, color: Color32
             closed(&[p(1.5, 2.5), p(12.5, 2.5), p(12.5, 11.5), p(1.5, 11.5)]);
             line(&[p(3.5, 9.5), p(7.0, 4.5), p(10.5, 9.5), p(3.5, 9.5)]);
             line(&[p(5.25, 7.0), p(8.75, 7.0), p(7.0, 9.5), p(5.25, 7.0)]);
+        }
+        NodeIcon::Group => {
+            closed(&[p(1.0, 1.5), p(13.0, 1.5), p(13.0, 12.5), p(1.0, 12.5)]);
+            closed(&[p(3.0, 4.0), p(6.0, 4.0), p(6.0, 7.5), p(3.0, 7.5)]);
+            closed(&[p(8.0, 6.5), p(11.0, 6.5), p(11.0, 10.0), p(8.0, 10.0)]);
+            line(&[p(6.0, 5.75), p(7.0, 5.75), p(7.0, 8.25), p(8.0, 8.25)]);
+        }
+        NodeIcon::GroupInput => {
+            // An arrow into a frame open to the left.
+            line(&[p(6.0, 1.5), p(12.5, 1.5), p(12.5, 12.5), p(6.0, 12.5)]);
+            line(&[p(1.0, 7.0), p(9.5, 7.0)]);
+            line(&[p(7.0, 4.5), p(9.5, 7.0), p(7.0, 9.5)]);
+        }
+        NodeIcon::GroupOutput => {
+            // An arrow out of a frame open to the right.
+            line(&[p(8.0, 1.5), p(1.5, 1.5), p(1.5, 12.5), p(8.0, 12.5)]);
+            line(&[p(4.5, 7.0), p(13.0, 7.0)]);
+            line(&[p(10.5, 4.5), p(13.0, 7.0), p(10.5, 9.5)]);
         }
         NodeIcon::Switch => {
             dot(p(2.5, 3.5), 1.6);

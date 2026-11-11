@@ -145,6 +145,13 @@ pub trait SnarlViewer<T> {
         snarl: &mut Snarl<T>,
     ) -> impl SnarlPin + 'static;
 
+    /// Nodalis: whether the node is drawn; nodes in other levels of node groups are not.
+    #[inline]
+    fn visible(&mut self, node: &T) -> bool {
+        let _ = node;
+        true
+    }
+
     /// Checks if node has something to show in body - between input and output pins.
     #[inline]
     fn has_body(&mut self, node: &T) -> bool {

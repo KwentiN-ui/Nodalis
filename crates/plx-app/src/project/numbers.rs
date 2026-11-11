@@ -104,6 +104,17 @@ pub(super) fn number_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Ve
             )
         });
     }
+    if switch && number.values.len().saturating_sub(1) < MAX_CHOICES {
+        // An empty pin below the choices: a wire dropped on it adds a choice, as in Blender.
+        rows.push(Row {
+            input: true,
+            ..row(
+                vec![links::PARAMETERS.to_owned(), super::groups::OPEN.to_owned()],
+                String::new(),
+                "Drag the pin of a number here to add it as a new choice.".into(),
+            )
+        });
+    }
     if switch {
         rows.push(Row {
             widget: Some(RowWidget::Choices),

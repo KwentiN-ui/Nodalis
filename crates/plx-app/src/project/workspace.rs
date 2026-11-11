@@ -27,7 +27,7 @@ impl BlockTile {
             Self::MeshExport => BlockKind::MeshExport,
             Self::Note => BlockKind::Note,
             Self::Plot => BlockKind::Plot,
-            Self::MeshPreview => BlockKind::MeshPreview,
+            Self::Preview => BlockKind::Preview,
         }
     }
 }
@@ -307,7 +307,14 @@ impl ProjectApp {
             Cmd::OpenBlock | Cmd::Rename => self.selected.len() == 1,
             Cmd::OpenInNewWindow => self.selected_analysis().is_some(),
             Cmd::SolveBlock => self.selected_analysis().is_some() && !self.busy(),
-            Cmd::Duplicate | Cmd::Delete | Cmd::FrameBlocks | Cmd::Compact => any,
+            Cmd::Duplicate | Cmd::Delete | Cmd::FrameBlocks | Cmd::Compact | Cmd::GroupBlocks => {
+                any
+            }
+            Cmd::Ungroup => (self.selected.iter()).any(|&id| {
+                self.nodes
+                    .iter()
+                    .any(|n| n.id == id && n.kind() == Kind::Group)
+            }),
             Cmd::Unframe => {
                 (self.selected.iter()).any(|&id| frames::frame_of(&self.frames, id).is_some())
             }
@@ -372,6 +379,8 @@ impl ProjectApp {
             Cmd::Duplicate => self.act(ctx, Action::DuplicateAll(selected)),
             Cmd::Delete => self.act(ctx, Action::DeleteAll(selected)),
             Cmd::FrameBlocks => self.act(ctx, Action::Frame(selected)),
+            Cmd::GroupBlocks => self.act(ctx, Action::Group(selected)),
+            Cmd::Ungroup => self.act(ctx, Action::Ungroup(selected)),
             Cmd::Unframe => self.act(ctx, Action::Unframe(selected)),
             Cmd::Compact => self.act(ctx, Action::Compact(selected)),
             Cmd::ShowAll => self.show_all = true,
