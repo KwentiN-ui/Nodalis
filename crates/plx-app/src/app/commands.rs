@@ -165,6 +165,7 @@ impl AnalysisWindow {
             | Cmd::MeshParameters
             | Cmd::LocalMeshSize
             | Cmd::ExtrudeMesh
+            | Cmd::ThickenShellMesh
             | Cmd::TetrahedralGmsh => has_geometry,
             Cmd::MeshAll => has_geometry && !meshing,
             Cmd::MeshSelected => {
@@ -321,12 +322,17 @@ impl AnalysisWindow {
         match cmd {
             Cmd::Import | Cmd::ImportMesh => self.import(ctx),
             Cmd::DefaultMeshParameters => w.open_mesh_setup(),
-            Cmd::MeshParameters | Cmd::LocalMeshSize | Cmd::TetrahedralGmsh | Cmd::ExtrudeMesh => {
+            Cmd::MeshParameters
+            | Cmd::LocalMeshSize
+            | Cmd::TetrahedralGmsh
+            | Cmd::ExtrudeMesh
+            | Cmd::ThickenShellMesh => {
                 let index = match cmd {
                     Cmd::MeshParameters => 0,
                     Cmd::LocalMeshSize => 1,
                     Cmd::TetrahedralGmsh => 2,
-                    _ => 3,
+                    Cmd::ExtrudeMesh => 3,
+                    _ => 4,
                 };
                 if let Some(model) = &w.model
                     && let Some(geometry) = &model.geometry

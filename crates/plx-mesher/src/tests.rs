@@ -567,6 +567,70 @@ fn faces_outside_solids_are_meshed_as_shell_parts() {
     assert!(quadratic.elements().iter().any(|e| e.type_name == "S8"));
 }
 
+#[test]
+fn thickened_shells_are_meshed_as_solids() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = rectangle([10.0, 0.0, 0.0], [20.0, 10.0], 2.0);
+    geometry.meshing.max_size = 2.0;
+    geometry.meshing.second_order = false;
+    geometry.meshing.quad_dominated = true;
+    geometry.mesh_items.push(MeshSetupItem {
+        name: "Thicken_Shell_Mesh-1".into(),
+        kind: MeshSetupKind::ThickenShellMesh(plx_model::ThickenShellMesh {
+            parts: vec!["SHELL-1".into()],
+            thickness: 1.0,
+            layers: 3,
+            offset: 0.5,
+        }),
+    });
+    let shell = {
+        let mut plain = geometry.clone();
+        plain.mesh_items.clear();
+        generate_mesh(&plain).unwrap().mesh
+    };
+    let mesh = generate_mesh(&geometry).unwrap().mesh;
+    assert_eq!(mesh.element_count(), 3 * shell.element_count());
+    assert!((mesh.elements().iter()).all(|e| ["C3D8", "C3D6"].contains(&e.type_name.as_str())));
+    assert!(mesh.elements().iter().any(|e| e.type_name == "C3D8"));
+    assert!(
+        mesh.elements()
+            .iter()
+            .all(|e| e.min_jacobian(&mesh).unwrap() > 0.0)
+    );
+    // The rectangle faces +z: the solid reaches from it up to z = 1, and its face is the
+    // bottom side, where the shell was.
+    let (min, max) = mesh.bounds().unwrap();
+    assert!(
+        min[2].abs() < 1e-9 && (max[2] - 1.0).abs() < 1e-9,
+        "{min:?} {max:?}"
+    );
+    let face = *mesh.cad.faces.keys().next().unwrap();
+    assert_eq!(mesh.cad.faces[&face].len(), shell.element_count());
+    let on_face = mesh.cad_nodes(&[CadEntity::Face(face)]);
+    assert_eq!(on_face.len(), shell.node_count());
+    assert!(
+        on_face
+            .iter()
+            .all(|&n| mesh.node(n).unwrap()[2].abs() < 1e-9)
+    );
+    // An edge holds its nodes through the thickness.
+    let edge = *mesh.cad.segments.keys().next().unwrap();
+    assert_eq!(
+        mesh.cad_nodes(&[CadEntity::Edge(edge)]).len(),
+        4 * shell.cad_nodes(&[CadEntity::Edge(edge)]).len()
+    );
+
+    // Second order: twenty-node hexahedra and fifteen-node wedges.
+    geometry.meshing.second_order = true;
+    let quadratic = generate_mesh(&geometry).unwrap().mesh;
+    assert!(
+        (quadratic.elements().iter()).all(|e| ["C3D20", "C3D15"].contains(&e.type_name.as_str()))
+    );
+    assert!((quadratic.elements().iter()).all(|e| e.min_jacobian(&quadratic).unwrap() > 0.0));
+}
+
 /// A geometry of a box and, beside it, an L of two lines: one along x, one up along z.
 fn box_and_lines() -> Geometry {
     let file = TempFile::new("brep");

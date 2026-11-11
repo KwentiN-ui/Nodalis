@@ -137,6 +137,7 @@ pub enum Cmd {
     MeshParameters,
     LocalMeshSize,
     ExtrudeMesh,
+    ThickenShellMesh,
     TetrahedralGmsh,
     MeshAll,
     MeshSelected,
@@ -947,6 +948,16 @@ fn build() -> Vec<Command> {
         Tool(Icon::ExtrudeMesh),
         "",
         "Hexahedra swept from a face mesh through a part.",
+    ));
+    add(command(
+        C::ThickenShellMesh,
+        "Thicken\nShell",
+        g,
+        t,
+        "Mesh Setup",
+        Tool(Icon::ThickenShellMesh),
+        "",
+        "Solid elements for picked shells: the face mesh offset along its normals in layers.",
     ));
     add(command(
         C::TetrahedralGmsh,
