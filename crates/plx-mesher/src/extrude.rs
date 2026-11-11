@@ -12,7 +12,7 @@ use plx_model::{ExtrudeMesh, Geometry, Recombination};
 
 use crate::gmsh::{Gmsh, GmshError};
 use crate::{
-    GeneratedMesh, LINE2, LINE3, MeshOptions, POINT, QUAD4, QUAD8, TRI3, TRI6, local_sizes,
+    GeneratedMesh, LINE2, LINE3, MeshOptions, POINT, QUAD4, QUAD8, TRI3, TRI6, generate_faces,
     node_coords,
 };
 
@@ -531,16 +531,22 @@ pub(crate) fn extrude_part_mesh(
     let mut options = MeshOptions::of_part(geometry, part);
     options.algorithms.0 = extrude.algorithm_2d;
     options.quads = extrude.recombination != Recombination::None;
-    options.apply(gmsh)?;
-    let recombination = match extrude.recombination {
+    options.recombination = match extrude.recombination {
         Recombination::None | Recombination::Simple => 0.0,
         Recombination::Blossom => 1.0,
         Recombination::SimpleFullQuad => 2.0,
         Recombination::BlossomFullQuad => 3.0,
     };
-    gmsh.set_number("Mesh.RecombinationAlgorithm", recombination)?;
-    local_sizes(gmsh, geometry, &sweep.source.iter().copied().collect())?;
-    gmsh.generate(2)?;
+    let mut notes = Vec::new();
+    let sized = sweep.source.iter().copied().collect();
+    generate_faces(
+        gmsh,
+        geometry,
+        &mut options,
+        &sweep.source,
+        &sized,
+        &mut notes,
+    )?;
     let quadratic = options.order == 2;
     let coords = node_coords(gmsh)?;
     let motion = Motion::Translate(sweep.vector);
@@ -567,10 +573,9 @@ pub(crate) fn extrude_part_mesh(
         .map_err(|reason| GmshError::Other(format!("{part}: {reason}")))?;
     let (mut mesh, builder) = sweep_mesh(part, &coords, &elements, motion, &levels, quadratic)?;
     mesh.cad = builder.cad_map(gmsh, &mesh, &elements, &sweep)?;
-    Ok(Ok(GeneratedMesh {
-        mesh,
-        warnings: gmsh.warnings()?,
-    }))
+    let mut warnings = gmsh.warnings()?;
+    warnings.extend(notes.into_iter().map(|note| format!("{part}: {note}")));
+    Ok(Ok(GeneratedMesh { mesh, warnings }))
 }
 
 /// Makes the nodes of the swept mesh, numbered from 1, level by level.

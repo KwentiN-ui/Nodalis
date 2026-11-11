@@ -389,6 +389,19 @@ impl Gmsh {
     }
 
     /// Adds a flat disk of a radius about a centre, normal to `axis`; returns its tag.
+    /// A ball as a solid; returns its tag.
+    pub fn add_sphere(&self, [x, y, z]: [f64; 3], radius: f64) -> Result<i32, GmshError> {
+        use std::f64::consts::{FRAC_PI_2, TAU};
+        let mut tag = 0;
+        self.call(|e| {
+            tag = unsafe {
+                (self.api.occ_add_sphere)(x, y, z, radius, -1, -FRAC_PI_2, FRAC_PI_2, TAU, e)
+            };
+        })?;
+        self.synchronize()?;
+        Ok(tag)
+    }
+
     pub fn add_disk(
         &self,
         centre: [f64; 3],
@@ -904,6 +917,15 @@ impl Gmsh {
     /// Makes the field the element size everywhere, combined with the other size limits.
     pub fn set_background_field(&self, field: i32) -> Result<(), GmshError> {
         self.call(|e| unsafe { (self.api.field_set_as_background)(field, e) })
+    }
+
+    pub fn remove_field(&self, field: i32) -> Result<(), GmshError> {
+        self.call(|e| unsafe { (self.api.field_remove)(field, e) })
+    }
+
+    /// Discards the whole mesh; the geometry stays.
+    pub fn clear_mesh(&self) -> Result<(), GmshError> {
+        self.call(|e| unsafe { (self.api.mesh_clear)(std::ptr::null(), 0, e) })
     }
 
     fn synchronize(&self) -> Result<(), GmshError> {

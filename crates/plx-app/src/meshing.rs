@@ -60,11 +60,13 @@ fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters, units: UnitSystem
         ui.checkbox(&mut d.optimize, "Optimize mesh (Netgen)");
         ui.add_enabled(
             faces,
-            egui::Checkbox::new(&mut d.quad_dominated, "Quad-dominated surface mesh"),
+            egui::Checkbox::new(&mut d.quad_dominated, "Quadrilaterals on faces"),
         )
         .on_hover_text(
-            "Mesh faces (2D models and shells) mostly with quadrilaterals. Solids keep \
-             triangles on their faces, as tetrahedra need them.",
+            "Mesh faces (2D models and shells) with quadrilaterals in a mostly regular grid, \
+             by Gmsh's quasi-structured algorithm; off for triangles. A Tetrahedral Gmsh item \
+             chooses another algorithm, whose triangles are joined to quadrilaterals. Solids \
+             keep triangles on their faces, as tetrahedra need them.",
         )
         .on_disabled_hover_text(
             "Only for faces (2D models and shells): the parts are solids, meshed with \
@@ -220,12 +222,12 @@ const ALGORITHMS_2D: [(Algorithm2d, &str); 4] = [
 
 /// The surface algorithms for an extrude mesh, those for quadrilaterals first.
 const EXTRUDE_ALGORITHMS_2D: [(Algorithm2d, &str); 7] = [
+    (Algorithm2d::QuasiStructuredQuad, "Quasi-structured quad"),
     (Algorithm2d::FrontalQuads, "Frontal-Delaunay for quads"),
     (
         Algorithm2d::PackingOfParallelograms,
         "Packing of parallelograms",
     ),
-    (Algorithm2d::QuasiStructuredQuad, "Quasi-structured quad"),
     (Algorithm2d::FrontalDelaunay, "Frontal-Delaunay"),
     (Algorithm2d::Delaunay, "Delaunay"),
     (Algorithm2d::MeshAdapt, "MeshAdapt"),
@@ -628,7 +630,11 @@ impl MeshItemEditor {
                 ..
             } => {
                 parts_ui(ui, &mut self.parts);
-                ui.label("Surface algorithm");
+                ui.label("Surface algorithm").on_hover_text(
+                    "For the faces of solids and for shells and 2D models. Quadrilaterals on \
+                     faces are then joined from this algorithm's triangles instead of made \
+                     by the quasi-structured algorithm.",
+                );
                 algorithm_combo(ui, "algorithm 2d", algorithm_2d, &ALGORITHMS_2D);
                 ui.end_row();
                 ui.label("Volume algorithm");
@@ -718,11 +724,20 @@ impl MeshItemEditor {
                     "How triangles are joined to quadrilaterals, which become hexahedra; \
                      triangles become wedges. Full-quad gives quadrilaterals only.",
                 );
-                algorithm_combo(
-                    ui,
-                    "extrude recombination",
-                    &mut extrude.recombination,
-                    &RECOMBINATIONS,
+                // The quasi-structured algorithm makes its quadrilaterals itself.
+                let recombines = extrude.algorithm_2d != Algorithm2d::QuasiStructuredQuad;
+                ui.add_enabled_ui(recombines, |ui| {
+                    algorithm_combo(
+                        ui,
+                        "extrude recombination",
+                        &mut extrude.recombination,
+                        &RECOMBINATIONS,
+                    );
+                })
+                .response
+                .on_disabled_hover_text(
+                    "The quasi-structured algorithm gives quadrilaterals only, without \
+                     joining triangles.",
                 );
                 ui.end_row();
                 ui.label("Layers defined by")
