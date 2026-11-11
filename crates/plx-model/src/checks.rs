@@ -5991,7 +5991,10 @@ mod tests {
             active: true,
             visible: true,
             region: Region::Nodes(vec![7]),
-            kind: LoadKind::ConcentratedFlux(10.0),
+            kind: LoadKind::Flux {
+                value: 10.0,
+                each_node: true,
+            },
             amplitude: None,
             factor_amplitude: None,
             tables: Default::default(),
@@ -6019,7 +6022,7 @@ mod tests {
         model.properties.absolute_zero = Some(-273.15);
         model.properties.stefan_boltzmann = Some(5.67e-11);
         assert_eq!(check(&model, &mesh), []);
-        model.steps[0].loads[0].kind = LoadKind::ConcentratedFlux(10.0);
+        model.steps[0].loads[0].kind = LoadKind::flux(10.0);
         if let StepKind::HeatTransfer(settings) = &mut model.steps[0].kind {
             settings.steady_state = false;
         }

@@ -3850,14 +3850,8 @@ fn step_block<'f>(
             items: Vec::new(),
         });
     }
-    if kind.supports_load(&LoadKind::ConcentratedFlux(0.0)) {
+    if kind.supports_load(&LoadKind::flux(0.0)) {
         resets.push(Card::Cflux {
-            op_new: true,
-            items: Vec::new(),
-        });
-    }
-    if kind.is_thermal() && flux_kinds.distributed {
-        resets.push(Card::Dflux {
             op_new: true,
             items: Vec::new(),
         });
@@ -4113,41 +4107,52 @@ fn step_block<'f>(
                     items,
                 }]
             }
-            LoadKind::ConcentratedFlux(flux) => {
-                let set = sets.node_set(&load.name, &load.region)?;
+            LoadKind::Flux {
+                value: flux,
+                each_node,
+            } => {
+                let faces = load.region.faces(sets.mesh);
+                let edges = load.region.edges(sets.mesh);
+                let bodies = matches!(load.region, Region::Parts(_) | Region::ElementSet(_));
+                let axisymmetric = space == ModelSpace::Axisymmetric;
+                // On points the nodes share the heat flow equally; with `each_node` every
+                // node of the region takes the whole of it.
+                let items = if each_node || (faces.is_empty() && edges.is_empty() && !bodies) {
+                    let count = match each_node {
+                        true => 1,
+                        false => load.region.nodes(sets.mesh).len().max(1),
+                    };
+                    let set = sets.node_set(&load.name, &load.region)?;
+                    vec![ir::step::ConcentratedFlux {
+                        region: node_set_ref(&set),
+                        value: flux / count as f64,
+                        amplitude,
+                    }]
+                } else {
+                    // On faces by area, on picked edges by length, in parts by volume.
+                    let nodal = if !faces.is_empty() {
+                        traction_forces(sets.mesh, &faces, [flux, 0.0, 0.0], axisymmetric)
+                    } else if !edges.is_empty() {
+                        edge_traction_forces(sets.mesh, &edges, [flux, 0.0, 0.0], axisymmetric)
+                    } else {
+                        let elements = load.region.elements(sets.mesh);
+                        volume_fluxes(sets.mesh, &elements, flux, axisymmetric)
+                    };
+                    if nodal.is_empty() {
+                        return Err(empty(&load.name, "element faces, edges or volumes"));
+                    }
+                    (nodal.into_iter())
+                        .filter(|(_, value)| value[0] != 0.0)
+                        .map(|(node, value)| ir::step::ConcentratedFlux {
+                            region: NodeRef::Node(node),
+                            value: value[0],
+                            amplitude: amplitude.clone(),
+                        })
+                        .collect()
+                };
                 vec![Card::Cflux {
                     op_new: false,
-                    items: vec![ir::step::ConcentratedFlux {
-                        region: node_set_ref(&set),
-                        value: flux,
-                        amplitude,
-                    }],
-                }]
-            }
-            LoadKind::SurfaceFlux(flux) => {
-                let items = (sets.face_sets(&load.name, &load.region)?.into_iter())
-                    .map(|(set, face)| ir::step::DistributedFlux {
-                        region: element_set_ref(&set),
-                        kind: ir::step::FluxKind::Face(face),
-                        value: flux,
-                        amplitude: amplitude.clone(),
-                    })
-                    .collect();
-                vec![Card::Dflux {
-                    op_new: false,
                     items,
-                }]
-            }
-            LoadKind::BodyFlux(flux) => {
-                let set = sets.element_set(&load.name, &load.region)?;
-                vec![Card::Dflux {
-                    op_new: false,
-                    items: vec![ir::step::DistributedFlux {
-                        region: element_set_ref(&set),
-                        kind: ir::step::FluxKind::Body,
-                        value: flux,
-                        amplitude,
-                    }],
                 }]
             }
             LoadKind::Film { sink, coefficient } => {
@@ -4445,6 +4450,35 @@ fn edge_traction_forces(
         .collect()
 }
 
+/// A total heat flow spread over the volume of elements: each node takes its share of the
+/// volume ([`plx_mesh::Element::node_volumes`]), so the flow per volume is the same
+/// everywhere, a body flux. Kept in the first component, like the nodal forces of
+/// [`traction_forces`].
+fn volume_fluxes(
+    mesh: &FeMesh,
+    elements: &[ElementId],
+    flux: f64,
+    axisymmetric: bool,
+) -> BTreeMap<NodeId, [f64; 3]> {
+    let mut weights: BTreeMap<NodeId, f64> = BTreeMap::new();
+    let mut total = 0.0;
+    for element in elements.iter().filter_map(|&e| mesh.element(e)) {
+        let Some(shares) = element.node_volumes(mesh, axisymmetric) else {
+            continue;
+        };
+        for (&node, share) in element.nodes.iter().zip(shares) {
+            *weights.entry(node).or_default() += share;
+            total += share;
+        }
+    }
+    if total <= 0.0 {
+        return BTreeMap::new();
+    }
+    (weights.into_iter())
+        .map(|(node, weight)| (node, [flux * weight / total, 0.0, 0.0]))
+        .collect()
+}
+
 /// Integrals of the shape functions along an edge of two end points, or of two end points
 /// and a midside point: the nodes' shares of the edge's length, or with `axisymmetric` of
 /// the length times the radius x (the area the edge sweeps, divided by 2 pi).
@@ -4495,11 +4529,10 @@ fn polygon_area(corners: &[[f64; 3]]) -> f64 {
     0.5 * (sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]).sqrt()
 }
 
-/// Which kinds of heat loads the model has in any step: distributed fluxes,
-/// films and radiation are reset only then.
+/// Which kinds of heat loads the model has in any step: films and radiation are reset only
+/// then.
 #[derive(Clone, Copy, Debug, Default)]
 struct FluxKinds {
-    distributed: bool,
     film: bool,
     radiation: bool,
 }
@@ -4509,7 +4542,6 @@ impl FluxKinds {
         let mut kinds = Self::default();
         for load in model.steps.iter().flat_map(|s| &s.loads) {
             match load.kind {
-                LoadKind::SurfaceFlux(_) | LoadKind::BodyFlux(_) => kinds.distributed = true,
                 LoadKind::Film { .. } => kinds.film = true,
                 LoadKind::Radiation { .. } => kinds.radiation = true,
                 _ => {}

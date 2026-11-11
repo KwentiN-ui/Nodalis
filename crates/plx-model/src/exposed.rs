@@ -623,9 +623,7 @@ fn load_slot(kind: &mut LoadKind, field: Field) -> Option<(Slot<'_>, ValueKind)>
         (LoadKind::Centrifugal { point, axis, speed }, field) => {
             rotation_slot(point, axis, speed, field)?
         }
-        (LoadKind::ConcentratedFlux(q), Field::Value) => real(q, Quantity::Power),
-        (LoadKind::SurfaceFlux(q), Field::Value) => real(q, Quantity::HeatFlux),
-        (LoadKind::BodyFlux(q), Field::Value) => real(q, Quantity::PowerPerVolume),
+        (LoadKind::Flux { value, .. }, Field::Value) => real(value, Quantity::Power),
         (LoadKind::Film { sink, .. } | LoadKind::Radiation { sink, .. }, Field::Sink) => {
             real(sink, Quantity::Temperature)
         }
