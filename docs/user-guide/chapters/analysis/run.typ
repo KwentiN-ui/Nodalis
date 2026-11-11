@@ -65,6 +65,17 @@ of the run once more. #ui("Solve Again") does not take steps over: it computes e
 #screenshot("monitor-steps-taken-over.png", [The monitor after a frequency step was added to a
   solved static step: step 1 is taken over, only step 2 is computed])
 
+=== Standby during a run
+
+While a run is active, Nodalis asks the operating system not to go to standby on its own, so a long
+analysis is not interrupted when nobody touches the computer. On Windows this is a request
+for the system to stay awake, on Linux an idle inhibitor lock of systemd-logind, the same as
+`systemd-inhibit` takes. The request is released as soon as the run has finished, failed or
+been stopped; with several runs at once it is released after the last one. The screen is not
+kept on: it can still switch off and lock. Closing the lid or choosing Suspend by hand still
+puts the computer to sleep. If the system does not offer the request (no D-Bus session on
+Linux, for instance), the run starts as usual and the computer may sleep.
+
 === Monitor <monitor>
 
 The monitor is the #ui("Analysis") tab of the output pane below the 3D view (@output-pane); it
