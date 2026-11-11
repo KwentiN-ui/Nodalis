@@ -201,7 +201,7 @@ impl ProjectApp {
     /// Adds a Plot block that draws a line until another kind of plot is chosen.
     pub(super) fn add_plot(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("Plot");
+        let name = "Plot".to_string();
         let block = PlotBlock::new(self.settings.new_model.units, PlotKind::default(), 10);
         self.nodes
             .push(Node::new(id, name.clone(), Block::Plot(block)));
@@ -216,7 +216,7 @@ impl ProjectApp {
     /// Adds a Mesh Preview block.
     pub(super) fn add_mesh_preview(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("Mesh Preview");
+        let name = "Mesh Preview".to_string();
         self.nodes.push(Node::new(
             id,
             name.clone(),
