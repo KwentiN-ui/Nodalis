@@ -132,7 +132,7 @@ pub use section::{
 pub use signature::{EntitySignature, TagMap, match_entities};
 pub use solver_diagnostics::{Origins, diagnose_solver_check};
 pub use study::{DesignPoint, FillMode, FillRule, PointRun, PointState, StudyColumn, StudyTable};
-pub use symmetry::{SymmetryError, SymmetryPlane, symmetry_dofs, symmetry_plane};
+pub use symmetry::{BeamsOnPlane, SymmetryError, SymmetryPlane, symmetry_dofs, symmetry_plane};
 pub use units::{BASE_QUANTITIES, DERIVED_QUANTITIES, Quantity, STORED, UnitSystem};
 pub use validity::{Invalid, ModelItem};
 
@@ -2052,6 +2052,11 @@ pub enum BoundaryKind {
     Symmetry {
         /// Normal of the plane as the user entered it; `None` takes it from the region.
         normal: Option<[f64; 3]>,
+        /// Beams lying on the plane are cut in half by it: the solver gets half their
+        /// section (area, second moments, torsion and so mass), see
+        /// [`FeModel::halved_beams`]. Loads on them the user halves.
+        #[serde(default = "crate::active")]
+        halve_beams: bool,
     },
 }
 
